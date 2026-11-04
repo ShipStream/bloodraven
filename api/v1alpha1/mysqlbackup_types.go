@@ -107,6 +107,15 @@ type MysqlBackupStatus struct {
 	// heuristic after the referenced profile is gone.
 	StorageType BackupStorageType `json:"storageType,omitempty"`
 
+	// ArtifactStorage records the storage destination the producing Job
+	// wrote to (bucket, endpoint and region for S3; claim for PVC). It is
+	// captured from the Job when the Job is created and never follows later
+	// profile edits, so artifact cleanup cannot be redirected to another
+	// bucket or claim. Credentials are deliberately not recorded: cleanup
+	// reads them from the profile's current credentialsSecret.
+	// +optional
+	ArtifactStorage *BackupArtifactStorage `json:"artifactStorage,omitempty"`
+
 	// Size is the reported backup size as a human-readable string, best
 	// effort. Empty when the Job log did not report a size.
 	Size string `json:"size,omitempty"`
@@ -174,6 +183,24 @@ type MysqlBackupStatus struct {
 	// Conditions represent the latest available observations of this
 	// backup's state.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// BackupArtifactStorage is the immutable storage destination of a backup
+// artifact. The artifact path itself is MysqlBackupStatus.Location.
+type BackupArtifactStorage struct {
+	// Bucket is the S3 bucket the artifact was written to.
+	// +optional
+	Bucket string `json:"bucket,omitempty"`
+	// EndpointURL is the S3 endpoint override in effect for the producing
+	// Job, empty for the AWS default endpoint.
+	// +optional
+	EndpointURL string `json:"endpointURL,omitempty"`
+	// Region is the S3 region in effect for the producing Job.
+	// +optional
+	Region string `json:"region,omitempty"`
+	// ClaimName is the PersistentVolumeClaim the artifact was written to.
+	// +optional
+	ClaimName string `json:"claimName,omitempty"`
 }
 
 func init() {

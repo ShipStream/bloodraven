@@ -105,7 +105,7 @@ func TestBackupMetadataReview_ReadyConditionPreservedDuringCleanup(t *testing.T)
 				t.Fatal(err)
 			}
 			original = *apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
-			if done, err := r.finalize(context.Background(), mb); err != nil || done {
+			if done, _, err := r.finalize(context.Background(), mb); err != nil || done {
 				t.Fatalf("expected artifact cleanup in progress: done=%v err=%v", done, err)
 			}
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {

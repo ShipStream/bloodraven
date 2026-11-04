@@ -76,6 +76,12 @@ func main() {
 			// encrypt_upload.go.
 			runEncryptUpload(os.Args[2:])
 			return
+		case "artifact-cleanup":
+			// Invoked as the main container of the MysqlBackup
+			// finalizer's cleanup Job: deletes the backup artifact
+			// from S3 or a PVC. See artifact_cleanup.go.
+			runArtifactCleanup(os.Args[2:])
+			return
 		case "decrypt-download":
 			// Invoked as an init container of a restore / verification
 			// Job whose source backup was encrypted: downloads the

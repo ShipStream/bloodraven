@@ -96,6 +96,8 @@ func backupMetadataLogs(t *testing.T, r *MysqlBackupReconciler, handler http.Han
 }
 
 func TestMysqlBackupReconciler_RecoversCompletionAfterLogFailure(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
 	r, c, fg, mb, job := backupMetadataFixture(t, false)
 	var available atomic.Bool
 	var requests atomic.Int32
@@ -160,7 +162,7 @@ func TestMysqlBackupReconciler_RecoversCompletionAfterLogFailure(t *testing.T) {
 	if successEvents != 1 {
 		t.Fatalf("BackupSucceeded events=%d, want 1", successEvents)
 	}
-	cleanup, err := buildCleanupJob(cleanupJobInputs{FailoverGroup: fg, Profile: &fg.Spec.Backup.Profiles[0], Backup: mb, CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+	cleanup, err := buildCleanupJob(cleanupJobInputs{FailoverGroup: fg, Profile: &fg.Spec.Backup.Profiles[0], Backup: mb})
 	if err != nil || envMap(cleanup.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_OUTPUT_URL"] != location {
 		t.Fatalf("cleanup did not use recovered artifact: err=%v", err)
 	}
@@ -312,6 +314,8 @@ func TestMysqlBackupReconciler_CompletionFallbackUsesJob(t *testing.T) {
 }
 
 func TestMysqlBackupReconciler_RecoversLocationBeforeFinalization(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
 	for _, mode := range []string{"empty", "legacy-space-corruption", "failed-job"} {
 		t.Run(mode, func(t *testing.T) {
 			r, c, _, mb, job := backupMetadataFixture(t, false)
@@ -329,7 +333,7 @@ func TestMysqlBackupReconciler_RecoversLocationBeforeFinalization(t *testing.T) 
 			if err := c.Status().Update(context.Background(), mb); err != nil {
 				t.Fatal(err)
 			}
-			done, err := r.finalize(context.Background(), mb)
+			done, _, err := r.finalize(context.Background(), mb)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -66,6 +67,7 @@ type MysqlBackupReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 
 func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -79,19 +81,18 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Handle deletion with finalizer. The rewritten finalize returns
-	// (done, err):
-	//   (true,  nil)  => we may remove the finalizer
-	//   (false, nil)  => cleanup still in progress, requeue softly
-	//   (false, err)  => hard error, back off on the next reconcile
+	// Handle deletion with finalizer. See finalize for the contract.
 	if !backup.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&backup, mysqlBackupFinalizer) {
-			done, err := r.finalize(ctx, &backup)
+			done, requeue, err := r.finalize(ctx, &backup)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("finalize mysqlbackup: %w", err)
 			}
 			if !done {
-				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+				if requeue <= 0 {
+					requeue = 15 * time.Second
+				}
+				return ctrl.Result{RequeueAfter: requeue}, nil
 			}
 			controllerutil.RemoveFinalizer(&backup, mysqlBackupFinalizer)
 			if err := r.Update(ctx, &backup); err != nil {
@@ -243,6 +244,9 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		backup.Status.JobName = built.Name
 		backup.Status.SourceSite = sourceSite
 		backup.Status.StorageType = profile.Storage.Type
+		if storage, err := artifactStorageFromJob(built); err == nil {
+			backup.Status.ArtifactStorage = storage
+		}
 		backup.Status.MysqlImage = mysqlImageFor(&fg)
 		backup.Status.ActiveSiteAtStart = fg.Status.ActiveSite
 		backup.Status.Encrypted, backup.Status.EncryptionAlgorithm = backupJobEncryption(built)
@@ -327,6 +331,12 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, r.persistBackupMetadataFailure(ctx, &backup, &next, err)
 		}
 		next.Encrypted, next.EncryptionAlgorithm = backupJobEncryption(&job)
+		if next.ArtifactStorage == nil {
+			// Jobs created before status.artifactStorage existed.
+			if storage, err := artifactStorageFromJob(&job); err == nil {
+				next.ArtifactStorage = storage
+			}
+		}
 		setCondition(&next.Conditions, metav1.Condition{
 			Type:               ConditionBackupReady,
 			Status:             metav1.ConditionTrue,
@@ -473,21 +483,23 @@ func (r *MysqlBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // finalize deletes the dump artifact for a MysqlBackup before the CR is
-// released. Returns (done, err) so the caller can distinguish
-// "cleanup complete" from "cleanup in progress":
+// released:
 //
-//	(true,  nil)  => may remove the finalizer
-//	(false, nil)  => still working, requeue
-//	(false, err)  => hard error, back off
+//	(true,  _, nil) => may remove the finalizer
+//	(false, d, nil) => cleanup running, retrying or blocked; requeue after d
+//	(false, _, err) => API error, back off
+//
+// A failed cleanup Job is a state, not an error: the ArtifactCleanup
+// condition names the cause and a fresh Job runs after a fixed delay.
 //
 // When the referenced group or profile is gone we emit an
 // ArtifactCleanupSkipped warning event and release the finalizer
-// immediately — there's nothing we can do without a bucket/claim.
-func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
+// immediately — there's nothing we can do without credentials.
+func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, time.Duration, error) {
 	// Recover successful artifacts before an empty-location finalizer can
 	// release them. Failed Jobs never acquire a planned cleanup destination.
 	if _, err := r.repairTerminalAttribution(ctx, backup); err != nil && !errors.Is(err, errBackupDestinationUnavailable) {
-		return false, err
+		return false, 0, err
 	}
 	if backup.Status.Location == "" {
 		condition := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionBackupMetadataComplete)
@@ -495,7 +507,7 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
 				"no recorded artifact destination (producing Job %q); skipping cleanup", backupJobName(backup.Name))
 		}
-		return true, nil
+		return true, 0, nil
 	}
 
 	var fg v1alpha1.MysqlFailoverGroup
@@ -504,9 +516,9 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		if apierrors.IsNotFound(err) {
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
 				"failover group %q gone; cannot clean up artifact at %q", fgKey.Name, backup.Status.Location)
-			return true, nil
+			return true, 0, nil
 		}
-		return false, fmt.Errorf("get failover group: %w", err)
+		return false, 0, fmt.Errorf("get failover group: %w", err)
 	}
 
 	profile := findProfile(&fg, backup.Spec.ProfileName)
@@ -514,60 +526,231 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
 			"profile %q gone from group %q; cannot clean up artifact at %q",
 			backup.Spec.ProfileName, fg.Name, backup.Status.Location)
-		return true, nil
+		return true, 0, nil
 	}
 
-	// Re-create the derived creds Secret in case it was GC'd between
-	// backup completion and finalize.
-	credsName := backupCredsSecretName(backup.Name)
-	if err := r.ensureDerivedCredsSecret(ctx, &fg, backup, credsName); err != nil {
-		return false, fmt.Errorf("ensure creds secret: %w", err)
+	// The destination comes from the producing Job, never from the live
+	// profile: a bucket, endpoint or claim edited since the backup ran must
+	// not redirect a recursive delete.
+	producer, err := r.ownedBackupJob(ctx, backup)
+	if err != nil {
+		return false, 0, err
+	}
+	storage := backup.Status.ArtifactStorage
+	if storage == nil {
+		if producer == nil {
+			return r.blockArtifactCleanup(ctx, backup, cleanupReasonDestinationUnverified,
+				fmt.Sprintf("no status.artifactStorage and the producing Job %q is gone; inspect storage, delete the artifact at %q by hand, then remove finalizer %q",
+					backupJobName(backup.Name), backup.Status.Location, mysqlBackupFinalizer), 10*time.Minute)
+		}
+		recovered, err := artifactStorageFromJob(producer)
+		if err != nil {
+			return r.blockArtifactCleanup(ctx, backup, cleanupReasonDestinationUnverified,
+				fmt.Sprintf("cannot recover the artifact destination from Job %q: %v", producer.Name, err), 10*time.Minute)
+		}
+		patch := client.MergeFrom(backup.DeepCopy())
+		backup.Status.ArtifactStorage = recovered
+		if err := r.Status().Patch(ctx, backup, patch); err != nil {
+			return false, 0, fmt.Errorf("record recovered artifact storage: %w", err)
+		}
+		storage = recovered
+	}
+	if problem := artifactIdentityProblem(backup, storage, producer); problem != "" {
+		return r.blockArtifactCleanup(ctx, backup, cleanupReasonDestinationMismatch, problem, 30*time.Minute)
 	}
 
-	// Observe the cleanup Job.
 	var cleanupJob batchv1.Job
 	cleanupKey := types.NamespacedName{Namespace: backup.Namespace, Name: cleanupJobName(backup.Name)}
 	if err := r.Get(ctx, cleanupKey, &cleanupJob); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("get cleanup job: %w", err)
+			return false, 0, fmt.Errorf("get cleanup job: %w", err)
 		}
-		// Build and create.
+		// Never overlap executions: a retried Job's pods must be gone
+		// before its replacement starts.
+		if active, err := r.activeCleanupPods(ctx, backup); err != nil {
+			return false, 0, err
+		} else if active {
+			return false, 5 * time.Second, nil
+		}
 		built, err := buildCleanupJob(cleanupJobInputs{
-			FailoverGroup:        &fg,
-			Profile:              profile,
-			Backup:               backup,
-			CredsSecretName:      credsName,
-			ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
+			FailoverGroup: &fg,
+			Profile:       profile,
+			Backup:        backup,
+			Storage:       storage,
 		})
-		if err != nil {
-			return false, fmt.Errorf("build cleanup job: %w", err)
+		switch {
+		case errors.Is(err, errOperatorImageUnset):
+			return r.blockArtifactCleanup(ctx, backup, cleanupReasonOperatorImageUnset, err.Error(), 5*time.Minute)
+		case errors.Is(err, errCleanupCredentialsMissing):
+			return r.blockArtifactCleanup(ctx, backup, cleanupReasonCredentialsMissing,
+				fmt.Sprintf("profile %q: %v", profile.Name, err), 5*time.Minute)
+		case err != nil:
+			return r.blockArtifactCleanup(ctx, backup, cleanupReasonRejected, err.Error(), cleanupRetryAfterRejection)
 		}
 		if err := controllerutil.SetControllerReference(backup, built, r.Scheme); err != nil {
-			return false, fmt.Errorf("set cleanup job owner ref: %w", err)
+			return false, 0, fmt.Errorf("set cleanup job owner ref: %w", err)
 		}
 		if err := r.Create(ctx, built); err != nil {
-			return false, fmt.Errorf("create cleanup job: %w", err)
+			if apierrors.IsAlreadyExists(err) {
+				return false, 5 * time.Second, nil
+			}
+			return false, 0, fmt.Errorf("create cleanup job: %w", err)
 		}
 		r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupStarted",
 			"created cleanup Job %s for artifact at %q", built.Name, backup.Status.Location)
-		return false, nil
+		return false, 15 * time.Second, nil
+	}
+	if !metav1.IsControlledBy(&cleanupJob, backup) {
+		return r.blockArtifactCleanup(ctx, backup, cleanupReasonJobConflict,
+			fmt.Sprintf("Job %s is not owned by this MysqlBackup; waiting for it to be removed", cleanupJob.Name), 30*time.Second)
+	}
+	if cleanupJob.DeletionTimestamp != nil {
+		return false, 5 * time.Second, nil
 	}
 
-	phase, msg := jobPhase(&cleanupJob, "cleanup")
+	phase, _ := jobPhase(&cleanupJob, "cleanup")
 	switch phase {
 	case v1alpha1.BackupPhaseSucceeded:
-		r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupSucceeded",
-			"artifact cleanup succeeded for %q", backup.Status.Location)
-		return true, nil
+		pod, err := latestJobPod(ctx, r.Client, &cleanupJob)
+		if err != nil {
+			return false, 0, fmt.Errorf("read cleanup verdict: %w", err)
+		}
+		_, message, _ := cleanupPodVerdict(pod)
+		objects, counted := backupmeta.ParseCleanupComplete(message)
+		switch {
+		case counted && objects == 0:
+			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupNothingFound",
+				"no objects found at %q in the recorded destination; nothing was deleted", backup.Status.Location)
+		case counted:
+			r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupSucceeded",
+				"artifact cleanup removed %d objects at %q", objects, backup.Status.Location)
+		default:
+			r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupSucceeded",
+				"artifact cleanup succeeded for %q", backup.Status.Location)
+		}
+		return true, 0, nil
 	case v1alpha1.BackupPhaseFailed:
-		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupFailed",
-			"artifact cleanup Job %s failed: %s (remove finalizer %q to force-delete)",
-			cleanupJob.Name, msg, mysqlBackupFinalizer)
-		return false, fmt.Errorf("cleanup job %s failed: %s", cleanupJob.Name, msg)
+		return r.retryFailedCleanup(ctx, backup, &cleanupJob)
 	default:
-		// Still running.
-		return false, nil
+		return false, 15 * time.Second, nil
 	}
+}
+
+// retryFailedCleanup records a failed cleanup Job once, then replaces it
+// after cleanupRetryAfterFailure (transient or unknown failures, including
+// deadline, eviction and OOM) or cleanupRetryAfterRejection (exit 2).
+func (r *MysqlBackupReconciler) retryFailedCleanup(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) (bool, time.Duration, error) {
+	pod, err := latestJobPod(ctx, r.Client, job)
+	if err != nil {
+		return false, 0, fmt.Errorf("read cleanup verdict: %w", err)
+	}
+	code, message, terminated := cleanupPodVerdict(pod)
+	reason, wait := cleanupReasonFailed, cleanupRetryAfterFailure
+	if terminated && code == backupmeta.CleanupExitRejected {
+		reason, wait = cleanupReasonRejected, cleanupRetryAfterRejection
+	}
+	detail := strings.TrimSpace(strings.TrimPrefix(message, backupmeta.CleanupFailedPrefix))
+	if detail == "" {
+		_, detail = jobPhase(job, "cleanup")
+	}
+	if job.Annotations[annotationCleanupFailureRecorded] == "" {
+		patch := client.MergeFrom(job.DeepCopy())
+		if job.Annotations == nil {
+			job.Annotations = map[string]string{}
+		}
+		job.Annotations[annotationCleanupFailureRecorded] = "true"
+		if err := r.Patch(ctx, job, patch); err != nil {
+			return false, 0, fmt.Errorf("mark cleanup job failure recorded: %w", err)
+		}
+		bmetrics.BackupArtifactCleanupFailuresTotal.WithLabelValues(backup.Spec.FailoverGroupRef.Name, backup.Spec.ProfileName, reason).Inc()
+		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupFailed",
+			"artifact cleanup Job %s failed (%s): %s; a new Job runs %s after the failure",
+			job.Name, reason, detail, wait)
+	}
+	if err := r.setArtifactCleanupCondition(ctx, backup, reason, fmt.Sprintf("cleanup Job %s failed: %s", job.Name, detail)); err != nil {
+		return false, 0, err
+	}
+	failedAt := job.CreationTimestamp.Time
+	if t := stableJobCompletionTime(job); t != nil {
+		failedAt = t.Time
+	}
+	if remaining := time.Until(failedAt.Add(wait)); remaining > 0 {
+		return false, remaining, nil
+	}
+	foreground := metav1.DeletePropagationForeground
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &foreground}); err != nil && !apierrors.IsNotFound(err) {
+		return false, 0, fmt.Errorf("delete failed cleanup job: %w", err)
+	}
+	r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupRetry",
+		"replacing failed cleanup Job %s", job.Name)
+	return false, 5 * time.Second, nil
+}
+
+// blockArtifactCleanup reports a cleanup that cannot start and requeues.
+func (r *MysqlBackupReconciler) blockArtifactCleanup(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string, requeue time.Duration) (bool, time.Duration, error) {
+	previous := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionArtifactCleanup)
+	changed := previous == nil || previous.Reason != reason || previous.Message != message
+	if err := r.setArtifactCleanupCondition(ctx, backup, reason, message); err != nil {
+		return false, 0, err
+	}
+	if changed {
+		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupBlocked", "%s: %s", reason, message)
+	}
+	return false, requeue, nil
+}
+
+func (r *MysqlBackupReconciler) setArtifactCleanupCondition(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string) error {
+	previous := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionArtifactCleanup)
+	if previous != nil && previous.Status == metav1.ConditionFalse && previous.Reason == reason && previous.Message == message {
+		return nil
+	}
+	patch := client.MergeFrom(backup.DeepCopy())
+	setCondition(&backup.Status.Conditions, metav1.Condition{
+		Type:               ConditionArtifactCleanup,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: backup.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             reason,
+		Message:            message,
+	})
+	if err := r.Status().Patch(ctx, backup, patch); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("patch %s condition: %w", ConditionArtifactCleanup, err)
+	}
+	return nil
+}
+
+// ownedBackupJob returns the backup's own producing Job, or nil when it is
+// gone or belongs to another incarnation of the same name.
+func (r *MysqlBackupReconciler) ownedBackupJob(ctx context.Context, backup *v1alpha1.MysqlBackup) (*batchv1.Job, error) {
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: backupJobName(backup.Name)}, &job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get producing backup job: %w", err)
+	}
+	if !metav1.IsControlledBy(&job, backup) {
+		return nil, nil
+	}
+	return &job, nil
+}
+
+// activeCleanupPods reports whether any cleanup pod of this backup is still
+// pending or running.
+func (r *MysqlBackupReconciler) activeCleanupPods(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(backup.Namespace), client.MatchingLabels{
+		labelMysqlBackup:  backup.Name,
+		labelResourceKind: "backup-cleanup",
+	}); err != nil {
+		return false, fmt.Errorf("list cleanup pods: %w", err)
+	}
+	for i := range pods.Items {
+		if phase := pods.Items[i].Status.Phase; phase != corev1.PodSucceeded && phase != corev1.PodFailed {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // failBackup transitions a MysqlBackup to Failed with the given reason.

@@ -13,6 +13,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -467,18 +468,12 @@ func deleteAndWait(ctx context.Context, env *runner.Env, obj ctrlclient.Object, 
 	if err := env.Kube.Controller.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete %s %s: %w", kind, name, err)
 	}
-	if kind == "MysqlBackup" {
-		// See comment below: the playground mysqlsh image may not support
-		// util.rmdump, so the finalizer cleanup job can never complete. Remove
-		// the test CR finalizer immediately after deletion is requested rather
-		// than consuming the cleanup budget and failing an otherwise-successful
-		// backup/restore scenario.
-		if err := forceRemoveFinalizers(ctx, env, obj, kind, name); err != nil {
-			return fmt.Errorf("force finalizer removal for %s %s: %w", kind, name, err)
-		}
-		return waitForDeleted(ctx, env, obj, kind, name, 30*time.Second)
-	}
 	deleteTimeout := 90 * time.Second
+	if kind == "MysqlBackup" {
+		// The finalizer runs an artifact-cleanup Job from the operator
+		// image; allow for the first pull of that image in the namespace.
+		deleteTimeout = 5 * time.Minute
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, deleteTimeout)
 	defer cancel()
 	tick := time.NewTicker(time.Second)
@@ -493,11 +488,18 @@ func deleteAndWait(ctx context.Context, env *runner.Env, obj ctrlclient.Object, 
 		}
 		select {
 		case <-waitCtx.Done():
-			if kind == "MysqlBackup" {
-				if err := forceRemoveFinalizers(ctx, env, fresh, kind, name); err != nil {
-					return fmt.Errorf("wait for %s %s deletion: %w; force finalizer removal failed: %v", kind, name, waitCtx.Err(), err)
+			if backup, ok := fresh.(*v1alpha1.MysqlBackup); ok {
+				// Artifact cleanup did not finish: fail the scenario with
+				// the operator's reason, then unstick the CR so later
+				// scenarios start clean.
+				cause := "no ArtifactCleanup condition"
+				if c := apimeta.FindStatusCondition(backup.Status.Conditions, "ArtifactCleanup"); c != nil {
+					cause = c.Reason + ": " + c.Message
 				}
-				return waitForDeleted(ctx, env, fresh, kind, name, 30*time.Second)
+				if err := forceRemoveFinalizers(ctx, env, fresh, kind, name); err != nil {
+					env.Capture.Note(fmt.Sprintf("force finalizer removal for %s %s failed: %v", kind, name, err))
+				}
+				return fmt.Errorf("artifact cleanup for %s %s did not finish within %s (%s)", kind, name, deleteTimeout, cause)
 			}
 			return fmt.Errorf("wait for %s %s deletion: %w", kind, name, waitCtx.Err())
 		case <-tick.C:
@@ -522,27 +524,6 @@ func forceRemoveFinalizers(ctx context.Context, env *runner.Env, obj ctrlclient.
 	}
 	env.Capture.Note(fmt.Sprintf("force-removed finalizers from %s %s after cleanup timeout", kind, name))
 	return nil
-}
-
-func waitForDeleted(ctx context.Context, env *runner.Env, obj ctrlclient.Object, kind, name string, timeout time.Duration) error {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-	for {
-		fresh := obj.DeepCopyObject().(ctrlclient.Object)
-		if err := env.Kube.Controller.Get(waitCtx, types.NamespacedName{Namespace: env.Namespace, Name: name}, fresh); apierrors.IsNotFound(err) {
-			env.Capture.Note(fmt.Sprintf("deleted %s %s after force finalizer removal", kind, name))
-			return nil
-		} else if err != nil {
-			return fmt.Errorf("get %s %s after force finalizer removal: %w", kind, name, err)
-		}
-		select {
-		case <-waitCtx.Done():
-			return fmt.Errorf("wait for %s %s deletion after force finalizer removal: %w", kind, name, waitCtx.Err())
-		case <-tick.C:
-		}
-	}
 }
 
 func dropMarkerSchemaAndReplicate(ctx context.Context, env *runner.Env, dbName string) error {

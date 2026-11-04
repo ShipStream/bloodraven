@@ -935,3 +935,41 @@ Do not:
 - Restart the operator to push the update through: the new process repeats the same check on its first attempt.
 - Change the update strategy to `Recreate` to get past it: that rolls every site at once onto the template that broke one.
 - Promote the stalled site by hand: its pod is out of the application Services and, with a broken sidecar, cannot self-fence.
+
+## 35. Deleted `MysqlBackup` stuck Terminating (artifact cleanup)
+
+### Symptoms
+- A `MysqlBackup` deleted by hand or by retention stays Terminating with the `shipstream.io/mysqlbackup` finalizer.
+- `ArtifactCleanupFailed` or `ArtifactCleanupBlocked` Warning Events; `bloodraven_backup_artifact_cleanup_failures_total` rising.
+- After an upgrade from an operator whose cleanup ran `cleanup.py`: old Terminating S3 backups with Failed `mysqlbackup-<name>-cleanup` Jobs. That script needed `util.rmdump`, which MySQL Shell does not have, so S3 cleanup never worked. The new operator replaces those Jobs on its own; let it.
+
+### Diagnostic steps
+1. Read the cause and the recorded destination (`scripts/triage.sh` section 8 prints both):
+   ```bash
+   kubectl get mysqlbackup <name> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="ArtifactCleanup")]}{"\n"}{.status.location}{"\n"}{.status.artifactStorage}{"\n"}'
+   kubectl get pods -n <ns> -l shipstream.io/resource=backup-cleanup,shipstream.io/mysqlbackup=<name> \
+     -o jsonpath='{range .items[*]}{.metadata.name}{" exit="}{.status.containerStatuses[0].state.terminated.exitCode}{" "}{.status.containerStatuses[0].state.terminated.message}{"\n"}{end}'
+   ```
+2. Reasons:
+   - `CleanupFailed`: exit 3 (storage error), deadline, eviction or no recorded exit. A new Job runs 5 minutes after the failure.
+   - `CleanupRejected`: exit 2. The message says why: missing credential keys, a refused path, a cross-bucket location, an invalid endpoint. A new Job runs 30 minutes after the failure.
+   - `CredentialsUnavailable`: the profile no longer has an S3 `credentialsSecret`.
+   - `OperatorImageUnset`: the operator cannot name its own image; check its Deployment.
+   - `DestinationUnverified`: no `status.artifactStorage` (a backup from an older operator) and its producing Job is gone, so the bucket/claim the backup used is unknown.
+   - `DestinationMismatch`: `status.location` does not end in the backup name, is outside the recorded bucket or `/backups`, or differs from the producing Job's destination.
+   - `CleanupJobConflict`: a Job named `mysqlbackup-<name>-cleanup` exists but is not owned by this backup.
+3. Cleanup deletes from `status.artifactStorage` (captured when the backup ran), never from the live profile. A changed profile bucket, endpoint or claim does not move the delete; only credentials come from the current profile.
+
+### Safe remediation
+1. For `CleanupFailed`, `CleanupRejected` and `CredentialsUnavailable`, fix the cause (Secret keys, IAM `s3:ListBucket`/`s3:DeleteObject` on the prefix, endpoint reachability, the operator image pull) and wait. Retries never stop, and a credential rotated inside the same Secret is picked up by the next Job. A replacement starts only after the failed Job's pods are gone.
+2. For `DestinationUnverified` and `DestinationMismatch`, find the artifact using the original Job inputs and storage inspection (see [playbook 13](#13-succeeded-backup-cannot-be-found-at-its-recorded-location)). Delete it by hand, then remove the finalizer:
+   ```bash
+   kubectl patch mysqlbackup <name> -n <ns> --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+   ```
+3. `ArtifactCleanupNothingFound` releases the finalizer without deleting anything. If the artifact should have existed, inspect the bucket or claim the backup actually used.
+
+Do not:
+- Remove the finalizer while the artifact is still in storage: nothing will clean it up later.
+- Edit `status.artifactStorage` or `status.location` to point cleanup somewhere else: the recursive delete would follow it.
+- Delete a running cleanup Job to hurry it: the operator replaces only failed Jobs, after their pods are gone.
+
