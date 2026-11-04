@@ -225,7 +225,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 		Spec: batchv1.JobSpec{
 			ActiveDeadlineSeconds: &activeDeadline,
 			BackoffLimit:          &backoff,
-			// A refusal (exit 2) will not succeed on an in-Job retry;
+			// A refusal (CleanupExitRejected) will not succeed on an in-Job retry;
 			// the finalizer retries it later with a fresh Job.
 			PodFailurePolicy: &batchv1.PodFailurePolicy{Rules: []batchv1.PodFailurePolicyRule{{
 				Action: batchv1.PodFailurePolicyActionFailJob,
@@ -396,23 +396,25 @@ func cleanupPodStuck(pod *corev1.Pod, now time.Time) string {
 	if waiting := cleanupPodWaiting(pod); waiting != "" || pod == nil {
 		return waiting
 	}
-	elapsed := now.Sub(pod.CreationTimestamp.Time)
-	if pod.Status.Phase != corev1.PodPending || pod.CreationTimestamp.IsZero() || elapsed < cleanupStartGrace {
+	created := pod.CreationTimestamp
+	if pod.Status.Phase != corev1.PodPending || created.IsZero() || now.Sub(created.Time) < cleanupStartGrace {
 		return ""
 	}
-	elapsed = elapsed.Truncate(time.Second)
+	// The text names the pod's creation time, not the elapsed time, so the
+	// condition does not change (and is not rewritten) on every pass.
+	since := created.UTC().Format(time.RFC3339)
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse {
-			return fmt.Sprintf("pod %s not scheduled for %s: %s: %s", pod.Name, elapsed, c.Reason, c.Message)
+			return fmt.Sprintf("pod %s not scheduled since %s: %s: %s", pod.Name, since, c.Reason, c.Message)
 		}
 	}
 	for _, status := range pod.Status.ContainerStatuses {
 		if w := status.State.Waiting; w != nil {
-			return fmt.Sprintf("container %s still %s after %s; check the pod's FailedMount/FailedAttachVolume events (kubectl describe pod %s)",
-				status.Name, w.Reason, elapsed, pod.Name)
+			return fmt.Sprintf("container %s still %s since %s; check the pod's FailedMount/FailedAttachVolume events (kubectl describe pod %s)",
+				status.Name, w.Reason, since, pod.Name)
 		}
 	}
-	return fmt.Sprintf("pod %s still Pending after %s; check its events (kubectl describe pod %s)", pod.Name, elapsed, pod.Name)
+	return fmt.Sprintf("pod %s Pending since %s; check its events (kubectl describe pod %s)", pod.Name, since, pod.Name)
 }
 
 // cleanupPodVerdict returns the exit code and termination message of the

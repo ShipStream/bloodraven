@@ -35,6 +35,8 @@ func TestBackupMetadataReview_UnrecoverableHistoricalDestination(t *testing.T) {
 			}
 			mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
 			mb.Status.Location = ""
+			// A historical backup: no destination snapshot either.
+			mb.Status.ArtifactStorage = nil
 			if err := c.Status().Update(ctx, mb); err != nil {
 				t.Fatal(err)
 			}

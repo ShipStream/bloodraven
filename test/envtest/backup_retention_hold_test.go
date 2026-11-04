@@ -108,17 +108,20 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	vr := &controller.MysqlBackupVerificationReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
-	br := &controller.MysqlBackupReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
 	vKey, bKey := client.ObjectKeyFromObject(v), client.ObjectKeyFromObject(backup)
+	// Every later step uses a fresh reconciler instance, as after an
+	// operator restart: all state the hold needs lives in the API server.
 	reconcileBackup := func() {
 		t.Helper()
-		if _, err := br.Reconcile(ctx, ctrl.Request{NamespacedName: bKey}); err != nil {
+		fresh := &controller.MysqlBackupReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
+		if _, err := fresh.Reconcile(ctx, ctrl.Request{NamespacedName: bKey}); err != nil {
 			t.Fatalf("backup reconcile: %v", err)
 		}
 	}
 	reconcileVerification := func() {
 		t.Helper()
-		if _, err := vr.Reconcile(ctx, ctrl.Request{NamespacedName: vKey}); err != nil {
+		fresh := &controller.MysqlBackupVerificationReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
+		if _, err := fresh.Reconcile(ctx, ctrl.Request{NamespacedName: vKey}); err != nil {
 			t.Fatalf("verification reconcile: %v", err)
 		}
 	}

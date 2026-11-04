@@ -454,7 +454,7 @@ func deleteBackupCRs(ctx context.Context, env *runner.Env, backupName, verificat
 		}
 	}
 	if backupName != "" {
-		if err := deleteAndWait(ctx, env, &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: backupName, Namespace: env.Namespace}}, "MysqlBackup", backupName); err != nil {
+		if err := deleteBackupAndAssertArtifactGone(ctx, env, backupName); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -462,6 +462,76 @@ func deleteBackupCRs(ctx context.Context, env *runner.Env, backupName, verificat
 		return fmt.Errorf("delete backup CRs: %v", errs)
 	}
 	return nil
+}
+
+// deleteBackupAndAssertArtifactGone deletes a MysqlBackup and, for an S3
+// backup, checks the artifact in RustFS itself: objects exist under its
+// prefix before the delete, and none remain once the CR is gone. A cleanup
+// that deleted nothing but exited successfully would otherwise pass.
+func deleteBackupAndAssertArtifactGone(ctx context.Context, env *runner.Env, name string) error {
+	var backup v1alpha1.MysqlBackup
+	err := env.Kube.Controller.Get(ctx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &backup)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get MysqlBackup %s: %w", name, err)
+	}
+	bucket, prefix, ok, err := backupArtifactPrefix(&backup)
+	if err != nil {
+		return fmt.Errorf("MysqlBackup %s: %w", name, err)
+	}
+	if ok {
+		keys, err := env.Chaos.ListRustFSKeys(ctx, bucket, prefix)
+		if err != nil {
+			return fmt.Errorf("list artifact of MysqlBackup %s before delete: %w", name, err)
+		}
+		if len(keys) == 0 {
+			return fmt.Errorf("MysqlBackup %s: no objects under s3://%s/%s before delete; the storage assertion would prove nothing", name, bucket, prefix)
+		}
+		env.Capture.Note(fmt.Sprintf("MysqlBackup %s artifact: %d objects under s3://%s/%s", name, len(keys), bucket, prefix))
+	}
+	if err := deleteAndWait(ctx, env, &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: env.Namespace}}, "MysqlBackup", name); err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	keys, err := env.Chaos.ListRustFSKeys(ctx, bucket, prefix)
+	if err != nil {
+		return fmt.Errorf("list artifact of MysqlBackup %s after delete: %w", name, err)
+	}
+	if len(keys) > 0 {
+		return fmt.Errorf("MysqlBackup %s is gone but %d objects remain under s3://%s/%s (first: %s)", name, len(keys), bucket, prefix, keys[0])
+	}
+	env.Capture.Note(fmt.Sprintf("MysqlBackup %s artifact removed from s3://%s/%s", name, bucket, prefix))
+	return nil
+}
+
+// backupArtifactPrefix returns the bucket and object-key prefix (ending in
+// "/") of an S3 backup's artifact, from the recorded destination. ok is
+// false for a backup with no S3 artifact to check.
+func backupArtifactPrefix(b *v1alpha1.MysqlBackup) (bucket, prefix string, ok bool, err error) {
+	if b.Status.StorageType != v1alpha1.BackupStorageS3 || b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+		return "", "", false, nil
+	}
+	storage := b.Status.ArtifactStorage
+	if storage == nil || storage.Location == "" || storage.Bucket == "" {
+		return "", "", false, fmt.Errorf("succeeded S3 backup has no recorded status.artifactStorage")
+	}
+	key := storage.Location
+	if rest, found := strings.CutPrefix(key, "s3://"); found {
+		locBucket, k, _ := strings.Cut(rest, "/")
+		if locBucket != storage.Bucket {
+			return "", "", false, fmt.Errorf("location bucket %q differs from recorded bucket %q", locBucket, storage.Bucket)
+		}
+		key = k
+	}
+	key = strings.TrimRight(key, "/")
+	if key == "" {
+		return "", "", false, fmt.Errorf("empty artifact key in %q", storage.Location)
+	}
+	return storage.Bucket, key + "/", true, nil
 }
 
 func deleteAndWait(ctx context.Context, env *runner.Env, obj ctrlclient.Object, kind, name string) error {

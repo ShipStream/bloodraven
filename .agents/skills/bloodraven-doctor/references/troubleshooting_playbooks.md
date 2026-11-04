@@ -953,7 +953,7 @@ Do not:
 2. Reasons:
    - `CleanupFailed`: exit 75 (storage error), a crash, deadline, eviction or no recorded exit. A new Job runs 5 minutes after the failure.
    - `CleanupRejected`: exit 64. The message says why: missing credential keys, a refused path, a cross-bucket location, an invalid endpoint. A new Job runs 30 minutes after the failure.
-   - `CleanupPending`: the pod cannot start; the message carries the waiting reason (`ImagePullBackOff`: the operator image must be pullable in the backup namespace with `spec.backup.imagePullSecrets`), or how long it has been unscheduled or `ContainerCreating` (check `kubectl describe pod` for `FailedMount`/`FailedAttachVolume`, typically a ReadWriteOnce claim attached on another node).
+   - `CleanupPending`: the pod cannot start; the message carries the waiting reason (`ImagePullBackOff`: the operator image must be pullable in the backup namespace with `spec.backup.imagePullSecrets`), or since when it has been unscheduled or `ContainerCreating` (check `kubectl describe pod` for `FailedMount`/`FailedAttachVolume`, typically a ReadWriteOnce claim attached on another node).
    - `ForegroundDeletion` / `OrphanDeletion`: deleted with `--cascade=foreground` (Argo CD's default prune) or `--cascade=orphan`; cleanup starts once the garbage collector has processed the backup's dependents.
    - `CleanupJobInvalid`: the recorded destination cannot be turned into a Job (unknown storage type, no bucket or claim recorded). No Job ran; treat like `DestinationUnverified`.
    - `CredentialsUnavailable`: the profile no longer has an S3 `credentialsSecret`.
@@ -961,6 +961,7 @@ Do not:
    - `DestinationUnverified`: no recorded `status.artifactStorage.location` (a backup from an older operator) and it cannot be recovered from the producing Job (gone, owned by something else, or its destination depends on runtime-only values), so the exact artifact is unknown.
    - `DestinationMismatch`: `status.location` is not exactly `status.artifactStorage.location`, does not end in the backup name, is outside the recorded bucket or `/backups`, or differs from the producing Job's destination.
    - `CleanupJobConflict`: a Job named `mysqlcleanup-<name>` exists but is not owned by this backup.
+   - A new backup stuck `Pending` with `Ready=False/BackupJobConflict` (not a cleanup problem): a `mysqlbackup-<name>` Job it does not own exists, usually orphaned by an earlier same-name backup deleted with `--cascade=orphan`. Delete that Job if nothing owns it; the backup fails after 30 minutes otherwise.
    - `HeldByVerification`: a verification is still reading the artifact; see [playbook 36](#36-backup-kept-past-retention-or-deletion-waiting-on-a-verification).
 3. Cleanup deletes from `status.artifactStorage` (captured when the backup ran), never from the live profile. A changed profile bucket, endpoint or claim does not move the delete; only credentials come from the current profile.
 

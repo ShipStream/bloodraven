@@ -32,6 +32,9 @@ func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, na
 	var cutoff *time.Time
 	var retained []string
 	unknown, inFlight := false, false
+	// One verification List per request, however many backups are stuck
+	// Terminating (a wedged cleanup can leave many).
+	var readers *controller.BackupReadChecker
 	for i := range list.Items {
 		b := &list.Items[i]
 		if b.Spec.FailoverGroupRef.Name != group {
@@ -43,7 +46,10 @@ func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, na
 		// it. A stamped hold is enough; otherwise (a run started by an
 		// older operator) ask the API server, and fail closed on errors.
 		if !b.DeletionTimestamp.IsZero() && !controller.BackupHasVerificationHold(b) {
-			read, err := controller.BackupBeingRead(ctx, holdReader, b)
+			if readers == nil {
+				readers = controller.NewBackupReadChecker(holdReader)
+			}
+			read, err := readers.BeingRead(ctx, b)
 			if err != nil {
 				return nil, fmt.Errorf("check verification readers of backup %s: %w", b.Name, err)
 			}

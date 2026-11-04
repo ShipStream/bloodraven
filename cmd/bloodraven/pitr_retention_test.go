@@ -15,6 +15,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/platform"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -201,5 +202,47 @@ func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
 				t.Fatalf("cutoff %v, want %s", resp["cutoffTime"], tc.cutoff.Format(time.RFC3339))
 			}
 		})
+	}
+}
+
+// TestPITRCutoffListsVerificationsOnce pins that a lookup with many stuck
+// Terminating backups costs one uncached verification List, not one each.
+func TestPITRCutoffListsVerificationsOnce(t *testing.T) {
+	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	objs := []client.Object{retentionBoundaryBackup("kept", retentionTestSID+":1-20", start.Add(time.Hour))}
+	now := metav1.Now()
+	for _, name := range []string{"stuck-a", "stuck-b", "stuck-c", "stuck-d"} {
+		b := retentionBoundaryBackup(name, retentionTestSID+":1-10", start)
+		b.UID = types.UID("uid-" + name)
+		b.DeletionTimestamp = &now
+		b.Finalizers = []string{"shipstream.io/mysqlbackup"}
+		objs = append(objs, b)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	lists := 0
+	holdReader := interceptor.NewClient(c, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*v1alpha1.MysqlBackupVerificationList); ok {
+				lists++
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lists != 1 {
+		t.Fatalf("verification Lists = %d, want 1 per request", lists)
+	}
+	if resp["cutoffTime"] != start.Add(time.Hour).Format(time.RFC3339) {
+		t.Fatalf("cutoff %v", resp["cutoffTime"])
 	}
 }

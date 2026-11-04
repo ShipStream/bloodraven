@@ -700,9 +700,63 @@ func TestFinalize_ReportsPodStuckCreating(t *testing.T) {
 	}
 	f.finalize(t)
 	cond := cleanupCondition(t, f)
-	if cond == nil || cond.Reason != cleanupReasonPending || !strings.Contains(cond.Message, "ContainerCreating after 3m") ||
+	if cond == nil || cond.Reason != cleanupReasonPending || !strings.Contains(cond.Message, "still ContainerCreating since ") ||
 		!strings.Contains(cond.Message, "FailedMount") {
 		t.Fatalf("condition %+v", cond)
+	}
+	// The message is stable: later passes do not rewrite status.
+	rv := f.mb.ResourceVersion
+	f.finalize(t)
+	if f.mb.ResourceVersion != rv {
+		t.Fatal("CleanupPending was rewritten on an unchanged pod")
+	}
+	// The pod starts: the condition is cleared.
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: cleanupContainerName, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+	if err := f.c.Status().Update(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	f.finalize(t)
+	if cond := cleanupCondition(t, f); cond != nil {
+		t.Fatalf("stale CleanupPending after the pod started: %+v", cond)
+	}
+}
+
+func TestFinalize_RestoresBlankedLocationFromSnapshot(t *testing.T) {
+	ctx := context.Background()
+	f := newCleanupFixture(t)
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	f.mb.Status.Location = ""
+	if err := f.c.Status().Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := f.finalize(t); done {
+		t.Fatal("released the finalizer and orphaned an artifact whose destination is recorded")
+	}
+	if f.mb.Status.Location != "lion/art" {
+		t.Fatalf("location not restored: %q", f.mb.Status.Location)
+	}
+	if job, ok := f.cleanupJob(t); !ok || envMap(job.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_OUTPUT_URL"] != "lion/art" {
+		t.Fatal("cleanup did not target the recorded artifact")
+	}
+	if n := countEvents(f.rec, "ArtifactLocationRestored"); n != 1 {
+		t.Fatalf("ArtifactLocationRestored events = %d", n)
+	}
+
+	// A failed backup has no artifact even if its Job's destination was
+	// recorded at creation: still released.
+	failed := newCleanupFixture(t)
+	if err := failed.c.Get(ctx, client.ObjectKeyFromObject(failed.mb), failed.mb); err != nil {
+		t.Fatal(err)
+	}
+	failed.mb.Status.Phase, failed.mb.Status.Location = v1alpha1.BackupPhaseFailed, ""
+	if err := failed.c.Status().Update(ctx, failed.mb); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := failed.finalize(t); !done {
+		t.Fatal("a failed backup without an artifact was not released")
 	}
 }
 
@@ -725,10 +779,10 @@ func TestCleanupPodStuck(t *testing.T) {
 		want string
 	}{
 		{name: "creating within the grace", pod: pending(30*time.Second, creating), want: ""},
-		{name: "creating past the grace", pod: pending(2*time.Minute, creating), want: "still ContainerCreating after 2m"},
+		{name: "creating past the grace", pod: pending(2*time.Minute, creating), want: "still ContainerCreating since " + now.Add(-2*time.Minute).UTC().Format(time.RFC3339)},
 		{name: "unschedulable", pod: pending(2*time.Minute, func(p *corev1.Pod) {
 			p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: "volume node affinity conflict"}}
-		}), want: "not scheduled for 2m0s: Unschedulable: volume node affinity conflict"},
+		}), want: ": Unschedulable: volume node affinity conflict"},
 		{name: "image pull, immediately", pod: pending(time.Second, func(p *corev1.Pod) {
 			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ErrImagePull"}}}}
 		}), want: "waiting: ErrImagePull"},
@@ -919,17 +973,33 @@ func TestReconcile_DoesNotAdoptAnotherBackupsJob(t *testing.T) {
 	r, c := newBackupReconciler(t, fg, mb, foreign, dsnSecret())
 	rec := record.NewFakeRecorder(20)
 	r.Recorder = rec
-	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mb)})
-	if err != nil || res.RequeueAfter != 30*time.Second {
-		t.Fatalf("res=%+v err=%v", res, err)
+	for range 2 {
+		res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mb)})
+		if err != nil || res.RequeueAfter != 15*time.Second {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 		t.Fatal(err)
 	}
-	if mb.Status.Phase != "" {
-		t.Fatalf("adopted another backup's Job: phase %s", mb.Status.Phase)
+	ready := apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
+	if mb.Status.Phase != v1alpha1.BackupPhasePending || ready == nil || ready.Reason != "BackupJobConflict" || mb.Status.JobName != "" {
+		t.Fatalf("want Pending/BackupJobConflict without adopting the Job, got %+v", mb.Status)
 	}
 	if n := countEvents(rec, "BackupJobConflict"); n != 1 {
-		t.Fatalf("BackupJobConflict events = %d", n)
+		t.Fatalf("BackupJobConflict events = %d, want 1 (on the transition)", n)
+	}
+
+	// The pending deadline applies: an orphaned Job that never goes away
+	// fails the backup instead of leaving it pending forever.
+	mb.CreationTimestamp = metav1.NewTime(time.Now().Add(-maxBackupPendingDuration - time.Minute))
+	if _, err := r.pendBackup(context.Background(), mb, "BackupJobConflict", "still conflicting"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
+		t.Fatal(err)
+	}
+	if mb.Status.Phase != v1alpha1.BackupPhaseFailed {
+		t.Fatalf("phase %s, want Failed after the pending deadline", mb.Status.Phase)
 	}
 }

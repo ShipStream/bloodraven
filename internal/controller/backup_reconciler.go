@@ -190,10 +190,11 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	if jobErr == nil && !metav1.IsControlledBy(&job, &backup) {
 		// Never adopt another object's Job, e.g. a legacy cleanup Job
-		// named "mysqlbackup-<other>-cleanup" for a backup "<other>-cleanup".
-		r.Recorder.Eventf(&backup, corev1.EventTypeWarning, "BackupJobConflict",
-			"Job %s exists but is not owned by this MysqlBackup; waiting for it to be removed", job.Name)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		// named "mysqlbackup-<other>-cleanup" for a backup "<other>-cleanup",
+		// or a Job orphaned by an earlier backup of the same name. Wait in
+		// Pending, which fails the backup after maxBackupPendingDuration.
+		return r.pendBackup(ctx, &backup, "BackupJobConflict",
+			fmt.Sprintf("Job %s exists but is not owned by this MysqlBackup; waiting for it to be removed", job.Name))
 	}
 
 	// The live profile is needed to launch a Job. An existing Job remains
@@ -535,6 +536,19 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	} else if !stripped {
 		return false, 2 * time.Second, nil
 	}
+	if backup.Status.Location == "" && backup.Status.Phase == v1alpha1.BackupPhaseSucceeded &&
+		backup.Status.ArtifactStorage != nil && backup.Status.ArtifactStorage.Location != "" {
+		// status.location was blanked after the destination was recorded.
+		// The immutable snapshot still names the artifact; restore it
+		// rather than release the finalizer and orphan the artifact.
+		patch := client.MergeFrom(backup.DeepCopy())
+		backup.Status.Location = backup.Status.ArtifactStorage.Location
+		if err := r.Status().Patch(ctx, backup, patch); err != nil {
+			return false, 0, fmt.Errorf("restore artifact location: %w", err)
+		}
+		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactLocationRestored",
+			"status.location was empty; restored %q from status.artifactStorage for cleanup", backup.Status.Location)
+	}
 	if backup.Status.Location == "" {
 		condition := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionBackupMetadataComplete)
 		if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded || condition != nil && condition.Reason == "DestinationUnavailable" {
@@ -711,10 +725,14 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			return false, 0, fmt.Errorf("read cleanup pod: %w", err)
 		}
 		if waiting := cleanupPodStuck(pod, time.Now()); waiting != "" {
+			// The text is stable for a given pod and cause, so this
+			// writes only when the reason or the pod changes.
 			if err := r.setArtifactCleanupCondition(ctx, backup, cleanupReasonPending,
 				fmt.Sprintf("cleanup Job %s: %s", cleanupJob.Name, waiting)); err != nil {
 				return false, 0, err
 			}
+		} else if err := r.clearArtifactCleanupCondition(ctx, backup, cleanupReasonPending); err != nil {
+			return false, 0, err
 		}
 		return false, 15 * time.Second, nil
 	}
@@ -816,6 +834,21 @@ func (r *MysqlBackupReconciler) blockArtifactCleanup(ctx context.Context, backup
 		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupBlocked", "%s: %s", reason, message)
 	}
 	return false, requeue, nil
+}
+
+// clearArtifactCleanupCondition removes the ArtifactCleanup condition when it
+// still carries reason, e.g. CleanupPending once the cleanup pod starts.
+func (r *MysqlBackupReconciler) clearArtifactCleanupCondition(ctx context.Context, backup *v1alpha1.MysqlBackup, reason string) error {
+	current := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionArtifactCleanup)
+	if current == nil || current.Reason != reason {
+		return nil
+	}
+	patch := client.MergeFrom(backup.DeepCopy())
+	removeCondition(&backup.Status.Conditions, ConditionArtifactCleanup)
+	if err := r.Status().Patch(ctx, backup, patch); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("clear %s condition: %w", ConditionArtifactCleanup, err)
+	}
+	return nil
 }
 
 func (r *MysqlBackupReconciler) setArtifactCleanupCondition(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string) error {

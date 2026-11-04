@@ -161,6 +161,16 @@ func readerUIDs(refs []artifactReader) []string {
 // covers verifications started by an operator that did not stamp holds and
 // the window before a new one stamps.
 func artifactReaderRefs(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]artifactReader, error) {
+	var list v1alpha1.MysqlBackupVerificationList
+	if err := reader.List(ctx, &list, client.InNamespace(backup.Namespace)); err != nil {
+		return nil, fmt.Errorf("list verifications: %w", err)
+	}
+	return artifactReaderRefsFromList(ctx, reader, backup, &list)
+}
+
+// artifactReaderRefsFromList is artifactReaderRefs with the namespace's
+// verifications already listed, so several backups share one List.
+func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, list *v1alpha1.MysqlBackupVerificationList) ([]artifactReader, error) {
 	readers := map[string]string{}
 	seen := map[types.UID]bool{}
 	for key, name := range backup.Annotations {
@@ -178,10 +188,6 @@ func artifactReaderRefs(ctx context.Context, reader client.Reader, backup *v1alp
 		}
 	}
 
-	var list v1alpha1.MysqlBackupVerificationList
-	if err := reader.List(ctx, &list, client.InNamespace(backup.Namespace)); err != nil {
-		return nil, fmt.Errorf("list verifications: %w", err)
-	}
 	for i := range list.Items {
 		v := &list.Items[i]
 		if _, found := readers[v.Name]; found || seen[v.UID] {
@@ -256,11 +262,32 @@ func (r *MysqlBackupReconciler) stripDeadHolds(ctx context.Context, backup *v1al
 	return true, nil
 }
 
-// BackupBeingRead reports whether any verification may still be reading the
-// backup's artifact, through the given (uncached) reader. An API error is
+// BackupReadChecker answers whether verifications may still be reading
+// backups, through an (uncached) reader. It lists each namespace's
+// verifications once, so checking many backups costs one List plus the
+// reads for the verifications that reference them. API errors are
 // returned so that callers fail closed.
-func BackupBeingRead(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) (bool, error) {
-	readers, err := artifactReaders(ctx, reader, backup)
+type BackupReadChecker struct {
+	reader client.Reader
+	lists  map[string]*v1alpha1.MysqlBackupVerificationList
+}
+
+// NewBackupReadChecker returns a checker for one decision (one request).
+func NewBackupReadChecker(reader client.Reader) *BackupReadChecker {
+	return &BackupReadChecker{reader: reader, lists: map[string]*v1alpha1.MysqlBackupVerificationList{}}
+}
+
+// BeingRead reports whether any verification may still read the backup.
+func (c *BackupReadChecker) BeingRead(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
+	list, ok := c.lists[backup.Namespace]
+	if !ok {
+		list = &v1alpha1.MysqlBackupVerificationList{}
+		if err := c.reader.List(ctx, list, client.InNamespace(backup.Namespace)); err != nil {
+			return false, fmt.Errorf("list verifications: %w", err)
+		}
+		c.lists[backup.Namespace] = list
+	}
+	readers, err := artifactReaderRefsFromList(ctx, c.reader, backup, list)
 	return len(readers) > 0, err
 }
 
