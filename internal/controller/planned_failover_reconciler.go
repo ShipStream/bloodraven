@@ -499,11 +499,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 		cancel()
 		if err != nil {
 			// Either the source has crashed (nothing to unfence) or a
-			// transient GTID read failed after the fence took effect.
-			// FenceSite is transactional — on GTID read failure it
-			// best-effort unfences before returning — so we do not need
-			// to retry the unfence here. The emergency failover path
-			// will handle the now-unavailable primary.
+			// transient error hit the fence write or the GTID read.
+			// FenceSite is transactional — on either failure it
+			// best-effort unfences before returning, and its error says
+			// when that unfence failed too — so we do not need to retry
+			// the unfence here. The emergency failover path will handle
+			// the now-unavailable primary.
 			r.Runner.SetPlannedFailoverActive(nn, false)
 			return r.plannedFailoverFail(ctx, fg, "SourceCrashed",
 				fmt.Sprintf("planned-failover: failed to fence source primary %q: %v; emergency failover path will take over", cur.SourcePrimary, err),
@@ -807,11 +808,13 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Conte
 
 	// Best-effort unfence of the source primary. If this fails the
 	// cluster is still consistent but has no writable site. The topology
-	// manager re-asserts a super_read_only fence only on the recorded last
-	// failover target and otherwise leaves it for a human, so the Failed
-	// message carries the warning.
+	// manager's primary re-assert lifts a super_read_only fence only on a
+	// named authority (status.lastFailoverTarget, or a named last active
+	// site) and otherwise leaves it for a human, so the Failed message
+	// carries the warning. The unfence is detached from ctx's cancellation
+	// so an operator shutdown mid-rollback does not abandon it.
 	if cur != nil && cur.SourcePrimary != "" && r.Runner != nil {
-		unfenceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		unfenceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		if err := r.Runner.PlannedFailoverUnfence(unfenceCtx, nn, cur.SourcePrimary); err != nil {
 			log.FromContext(ctx).Error(err, "planned-failover: unfence after rollback",
 				"fg", nn, "site", cur.SourcePrimary)

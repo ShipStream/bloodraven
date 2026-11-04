@@ -2805,31 +2805,41 @@ func (tm *TopologyManager) isPlannedFailoverActive() bool {
 // site's GTID_EXECUTED captured after the fence takes effect. Returns
 // errSiteNotFound when the site name is unknown.
 //
-// Transactional: if the GTID read fails after the fence succeeded, the
-// site is best-effort unfenced before the error is returned. Leaving a
-// healthy primary stuck read-only on a transient metadata read is worse
-// than failing the whole operation — the caller can retry and the site
-// stays writable in the meantime.
+// Transactional: if the fence write or the GTID read fails, the site is
+// best-effort unfenced before the error is returned. A SET GLOBAL that
+// reports an error (a timeout, a dropped connection) may still have been
+// applied, so a failed fence write is not proof the site is still
+// writable. Leaving a healthy primary stuck read-only on a transient error
+// is worse than failing the whole operation — the caller can retry and the
+// site stays writable in the meantime. When that unfence fails too, the
+// returned error says so.
 func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, error) {
 	site := tm.getSite(name)
 	if site == nil {
 		return "", errSiteNotFound
 	}
 	if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
-		return "", fmt.Errorf("set super_read_only=ON on %q: %w", name, err)
+		return "", tm.rollbackFence(ctx, name, site, fmt.Errorf("set super_read_only=ON on %q: %w", name, err))
 	}
 	gtid, err := site.mysql.GetGtidExecuted(ctx)
 	if err != nil {
-		// Best-effort unfence using a fresh short-lived context so a
-		// cancelled parent ctx doesn't block the rollback attempt.
-		unfenceCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if unfenceErr := unfenceSite(unfenceCtx, site.mysql); unfenceErr != nil {
-			tm.logger.Error("fence rollback failed: site left read-only", "site", name, "error", unfenceErr)
-		}
-		cancel()
-		return "", fmt.Errorf("read GTID_EXECUTED on %q after fence: %w", name, err)
+		return "", tm.rollbackFence(ctx, name, site, fmt.Errorf("read GTID_EXECUTED on %q after fence: %w", name, err))
 	}
 	return gtid, nil
+}
+
+// rollbackFence best-effort unfences site after a failed FenceSite and
+// returns cause, annotated when the unfence failed too. It runs under its
+// own short budget, detached from ctx's cancellation, so a cancelled or
+// expired fence context does not block the rollback.
+func (tm *TopologyManager) rollbackFence(ctx context.Context, name string, site *siteTracker, cause error) error {
+	unfenceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if unfenceErr := unfenceSite(unfenceCtx, site.mysql); unfenceErr != nil {
+		tm.logger.Error("fence rollback failed: site left read-only", "site", name, "error", unfenceErr)
+		return fmt.Errorf("%w (warning: source primary unfence failed: %v)", cause, unfenceErr)
+	}
+	return cause
 }
 
 // UnfenceSite gives the named site its writes back. Used by the
