@@ -44,7 +44,8 @@ func TestStoreConfigBuildersSetPVCAccessMode(t *testing.T) {
 		{
 			name: "decrypt-download reads",
 			build: func() (*sidecar.PITRConfig, error) {
-				cfg, _, _, err := decryptDownloadStoreConfig("PVC", "/backups/orders/backup-1")
+				// The operator passes the mount-relative prefix.
+				cfg, _, _, err := decryptDownloadStoreConfig("PVC", "orders/backup-1")
 				return cfg, err
 			},
 		},
@@ -90,5 +91,38 @@ func TestPITRQuarantineRejectsUnmountedArchive(t *testing.T) {
 	err := pitrQuarantine(context.Background(), args, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "is not a mount point") {
 		t.Fatalf("pitrQuarantine = %v, want a not-a-mount-point error", err)
+	}
+}
+
+// TestDecryptDownloadStoreConfigPVCRelativePrefix pins the prefix shape
+// the operator renders for decrypt-download (BLOODRAVEN_SOURCE_PREFIX is
+// relative to BLOODRAVEN_PVC_MOUNT_PATH); filepath.Rel against an
+// absolute mount rejected it, so every encrypted PVC restore and
+// verification failed before reading a byte.
+func TestDecryptDownloadStoreConfigPVCRelativePrefix(t *testing.T) {
+	t.Setenv("BLOODRAVEN_PVC_MOUNT_PATH", "/restore-src-encrypted")
+	for _, tt := range []struct {
+		name, prefix, wantKey string
+		wantErr               bool
+	}{
+		{name: "relative", prefix: "orders/backup-1", wantKey: "orders/backup-1"},
+		{name: "absolute under mount", prefix: "/restore-src-encrypted/orders/backup-1", wantKey: "orders/backup-1"},
+		{name: "relative escape", prefix: "../etc", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, key, _, err := decryptDownloadStoreConfig("PVC", tt.prefix)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("decryptDownloadStoreConfig(%q) = key %q, want error", tt.prefix, key)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if key != tt.wantKey || cfg.PVC == nil || cfg.PVC.MountPath != "/restore-src-encrypted" || cfg.PVC.Writable {
+				t.Fatalf("key=%q cfg.PVC=%+v, want key %q on a read-only mount config", key, cfg.PVC, tt.wantKey)
+			}
+		})
 	}
 }

@@ -88,7 +88,11 @@ func resolveExistingDir(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("pvc archive store: mount path %s does not exist", path)
+			// The image does not ship the mount directory, so a pod
+			// whose archive volume was removed lands here rather than
+			// in the "inside <mount>" branch below. Keep the same
+			// "is not a mount point" wording the runbooks key on.
+			return "", fmt.Errorf("pvc archive store: %s is not a mount point (it does not exist); the archive volume is not mounted", path)
 		}
 		return "", fmt.Errorf("pvc archive store: resolve mount path %s: %w", path, err)
 	}

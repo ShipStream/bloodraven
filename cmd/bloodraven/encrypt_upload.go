@@ -186,7 +186,17 @@ func encryptUploadStoreConfig(storageType, outputURL string) (*sidecar.PITRConfi
 // decryptDownloadStoreConfig is the store config for decrypt-download.
 // It only reads (the source PVC is mounted read-only), so the PVC store
 // verifies the mount but does not probe write access.
+//
+// For PVC the operator passes BLOODRAVEN_SOURCE_PREFIX relative to the
+// mount (backup.status.location minus the mount path), while
+// storageConfigFromEnv expects an absolute path under the mount, so a
+// relative prefix is anchored at BLOODRAVEN_PVC_MOUNT_PATH first.
 func decryptDownloadStoreConfig(storageType, sourcePrefix string) (*sidecar.PITRConfig, string, string, error) {
+	if storageType == "PVC" && !filepath.IsAbs(sourcePrefix) {
+		if mount := os.Getenv("BLOODRAVEN_PVC_MOUNT_PATH"); mount != "" {
+			sourcePrefix = filepath.Join(mount, sourcePrefix)
+		}
+	}
 	return storageConfigFromEnv(storageType, sourcePrefix)
 }
 

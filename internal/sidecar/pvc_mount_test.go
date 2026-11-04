@@ -74,7 +74,7 @@ func TestCheckMountPoint(t *testing.T) {
 		},
 		{name: "root filesystem itself", path: "/", mountinfo: root, wantErr: []string{"resolves to the root filesystem"}},
 		{name: "relative path", path: "archive", mountinfo: root, wantErr: []string{"not absolute"}},
-		{name: "missing path", path: filepath.Join(base, "absent"), mountinfo: root, wantErr: []string{"does not exist"}},
+		{name: "missing path", path: filepath.Join(base, "absent"), mountinfo: root, wantErr: []string{"is not a mount point", "does not exist", "archive volume is not mounted"}},
 		{name: "regular file", path: file, mountinfo: root, wantErr: []string{"is not a directory"}},
 		{name: "malformed line", path: mount, mountinfo: "36 25 0:32 / " + mount + " rw", wantErr: []string{"pvc archive store: cannot verify mount: malformed mountinfo line"}},
 		{name: "missing separator", path: mount, mountinfo: "36 25 0:32 / " + mount + " rw shared:1 ext4 /dev/sda1 rw", wantErr: []string{"pvc archive store: cannot verify mount: malformed mountinfo line"}},
