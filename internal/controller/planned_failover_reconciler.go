@@ -136,19 +136,29 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Cont
 	if cur == nil || plannedFailoverTerminal(cur) {
 		return 0, nil
 	}
-	// A replaced manager's ordered update seen at any point from the fence
-	// on may already have invalidated the lag proof, even if it has exited
-	// by Promoting: record it so Promoting never promotes.
+	// A replaced manager's ordered update that has claimed the sites is a
+	// second actor on them. Before the fence, refuse without fencing.
+	// From the fence on, it may already have invalidated the lag proof and
+	// may still promote a site, so no phase handler runs: no drain, lag
+	// wait, Dragonfly takeover, promotion or rollback probe/unfence. The
+	// state is recorded (it outlives the update exiting) and every later
+	// pass goes to plannedFailoverAwaitPredecessor, which decides only
+	// once the update has exited.
 	switch cur.Phase {
 	case v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync, v1alpha1.PlannedFailoverPhasePromotingDragonfly:
-		if cur.Reason != plannedFailoverReasonPredecessorUpdate && r.Runner != nil && r.Runner.OrderedUpdateUnwinding(nn) {
-			next := cur.DeepCopy()
-			next.Reason = plannedFailoverReasonPredecessorUpdate
-			if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
-				return 0, err
+		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync, v1alpha1.PlannedFailoverPhasePromotingDragonfly,
+		v1alpha1.PlannedFailoverPhasePromoting:
+		unwinding := r.Runner != nil && r.Runner.OrderedUpdateUnwinding(nn)
+		if cur.Phase == v1alpha1.PlannedFailoverPhaseDraining && cur.DrainStartTime == nil {
+			if unwinding {
+				return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
+					"planned-failover: a replaced topology manager's ordered update is still finishing; source not fenced, retry once it has exited",
+					"failed_other")
 			}
-			cur = fg.Status.PlannedFailover
+			break
+		}
+		if r.Runner != nil && (cur.Reason == plannedFailoverReasonPredecessorUpdate || unwinding) {
+			return r.plannedFailoverAwaitPredecessor(ctx, fg, nn)
 		}
 	}
 	switch cur.Phase {
@@ -452,13 +462,22 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 	if result != PlannedFailoverAccept {
 		return r.plannedFailoverFail(ctx, fg, reason, err.Error(), "failed_other")
 	}
-	// A restarted topology manager clears status.updatePhase while its
-	// predecessor's ordered update may still be unwinding on the sites;
-	// the check above cannot see that one. Refuse before fencing.
-	if r.Runner != nil && r.Runner.OrderedUpdateUnwinding(nn) {
-		return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
-			"planned-failover: a replaced topology manager's ordered update is still finishing; retry once it has exited",
-			"failed_other")
+	// The check above reads status.updatePhase from the cache, which lags
+	// an update that has just claimed its window, and cannot see a
+	// replaced manager's update at all. Claim the sites atomically against
+	// the ordered-update claim before anything is written or fenced:
+	// from here on no update can claim, and one already claimed refuses
+	// this planned failover.
+	if r.Runner != nil {
+		ok, why, retry := r.Runner.ClaimPlannedFailover(nn)
+		if !ok && retry {
+			return 2 * time.Second, nil
+		}
+		if !ok {
+			return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
+				fmt.Sprintf("planned-failover: %s; retry once it has finished", why),
+				"failed_other")
+		}
 	}
 
 	// Advance to Draining on the next reconcile so status transitions
@@ -467,12 +486,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 	next.Phase = v1alpha1.PlannedFailoverPhaseDraining
 	next.Message = fmt.Sprintf("fencing source primary %q", next.SourcePrimary)
 	if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+		// Not recorded: release the claim. The next reconcile derives the
+		// guard from status again.
+		if r.Runner != nil {
+			r.Runner.SetPlannedFailoverActive(nn, false)
+		}
 		return 0, err
-	}
-	// Set the topology guard now so the draining reconcile cannot
-	// race an emergency failover.
-	if r.Runner != nil {
-		r.Runner.SetPlannedFailoverActive(nn, true)
 	}
 	return 1 * time.Second, nil
 }
@@ -725,12 +744,6 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 			"failed_other")
 	}
 
-	// A replaced manager's ordered update ran, or still runs, during this
-	// planned failover: wait for it, then decide from what it left.
-	if cur.Reason == plannedFailoverReasonPredecessorUpdate || r.Runner.OrderedUpdateUnwinding(nn) {
-		return r.plannedFailoverAwaitPredecessor(ctx, fg, nn)
-	}
-
 	promoteCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	promotionGtid, err := r.Runner.PlannedFailoverPromote(promoteCtx, nn, cur.Target, cur.SourcePrimary)
 	cancel()
@@ -926,6 +939,11 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Conte
 	// site) and otherwise leaves it for a human, so the Failed message
 	// carries the warning. The unfence is detached from ctx's cancellation
 	// so an operator shutdown mid-rollback does not abandon it.
+	// A replaced manager's ordered update claimed meanwhile may still
+	// promote a site after any probe: decide only once it has exited.
+	if cur != nil && r.Runner != nil && r.Runner.OrderedUpdateUnwinding(nn) {
+		return r.plannedFailoverAwaitPredecessor(ctx, fg, nn)
+	}
 	if cur != nil && cur.SourcePrimary != "" && r.Runner != nil {
 		// Never hand the source its writes back while another site
 		// already accepts them: that is a split brain, not a rollback.

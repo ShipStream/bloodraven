@@ -3472,7 +3472,9 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
 		"driftSites", driftSites, "active", activeName)
 	tm.mu.Lock()
-	if tm.deploymentUpdatePending || tm.retired || tm.predecessorUpdateInFlight {
+	// A planned failover owns the sites while its guard is set; an update
+	// started now could only be refused at its claim.
+	if tm.deploymentUpdatePending || tm.retired || tm.predecessorUpdateInFlight || tm.plannedFailoverActive {
 		tm.mu.Unlock()
 		return false
 	}
@@ -3515,7 +3517,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 		admitErr := tm.admitTopologyHandoff(ctx, func() {
 			tm.mu.Lock()
 			defer tm.mu.Unlock()
-			if ctx.Err() != nil || tm.authorityEpoch != updateAuthorityEpoch || tm.activeSiteLocked() != activeName || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation || tm.topologyFrozen || tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) {
+			if ctx.Err() != nil || tm.retired || tm.authorityEpoch != updateAuthorityEpoch || tm.activeSiteLocked() != activeName || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation || tm.topologyFrozen || tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) {
 				return
 			}
 			tm.deploymentUpdateRunning = true

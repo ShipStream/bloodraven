@@ -339,7 +339,8 @@ func TestRefusedRotationReservationIsNotCarried(t *testing.T) {
 // while its ordered-update goroutine is still alive and about to hand the
 // active site off. Until that goroutine exits, a rotation must not be
 // admitted, whatever replaced the manager; the old worker's handoff and a
-// rotation of its target cannot both proceed.
+// rotation of its target cannot both proceed. (Retired before its claim,
+// the old worker now also never claims the sites.)
 func TestRotationRefusedWhileRetiringManagerUpdateInFlight(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	r := &TopologyManagerRunner{logger: logger, managers: make(map[types.NamespacedName]*managedTopology)}
@@ -400,8 +401,9 @@ func TestRotationRefusedWhileRetiringManagerUpdateInFlight(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if standbyReadOnly(standby) {
-		t.Fatal("setup: the old worker did not hand off to dc2")
+	// It was still before its claim when retired, so it touched nothing.
+	if !standbyReadOnly(standby) {
+		t.Fatal("a retired manager's unclaimed update claimed the sites and handed off")
 	}
 	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); !ok {
 		t.Fatalf("rotation still refused after the old update exited: %s", why)

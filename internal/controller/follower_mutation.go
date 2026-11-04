@@ -204,12 +204,35 @@ func (tm *TopologyManager) retire() {
 	tm.mu.Unlock()
 }
 
-// orderedUpdateInFlight reports whether an ordered-update goroutine of this
-// manager is pending or running.
-func (tm *TopologyManager) orderedUpdateInFlight() bool {
+// orderedUpdateClaimed reports whether this manager has an ordered update
+// that has claimed its MySQL mutation window. A pending goroutine that has
+// not claimed it has touched nothing, and on a retired manager (or during a
+// planned failover) it never will.
+func (tm *TopologyManager) orderedUpdateClaimed() bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	return tm.deploymentUpdatePending || tm.deploymentUpdateRunning
+	return tm.deploymentUpdateRunning
+}
+
+// ClaimPlannedFailover sets the planned-failover guard for a planned
+// failover about to fence its source. Decided under mu against the
+// ordered-update claim (which refuses while the guard is set), it refuses
+// while this manager has an update claimed or a topology change in flight,
+// or still defers to a replaced manager's update. Either the update or the
+// planned failover owns the sites, never both.
+func (tm *TopologyManager) ClaimPlannedFailover() (bool, string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	switch {
+	case tm.deploymentUpdateRunning:
+		return false, "an ordered update is running"
+	case tm.deploymentChanging > 0:
+		return false, "a promotion is in flight"
+	case tm.predecessorUpdateInFlight:
+		return false, "a replaced topology manager's ordered update is still finishing"
+	}
+	tm.plannedFailoverActive = true
+	return true, ""
 }
 
 // mutationInFlight reports whether this manager has an ordered update

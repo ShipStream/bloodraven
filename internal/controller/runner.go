@@ -1291,14 +1291,33 @@ func (r *TopologyManagerRunner) OrderedUpdateUnwinding(nn types.NamespacedName) 
 }
 
 // retiringUpdateInFlightLocked reports whether a retiring manager of nn
-// still has an ordered update pending or running. Caller holds r.mu.
+// still has a claimed ordered update. Caller holds r.mu.
 func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.NamespacedName) bool {
 	for _, mt := range r.retiring[nn] {
-		if mt.tm.orderedUpdateInFlight() {
+		if mt.tm.orderedUpdateClaimed() {
 			return true
 		}
 	}
 	return false
+}
+
+// ClaimPlannedFailover claims the group's sites for a planned failover
+// about to fence its source (see TopologyManager.ClaimPlannedFailover).
+// It also refuses while a retiring manager still has a claimed update,
+// and while no manager runs (retry=true: nothing is wrong, just early).
+func (r *TopologyManagerRunner) ClaimPlannedFailover(nn types.NamespacedName) (ok bool, why string, retry bool) {
+	r.mu.RLock()
+	mt := r.managers[nn]
+	retiring := r.retiringUpdateInFlightLocked(nn)
+	r.mu.RUnlock()
+	if retiring {
+		return false, "a replaced topology manager's ordered update is still finishing", false
+	}
+	if mt == nil {
+		return false, "no topology manager is running for the group yet", true
+	}
+	ok, why = mt.tm.ClaimPlannedFailover()
+	return ok, why, false
 }
 
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.
