@@ -18,7 +18,7 @@ the official 8.4.11 mysqlbinlog client absent from the minimal server image.
 Then regenerate the native oracle from the repository root:
 
 ```sh
-BLOODRAVEN_PITR_NATIVE_TEST=1 BLOODRAVEN_PITR_NATIVE_UPDATE=1 go test ./cmd/bloodraven -run '^TestRound2NativeMysqlbinlog$' -count=1 -v
+BLOODRAVEN_PITR_NATIVE_TEST=1 BLOODRAVEN_PITR_NATIVE_UPDATE=1 go test ./cmd/bloodraven -run '^TestPITRNativeMysqlbinlog$' -count=1 -v
 ```
 
 Without UPDATE, that opt-in test checks the committed oracle using actual
@@ -70,7 +70,7 @@ native-shaped payload puts XID at the stop and demonstrates mysqlbinlog's
 added ROLLBACK. Run the official-client checks with:
 
 ```sh
-BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run 'TestRound2NativeMysqlbinlog|TestRound5NativeMysqlbinlogPayloadCuts' -count=1 -v
+BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run 'TestPITRNativeMysqlbinlog|TestPITRNativeMysqlbinlogPayloadCuts' -count=1 -v
 ```
 
 
