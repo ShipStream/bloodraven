@@ -190,11 +190,15 @@ else
 		-keyout "$TMP/ca.key" -out "$TMP/ca.crt" \
 		-addext 'basicConstraints=critical,CA:TRUE' \
 		-addext 'keyUsage=critical,keyCertSign,cRLSign' \
+		-addext 'subjectKeyIdentifier=hash' \
 		-subj "/CN=bloodraven-playground-ca" >/dev/null
 
 	# SANs cover every name MySQL is dialled by: the per-site internal
 	# Services (used for replication and by the operator), the
 	# client-facing Services, and localhost for port-forwarded clients.
+	# The key identifiers are explicit because `x509 -req -extfile` adds
+	# only the listed extensions, and OpenSSL 4.x strict verification
+	# rejects a leaf without an Authority Key Identifier.
 	cat > "$TMP/san.cnf" <<EOF
 [req]
 distinguished_name = dn
@@ -202,6 +206,8 @@ distinguished_name = dn
 [v3]
 subjectAltName = @alt
 extendedKeyUsage = serverAuth, clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
 [alt]
 DNS.1 = mysql-${FG}-iad
 DNS.2 = mysql-${FG}-pdx
@@ -233,6 +239,8 @@ distinguished_name = dn
 [v3]
 subjectAltName = DNS:bloodraven.${NAMESPACE}.svc.cluster.local
 extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
 EOF
 	openssl req -newkey rsa:2048 -nodes \
 		-keyout "$TMP/escrow-tls.key" -out "$TMP/escrow-tls.csr" \

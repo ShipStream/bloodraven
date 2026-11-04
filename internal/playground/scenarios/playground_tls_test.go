@@ -1,6 +1,9 @@
 package scenarios
 
 import (
+	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,6 +63,10 @@ bash ../../../playground/enable-encryption.sh --prepare-tls
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate playground certificates: %v\n%s", err, out)
 	}
+	ca := readCertificate(t, filepath.Join(dir, "ca.crt"))
+	if len(ca.SubjectKeyId) == 0 {
+		t.Fatal("CA has no Subject Key Identifier")
+	}
 	for _, tc := range []struct{ cert, hostname string }{
 		{"mysql", "mysql-playground-iad-internal.bloodraven-playground.svc.cluster.local"},
 		{"escrow", "bloodraven.bloodraven-playground.svc.cluster.local"},
@@ -69,6 +76,16 @@ bash ../../../playground/enable-encryption.sh --prepare-tls
 				"-verify_hostname", tc.hostname, "-CAfile", filepath.Join(dir, "ca.crt"), filepath.Join(dir, tc.cert+".crt"))
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("strict certificate verification: %v\n%s", err, out)
+			}
+			// OpenSSL 3.x verifies a leaf without key identifiers, so check
+			// them directly to catch a regression on any OpenSSL version.
+			leaf := readCertificate(t, filepath.Join(dir, tc.cert+".crt"))
+			if len(leaf.SubjectKeyId) == 0 {
+				t.Error("leaf has no Subject Key Identifier")
+			}
+			if !bytes.Equal(leaf.AuthorityKeyId, ca.SubjectKeyId) {
+				t.Errorf("leaf Authority Key Identifier = %X, want the CA's Subject Key Identifier %X",
+					leaf.AuthorityKeyId, ca.SubjectKeyId)
 			}
 		})
 	}
@@ -180,4 +197,21 @@ bash ../../../playground/enable-encryption.sh --prepare-tls
 	if out, err := os.ReadFile(filepath.Join(dir, "unexpected")); !os.IsNotExist(err) {
 		t.Fatalf("unexpected kubectl calls (read error: %v):\n%s", err, out)
 	}
+}
+
+func readCertificate(t *testing.T, path string) *x509.Certificate {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		t.Fatalf("%s: no PEM certificate", path)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return cert
 }
