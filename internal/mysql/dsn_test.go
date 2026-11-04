@@ -54,3 +54,37 @@ func TestParseDSNValid(t *testing.T) {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }
+
+// A rejected parameter is named so the DSN can be fixed, but its value is
+// never quoted.
+func TestParseDSNNamesTheFailingParameter(t *testing.T) {
+	const secret = "s3cr3t-pw"
+	for _, tc := range []struct{ dsn, key string }{
+		{"op:" + secret + "@tcp(127.0.0.1:3306)/mysql?parseTime=" + secret, "parseTime"},
+		{"op:" + secret + "@tcp(127.0.0.1:3306)/mysql?charset=utf8mb4&timeout=" + secret, "timeout"},
+		{"op:" + secret + "@tcp(127.0.0.1:3306)/mysql?tls=" + secret, "tls"},
+		{"op:" + secret + "@tcp(127.0.0.1:3306)/mysql?serverPubKey=" + secret, "serverPubKey"},
+	} {
+		_, err := ParseDSN(tc.dsn)
+		if err == nil {
+			t.Fatalf("ParseDSN(%q) succeeded; want an error", tc.dsn)
+		}
+		if !strings.Contains(err.Error(), `parameter "`+tc.key+`"`) {
+			t.Fatalf("error %q does not name parameter %q", err, tc.key)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error quotes the secret: %q", err)
+		}
+	}
+}
+
+// Without a failing parameter the error stays generic.
+func TestParseDSNDoesNotBlameAValidParameter(t *testing.T) {
+	_, err := ParseDSN("op:s3cr3t-pw/mysql?parseTime=true")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(err.Error(), "parameter") || strings.Contains(err.Error(), "s3cr3t-pw") {
+		t.Fatalf("unexpected error text: %q", err)
+	}
+}

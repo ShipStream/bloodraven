@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -30,9 +32,40 @@ func ParseDSN(dsn string) (*mysqldriver.Config, error) {
 	if safeDSNErrors[err.Error()] {
 		return nil, err
 	}
+	if key := failingDSNParam(dsn); key != "" {
+		return nil, fmt.Errorf("malformed DSN: invalid value for parameter %q (the value is withheld because it can be secret)", key)
+	}
 	msg := "malformed DSN (the driver's message is withheld because it can quote the password)"
 	if !strings.Contains(dsn, "@") {
 		msg += `; it has no "@" between the credentials and the address`
 	}
 	return nil, errors.New(msg)
+}
+
+// dsnParamKey matches the parameter names failingDSNParam may report. A
+// key that does not look like a parameter name is never echoed.
+var dsnParamKey = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
+
+// failingDSNParam returns the name of the first query parameter the driver
+// rejects on its own, or "" when none does. Like the driver, it takes the
+// parameters from after the first "?" that follows the last "/".
+func failingDSNParam(dsn string) string {
+	slash := strings.LastIndexByte(dsn, '/')
+	if slash < 0 {
+		return ""
+	}
+	_, params, ok := strings.Cut(dsn[slash+1:], "?")
+	if !ok {
+		return ""
+	}
+	for _, kv := range strings.Split(params, "&") {
+		key, _, _ := strings.Cut(kv, "=")
+		if !dsnParamKey.MatchString(key) {
+			continue
+		}
+		if _, err := mysqldriver.ParseDSN("u@tcp(127.0.0.1:3306)/?" + kv); err != nil {
+			return key
+		}
+	}
+	return ""
 }

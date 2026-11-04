@@ -89,7 +89,7 @@ test: test-unit test-component test-license-roundtrip ## Run fast tests (unit + 
 test-all: ## Run all tests including integration (network listeners)
 	go test -tags integration -race ./...
 
-test-unit: ## Run unit tests only (no network, no listeners, fast); chart render tests need helm
+test-unit: ## Run unit tests under internal/, cmd/ and charts/ (chart render tests need helm)
 	go test -race ./internal/... ./cmd/... ./charts/...
 
 test-component: ## Run component tests (cross-package with fakes, no real cluster)

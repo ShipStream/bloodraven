@@ -51,7 +51,7 @@ func joinBinlogFixtures(t *testing.T, files ...[]byte) []byte {
 }
 
 func TestPITRBackupStraddlingLineageAccepted(t *testing.T) {
-	for _, shape := range []string{"mid file", "mid file rotated", "straddling idle successor", "round1 exact idle", "s31 seed backup markers rotation"} {
+	for _, shape := range []string{"mid file", "mid file rotated", "straddling idle successor", "exact idle boundary", "s31 seed backup markers rotation"} {
 		t.Run(shape, func(t *testing.T) {
 			file := joinBinlogFixtures(t, coverageStream(t, 9, coverageTime(8, 0, 0), false, false), coverageStream(t, 10, coverageTime(9, 0, 0), false, false), coverageStream(t, 11, coverageTime(9, 40, 0), false, false))
 			files := [][]byte{file}
@@ -63,7 +63,7 @@ func TestPITRBackupStraddlingLineageAccepted(t *testing.T) {
 				file = joinBinlogFixtures(t, coverageStream(t, 9, coverageTime(9, 0, 0), false, false), coverageStream(t, 10, coverageTime(9, 20, 0), false, false))
 				file = patchEventTimestamp(t, file, 3, uint32(coverageTime(9, 31, 0).Unix()))
 				files = [][]byte{file, coverageStream(t, 11, coverageTime(9, 40, 0), true, false)}
-			case "round1 exact idle":
+			case "exact idle boundary":
 				files = [][]byte{patchEventTimestamp(t, pitrFixture(t, "incarnation-a.bin"), 3, uint32(coverageTime(9, 31, 0).Unix()))}
 				bound = retentionTestSID + ":1-11"
 			}
