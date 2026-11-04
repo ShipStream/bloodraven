@@ -203,6 +203,35 @@ func TestDeploymentPodReadiness(t *testing.T) {
 			wantReason: "init container init not ready: CrashLoopBackOff, last exit code 2 (Error)",
 		},
 		{
+			// An ordinary init container has no readiness probe: running
+			// means it is still initializing the pod.
+			name: "init container still running",
+			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", func(p *corev1.Pod) {
+				p.Status.Phase = corev1.PodPending
+				p.Spec.InitContainers = []corev1.Container{{Name: "keyring-init"}}
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{
+					{Name: "keyring-init", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				}
+				waiting := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}
+				notReady(corev1.ContainerStatus{Name: "mysql", State: waiting}, corev1.ContainerStatus{Name: "sidecar", State: waiting})(p)
+			})},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: "init container keyring-init not ready: still running",
+		},
+		{
+			name: "native sidecar init container readiness probe failing",
+			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", func(p *corev1.Pod) {
+				always := corev1.ContainerRestartPolicyAlways
+				p.Spec.InitContainers = []corev1.Container{{Name: "proxy", RestartPolicy: &always}}
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{
+					{Name: "proxy", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				}
+				notReady(containerReady("mysql"), containerReady("sidecar"))(p)
+			})},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: "init container proxy not ready: running, readiness probe failing",
+		},
+		{
 			name: "readiness probe failing",
 			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", notReady(
 				containerReady("mysql"),
@@ -242,11 +271,15 @@ func TestDeploymentPodReadinessCountsRestarts(t *testing.T) {
 	pod := readinessPod("mysql-lion-dc2-new-a", "new", func(p *corev1.Pod) {
 		p.Status.ContainerStatuses[0].RestartCount = 1
 		p.Status.ContainerStatuses[1].RestartCount = 4
+		// A native sidecar init container runs for the pod's lifetime, so
+		// its crashes count too.
+		p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "proxy", Ready: true, RestartCount: 2,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
 	})
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(rolledOut(), pod).Build()
 	got, err := deploymentPodReadiness(context.Background(), c, types.NamespacedName{Namespace: readinessNS, Name: readinessDeploy})
-	if err != nil || !got.Ready || got.Restarts != 5 {
-		t.Fatalf("deploymentPodReadiness() = %+v, %v; want Ready with 5 restarts", got, err)
+	if err != nil || !got.Ready || got.Restarts != 7 {
+		t.Fatalf("deploymentPodReadiness() = %+v, %v; want Ready with 7 restarts", got, err)
 	}
 }
 

@@ -127,7 +127,7 @@ func deploymentPodReadiness(ctx context.Context, reader client.Reader, nn types.
 	verdict := PodReadiness{Ready: true}
 	for _, pod := range current {
 		restarts := containerRestarts(pod)
-		if !podIsReady(pod) {
+		if !podReady(pod) {
 			return PodReadiness{Pod: pod.Name, Restarts: restarts, Reason: podNotReadyReason(pod)}, nil
 		}
 		verdict.Pod = pod.Name
@@ -152,11 +152,6 @@ func deploymentReplicaSetOf(pod *corev1.Pod, deployment string) (string, bool) {
 	return owner.Name, true
 }
 
-func podIsReady(pod *corev1.Pod) bool {
-	c := podConditionOf(pod, corev1.PodReady)
-	return c != nil && c.Status == corev1.ConditionTrue
-}
-
 func podConditionOf(pod *corev1.Pod, t corev1.PodConditionType) *corev1.PodCondition {
 	for i := range pod.Status.Conditions {
 		if pod.Status.Conditions[i].Type == t {
@@ -166,12 +161,32 @@ func podConditionOf(pod *corev1.Pod, t corev1.PodConditionType) *corev1.PodCondi
 	return nil
 }
 
+// containerRestarts counts init container restarts too: a restartable
+// (native sidecar) init container from spec.extraInitContainers runs for
+// the pod's lifetime, and its crash between two probes must break the
+// Ready streak like any other container's.
 func containerRestarts(pod *corev1.Pod) int32 {
 	var n int32
+	for _, cs := range pod.Status.InitContainerStatuses {
+		n += cs.RestartCount
+	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		n += cs.RestartCount
 	}
 	return n
+}
+
+// restartableInitContainer reports whether the named init container is a
+// native sidecar (restartPolicy: Always), the only kind with a readiness
+// probe.
+func restartableInitContainer(pod *corev1.Pod, name string) bool {
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if c.Name == name {
+			return c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways
+		}
+	}
+	return false
 }
 
 // podNotReadyReason says why a pod is not Ready: the first init container
@@ -188,6 +203,12 @@ func podNotReadyReason(pod *corev1.Pod) string {
 		if cs.State.Running != nil && cs.Ready {
 			// A restartable (native sidecar) init container.
 			continue
+		}
+		if cs.State.Running != nil && !restartableInitContainer(pod, cs.Name) {
+			// An ordinary init container has no readiness probe; running
+			// means the pod is still initializing.
+			parts = append(parts, "init container "+cs.Name+" not ready: still running")
+			break
 		}
 		parts = append(parts, "init container "+containerNotReadyReason(cs))
 		break
