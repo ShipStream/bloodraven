@@ -73,6 +73,26 @@ func plannedFailoverInFlight(s *v1alpha1.PlannedFailoverStatus) bool {
 	return false
 }
 
+// plannedFailoverHoldsSites reports whether a planned failover in status s
+// has fenced its source, so the topology manager's guard must be held
+// (re-derived from status after a restart). Before the fence it holds
+// nothing: a claim granted then lasts until the next pass re-derives the
+// guard, and Draining claims again in the pass that fences. A request
+// waiting to claim therefore never holds off emergency failover,
+// re-assert or split-brain fencing.
+func plannedFailoverHoldsSites(s *v1alpha1.PlannedFailoverStatus) bool {
+	if !plannedFailoverInFlight(s) {
+		return false
+	}
+	switch s.Phase {
+	case v1alpha1.PlannedFailoverPhasePending, v1alpha1.PlannedFailoverPhaseValidating:
+		return false
+	case v1alpha1.PlannedFailoverPhaseDraining:
+		return s.DrainStartTime != nil
+	}
+	return true
+}
+
 // reconcilePlannedFailover drives the planned-failover state machine
 // for the given CR. Returns a non-zero requeue duration when the
 // reconciler should wake up before the default resync; a nil error
@@ -86,7 +106,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Cont
 	// This is idempotent and cheap; setting it unconditionally guards
 	// against operator restarts landing between phase transitions.
 	if r.Runner != nil {
-		r.Runner.SetPlannedFailoverActive(nn, plannedFailoverInFlight(fg.Status.PlannedFailover))
+		r.Runner.SetPlannedFailoverActive(nn, plannedFailoverHoldsSites(fg.Status.PlannedFailover))
 	}
 
 	raw, hasAnnotation := fg.GetAnnotations()[PlannedFailoverAnnotation]
@@ -468,6 +488,13 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 	// the ordered-update claim before anything is written or fenced:
 	// from here on no update can claim, and one already claimed refuses
 	// this planned failover.
+	if cur.SourcePrimary == "" {
+		// Accepted while no primary was known (NoPrimary): nothing to
+		// fence; emergency failover or re-assert owns the recovery.
+		return r.plannedFailoverFail(ctx, fg, "SourceCrashed",
+			"planned-failover: no active source primary; emergency failover or re-assert will handle the group",
+			"failed_other")
+	}
 	if r.Runner != nil {
 		if ok, why, retry := r.Runner.ClaimPlannedFailover(nn, cur.SourcePrimary, cur.Target); !ok {
 			return r.plannedFailoverClaimRefused(ctx, fg, why, retry)
@@ -509,16 +536,23 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverClaimRefused(ctx context.C
 	case plannedClaimRefusedRotation:
 		reason = "KeyringRotation"
 	}
+	// In Draining, an earlier pass may have fenced the source and lost
+	// the status write that records it: this pass fenced nothing, but the
+	// source may be read-only.
+	fence := "source not fenced"
+	if cur.Phase == v1alpha1.PlannedFailoverPhaseDraining {
+		fence = fmt.Sprintf("source %q not fenced by this pass (an earlier pass whose status write was lost may have left it read-only; check it)", cur.SourcePrimary)
+	}
 	if !retry {
 		return r.plannedFailoverFail(ctx, fg, reason,
-			fmt.Sprintf("planned-failover: %s; source not fenced, retry once it has finished", why),
+			fmt.Sprintf("planned-failover: %s; %s, retry once it has finished", why, fence),
 			"failed_other")
 	}
 	now := time.Now()
 	if cur.RetryAfter != nil && !now.Before(cur.RetryAfter.Time) {
 		return r.plannedFailoverFail(ctx, fg, reason,
-			fmt.Sprintf("planned-failover: could not claim the sites within %s (%s); source not fenced, re-annotate to retry",
-				plannedFailoverClaimWait, why),
+			fmt.Sprintf("planned-failover: could not claim the sites within %s (%s); %s, re-annotate to retry",
+				plannedFailoverClaimWait, why, fence),
 			"failed_other")
 	}
 	msg := fmt.Sprintf("waiting to claim the sites: %s; source %q not fenced", why, cur.SourcePrimary)
@@ -803,12 +837,16 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 	promoteCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	var promotionGtid string
 	var err error
-	if done, gtid := r.plannedPromotionRecorded(ctx, fg, nn); done {
+	if done, at, gtid := r.plannedPromotionRecorded(ctx, fg, nn); done {
 		// This run already promoted the target (a status write after it
 		// was lost, possibly across an operator restart): confirm it,
 		// never execute it again.
 		promotionGtid = gtid
-		err = r.Runner.PlannedFailoverConfirmPromotion(promoteCtx, nn, cur.Target, cur.SourceGtidAtFence)
+		err = r.Runner.PlannedFailoverConfirmPromotion(promoteCtx, nn, cur.Target, cur.SourceGtidAtFence, at, gtid)
+		if errors.Is(err, errNoTopologyManager) {
+			// A replacement manager not registered yet: keep confirming.
+			err = fmt.Errorf("%w: %v", errPromotionConfirmPending, err)
+		}
 	} else {
 		promotionGtid, err = r.Runner.PlannedFailoverPromote(promoteCtx, nn, cur.Target, cur.SourcePrimary)
 	}
@@ -901,12 +939,15 @@ const plannedFailoverReasonPromotionUnconfirmed = "PromotionUnconfirmed"
 // copy recordFailover writes before PlannedPromote returns) shows the
 // target promoted since this run fenced its source. No other actor can
 // have promoted it since: the planned failover's claim keeps them out. It
-// reads uncached, falling back to fg, and returns the promotion GTID status
-// records for it, if any.
-func (r *MysqlFailoverGroupReconciler) plannedPromotionRecorded(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) (bool, string) {
+// reads uncached, falling back to fg, and returns when the promotion was
+// recorded and its GTID watermark: status's, if status records this very
+// promotion, else the source's fenced set (the target held exactly that
+// when it was promoted: the source was fenced, the target had caught up,
+// and a divergent target is never promoted).
+func (r *MysqlFailoverGroupReconciler) plannedPromotionRecorded(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) (bool, time.Time, string) {
 	cur := fg.Status.PlannedFailover
 	if cur.DrainStartTime == nil {
-		return false, ""
+		return false, time.Time{}, ""
 	}
 	latest := fg
 	var fresh v1alpha1.MysqlFailoverGroup
@@ -916,20 +957,20 @@ func (r *MysqlFailoverGroupReconciler) plannedPromotionRecorded(ctx context.Cont
 	}
 	cancel()
 	since := cur.DrainStartTime.Time.UTC().Truncate(time.Second)
-	recs := []FailoverRecord{FailoverRecordFromStatus(latest)}
-	if rec, err := FailoverRecordFromAnnotations(latest.Annotations); err == nil {
-		recs = append(recs, rec)
+	ours := func(rec FailoverRecord) bool {
+		return rec.LastFailoverTarget == cur.Target && !rec.LastFailover.IsZero() && !rec.LastFailover.Before(since)
 	}
-	for _, rec := range recs {
-		if rec.LastFailoverTarget == cur.Target && !rec.LastFailover.IsZero() && !rec.LastFailover.Before(since) {
-			gtid := ""
-			if latest.Status.LastFailoverTarget == cur.Target {
-				gtid = latest.Status.PromotionGtidExecuted
-			}
-			return true, gtid
+	if rec := FailoverRecordFromStatus(latest); ours(rec) {
+		gtid := latest.Status.PromotionGtidExecuted
+		if strings.TrimSpace(gtid) == "" {
+			gtid = cur.SourceGtidAtFence
 		}
+		return true, rec.LastFailover, gtid
 	}
-	return false, ""
+	if rec, err := FailoverRecordFromAnnotations(latest.Annotations); err == nil && ours(rec) {
+		return true, rec.LastFailover, cur.SourceGtidAtFence
+	}
+	return false, time.Time{}, ""
 }
 
 // plannedFailoverAwaitConfirmation keeps Promoting retrying the
@@ -1093,6 +1134,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverResuming(ctx context.Conte
 	// (cooldown-gated by the shared lastFailover we just stamped).
 	if r.Runner != nil {
 		r.Runner.SetPlannedFailoverActive(nn, false)
+		r.Runner.ForgetPlannedPromotion(nn)
 	}
 	return 0, nil
 }
@@ -1192,6 +1234,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverFail(ctx context.Context, 
 
 	if r.Runner != nil {
 		r.Runner.SetPlannedFailoverActive(nn, false)
+		r.Runner.ForgetPlannedPromotion(nn)
 	}
 	return 0, nil
 }

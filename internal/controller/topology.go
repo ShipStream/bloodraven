@@ -609,7 +609,8 @@ type TopologyManager struct {
 	// plannedPromotion is the last promotion PlannedPromote completed (see
 	// ownPlannedPromotion). It survives the planned-failover flag being
 	// dropped and re-derived (a Dragonfly snapshot upgrade shares the
-	// flag), and is cleared when any later topology change is claimed.
+	// flag), and is cleared when its planned failover reaches a terminal
+	// phase or any later topology change is claimed.
 	// Protected by mu.
 	plannedPromotion *plannedPromotionRecord
 
@@ -3127,21 +3128,23 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 		return "", err
 	}
 	tm.deploymentPromotionExecuted(target)
-	if err := tm.confirmWritable(ctx, targetSite); err != nil {
-		return "", fmt.Errorf("promotion succeeded but writable confirmation failed: %w", err)
-	}
 
-	// Record the failover-tracking state before the DNS flip: the target
-	// is writable now, so a DNS-provider outage must not erase the
-	// cooldown / split-brain / status-GTID fields the reconciler relies
-	// on. The DNS flip below is best-effort for state tracking; on
-	// failure we still return the promotion GTID (not "") so the caller
-	// can surface what was promoted rather than mistaking a stale-DNS
-	// condition for a failed promotion.
+	// Record the failover-tracking state, and that this planned failover
+	// promoted target, as soon as Execute succeeded: before the
+	// confirmation, so a confirmation that fails is retried as a known
+	// promotion (never executed again), and before the DNS flip, so a
+	// DNS-provider outage cannot erase the cooldown / split-brain /
+	// status-GTID fields the reconciler relies on. The DNS flip below is
+	// best-effort for state tracking; on failure we still return the
+	// promotion GTID (not "") so the caller can surface what was promoted
+	// rather than mistaking a stale-DNS condition for a failed promotion.
 	tm.recordFailover(ctx, tm.clock.Now(), target, promotionGtid)
 	tm.mu.Lock()
 	tm.plannedPromotion = &plannedPromotionRecord{target: target, gtid: promotionGtid}
 	tm.mu.Unlock()
+	if err := tm.confirmWritable(ctx, targetSite); err != nil {
+		return promotionGtid, fmt.Errorf("%w: %v", errPromotionConfirmPending, err)
+	}
 
 	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
 		return promotionGtid, fmt.Errorf("%w: %v", errDNSFlipAfterPromotion, err)
@@ -3162,10 +3165,13 @@ var errDNSFlipAfterPromotion = errors.New("DNS flip failed after successful prom
 var errPromotionConfirmPending = errors.New("planned promote: the target was promoted but is not confirmed writable yet")
 
 // ConfirmPlannedPromotion confirms a promotion of target that the durable
-// failover record says already happened, without executing anything: the
-// target must read writable and contain fencedGtid (the source's fenced
-// set). DNS is re-applied.
-func (tm *TopologyManager) ConfirmPlannedPromotion(ctx context.Context, target, fencedGtid string) error {
+// failover record says already happened at promotedAt, without executing
+// anything: the target must read writable and contain fencedGtid (the
+// source's fenced set). It then hydrates the failover tracking this manager
+// would have recorded had it made the promotion itself (a replacement
+// manager restored them from an older status), so its later status writes
+// carry promotionGtid as the promotion watermark. DNS is re-applied.
+func (tm *TopologyManager) ConfirmPlannedPromotion(ctx context.Context, target, fencedGtid string, promotedAt time.Time, promotionGtid string) error {
 	targetSite := tm.getSite(target)
 	if targetSite == nil {
 		return errSiteNotFound
@@ -3190,6 +3196,17 @@ func (tm *TopologyManager) ConfirmPlannedPromotion(ctx context.Context, target, 
 			return fmt.Errorf("%w: %q does not contain the source's fenced GTID set", errPromotionConfirmPending, target)
 		}
 	}
+	tm.mu.Lock()
+	if strings.TrimSpace(promotionGtid) != "" {
+		tm.promotionGtidExecuted = promotionGtid
+		tm.groupHasData = true
+	}
+	if !promotedAt.Before(tm.lastFailover) {
+		tm.lastFailover, tm.lastFailoverTarget = promotedAt, target
+	}
+	tm.lastActiveSite, tm.lastActiveSiteNamed = target, true
+	tm.deploymentAuthorityLocked(target)
+	tm.mu.Unlock()
 	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
 		return fmt.Errorf("%w: %v", errDNSFlipAfterPromotion, err)
 	}

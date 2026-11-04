@@ -39,6 +39,8 @@ import (
 //	PlannedPromote               R    R     W   R   R   R   R
 //	own planned promotion done   R    A8    W   R   R   R   R
 //	promotion not yet observed   R    R     W   R   R   R   A1
+//	planned failover waiting     A    A     A   A   A   A   A
+//	(pre-fence, not granted)
 //	planned failover             R    A     A   R   R   R   R
 //	ordered update claimed       R    R     R   R   R   R   R
 //	ordered update pending       A2   A2    A2  A2  R   A2  A2
@@ -68,6 +70,12 @@ import (
 //	   of a refusal as an unobserved promotion (ownPlannedPromotion).
 //	W7 A retired manager is unregistered; the runner sees no manager (Rot
 //	   is refused for the same reason).
+//
+// A granted PF claim lasts until the next pass re-derives the guard from
+// status, which sets it only from the fence on (plannedFailoverHoldsSites);
+// Draining claims again in the pass that fences. A request that is waiting
+// to claim holds nothing, so emergency failover, re-assert and split-brain
+// fencing are never held off by it.
 //
 // PF also needs the manager to name the source as the unique writable
 // primary: unknown authority (not yet classified, or two sites writable)

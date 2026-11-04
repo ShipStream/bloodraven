@@ -166,6 +166,21 @@ func (r *TopologyManagerRunner) SetTopologyFrozen(nn types.NamespacedName, froze
 	return true
 }
 
+// ForgetPlannedPromotion drops the record of the last planned promotion
+// once its planned failover reached a terminal phase, so a later run never
+// mistakes it for its own (see ownPlannedPromotion).
+func (r *TopologyManagerRunner) ForgetPlannedPromotion(nn types.NamespacedName) {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return
+	}
+	mt.tm.mu.Lock()
+	mt.tm.plannedPromotion = nil
+	mt.tm.mu.Unlock()
+}
+
 // SetPlannedFailoverActive toggles the planned-failover guard on the
 // managed TopologyManager so the automatic cross-site evaluator stands
 // down while the reconciler drives its own fence/promote sequence.
@@ -350,12 +365,12 @@ func (r *TopologyManagerRunner) PlannedFailoverPromote(ctx context.Context, nn t
 
 // PlannedFailoverConfirmPromotion confirms an already-recorded promotion
 // of target (see TopologyManager.ConfirmPlannedPromotion).
-func (r *TopologyManagerRunner) PlannedFailoverConfirmPromotion(ctx context.Context, nn types.NamespacedName, target, fencedGtid string) error {
+func (r *TopologyManagerRunner) PlannedFailoverConfirmPromotion(ctx context.Context, nn types.NamespacedName, target, fencedGtid string, promotedAt time.Time, promotionGtid string) error {
 	tm, err := r.plannedFailoverManager(nn)
 	if err != nil {
 		return err
 	}
-	return tm.ConfirmPlannedPromotion(ctx, target, fencedGtid)
+	return tm.ConfirmPlannedPromotion(ctx, target, fencedGtid, promotedAt, promotionGtid)
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
@@ -522,7 +537,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		suppress := restoreInFlight(fg)
 		frozen := inPlaceRestoreFreezesTopology(fg)
-		plannedActive := plannedFailoverInFlight(fg.Status.PlannedFailover)
+		plannedActive := plannedFailoverHoldsSites(fg.Status.PlannedFailover)
 
 		if live && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
@@ -891,7 +906,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// Likewise the planned-failover guard: the RecoveryInProgress markers
 	// restored below would otherwise let the first Poll drain or recover
 	// sites a planned failover that survived the restart is using.
-	tm.SetPlannedFailoverActive(plannedFailoverInFlight(fg.Status.PlannedFailover))
+	tm.SetPlannedFailoverActive(plannedFailoverHoldsSites(fg.Status.PlannedFailover))
 	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 	tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))

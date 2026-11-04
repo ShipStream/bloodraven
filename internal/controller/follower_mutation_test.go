@@ -1225,7 +1225,7 @@ func TestPlannedFailoverPreFence_TransientRefusalsWaitThenProceedOrFail(t *testi
 						t.Fatalf("reconcile: %v", err)
 					}
 					pf = fetchFG(t, r, nn).Status.PlannedFailover
-					if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != tc.reason || !strings.Contains(pf.Message, "source not fenced") {
+					if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != tc.reason || !strings.Contains(pf.Message, "not fenced") {
 						t.Fatalf("phase=%q reason=%q (%s); want Failed/%s past the deadline", pf.Phase, pf.Reason, pf.Message, tc.reason)
 					}
 					if superReadOnlyCallCount(iad) != 0 {
@@ -1698,5 +1698,257 @@ func TestPlannedFailoverPromoting_DNSFailureAfterPromotionSucceeds(t *testing.T)
 	}
 	if !found {
 		t.Fatal("no PlannedFailoverDNSFlipFailed Warning event")
+	}
+}
+
+// Opus round 14, Major 1: a planned failover waiting before its fence
+// (here: authority unknown because the source just died) holds no claim,
+// so the emergency failover that runs meanwhile still promotes.
+func TestPlannedFailoverPreFenceWait_DoesNotHoldOffEmergencyFailover(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	pollN(tm, 2)
+
+	fg := preFencePF(v1alpha1.PlannedFailoverPhaseDraining)
+	fg.Status.PlannedFailover.SourcePrimary, fg.Status.PlannedFailover.Target = "dc1", "dc2"
+	nn := fgNN(fg)
+	r, _ := newReconciler(fg)
+	r.Runner = &TopologyManagerRunner{logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
+	r.Runner.SetManagerForTest(nn, tm)
+
+	waited := false
+	tm.beforePromotionClaim = func(string) {
+		if waited {
+			return
+		}
+		waited = true
+		// The planned failover's pass lands between the emergency
+		// failover's eligibility checks and its claim.
+		if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		pf := fetchFG(t, r, nn).Status.PlannedFailover
+		if pf.Phase != v1alpha1.PlannedFailoverPhaseDraining || pf.DrainStartTime != nil || pf.RetryAfter == nil {
+			t.Fatalf("setup: phase=%q drainStart=%v retryAfter=%v (%s); want a pre-fence wait", pf.Phase, pf.DrainStartTime, pf.RetryAfter, pf.Message)
+		}
+		if tm.isPlannedFailoverActive() {
+			t.Fatal("a planned failover waiting before its fence holds the topology guard")
+		}
+	}
+	site0.setError(errors.New("connection refused"))
+	pollN(tm, 3)
+	if !waited {
+		t.Fatal("setup: the emergency failover never reached its claim")
+	}
+	site1.mu.Lock()
+	promoted := !site1.readOnly
+	site1.mu.Unlock()
+	if !promoted {
+		t.Fatal("emergency failover held off by a planned failover that had claimed nothing")
+	}
+}
+
+// GPT round 14: a replacement manager restored an older watermark (status
+// had not caught up; only the annotation recorded the promotion). Confirming
+// the recorded promotion hydrates it, so the polls that follow publish the
+// promotion's watermark, not the older one.
+func TestPlannedFailoverPromoting_ConfirmationHydratesWatermark(t *testing.T) {
+	const olderGtid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3"
+	fg := promotingPF(time.Now().Add(-time.Minute), fencedGtid)
+	older := metav1.NewTime(time.Now().Add(-time.Hour))
+	fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted = &older, "iad", olderGtid
+	promotedAt := time.Now().Add(-10 * time.Second).UTC().Truncate(time.Second)
+	ann, err := FailoverRecordAnnotations(FailoverRecord{LastFailover: promotedAt, LastFailoverTarget: "pdx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fg.Annotations = ann
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: fencedGtid}
+	pdx := &mockMySQL{readOnly: false, gtidExecuted: fencedGtid}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What restoreFailoverState leaves: status's watermark, the newer
+	// annotation's target.
+	tm.mu.Lock()
+	tm.promotionGtidExecuted = olderGtid
+	tm.lastFailover, tm.lastFailoverTarget = promotedAt, "pdx"
+	tm.mu.Unlock()
+
+	if pf := reconcileUntil(t, r, nn, v1alpha1.PlannedFailoverPhaseSucceeded, nil); pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
+		t.Fatalf("phase=%q (%s); want Succeeded", pf.Phase, pf.Message)
+	}
+	if got := fetchFG(t, r, nn).Status.PromotionGtidExecuted; got != fencedGtid {
+		t.Fatalf("status watermark %q after Resuming, want %q", got, fencedGtid)
+	}
+	pollN(tm, 3)
+	if got := tm.buildSnapshot(nil).PromotionGtidExecuted; got != fencedGtid {
+		t.Fatalf("polls publish watermark %q, want the confirmed promotion's %q", got, fencedGtid)
+	}
+}
+
+// Opus round 14, Major 2: a durable record proves the promotion, but the
+// replacement manager is not registered yet. Promoting keeps confirming
+// within its deadline and completes once a manager runs; nothing is
+// executed again.
+func TestPlannedFailoverPromoting_ConfirmationWaitsForManager(t *testing.T) {
+	fg := promotingPF(time.Now().Add(-time.Minute), fencedGtid)
+	promotedAt := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &promotedAt, "pdx"
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: fencedGtid}
+	pdx := &mockMySQL{readOnly: false, gtidExecuted: fencedGtid}
+	r, _ := newReconciler(fg)
+	successor := plannedDrainRunner(nn, iad, pdx)
+	r.Runner = &TopologyManagerRunner{logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.RetryAfter == nil {
+		t.Fatalf("phase=%q retryAfter=%v (%s); want Promoting, confirming", pf.Phase, pf.RetryAfter, pf.Message)
+	}
+	tm, err := successor.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Runner.SetManagerForTest(nn, tm)
+	if pf := reconcileUntil(t, r, nn, v1alpha1.PlannedFailoverPhaseSucceeded, nil); pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
+		t.Fatalf("phase=%q (%s); want Succeeded", pf.Phase, pf.Message)
+	}
+	pdx.mu.Lock()
+	stops := pdx.stopReplicaCalls
+	pdx.mu.Unlock()
+	if stops != 0 {
+		t.Fatal("the promotion was executed again")
+	}
+}
+
+// Opus round 14, Minor 3: the record of a planned promotion ends with its
+// run. A later run promoting the same site (after authority came back to
+// the source) executes, instead of "confirming" a read-only target.
+func TestPlannedPromotionRecord_EndsWithItsRun(t *testing.T) {
+	fg := promotingPF(time.Now().Add(-2*time.Second), fencedGtid)
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: fencedGtid}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: fencedGtid}
+	r, c := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf := reconcileUntil(t, r, nn, v1alpha1.PlannedFailoverPhaseSucceeded, nil); pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
+		t.Fatalf("setup: phase=%q (%s)", pf.Phase, pf.Message)
+	}
+	tm.mu.RLock()
+	stale := tm.plannedPromotion
+	tm.mu.RUnlock()
+	if stale != nil {
+		t.Fatalf("record %+v kept after its run succeeded", *stale)
+	}
+
+	// pdx is demoted again by hand; a new run (fenced iad) promotes it once
+	// more.
+	iad.mu.Lock()
+	iad.readOnly, iad.superReadOnly = true, true
+	iad.mu.Unlock()
+	pdx.mu.Lock()
+	pdx.readOnly, pdx.superReadOnly = true, true
+	before := pdx.stopReplicaCalls
+	pdx.mu.Unlock()
+	tm.mu.Lock()
+	tm.promotedSite, tm.deploymentAwaitingObservation = "", false
+	tm.mu.Unlock()
+	var cur v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), nn, &cur); err != nil {
+		t.Fatal(err)
+	}
+	later := metav1.NewTime(time.Now().Add(time.Second))
+	cur.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &later,
+		DrainStartTime: &later, SourceGtidAtFence: fencedGtid,
+	}
+	if err := c.Status().Update(context.Background(), &cur); err != nil {
+		t.Fatal(err)
+	}
+	if pf := reconcileUntil(t, r, nn, v1alpha1.PlannedFailoverPhaseSucceeded, nil); pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
+		t.Fatalf("phase=%q reason=%q (%s); want the second run to promote", pf.Phase, pf.Reason, pf.Message)
+	}
+	pdx.mu.Lock()
+	ran := pdx.stopReplicaCalls > before
+	pdx.mu.Unlock()
+	if !ran {
+		t.Fatal("the second run did not execute its promotion")
+	}
+}
+
+// Opus round 14, Minor 4: Draining after a fence whose status write was
+// lost, with a third site unreadable: the run waits, and when it gives up
+// its message does not claim the source was never fenced.
+func TestPlannedFailoverDraining_LostFenceWriteUnreadablePeerMessage(t *testing.T) {
+	fg := preFencePF(v1alpha1.PlannedFailoverPhaseDraining)
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true}
+	pdx := &mockMySQL{readOnly: true}
+	sjc := &mockMySQL{readOnly: true}
+	sjc.setError(errors.New("unreachable"))
+	r, c := newReconciler(fg)
+	r.Runner, _ = threeSiteDrainRunner(nn, iad, pdx, sjc)
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	cur := fetchFG(t, r, nn)
+	if pf := cur.Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseDraining || pf.RetryAfter == nil || pf.DrainStartTime != nil {
+		t.Fatalf("phase=%q retryAfter=%v drainStart=%v (%s); want a wait", pf.Phase, pf.RetryAfter, pf.DrainStartTime, pf.Message)
+	}
+	past := metav1.NewTime(time.Now().Add(-time.Second))
+	cur.Status.PlannedFailover.RetryAfter = &past
+	if err := c.Status().Update(context.Background(), cur); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || strings.Contains(pf.Message, "source not fenced") || !strings.Contains(pf.Message, "may have left it read-only") {
+		t.Fatalf("phase=%q (%s); want Failed saying the source may be read-only", pf.Phase, pf.Message)
+	}
+}
+
+// Opus round 14, Minor 5: on the first run, Execute succeeded but the
+// confirmation failed. That is a known promotion: Promoting retries the
+// confirmation and completes, without executing again and never as
+// ExecuteFailed.
+func TestPlannedFailoverPromoting_FirstRunConfirmFailureRetries(t *testing.T) {
+	fg := promotingPF(time.Now().Add(-2*time.Second), fencedGtid)
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: fencedGtid}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: fencedGtid, err: errors.New("probe unavailable")}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	pdx.mu.Lock()
+	stops := pdx.stopReplicaCalls
+	pdx.mu.Unlock()
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.RetryAfter == nil || stops == 0 {
+		t.Fatalf("phase=%q reason=%q retryAfter=%v executed=%v (%s); want Promoting retrying the confirmation", pf.Phase, pf.Reason, pf.RetryAfter, stops > 0, pf.Message)
+	}
+	pdx.setError(nil)
+	if pf := reconcileUntil(t, r, nn, v1alpha1.PlannedFailoverPhaseSucceeded, nil); pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
+		t.Fatalf("phase=%q reason=%q (%s); want Succeeded", pf.Phase, pf.Reason, pf.Message)
+	}
+	pdx.mu.Lock()
+	again := pdx.stopReplicaCalls != stops
+	pdx.mu.Unlock()
+	if again {
+		t.Fatal("the promotion was executed again")
 	}
 }

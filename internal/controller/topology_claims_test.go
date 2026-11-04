@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // claimFixture is a two-site group, dc1 the settled primary and dc2 a
@@ -180,6 +182,14 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			f.tm.promotedSite = "dc2" // recordFailover
 			f.tm.mu.Unlock()
 			f.tm.finishDeploymentTopologyChange()
+		}},
+		// A request waiting before its fence holds nothing: the guard is
+		// re-derived from its (pre-fence) status as unset.
+		{"planned failover waiting to claim", "AAAAAAA", func(t *testing.T, f *claimFixture) {
+			if ok, _, _ := f.r.ClaimPlannedFailover(f.nn, "dc2", "dc1"); ok {
+				t.Fatal("setup: a claim against the wrong source was granted")
+			}
+			f.tm.SetPlannedFailoverActive(plannedFailoverHoldsSites(&v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining}))
 		}},
 		{"planned failover", "RAARRRR", func(t *testing.T, f *claimFixture) {
 			if ok, why, _ := f.r.ClaimPlannedFailover(f.nn, "dc1", "dc2"); !ok {
