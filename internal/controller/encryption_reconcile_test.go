@@ -1595,3 +1595,71 @@ func TestReconcileEncryption_DeferredRotationSurvivesEscrowRepair(t *testing.T) 
 		t.Fatalf("dc2 = %+v: the kept request did not start the rotation once unblocked", s)
 	}
 }
+
+// GPT round 8: a rotation-stamp PUT whose response is lost may still commit
+// after settlement has read the old status. Here it is held back until
+// after the settlement read. Either settlement fences the object first, so
+// the late PUT is rejected and no rotation can land beside a handoff; or it
+// cannot fence, and the promotion block stays.
+func TestReconcileEncryption_LateCommittingStampCannotOutliveItsHold(t *testing.T) {
+	for _, fenceFails := range []bool{false, true} {
+		name := "fence succeeds: the late PUT is rejected"
+		if fenceFails {
+			name = "fence fails: the hold stays"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fg := sealedGroupWithActive("dc1")
+			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			r, c := encReconciler(t, scriptedKeyring(nil), fg)
+			seedEscrow(t, c, fg)
+			base := c.(client.WithWatch)
+			tm := rotationRunner(r, c)
+			nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+
+			var inFlight client.Object
+			r.Client = interceptor.NewClient(base, interceptor.Funcs{
+				SubResourceUpdate: func(_ context.Context, _ client.Client, _ string, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+					// The PUT is on the wire; its response is lost.
+					inFlight = obj.DeepCopyObject().(client.Object)
+					return apierrors.NewTimeoutError("status write timed out", 1)
+				},
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if fenceFails {
+						return errors.New("api server unreachable")
+					}
+					return cl.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			if _, err := r.reconcileEncryptionAtRest(ctx, fg); err == nil {
+				t.Fatal("want the lost-response error")
+			}
+			if inFlight == nil {
+				t.Fatal("setup: no status write was attempted")
+			}
+
+			// Settlement has read Sealed. Now the delayed PUT reaches the
+			// API server.
+			lateErr := base.Status().Update(ctx, inFlight)
+			var stored v1alpha1.MysqlFailoverGroup
+			if err := base.Get(ctx, nn, &stored); err != nil {
+				t.Fatal(err)
+			}
+			stamped := siteStatus(&stored, "dc2").UnsealReason == v1alpha1.UnsealReasonRotation
+			handoffErr := tm.liveHandoffRefusal("dc2")()
+
+			if fenceFails {
+				if handoffErr == nil {
+					t.Fatal("hold released without a fence; a late stamp could land beside a handoff")
+				}
+				return
+			}
+			if !apierrors.IsConflict(lateErr) || stamped {
+				t.Fatalf("late PUT after the fence: err=%v, stamped=%v; want a conflict and no stamp", lateErr, stamped)
+			}
+			if handoffErr != nil {
+				t.Fatalf("hold kept although the stamp can no longer land: %v", handoffErr)
+			}
+		})
+	}
+}

@@ -223,10 +223,14 @@ func (r *TopologyManagerRunner) plannedFailoverManager(nn types.NamespacedName) 
 	mt, ok := r.managers[nn]
 	r.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("planned-failover: no topology manager running for %s", nn)
+		return nil, fmt.Errorf("%w for %s", errNoTopologyManager, nn)
 	}
 	return mt.tm, nil
 }
+
+// errNoTopologyManager: no manager is registered for the group, typically
+// between a replaced manager's retirement and its successor's start.
+var errNoTopologyManager = errors.New("planned-failover: no topology manager running")
 
 // SetAPIReader sets the uncached reader the runner's Dragonfly managers read
 // the group through once they hold its gate. Call before Start.

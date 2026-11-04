@@ -136,6 +136,21 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Cont
 	if cur == nil || plannedFailoverTerminal(cur) {
 		return 0, nil
 	}
+	// A replaced manager's ordered update seen at any point from the fence
+	// on may already have invalidated the lag proof, even if it has exited
+	// by Promoting: record it so Promoting never promotes.
+	switch cur.Phase {
+	case v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag,
+		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync, v1alpha1.PlannedFailoverPhasePromotingDragonfly:
+		if cur.Reason != plannedFailoverReasonPredecessorUpdate && r.Runner != nil && r.Runner.OrderedUpdateUnwinding(nn) {
+			next := cur.DeepCopy()
+			next.Reason = plannedFailoverReasonPredecessorUpdate
+			if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+				return 0, err
+			}
+			cur = fg.Status.PlannedFailover
+		}
+	}
 	switch cur.Phase {
 	case v1alpha1.PlannedFailoverPhasePending, v1alpha1.PlannedFailoverPhaseValidating:
 		return r.plannedFailoverValidating(ctx, fg, nn)
@@ -780,17 +795,29 @@ const plannedFailoverPredecessorWait = 2 * time.Minute
 // A writable peer, an unreadable one (the update may have promoted a site
 // this manager cannot reach), or a wait past plannedFailoverPredecessorWait
 // leaves the source fenced for a human: the safe choice when the outcome
-// cannot be established.
+// cannot be established. No registered manager (the successor not started
+// yet) counts as still waiting, within the same deadline.
 func (r *MysqlFailoverGroupReconciler) plannedFailoverAwaitPredecessor(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) (time.Duration, error) {
 	cur := fg.Status.PlannedFailover
 	now := time.Now()
-	if r.Runner.OrderedUpdateUnwinding(nn) {
+	waiting := r.Runner.OrderedUpdateUnwinding(nn)
+	var writable, unknown []string
+	var probeErr error
+	if !waiting {
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		writable, unknown, probeErr = r.Runner.PlannedFailoverWritablePeers(probeCtx, nn, cur.SourcePrimary)
+		cancel()
+		// Between a replaced manager's retirement and its successor's
+		// start no manager can probe; that is part of the same wait.
+		waiting = errors.Is(probeErr, errNoTopologyManager)
+	}
+	if waiting {
 		if cur.Reason != plannedFailoverReasonPredecessorUpdate || cur.RetryAfter == nil {
 			next := cur.DeepCopy()
 			next.Reason = plannedFailoverReasonPredecessorUpdate
 			deadline := metav1.NewTime(now.Add(plannedFailoverPredecessorWait))
 			next.RetryAfter = &deadline
-			next.Message = fmt.Sprintf("waiting for a replaced topology manager's ordered update to exit; source %q stays fenced", cur.SourcePrimary)
+			next.Message = fmt.Sprintf("waiting for a replaced topology manager's ordered update to exit and its successor to start; source %q stays fenced", cur.SourcePrimary)
 			if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
 				return 0, err
 			}
@@ -800,14 +827,11 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverAwaitPredecessor(ctx conte
 			return 2 * time.Second, nil
 		}
 		return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
-			fmt.Sprintf("planned-failover: a replaced topology manager's ordered update did not exit within %s; source %q left fenced because what it did to the sites cannot be established; manual recovery required",
+			fmt.Sprintf("planned-failover: a replaced topology manager's ordered update did not exit, or no topology manager came up, within %s; source %q left fenced because what happened to the sites cannot be established; manual recovery required",
 				plannedFailoverPredecessorWait, cur.SourcePrimary),
 			"failed_other")
 	}
 
-	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	writable, unknown, probeErr := r.Runner.PlannedFailoverWritablePeers(probeCtx, nn, cur.SourcePrimary)
-	cancel()
 	if probeErr != nil || len(writable)+len(unknown) > 0 {
 		detail := fmt.Sprintf("writable: %v, unreadable: %v", writable, unknown)
 		if probeErr != nil {

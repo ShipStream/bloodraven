@@ -7428,10 +7428,14 @@ spec:
                     type: string
                   retryAfter:
                     description: |-
-                      RetryAfter is populated on the Deferred phase with the earliest
-                      time the state machine will retry validation. Derived from
-                      status.lastFailover + spec.failoverCooldown. Clears on transition
-                      out of Deferred.
+                      RetryAfter has two uses. On the Deferred phase it is the earliest
+                      time the state machine will retry validation, derived from
+                      status.lastFailover + spec.failoverCooldown (or the deployment
+                      hold's expiry); it clears on transition out of Deferred. On the
+                      Promoting phase with reason PredecessorUpdateInFlight it is the
+                      deadline for a replaced topology manager's ordered update to exit
+                      and a manager to be running; past it, the planned failover fails
+                      with the source left fenced.
                     format: date-time
                     type: string
                   sourceGtidAtFence:

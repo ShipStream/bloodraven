@@ -714,3 +714,100 @@ func TestPlannedFailoverPromoting_AwaitsPredecessorUpdate(t *testing.T) {
 		}
 	})
 }
+
+// Opus round 8, Minor 1: once the old update has exited the successor may
+// not be registered yet. That is part of the same wait, not a failure.
+func TestPlannedFailoverPromoting_WaitsForSuccessorManager(t *testing.T) {
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	deadline := metav1.NewTime(time.Now().Add(time.Minute))
+	fg := plannedFailoverFG("")
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+		Reason: plannedFailoverReasonPredecessorUpdate, RetryAfter: &deadline,
+	}
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	successor, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The old manager is retiring, its update has exited, and the
+	// successor is not registered yet.
+	retired, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+	r.Runner.mu.Lock()
+	delete(r.Runner.managers, nn)
+	r.Runner.retiring = map[types.NamespacedName][]*managedTopology{nn: {{tm: retired}}}
+	r.Runner.mu.Unlock()
+
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || !iad.superReadOnly {
+		t.Fatalf("phase=%q (%s): a missing successor must keep the wait, source fenced", pf.Phase, pf.Message)
+	}
+
+	r.Runner.SetManagerForTest(nn, successor)
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pf = fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "ConcurrentOperation" || iad.superReadOnly || iad.readOnly {
+		t.Fatalf("phase=%q reason=%q (%s), iad fenced=%v; want Failed/ConcurrentOperation with the source unfenced",
+			pf.Phase, pf.Reason, pf.Message, iad.superReadOnly)
+	}
+	if pdx.promoted {
+		t.Fatal("promoted after a predecessor's update ran")
+	}
+}
+
+// Opus round 8, Minor 2: an update seen during WaitingForLag that has exited
+// by Promoting still stops the promotion; its handoff may have invalidated
+// the lag proof.
+func TestPlannedFailover_PredecessorSeenBeforePromotingBlocksPromotion(t *testing.T) {
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg := plannedFailoverFG("")
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+		DrainStartTime: &start, LagWaitStartTime: &start, SourceGtidAtFence: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-5",
+		MaxLagWait: &metav1.Duration{Duration: 30 * time.Second},
+	}
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-5"}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-5"}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.setPredecessorUpdateInFlight(true)
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Reason != plannedFailoverReasonPredecessorUpdate {
+		t.Fatalf("phase=%q reason=%q: the update seen after the fence was not recorded", pf.Phase, pf.Reason)
+	}
+	tm.setPredecessorUpdateInFlight(false)
+
+	// Drive the state machine on; Promoting must not promote.
+	for i := 0; i < 5; i++ {
+		fresh := fetchFG(t, r, nn)
+		if plannedFailoverTerminal(fresh.Status.PlannedFailover) {
+			break
+		}
+		if _, err := r.reconcilePlannedFailover(context.Background(), fresh); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pdx.promoted {
+		t.Fatal("promoted on a lag proof the predecessor's update may have invalidated")
+	}
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "ConcurrentOperation" {
+		t.Fatalf("phase=%q reason=%q (%s), want Failed/ConcurrentOperation", pf.Phase, pf.Reason, pf.Message)
+	}
+}

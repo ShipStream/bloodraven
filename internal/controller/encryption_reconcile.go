@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -229,6 +230,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 // because the same site may hold an earlier, possibly persisted stamp; an
 // uncached read decides, published as the authoritative view. If that read
 // fails, everything stays held (fail closed) and the requeued pass retries.
+//
+// A read that lacks a stamp only proves the stamp has not landed yet: a
+// write that failed in transport may still be in flight and commit later.
+// Every encryption status write is conditioned on the resourceVersion it
+// read (patchEncryptionStatus), so before any hold ends the object is moved
+// past the version just read (fenceEncryptionStatusWrites); from then on no
+// such write can commit, and the read is final. If the fence fails, the
+// holds stay.
 func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx context.Context, nn types.NamespacedName) {
 	if r.Runner == nil {
 		return
@@ -245,7 +254,34 @@ func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx con
 			"fg", nn, "sites", held)
 		return
 	}
-	r.Runner.PublishKeyringRotationBlocked(nn, rotationBlockedSites(&latest))
+	persisted := rotationBlockedSites(&latest)
+	ending := slices.DeleteFunc(slices.Clone(held), func(s string) bool { return slices.Contains(persisted, s) })
+	if len(ending) > 0 {
+		if err := r.fenceEncryptionStatusWrites(readCtx, &latest); err != nil {
+			log.FromContext(ctx).Error(err, "keyring rotation: cannot rule out a rotation stamp still in flight; keeping the promotion block",
+				"fg", nn, "sites", ending)
+			return
+		}
+	}
+	r.Runner.PublishKeyringRotationBlocked(nn, persisted)
+}
+
+// encryptionStatusFenceAnnotation is bumped by fenceEncryptionStatusWrites.
+// Its value carries no meaning; writing it is what matters.
+const encryptionStatusFenceAnnotation = "shipstream.io/encryption-status-fence"
+
+// fenceEncryptionStatusWrites advances read's resourceVersion with a write
+// conditioned on it. Once it succeeds, a status write conditioned on that
+// or any older version, such as one whose response was lost, can no longer
+// commit.
+func (r *MysqlFailoverGroupReconciler) fenceEncryptionStatusWrites(ctx context.Context, read *v1alpha1.MysqlFailoverGroup) error {
+	fenced := read.DeepCopy()
+	patch := client.MergeFromWithOptions(read.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	if fenced.Annotations == nil {
+		fenced.Annotations = map[string]string{}
+	}
+	fenced.Annotations[encryptionStatusFenceAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	return r.Patch(ctx, fenced, patch)
 }
 
 // reconcileSiteKeyring advances one site. Returns true when the site is
