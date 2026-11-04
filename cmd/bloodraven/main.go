@@ -183,6 +183,7 @@ func main() {
 	// reconciler. Both share the manager, so they share leader election.
 	backupReconciler := &controller.MysqlBackupReconciler{
 		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorderFor("bloodraven-backup"),
 		Clientset: clientset,
@@ -198,6 +199,7 @@ func main() {
 	// success and retains them on failure for inspection.
 	verificationReconciler := &controller.MysqlBackupVerificationReconciler{
 		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorderFor("bloodraven-verification"),
 		Clientset: clientset,

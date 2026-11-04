@@ -27,6 +27,7 @@ const (
 	cleanupReasonCredentialsMissing    = "CredentialsUnavailable"
 	cleanupReasonOperatorImageUnset    = "OperatorImageUnset"
 	cleanupReasonJobConflict           = "CleanupJobConflict"
+	cleanupReasonHeldByVerification    = "HeldByVerification"
 )
 
 const (

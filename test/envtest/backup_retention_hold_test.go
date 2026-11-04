@@ -1,0 +1,267 @@
+//go:build envtest
+
+package envtest
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/controller"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const holdAnnotationPrefix = "hold.verification.shipstream.io/"
+
+func hasHold(b *v1alpha1.MysqlBackup) bool {
+	for key := range b.Annotations {
+		if strings.HasPrefix(key, holdAnnotationPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func createHeldTestBackup(t *testing.T, ns, fgName, name string, completed time.Time) *v1alpha1.MysqlBackup {
+	t.Helper()
+	b := newSucceededBackup(ns, fgName, "nightly-s3")
+	b.Name = name
+	b.Finalizers = []string{"shipstream.io/mysqlbackup"}
+	if err := k8sClient.Create(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	done := metav1.NewTime(completed)
+	b.Status = v1alpha1.MysqlBackupStatus{
+		Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &done, StartTime: &done,
+		StorageType: v1alpha1.BackupStorageS3, Location: "lion/" + name,
+		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Bucket: "bloodraven"},
+	}
+	if err := k8sClient.Status().Update(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestEnvtest_VerificationHoldOrdersAgainstDelete pins the API semantics the
+// hold relies on: a hold stamped after retention read the backup makes the
+// delete fail its precondition, and a delete that lands first makes the
+// stamp's optimistic lock fail.
+func TestEnvtest_VerificationHoldOrdersAgainstDelete(t *testing.T) {
+	ns := createNamespace(t, "verification-hold-order")
+	fg := newVerificationFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+
+	stampFirst := createHeldTestBackup(t, ns, fg.Name, "stamp-first", time.Now())
+	retentionView := stampFirst.DeepCopy()
+	patch := client.MergeFromWithOptions(stampFirst.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	stampFirst.Annotations = map[string]string{holdAnnotationPrefix + "uid-v": "v"}
+	if err := k8sClient.Patch(ctx, stampFirst, patch); err != nil {
+		t.Fatal(err)
+	}
+	uid, rv := retentionView.UID, retentionView.ResourceVersion
+	if err := k8sClient.Delete(ctx, retentionView, client.Preconditions{UID: &uid, ResourceVersion: &rv}); !apierrors.IsConflict(err) {
+		t.Fatalf("delete with a pre-stamp resourceVersion: %v, want Conflict", err)
+	}
+
+	deleteFirst := createHeldTestBackup(t, ns, fg.Name, "delete-first", time.Now())
+	verificationView := deleteFirst.DeepCopy()
+	if err := k8sClient.Delete(ctx, deleteFirst); err != nil {
+		t.Fatal(err)
+	}
+	patch = client.MergeFromWithOptions(verificationView.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	verificationView.Annotations = map[string]string{holdAnnotationPrefix + "uid-v": "v"}
+	if err := k8sClient.Patch(ctx, verificationView, patch); !apierrors.IsConflict(err) {
+		t.Fatalf("stamp with a pre-delete resourceVersion: %v, want Conflict", err)
+	}
+}
+
+// TestEnvtest_VerificationHoldLifecycle runs both reconcilers against a
+// real API server: a manual delete during a run is deferred, a run that
+// fails while its pod still runs keeps the hold, and cleanup starts only
+// after the pod stops and the hold is released.
+func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
+	controller.SetOperatorImageDefaults("registry.test/bloodraven:envtest", "bloodraven")
+	t.Cleanup(func() { controller.SetOperatorImageDefaults("", "") })
+	ns := createNamespace(t, "verification-hold-lifecycle")
+	ensureSecret(t, ns)
+	fg := newVerificationFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	backup := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-read", time.Now())
+	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
+		FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &corev1.LocalObjectReference{Name: backup.Name},
+	}}
+	if err := k8sClient.Create(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	vr := &controller.MysqlBackupVerificationReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
+	br := &controller.MysqlBackupReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
+	vKey, bKey := client.ObjectKeyFromObject(v), client.ObjectKeyFromObject(backup)
+	reconcileBackup := func() {
+		t.Helper()
+		if _, err := br.Reconcile(ctx, ctrl.Request{NamespacedName: bKey}); err != nil {
+			t.Fatalf("backup reconcile: %v", err)
+		}
+	}
+	reconcileVerification := func() {
+		t.Helper()
+		if _, err := vr.Reconcile(ctx, ctrl.Request{NamespacedName: vKey}); err != nil {
+			t.Fatalf("verification reconcile: %v", err)
+		}
+	}
+	cleanupKey := client.ObjectKey{Namespace: ns, Name: "mysqlbackup-" + backup.Name + "-cleanup"}
+
+	reconcileUntil(t, vr, vKey, func() bool {
+		if err := k8sClient.Get(ctx, vKey, v); err != nil {
+			t.Fatal(err)
+		}
+		return v.Status.Phase == v1alpha1.VerificationPhaseRestoring
+	})
+	if err := k8sClient.Get(ctx, bKey, backup); err != nil || !hasHold(backup) {
+		t.Fatalf("launch did not stamp the hold: %v %v", err, backup.Annotations)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "reader-pod", Namespace: ns, Labels: map[string]string{"shipstream.io/mysqlbackup-verification": v.Name}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "verify", Image: "verify"}}},
+	}
+	if err := k8sClient.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Phase = corev1.PodRunning
+	if err := k8sClient.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+
+	// A manual delete during the run is deferred.
+	if err := k8sClient.Delete(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	reconcileBackup()
+	var cleanup batchv1.Job
+	if err := k8sClient.Get(ctx, cleanupKey, &cleanup); !apierrors.IsNotFound(err) {
+		t.Fatalf("cleanup Job created while a verification reads the artifact: %v", err)
+	}
+	if err := k8sClient.Get(ctx, bKey, backup); err != nil {
+		t.Fatal(err)
+	}
+	if cond := apiMeta.FindStatusCondition(backup.Status.Conditions, controller.ConditionArtifactCleanup); cond == nil || cond.Reason != "HeldByVerification" {
+		t.Fatalf("ArtifactCleanup condition = %+v", cond)
+	}
+
+	// The run fails while its pod is still running: the hold stays.
+	var job batchv1.Job
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: v.Status.JobName}, &job); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.Now()
+	job.Status.StartTime = &now
+	job.Status.Failed = 1
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "BackoffLimitExceeded"},
+		{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "BackoffLimitExceeded"},
+	}
+	if err := k8sClient.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	reconcileVerification()
+	reconcileVerification()
+	if err := k8sClient.Get(ctx, vKey, v); err != nil || v.Status.Phase != v1alpha1.VerificationPhaseFailed {
+		t.Fatalf("verification phase %s (%v), want Failed", v.Status.Phase, err)
+	}
+	if err := k8sClient.Get(ctx, bKey, backup); err != nil || !hasHold(backup) {
+		t.Fatalf("hold released while the verification pod still runs: %v", err)
+	}
+	reconcileBackup()
+	if err := k8sClient.Get(ctx, cleanupKey, &cleanup); !apierrors.IsNotFound(err) {
+		t.Fatalf("cleanup started while the failed run's pod still runs: %v", err)
+	}
+
+	// The pod stops: the hold is released and cleanup starts.
+	pod.Status.Phase = corev1.PodFailed
+	if err := k8sClient.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	reconcileVerification()
+	if err := k8sClient.Get(ctx, bKey, backup); err != nil || hasHold(backup) {
+		t.Fatalf("hold not released after the run stopped: %v %v", err, backup.Annotations)
+	}
+	reconcileBackup()
+	if err := k8sClient.Get(ctx, cleanupKey, &cleanup); err != nil {
+		t.Fatalf("cleanup did not start after the hold was released: %v", err)
+	}
+}
+
+// TestEnvtest_RetentionHoldsUnstampedRun covers a verification started by
+// an operator that did not stamp holds: retention finds it by scanning,
+// and the run's next reconcile stamps the hold.
+func TestEnvtest_RetentionHoldsUnstampedRun(t *testing.T) {
+	ns := createNamespace(t, "verification-hold-upgrade")
+	ensureSecret(t, ns)
+	fg := newVerificationFG(ns)
+	fg.Spec.Backup.Profiles[0].Retention = 1
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	older := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-older", time.Now().Add(-2*time.Hour))
+	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
+		FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &corev1.LocalObjectReference{Name: older.Name},
+	}}
+	if err := k8sClient.Create(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	vr := &controller.MysqlBackupVerificationReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
+	vKey, oKey := client.ObjectKeyFromObject(v), client.ObjectKeyFromObject(older)
+	reconcileUntil(t, vr, vKey, func() bool {
+		if err := k8sClient.Get(ctx, vKey, v); err != nil {
+			t.Fatal(err)
+		}
+		return v.Status.Phase == v1alpha1.VerificationPhaseRestoring
+	})
+	// Simulate the older operator: no hold on the backup.
+	if err := k8sClient.Get(ctx, oKey, older); err != nil {
+		t.Fatal(err)
+	}
+	older.Annotations = nil
+	if err := k8sClient.Update(ctx, older); err != nil {
+		t.Fatal(err)
+	}
+
+	newer := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-newer", time.Now())
+	rec := record.NewFakeRecorder(50)
+	br := &controller.MysqlBackupReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: rec}
+	if _, err := br.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(newer)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Get(ctx, oKey, older); err != nil || !older.DeletionTimestamp.IsZero() {
+		t.Fatalf("retention deleted a backup an unstamped run is reading: %v deleting=%v", err, older.DeletionTimestamp)
+	}
+	deferred := false
+	for len(rec.Events) > 0 {
+		if strings.Contains(<-rec.Events, "RetentionDeferred") {
+			deferred = true
+		}
+	}
+	if !deferred {
+		t.Fatal("no RetentionDeferred event")
+	}
+
+	if _, err := vr.Reconcile(ctx, ctrl.Request{NamespacedName: vKey}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Get(ctx, oKey, older); err != nil || !hasHold(older) {
+		t.Fatalf("observe did not stamp the hold: %v %v", err, older.Annotations)
+	}
+}

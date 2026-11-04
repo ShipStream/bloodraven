@@ -3,6 +3,7 @@ package controller
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -57,12 +58,18 @@ type MysqlBackupVerificationReconciler struct {
 	// Fake-client tests leave this nil; status will then only carry the
 	// terminal Phase and Conditions.
 	Clientset kubernetes.Interface
+
+	// APIReader is an uncached reader for verification holds on
+	// MysqlBackups. SetupWithManager defaults it to mgr.GetAPIReader();
+	// unit tests leave it nil and read the client.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications/finalizers,verbs=update
-// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackups,verbs=get;list;watch
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackups,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
@@ -80,11 +87,23 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
-	// Deletion path: clean up artifacts then drop the finalizer.
+	// Deletion path: clean up artifacts, wait for the verification's
+	// pods to stop reading the backup, release the hold, then drop the
+	// finalizer. Releasing earlier would let retention or artifact
+	// cleanup delete the backup under a still-running pod.
 	if !v.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&v, mysqlBackupVerificationFinalizer) {
 			if _, err := r.cleanupEphemeral(ctx, &v, true); err != nil {
 				return ctrl.Result{RequeueAfter: 15 * time.Second}, fmt.Errorf("cleanup on delete: %w", err)
+			}
+			released, err := r.releaseVerificationHold(ctx, &v)
+			if err != nil {
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, fmt.Errorf("release verification hold: %w", err)
+			}
+			if stopped, err := verificationExecutionStopped(ctx, r.apiReader(), v.Namespace, v.Name); err != nil {
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+			} else if !released || !stopped {
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			controllerutil.RemoveFinalizer(&v, mysqlBackupVerificationFinalizer)
 			if err := r.Update(ctx, &v); err != nil {
@@ -111,6 +130,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 		if err != nil {
 			logger.Error(err, "post-terminal cleanup")
 		}
+		requeue = shorterRequeue(requeue, r.maybeReleaseHold(ctx, &v))
 		if err := r.pruneRetention(ctx, &v); err != nil {
 			logger.Error(err, "retention prune")
 		}
@@ -190,6 +210,20 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 			return ctrl.Result{}, fmt.Errorf("persist pinned backup reference: %w", err)
 		}
 	}
+	// Hold the pinned backup against retention and artifact cleanup
+	// before anything reads it. The pin is persisted first, so a crash
+	// here re-stamps the same backup on the next pass.
+	if err := r.stampVerificationHold(ctx, v, false); err != nil {
+		switch {
+		case errors.Is(err, errHoldBackupGone), errors.Is(err, errHoldBackupReplaced), errors.Is(err, errHoldBackupTerminating):
+			return r.failVerification(ctx, v, "BackupNotAvailable",
+				fmt.Sprintf("pinned backup %q: %v", v.Status.BackupRef.Name, err))
+		case apierrors.IsConflict(err):
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		default:
+			return ctrl.Result{}, err
+		}
+	}
 
 	// Ensure the derived creds Secret (S3 workloads consult it; the
 	// ephemeral mysqld uses an in-pod synthetic root).
@@ -230,6 +264,14 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if err := controllerutil.SetControllerReference(v, built, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("set job owner ref: %w", err)
 	}
+	// Last uncached check: retention may have deleted the backup between
+	// the stamp and now only if it won the resourceVersion race, which
+	// leaves it Terminating or without this hold.
+	if refusal, err := r.launchHoldConfirmed(ctx, v); err != nil {
+		return ctrl.Result{}, err
+	} else if refusal != "" {
+		return r.failVerification(ctx, v, "BackupNotAvailable", refusal)
+	}
 	if err := r.Create(ctx, built); err != nil {
 		return ctrl.Result{}, fmt.Errorf("create verification job: %w", err)
 	}
@@ -255,6 +297,20 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	}
 	if err := r.pinVerificationJobSource(ctx, v, job, ref); err != nil {
 		return ctrl.Result{}, err
+	}
+	if !verificationTerminal(v.Status.Phase) {
+		// Idempotent; covers runs started by an operator that did not
+		// stamp holds and a crash between Job creation and status. The
+		// backup may already be Terminating: the hold then defers its
+		// artifact cleanup until this run stops.
+		if err := r.stampVerificationHold(ctx, v, true); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if !errors.Is(err, errHoldBackupGone) && !errors.Is(err, errHoldBackupReplaced) {
+				return ctrl.Result{}, err
+			}
+		}
 	}
 	// Observe the Job. Status translation reuses the backup helper.
 	phase, message := jobPhase(job, "verification")
@@ -359,6 +415,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		if err != nil {
 			logger.Error(err, "post-terminal cleanup")
 		}
+		requeue = shorterRequeue(requeue, r.maybeReleaseHold(ctx, v))
 		if err := r.pruneRetention(ctx, v); err != nil {
 			logger.Error(err, "retention prune")
 		}
@@ -395,6 +452,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	if err != nil {
 		logger.Error(err, "post-terminal cleanup")
 	}
+	requeue = shorterRequeue(requeue, r.maybeReleaseHold(ctx, v))
 	if err := r.pruneRetention(ctx, v); err != nil {
 		logger.Error(err, "retention prune")
 	}
@@ -403,6 +461,9 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 
 // SetupWithManager registers the reconciler with the manager.
 func (r *MysqlBackupVerificationReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlBackupVerification{}).
 		Owns(&batchv1.Job{}).
@@ -424,6 +485,9 @@ func (r *MysqlBackupVerificationReconciler) resolveBackup(ctx context.Context, v
 		}
 		if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded {
 			return nil, fmt.Errorf("referenced MysqlBackup %q is not Succeeded (phase=%q)", backup.Name, backup.Status.Phase)
+		}
+		if !backup.DeletionTimestamp.IsZero() {
+			return nil, fmt.Errorf("referenced MysqlBackup %q is being deleted", backup.Name)
 		}
 		if backup.Spec.FailoverGroupRef.Name != v.Spec.FailoverGroupRef.Name ||
 			backup.Spec.ProfileName != v.Spec.ProfileName {
@@ -447,7 +511,7 @@ func (r *MysqlBackupVerificationReconciler) resolveBackup(ctx context.Context, v
 	var best *v1alpha1.MysqlBackup
 	for i := range list.Items {
 		b := &list.Items[i]
-		if b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+		if b.Status.Phase != v1alpha1.BackupPhaseSucceeded || !b.DeletionTimestamp.IsZero() {
 			continue
 		}
 		if b.Status.CompletionTime == nil {
@@ -497,6 +561,28 @@ func (r *MysqlBackupVerificationReconciler) findBlockingVerification(ctx context
 		}
 	}
 	return "", nil
+}
+
+// maybeReleaseHold releases a terminal verification's hold once its pods
+// have stopped, and returns how soon to look again while they have not.
+func (r *MysqlBackupVerificationReconciler) maybeReleaseHold(ctx context.Context, v *v1alpha1.MysqlBackupVerification) time.Duration {
+	done, err := r.releaseVerificationHold(ctx, v)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "release verification hold")
+		return 5 * time.Second
+	}
+	if !done {
+		return 30 * time.Second
+	}
+	return 0
+}
+
+// shorterRequeue returns the shorter non-zero delay.
+func shorterRequeue(a, b time.Duration) time.Duration {
+	if a == 0 || b != 0 && b < a {
+		return b
+	}
+	return a
 }
 
 func verificationTerminal(p v1alpha1.VerificationPhase) bool {

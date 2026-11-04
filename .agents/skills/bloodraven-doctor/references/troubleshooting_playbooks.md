@@ -958,6 +958,7 @@ Do not:
    - `DestinationUnverified`: no `status.artifactStorage` (a backup from an older operator) and its producing Job is gone, so the bucket/claim the backup used is unknown.
    - `DestinationMismatch`: `status.location` does not end in the backup name, is outside the recorded bucket or `/backups`, or differs from the producing Job's destination.
    - `CleanupJobConflict`: a Job named `mysqlbackup-<name>-cleanup` exists but is not owned by this backup.
+   - `HeldByVerification`: a verification is still reading the artifact; see [playbook 36](#36-backup-kept-past-retention-or-deletion-waiting-on-a-verification).
 3. Cleanup deletes from `status.artifactStorage` (captured when the backup ran), never from the live profile. A changed profile bucket, endpoint or claim does not move the delete; only credentials come from the current profile.
 
 ### Safe remediation
@@ -972,4 +973,33 @@ Do not:
 - Remove the finalizer while the artifact is still in storage: nothing will clean it up later.
 - Edit `status.artifactStorage` or `status.location` to point cleanup somewhere else: the recursive delete would follow it.
 - Delete a running cleanup Job to hurry it: the operator replaces only failed Jobs, after their pods are gone.
+
+## 36. Backup kept past retention, or deletion waiting on a verification
+
+### Symptoms
+- A successful `MysqlBackup` outside its profile's `count`/`maxAgeDays` window is not pruned, with `RetentionDeferred` Events.
+- A deleted `MysqlBackup` stays Terminating with `ArtifactCleanup=False/HeldByVerification` and `ArtifactCleanupDeferred` Events.
+- A deleted `MysqlBackupVerification` stays Terminating.
+
+### Diagnostic steps
+1. List the holds on the backup and the verifications that reference it:
+   ```bash
+   kubectl get mysqlbackup <backup> -n <ns> -o json | jq '.metadata.annotations // {} | with_entries(select(.key | startswith("hold.verification.shipstream.io/")))'
+   kubectl get mysqlbackupverifications -n <ns> -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,BACKUP_UID:.status.backupRef.uid,JOB:.status.jobName
+   ```
+2. For each holding verification, check whether anything still runs:
+   ```bash
+   kubectl get job mysqlverify-<verification> -n <ns> -o jsonpath='{.status.conditions[*].type}{"\n"}'
+   kubectl get pods -n <ns> -l shipstream.io/mysqlbackup-verification=<verification> -o custom-columns=POD:.metadata.name,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp
+   ```
+3. A hold is live while the verification is not finished, or while its Job is unfinished, or while any labelled pod is `Pending` or `Running`. A hold whose verification is gone counts only while that verification's pods still run. An unfinished verification that is not yet pinned holds every successful backup of its group and profile.
+
+### Safe remediation
+1. During a run this is expected; retention and cleanup resume on their own after the run stops (the hold release triggers a backup reconcile).
+2. If a finished run still holds, it is usually a failed run kept by `keepOnFailure: true` whose pod is still running, or a pod stuck terminating on an unreachable node. Delete the verification (its finalizer waits for its pods) or resolve the stuck pod.
+3. A verification that stays Terminating is waiting for its pods to be gone; it releases its hold and finalizer once they are.
+
+Do not:
+- Remove a `hold.verification.shipstream.io/*` annotation by hand while a pod of that verification runs: retention or cleanup could then delete the artifact under it.
+- Remove the verification finalizer to hurry deletion. The hold then stays on the backup; it stops counting once the pods are gone, but retention only notices on its next pass.
 

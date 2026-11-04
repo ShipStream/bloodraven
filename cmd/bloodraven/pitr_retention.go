@@ -6,6 +6,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/controller"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,7 +30,10 @@ func resolvePITRCutoff(ctx context.Context, reader client.Reader, namespace, gro
 	unknown, inFlight := false, false
 	for i := range list.Items {
 		b := &list.Items[i]
-		if !b.DeletionTimestamp.IsZero() || b.Spec.FailoverGroupRef.Name != group {
+		// A backup being deleted no longer bounds retention, unless a
+		// verification holds it: its artifact is kept until that run
+		// stops, and so must be the binlogs a PITR replay reads after it.
+		if !b.DeletionTimestamp.IsZero() && !controller.BackupHasVerificationHold(b) || b.Spec.FailoverGroupRef.Name != group {
 			continue
 		}
 		switch b.Status.Phase {

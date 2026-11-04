@@ -59,6 +59,12 @@ type MysqlBackupReconciler struct {
 	// status.location / status.size can be populated. Tests using the
 	// controller-runtime fake client leave it nil.
 	Clientset kubernetes.Interface
+
+	// APIReader is an uncached reader for retention and cleanup decisions
+	// that must see verification holds as they are now, not as the
+	// informer cache last saw them. SetupWithManager defaults it to
+	// mgr.GetAPIReader(); unit tests leave it nil and read the client.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackups,verbs=get;list;watch;create;update;patch;delete
@@ -69,6 +75,7 @@ type MysqlBackupReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications,verbs=get;list;watch
 
 func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("mysqlbackup", req.NamespacedName)
@@ -476,6 +483,9 @@ func (r *MysqlBackupReconciler) repairTerminalAttribution(ctx context.Context, b
 
 // SetupWithManager registers the reconciler with the manager.
 func (r *MysqlBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlBackup{}).
 		Owns(&batchv1.Job{}).
@@ -564,6 +574,23 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	if err := r.Get(ctx, cleanupKey, &cleanupJob); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return false, 0, fmt.Errorf("get cleanup job: %w", err)
+		}
+		// A verification may still be reading the artifact (a manual
+		// delete during a run, or a hold retention could not see).
+		readers, err := artifactReaders(ctx, r.apiReader(), backup)
+		if err != nil {
+			return false, 0, err
+		}
+		if len(readers) > 0 {
+			message := fmt.Sprintf("verification %s may still be reading the artifact", strings.Join(readers, ", "))
+			previous := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionArtifactCleanup)
+			if previous == nil || previous.Reason != cleanupReasonHeldByVerification || previous.Message != message {
+				r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupDeferred", "cleanup waits: %s", message)
+			}
+			if err := r.setArtifactCleanupCondition(ctx, backup, cleanupReasonHeldByVerification, message); err != nil {
+				return false, 0, err
+			}
+			return false, 30 * time.Second, nil
 		}
 		// Never overlap executions: a retried Job's pods must be gone
 		// before its replacement starts.
@@ -1250,10 +1277,11 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 				continue
 			}
 		}
-		// Not kept by any policy check => delete.
+		// Not kept by any policy check => delete, unless a verification
+		// may still be reading the artifact.
 		victim := b
-		if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete old succeeded backup %s: %w", victim.Name, err)
+		if err := r.deleteUnreadBackup(ctx, &victim); err != nil {
+			return err
 		}
 	}
 	return nil

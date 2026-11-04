@@ -157,6 +157,13 @@ kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,ship
 echo "Artifact cleanup (Terminating backups show DELETING; CLEANUP is the ArtifactCleanup reason):"
 kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,LOCATION:.status.location,BUCKET:.status.artifactStorage.bucket,CLAIM:.status.artifactStorage.claimName,CLEANUP:.status.conditions[?(@.type=="ArtifactCleanup")].reason,MESSAGE:.status.conditions[?(@.type=="ArtifactCleanup")].message' 2>/dev/null || echo "Artifact cleanup status unavailable."
 kubectl get pods -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup-cleanup" -o 'custom-columns=POD:.metadata.name,BACKUP:.metadata.labels.shipstream\.io/mysqlbackup,PHASE:.status.phase,EXIT:.status.containerStatuses[*].state.terminated.exitCode,VERDICT:.status.containerStatuses[*].state.terminated.message' 2>/dev/null || echo "Cleanup pods unavailable."
+if command -v jq >/dev/null 2>&1; then
+  echo "Verification holds (backup -> {hold.verification.shipstream.io/<uid>: verification}):"
+  kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o json 2>/dev/null | \
+    jq -r '.items[] | select(.metadata.annotations // {} | keys | any(startswith("hold.verification.shipstream.io/"))) |
+      "\(.metadata.name)\t\(.metadata.annotations | with_entries(select(.key | startswith("hold.verification.shipstream.io/"))) | tojson)"' \
+    || echo "Verification holds unavailable."
+fi
 echo ""
 echo "--- 9. Verification Execution Source ---"
 kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase,JOB:.status.jobName,BACKUP:.status.backupRef.name,BACKUP_UID:.status.backupRef.uid,LOCATION:.status.backupRef.location,STORAGE:.status.backupRef.storageType,VERIFIED:.status.conditions[?(@.type=="Verified")].status,REASON:.status.conditions[?(@.type=="Verified")].reason' 2>/dev/null || echo "Verification status unavailable."

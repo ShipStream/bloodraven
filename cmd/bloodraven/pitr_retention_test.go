@@ -124,3 +124,41 @@ func TestPITRCutoffDoesNotCachePositiveCoverage(t *testing.T) {
 		t.Fatalf("new retained backup was hidden by cached proof or label filter: %v", proof)
 	}
 }
+
+// TestPITRCutoffKeepsHeldTerminatingBackup pins #211: a backup deleted
+// while a verification reads it keeps its artifact until the run stops, so
+// it must keep bounding binlog retention for that long too.
+func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
+	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		held   bool
+		cutoff time.Time
+	}{
+		{name: "held", held: true, cutoff: start},
+		{name: "not held", held: false, cutoff: start.Add(time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := v1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			deleting := retentionBoundaryBackup("deleting", retentionTestSID+":1-10", start)
+			now := metav1.Now()
+			deleting.DeletionTimestamp = &now
+			deleting.Finalizers = []string{"shipstream.io/mysqlbackup"}
+			if tc.held {
+				deleting.Annotations = map[string]string{"hold.verification.shipstream.io/uid-v": "v"}
+			}
+			kept := retentionBoundaryBackup("kept", retentionTestSID+":1-20", start.Add(time.Hour))
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deleting, kept).Build()
+			resp, err := resolvePITRCutoff(context.Background(), c, "ns", "fg", "p")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp["cutoffTime"] != tc.cutoff.Format(time.RFC3339) {
+				t.Fatalf("cutoff %v, want %s", resp["cutoffTime"], tc.cutoff.Format(time.RFC3339))
+			}
+		})
+	}
+}

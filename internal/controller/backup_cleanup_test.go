@@ -314,7 +314,7 @@ func cleanupPodFor(job *batchv1.Job, phase corev1.PodPhase, code int32, message 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: job.Name + "-pod", Namespace: job.Namespace,
-			Labels: map[string]string{"batch.kubernetes.io/job-name": job.Name, labelMysqlBackup: job.Labels[labelMysqlBackup], labelResourceKind: "backup-cleanup"},
+			Labels:          map[string]string{"batch.kubernetes.io/job-name": job.Name, labelMysqlBackup: job.Labels[labelMysqlBackup], labelResourceKind: "backup-cleanup"},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: boolPtr(true)}},
 		},
 		Status: corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{{

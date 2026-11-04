@@ -107,6 +107,7 @@ kubectl get mysqlbackups.shipstream.io -n "$NAMESPACE" -o json 2>/dev/null | \
     jq --arg group "$MFG_NAME" '[.items[] | select(.spec.failoverGroupRef.name == $group) |
       {name: .metadata.name, profile: .spec.profileName, phase: .status.phase,
        deletionTimestamp: .metadata.deletionTimestamp,
+       verificationHolds: (.metadata.annotations // {} | with_entries(select(.key | startswith("hold.verification.shipstream.io/")))),
        startTime: .status.startTime, completionTime: .status.completionTime,
        gtidExecuted: .status.gtidExecuted}]' > "$OUTPUT_DIR/backups.json" 2> "$OUTPUT_DIR/backup-errors.txt" || true
 
