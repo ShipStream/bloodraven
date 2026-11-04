@@ -606,9 +606,10 @@ type TopologyManager struct {
 	// their beginAutoPromotionOf claim.
 	beforePromotionClaim func(target string)
 
-	// plannedPromotion is the promotion PlannedPromote completed for the
-	// planned failover still holding its claim (see ownPlannedPromotion).
-	// Cleared when that claim is released or another change is claimed.
+	// plannedPromotion is the last promotion PlannedPromote completed (see
+	// ownPlannedPromotion). It survives the planned-failover flag being
+	// dropped and re-derived (a Dragonfly snapshot upgrade shares the
+	// flag), and is cleared when any later topology change is claimed.
 	// Protected by mu.
 	plannedPromotion *plannedPromotionRecord
 
@@ -2925,9 +2926,6 @@ func (tm *TopologyManager) isTopologyFrozen() bool {
 func (tm *TopologyManager) SetPlannedFailoverActive(v bool) {
 	tm.mu.Lock()
 	tm.plannedFailoverActive = v
-	if !v {
-		tm.plannedPromotion = nil
-	}
 	tm.mu.Unlock()
 }
 
@@ -3146,10 +3144,56 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	tm.mu.Unlock()
 
 	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
-		return promotionGtid, fmt.Errorf("DNS flip failed after successful promotion: %w", err)
+		return promotionGtid, fmt.Errorf("%w: %v", errDNSFlipAfterPromotion, err)
 	}
 
 	return promotionGtid, nil
+}
+
+// errDNSFlipAfterPromotion is returned, with the promotion GTID, when the
+// target was promoted and confirmed writable but the DNS write failed. The
+// switchover happened; the poll-driven DNS reconcile heals the record.
+var errDNSFlipAfterPromotion = errors.New("DNS flip failed after successful promotion")
+
+// errPromotionConfirmPending is returned when the target is known to have
+// been promoted (by this planned failover) but could not be confirmed
+// writable just now. Nothing is executed again; the caller retries the
+// confirmation.
+var errPromotionConfirmPending = errors.New("planned promote: the target was promoted but is not confirmed writable yet")
+
+// ConfirmPlannedPromotion confirms a promotion of target that the durable
+// failover record says already happened, without executing anything: the
+// target must read writable and contain fencedGtid (the source's fenced
+// set). DNS is re-applied.
+func (tm *TopologyManager) ConfirmPlannedPromotion(ctx context.Context, target, fencedGtid string) error {
+	targetSite := tm.getSite(target)
+	if targetSite == nil {
+		return errSiteNotFound
+	}
+	if err := tm.confirmWritable(ctx, targetSite); err != nil {
+		return fmt.Errorf("%w: %v", errPromotionConfirmPending, err)
+	}
+	if fencedGtid != "" {
+		raw, err := targetSite.mysql.GetGtidExecuted(ctx)
+		if err != nil {
+			return fmt.Errorf("%w: read GTID_EXECUTED on %q: %v", errPromotionConfirmPending, target, err)
+		}
+		have, err := mysql.ParseGTIDSet(raw)
+		if err != nil {
+			return fmt.Errorf("%w: parse GTID_EXECUTED on %q: %v", errPromotionConfirmPending, target, err)
+		}
+		want, err := mysql.ParseGTIDSet(fencedGtid)
+		if err != nil {
+			return fmt.Errorf("%w: parse the fenced GTID set: %v", errPromotionConfirmPending, err)
+		}
+		if !have.Contains(want) {
+			return fmt.Errorf("%w: %q does not contain the source's fenced GTID set", errPromotionConfirmPending, target)
+		}
+	}
+	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
+		return fmt.Errorf("%w: %v", errDNSFlipAfterPromotion, err)
+	}
+	return nil
 }
 
 // reconfirmPlannedPromotion answers a re-run of PlannedPromote for a
@@ -3158,10 +3202,10 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 // recorded promotion GTID is returned.
 func (tm *TopologyManager) reconfirmPlannedPromotion(ctx context.Context, targetSite *siteTracker, rec plannedPromotionRecord) (string, error) {
 	if err := tm.confirmWritable(ctx, targetSite); err != nil {
-		return "", fmt.Errorf("promotion succeeded but writable confirmation failed: %w", err)
+		return "", fmt.Errorf("%w: %v", errPromotionConfirmPending, err)
 	}
 	if err := tm.applyDNS(ctx, rec.target, targetSite.lbIP); err != nil {
-		return rec.gtid, fmt.Errorf("DNS flip failed after successful promotion: %w", err)
+		return rec.gtid, fmt.Errorf("%w: %v", errDNSFlipAfterPromotion, err)
 	}
 	return rec.gtid, nil
 }

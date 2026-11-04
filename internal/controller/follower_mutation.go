@@ -247,6 +247,7 @@ const (
 	plannedClaimRefusedRestore            = "an in-place restore is in progress"
 	plannedClaimRefusedBootstrap          = "a bootstrap clone is running"
 	plannedClaimRefusedRotation           = "the target is mid-keyring-rotation"
+	plannedClaimRefusedAuthorityUnsettled = "the topology manager has not established a unique writable primary"
 )
 
 // plannedClaimRefusedSourceMoved is the refusal when the manager observes
@@ -262,8 +263,20 @@ func plannedClaimRefusedSourceMoved(active, source string) string {
 // both. retry marks a refusal that clears on its own within seconds (a
 // promotion finishing or being observed); the rest fail the request. A
 // manager that observes a primary other than source refuses for good: a
-// promotion moved authority since the request was validated. Idempotent.
+// promotion moved authority since the request was validated. A manager
+// that cannot name a unique writable primary (not yet classified after a
+// start, or two sites writable) cannot rule out that some other site is the
+// real primary, so it refuses for now (retry). Idempotent.
 func (tm *TopologyManager) ClaimPlannedFailover(source, target string) (ok bool, why string, retry bool) {
+	return tm.claimPlannedFailover(source, target, false)
+}
+
+// claimPlannedFailover is ClaimPlannedFailover. sourceFencedAlone records
+// that a live probe just found the source read-only and every other site
+// read-only: the state this planned failover's own fence leaves behind when
+// its status write was lost, in which no site is writable and the manager
+// therefore names no primary.
+func (tm *TopologyManager) claimPlannedFailover(source, target string, sourceFencedAlone bool) (ok bool, why string, retry bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	switch {
@@ -284,11 +297,40 @@ func (tm *TopologyManager) ClaimPlannedFailover(source, target string) (ok bool,
 	case tm.promotionUnobservedLocked():
 		return false, plannedClaimRefusedUnobserved, true
 	}
-	if active := tm.activeSiteLocked(); active != "" && active != source {
+	switch active := tm.activeSiteLocked(); {
+	case active == "" && !sourceFencedAlone:
+		return false, plannedClaimRefusedAuthorityUnsettled, true
+	case active != "" && active != source:
 		return false, plannedClaimRefusedSourceMoved(active, source), false
 	}
 	tm.plannedFailoverActive = true
 	return true, "", false
+}
+
+// sourceFencedAlone probes source and every other site live and reports
+// whether source is read-only and every other site confirmed read-only,
+// with what it found otherwise.
+func (tm *TopologyManager) sourceFencedAlone(ctx context.Context, source string) (bool, string) {
+	site := tm.getSite(source)
+	if site == nil {
+		return false, fmt.Sprintf("source %q is not a site of this group", source)
+	}
+	var ro bool
+	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		var err error
+		ro, err = site.mysql.CheckReadOnly(probeCtx)
+		return err
+	}); err != nil {
+		return false, fmt.Sprintf("source %q could not be probed: %v", source, err)
+	}
+	if !ro {
+		return false, fmt.Sprintf("source %q is still writable", source)
+	}
+	writable, unknown := tm.WritablePeers(ctx, source)
+	if len(writable)+len(unknown) > 0 {
+		return false, fmt.Sprintf("writable: %v, unreadable: %v", writable, unknown)
+	}
+	return true, ""
 }
 
 // mutationInFlight reports whether this manager has an ordered update

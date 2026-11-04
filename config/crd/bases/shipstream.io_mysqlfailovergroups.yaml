@@ -7424,7 +7424,8 @@ spec:
                       Reason is a machine-readable tag on Failed outcomes. Examples:
                       "CooldownActive", "LagTimeout", "InvalidGTID", "SourceCrashed",
                       "ExecuteFailed", "InvalidAnnotation", "ConcurrentOperation",
-                      "TopologyManagerUnavailable", "PromotionRefused", "UnknownSite".
+                      "TopologyManagerUnavailable", "PromotionRefused", "PromotionUnconfirmed",
+                      "UnknownSite".
                     type: string
                   retryAfter:
                     description: |-

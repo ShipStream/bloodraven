@@ -348,6 +348,16 @@ func (r *TopologyManagerRunner) PlannedFailoverPromote(ctx context.Context, nn t
 	return tm.PlannedPromote(ctx, target, source)
 }
 
+// PlannedFailoverConfirmPromotion confirms an already-recorded promotion
+// of target (see TopologyManager.ConfirmPlannedPromotion).
+func (r *TopologyManagerRunner) PlannedFailoverConfirmPromotion(ctx context.Context, nn types.NamespacedName, target, fencedGtid string) error {
+	tm, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		return err
+	}
+	return tm.ConfirmPlannedPromotion(ctx, target, fencedGtid)
+}
+
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
 // Topology polling and failover must only run on the leader.
 func (r *TopologyManagerRunner) NeedLeaderElection() bool {
@@ -1328,8 +1338,38 @@ func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.Namespaced
 // planned failover, as the current manager's does; a retiring promotion,
 // or no manager running yet, is retry=true: nothing is wrong, just early.
 func (r *TopologyManagerRunner) ClaimPlannedFailover(nn types.NamespacedName, source, target string) (ok bool, why string, retry bool) {
+	mt, ok, why, retry := r.plannedFailoverClaimTarget(nn)
+	if !ok {
+		return false, why, retry
+	}
+	return mt.tm.ClaimPlannedFailover(source, target)
+}
+
+// ClaimPlannedFailoverFencedSource is ClaimPlannedFailover for a planned
+// failover that may already have fenced its source (Draining before
+// drainStartTime was recorded) while the manager names no primary. It
+// claims only if a live probe finds the source read-only and every other
+// site confirmed read-only: what that fence leaves behind. Anything else,
+// a writable or unreadable site included, is refused for now.
+func (r *TopologyManagerRunner) ClaimPlannedFailoverFencedSource(ctx context.Context, nn types.NamespacedName, source, target string) (ok bool, why string, retry bool) {
+	mt, ok, why, retry := r.plannedFailoverClaimTarget(nn)
+	if !ok {
+		return false, why, retry
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	alone, detail := mt.tm.sourceFencedAlone(probeCtx, source)
+	cancel()
+	if !alone {
+		return false, fmt.Sprintf("%s (%s)", plannedClaimRefusedAuthorityUnsettled, detail), true
+	}
+	return mt.tm.claimPlannedFailover(source, target, true)
+}
+
+// plannedFailoverClaimTarget returns nn's manager for a planned-failover
+// claim, refusing while a retiring manager is still changing the sites.
+func (r *TopologyManagerRunner) plannedFailoverClaimTarget(nn types.NamespacedName) (mt *managedTopology, ok bool, why string, retry bool) {
 	r.mu.RLock()
-	mt := r.managers[nn]
+	mt = r.managers[nn]
 	retiringUpdate := r.retiringUpdateInFlightLocked(nn)
 	retiringPromotion := false
 	for _, old := range r.retiring[nn] {
@@ -1338,13 +1378,13 @@ func (r *TopologyManagerRunner) ClaimPlannedFailover(nn types.NamespacedName, so
 	r.mu.RUnlock()
 	switch {
 	case retiringUpdate:
-		return false, plannedClaimRefusedPredecessorUpdate, false
+		return nil, false, plannedClaimRefusedPredecessorUpdate, false
 	case retiringPromotion:
-		return false, plannedClaimRefusedPredecessorPromote, true
+		return nil, false, plannedClaimRefusedPredecessorPromote, true
 	case mt == nil:
-		return false, plannedClaimRefusedNoManager, true
+		return nil, false, plannedClaimRefusedNoManager, true
 	}
-	return mt.tm.ClaimPlannedFailover(source, target)
+	return mt, true, "", false
 }
 
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.

@@ -581,7 +581,15 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 		// (an operator restart, or a Validating write whose response was
 		// lost) rather than claimed against the ordered-update claim, so
 		// an update may have claimed meanwhile. The claim is idempotent.
-		if ok, why, retry := r.Runner.ClaimPlannedFailover(nn, cur.SourcePrimary, cur.Target); !ok {
+		ok, why, retry := r.Runner.ClaimPlannedFailover(nn, cur.SourcePrimary, cur.Target)
+		if !ok && why == plannedClaimRefusedAuthorityUnsettled {
+			// This pass may follow our own fence whose status write was
+			// lost: the source read-only and no site writable, so the
+			// manager names no primary. Go on only if a live probe shows
+			// exactly that.
+			ok, why, retry = r.Runner.ClaimPlannedFailoverFencedSource(ctx, nn, cur.SourcePrimary, cur.Target)
+		}
+		if !ok {
 			return r.plannedFailoverClaimRefused(ctx, fg, why, retry)
 		}
 		fenceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -793,8 +801,28 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 	}
 
 	promoteCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	promotionGtid, err := r.Runner.PlannedFailoverPromote(promoteCtx, nn, cur.Target, cur.SourcePrimary)
+	var promotionGtid string
+	var err error
+	if done, gtid := r.plannedPromotionRecorded(ctx, fg, nn); done {
+		// This run already promoted the target (a status write after it
+		// was lost, possibly across an operator restart): confirm it,
+		// never execute it again.
+		promotionGtid = gtid
+		err = r.Runner.PlannedFailoverConfirmPromotion(promoteCtx, nn, cur.Target, cur.SourceGtidAtFence)
+	} else {
+		promotionGtid, err = r.Runner.PlannedFailoverPromote(promoteCtx, nn, cur.Target, cur.SourcePrimary)
+	}
 	cancel()
+	if errors.Is(err, errDNSFlipAfterPromotion) {
+		// The switchover happened; the poll-driven DNS reconcile heals
+		// the record.
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PlannedFailoverDNSFlipFailed",
+			"promoted %q, but its DNS write failed: %v; the operator retries it on its polls", cur.Target, err)
+		err = nil
+	}
+	if errors.Is(err, errPromotionConfirmPending) {
+		return r.plannedFailoverAwaitConfirmation(ctx, fg, err)
+	}
 	if err != nil {
 		if errors.Is(err, errKeyringRotationBlocked) {
 			return r.plannedFailoverRollback(ctx, fg, nn, "KeyringRotation",
@@ -809,6 +837,14 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 			return r.plannedFailoverRollback(ctx, fg, nn, "RecoveryInFlight",
 				fmt.Sprintf("%v before the promotion deadline; nothing was sent to %q; source %q unfenced, re-annotate to retry",
 					err, cur.Target, cur.SourcePrimary),
+				"failed_other")
+		}
+		if errors.Is(err, errPlannedPromotionMaybeDone) {
+			// No record says this run promoted the target, but a
+			// promotion of it is pending observation: it may be ours. The
+			// rollback leaves the source fenced if the target is writable.
+			return r.plannedFailoverRollback(ctx, fg, nn, plannedFailoverReasonPromotionRefused,
+				fmt.Sprintf("%v; nothing was sent to %q now, but its promotion may already have happened", err, cur.Target),
 				"failed_other")
 		}
 		if errors.Is(err, errPlannedPromotionRefused) {
@@ -833,6 +869,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 
 	next := cur.DeepCopy()
 	next.Phase = v1alpha1.PlannedFailoverPhaseResuming
+	next.RetryAfter = nil
 	if promotionGtid != "" {
 		next.TargetGtidAtPromotion = promotionGtid
 	}
@@ -849,6 +886,80 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 // stays "do not promote": that update may have handed off, or unfenced the
 // source and let it take writes after the lag proof.
 const plannedFailoverReasonPredecessorUpdate = "PredecessorUpdateInFlight"
+
+// plannedFailoverConfirmWait bounds how long Promoting retries confirming
+// a promotion this run already completed before it gives up, leaving the
+// source fenced.
+const plannedFailoverConfirmWait = 2 * time.Minute
+
+// plannedFailoverReasonPromotionUnconfirmed marks a planned failover whose
+// target was promoted but could not be confirmed writable in time.
+const plannedFailoverReasonPromotionUnconfirmed = "PromotionUnconfirmed"
+
+// plannedPromotionRecorded reports whether the durable failover record
+// (status.lastFailover / lastFailoverTarget, or the out-of-band annotation
+// copy recordFailover writes before PlannedPromote returns) shows the
+// target promoted since this run fenced its source. No other actor can
+// have promoted it since: the planned failover's claim keeps them out. It
+// reads uncached, falling back to fg, and returns the promotion GTID status
+// records for it, if any.
+func (r *MysqlFailoverGroupReconciler) plannedPromotionRecorded(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) (bool, string) {
+	cur := fg.Status.PlannedFailover
+	if cur.DrainStartTime == nil {
+		return false, ""
+	}
+	latest := fg
+	var fresh v1alpha1.MysqlFailoverGroup
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := r.authorityReader().Get(readCtx, nn, &fresh); err == nil {
+		latest = &fresh
+	}
+	cancel()
+	since := cur.DrainStartTime.Time.UTC().Truncate(time.Second)
+	recs := []FailoverRecord{FailoverRecordFromStatus(latest)}
+	if rec, err := FailoverRecordFromAnnotations(latest.Annotations); err == nil {
+		recs = append(recs, rec)
+	}
+	for _, rec := range recs {
+		if rec.LastFailoverTarget == cur.Target && !rec.LastFailover.IsZero() && !rec.LastFailover.Before(since) {
+			gtid := ""
+			if latest.Status.LastFailoverTarget == cur.Target {
+				gtid = latest.Status.PromotionGtidExecuted
+			}
+			return true, gtid
+		}
+	}
+	return false, ""
+}
+
+// plannedFailoverAwaitConfirmation keeps Promoting retrying the
+// confirmation of a promotion this run already completed, up to
+// plannedFailoverConfirmWait (deadline in retryAfter). Nothing is executed
+// again. Past the deadline the run fails with the source left fenced: the
+// target was promoted, so unfencing the source could make two primaries.
+func (r *MysqlFailoverGroupReconciler) plannedFailoverAwaitConfirmation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cause error) (time.Duration, error) {
+	cur := fg.Status.PlannedFailover
+	now := time.Now()
+	if cur.RetryAfter != nil && !now.Before(cur.RetryAfter.Time) {
+		return r.plannedFailoverFail(ctx, fg, plannedFailoverReasonPromotionUnconfirmed,
+			fmt.Sprintf("planned-failover: %q was promoted but could not be confirmed writable within %s (%v); source %q left fenced; manual recovery required: check the target before anything else, do not unfence the source",
+				cur.Target, plannedFailoverConfirmWait, cause, cur.SourcePrimary),
+			"failed_other")
+	}
+	msg := fmt.Sprintf("%q was promoted; confirming it is writable: %v", cur.Target, cause)
+	if cur.RetryAfter == nil || cur.Message != msg {
+		next := cur.DeepCopy()
+		if next.RetryAfter == nil {
+			deadline := metav1.NewTime(now.Add(plannedFailoverConfirmWait))
+			next.RetryAfter = &deadline
+		}
+		next.Message = msg
+		if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+			return 0, err
+		}
+	}
+	return 5 * time.Second, nil
+}
 
 // plannedFailoverReasonPromotionRefused marks a planned failover whose
 // promotion claim the topology manager refused (another actor held the

@@ -69,6 +69,12 @@ import (
 //	W7 A retired manager is unregistered; the runner sees no manager (Rot
 //	   is refused for the same reason).
 //
+// PF also needs the manager to name the source as the unique writable
+// primary: unknown authority (not yet classified, or two sites writable)
+// is W, another primary R. Draining's re-claim after a fence whose status
+// write was lost passes only on a live probe finding the source and every
+// peer read-only (ClaimPlannedFailoverFencedSource).
+//
 // A bootstrap into a read-only reader does not hold off Auto (see
 // bootstrapBlocksCrossSite); its row is otherwise the promotable one's.
 //
@@ -144,7 +150,8 @@ type plannedPromotionRecord struct {
 }
 
 // ownPlannedPromotion returns the promotion of target this manager already
-// completed for the planned failover that still holds its claim, or nil.
+// completed for a planned failover, while a planned failover holds its
+// claim and no topology change was claimed since, or nil.
 // A re-run of Promoting (its Resuming status write was lost) finds it and
 // confirms instead of claiming again: no other actor can have promoted
 // since, because the planned failover's claim kept them all out.
@@ -178,6 +185,8 @@ func (tm *TopologyManager) beginPlannedPromotionOf(target string) (why string, r
 		return "an in-place restore is in progress", false
 	case !bootstrapIdlePhase(tm.bootstrapPhase):
 		return "a bootstrap clone is running", false
+	case tm.promotionUnobservedLocked() && tm.promotedSite == target:
+		return plannedPromoteRefusedTargetUnobserved, false
 	case tm.promotionUnobservedLocked():
 		return "another promotion has not been observed yet", false
 	case !tm.beginDeploymentTopologyChangeLocked():
@@ -213,11 +222,22 @@ func (tm *TopologyManager) claimPlannedPromotion(ctx context.Context, target str
 		return nil, fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
 	case why != "" && tm.predecessorUpdateUnwinding():
 		return nil, errPredecessorUpdateInFlight
+	case why == plannedPromoteRefusedTargetUnobserved:
+		return nil, fmt.Errorf("%w: %s", errPlannedPromotionMaybeDone, why)
 	case why != "":
 		return nil, fmt.Errorf("%w: %s", errPlannedPromotionRefused, why)
 	}
 	return nil, nil
 }
+
+// plannedPromoteRefusedTargetUnobserved: a promotion of this very target
+// is recorded but not yet observed, and this manager has no record that it
+// was the planned failover's own (an operator restart lost it).
+const plannedPromoteRefusedTargetUnobserved = "a promotion of the target has not been observed yet"
+
+// errPlannedPromotionMaybeDone is a refused claim (nothing sent now) where
+// the target may already have been promoted by an earlier attempt.
+var errPlannedPromotionMaybeDone = fmt.Errorf("%w (it may already have happened)", errPlannedPromotionRefused)
 
 // errPlannedPromotionRefused is returned by PlannedPromote when its claim
 // on the sites is refused. Nothing has been sent to the target.
@@ -248,6 +268,7 @@ func (tm *TopologyManager) claimOrderedUpdate(ctx context.Context, epoch uint64,
 		}
 		tm.deploymentUpdateRunning = true
 		tm.deploymentChanging++
+		tm.plannedPromotion = nil
 		tm.authorityEpoch++
 		tm.deploymentTopologyPendingLocked()
 		claimed = true

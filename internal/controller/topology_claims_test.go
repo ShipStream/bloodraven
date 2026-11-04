@@ -278,9 +278,13 @@ func TestAutoPromotion_ClaimBetweenEligibilityAndClaimStopsIt(t *testing.T) {
 		hold func(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedName, tm *TopologyManager)
 	}{
 		{"planned failover", func(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedName, tm *TopologyManager) {
-			if ok, why, _ := r.ClaimPlannedFailover(nn, "dc1", "dc2"); !ok {
-				t.Fatalf("planned-failover claim refused in the window: %s", why)
+			// No site is writable here, so the claim itself waits (GPT
+			// round 13); the guard still arrives from status, as the
+			// runner's sync derives it for an in-flight planned failover.
+			if ok, why, retry := r.ClaimPlannedFailover(nn, "dc1", "dc2"); ok || !retry || why != plannedClaimRefusedAuthorityUnsettled {
+				t.Fatalf("planned-failover claim with no primary named = %v, %q, retry=%v; want a wait", ok, why, retry)
 			}
+			tm.SetPlannedFailoverActive(true)
 		}},
 		{"in-place restore", func(t *testing.T, _ *TopologyManagerRunner, _ types.NamespacedName, tm *TopologyManager) {
 			tm.SetTopologyFrozen(true)
