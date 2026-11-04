@@ -123,3 +123,101 @@ func TestOrderedUpdate_HandoffPromotesOnlyAfterStandbyHasFencedSourceGTIDs(t *te
 		t.Error("iad was not promoted")
 	}
 }
+
+// The handoff hands pdx's role to iad, and pdx comes back from its
+// Deployment update holding transactions iad never received (an
+// out-of-band write; the handoff itself cannot lose any). The rollout
+// refuses to repoint pdx and leaves it fenced with no replication channel.
+// The refusal is only safe because old-primary recovery then takes the
+// site: it must report the set as divergentGtid and block, not rejoin it.
+func TestOrderedUpdate_OldActiveWithTransactionsNewPrimaryLacksIsReportedByRecovery(t *testing.T) {
+	const errant = "d1240b6c-71ca-11f0-9e33-c80aa9429563:1-221"
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	pdxHost := "mysql-lion-pdx.default.svc.cluster.local"
+	iadHost := "mysql-lion-iad.default.svc.cluster.local"
+	pdx := &mockMySQL{readOnly: false, gtidExecuted: handoffFenced}
+	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: handoffFenced,
+		replicaStatus: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: pdxHost}}
+	sites := []controller.SiteTopologyConfig{
+		{Name: "pdx", Zone: "zone-pdx", LBIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate, Host: pdxHost},
+		{Name: "iad", Zone: "zone-iad", LBIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate, Host: iadHost},
+	}
+	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	fc := controller.NewFailoverController(logger)
+	uc := controller.NewUpdateController(fc, logger)
+	tm := controller.NewTopologyManagerWithClock(
+		controller.TopologyConfig{Name: "lion", Sites: sites, FailureThreshold: 3, RecoveryThreshold: 2},
+		[]mysql.Checker{pdx, iad}, fc, uc, nil,
+		controller.BootstrapConfig{ReplUser: "repl", ReplPassword: "secret"},
+		newMockTainter(), platform.NewHub(logger), &mockDNS{}, logger, clk,
+	)
+	var mu sync.Mutex
+	var applied []string
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		mu.Lock()
+		applied = append(applied, site)
+		mu.Unlock()
+		if site == "pdx" {
+			// The pod is replaced: mysqld is back with read_only only,
+			// holding writes iad never received.
+			pdx.respawn(true)
+			pdx.setGtidExecuted(handoffFenced + "," + errant)
+		}
+		return nil
+	}
+
+	for i := 0; i < 4; i++ {
+		tm.Poll(context.Background())
+	}
+	if s := tm.Status(); s.ActiveSite != "pdx" {
+		t.Fatalf("setup: active site = %q, want pdx", s.ActiveSite)
+	}
+
+	tm.SetSpecDriftSites([]string{"pdx"})
+	tm.Poll(context.Background())
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		updated := slices.Contains(applied, "pdx")
+		mu.Unlock()
+		if updated && !uc.IsUpdating() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ordered update did not reach and finish the old active; applied=%v", applied)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if iad.isReadOnly() {
+		t.Fatal("setup: the handoff did not promote iad")
+	}
+	// The runner rebuilds drift from live Deployment hashes, and pdx's
+	// Deployment was updated, so it has none left.
+	tm.SetSpecDriftSites(nil)
+
+	var pdxStatus controller.SiteStatusEntry
+	for i := 0; i < 10 && pdxStatus.RecoveryState != "RecoveryBlocked"; i++ {
+		clk.Advance(2 * time.Second)
+		tm.Poll(context.Background())
+		pdxStatus = tm.Status().Sites[0]
+	}
+
+	if pdxStatus.RecoveryState != "RecoveryBlocked" {
+		t.Fatalf("pdx recoveryState = %q, want RecoveryBlocked: old-primary recovery did not report the refused old active", pdxStatus.RecoveryState)
+	}
+	if pdxStatus.DivergentGtid != errant || pdxStatus.DivergentTransactionCount == nil || *pdxStatus.DivergentTransactionCount != 221 {
+		t.Errorf("pdx divergentGtid = %q (count %v), want %q (221)", pdxStatus.DivergentGtid, pdxStatus.DivergentTransactionCount, errant)
+	}
+	if pdxStatus.DivergenceDetectedBy != "OldPrimaryRecovery" {
+		t.Errorf("pdx divergenceDetectedBy = %q, want OldPrimaryRecovery", pdxStatus.DivergenceDetectedBy)
+	}
+	pdx.mu.Lock()
+	repointed := pdx.replicationSourceSet || pdx.replicaStarted
+	pdx.mu.Unlock()
+	if repointed {
+		t.Error("pdx was repointed at iad although it holds transactions iad lacks")
+	}
+	if !pdx.isSuperReadOnly() {
+		t.Error("pdx is not fenced with super_read_only")
+	}
+}
