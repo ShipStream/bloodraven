@@ -274,11 +274,6 @@ func (tm *TopologyManager) withReplicaStartGate(site string, op func() error) er
 	return op()
 }
 
-// startReplicaGate is withReplicaStartGate for UpdateController.
-func (tm *TopologyManager) startReplicaGate(site string, start func() error) error {
-	return tm.withReplicaStartGate(site, start)
-}
-
 // RestorePeerStopOutcome is the result of one StopRestorePeerReplication
 // call for a site.
 type RestorePeerStopOutcome struct {
@@ -309,18 +304,23 @@ func (tm *TopologyManager) StopRestorePeerReplication(ctx context.Context, site,
 	if s == nil {
 		return RestorePeerStopOutcome{}, fmt.Errorf("unknown site %q", site)
 	}
+	// Serialized with applyRestoreProtection, which replaces the held set.
+	// Taken before the write side of peerStartMu: applyRestoreProtection
+	// holds it across an API read, and a write lock held while waiting
+	// for it would block every replication start gate (and with it the
+	// poll loop's source convergence) for that read's duration.
+	tm.restoreProtectionMu.Lock()
 	if !tm.peerStartMu.TryLock() {
+		tm.restoreProtectionMu.Unlock()
 		return RestorePeerStopOutcome{}, errRestorePeerStartBusy
 	}
-	// Serialized with applyRestoreProtection, which replaces the held set.
-	tm.restoreProtectionMu.Lock()
 	tm.mu.Lock()
 	if !slices.Contains(tm.restorePeerHeld, site) {
 		tm.restorePeerHeld = sortedUnion(tm.restorePeerHeld, []string{site})
 	}
 	tm.mu.Unlock()
-	tm.restoreProtectionMu.Unlock()
 	tm.peerStartMu.Unlock()
+	tm.restoreProtectionMu.Unlock()
 
 	stopper, ok := s.mysql.(mysql.ReplicaIOStopper)
 	if !ok {
@@ -539,8 +539,10 @@ func (r *TopologyManagerRunner) RestoreMutationInFlight(nn types.NamespacedName,
 // restore's DROP statements or stop a legitimate reclone's replication);
 // any other change is applied from a read through the uncached API reader
 // taken under the lock, so applications never go back in time. written
-// marks an object this operator just wrote; it is still confirmed, because
-// two writers' pushes may arrive out of order. When the read fails the
+// marks an object this operator just wrote; a change it implies is still
+// confirmed (even a tightening), because two writers' pushes may arrive
+// out of order, but one that matches the manager's guards needs no read.
+// When the read fails the
 // change is only tightened and the error returned; the next sync retries.
 // Without an uncached reader (tests) fg is the only view there is.
 func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, written bool) error {
@@ -555,12 +557,14 @@ func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *
 		emitRestoreReclonePendingMetric(fg)
 		return nil
 	}
+	cur := tm.restoreProtectionSnapshot()
+	if want.equal(cur) {
+		// Nothing to change, even for an object this operator just wrote:
+		// a newer write by another writer is applied by its own push.
+		emitRestoreReclonePendingMetric(fg)
+		return nil
+	}
 	if !written {
-		cur := tm.restoreProtectionSnapshot()
-		if want.equal(cur) {
-			emitRestoreReclonePendingMetric(fg)
-			return nil
-		}
 		if want.onlyTightens(cur) {
 			// Additions only: nothing a concurrent writer set is cleared.
 			tm.tightenRestoreProtection(want)

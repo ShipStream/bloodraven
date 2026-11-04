@@ -827,7 +827,7 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checke
 		gtidAuditSourceUUID: make(map[string]string),
 	}
 	if updater != nil {
-		updater.SetReplicaStartGate(tm.startReplicaGate)
+		updater.SetReplicaStartGate(tm.withReplicaStartGate)
 	}
 	return tm
 }

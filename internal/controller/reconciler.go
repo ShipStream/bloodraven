@@ -2018,10 +2018,11 @@ func mutateServiceSpec(svc *corev1.Service, serviceType corev1.ServiceType, etp 
 	}
 }
 
-// podsLabelled reports whether any of pods carries key=value.
-func podsLabelled(pods []corev1.Pod, key, value string) bool {
+// podsNotLabelled reports whether any of pods does not carry key=value
+// (a different value, or no such label yet).
+func podsNotLabelled(pods []corev1.Pod, key, value string) bool {
 	for i := range pods {
-		if pods[i].Labels[key] == value {
+		if pods[i].Labels[key] != value {
 			return true
 		}
 	}
@@ -2167,10 +2168,11 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 		if si.role != "primary" && restoreReclonePending(fg, si.spec.Name) {
 			healthy = "no"
 		}
-		// The cached view may predate the queue: before a site whose pods
-		// are out of the reader Services is put back, confirm uncached
-		// that it is not queued.
-		if healthy == "yes" && si.role != "primary" && podsLabelled(pods.Items, labelHealthy, "no") && confirmPending(si.spec.Name) {
+		// The cached view may predate the queue: before a pod that is not
+		// in the reader Services yet (labelled unhealthy, or a new pod not
+		// labelled at all) is put in, confirm uncached that the site is not
+		// queued.
+		if healthy == "yes" && si.role != "primary" && podsNotLabelled(pods.Items, labelHealthy, "yes") && confirmPending(si.spec.Name) {
 			healthy = "no"
 		}
 

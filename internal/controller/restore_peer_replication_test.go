@@ -395,7 +395,7 @@ func TestRecovery_SkipsHeldPeerWithoutChannel(t *testing.T) {
 func TestUpdater_DirectReplicaReadyStartsThroughGate(t *testing.T) {
 	tm, _, peer := heldTopologyManager(t)
 	u := NewUpdateController(NewFailoverController(testLogger()), testLogger())
-	u.SetReplicaStartGate(tm.startReplicaGate)
+	u.SetReplicaStartGate(tm.withReplicaStartGate)
 	tm.SetRestorePeerHold([]string{"dc2"}, nil, true)
 	target := UpdateTarget{Name: "dc2", Checker: peer}
 	if directReplicaReady(context.Background(), peer, "mysql-dc1", func() error { return u.startReplica(context.Background(), target) }) {
