@@ -33,6 +33,19 @@ type SiteObservation struct {
 	// PromotionBlockedReason says why PromotionBlocked is set; it only
 	// selects the alert wording. Empty means PromotionBlockedRotation.
 	PromotionBlockedReason string
+	// PendingWritable marks a StateUnknown site (not yet classified since the
+	// operator started) whose latest successful probe answered writable. The
+	// recovery debounce has not confirmed it, so it is never treated as the
+	// primary, but no other site is promoted over it either. Ignored for any
+	// other State.
+	PendingWritable bool
+	// ClassificationOverdue marks a StateUnknown site that has been probed
+	// often enough to be classified had its probes answered or failed
+	// consistently: its answers alternate with errors. It no longer turns
+	// NoPrimary into Initializing, so a flapping site cannot hold the group
+	// in Initializing indefinitely. PendingWritable still applies to it.
+	// Ignored for any other State.
+	ClassificationOverdue bool
 }
 
 // Reasons for SiteObservation.PromotionBlocked.
@@ -57,13 +70,18 @@ type CrossSiteAction struct {
 	PromotionCandidates []string
 	// SplitBrain is true iff more than one site is currently writable.
 	// Callers that want auto-resolution should consult ResolveSplitBrain.
+	// Reason can be "SplitBrain" while this is false: a second site's
+	// writable answer is reported before the debounce confirms it, but
+	// nothing may act on it until then.
 	SplitBrain bool
 	// Alert, when non-empty, is a human-readable summary of a cross-site
 	// condition (TotalLoss / SplitBrain / NoPrimary / Degraded).
 	Alert string
 	// Reason is a short machine-readable reason tag suitable for metric
 	// labels or CR condition reasons: "Healthy", "Degraded",
-	// "SplitBrain", "NoPrimary", "TotalLoss".
+	// "SplitBrain", "NoPrimary", "TotalLoss", or "Initializing" (no site is
+	// confirmed writable and a primary-candidate is still unclassified;
+	// never an alert).
 	Reason string
 }
 
@@ -80,10 +98,19 @@ type CrossSiteAction struct {
 // supplied priorities. Split-brain auto-resolution (which needs
 // knowledge of prior failovers) is layered on top by the caller via
 // ResolveSplitBrain.
+//
+// A primary-candidate in StateUnknown has not been classified since the
+// operator started. While no site is confirmed writable, such a site turns
+// NoPrimary into Initializing: NoPrimary claims every candidate was seen
+// read-only, which is not known yet. Once it is ClassificationOverdue it no
+// longer does, so a flapping site cannot hide NoPrimary indefinitely. A
+// PendingWritable one, overdue or not, also holds back the failover row, so
+// no site is promoted over a site that answered writable, and it counts
+// toward an (unconfirmed) split brain.
 func EvalCrossSite(observations []SiteObservation, sitePriorities []string) CrossSiteAction {
 	var action CrossSiteAction
 
-	var writable, readOnly, unreachable []SiteObservation
+	var writable, readOnly, unreachable, unclassified, overdue, pending []SiteObservation
 	coreCount := 0
 	for _, obs := range observations {
 		// Count configured core sites by role before state classification so an
@@ -106,6 +133,17 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 			readOnly = append(readOnly, obs)
 		case StateUnreachable:
 			unreachable = append(unreachable, obs)
+		case StateUnknown:
+			if obs.Role == SiteRolePrimaryCandidate {
+				if obs.ClassificationOverdue {
+					overdue = append(overdue, obs)
+				} else {
+					unclassified = append(unclassified, obs)
+				}
+				if obs.PendingWritable {
+					pending = append(pending, obs)
+				}
+			}
 		}
 	}
 
@@ -144,13 +182,26 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 		return action
 	}
 
+	// A writable answer the debounce has not confirmed is reported with the
+	// confirmed ones, so a second writable site is never hidden behind the
+	// debounce. SplitBrain stays false: fencing and split-brain resolution
+	// wait for the confirmation.
+	if len(writable)+len(pending) > 1 {
+		answered := append(siteNames(writable), siteNames(pending)...)
+		action.Alert = fmt.Sprintf("SPLIT BRAIN: %d sites are writable (%s); %s not yet confirmed",
+			len(answered), strings.Join(answered, ", "), strings.Join(siteNames(pending), ", "))
+		action.Reason = "SplitBrain"
+		return action
+	}
+
 	// No writable site. Emit promotion candidates only when at least
-	// one site is unreachable — i.e. the primary has clearly failed.
+	// one site is unreachable — i.e. the primary has clearly failed —
+	// and no site has answered writable without confirmation yet.
 	// Without any unreachable peer we refuse to auto-elect a primary
 	// (all-read-only is a startup or recovery state that needs human
 	// input).
 	if len(writable) == 0 {
-		if len(unreachable) > 0 && len(readOnly) > 0 {
+		if len(pending) == 0 && len(unreachable) > 0 && len(readOnly) > 0 {
 			candidates := RankPromotionCandidates(readOnly, sitePriorities)
 			if len(candidates) > 0 {
 				action.PromotionCandidates = candidates
@@ -176,10 +227,17 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 				return action
 			}
 		}
+		if len(unclassified) > 0 {
+			action.Reason = "Initializing"
+			return action
+		}
 		// No eligible promotion target: alert only. Use a message that
 		// matches the two-site convention when exactly two read-only
 		// sites are observed, for test/UX familiarity.
-		if len(readOnly) == 2 && len(unreachable) == 0 {
+		if len(overdue) > 0 {
+			action.Alert = fmt.Sprintf("NO PRIMARY: no writable site available; %s not classified (probes alternate between answers and errors)",
+				strings.Join(siteNames(overdue), ", "))
+		} else if len(readOnly) == 2 && len(unreachable) == 0 {
 			action.Alert = "NO PRIMARY: both sites are read-only"
 		} else {
 			action.Alert = "NO PRIMARY: no writable site available"

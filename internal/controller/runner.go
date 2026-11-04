@@ -269,8 +269,8 @@ func (r *TopologyManagerRunner) PlannedFailoverFence(ctx context.Context, nn typ
 	return tm.FenceSite(ctx, site)
 }
 
-// PlannedFailoverUnfence clears super_read_only on the named site.
-// Used by the rollback path when the target fails to catch up.
+// PlannedFailoverUnfence clears super_read_only and read_only on the named
+// site. Used by the rollback path when the target fails to catch up.
 func (r *TopologyManagerRunner) PlannedFailoverUnfence(ctx context.Context, nn types.NamespacedName, site string) error {
 	tm, err := r.plannedFailoverManager(nn)
 	if err != nil {
@@ -1361,42 +1361,41 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Update conditions using freshFG.Generation so ObservedGeneration reflects
 	// the generation of the object we are actually writing against.
 	now := metav1.Now()
-	readyStatus := hasWritable && replicationHealthy
+	reason := degradedReason(snap)
+	readyStatus := conditionBool(hasWritable && replicationHealthy)
+	readyReason := "TopologyPolled"
 	readyMessage := "At least one site is writable and replication is healthy"
 	if !hasWritable {
 		readyMessage = "No site is writable"
 	} else if !replicationHealthy {
 		readyMessage = "Replication is not healthy"
 	}
+	degradedStatus, degradedMessage := metav1.ConditionTrue, snap.Alert
+	switch reason {
+	case "Healthy":
+		degradedStatus, degradedMessage = metav1.ConditionFalse, "No cross-site alerts"
+	case "Initializing":
+		// Neither is known yet. Unknown keeps Ready=False and Degraded=True
+		// consumers from reading every operator start as an outage.
+		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, reason, initializingMessage(snap)
+		degradedStatus, degradedMessage = metav1.ConditionUnknown, readyMessage
+	}
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
-		Status:             conditionBool(readyStatus),
+		Status:             readyStatus,
 		ObservedGeneration: freshFG.Generation,
 		LastTransitionTime: now,
-		Reason:             "TopologyPolled",
+		Reason:             readyReason,
 		Message:            readyMessage,
 	})
-
-	reason := degradedReason(snap)
-	if reason != "Healthy" {
-		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Degraded",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
-			LastTransitionTime: now,
-			Reason:             reason,
-			Message:            snap.Alert,
-		})
-	} else {
-		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Degraded",
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshFG.Generation,
-			LastTransitionTime: now,
-			Reason:             "Healthy",
-			Message:            "No cross-site alerts",
-		})
-	}
+	setCondition(&freshFG.Status.Conditions, metav1.Condition{
+		Type:               "Degraded",
+		Status:             degradedStatus,
+		ObservedGeneration: freshFG.Generation,
+		LastTransitionTime: now,
+		Reason:             reason,
+		Message:            degradedMessage,
+	})
 
 	// Add replication-specific degraded conditions.
 	maxLagSeconds := freshFG.Spec.EffectiveMaxLagSeconds()
@@ -1460,9 +1459,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// A divergence block outranks the per-site replication reasons above,
 	// which are last-writer-wins: a lagging or broken replica must not hide
 	// that a site holds transactions the primary lacks. Topology alerts
-	// (split brain, no primary, total loss) still win. Ready is untouched:
-	// the group serves, and Ready gates application rollouts.
-	if reason == "Healthy" {
+	// (split brain, no primary, total loss) still win; Initializing is not
+	// an alert and does not. Ready is untouched: the group serves, and Ready
+	// gates application rollouts.
+	if reason == "Healthy" || reason == "Initializing" {
 		if msg := divergenceDegradedMessage(snap); msg != "" {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type: "Degraded", Status: metav1.ConditionTrue,
@@ -2020,6 +2020,12 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 	}
 
 	newReason := degradedReason(snap)
+	if newReason == "Initializing" {
+		// Not a topology verdict: neither raise an event nor record it, so
+		// the first real verdict compares against what came before (no
+		// SiteRecovered for a group that was never reported degraded).
+		return
+	}
 
 	r.mu.RLock()
 	mt, ok := r.managers[nn]
@@ -2098,6 +2104,27 @@ func degradedReason(snap TopologySnapshot) string {
 		return "NoPrimary"
 	}
 	return "Alert"
+}
+
+// initializingMessage names the primary-candidates not yet classified since
+// the operator started, for the Initializing Ready and Degraded conditions.
+func initializingMessage(snap TopologySnapshot) string {
+	var parts []string
+	for _, s := range snap.Sites {
+		// Same filter as EvalCrossSite's unclassified set.
+		if s.State != state.StateUnknown || s.Role != state.SiteRolePrimaryCandidate || s.ClassificationOverdue {
+			continue
+		}
+		if s.PendingWritable {
+			parts = append(parts, s.Name+" answered writable and awaits recoveryThreshold confirmation")
+		} else {
+			parts = append(parts, s.Name+" has not answered a probe yet")
+		}
+	}
+	if len(parts) == 0 {
+		return "Classifying sites after operator start"
+	}
+	return "Classifying sites after operator start: " + strings.Join(parts, "; ")
 }
 
 // divergentPromotionCondition records that a site holding transactions its

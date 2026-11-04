@@ -42,6 +42,10 @@
 # Optional PITR env (enables post-load binlog replay):
 #   BLOODRAVEN_PITR_STOP_DATETIME     mysqlbinlog --stop-datetime target
 #                                     (RFC 3339 or MySQL form).
+#   BLOODRAVEN_PITR_ALLOW_PARTIAL     true permits an uncovered earlier point
+#   BLOODRAVEN_PITR_MODE              timestamp (default) or latest verification
+#   BLOODRAVEN_PITR_VERDICT_PATH      where the success verdict is written;
+#                                     defaults to /dev/termination-log
 #   BLOODRAVEN_PITR_EXCLUDE_GTIDS     optional mysqlbinlog --exclude-gtids set.
 #   BLOODRAVEN_PITR_LOCAL_DIR         local directory populated by the
 #                                     `bloodraven pitr-download` init
@@ -61,8 +65,10 @@
 #                                     cross-schema statements.
 import datetime
 import glob
+import hashlib
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -329,9 +335,9 @@ def _maybe_preflight_drops(session):
 # PITR: binlog replay on top of the loaded dump
 # --------------------------------------------------------------------
 #
-# The `bloodraven pitr-download` init container has already fetched
-# every archived binlog that could contribute to the replay window and
-# dropped them into BLOODRAVEN_PITR_LOCAL_DIR, organized per site:
+# The `bloodraven pitr-download` init container has already staged the
+# replaying site's window, verified against the backup bound, and written
+# coverage.json beside it in BLOODRAVEN_PITR_LOCAL_DIR, organized per site:
 #
 #   /pitr-binlogs/
 #   ├── us-east-1a/
@@ -340,42 +346,66 @@ def _maybe_preflight_drops(session):
 #   └── us-east-1b/
 #       └── mysql-bin.000001
 #
-# This script globs them in deterministic order (site, then file) and
-# pipes one `mysqlbinlog --stop-datetime=<target>` run over all of them
-# through `mysql --binary-mode` to the target instance. GTID dedup on the
-# server skips transactions already present from the dump load and copies
-# archived by more than one site. That dedup needs the dump's GTID set in
-# gtid_purged first: the operator passes updateGtidSet:"replace" (with
-# skipBinlog:true) in BLOODRAVEN_LOAD_OPTIONS for bootstrap PITR restores.
-#
-# Known limitation: the order across sites DOES matter. mysqlbinlog stops
-# the whole run at the first event past the stop time, so once one site's
-# files reach past it, later sites' files are not read. If a site was
-# primary again after another site (a failback inside the window), the
-# other site's transactions in between are silently skipped. Fixing it
-# needs chronological per-site replay (tracked as a follow-up).
+# Files replay in site and file order through one mysqlbinlog invocation.
+# Normally only one site is staged; the planner refuses a window in which two
+# sites replay. Explicit allowUnverifiedCrossSite restores stage several sites
+# and report a warning: the first stop event ends the run, so later-sorted
+# sites can be skipped. GTID dedup prevents duplicate application; it does not
+# prove cross-site completeness. The dump GTIDs enter gtid_purged through
+# updateGtidSet:"replace" with skipBinlog:true before replay.
+
+
+_PITR_TARGET = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?"
+    r"(Z|[+-]\d{2}:?\d{2})?$", re.IGNORECASE)
 
 
 def _parse_pitr_target(s):
     """Normalize the user-provided datetime to mysqlbinlog's expected
     'YYYY-MM-DD HH:MM:SS' form. Accepts RFC 3339 ("2026-04-15T09:30:00Z"
-    or with offset) for k8s-style timestamp pasting."""
+    or with offset) for k8s-style timestamp pasting. The parse does not
+    depend on the Python version's fromisoformat, and like the Go planner it
+    rejects more than nine fractional digits."""
     s = s.strip()
-    if "T" in s:
-        try:
-            dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
-            if dt.tzinfo is not None:
-                dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            pass
-    return s
+    m = _PITR_TARGET.match(s)
+    if not m:
+        raise ValueError("unrecognized PITR stop datetime {!r}".format(s))
+    year, month, day, hour, minute, second = (int(v) for v in m.group(1, 2, 3, 4, 5, 6))
+    dt = datetime.datetime(year, month, day, hour, minute, second)
+    zone = m.group(8)
+    if zone and zone.upper() != "Z":
+        sign = 1 if zone[0] == "+" else -1
+        digits = zone[1:].replace(":", "")
+        dt -= sign * datetime.timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    # Binlog event timestamps have one-second resolution. Rounding a
+    # fractional ceiling up preserves every event strictly before it.
+    if any(c != "0" for c in (m.group(7) or "")):
+        dt += datetime.timedelta(seconds=1)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _write_termination(message, path=None):
+    """Record a compact message for the controller. The kubelet keeps only
+    the last 4096 bytes, so the stable reason comes first and stays short."""
+    if len(message) > 3072:
+        message = message[:3072] + " ... (truncated; see container log)"
+    try:
+        with open(path or os.environ.get("BLOODRAVEN_TERMINATION_LOG", "/dev/termination-log"), "w") as f:
+            f.write(message)
+    except OSError:
+        pass
+
+
+def _fail(message):
+    print(message, file=sys.stderr, flush=True)
+    _write_termination(message)
+    sys.exit(2)
 
 
 def _collect_binlogs(local_dir):
     """Return every binlog file under local_dir in a deterministic
     order (site, then filename). Missing / empty dirs return an empty
-    list so callers can treat "nothing to replay" as a no-op."""
+    list; coverage policy decides whether no replay is acceptable."""
     files = []
     if not os.path.isdir(local_dir):
         return files
@@ -393,15 +423,109 @@ def _collect_binlogs(local_dir):
     return files
 
 
+def _read_pitr_coverage(local_dir, stop_datetime):
+    try:
+        with open(os.path.join(local_dir, "coverage.json")) as f:
+            coverage = json.load(f)
+        if not isinstance(coverage, dict):
+            raise ValueError("coverage must be an object")
+        if type(coverage.get("version")) is not int or coverage["version"] != 1:
+            raise ValueError("unsupported coverage version")
+        if _parse_pitr_target(coverage["stopDatetime"]) != stop_datetime:
+            raise ValueError("coverage stop time differs from requested stop time")
+        for field in ("allowPartial", "targetCovered", "partial"):
+            if type(coverage[field]) is not bool:
+                raise ValueError("invalid coverage policy field " + field)
+        for field in ("allowUnverifiedCrossSite", "crossSiteUnverified"):
+            coverage.setdefault(field, False)
+            if type(coverage[field]) is not bool:
+                raise ValueError("invalid coverage policy field " + field)
+        allow_cross = os.environ.get("BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE") == "true"
+        if allow_cross and os.environ.get("BLOODRAVEN_VERIFY_PITR_MODE", "none") not in ("", "none"):
+            raise ValueError("verification cannot opt into unverified cross-site replay")
+        if coverage["allowUnverifiedCrossSite"] != allow_cross:
+            raise ValueError("coverage cross-site policy differs from request")
+        if coverage["crossSiteUnverified"] and not allow_cross:
+            raise ValueError("unverified cross-site replay was not authorized")
+        mode = os.environ.get("BLOODRAVEN_PITR_MODE", "timestamp")
+        if coverage["mode"] != mode:
+            raise ValueError("coverage mode differs from requested mode")
+        allow_partial = os.environ.get("BLOODRAVEN_PITR_ALLOW_PARTIAL") == "true"
+        if coverage["allowPartial"] != allow_partial:
+            raise ValueError("coverage partial policy differs from request")
+        if mode != "latest" and not coverage["targetCovered"]:
+            if not allow_partial or coverage["partial"] is not True:
+                raise ValueError("PITRTargetNotCovered: missing upper coverage")
+        elif coverage["partial"]:
+            raise ValueError("unexpected partial outcome")
+        if coverage.get("refusalReason"):
+            raise ValueError(coverage["refusalReason"])
+        proof = [site for site in coverage["sites"] if site["site"] == coverage.get("proofSite", "")]
+        if mode == "timestamp" and coverage["targetCovered"] != bool(proof and proof[0]["stopReached"] and proof[0]["anchored"]):
+            raise ValueError("inconsistent proof site stop barrier")
+        files = []
+        newest = ""
+        reached_barrier = False
+        has_transactions = False
+        for site in sorted(coverage["sites"], key=lambda item: item["site"]):
+            for staged in site["staged"]:
+                path = os.path.realpath(os.path.join(local_dir, staged["path"]))
+                if os.path.commonpath([os.path.realpath(local_dir), path]) != os.path.realpath(local_dir):
+                    raise ValueError("staged path escapes coverage directory")
+                digest = hashlib.sha256()
+                with open(path, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != staged["sha256"]:
+                    raise ValueError("staged identity differs from verified archive")
+                files.append(path)
+            has_transactions = has_transactions or site["hasReplayTransactions"]
+            if not reached_barrier:
+                ts = site["newestReplayEventTime"]
+                if ts != "0001-01-01T00:00:00Z" and ts > newest:
+                    newest = ts
+                reached_barrier = site["stagedStopReached"]
+        if sorted(files) != sorted(os.path.realpath(f) for f in _collect_binlogs(local_dir)):
+            raise ValueError("staged files differ from coverage identities")
+        if mode == "latest" and not has_transactions:
+            raise ValueError("PITRNoArchivedReplay: no archived binlog after the backup to replay")
+        if not files and not (coverage["targetCovered"] or (allow_partial and coverage["partial"])):
+            raise ValueError("PITRTargetNotCovered: no archived files")
+        coverage["replaySites"] = [site["site"] for site in sorted(coverage["sites"], key=lambda item: item["site"]) if site["staged"]]
+        if coverage["crossSiteUnverified"] and len(coverage["replaySites"]) < 2:
+            raise ValueError("unverified outcome requires multiple replay sites")
+        coverage["newestReplayedEventTime"] = newest
+        return coverage
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        _fail("PITRCoverageInvalid: {}".format(e))
+
+
 def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_dir,
-              filter_database):
+              filter_database, coverage=None):
+    if coverage is None:
+        coverage = _read_pitr_coverage(local_dir, stop_datetime)
     files = _collect_binlogs(local_dir)
+    if coverage["crossSiteUnverified"]:
+        print("BLOODRAVEN_PITR_CROSS_SITE_UNVERIFIED sites={} cross-site completeness was not verified".format(
+              ",".join(coverage["replaySites"])), flush=True)
+    if coverage["partial"]:
+        print("BLOODRAVEN_PITR_PARTIAL requested={} newest={}".format(
+              stop_datetime, coverage["newestReplayedEventTime"] or "none"), flush=True)
     if not files:
-        print("BLOODRAVEN_PITR_NOOP: no archived binlogs in {}; dump load is final state".format(
-              local_dir), flush=True)
+        if coverage["targetCovered"]:
+            print("BLOODRAVEN_PITR_COMPLETE stop_datetime={} files=0 covered=true".format(stop_datetime), flush=True)
+        else:
+            print("BLOODRAVEN_PITR_NOOP: no archived binlogs in {}; dump load is final state".format(local_dir), flush=True)
         return "", 0
 
-    binlog_cmd = ["mysqlbinlog", "--stop-datetime=" + stop_datetime]
+    source_gtids = os.environ.get("BLOODRAVEN_SOURCE_GTID_EXECUTED", "").strip()
+    if source_gtids:
+        exclude_gtids = source_gtids + ("," + exclude_gtids if exclude_gtids else "")
+    # latest replays every staged file: mysqlbinlog emits no transaction at
+    # all for a year-9999 --stop-datetime, so latest passes no stop.
+    binlog_cmd = ["mysqlbinlog"]
+    if coverage["mode"] != "latest":
+        binlog_cmd.append("--stop-datetime=" + stop_datetime)
     if exclude_gtids:
         binlog_cmd += ["--exclude-gtids=" + exclude_gtids]
     if filter_database:
@@ -437,16 +561,88 @@ def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_di
     rc2 = p2.wait()
     rc1 = p1.wait()
     if rc1 != 0:
-        print("BLOODRAVEN_PITR_FAILED: mysqlbinlog exit={}".format(rc1),
-              file=sys.stderr, flush=True)
-        sys.exit(2)
+        _fail("BLOODRAVEN_PITR_FAILED: mysqlbinlog exit={}".format(rc1))
     if rc2 != 0:
-        print("BLOODRAVEN_PITR_FAILED: mysql exit={}".format(rc2),
-              file=sys.stderr, flush=True)
-        sys.exit(2)
+        _fail("BLOODRAVEN_PITR_FAILED: mysql exit={}".format(rc2))
     print("BLOODRAVEN_PITR_COMPLETE stop_datetime={}".format(stop_datetime),
           flush=True)
     return files[-1], len(files)
+
+
+def _gtid_union(*sets):
+    return ",".join(s for s in sets if s)
+
+
+def _gtid_query(session, sql, *args):
+    row = session.run_sql(sql, list(args)).fetch_one()
+    return "" if row is None or row[0] is None else str(row[0]).replace("\n", "")
+
+
+def _verify_loaded_dump(session, coverage, exclude_gtids):
+    """Check the staged replay against the loaded dump's own gtid_executed.
+
+    The source bound is read before mysqlsh takes its consistent snapshot,
+    so the dump can hold more than the bound. With an unknown bound, this is
+    the only lower-edge and lineage check. Runs before any replay."""
+    executed = _gtid_query(session, "SELECT @@global.gtid_executed")
+    applied = _gtid_union(executed, exclude_gtids)
+    for site in coverage["sites"]:
+        post = site.get("postStopGTIDs", "")
+        if post:
+            dumped = _gtid_query(session, "SELECT GTID_SUBTRACT(?, GTID_SUBTRACT(?, ?))", post, post, executed)
+            if dumped:
+                _fail("PITRTargetNotCovered: site {}: the backup already contains transactions committed at or after the target: {}; use a backup that completed before the target".format(site["site"], dumped))
+    replays = False
+    unknown_bound = not os.environ.get("BLOODRAVEN_SOURCE_GTID_EXECUTED", "").strip()
+    for site in coverage["sites"]:
+        if not site["staged"]:
+            continue
+        window = site.get("inWindowGTIDs", "")
+        if window and _gtid_query(session, "SELECT GTID_SUBTRACT(?, ?)", window, applied):
+            replays = True
+        if not unknown_bound:
+            continue
+        earlier = ""
+        anchored = False
+        for staged in site["staged"]:
+            previous, gtids = staged["previousGTIDs"], staged["gtids"]
+            missing = _gtid_query(session, "SELECT GTID_SUBTRACT(?, ?)", previous, _gtid_union(executed, earlier))
+            if missing:
+                _fail("PITRTargetNotCovered: site {}: archive does not contain transactions between the loaded backup and {}".format(site["site"], missing))
+            if not anchored and gtids and _gtid_query(session, "SELECT GTID_SUBTRACT(?, ?)", gtids, applied):
+                if _gtid_query(session, "SELECT GTID_SUBTRACT(?, ?)", executed, _gtid_union(previous, gtids)):
+                    _fail("PITRTargetNotCovered: site {}: replayed history does not continue the loaded backup".format(site["site"]))
+                anchored = True
+            earlier = _gtid_union(earlier, gtids)
+    if coverage["mode"] == "latest" and not replays:
+        _fail("PITRNoArchivedReplay: every archived transaction after the backup is already in the loaded dump; rotate the active binlog on the source (FLUSH BINARY LOGS)")
+
+
+def _bounded(items, limit=8):
+    items = list(items)
+    if len(items) > limit:
+        items = items[:limit] + ["+{}".format(len(items) - limit)]
+    return ",".join(items)
+
+
+def _write_pitr_verdict(coverage, stop_datetime, last_file, count):
+    """The controller certifies a PITR Job only from this verdict, read from
+    the container's termination message. It is written last, after policy
+    checks and replay, and carries no GTID sets."""
+    parts = [
+        "BLOODRAVEN_PITR_VERDICT",
+        "v=1",
+        "mode={}".format(coverage["mode"]),
+        "stop={}".format(_escape_token(stop_datetime)),
+        "targetCovered={}".format(str(coverage["targetCovered"]).lower()),
+        "partial={}".format(str(coverage["partial"]).lower()),
+        "crossSiteUnverified={}".format(str(coverage.get("crossSiteUnverified", False)).lower()),
+        "newest={}".format(_escape_token(coverage["newestReplayedEventTime"])),
+        "files={}".format(int(count or 0)),
+        "lastFile={}".format(_escape_token(os.path.basename(last_file or "")[:255])),
+        "sites={}".format(_escape_token(_bounded(coverage.get("replaySites", [])))),
+    ]
+    _write_termination(" ".join(parts), os.environ.get("BLOODRAVEN_PITR_VERDICT_PATH"))
 
 
 # --------------------------------------------------------------------
@@ -583,7 +779,7 @@ def _target_coordinates(session):
     return gtid, binlog_file, binlog_pos
 
 
-def _print_restore_complete(session, pitr_stop_datetime, pitr_file, pitr_count):
+def _print_restore_complete(session, pitr_stop_datetime, pitr_file, pitr_count, coverage=None):
     target_gtid, target_file, target_pos = _target_coordinates(session)
     parts = [
         "BLOODRAVEN_RESTORE_COMPLETE",
@@ -598,6 +794,13 @@ def _print_restore_complete(session, pitr_stop_datetime, pitr_file, pitr_count):
         "pitrReplayedBinlogFile={}".format(_escape_token(pitr_file)),
         "pitrReplayedBinlogCount={}".format(int(pitr_count or 0)),
     ]
+    if coverage is not None:
+        parts += ["pitrCoverageVersion=1",
+                  "pitrTargetCovered={}".format(str(coverage["targetCovered"]).lower()),
+                  "pitrPartial={}".format(str(coverage["partial"]).lower()),
+                  "pitrCrossSiteUnverified={}".format(str(coverage.get("crossSiteUnverified", False)).lower()),
+                  "pitrReplaySites={}".format(_escape_token(",".join(coverage.get("replaySites", [])))),
+                  "pitrNewestEventTime={}".format(_escape_token(coverage["newestReplayedEventTime"]))]
     print(" ".join(parts), flush=True)
 
 
@@ -642,6 +845,19 @@ def main():
     if _ssl_ca:
         conn["ssl-ca"] = _ssl_ca
 
+    # Every coverage refusal is known before the load: validate it while the
+    # target is still untouched.
+    stop_dt = os.environ.get("BLOODRAVEN_PITR_STOP_DATETIME")
+    pitr_stop_datetime = ""
+    coverage = None
+    local_dir = os.environ.get("BLOODRAVEN_PITR_LOCAL_DIR", "/pitr-binlogs")
+    if stop_dt:
+        try:
+            pitr_stop_datetime = _parse_pitr_target(stop_dt)
+        except ValueError as e:
+            _fail("PITRCoverageInvalid: {}".format(e))
+        coverage = _read_pitr_coverage(local_dir, pitr_stop_datetime)
+
     print("BLOODRAVEN_LOAD_START host={} input={}".format(host, input_url),
           flush=True)
 
@@ -682,21 +898,22 @@ def main():
     print("BLOODRAVEN_LOAD_COMPLETE input={}".format(input_url), flush=True)
 
     # Optional PITR replay on top of the loaded dump.
-    stop_dt = os.environ.get("BLOODRAVEN_PITR_STOP_DATETIME")
-    pitr_stop_datetime = ""
     pitr_file = ""
     pitr_count = 0
-    if stop_dt:
-        stop_dt_mysql = _parse_pitr_target(stop_dt)
-        pitr_stop_datetime = stop_dt_mysql
+    if coverage is not None:
         exclude_gtids = os.environ.get("BLOODRAVEN_PITR_EXCLUDE_GTIDS", "")
-        local_dir = os.environ.get("BLOODRAVEN_PITR_LOCAL_DIR", "/pitr-binlogs")
         filter_db = os.environ.get("BLOODRAVEN_PITR_FILTER_DATABASE", "")
+        try:
+            _verify_loaded_dump(session, coverage, exclude_gtids)
+        except Exception as e:  # noqa: BLE001
+            _fail("PITRCoverageInvalid: cannot check replay against the loaded dump: {}".format(e))
         pitr_file, pitr_count = _run_pitr(host_only, port, user, password,
-                                          stop_dt_mysql, exclude_gtids,
-                                          local_dir, filter_db)
+                                          pitr_stop_datetime, exclude_gtids,
+                                          local_dir, filter_db, coverage)
 
-    _print_restore_complete(session, pitr_stop_datetime, pitr_file, pitr_count)
+    _print_restore_complete(session, pitr_stop_datetime, pitr_file, pitr_count, coverage)
+    if coverage is not None:
+        _write_pitr_verdict(coverage, pitr_stop_datetime, pitr_file, pitr_count)
 
 
 if __name__ == "__main__":

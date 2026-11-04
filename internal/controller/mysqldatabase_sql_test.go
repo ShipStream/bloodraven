@@ -2,6 +2,7 @@ package controller
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -164,6 +165,32 @@ func TestRenderGrantDeploymentPrivileges(t *testing.T) {
 				t.Fatalf("renderGrant = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestRenderGrantRoutinePrivileges(t *testing.T) {
+	got, err := renderGrant("spec.users[0].privileges",
+		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAlterRoutine, v1alpha1.PrivilegeCreateRoutine, v1alpha1.PrivilegeExecute, v1alpha1.PrivilegeSelect},
+		"acme_wms", "acme_deploy", []string{"10.0.0.1", "10.0.0.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "GRANT SELECT, EXECUTE, CREATE ROUTINE, ALTER ROUTINE ON `acme_wms`.* TO 'acme_deploy'@'10.0.0.1', 'acme_deploy'@'10.0.0.2'"
+	if got != want {
+		t.Fatalf("renderGrant = %q, want %q", got, want)
+	}
+}
+
+// Narrowing reads the held set back through schemaPrivilegeNames, so every
+// grantable privilege must be revocable as surplus.
+func TestSchemaPrivilegeNamesCoverAllowlist(t *testing.T) {
+	for _, name := range v1alpha1.AllowedPrivilegeNames() {
+		if name == string(v1alpha1.PrivilegeAllPrivileges) {
+			continue
+		}
+		if !slices.Contains(schemaPrivilegeNames, name) {
+			t.Errorf("allowlisted privilege %q is missing from schemaPrivilegeNames", name)
+		}
 	}
 }
 

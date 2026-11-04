@@ -390,6 +390,12 @@ func waitForVerificationPhase(ctx context.Context, env *runner.Env, name string,
 				captureVerificationJobLogs(ctx, env, v)
 				return v, fmt.Errorf("MysqlBackupVerification %s failed: %s", name, last)
 			}
+			// An expected refusal that succeeds is the regression itself;
+			// report it at once, with forensics, instead of timing out.
+			if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded {
+				captureVerificationJobLogs(ctx, env, v)
+				return v, fmt.Errorf("MysqlBackupVerification %s succeeded, want %s: %s", name, want, last)
+			}
 		}
 		select {
 		case <-ctx.Done():

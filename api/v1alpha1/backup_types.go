@@ -164,14 +164,14 @@ type PITRStatus struct {
 	ProfileName string `json:"profileName,omitempty"`
 
 	// OldestArchivedTime is the earliest first-event timestamp across
-	// all archived binlogs still present in storage. Together with a
-	// full backup's completion time this is the earliest recoverable
-	// point.
+	// all archived binlogs still present in storage. It bounds archive
+	// retention; it does not prove that a target can be restored.
 	OldestArchivedTime *metav1.Time `json:"oldestArchivedTime,omitempty"`
 
 	// NewestArchivedTime is the latest last-event timestamp across all
-	// archived binlogs. Together with OldestArchivedTime this is the
-	// window available for restores.
+	// archived binlogs. It measures archive freshness. Whether a target
+	// is covered is decided per restore from verified archive bytes, a
+	// single replaying site and a proven stop event.
 	NewestArchivedTime *metav1.Time `json:"newestArchivedTime,omitempty"`
 
 	// ArchivedFileCount is the number of binlog files currently held in
@@ -198,6 +198,41 @@ type PITRStatus struct {
 // failover group's spec.backup.pitr block to have been enabled at the
 // time of the full dump, otherwise no binlog archive exists to replay.
 type PointInTimeSpec struct {
+	// Sites are the archive site names to replay. Defaults to this group's sites.
+	// Set when the source archive's sites differ, or to include a removed site.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9-]+$`
+	Sites []string `json:"sites,omitempty"`
+
+	// ArchiveProfileName names the spec.backup.profiles entry whose binlog
+	// archive the restore reads. Defaults to spec.backup.pitr.profileName.
+	// Set it when restoring another group's archive, for example into renamed
+	// sites, so this group keeps archiving into its own prefix instead of
+	// adding foreign manifests to the source's prefix.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	ArchiveProfileName string `json:"archiveProfileName,omitempty"`
+
+	// AllowPartial permits restoring to the newest archived point when the target
+	// is not covered, and admits a backup with an unknown GTID bound, which the
+	// restore then checks against the loaded dump. It never bypasses archive
+	// safety, site omission, lower-edge or lineage checks.
+	// +optional
+	// +kubebuilder:default=false
+	AllowPartial bool `json:"allowPartial,omitempty"`
+
+	// AllowUnverifiedCrossSite replays archives from more than one site in site
+	// name order, one mysqlbinlog run, without proving cross-site completeness.
+	// mysqlbinlog stops at the first event at or after the target in any site,
+	// so later sites' earlier transactions can be skipped. This never bypasses
+	// archive, payload, lower-edge or stop-proof checks.
+	// +optional
+	// +kubebuilder:default=false
+	AllowUnverifiedCrossSite bool `json:"allowUnverifiedCrossSite,omitempty"`
+
 	// StopDatetime is the MySQL-style datetime at which to stop
 	// replaying binlog events (forwarded to mysqlbinlog
 	// --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
@@ -1071,6 +1106,26 @@ type RestoreInPlaceStatus struct {
 
 // RestoreStatus tracks an in-flight or completed initFromBackup run.
 type RestoreStatus struct {
+	// JobUID identifies the producing Job across retries using the same name.
+	// +optional
+	JobUID string `json:"jobUID,omitempty"`
+	// PitrCrossSiteUnverified reports explicit replay without cross-site proof.
+	// +optional
+	PitrCrossSiteUnverified bool `json:"pitrCrossSiteUnverified,omitempty"`
+	// PitrReplaySites names the staged sites in replay order.
+	// +optional
+	PitrReplaySites []string `json:"pitrReplaySites,omitempty"`
+	// Reason distinguishes partial and unverified PITR outcomes and failures.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// PitrNewestEventTime is the newest verified event in the replayed prefix.
+	// Empty means no archived event was replayed; never the requested stop time.
+	// +optional
+	PitrNewestEventTime string `json:"pitrNewestEventTime,omitempty"`
+	// PitrPartial reports that allowPartial relaxed target coverage.
+	// +optional
+	PitrPartial bool `json:"pitrPartial,omitempty"`
+
 	// Phase of the restore Job.
 	Phase BackupPhase `json:"phase,omitempty"`
 

@@ -56,6 +56,17 @@ SOCKET="${RUN_DIR}/mysqld.sock"
 ERRLOG="${MOUNT_DIR}/mysqld.err"
 
 log() { printf '[verify] %s\n' "$*"; }
+# The controller reads failures and the PITR verdict from the termination
+# message, so explicit failures record a compact reason there.
+TERMINATION_LOG="${BLOODRAVEN_TERMINATION_LOG:-/dev/termination-log}"
+fail() {
+    local rc=$1
+    shift
+    local message="$*"
+    log "$message"
+    printf '%s' "${message:0:3072}" >"$TERMINATION_LOG" 2>/dev/null || true
+    exit "$rc"
+}
 
 # Match backupmeta.EscapeValue and Python's urllib.parse.quote safe set.
 escape_sentinel_token() {
@@ -236,6 +247,9 @@ unset BLOODRAVEN_TLS
 unset BLOODRAVEN_TLS_CA_FILE
 
 log "running restore.py against ephemeral mysqld"
+# restore.py's success verdict is published only once verification passes.
+PITR_VERDICT="$(mktemp /tmp/bloodraven-pitr-verdict.XXXXXX)"
+export BLOODRAVEN_PITR_VERDICT_PATH="$PITR_VERDICT"
 set +e
 RESTORE_LOG="$(mktemp /tmp/bloodraven-restore.XXXXXX.log)"
 mysqlsh --no-wizard --py -f "$SCRIPTS_DIR/restore.py" 2>&1 | tee "$RESTORE_LOG"
@@ -243,6 +257,10 @@ LOAD_RC=${PIPESTATUS[0]}
 set -e
 
 if [[ $LOAD_RC -ne 0 ]]; then
+    # restore.py records its PITR refusals itself; keep those.
+    if [[ ! -s "$TERMINATION_LOG" ]]; then
+        fail "$LOAD_RC" "restore.py exited with rc=$LOAD_RC: $(grep -v '^\s*$' "$RESTORE_LOG" | tail -n 1)"
+    fi
     log "restore.py exited with rc=$LOAD_RC"
     exit "$LOAD_RC"
 fi
@@ -250,31 +268,32 @@ fi
 # ---- PITR replay -----------------------------------------------------
 # restore.py owns PITR replay for both restore and verification jobs.
 # Bridge its BLOODRAVEN_RESTORE_COMPLETE metadata into the verification
-# sentinel consumed by the reconciler. The restore sentinel does not
-# include exact replay position/timestamp, but a non-empty replay mark
-# still records that PITR replay ran and which archived binlog was last
-# reported by restore.py; the sanity query below proves target semantics.
+# sentinel consumed by the reconciler, including the newest verified event in
+# the prefix passed through replay (never the requested stop time).
 PITR_MODE="${BLOODRAVEN_VERIFY_PITR_MODE:-none}"
 if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
     RESTORE_COMPLETE="$(grep 'BLOODRAVEN_RESTORE_COMPLETE' "$RESTORE_LOG" | tail -n 1 || true)"
     LAST_FILE=""
     REPLAY_COUNT=""
+    NEWEST_EVENT=""
+    COVERAGE_VERSION=""
+    TARGET_COVERED="false"
+    PARTIAL="false"
     for f in $RESTORE_COMPLETE; do
         case "$f" in
             pitrReplayedBinlogFile=*) LAST_FILE="${f#pitrReplayedBinlogFile=}" ;;
+            pitrCoverageVersion=*) COVERAGE_VERSION="${f#pitrCoverageVersion=}" ;;
+            pitrTargetCovered=*) TARGET_COVERED="${f#pitrTargetCovered=}" ;;
+            pitrPartial=*) PARTIAL="${f#pitrPartial=}" ;;
+            pitrNewestEventTime=*) NEWEST_EVENT="${f#pitrNewestEventTime=}" ;;
             pitrReplayedBinlogCount=*) REPLAY_COUNT="${f#pitrReplayedBinlogCount=}" ;;
         esac
     done
-    if [[ -z "$RESTORE_COMPLETE" ]]; then
-        log "PITR mode=$PITR_MODE but restore.py did not report restore completion"
-        exit 1
+    if [[ ! -s "$PITR_VERDICT" ]]; then
+        fail 1 "PITRCoverageInvalid: PITR mode=$PITR_MODE but restore.py wrote no verdict"
     fi
-    if [[ -z "$LAST_FILE" && "$REPLAY_COUNT" != "0" ]]; then
-        log "PITR mode=$PITR_MODE but restore.py did not report replayed binlogs"
-        exit 1
-    fi
-    printf 'BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=%s position=%s timestamp=%s\n' \
-        "$LAST_FILE" "0" ""
+    printf 'BLOODRAVEN_VERIFY_REPLAY_COMPLETE coverage=%s mode=%s targetCovered=%s partial=%s files=%s file=%s position=%s timestamp=%s\n' \
+        "$COVERAGE_VERSION" "$PITR_MODE" "$TARGET_COVERED" "$PARTIAL" "$REPLAY_COUNT" "$LAST_FILE" "0" "$NEWEST_EVENT"
 fi
 
 # ---- Sanity check ----------------------------------------------------
@@ -305,16 +324,14 @@ if [[ -n "$SANITY_Q" ]]; then
     if [[ $SANITY_RC -eq 124 ]]; then
         printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s error=%s\n' \
             "$DURATION_MS" "timeout"
-        log "sanity query timed out after ${SANITY_MAX}s"
-        exit 1
+        fail 1 "SanityCheckTimeout: sanity query timed out after ${SANITY_MAX}s"
     fi
     if [[ $SANITY_RC -ne 0 ]]; then
         # Preserve literal underscores and whitespace in diagnostic text.
         ERR_ESC=$(escape_sentinel_token "$SANITY_OUT")
         printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s error=%s\n' \
             "$DURATION_MS" "${ERR_ESC:-error}"
-        log "sanity query failed rc=$SANITY_RC: $SANITY_OUT"
-        exit "$SANITY_RC"
+        fail "$SANITY_RC" "SanityCheckFailed: sanity query failed rc=$SANITY_RC: $SANITY_OUT"
     fi
 
     # Scalar capture: first line, first field. Empty result set → 0 rows.
@@ -331,11 +348,14 @@ if [[ -n "$SANITY_Q" ]]; then
     # Non-integer scalars (strings, decimals) pass through unconditionally.
     if [[ "$SANITY_MIN" -gt 0 ]] && [[ "$SCALAR" =~ ^[0-9]+$ ]]; then
         if [[ "$SCALAR" -lt "$SANITY_MIN" ]]; then
-            log "sanity scalar $SCALAR < minRows $SANITY_MIN"
-            exit 1
+            fail 1 "SanityCheckFailed: sanity scalar $SCALAR < minRows $SANITY_MIN"
         fi
     fi
 fi
 
+# Publishing the verdict is the last action.
+if [[ -s "$PITR_VERDICT" ]]; then
+    cat "$PITR_VERDICT" >"$TERMINATION_LOG"
+fi
 log "verification succeeded"
 exit 0

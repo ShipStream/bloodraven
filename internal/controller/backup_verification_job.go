@@ -144,11 +144,22 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validatePITRBackupBefore(pitFromVerification, backup.Status); err != nil {
+		return nil, err
+	}
+	if err := validatePITRBackupBound(pitFromVerification, backup.Status.GtidExecuted, true); err != nil {
+		return nil, err
+	}
 	pitrFrags, err := buildRestorePITRFragmentsFor(fg, pitFromVerification)
 	if err != nil {
 		return nil, err
 	}
 
+	if pitrFrags.InitContainer != nil {
+		modeEnv := corev1.EnvVar{Name: "BLOODRAVEN_PITR_MODE", Value: v.Spec.PointInTime.Mode}
+		pitrFrags.InitContainer.Env = append(pitrFrags.InitContainer.Env, modeEnv)
+		pitrFrags.MainEnv = append(pitrFrags.MainEnv, modeEnv)
+	}
 	env := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_DATA_DIR", Value: verificationDataMountPath},
 		{Name: "BLOODRAVEN_RUN_DIR", Value: verificationRunMountPath},
@@ -318,6 +329,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	var initContainers []corev1.Container
 	if pitrFrags.InitContainer != nil {
 		pitrFrags.InitContainer.Env = append(pitrFrags.InitContainer.Env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_START_GTIDS", Value: backup.Status.GtidExecuted})
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_GTID_EXECUTED", Value: backup.Status.GtidExecuted})
 		initContainers = append(initContainers, *pitrFrags.InitContainer)
 	}
 
@@ -481,13 +493,14 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		}
 		initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
 		initContainers = append(initContainers, corev1.Container{
-			Name:            "decrypt-download",
-			Image:           operatorImageFromEnv,
-			Command:         operatorCommand("decrypt-download"),
-			Env:             decEnv,
-			Resources:       initResources,
-			VolumeMounts:    decMounts,
-			SecurityContext: initSC,
+			Name:                     "decrypt-download",
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+			Image:                    operatorImageFromEnv,
+			Command:                  operatorCommand("decrypt-download"),
+			Env:                      decEnv,
+			Resources:                initResources,
+			VolumeMounts:             decMounts,
+			SecurityContext:          initSC,
 		})
 	}
 
@@ -540,8 +553,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{
-							Name:  backupJobContainerName,
-							Image: image,
+							Name: backupJobContainerName,
+							// verify.sh publishes restore.py's PITR verdict and its
+							// own failures here; others fall back to the log tail.
+							TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+							Image:                    image,
 							// verify.sh is mounted as executable via the
 							// scripts ConfigMap default mode 0555.
 							Command:         []string{"/bin/bash", backupScriptsMountPath + "/verify.sh"},
@@ -614,18 +630,15 @@ func verificationPITRSpec(in *v1alpha1.PointInTimeVerificationSpec) (*v1alpha1.P
 	case "", "none":
 		return nil, nil
 	case "latest":
-		// A stop datetime far enough in the future that no archived
-		// event could land after it. mysqlbinlog --stop-datetime is
-		// inclusive of the target time, and the pitr-download init
-		// container uses it as the ceiling when selecting manifest
-		// entries — so a sentinel value effectively means "everything
-		// available".
-		return &v1alpha1.PointInTimeSpec{StopDatetime: "9999-12-31T23:59:59Z"}, nil
+		// The pipeline uses a far-future ceiling. The download init container
+		// also receives mode=latest and requires replay beyond the backup,
+		// rather than treating this sentinel as a target to cover.
+		return &v1alpha1.PointInTimeSpec{StopDatetime: "9999-12-31T23:59:59Z", Sites: append([]string(nil), in.Sites...)}, nil
 	case "timestamp":
 		if in.Timestamp == "" {
 			return nil, fmt.Errorf("pointInTime.timestamp is required when mode=timestamp")
 		}
-		return &v1alpha1.PointInTimeSpec{StopDatetime: in.Timestamp}, nil
+		return &v1alpha1.PointInTimeSpec{StopDatetime: in.Timestamp, Sites: append([]string(nil), in.Sites...)}, nil
 	default:
 		return nil, fmt.Errorf("pointInTime.mode %q is not one of none|latest|timestamp", in.Mode)
 	}

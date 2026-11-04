@@ -132,6 +132,10 @@ type SiteSnapshot struct {
 	SourceConvergenceReason string
 	ServingHealthy          bool
 	ReplicationHealthy      bool
+	// PendingWritable mirrors state.SiteObservation.PendingWritable.
+	PendingWritable bool
+	// ClassificationOverdue mirrors state.SiteObservation.ClassificationOverdue.
+	ClassificationOverdue bool
 
 	// Per-site old-primary recovery state ("", RecoveryInProgress, or
 	// RecoveryBlocked) with the divergence report when blocked. Multiple
@@ -176,7 +180,7 @@ type TopologySnapshot struct {
 	LastFailover       time.Time
 	LastFailoverTarget string
 	Alert              string // non-empty if a cross-site alert fired this cycle
-	DegradedReason     string // one of "Healthy", "Degraded", "SplitBrain", "NoPrimary", "TotalLoss", or ""
+	DegradedReason     string // one of "Healthy", "Degraded", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
 	UpdatePhase        string // non-empty if an ordered update is in progress
 	UpdateStalled      string // why the ordered update is stopped on a pod that is not Ready (PodNotReadyError), or ""
 	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
@@ -231,7 +235,14 @@ type siteTracker struct {
 	state         state.SiteState
 	failCount     int
 	recoveryCount int
-	lastSeen      time.Time // last successful poll
+	// lastAnswerWritable is whether the latest successful probe answered
+	// read_only=0. A failed probe leaves it unchanged, as it leaves state.
+	// Protected by TopologyManager.mu.
+	lastAnswerWritable bool
+	// probes counts the probes run against this site since the tracker
+	// started (deferred probes excluded). Protected by TopologyManager.mu.
+	probes   int
+	lastSeen time.Time // last successful poll
 	// nextProbe is when an unreachable site is next probed. Backoff is
 	// per site: a site that stays down is probed less often, and the
 	// other sites keep the base cadence. Zero means probe every poll.
@@ -269,7 +280,24 @@ func (t *siteTracker) isPromotable() bool {
 // observation returns this tracker's current state as a SiteObservation
 // suitable for feeding EvalCrossSite. Caller must hold tm.mu (read).
 func (t *siteTracker) observation() state.SiteObservation {
-	return state.SiteObservation{Name: t.name, Role: t.role, State: t.state}
+	return state.SiteObservation{Name: t.name, Role: t.role, State: t.state, PendingWritable: t.pendingWritable()}
+}
+
+// pendingWritable reports whether a site not yet classified since the
+// operator started last answered writable. Every way out of this (a
+// confirmed state, or a read-only answer) is a state transition, so a
+// cross-site decision it holds back is re-evaluated without a retry.
+func (t *siteTracker) pendingWritable() bool {
+	return t.state == state.StateUnknown && t.lastAnswerWritable
+}
+
+// classificationOverdueLocked reports whether site is still unclassified
+// after failureThreshold+recoveryThreshold probes: enough to classify a site
+// whose probes answer or fail consistently, with room for one blip. Such a
+// site alternates between answers and errors, so it no longer makes the
+// group read as Initializing. Caller must hold tm.mu.
+func (tm *TopologyManager) classificationOverdueLocked(site *siteTracker) bool {
+	return site.state == state.StateUnknown && site.probes >= tm.cfg.FailureThreshold+tm.cfg.RecoveryThreshold
 }
 
 // siteMetricLabels returns the identity labels for site-scoped gauges.
@@ -1282,9 +1310,18 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		tm.deploymentAwaitingObservation = false
 	}
 	prevStates := make([]state.SiteState, len(tm.sites))
+	// classificationLapsed records that a site ran out of its probe budget
+	// while still unclassified. That changes the cross-site verdict
+	// (Initializing to NoPrimary) without a state transition.
+	classificationLapsed := false
 	for i := range tm.sites {
+		overdueBefore := tm.classificationOverdueLocked(&tm.sites[i])
+		if !results[i].deferred {
+			tm.sites[i].probes++
+		}
 		if results[i].err == nil {
 			tm.sites[i].lastSeen = now
+			tm.sites[i].lastAnswerWritable = !results[i].readOnly
 		}
 		tm.sites[i].probeFailed = results[i].err != nil
 		prevStates[i] = tm.sites[i].state
@@ -1295,6 +1332,11 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				tm.sites[i].replicating = false
 				tm.sites[i].replicatingStreak = 0
 			}
+		}
+		if !overdueBefore && tm.classificationOverdueLocked(&tm.sites[i]) {
+			classificationLapsed = true
+			tm.logger.Warn("site not classified after its probe budget; probes alternate between answers and errors",
+				"site", tm.sites[i].name, "probes", tm.sites[i].probes)
 		}
 	}
 	tm.mu.Unlock()
@@ -1341,7 +1383,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	retryDeferred := tm.crossSiteRetryReady()
 	action := state.EvalCrossSite(tm.observations(), tm.cfg.SitePriorities)
 	alertMsg := action.Alert
-	if anyTransition || blockedSetChanged || retryDeferred {
+	if anyTransition || blockedSetChanged || retryDeferred || classificationLapsed {
 		tm.clearCrossSiteRetry()
 		tm.applyCrossSiteAction(ctx, action)
 	}
@@ -1546,7 +1588,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	tm.mu.RLock()
 	statusRetry := tm.statusWriteFailed
 	tm.mu.RUnlock()
-	statusChanged := anyTransition || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted
+	statusChanged := anyTransition || classificationLapsed || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted
 	if (statusChanged || statusRetry) && tm.StatusCallback != nil {
 		var snapshot TopologySnapshot
 		haveSnapshot := false
@@ -1866,6 +1908,7 @@ func (tm *TopologyManager) observations() []state.SiteObservation {
 	out := make([]state.SiteObservation, len(tm.sites))
 	for i := range tm.sites {
 		obs := tm.sites[i].observation()
+		obs.ClassificationOverdue = tm.classificationOverdueLocked(&tm.sites[i])
 		if _, rotating := blocked[tm.sites[i].name]; rotating {
 			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedRotation
 		} else if tm.restoreReclonePendingLocked(tm.sites[i].name) {
@@ -1907,6 +1950,8 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			SourceConvergenceReason: tm.sites[i].sourceConvergenceReason,
 			ServingHealthy:          tm.sites[i].servingHealthy,
 			ReplicationHealthy:      tm.sites[i].replicating,
+			PendingWritable:         tm.sites[i].pendingWritable(),
+			ClassificationOverdue:   tm.classificationOverdueLocked(&tm.sites[i]),
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
 			sites[i].RecoveryState = rec.state
@@ -2828,44 +2873,62 @@ func (tm *TopologyManager) isPlannedFailoverActive() bool {
 // site's GTID_EXECUTED captured after the fence takes effect. Returns
 // errSiteNotFound when the site name is unknown.
 //
-// Transactional: if the GTID read fails after the fence succeeded, the
-// site is best-effort unfenced before the error is returned. Leaving a
-// healthy primary stuck in super_read_only on a transient metadata
-// read is worse than failing the whole operation — the caller can
-// retry and the site stays writable in the meantime.
+// Transactional: if the fence write or the GTID read fails, the site is
+// best-effort unfenced before the error is returned. A SET GLOBAL that
+// reports an error (a timeout, a dropped connection) may still have been
+// applied, so a failed fence write is not proof the site is still
+// writable. Leaving a healthy primary stuck read-only on a transient error
+// is worse than failing the whole operation — the caller can retry and the
+// site stays writable in the meantime. When that unfence fails too, the
+// returned error says so.
 func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, error) {
 	site := tm.getSite(name)
 	if site == nil {
 		return "", errSiteNotFound
 	}
 	if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
-		return "", fmt.Errorf("set super_read_only=ON on %q: %w", name, err)
+		return "", tm.rollbackFence(ctx, name, site, fmt.Errorf("set super_read_only=ON on %q: %w", name, err))
 	}
 	gtid, err := site.mysql.GetGtidExecuted(ctx)
 	if err != nil {
-		// Best-effort unfence using a fresh short-lived context so a
-		// cancelled parent ctx doesn't block the rollback attempt.
-		unfenceCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if unfenceErr := site.mysql.SetSuperReadOnly(unfenceCtx, false); unfenceErr != nil {
-			tm.logger.Error("fence rollback failed: site left super_read_only=ON", "site", name, "error", unfenceErr)
-		}
-		cancel()
-		return "", fmt.Errorf("read GTID_EXECUTED on %q after fence: %w", name, err)
+		return "", tm.rollbackFence(ctx, name, site, fmt.Errorf("read GTID_EXECUTED on %q after fence: %w", name, err))
 	}
 	return gtid, nil
 }
 
-// UnfenceSite clears super_read_only on the named site. Used by the
+// rollbackFence best-effort unfences site after a failed FenceSite and
+// returns cause, annotated when the unfence failed too. It runs under its
+// own short budget, detached from ctx's cancellation, so a cancelled or
+// expired fence context does not block the rollback.
+func (tm *TopologyManager) rollbackFence(ctx context.Context, name string, site *siteTracker, cause error) error {
+	unfenceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if unfenceErr := unfenceSite(unfenceCtx, site.mysql); unfenceErr != nil {
+		tm.logger.Error("fence rollback failed: site left read-only", "site", name, "error", unfenceErr)
+		return fmt.Errorf("%w (warning: source primary unfence failed: %v)", cause, unfenceErr)
+	}
+	return cause
+}
+
+// UnfenceSite gives the named site its writes back. Used by the
 // planned-failover rollback path when the target fails to catch up.
 func (tm *TopologyManager) UnfenceSite(ctx context.Context, name string) error {
 	site := tm.getSite(name)
 	if site == nil {
 		return errSiteNotFound
 	}
-	if err := site.mysql.SetSuperReadOnly(ctx, false); err != nil {
-		return fmt.Errorf("set super_read_only=OFF on %q: %w", name, err)
+	if err := unfenceSite(ctx, site.mysql); err != nil {
+		return fmt.Errorf("unfence %q: %w", name, err)
 	}
 	return nil
+}
+
+// unfenceSite undoes a FenceSite fence. super_read_only=ON also sets
+// read_only=ON and clearing super_read_only alone leaves it set, so both
+// are cleared, super_read_only first. read_only=OFF is attempted even when
+// the first statement fails, because it clears super_read_only too.
+func unfenceSite(ctx context.Context, m mysql.Checker) error {
+	return errors.Join(m.SetSuperReadOnly(ctx, false), m.SetReadOnly(ctx, false))
 }
 
 // GetSiteGtidExecuted returns the named site's current GTID_EXECUTED.

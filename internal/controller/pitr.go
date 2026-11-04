@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"path"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -339,16 +340,21 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	if pit.StopDatetime == "" {
 		return out, fmt.Errorf("pointInTime.stopDatetime is required")
 	}
-	if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
-		return out, fmt.Errorf(
-			"pointInTime is set but spec.backup.pitr.enabled=false; " +
-				"PITR restore requires the failover group to have continuous binlog " +
-				"archival configured on the source")
+	// archiveProfileName reads a source archive that this group does not
+	// archive into, so a restored group never writes into the source prefix.
+	profileName := pit.ArchiveProfileName
+	if profileName == "" {
+		if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
+			return out, fmt.Errorf(
+				"pointInTime is set but spec.backup.pitr.enabled=false; " +
+					"PITR restore requires the failover group to have continuous binlog " +
+					"archival configured on the source, or pointInTime.archiveProfileName")
+		}
+		profileName = fg.Spec.Backup.PITR.ProfileName
 	}
-	pitr := fg.Spec.Backup.PITR
-	profile := findProfile(fg, pitr.ProfileName)
+	profile := findProfile(fg, profileName)
 	if profile == nil {
-		return out, fmt.Errorf("pitr profile %q not found in spec.backup.profiles", pitr.ProfileName)
+		return out, fmt.Errorf("pitr profile %q not found in spec.backup.profiles", profileName)
 	}
 
 	// Shared emptyDir volume. Init container writes; main container
@@ -362,17 +368,17 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	initMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir}
 	mainMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir, ReadOnly: true}
 
-	// Build a comma-separated site list from the spec so the init
-	// container can skip a List call in the common case. The init
-	// container falls back to listing the manifest prefix when this
-	// env var is empty.
-	var siteNames []string
-	for _, s := range fg.Spec.Sites {
-		siteNames = append(siteNames, s.Name)
+	siteNames := append([]string(nil), pit.Sites...)
+	if len(siteNames) == 0 {
+		for _, s := range fg.Spec.Sites {
+			siteNames = append(siteNames, s.Name)
+		}
 	}
 
 	initEnv := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
+		{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(pit.AllowPartial)},
+		{Name: "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", Value: strconv.FormatBool(pit.AllowUnverifiedCrossSite)},
 		{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
 		{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
 		{Name: "BLOODRAVEN_PITR_SITES", Value: joinComma(siteNames)},
@@ -518,24 +524,28 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	}
 	initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
 	init := corev1.Container{
-		Name:            restorePITRInitContainerName,
-		Image:           image,
-		Command:         operatorCommand("pitr-download"),
-		Env:             initEnv,
-		Resources:       initResources,
-		VolumeMounts:    initMounts,
-		SecurityContext: initSC,
+		Name:                     restorePITRInitContainerName,
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		Image:                    image,
+		Command:                  operatorCommand("pitr-download"),
+		Env:                      initEnv,
+		Resources:                initResources,
+		VolumeMounts:             initMounts,
+		SecurityContext:          initSC,
 	}
 
 	mainEnv := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_PITR_LOCAL_DIR", Value: restorePITRLocalDir},
 		{Name: "TZ", Value: "UTC"},
 		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
+		{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(pit.AllowPartial)},
+		{Name: "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", Value: strconv.FormatBool(pit.AllowUnverifiedCrossSite)},
 	}
 	if pit.ExcludeGtids != "" {
-		mainEnv = append(mainEnv, corev1.EnvVar{
-			Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: pit.ExcludeGtids,
-		})
+		// The planner must exempt exactly what mysqlbinlog --exclude-gtids skips.
+		exclude := corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: pit.ExcludeGtids}
+		mainEnv = append(mainEnv, exclude)
+		init.Env = append(init.Env, exclude)
 	}
 
 	return restorePITRFragments{

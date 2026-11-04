@@ -80,6 +80,8 @@ var canonicalPrivileges = []struct {
 	{PrivilegeTrigger, "TRIGGER"},
 	{PrivilegeEvent, "EVENT"},
 	{PrivilegeExecute, "EXECUTE"},
+	{PrivilegeCreateRoutine, "CREATE ROUTINE"},
+	{PrivilegeAlterRoutine, "ALTER ROUTINE"},
 }
 
 // ValidateMysqlIdentifier rejects any value that must not be interpolated

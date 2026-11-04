@@ -140,6 +140,15 @@ func TestRound2CommittedNativeWindows(t *testing.T) {
 			}
 			out := t.TempDir()
 			n, err := downloadSiteBinlogs(ctx, store, "binlogs", "iad", stop, out, slog.Default())
+			if tc.Rollback {
+				// The advanced header clock puts a server-local event at the
+				// stop ahead of transactions whose commit timestamps precede
+				// it. mysqlbinlog ends there and skips them, so coverage fails.
+				if err == nil || !strings.Contains(err.Error(), "replay would not apply it") {
+					t.Fatalf("skipped pre-target commits certified: %d %v", n, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

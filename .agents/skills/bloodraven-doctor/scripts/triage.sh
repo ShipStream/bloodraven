@@ -85,6 +85,10 @@ TOPOLOGY_GENERATION=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" 
 echo "Active Primary Site: ${ACTIVE_SITE:-Unknown}"
 echo "Last Failover:       ${LAST_FAILOVER:-None}"
 echo "Topology generation: ${TOPOLOGY_GENERATION:-unavailable}"
+RESTORE_STATUS=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restore}' 2>/dev/null || true)
+if [[ -n "$RESTORE_STATUS" ]]; then
+    echo "Restore status (requested ceiling and newest replayed event are separate): $RESTORE_STATUS"
+fi
 RESTORE_RECLONES=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.phase}{" pending=["}{.status.restoreReclones.pending[*]}{"] requested="}{.status.restoreReclones.requested}{" failures="}{.status.restoreReclones.failures[*].message}' 2>/dev/null || true)
 if [[ "$RESTORE_RECLONES" != " pending=[] requested= failures=" && -n "$RESTORE_RECLONES" ]]; then
     echo "Post-restore reclones: $RESTORE_RECLONES (pending sites are not promoted automatically and are out of the -replica and read-only Services; Held = nothing is cloned)"
@@ -110,6 +114,9 @@ echo "--- 2. Sites & Replication Summary ---"
 kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.sites[*]}Site: {.name}{"\n"}  Role: {.role}{"\n"}  Reachable: {.reachable}{"\n"}  ReadOnly: {.readOnly}{"\n"}  Replicating: {.replicating}{"\n"}  SecondsBehindSource: {.secondsBehindSource}{"\n"}  ReplicationError: {.replicationError}{"\n"}  RecoveryState: {.recoveryState}{"\n"}  Divergence: {.divergenceDetectedBy}{" vs "}{.divergenceComparedTo}{" "}{.divergentTransactionCount}{" "}{.divergentGtid}{"\n\n"}{end}' 2>/dev/null || echo "Could not parse site status."
 DEGRADED=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Degraded")].status}{" "}{.status.conditions[?(@.type=="Degraded")].reason}{": "}{.status.conditions[?(@.type=="Degraded")].message}' 2>/dev/null || true)
 echo "Degraded: ${DEGRADED:-unavailable}"
+if [[ "$DEGRADED" == *Initializing* ]]; then
+    echo "  The operator just started and has not classified every primary-candidate yet; this is not an outage. Re-run in a few seconds; a site still unclassified after failureThreshold+recoveryThreshold probes is reported as NoPrimary instead."
+fi
 if [[ "$DEGRADED" == *DivergentTransactions* ]]; then
     echo "  A site holds transactions the primary lacks (replication may still be running). Ordered updates and planned failovers will not promote it: run gtid-audit.sh and see playbook 33."
 fi

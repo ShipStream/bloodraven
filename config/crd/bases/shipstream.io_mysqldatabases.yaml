@@ -245,9 +245,11 @@ spec:
                         - TRIGGER
                         - EVENT
                         - EXECUTE
+                        - CREATE ROUTINE
+                        - ALTER ROUTINE
                         maxLength: 32
                         type: string
-                      maxItems: 17
+                      maxItems: 19
                       minItems: 1
                       type: array
                       x-kubernetes-list-type: atomic
@@ -373,9 +375,11 @@ spec:
                       - TRIGGER
                       - EVENT
                       - EXECUTE
+                      - CREATE ROUTINE
+                      - ALTER ROUTINE
                       maxLength: 32
                       type: string
-                    maxItems: 17
+                    maxItems: 19
                     minItems: 1
                     type: array
                     x-kubernetes-list-type: atomic
@@ -473,9 +477,11 @@ spec:
                         - TRIGGER
                         - EVENT
                         - EXECUTE
+                        - CREATE ROUTINE
+                        - ALTER ROUTINE
                         maxLength: 32
                         type: string
-                      maxItems: 17
+                      maxItems: 19
                       minItems: 1
                       type: array
                       x-kubernetes-list-type: atomic

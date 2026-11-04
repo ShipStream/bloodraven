@@ -75,7 +75,7 @@ if ready ~= nil and ready.status == "True" then
   return hs
 end
 
-if ready ~= nil and ready.status == "False" then
+if ready ~= nil and (ready.status == "False" or ready.status == "Unknown") then
   hs.status = "Progressing"
   hs.message = ready.message or "Not ready"
   return hs
