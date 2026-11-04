@@ -254,7 +254,7 @@ func (f *FailoverController) abortHandoff(ctx context.Context, candidateSite str
 func (f *FailoverController) abortHandoffWithin(ctx context.Context, budget time.Duration, candidateSite string, source mysql.Checker, cause error) error {
 	rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
-	rbErr := errors.Join(source.SetSuperReadOnly(rbCtx, false), source.SetReadOnly(rbCtx, false))
+	rbErr := unfenceSite(rbCtx, source)
 	if rbErr != nil {
 		f.logger.Error("maintenance handoff: rollback failed: source may be left read-only", "candidate", candidateSite, "cause", cause, "error", rbErr)
 		return fmt.Errorf("%w; source unfence failed: %v", cause, rbErr)
