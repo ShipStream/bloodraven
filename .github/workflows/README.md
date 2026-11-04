@@ -19,7 +19,7 @@ Pull requests run jobs for the areas they touch: Go jobs for Go-related source a
 | `changes` | Classifies changed paths and selects the affected jobs |
 | `lint` | Runs `golangci-lint`, source-built with the repo's Go toolchain through `go install` (pinned in `Makefile`); binary cached by OS, architecture, Go version, and linter version |
 | `build` | Compiles `cmd/bloodraven` and `cmd/sidecar` |
-| `test-unit` | `make test-unit` — unit tests under `./internal/...` |
+| `test-unit` | `make test-unit` — unit tests under `./internal/...`, `./cmd/...` and `./charts/...` (installs a pinned Helm for the chart render tests) |
 | `test-component` | `make test-component` — component tests under `./test/component/` |
 | `test-envtest` | `make test-envtest` — controller tests using envtest (real API server); setup-envtest and the 1.37.x assets are cached weekly from main |
 | `generate-check` | Runs `make generate && make manifests` and fails if files are stale |
