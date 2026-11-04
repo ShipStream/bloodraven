@@ -39,6 +39,13 @@ type SiteObservation struct {
 	// primary, but no other site is promoted over it either. Ignored for any
 	// other State.
 	PendingWritable bool
+	// ClassificationOverdue marks a StateUnknown site that has been probed
+	// often enough to be classified had its probes answered or failed
+	// consistently: its answers alternate with errors. It no longer turns
+	// NoPrimary into Initializing, so a flapping site cannot hold the group
+	// in Initializing indefinitely. PendingWritable still applies to it.
+	// Ignored for any other State.
+	ClassificationOverdue bool
 }
 
 // Reasons for SiteObservation.PromotionBlocked.
@@ -95,14 +102,15 @@ type CrossSiteAction struct {
 // A primary-candidate in StateUnknown has not been classified since the
 // operator started. While no site is confirmed writable, such a site turns
 // NoPrimary into Initializing: NoPrimary claims every candidate was seen
-// read-only, which is not known yet. A PendingWritable one also holds back
-// the failover row, so no site is promoted over a site that answered
-// writable, and it counts toward an (unconfirmed) split brain.
+// read-only, which is not known yet. Once it is ClassificationOverdue it no
+// longer does, so a flapping site cannot hide NoPrimary indefinitely. A
+// PendingWritable one, overdue or not, also holds back the failover row, so
+// no site is promoted over a site that answered writable, and it counts
+// toward an (unconfirmed) split brain.
 func EvalCrossSite(observations []SiteObservation, sitePriorities []string) CrossSiteAction {
 	var action CrossSiteAction
 
-	var writable, readOnly, unreachable, unclassified, pending []SiteObservation
-	var writableOrPending []string
+	var writable, readOnly, unreachable, unclassified, overdue, pending []SiteObservation
 	coreCount := 0
 	for _, obs := range observations {
 		// Count configured core sites by role before state classification so an
@@ -121,17 +129,19 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 		switch obs.State {
 		case StateWritable:
 			writable = append(writable, obs)
-			writableOrPending = append(writableOrPending, obs.Name)
 		case StateReadOnly:
 			readOnly = append(readOnly, obs)
 		case StateUnreachable:
 			unreachable = append(unreachable, obs)
 		case StateUnknown:
 			if obs.Role == SiteRolePrimaryCandidate {
-				unclassified = append(unclassified, obs)
+				if obs.ClassificationOverdue {
+					overdue = append(overdue, obs)
+				} else {
+					unclassified = append(unclassified, obs)
+				}
 				if obs.PendingWritable {
 					pending = append(pending, obs)
-					writableOrPending = append(writableOrPending, obs.Name)
 				}
 			}
 		}
@@ -177,8 +187,9 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 	// debounce. SplitBrain stays false: fencing and split-brain resolution
 	// wait for the confirmation.
 	if len(writable)+len(pending) > 1 {
+		answered := append(siteNames(writable), siteNames(pending)...)
 		action.Alert = fmt.Sprintf("SPLIT BRAIN: %d sites are writable (%s); %s not yet confirmed",
-			len(writableOrPending), strings.Join(writableOrPending, ", "), strings.Join(siteNames(pending), ", "))
+			len(answered), strings.Join(answered, ", "), strings.Join(siteNames(pending), ", "))
 		action.Reason = "SplitBrain"
 		return action
 	}
@@ -223,7 +234,10 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 		// No eligible promotion target: alert only. Use a message that
 		// matches the two-site convention when exactly two read-only
 		// sites are observed, for test/UX familiarity.
-		if len(readOnly) == 2 && len(unreachable) == 0 {
+		if len(overdue) > 0 {
+			action.Alert = fmt.Sprintf("NO PRIMARY: no writable site available; %s not classified (probes alternate between answers and errors)",
+				strings.Join(siteNames(overdue), ", "))
+		} else if len(readOnly) == 2 && len(unreachable) == 0 {
 			action.Alert = "NO PRIMARY: both sites are read-only"
 		} else {
 			action.Alert = "NO PRIMARY: no writable site available"

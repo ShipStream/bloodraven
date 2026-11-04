@@ -2064,7 +2064,8 @@ func degradedReason(snap TopologySnapshot) string {
 func initializingMessage(snap TopologySnapshot) string {
 	var parts []string
 	for _, s := range snap.Sites {
-		if s.State != state.StateUnknown || s.Role == state.SiteRoleReadOnly || s.Role == state.SiteRoleDROnly {
+		// Same filter as EvalCrossSite's unclassified set.
+		if s.State != state.StateUnknown || s.Role != state.SiteRolePrimaryCandidate || s.ClassificationOverdue {
 			continue
 		}
 		if s.PendingWritable {

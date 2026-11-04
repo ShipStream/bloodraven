@@ -314,3 +314,41 @@ func TestRunner_FirstPollAfterStartRaisesNoNoPrimary(t *testing.T) {
 		})
 	}
 }
+
+// A primary whose probes alternate between writable answers and errors is
+// never confirmed and never unreachable. Initializing covers only the first
+// failureThreshold+recoveryThreshold probes; after that the group reports
+// NoPrimary again, naming the site, and still promotes nothing over it.
+func TestPoll_FlappingPrimaryStopsReadingAsInitializing(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	standby := &mockMySQL{readOnly: true}
+	tm, _, dns := newTestTopologyManager(primary, standby)
+	var snap TopologySnapshot
+	tm.StatusCallback = func(s TopologySnapshot) { snap = s }
+
+	budget := tm.cfg.FailureThreshold + tm.cfg.RecoveryThreshold
+	for poll := 1; poll <= budget+2; poll++ {
+		if poll%2 == 0 {
+			primary.setError(errors.New("connection reset"))
+		} else {
+			primary.setError(nil)
+		}
+		tm.Poll(context.Background())
+		if s := snap.Sites[0]; s.State != state.StateUnknown {
+			t.Fatalf("poll %d: dc1 state = %s, want it to stay unknown while flapping", poll, s.State)
+		}
+		want := "Initializing"
+		if poll >= budget {
+			want = "NoPrimary"
+		}
+		if snap.DegradedReason != want {
+			t.Fatalf("poll %d: reason = %q (alert %q), want %q", poll, snap.DegradedReason, snap.Alert, want)
+		}
+		if want == "NoPrimary" && !strings.Contains(snap.Alert, "dc1 not classified") {
+			t.Fatalf("poll %d: alert = %q, want it to name the flapping site", poll, snap.Alert)
+		}
+	}
+	if !isReadOnly(standby) || dns.getLastIP() != "" {
+		t.Fatalf("acted on a flapping primary: standbyReadOnly=%v dns=%q", isReadOnly(standby), dns.getLastIP())
+	}
+}

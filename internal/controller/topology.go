@@ -134,6 +134,8 @@ type SiteSnapshot struct {
 	ReplicationHealthy      bool
 	// PendingWritable mirrors state.SiteObservation.PendingWritable.
 	PendingWritable bool
+	// ClassificationOverdue mirrors state.SiteObservation.ClassificationOverdue.
+	ClassificationOverdue bool
 
 	// Per-site old-primary recovery state ("", RecoveryInProgress, or
 	// RecoveryBlocked) with the divergence report when blocked. Multiple
@@ -236,7 +238,10 @@ type siteTracker struct {
 	// read_only=0. A failed probe leaves it unchanged, as it leaves state.
 	// Protected by TopologyManager.mu.
 	lastAnswerWritable bool
-	lastSeen           time.Time // last successful poll
+	// probes counts the probes run against this site since the tracker
+	// started (deferred probes excluded). Protected by TopologyManager.mu.
+	probes   int
+	lastSeen time.Time // last successful poll
 	// nextProbe is when an unreachable site is next probed. Backoff is
 	// per site: a site that stays down is probed less often, and the
 	// other sites keep the base cadence. Zero means probe every poll.
@@ -283,6 +288,15 @@ func (t *siteTracker) observation() state.SiteObservation {
 // cross-site decision it holds back is re-evaluated without a retry.
 func (t *siteTracker) pendingWritable() bool {
 	return t.state == state.StateUnknown && t.lastAnswerWritable
+}
+
+// classificationOverdueLocked reports whether site is still unclassified
+// after failureThreshold+recoveryThreshold probes: enough to classify a site
+// whose probes answer or fail consistently, with room for one blip. Such a
+// site alternates between answers and errors, so it no longer makes the
+// group read as Initializing. Caller must hold tm.mu.
+func (tm *TopologyManager) classificationOverdueLocked(site *siteTracker) bool {
+	return site.state == state.StateUnknown && site.probes >= tm.cfg.FailureThreshold+tm.cfg.RecoveryThreshold
 }
 
 // siteMetricLabels returns the identity labels for site-scoped gauges.
@@ -1275,7 +1289,15 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		tm.deploymentAwaitingObservation = false
 	}
 	prevStates := make([]state.SiteState, len(tm.sites))
+	// classificationLapsed records that a site ran out of its probe budget
+	// while still unclassified. That changes the cross-site verdict
+	// (Initializing to NoPrimary) without a state transition.
+	classificationLapsed := false
 	for i := range tm.sites {
+		overdueBefore := tm.classificationOverdueLocked(&tm.sites[i])
+		if !results[i].deferred {
+			tm.sites[i].probes++
+		}
 		if results[i].err == nil {
 			tm.sites[i].lastSeen = now
 			tm.sites[i].lastAnswerWritable = !results[i].readOnly
@@ -1289,6 +1311,11 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				tm.sites[i].replicating = false
 				tm.sites[i].replicatingStreak = 0
 			}
+		}
+		if !overdueBefore && tm.classificationOverdueLocked(&tm.sites[i]) {
+			classificationLapsed = true
+			tm.logger.Warn("site not classified after its probe budget; probes alternate between answers and errors",
+				"site", tm.sites[i].name, "probes", tm.sites[i].probes)
 		}
 	}
 	tm.mu.Unlock()
@@ -1335,7 +1362,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	retryDeferred := tm.crossSiteRetryReady()
 	action := state.EvalCrossSite(tm.observations(), tm.cfg.SitePriorities)
 	alertMsg := action.Alert
-	if anyTransition || blockedSetChanged || retryDeferred {
+	if anyTransition || blockedSetChanged || retryDeferred || classificationLapsed {
 		tm.clearCrossSiteRetry()
 		tm.applyCrossSiteAction(ctx, action)
 	}
@@ -1540,7 +1567,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	tm.mu.RLock()
 	statusRetry := tm.statusWriteFailed
 	tm.mu.RUnlock()
-	statusChanged := anyTransition || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted
+	statusChanged := anyTransition || classificationLapsed || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted
 	if (statusChanged || statusRetry) && tm.StatusCallback != nil {
 		var snapshot TopologySnapshot
 		haveSnapshot := false
@@ -1859,6 +1886,7 @@ func (tm *TopologyManager) observations() []state.SiteObservation {
 	out := make([]state.SiteObservation, len(tm.sites))
 	for i := range tm.sites {
 		obs := tm.sites[i].observation()
+		obs.ClassificationOverdue = tm.classificationOverdueLocked(&tm.sites[i])
 		if _, rotating := blocked[tm.sites[i].name]; rotating {
 			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedRotation
 		} else if tm.restoreReclonePendingLocked(tm.sites[i].name) {
@@ -1901,6 +1929,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			ServingHealthy:          tm.sites[i].servingHealthy,
 			ReplicationHealthy:      tm.sites[i].replicating,
 			PendingWritable:         tm.sites[i].pendingWritable(),
+			ClassificationOverdue:   tm.classificationOverdueLocked(&tm.sites[i]),
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
 			sites[i].RecoveryState = rec.state

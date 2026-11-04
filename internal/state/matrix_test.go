@@ -294,6 +294,32 @@ func TestEvalCrossSite_Unclassified(t *testing.T) {
 			wantCandidates: []string{"pdx"},
 		},
 		{
+			name: "a site still unclassified after its probe budget no longer reads as Initializing",
+			obs: []SiteObservation{
+				{Name: "iad", Role: pc, State: StateUnknown, ClassificationOverdue: true},
+				obs("pdx", pc, StateReadOnly),
+			},
+			wantReason: "NoPrimary",
+			wantAlert:  "iad not classified",
+		},
+		{
+			name: "an overdue writable answer still holds back promotion over it",
+			obs: []SiteObservation{
+				{Name: "iad", Role: pc, State: StateUnknown, PendingWritable: true, ClassificationOverdue: true},
+				obs("pdx", pc, StateUnreachable), obs("fra", pc, StateReadOnly),
+			},
+			wantReason: "NoPrimary",
+			wantAlert:  "iad not classified",
+		},
+		{
+			name: "an overdue site does not hide another site still being classified",
+			obs: []SiteObservation{
+				{Name: "iad", Role: pc, State: StateUnknown, ClassificationOverdue: true},
+				obs("pdx", pc, StateUnknown), obs("fra", pc, StateReadOnly),
+			},
+			wantReason: "Initializing",
+		},
+		{
 			name:       "threshold-confirmed total loss is unaffected",
 			obs:        []SiteObservation{obs("iad", pc, StateUnreachable), obs("pdx", pc, StateUnreachable)},
 			wantReason: "TotalLoss",

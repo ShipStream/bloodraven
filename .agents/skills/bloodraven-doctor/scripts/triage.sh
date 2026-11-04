@@ -104,7 +104,7 @@ kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jso
 DEGRADED=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Degraded")].status}{" "}{.status.conditions[?(@.type=="Degraded")].reason}{": "}{.status.conditions[?(@.type=="Degraded")].message}' 2>/dev/null || true)
 echo "Degraded: ${DEGRADED:-unavailable}"
 if [[ "$DEGRADED" == *Initializing* ]]; then
-    echo "  The operator just started and has not classified every primary-candidate yet; this is not an outage. Re-run in a few seconds; if it persists, a site's probes are failing intermittently."
+    echo "  The operator just started and has not classified every primary-candidate yet; this is not an outage. Re-run in a few seconds; a site still unclassified after failureThreshold+recoveryThreshold probes is reported as NoPrimary instead."
 fi
 if [[ "$DEGRADED" == *DivergentTransactions* ]]; then
     echo "  A site holds transactions the primary lacks (replication may still be running). Ordered updates and planned failovers will not promote it: run gtid-audit.sh and see playbook 33."
