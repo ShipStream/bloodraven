@@ -350,6 +350,7 @@ func TestSettle_GTIDReadFailureRetriesBeforeHolding(t *testing.T) {
 	r2, c2 := newReconciler(late, dsnSecret())
 	_, mocks2 := withFenceRunner(r2, c2, late)
 	mocks2["iad"].gtidExecutedErr = errors.New("connection reset")
+	backdateGTIDReadFailure(r2, late, restoreGTIDReadBound+time.Second)
 	if wait, err := r2.settleArmedRestoreReclones(context.Background(), late); err != nil || wait != 0 {
 		t.Fatalf("wait=%s err=%v past the bound, want a decision", wait, err)
 	}

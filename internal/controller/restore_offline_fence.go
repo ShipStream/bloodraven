@@ -43,6 +43,11 @@ import (
 // stamped a terminal status); the caller stops.
 var errInPlaceRunEnded = errors.New("in-place restore run ended")
 
+// errNoTopologyManager means no topology manager runs for the group yet
+// (operator start, manager replacement): the caller waits for the next
+// runner sync rather than treating the site as unreadable.
+var errNoTopologyManager = errors.New("no topology manager running")
+
 // errRestoreFenceUnsupported means the site's checker cannot apply the
 // database fence (test doubles that do not implement mysql.RestoreFencer).
 var errRestoreFenceUnsupported = errors.New("the site's MySQL checker cannot apply the restore offline_mode fence")
@@ -215,13 +220,13 @@ func (tm *TopologyManager) reassertRestoreOfflineFence(ctx context.Context) {
 
 func (r *TopologyManagerRunner) restoreFenceManager(nn types.NamespacedName) (*TopologyManager, error) {
 	if r == nil {
-		return nil, fmt.Errorf("no topology runner")
+		return nil, fmt.Errorf("%w: no topology runner", errNoTopologyManager)
 	}
 	r.mu.RLock()
 	mt, ok := r.managers[nn]
 	r.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("no topology manager running for %s", nn)
+		return nil, fmt.Errorf("%w for %s", errNoTopologyManager, nn)
 	}
 	return mt.tm, nil
 }

@@ -181,6 +181,10 @@ type MysqlFailoverGroupReconciler struct {
 	// RestoreInPlaceWaitingForPreviousQueue Event was last emitted for.
 	// Guarded by restorePeerStopMu.
 	restoreSettleNoted map[types.NamespacedName]string
+	// restoreGTIDReadFailures records the first failed read of the
+	// primary's gtid_executed per settlement (restorePrimaryUnchanged).
+	// Guarded by restorePeerStopMu.
+	restoreGTIDReadFailures map[types.NamespacedName]restoreGTIDReadFailure
 }
 
 type dragonflyRolloutKey struct {

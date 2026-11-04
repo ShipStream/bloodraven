@@ -607,6 +607,8 @@ func TestSettle_UnreadablePrimaryOrMissingSnapshotHolds(t *testing.T) {
 			r, c := newReconciler(fg, dsnSecret())
 			_, mocks := withFenceRunner(r, c, fg)
 			mocks["iad"].gtidExecuted, mocks["iad"].gtidExecutedErr = peerGTID("1-10"), tc.gtidEr
+			// The read has been failing for longer than the retry bound.
+			backdateGTIDReadFailure(r, fg, restoreGTIDReadBound+time.Second)
 			if _, err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
 				t.Fatal(err)
 			}

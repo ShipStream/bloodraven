@@ -685,6 +685,24 @@ func restorePeerStopSitesMissingFromQueue(fg *v1alpha1.MysqlFailoverGroup, targe
 	return missing
 }
 
+// cancelOnPeerSetChange ends a full-instance run in Fencing (without
+// consuming its confirm, so it re-runs with the current peers) when
+// spec.sites names a non-target site its reclone queue does not cover: a
+// site added after the restore was accepted, whose replication nothing
+// would stop. It reports whether it ended the run.
+func (r *MysqlFailoverGroupReconciler) cancelOnPeerSetChange(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) bool {
+	cur := fg.Status.RestoreInPlace
+	added := restorePeerStopSitesMissingFromQueue(fg, cur.TargetSite)
+	if len(added) == 0 {
+		return false
+	}
+	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
+		fmt.Sprintf("cancelled: the peer set changed after the restore was accepted (%s not in status.restoreReclones.pending); nothing was restored. "+
+			"The restore re-runs with the current peers", strings.Join(added, ", ")),
+		"RestoreInPlaceCancelled")
+	return true
+}
+
 // stopRestorePeerReplication is Fencing's last step for a full-instance
 // restore: it stops the replication receiver of every queued peer, after
 // letting a running receiver catch up to the fenced primary, and returns
@@ -714,11 +732,7 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 			}
 		}
 	}
-	if added := restorePeerStopSitesMissingFromQueue(fg, target); len(added) > 0 {
-		r.stampTerminalFailure(ctx, fg, target, cur.Scope, cur.ConfirmTokenUsed,
-			fmt.Sprintf("cancelled: the peer set changed after the restore was accepted (%s not in status.restoreReclones.pending); nothing was restored. "+
-				"The restore re-runs with the current peers", strings.Join(added, ", ")),
-			"RestoreInPlaceCancelled")
+	if r.cancelOnPeerSetChange(ctx, fg) {
 		return "", errInPlaceRunEnded
 	}
 	q := fg.Status.RestoreReclones

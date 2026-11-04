@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -381,7 +382,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		// including one removed from spec.sites: re-adding it must not
 		// resume its replication from the untrusted primary.
 		if active := fg.Status.ActiveSite; active != "" && slices.Contains(q.Pending, active) {
-			r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesAbandoned",
+			return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesAbandoned",
 				"site %s became the primary before the in-place restore recloned it; it keeps its pre-restore data and the remaining reclone queue (%s) is abandoned",
 				active, strings.Join(q.Pending, ", "))
 		}
@@ -411,9 +412,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		q = fg.Status.RestoreReclones
 	}
 	if len(known) == 0 {
-		r.clearRestoreReclones(ctx, fg, corev1.EventTypeNormal, "RestoreReclonesComplete",
+		return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeNormal, "RestoreReclonesComplete",
 			"every peer of the in-place restore (confirm=%s) has been recloned", q.ConfirmToken)
-		return 0, nil
 	}
 	active := fg.Status.ActiveSite
 	if active == "" {
@@ -423,10 +423,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		// Something other than this queue (a planned failover, a manual
 		// promotion) made a site with pre-restore data the primary.
 		// Cloning the rest from it would spread that data, so stop.
-		r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesAbandoned",
+		return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesAbandoned",
 			"site %s became the primary before the in-place restore recloned it; it keeps its pre-restore data and the remaining reclone queue (%s) is abandoned",
 			active, strings.Join(known, ", "))
-		return 0, nil
 	}
 	raw := fg.GetAnnotations()[RecloneAnnotation]
 	nn := client.ObjectKeyFromObject(fg)
@@ -692,9 +691,8 @@ func (r *MysqlFailoverGroupReconciler) settleArmedRestoreReclones(ctx context.Co
 			earlier = append(earlier, sup.Pending...)
 		}
 		if len(pending) == 0 {
-			r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesDiscarded",
+			return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesDiscarded",
 				"the in-place restore (confirm=%s) did not succeed and has no peers to hold", q.ConfirmToken)
-			return 0, nil
 		}
 		// An earlier queue that was put back keeps its identity; it now
 		// also covers the failed restore's other peers.
@@ -774,9 +772,11 @@ func (r *MysqlFailoverGroupReconciler) settleArmedRestoreReclones(ctx context.Co
 	if unchanged {
 		msg += ". The restore Job may still have loaded data without binlogging it into a primary that had no user schemas; check the primary"
 	}
-	r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesDiscarded", msg,
+	// The fence is released only once the discard is written: a failed
+	// write must not let application writes change gtid_executed under
+	// a queue that is still Armed.
+	return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesDiscarded", msg,
 		q.ConfirmToken, why, strings.Join(q.Pending, ", "))
-	return 0, nil
 }
 
 // restoreQueueOwnedByRun reports whether the Armed queue q belongs to the
@@ -833,10 +833,10 @@ const (
 // the primary unchanged: every pod of its Job has terminated (an orphaned
 // or still-terminating pod could yet drop schemas) and the primary reports
 // the gtid_executed recorded when the peers' receivers were stopped. While
-// it cannot tell yet it returns a requeue interval, for at most
-// restoreSettleBound for live pods and restoreGTIDReadBound for an
-// unreadable primary, measured from the run's completionTime; any doubt
-// after that is false.
+// it cannot tell yet it returns a requeue interval: for live pods, or no
+// topology manager yet, at most restoreSettleBound from the run's
+// completionTime; for an unreadable primary at most restoreGTIDReadBound
+// from this process's first failed read. Any doubt after that is false.
 func (r *MysqlFailoverGroupReconciler) restorePrimaryUnchanged(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (bool, time.Duration) {
 	q, rip := fg.Status.RestoreReclones, fg.Status.RestoreInPlace
 	if q == nil || rip == nil || rip.TargetSite == "" || q.FencedGtidExecuted == "" || r.Runner == nil {
@@ -863,19 +863,71 @@ func (r *MysqlFailoverGroupReconciler) restorePrimaryUnchanged(ctx context.Conte
 		return false, 0
 	}
 	now, err := r.Runner.RestoreGtidExecuted(ctx, client.ObjectKeyFromObject(fg), rip.TargetSite)
-	if err != nil {
-		if since < restoreGTIDReadBound {
+	if errors.Is(err, errNoTopologyManager) {
+		// Not unreadable: the manager starts at the runner's next sync
+		// (operator start, replacement). Wait, within the pod bound.
+		if since < restoreSettleBound {
 			return false, restoreSettleRetryWait
 		}
 		log.FromContext(ctx).Error(err, "read the primary's gtid_executed after a failed in-place restore", "fg", fg.Name, "site", rip.TargetSite)
 		return false, 0
 	}
+	if err != nil {
+		// Retried for restoreGTIDReadBound from the first failed read, not
+		// from completionTime: the pod wait above may already have used
+		// that much.
+		if time.Since(r.restoreGTIDReadFailedSince(fg)) < restoreGTIDReadBound {
+			return false, restoreSettleRetryWait
+		}
+		log.FromContext(ctx).Error(err, "read the primary's gtid_executed after a failed in-place restore", "fg", fg.Name, "site", rip.TargetSite)
+		return false, 0
+	}
+	r.forgetRestoreGTIDReadFailure(fg)
 	before, berr := mysql.ParseGTIDSet(q.FencedGtidExecuted)
 	after, aerr := mysql.ParseGTIDSet(now)
 	if berr != nil || aerr != nil {
 		return false, 0
 	}
 	return before.Contains(after) && after.Contains(before), 0
+}
+
+// restoreGTIDReadFailure is when this process first failed to read the
+// primary's gtid_executed while settling a run's queue.
+type restoreGTIDReadFailure struct {
+	key   string
+	since time.Time
+}
+
+// restoreGTIDReadKey identifies the settlement a GTID read belongs to.
+func restoreGTIDReadKey(fg *v1alpha1.MysqlFailoverGroup) string {
+	key := fg.Status.RestoreReclones.ConfirmToken
+	if rip := fg.Status.RestoreInPlace; rip != nil && rip.CompletionTime != nil {
+		key += "@" + rip.CompletionTime.UTC().Format(time.RFC3339Nano)
+	}
+	return key
+}
+
+// restoreGTIDReadFailedSince records (once per settlement) and returns
+// when the first GTID read of fg's settlement failed.
+func (r *MysqlFailoverGroupReconciler) restoreGTIDReadFailedSince(fg *v1alpha1.MysqlFailoverGroup) time.Time {
+	nn, key := client.ObjectKeyFromObject(fg), restoreGTIDReadKey(fg)
+	r.restorePeerStopMu.Lock()
+	defer r.restorePeerStopMu.Unlock()
+	if r.restoreGTIDReadFailures == nil {
+		r.restoreGTIDReadFailures = map[types.NamespacedName]restoreGTIDReadFailure{}
+	}
+	f, ok := r.restoreGTIDReadFailures[nn]
+	if !ok || f.key != key {
+		f = restoreGTIDReadFailure{key: key, since: time.Now()}
+		r.restoreGTIDReadFailures[nn] = f
+	}
+	return f.since
+}
+
+func (r *MysqlFailoverGroupReconciler) forgetRestoreGTIDReadFailure(fg *v1alpha1.MysqlFailoverGroup) {
+	r.restorePeerStopMu.Lock()
+	defer r.restorePeerStopMu.Unlock()
+	delete(r.restoreGTIDReadFailures, client.ObjectKeyFromObject(fg))
 }
 
 // restoreJobPodsAlive reports whether any pod of the in-place restore Job
@@ -896,8 +948,9 @@ func (r *MysqlFailoverGroupReconciler) restoreJobPodsAlive(ctx context.Context, 
 	return false, nil
 }
 
-// clearRestoreReclones removes the queue and records why.
-func (r *MysqlFailoverGroupReconciler) clearRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, eventType, reason, format string, args ...any) {
+// clearRestoreReclones removes the queue and records why. The error is
+// returned, and also logged for callers that only report it.
+func (r *MysqlFailoverGroupReconciler) clearRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, eventType, reason, format string, args ...any) error {
 	cleared, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1alpha1.MysqlFailoverGroup) bool {
 		if fresh.Status.RestoreReclones == nil {
 			return false
@@ -907,11 +960,12 @@ func (r *MysqlFailoverGroupReconciler) clearRestoreReclones(ctx context.Context,
 	})
 	if err != nil {
 		log.FromContext(ctx).Error(err, "clear restore reclone queue", "fg", fg.Name)
-		return
+		return err
 	}
 	if cleared {
 		r.Recorder.Eventf(fg, eventType, reason, format, args...)
 	}
+	return nil
 }
 
 // writeRecloneAnnotation sets the reclone annotation to value unless some

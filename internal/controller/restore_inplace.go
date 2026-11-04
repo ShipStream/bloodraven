@@ -657,6 +657,13 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencing(ctx context.Context, fg *v
 	// entered Fencing this tick), requeue briefly.
 	_, schema := inPlaceRunScope(fg)
 	isFullInstance := schema == ""
+	// A peer added since the restore was accepted ends the run before
+	// offline_mode goes up: the re-run fences once, with the current peers,
+	// instead of evicting applications twice. (A run whose queue is not
+	// armed yet, from an older operator, is checked once it is armed.)
+	if q := fg.Status.RestoreReclones; isFullInstance && q != nil && q.Phase == v1alpha1.RestoreReclonesArmed && r.cancelOnPeerSetChange(ctx, fg) {
+		return 0, nil
+	}
 	if isFullInstance && !r.primaryPodLabelFenced(ctx, fg) {
 		return 2 * time.Second, nil
 	}
