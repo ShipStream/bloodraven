@@ -50,7 +50,7 @@ func TestReviewLegacyIdentityRecoveryAndPriority(t *testing.T) {
 			ctx := context.Background()
 			local := t.TempDir()
 			cfg := &PITRConfig{BinlogDir: local, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}
-			pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+			pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -155,7 +155,7 @@ func TestReviewLegacyIdentityRecoveryAndPriority(t *testing.T) {
 
 func TestReviewStrippedIdentityRetainsObjectAddress(t *testing.T) {
 	ctx := context.Background()
-	pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatal(err)
 	}

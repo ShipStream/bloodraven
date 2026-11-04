@@ -93,7 +93,7 @@ func TestPitrDownloadConfigFromEnv_UnknownType(t *testing.T) {
 func TestDiscoverSitesAndDownloadPVCArchive(t *testing.T) {
 	ctx := context.Background()
 	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{
-		StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()},
+		StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +163,7 @@ func TestDiscoverSitesAndDownloadPVCArchive(t *testing.T) {
 
 func TestDownloadPreservesReusedBinlogNames(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ sys.stdout.buffer.write(b"".join(open(f, "rb").read() for f in namespace["_colle
 
 func TestDownloadRejectsUnsafeBinlogIdentity(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestDownloadRejectsUnsafeBinlogIdentity(t *testing.T) {
 
 func TestPITRDownloadIgnoresRetiredRows(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}

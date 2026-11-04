@@ -44,7 +44,7 @@ func TestReviewRetentionBindsExistingProofToArchivedBytes(t *testing.T) {
 		for _, layout := range []string{"ID", "legacy", "verified legacy"} {
 			t.Run(fmt.Sprintf("encrypted=%v/%s", encrypted, layout), func(t *testing.T) {
 				ctx := context.Background()
-				pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+				pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -102,7 +102,7 @@ func TestReviewRetentionBindsExistingProofToArchivedBytes(t *testing.T) {
 }
 func TestReviewRetentionBackfillIsBoundedAndPersistent(t *testing.T) {
 	ctx := context.Background()
-	pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -147,7 +147,7 @@ func TestBinlogMetadataIncludesCompleteTransactionCoverage(t *testing.T) {
 
 func TestRetentionBackfillsCoverageWithoutAliasingIncarnations(t *testing.T) {
 	ctx := context.Background()
-	store, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	store, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestRetentionKeepsUnverifiableArchivedCoverage(t *testing.T) {
 	for _, name := range []string{"mismatched content ID", "truncated file"} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
-			store, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+			store, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 			if err != nil {
 				t.Fatal(err)
 			}

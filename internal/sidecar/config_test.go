@@ -121,3 +121,25 @@ func TestConfigFromEnv_NeitherSet(t *testing.T) {
 		t.Fatal("expected error when neither MYSQL_DSN nor MYSQL_USER is set")
 	}
 }
+
+// The archiver writes, so its PVC store must probe write access; the
+// probe uses the manifest prefix because WritePrefix is left empty.
+func TestPITRConfigFromEnvPVCIsWritable(t *testing.T) {
+	t.Setenv("BLOODRAVEN_PITR_ENABLED", "1")
+	t.Setenv("BLOODRAVEN_PITR_STORAGE_TYPE", "PVC")
+	t.Setenv("BLOODRAVEN_PITR_PVC_MOUNT_PATH", "/run/bloodraven/pitr-archive")
+	t.Setenv("BLOODRAVEN_PITR_MANIFEST_PREFIX", "orders/binlogs")
+	cfg, err := pitrConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg == nil || cfg.PVC == nil {
+		t.Fatalf("pitrConfigFromEnv = %+v, want a PVC config", cfg)
+	}
+	if !cfg.PVC.Writable || cfg.PVC.WritePrefix != "" || cfg.PVC.MountVerifier != nil {
+		t.Fatalf("PVC config = %+v, want Writable, no WritePrefix override and the production mount check", cfg.PVC)
+	}
+	if cfg.ManifestPrefix != "orders/binlogs" {
+		t.Fatalf("ManifestPrefix = %q", cfg.ManifestPrefix)
+	}
+}

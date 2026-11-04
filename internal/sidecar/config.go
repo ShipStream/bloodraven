@@ -135,7 +135,26 @@ type PITRS3Config struct {
 type PITRPVCConfig struct {
 	// MountPath is where the backup PVC is mounted inside the sidecar.
 	// Binlog objects land under MountPath + "/binlogs/" + site.
+	// The store refuses to start unless MountPath is itself a mount
+	// point, so a pod without the volume cannot archive into the
+	// container filesystem.
 	MountPath string
+
+	// Writable makes store construction probe write access under
+	// WritePrefix. Writers (the archiver, pitr-quarantine,
+	// encrypt-upload) set it; readers leave it false because their
+	// volumes are mounted read-only.
+	Writable bool
+
+	// WritePrefix is the storage-relative directory the caller writes
+	// objects under. The probe runs in its deepest existing directory,
+	// and also in PITRConfig.ManifestPrefix's when that is set (manifests
+	// live there). The archiver sets it to <ManifestPrefix>/<site>.
+	WritePrefix string
+
+	// MountVerifier replaces the /proc/self/mountinfo mount check. For
+	// tests only (see TempDirMountVerifierForTest); nil in production.
+	MountVerifier func(path string) error
 }
 
 // ConfigFromEnv reads sidecar configuration from environment variables.
@@ -339,6 +358,7 @@ func pitrConfigFromEnv() (*PITRConfig, error) {
 	case "PVC":
 		cfg.PVC = &PITRPVCConfig{
 			MountPath: os.Getenv("BLOODRAVEN_PITR_PVC_MOUNT_PATH"),
+			Writable:  true,
 		}
 		if cfg.PVC.MountPath == "" {
 			return nil, fmt.Errorf("BLOODRAVEN_PITR_ENABLED=1 with STORAGE_TYPE=PVC but BLOODRAVEN_PITR_PVC_MOUNT_PATH is empty")

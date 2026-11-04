@@ -108,13 +108,13 @@ func runEncryptUpload(args []string) {
 		cancel()
 	}()
 
-	cfg, keyPrefix, locationDisplay, err := storageConfigFromEnv(storageType, outputURL)
+	cfg, keyPrefix, locationDisplay, err := encryptUploadStoreConfig(storageType, outputURL)
 	if err != nil {
 		logger.Error("resolve storage config", "error", err)
 		os.Exit(2)
 	}
 
-	store, err := sidecar.NewArchiveStore(ctx, cfg)
+	store, err := newArchiveStore(ctx, cfg)
 	if err != nil {
 		logger.Error("init archive store", "error", err)
 		os.Exit(2)
@@ -170,6 +170,34 @@ func runEncryptUpload(args []string) {
 		GtidExecuted: meta.GTIDExecuted, BinlogFile: meta.BinlogFile, BinlogPos: meta.BinlogPos,
 		CiphertextBytes: totalCiphertext, Files: files, Encrypted: true, EncryptionAlgorithm: algorithm,
 	}))
+}
+
+// encryptUploadStoreConfig is the store config for encrypt-upload, which
+// writes the backup under keyPrefix.
+func encryptUploadStoreConfig(storageType, outputURL string) (*sidecar.PITRConfig, string, string, error) {
+	cfg, keyPrefix, display, err := storageConfigFromEnv(storageType, outputURL)
+	if err == nil && cfg.PVC != nil {
+		cfg.PVC.Writable = true
+		cfg.PVC.WritePrefix = keyPrefix
+	}
+	return cfg, keyPrefix, display, err
+}
+
+// decryptDownloadStoreConfig is the store config for decrypt-download.
+// It only reads (the source PVC is mounted read-only), so the PVC store
+// verifies the mount but does not probe write access.
+//
+// For PVC the operator passes BLOODRAVEN_SOURCE_PREFIX relative to the
+// mount (backup.status.location minus the mount path), while
+// storageConfigFromEnv expects an absolute path under the mount, so a
+// relative prefix is anchored at BLOODRAVEN_PVC_MOUNT_PATH first.
+func decryptDownloadStoreConfig(storageType, sourcePrefix string) (*sidecar.PITRConfig, string, string, error) {
+	if storageType == "PVC" && !filepath.IsAbs(sourcePrefix) {
+		if mount := os.Getenv("BLOODRAVEN_PVC_MOUNT_PATH"); mount != "" {
+			sourcePrefix = filepath.Join(mount, sourcePrefix)
+		}
+	}
+	return storageConfigFromEnv(storageType, sourcePrefix)
 }
 
 // storageConfigFromEnv translates the BLOODRAVEN_STORAGE_* env vars into
@@ -421,12 +449,12 @@ func runDecryptDownload(args []string) {
 		cancel()
 	}()
 
-	cfg, keyPrefix, _, err := storageConfigFromEnv(storageType, sourcePrefix)
+	cfg, keyPrefix, _, err := decryptDownloadStoreConfig(storageType, sourcePrefix)
 	if err != nil {
 		logger.Error("resolve storage config", "error", err)
 		os.Exit(2)
 	}
-	store, err := sidecar.NewArchiveStore(ctx, cfg)
+	store, err := newArchiveStore(ctx, cfg)
 	if err != nil {
 		logger.Error("init archive store", "error", err)
 		os.Exit(2)
