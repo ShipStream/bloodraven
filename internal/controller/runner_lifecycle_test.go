@@ -278,6 +278,7 @@ func TestRotationReservationSurvivesManagerReplacement(t *testing.T) {
 		t.Fatalf("startManager: %v", err)
 	}
 	first := registeredManager(r, nn)
+	settleAuthority(first.tm)
 	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); !ok {
 		t.Fatalf("reservation refused with a running manager: %s", why)
 	}
@@ -376,6 +377,7 @@ func TestRotationRefusedWhileRetiringManagerUpdateInFlight(t *testing.T) {
 		t.Fatalf("rotation with the old update in flight and no replacement = %v, %q; want refused", ok, why)
 	}
 	replacement, _, _ := newTestTopologyManagerWithBootstrap(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	settleAuthority(replacement)
 	r.SetManagerForTest(nn, replacement)
 	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedManagerRestarting {
 		t.Fatalf("rotation with the old update in flight = %v, %q; want refused until it exits", ok, why)
@@ -410,4 +412,69 @@ func standbyReadOnly(m *mockMySQL) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.readOnly
+}
+
+// A replaced manager's ordered update can outlive its Run. The manager that
+// replaces it must not drain, recover or repoint the sites that update is
+// still working on until it exits (issue #175 item 1 across a restart).
+func TestReplacementManagerDefersToPredecessorUpdate(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	r := &TopologyManagerRunner{logger: logger, managers: make(map[types.NamespacedName]*managedTopology)}
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+
+	primary := &mockMySQL{readOnly: false}
+	follower := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+	old, _, _ := newTestTopologyManagerWithBootstrap(primary, follower)
+	old.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	pollN(old, 4)
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	// The old update blocks rolling the follower, then gives up.
+	old.ApplyUpdate = func(context.Context, string) error {
+		close(entered)
+		<-unblock
+		return errors.New("rollout abandoned")
+	}
+	r.registerManager(nn, &managedTopology{tm: old})
+	old.SetSpecDriftSites([]string{"dc2"})
+	if !old.checkUpdate(context.Background()) {
+		t.Fatal("setup: ordered update did not start")
+	}
+	<-entered
+
+	r.mu.Lock()
+	r.retireManagerLocked(nn, r.managers[nn])
+	r.mu.Unlock()
+	replacement, _, _ := newTestTopologyManagerWithBootstrap(primary, follower)
+	replacement.SetRecoveryInProgress("dc2")
+	r.registerManager(nn, &managedTopology{tm: replacement})
+
+	pollN(replacement, 4)
+	follower.mu.Lock()
+	kills, fences, changes := follower.killConnectionCalls, follower.superReadOnlyCalls, follower.changeSourceCalls
+	follower.mu.Unlock()
+	if kills != 0 || fences != 0 || changes != 0 {
+		t.Fatalf("replacement mutated a site the old update still owns: kill=%d fence=%d changeSource=%d", kills, fences, changes)
+	}
+
+	close(unblock)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		replacement.mu.RLock()
+		waiting := replacement.predecessorUpdateInFlight
+		replacement.mu.RUnlock()
+		if !waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the replacement still defers after the old update exited")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	pollN(replacement, 2)
+	follower.mu.Lock()
+	kills = follower.killConnectionCalls
+	follower.mu.Unlock()
+	if kills == 0 {
+		t.Fatal("recovery did not resume once the old update exited")
+	}
 }

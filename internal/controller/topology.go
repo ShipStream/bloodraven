@@ -593,6 +593,13 @@ type TopologyManager struct {
 	retired       bool
 	updateWorkers sync.WaitGroup
 
+	// predecessorUpdateInFlight is set on a manager that replaced one
+	// whose ordered-update goroutine was still running: that goroutine
+	// may still be handing off or repointing the sites, so this manager
+	// mutates no follower and starts no update until the runner clears
+	// it when the goroutine exits. Protected by mu.
+	predecessorUpdateInFlight bool
+
 	// recoveryDeferred records that old-primary recovery is standing down
 	// for a handoff, so the deferral is logged once per transition.
 	// Protected by mu.
@@ -2442,7 +2449,18 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 
 		tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
-		if !tm.beginDeploymentTopologyChange() {
+		began, rotationBlocked := tm.beginPromotionOf(candidate.name)
+		if rotationBlocked {
+			// A rotation was admitted after the eligibility check above;
+			// beginPromotionOf re-armed the dirty bit, so the next poll
+			// re-runs the decision without this candidate.
+			tm.logger.Warn("promotion refused: candidate is mid-keyring-rotation",
+				"site", candidate.name, "unsealReason", "Rotation")
+			tm.recordKeyringPromotionDecision(nil, []string{candidate.name})
+			tm.incrementKeyringPromotionBlocked([]string{candidate.name}, "refused")
+			return
+		}
+		if !began {
 			return
 		}
 		defer tm.finishDeploymentTopologyChange()
@@ -3044,9 +3062,12 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	// recovery drain pass admitted before the planned-failover flag was
 	// set may still be killing sessions on the target, and Execute must
 	// not start until it has finished.
-	var began bool
-	if err := tm.admitTopologyHandoff(ctx, func() { began = tm.beginDeploymentTopologyChange() }); err != nil {
+	var began, rotationBlocked bool
+	if err := tm.admitTopologyHandoff(ctx, func() { began, rotationBlocked = tm.beginPromotionOf(target) }); err != nil {
 		return "", fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
+	}
+	if rotationBlocked {
+		return "", fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
 	}
 	if !began {
 		return "", fmt.Errorf("topology change already in progress")
@@ -3411,7 +3432,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
 		"driftSites", driftSites, "active", activeName)
 	tm.mu.Lock()
-	if tm.deploymentUpdatePending || tm.retired {
+	if tm.deploymentUpdatePending || tm.retired || tm.predecessorUpdateInFlight {
 		tm.mu.Unlock()
 		return false
 	}
@@ -4858,7 +4879,16 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	// Admission is taken before the cooldown is stamped: a refused topology
 	// change touches no MySQL state, so charging it against the cooldown would
 	// block the next poll for failoverCooldown without an attempt having run.
-	if !tm.beginDeploymentTopologyChange() {
+	// It re-checks the rotation block in the same critical section as the
+	// claim (see beginPromotionOf).
+	began, rotationBlocked := tm.beginPromotionOf(target)
+	if rotationBlocked {
+		tm.logger.Warn("primary re-assert refused: target is mid-keyring-rotation",
+			"site", target, "unsealReason", "Rotation")
+		tm.incrementKeyringPromotionBlocked([]string{target}, "refused")
+		return false
+	}
+	if !began {
 		return false
 	}
 	defer tm.finishDeploymentTopologyChange()

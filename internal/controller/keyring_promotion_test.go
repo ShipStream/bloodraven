@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -70,6 +71,7 @@ func TestReserveKeyringRotation_RefusedWhileOrderedUpdateInFlight(t *testing.T) 
 
 func TestReserveKeyringRotation_BlocksPromotionUntilStampedOrReleased(t *testing.T) {
 	tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+	settleAuthority(tm)
 	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
 		t.Fatalf("reservation refused with no update in flight: %s", why)
 	}
@@ -171,5 +173,130 @@ func TestReserveKeyringRotation_RefusesLivePrimaryAndPromotionInFlight(t *testin
 	tm.mu.Unlock()
 	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
 		t.Fatalf("rotation of a settled replica refused: %s", why)
+	}
+}
+
+// settleAuthority makes dc1 the observed writable primary and dc2 a
+// read-only replica, the state rotation admission requires.
+func settleAuthority(tm *TopologyManager) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
+}
+
+// Promotion claim and rotation admission are decided under one lock: a
+// rotation admitted before the claim stops the promotion, and one requested
+// after the claim is refused.
+func TestBeginPromotionOf_ExcludesRotationAdmission(t *testing.T) {
+	tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+	settleAuthority(tm)
+	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
+		t.Fatalf("setup: %s", why)
+	}
+	if began, blocked := tm.beginPromotionOf("dc2"); began || !blocked {
+		t.Fatalf("beginPromotionOf after a reservation = began %v, blocked %v; want refused", began, blocked)
+	}
+	tm.ReleaseKeyringRotationReservations([]string{"dc2"})
+
+	began, blocked := tm.beginPromotionOf("dc2")
+	if !began || blocked {
+		t.Fatalf("beginPromotionOf = began %v, blocked %v; want claimed", began, blocked)
+	}
+	if ok, _ := tm.ReserveKeyringRotation("dc2"); ok {
+		t.Fatal("rotation admitted while a promotion of the site is claimed")
+	}
+	tm.finishDeploymentTopologyChange()
+	if ok, why := tm.ReserveKeyringRotation("dc2"); ok || why != rotationRefusedPromotionInFlight {
+		t.Fatalf("rotation before the promotion is observed = %v, %q; want refused", ok, why)
+	}
+}
+
+// GPT's interleaving: the rotation is admitted after PlannedPromote's
+// eligibility check but before its claim (here, while it waits at the
+// follower-mutation gate). The claim must see it and touch nothing.
+func TestPlannedPromote_RotationAdmittedBeforeClaimStopsPromotion(t *testing.T) {
+	source := &mockMySQL{readOnly: false}
+	target := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(source, target)
+	settleAuthority(tm)
+	release, ok := tm.beginFollowerMutation()
+	if !ok {
+		t.Fatal("setup: gate refused")
+	}
+	tm.SetPlannedFailoverActive(true)
+	done := make(chan error, 1)
+	go func() {
+		_, err := tm.PlannedPromote(context.Background(), "dc2", "dc1")
+		done <- err
+	}()
+	// Wait until PlannedPromote is past its eligibility check and waiting
+	// at the gate.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tm.followerMutationGate.mu.Lock()
+		waiting := tm.followerMutationGate.pending > 0
+		tm.followerMutationGate.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("PlannedPromote never reached the gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
+		t.Fatalf("rotation refused before any claim: %s", why)
+	}
+	release()
+	if err := <-done; !errors.Is(err, errKeyringRotationBlocked) {
+		t.Fatalf("PlannedPromote = %v, want errKeyringRotationBlocked", err)
+	}
+	source.mu.Lock()
+	fenced := source.superReadOnlyCalls
+	source.mu.Unlock()
+	target.mu.Lock()
+	promoted := target.promoted
+	target.mu.Unlock()
+	if fenced != 0 || promoted {
+		t.Fatal("a promotion refused at its claim touched MySQL")
+	}
+}
+
+// A manager that has not yet observed a unique writable primary with the
+// target read-only cannot tell whether the target is the real primary:
+// status.activeSite may lag a promotion or an operator restart.
+func TestReserveKeyringRotation_RequiresObservedAuthority(t *testing.T) {
+	tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+	if ok, why := tm.ReserveKeyringRotation("dc2"); ok || why != rotationRefusedAuthorityUnsettled {
+		t.Fatalf("fresh manager = %v, %q; want refused until authority is observed", ok, why)
+	}
+	tm.mu.Lock()
+	tm.sites[0].state = state.StateWritable
+	tm.mu.Unlock()
+	if ok, why := tm.ReserveKeyringRotation("dc2"); ok || why != rotationRefusedAuthorityUnsettled {
+		t.Fatalf("target not yet observed read-only = %v, %q; want refused", ok, why)
+	}
+	settleAuthority(tm)
+	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
+		t.Fatalf("settled replica refused: %s", why)
+	}
+}
+
+// The replacement-manager case GPT describes: status still names dc1, but
+// dc2 was promoted before the restart. A new manager must not admit a
+// rotation of dc2 before it has polled, nor after it has seen dc2 writable.
+func TestReserveKeyringRotation_StaleStatusAfterRestartRefusesRealPrimary(t *testing.T) {
+	oldPrimary := &mockMySQL{readOnly: true}
+	realPrimary := &mockMySQL{readOnly: false}
+	tm, _, _ := newTestTopologyManager(oldPrimary, realPrimary)
+	if ok, _ := tm.ReserveKeyringRotation("dc2"); ok {
+		t.Fatal("unpolled replacement admitted a rotation of the real primary")
+	}
+	pollN(tm, 4)
+	if ok, why := tm.ReserveKeyringRotation("dc2"); ok {
+		t.Fatalf("rotation of the observed primary admitted (%s)", why)
+	}
+	if ok, why := tm.ReserveKeyringRotation("dc1"); !ok {
+		t.Fatalf("rotation of the actual replica refused: %s", why)
 	}
 }

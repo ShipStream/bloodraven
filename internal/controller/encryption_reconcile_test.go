@@ -549,6 +549,7 @@ func TestReconcileEncryption_RefusesRotationDuringOrderedUpdate(t *testing.T) {
 func rotationRunner(r *MysqlFailoverGroupReconciler, c client.Client) *TopologyManager {
 	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
 	tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+	settleAuthority(tm)
 	r.Runner = &TopologyManagerRunner{client: c, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{nn: {tm: tm}}}
 	return tm
 }
@@ -1177,4 +1178,59 @@ func findCondition(conds []metav1.Condition, t string) *metav1.Condition {
 		}
 	}
 	return nil
+}
+
+// A refusal that clears on its own keeps the rotate-keyring request: once
+// the block is gone the rotation proceeds without the admin re-annotating.
+func TestReconcileEncryption_RetryableRefusalKeepsRotationRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		block func(fg *v1alpha1.MysqlFailoverGroup, tm *TopologyManager)
+		clear func(fg *v1alpha1.MysqlFailoverGroup, tm *TopologyManager)
+	}{
+		{"live ordered update",
+			func(_ *v1alpha1.MysqlFailoverGroup, tm *TopologyManager) { tm.deploymentUpdatePending = true },
+			func(_ *v1alpha1.MysqlFailoverGroup, tm *TopologyManager) { tm.deploymentUpdatePending = false }},
+		{"status ordered update",
+			func(fg *v1alpha1.MysqlFailoverGroup, _ *TopologyManager) { fg.Status.UpdatePhase = "UpdatingReplica" },
+			func(fg *v1alpha1.MysqlFailoverGroup, _ *TopologyManager) { fg.Status.UpdatePhase = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fg := sealedGroupWithActive("dc1")
+			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			r, c := encReconciler(t, scriptedKeyring(nil), fg)
+			seedEscrow(t, c, fg)
+			tm := rotationRunner(r, c)
+			nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+
+			tm.mu.Lock()
+			tc.block(fg, tm)
+			tm.mu.Unlock()
+			requeue, err := r.reconcileEncryptionAtRest(ctx, fg)
+			if err != nil {
+				t.Fatalf("refused pass: %v", err)
+			}
+			if requeue == 0 {
+				t.Error("a retryable refusal did not requeue")
+			}
+			var latest v1alpha1.MysqlFailoverGroup
+			if err := c.Get(ctx, nn, &latest); err != nil {
+				t.Fatal(err)
+			}
+			if latest.Annotations[RotateKeyringAnnotation] != "dc2" {
+				t.Fatal("a retryable refusal consumed the rotate-keyring request")
+			}
+
+			tm.mu.Lock()
+			tc.clear(&latest, tm)
+			tm.mu.Unlock()
+			if _, err := r.reconcileEncryptionAtRest(ctx, &latest); err != nil {
+				t.Fatalf("retry pass: %v", err)
+			}
+			if s := siteStatus(&latest, "dc2"); s.Phase != v1alpha1.KeyringPhaseUnsealed || s.UnsealReason != v1alpha1.UnsealReasonRotation {
+				t.Fatalf("dc2 = %+v: the kept request did not start the rotation once unblocked", s)
+			}
+		})
+	}
 }

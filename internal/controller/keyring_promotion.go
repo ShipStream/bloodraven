@@ -91,24 +91,43 @@ func (tm *TopologyManager) setKeyringRotationBlockedLocked(sorted []string) {
 // encryption reconciler persists UnsealReason=Rotation. Decided under mu,
 // it refuses while an ordered update is pending or running (the update's
 // handoff re-checks eligibility live, so a rotation and a handoff onto the
-// same standby can never both be admitted), while a promotion is in flight
-// or not yet observed, and when site is the primary this manager observes:
-// status.activeSite, which rotationAllowed reads, lags a promotion. Once
-// granted, the site is promotion-blocked at once, exactly like a durable
-// stamp, until an authoritative view lacks it or it is released.
+// same standby can never both be admitted), while a promotion is claimed,
+// in flight or not yet observed (beginPromotionOf decides the other side
+// under the same lock), and unless this manager currently observes a
+// unique writable primary other than site with site read-only:
+// status.activeSite, which rotationAllowed reads, lags a promotion and an
+// operator restart. Once granted, the site is promotion-blocked at once,
+// exactly like a durable stamp, until an authoritative view lacks it or it
+// is released.
 func (tm *TopologyManager) ReserveKeyringRotation(site string) (bool, string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	active := tm.activeSiteLocked()
 	switch {
 	case tm.deploymentUpdatePending || tm.deploymentUpdateRunning:
 		return false, "an ordered update is in progress"
-	case tm.deploymentChanging > 0 || tm.promotedSite != "":
-		return false, "a promotion is in flight; retry once the new primary is observed"
-	case tm.activeSiteLocked() == site:
+	case tm.deploymentChanging > 0 || tm.promotedSite != "" || tm.deploymentAwaitingObservation:
+		return false, rotationRefusedPromotionInFlight
+	case active == site:
 		return false, "site is the active primary; rotate replicas first, then run a planned failover and rotate this site once it is a replica"
+	case active == "" || !tm.siteObservedReadOnlyLocked(site):
+		// A manager that has not yet observed one writable primary and
+		// the target read-only (just started, or authority unsettled)
+		// cannot rule out that the target is the real primary: status
+		// may still name the old one.
+		return false, rotationRefusedAuthorityUnsettled
 	}
 	tm.addKeyringRotationReservationsLocked([]string{site})
 	return true, ""
+}
+
+func (tm *TopologyManager) siteObservedReadOnlyLocked(name string) bool {
+	for i := range tm.sites {
+		if tm.sites[i].name == name {
+			return tm.sites[i].state == state.StateReadOnly
+		}
+	}
+	return false
 }
 
 // restoreKeyringRotationReservations carries the runner's pending
@@ -259,8 +278,10 @@ func (r *TopologyManagerRunner) ReserveKeyringRotation(nn types.NamespacedName, 
 // Live rotation refusals that clear on their own; the encryption reconciler
 // requeues on them.
 const (
-	rotationRefusedManagerRestarting = "the topology manager is restarting with an ordered update still in flight; retrying"
-	rotationRefusedNoManager         = "no topology manager is running for the group yet; retrying"
+	rotationRefusedPromotionInFlight  = "a promotion is in flight; retrying once the new primary is observed"
+	rotationRefusedAuthorityUnsettled = "the operator has not yet observed a unique writable primary with this site read-only; retrying"
+	rotationRefusedManagerRestarting  = "the topology manager is restarting with an ordered update still in flight; retrying"
+	rotationRefusedNoManager          = "no topology manager is running for the group yet; retrying"
 )
 
 // PendingKeyringRotationReservations returns nn's reservations.

@@ -88,6 +88,9 @@ func (g *mutationGate) admit(ctx context.Context, publish func()) error {
 // it holds: they kill sessions and rewrite replication on the very sites a
 // handoff is using.
 //
+// predecessorUpdateInFlight covers a replaced manager's ordered update,
+// which outlives that manager's Run.
+//
 // promotedSite is the end-of-handoff barrier: recordFailover sets it, and it
 // clears only once a poll observes the target writable (or its TTL lapses),
 // so a poll still carrying pre-promotion observations cannot act on them.
@@ -95,7 +98,8 @@ func (g *mutationGate) admit(ctx context.Context, publish func()) error {
 func (tm *TopologyManager) followerMutationSuppressedLocked() bool {
 	return tm.promotedSite != "" || tm.topologyFrozen || tm.plannedFailoverActive ||
 		!bootstrapIdlePhase(tm.bootstrapPhase) ||
-		tm.deploymentUpdateRunning || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation
+		tm.deploymentUpdateRunning || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation ||
+		tm.predecessorUpdateInFlight
 }
 
 func (tm *TopologyManager) followerMutationSuppressed() bool {
@@ -209,6 +213,13 @@ func (tm *TopologyManager) orderedUpdateInFlight() bool {
 }
 
 // waitUpdateWorkers blocks until every ordered-update goroutine has exited.
+// Only meaningful on a retired manager, which adds no further worker.
 func (tm *TopologyManager) waitUpdateWorkers() {
 	tm.updateWorkers.Wait()
+}
+
+func (tm *TopologyManager) setPredecessorUpdateInFlight(v bool) {
+	tm.mu.Lock()
+	tm.predecessorUpdateInFlight = v
+	tm.mu.Unlock()
 }

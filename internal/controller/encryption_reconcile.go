@@ -124,6 +124,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 
 	requeue := time.Duration(0)
 	allSealed := true
+	// rotationDeferred: the requested rotation was refused for now and is
+	// retried, so its annotation must survive this pass.
+	rotationDeferred := false
 
 	// Rotations admitted this pass hold a reservation that blocks their
 	// promotion until an authoritative view of the status lacks them. If
@@ -144,7 +147,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		site := &st.Sites[i]
 		before := *site
 
-		wantRequeue, err := r.reconcileSiteKeyring(ctx, fg, site, store, fetch, rotateTarget)
+		wantRequeue, err := r.reconcileSiteKeyring(ctx, fg, site, store, fetch, rotateTarget, &rotationDeferred)
 		if before.UnsealReason != v1alpha1.UnsealReasonRotation && site.UnsealReason == v1alpha1.UnsealReasonRotation {
 			reserved = append(reserved, site.Name)
 		}
@@ -171,8 +174,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 
 	// Clear a consumed rotation annotation once the target site is back
 	// to Sealed, so the admin can trigger the next rotation without
-	// having to remove the annotation by hand.
-	if rotateTarget != "" {
+	// having to remove the annotation by hand. A deferred request has not
+	// been consumed.
+	if rotateTarget != "" && !rotationDeferred {
 		if s := st.SiteEncryptionStatusByName(rotateTarget); s != nil && s.Phase == v1alpha1.KeyringPhaseSealed && s.UnsealReason == "" {
 			if err := r.clearRotateAnnotation(ctx, fg); err != nil {
 				logger.Error(err, "failed to clear rotate-keyring annotation")
@@ -242,6 +246,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 	store *keyringEscrowStore,
 	fetch keyringStatusFetcher,
 	rotateTarget string,
+	rotationDeferred *bool,
 ) (bool, error) {
 	now := metav1.Now()
 
@@ -262,26 +267,30 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 	// An admin-requested rotation on a site that is currently sealed is
 	// the only transition that moves backwards out of Sealed.
 	if site.Phase == v1alpha1.KeyringPhaseSealed && rotateTarget == site.Name {
-		ok, why := r.rotationAllowed(fg, site.Name)
-		live := false
+		ok, why, retry := r.rotationAllowed(fg, site.Name)
 		if ok && r.Runner != nil {
 			// status.updatePhase reaches the CR only through the topology
 			// snapshot, so an update that has just started is invisible
 			// above. The reservation is decided live against the update's
-			// claim and blocks promotion of the site from here on.
+			// claim and blocks promotion of the site from here on. Every
+			// live refusal clears on its own.
 			ok, why = r.Runner.ReserveKeyringRotation(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, site.Name)
-			live = true
+			retry = !ok
 		}
 		if !ok {
-			// A live refusal clears without any status change to wake the
-			// reconciler (an update or a manager restart ending), so it is
-			// retried on the encryption requeue, with one event per reason.
-			if !live || site.Message != why {
+			// A retryable refusal keeps the request: the annotation stays
+			// and the rotation is retried on the encryption requeue, since
+			// what clears it (an update, failover or manager restart
+			// ending) need not wake the reconciler. One event per reason.
+			if !retry || site.Message != why {
 				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringRotationRefused",
 					"refusing to rotate keyring on site %s: %s", site.Name, why)
 			}
 			site.Message = why
-			return live, nil
+			if retry && rotationDeferred != nil {
+				*rotationDeferred = true
+			}
+			return retry, nil
 		}
 		site.Phase = v1alpha1.KeyringPhaseUnsealed
 		site.UnsealReason = v1alpha1.UnsealReasonRotation
@@ -625,20 +634,25 @@ func checkEscrowDeadline(fg *v1alpha1.MysqlFailoverGroup, site *v1alpha1.SiteEnc
 // replica that window is harmless — the site is re-cloneable from the
 // primary. On the primary it is not. The supported procedure is to
 // rotate the replicas, run a planned failover, then rotate the ex-primary.
-func (r *MysqlFailoverGroupReconciler) rotationAllowed(fg *v1alpha1.MysqlFailoverGroup, site string) (bool, string) {
+//
+// retry marks a refusal that clears on its own (an update or failover
+// ending, the topology settling): the request is kept and retried. Only a
+// request for the active primary is consumed, because it needs an admin's
+// planned failover first.
+func (r *MysqlFailoverGroupReconciler) rotationAllowed(fg *v1alpha1.MysqlFailoverGroup, site string) (ok bool, why string, retry bool) {
 	if fg.Status.ActiveSite == site {
-		return false, "site is the active primary; rotate replicas first, then run a planned failover and rotate this site once it is a replica"
+		return false, "site is the active primary; rotate replicas first, then run a planned failover and rotate this site once it is a replica", false
 	}
 	if fg.Status.ActiveSite == "" {
-		return false, "no active primary is known; refusing to rotate while the topology is unsettled"
+		return false, "no active primary is known; refusing to rotate while the topology is unsettled", true
 	}
 	if fg.Status.UpdatePhase != "" {
-		return false, "an ordered update is in progress"
+		return false, "an ordered update is in progress", true
 	}
 	if fg.Status.PlannedFailover != nil && !plannedFailoverTerminal(fg.Status.PlannedFailover) {
-		return false, "a planned failover is in progress"
+		return false, "a planned failover is in progress", true
 	}
-	return true, ""
+	return true, "", false
 }
 
 // RequestKeyringUnseal marks a site as needing a writable keyring before

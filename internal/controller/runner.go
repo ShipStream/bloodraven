@@ -963,14 +963,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	done := make(chan struct{})
 	archiverDone := make(chan struct{})
-	// Register under reservationMu with the group's pending rotation
-	// reservations already applied: a rotation admitted while no manager
-	// ran, or against the manager this one replaces, must block promotion
-	// here before Run can claim an ordered update.
-	r.reservationMu.Lock()
-	tm.restoreKeyringRotationReservations(r.pendingKeyringRotationReservations(nn))
-	r.mu.Lock()
-	r.managers[nn] = &managedTopology{
+	r.registerManager(nn, &managedTopology{
 		tm:           tm,
 		cancel:       cancel,
 		done:         done,
@@ -978,9 +971,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		archiver:     archiver,
 		archiverDone: archiverDone,
 		dragonfly:    dfMgr,
-	}
-	r.mu.Unlock()
-	r.reservationMu.Unlock()
+	})
 
 	go func() {
 		defer close(done)
@@ -1227,10 +1218,9 @@ func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt 
 		r.retiring = make(map[types.NamespacedName][]*managedTopology)
 	}
 	r.retiring[nn] = append(r.retiring[nn], mt)
+	// A retired manager adds no update worker, so the wait ends when the
+	// last one exits, whether or not its Run has returned.
 	go func() {
-		if mt.done != nil {
-			<-mt.done
-		}
 		mt.tm.waitUpdateWorkers()
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -1238,7 +1228,41 @@ func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt 
 		if len(r.retiring[nn]) == 0 {
 			delete(r.retiring, nn)
 		}
+		if cur := r.managers[nn]; cur != nil && !r.retiringUpdateInFlightLocked(nn) {
+			cur.tm.setPredecessorUpdateInFlight(false)
+		}
 	}()
+}
+
+// registerManager makes mt nn's running manager. Call it before mt's Run
+// starts. It registers under reservationMu with the group's pending
+// rotation reservations already applied: a rotation admitted against the
+// manager this one replaces must block promotion here before Run can claim
+// an ordered update. And a predecessor's ordered update can outlive its
+// Run: until it exits (retireManagerLocked clears the flag), mt leaves the
+// sites to it, with no recovery drain, old-primary recovery, source repoint
+// or update of its own.
+func (r *TopologyManagerRunner) registerManager(nn types.NamespacedName, mt *managedTopology) {
+	r.reservationMu.Lock()
+	defer r.reservationMu.Unlock()
+	mt.tm.restoreKeyringRotationReservations(r.pendingKeyringRotationReservations(nn))
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.retiringUpdateInFlightLocked(nn) {
+		mt.tm.setPredecessorUpdateInFlight(true)
+	}
+	r.managers[nn] = mt
+}
+
+// retiringUpdateInFlightLocked reports whether a retiring manager of nn
+// still has an ordered update pending or running. Caller holds r.mu.
+func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.NamespacedName) bool {
+	for _, mt := range r.retiring[nn] {
+		if mt.tm.orderedUpdateInFlight() {
+			return true
+		}
+	}
+	return false
 }
 
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.
