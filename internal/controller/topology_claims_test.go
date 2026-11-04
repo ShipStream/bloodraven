@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
-
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // claimFixture is a two-site group, dc1 the settled primary and dc2 a
@@ -80,28 +78,6 @@ var claimants = []struct {
 		}
 		return claimRefused
 	}},
-	{"PProm", func(t *testing.T, f *claimFixture) claimOutcome {
-		// PlannedPromote runs only under its planned failover's claim.
-		f.tm.SetPlannedFailoverActive(true)
-		_, err := f.tm.claimPlannedPromotion(shortCtx(t), "dc2")
-		switch {
-		case err == nil:
-			return claimAllowed
-		case errors.Is(err, errHandoffNotAdmitted):
-			return claimWaits
-		}
-		return claimRefused
-	}},
-	{"PF", func(t *testing.T, f *claimFixture) claimOutcome {
-		ok, _, retry := f.r.ClaimPlannedFailover(f.nn, "dc1", "dc2")
-		switch {
-		case ok:
-			return claimAllowed
-		case retry:
-			return claimWaits
-		}
-		return claimRefused
-	}},
 	{"Upd", func(t *testing.T, f *claimFixture) claimOutcome {
 		// Planned now, so the epoch and active site match: only an
 		// explicit check can refuse.
@@ -150,31 +126,18 @@ func TestTopologyClaimMatrix(t *testing.T) {
 		want string // one outcome per claimant, in column order
 		hold func(t *testing.T, f *claimFixture)
 	}{
-		{"Auto promotion", "RRWRRRR", func(t *testing.T, f *claimFixture) {
+		{"Auto promotion", "RRRRR", func(t *testing.T, f *claimFixture) {
 			if began, _ := f.tm.beginAutoPromotionOf("dc2"); !began {
 				t.Fatal("setup: auto promotion not claimed")
 			}
 		}},
-		{"PlannedPromote", "RRWRRRR", func(t *testing.T, f *claimFixture) {
-			if ok, why, _ := f.r.ClaimPlannedFailover(f.nn, "dc1", "dc2"); !ok {
-				t.Fatalf("setup: %s", why)
-			}
-			if _, err := f.tm.claimPlannedPromotion(ctx, "dc2"); err != nil {
+		{"PlannedPromote", "RRRRR", func(t *testing.T, f *claimFixture) {
+			f.tm.SetPlannedFailoverActive(true) // derived from status, as the reconciler does
+			if err := f.tm.claimPlannedPromotion(ctx, "dc2"); err != nil {
 				t.Fatalf("setup: %v", err)
 			}
 		}},
-		// The same planned failover re-runs Promoting after its Resuming
-		// write was lost: its own completed promotion is recognised, not
-		// refused as an unobserved one.
-		{"own planned promotion completed", "RAWRRRR", func(t *testing.T, f *claimFixture) {
-			if ok, why, _ := f.r.ClaimPlannedFailover(f.nn, "dc1", "dc2"); !ok {
-				t.Fatalf("setup: %s", why)
-			}
-			if _, err := f.tm.PlannedPromote(ctx, "dc2", "dc1"); err != nil {
-				t.Fatalf("setup: %v", err)
-			}
-		}},
-		{"promotion not yet observed", "RRWRRRA", func(t *testing.T, f *claimFixture) {
+		{"promotion not yet observed", "RRRRA", func(t *testing.T, f *claimFixture) {
 			if began, _ := f.tm.beginAutoPromotionOf("dc2"); !began {
 				t.Fatal("setup: auto promotion not claimed")
 			}
@@ -183,20 +146,10 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			f.tm.mu.Unlock()
 			f.tm.finishDeploymentTopologyChange()
 		}},
-		// A request waiting before its fence holds nothing: the guard is
-		// re-derived from its (pre-fence) status as unset.
-		{"planned failover waiting to claim", "AAAAAAA", func(t *testing.T, f *claimFixture) {
-			if ok, _, _ := f.r.ClaimPlannedFailover(f.nn, "dc2", "dc1"); ok {
-				t.Fatal("setup: a claim against the wrong source was granted")
-			}
-			f.tm.SetPlannedFailoverActive(plannedFailoverHoldsSites(&v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining}))
+		{"planned failover", "RRRRR", func(t *testing.T, f *claimFixture) {
+			f.tm.SetPlannedFailoverActive(true) // derived from status, from Pending on
 		}},
-		{"planned failover", "RAARRRR", func(t *testing.T, f *claimFixture) {
-			if ok, why, _ := f.r.ClaimPlannedFailover(f.nn, "dc1", "dc2"); !ok {
-				t.Fatalf("setup: %s", why)
-			}
-		}},
-		{"ordered update claimed", "RRRRRRR", func(t *testing.T, f *claimFixture) {
+		{"ordered update claimed", "RRRRR", func(t *testing.T, f *claimFixture) {
 			f.tm.mu.RLock()
 			epoch, active := f.tm.authorityEpoch, f.tm.activeSiteLocked()
 			f.tm.mu.RUnlock()
@@ -204,35 +157,35 @@ func TestTopologyClaimMatrix(t *testing.T) {
 				t.Fatalf("setup: claimed=%v err=%v", claimed, err)
 			}
 		}},
-		{"ordered update pending", "AAAARAA", func(t *testing.T, f *claimFixture) {
+		{"ordered update pending", "AARAA", func(t *testing.T, f *claimFixture) {
 			f.tm.mu.Lock()
 			f.tm.deploymentUpdatePending = true // startUpdate
 			f.tm.mu.Unlock()
 		}},
-		{"rotation of the target", "RRRAAAA", func(t *testing.T, f *claimFixture) {
+		{"rotation of the target", "RAAAA", func(t *testing.T, f *claimFixture) {
 			if ok, why := f.r.ReserveKeyringRotation(f.nn, "dc2"); !ok {
 				t.Fatalf("setup: %s", why)
 			}
 		}},
-		{"follower mutation", "AWAWAAA", func(t *testing.T, f *claimFixture) {
+		{"follower mutation", "AWAAA", func(t *testing.T, f *claimFixture) {
 			release, ok := f.tm.beginFollowerMutation()
 			if !ok {
 				t.Fatal("setup: follower mutation not admitted")
 			}
 			t.Cleanup(release)
 		}},
-		{"bootstrap into a promotable site", "RRRRARR", func(t *testing.T, f *claimFixture) {
+		{"bootstrap into a promotable site", "RRARR", func(t *testing.T, f *claimFixture) {
 			if _, why := f.tm.claimBootstrap("dc2", "reclone"); why != "" {
 				t.Fatalf("setup: %s", why)
 			}
 		}},
-		{"in-place restore", "RRRRARR", func(t *testing.T, f *claimFixture) {
+		{"in-place restore", "RRARR", func(t *testing.T, f *claimFixture) {
 			f.tm.SetTopologyFrozen(true) // runner, from status.restoreInPlace
 		}},
-		{"predecessor's ordered update", "RRRRRRR", func(t *testing.T, f *claimFixture) {
+		{"predecessor's ordered update", "RRRRR", func(t *testing.T, f *claimFixture) {
 			f.tm.setPredecessorUpdateInFlight(true) // registerManager
 		}},
-		{"predecessor still promoting", "RWWRRRR", func(t *testing.T, f *claimFixture) {
+		{"predecessor still promoting", "RRRRR", func(t *testing.T, f *claimFixture) {
 			if began, _ := f.tm.beginAutoPromotionOf("dc2"); !began {
 				t.Fatal("setup: auto promotion not claimed")
 			}
@@ -240,7 +193,7 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			f.tm = f.newManager()
 			f.r.registerManager(f.nn, &managedTopology{tm: f.tm})
 		}},
-		{"predecessor still in a follower mutation", "RWARARR", func(t *testing.T, f *claimFixture) {
+		{"predecessor still in a follower mutation", "RRARR", func(t *testing.T, f *claimFixture) {
 			release, ok := f.tm.beginFollowerMutation()
 			if !ok {
 				t.Fatal("setup: follower mutation not admitted")
@@ -250,7 +203,7 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			f.tm = f.newManager()
 			f.r.registerManager(f.nn, &managedTopology{tm: f.tm})
 		}},
-		{"this manager retired", "RRWRRRR", func(t *testing.T, f *claimFixture) {
+		{"this manager retired", "RRRRR", func(t *testing.T, f *claimFixture) {
 			f.retire(t)
 		}},
 	}
@@ -267,15 +220,6 @@ func TestTopologyClaimMatrix(t *testing.T) {
 	}
 }
 
-// A planned failover's claim refuses for good when the manager observes a
-// primary other than its source: authority moved since validation.
-func TestClaimPlannedFailover_RefusesWhenSourceIsNoLongerPrimary(t *testing.T) {
-	f := newClaimFixture(t)
-	if ok, why, retry := f.r.ClaimPlannedFailover(f.nn, "dc2", "dc1"); ok || retry || why != plannedClaimRefusedSourceMoved("dc1", "dc2") {
-		t.Fatalf("claim with source dc2 while dc1 is primary = %v, %q, retry=%v; want refused for good", ok, why, retry)
-	}
-}
-
 // GPT round 11: automatic promotion's claim did not check the planned
 // failover's guard, so a planned failover claimed between an emergency
 // failover's (or re-assert's) eligibility checks and its claim was raced:
@@ -287,13 +231,9 @@ func TestAutoPromotion_ClaimBetweenEligibilityAndClaimStopsIt(t *testing.T) {
 		name string
 		hold func(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedName, tm *TopologyManager)
 	}{
-		{"planned failover", func(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedName, tm *TopologyManager) {
-			// No site is writable here, so the claim itself waits (GPT
-			// round 13); the guard still arrives from status, as the
-			// runner's sync derives it for an in-flight planned failover.
-			if ok, why, retry := r.ClaimPlannedFailover(nn, "dc1", "dc2"); ok || !retry || why != plannedClaimRefusedAuthorityUnsettled {
-				t.Fatalf("planned-failover claim with no primary named = %v, %q, retry=%v; want a wait", ok, why, retry)
-			}
+		{"planned failover", func(t *testing.T, _ *TopologyManagerRunner, _ types.NamespacedName, tm *TopologyManager) {
+			// The guard arrives from status, as the reconciler and the
+			// runner's sync derive it for an in-flight planned failover.
 			tm.SetPlannedFailoverActive(true)
 		}},
 		{"in-place restore", func(t *testing.T, _ *TopologyManagerRunner, _ types.NamespacedName, tm *TopologyManager) {

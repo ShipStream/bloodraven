@@ -688,7 +688,6 @@ func TestDeploymentLeaseUnconfirmedPromotionFencesGeneration(t *testing.T) {
 	tm.deploymentLeases = m
 	tm.topologyGeneration, tm.deploymentActiveSite = 7, "dc1"
 	tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
-	tm.SetPlannedFailoverActive(true)
 	if _, err := tm.PlannedPromote(context.Background(), "dc2", "dc1"); err == nil {
 		t.Fatal("expected failed confirmation")
 	}
@@ -697,7 +696,6 @@ func TestDeploymentLeaseUnconfirmedPromotionFencesGeneration(t *testing.T) {
 		t.Fatalf("unconfirmed promotion reopened stale authority: %+v", snap)
 	}
 	target.setError(nil)
-	tm.SetPlannedFailoverActive(false)
 	tm.Poll(context.Background())
 	snap = tm.buildSnapshot(nil)
 	if snap.TopologyGeneration != 8 || snap.DeploymentEpoch == 0 {

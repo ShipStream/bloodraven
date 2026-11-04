@@ -34,9 +34,7 @@ func dragonflyUpgradeInFlight(s *v1alpha1.DragonflyUpgradeStatus) bool {
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if r.Runner != nil {
-		// The topology guard follows the planned failover only once it
-		// holds the sites (see plannedFailoverHoldsSites).
-		r.Runner.SetPlannedFailoverActive(nn, plannedFailoverHoldsSites(fg.Status.PlannedFailover) || dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg)))
+		r.Runner.SetPlannedFailoverActive(nn, dragonflyMaintenanceActive(fg))
 	}
 
 	_, hasAnnotation := fg.GetAnnotations()[DragonflySnapshotUpgradeAnnotation]
@@ -333,7 +331,7 @@ func (r *MysqlFailoverGroupReconciler) abandonDragonflyUpgrade(ctx context.Conte
 		return 0, err
 	}
 	if r.Runner != nil {
-		r.Runner.SetPlannedFailoverActive(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, plannedFailoverHoldsSites(fg.Status.PlannedFailover))
+		r.Runner.SetPlannedFailoverActive(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, plannedFailoverInFlight(fg.Status.PlannedFailover))
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyUpgradeFailed, "ActiveSiteChanged: %s", next.Message)
 	return 0, nil

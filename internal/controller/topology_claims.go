@@ -2,9 +2,7 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"time"
 
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -22,37 +20,38 @@ import (
 // Claimants (columns):
 //
 //	Auto   emergency failover, primary re-assert   beginAutoPromotionOf
-//	PProm  PlannedPromote (planned failover holds) claimPlannedPromotion
-//	PF     planned failover before its fence       ClaimPlannedFailover
 //	Upd    ordered update                          claimOrderedUpdate
 //	Rot    keyring rotation                        ReserveKeyringRotation
 //	Fol    old-primary recovery, recovery drain,   beginFollowerMutation
 //	       source convergence
 //	Boot   auto-clone, reclone, fresh deploy       claimBootstrap
 //
-// Held claim (rows) against claimant: R refused, W refused for now and
-// retried by the claimant (PF with a deadline, PProm until its context
-// ends, the rest on a later poll), A allowed.
+// The planned failover is not a claimant here: its reconciler sets the
+// plannedFailoverActive guard from status (from Pending until the run
+// ends), and its promotion (PlannedPromote, claimPlannedPromotion) claims
+// only against rotation, a running change and a replaced manager's
+// update. Making its side a real claim is tracked separately.
 //
-//	held \ claimant              Auto PProm PF  Upd Rot Fol Boot
-//	Auto promotion               R    R     W   R   R   R   R
-//	PlannedPromote               R    R     W   R   R   R   R
-//	own planned promotion done   R    A8    W   R   R   R   R
-//	promotion not yet observed   R    R     W   R   R   R   A1
-//	planned failover waiting     A    A     A   A   A   A   A
-//	(pre-fence, not granted)
-//	planned failover             R    A     A   R   R   R   R
-//	ordered update claimed       R    R     R   R   R   R   R
-//	ordered update pending       A2   A2    A2  A2  R   A2  A2
-//	rotation of the target       R    R     R   A3  A   A4  A4
-//	follower mutation            A5   W     A6  W   A4  A   A5
-//	bootstrap (promotable site)  R    R     R   R   A4  R   R
-//	in-place restore             R    R     R   R   A4  R   R
-//	predecessor's ordered update R    R     R   R   R   R   R
-//	predecessor still promoting  R    W     W   R   R   R   R
-//	predecessor in a follower    R    W     A6  R   A4  R   R
+// Held claim (rows) against claimant: R refused, W refused for now and
+// retried by the claimant on a later poll (Upd: it waits at the follower
+// mutation gate), A allowed.
+//
+//	held \ claimant              Auto Upd Rot Fol Boot
+//	Auto promotion               R    R   R   R   R
+//	PlannedPromote               R    R   R   R   R
+//	promotion not yet observed   R    R   R   R   A1
+//	planned failover (guard)     R    R   R   R   R
+//	ordered update claimed       R    R   R   R   R
+//	ordered update pending       A2   A2  R   A2  A2
+//	rotation of the target       R    A3  A   A4  A4
+//	follower mutation            A5   W   A4  A   A5
+//	bootstrap (promotable site)  R    R   A4  R   R
+//	in-place restore             R    R   A4  R   R
+//	predecessor's ordered update R    R   R   R   R
+//	predecessor still promoting  R    R   R   R   R
+//	predecessor in a follower    R    R   A4  R   R
 //	mutation
-//	this manager retired         R    R     W7  R   R   R   R
+//	this manager retired         R    R   R6  R   R
 //
 //	A1 Boot re-confirms the donor's authority before cloning, and the
 //	   fresh-deploy bootstrap starts right behind its own seed promotion.
@@ -63,25 +62,7 @@ import (
 //	A4 Not a topology change. The encryption reconciler decides from status
 //	   (a rotating site is not Sealed; a clone needs its recipient unsealed).
 //	A5 Both run on the poll goroutine, one after the other.
-//	A6 The fence touches only the source; PlannedPromote then waits at the
-//	   follower-mutation gate.
-//	A8 The same planned failover re-running Promoting (its Resuming write
-//	   was lost) gets its own completed promotion back to confirm, instead
-//	   of a refusal as an unobserved promotion (ownPlannedPromotion).
-//	W7 A retired manager is unregistered; the runner sees no manager (Rot
-//	   is refused for the same reason).
-//
-// A granted PF claim lasts until the next pass re-derives the guard from
-// status, which sets it only from the fence on (plannedFailoverHoldsSites);
-// Draining claims again in the pass that fences. A request that is waiting
-// to claim holds nothing, so emergency failover, re-assert and split-brain
-// fencing are never held off by it.
-//
-// PF also needs the manager to name the source as the unique writable
-// primary: unknown authority (not yet classified, or two sites writable)
-// is W, another primary R. Draining's re-claim after a fence whose status
-// write was lost passes only on a live probe finding the source and every
-// peer read-only (ClaimPlannedFailoverFencedSource).
+//	R6 A retired manager is unregistered; the runner sees no manager.
 //
 // A bootstrap into a read-only reader does not hold off Auto (see
 // bootstrapBlocksCrossSite); its row is otherwise the promotable one's.
@@ -89,9 +70,9 @@ import (
 // "Predecessor" rows are a replaced manager whose Run or update outlived
 // its stop. Its ordered update sets predecessorUpdateInFlight on the
 // replacement; anything else it is still doing (a promotion, a follower
-// mutation) is seen through predecessorMutating, and by the runner-level
-// claims (PF, Rot) through the retiring list. A retired manager claims
-// nothing new, so both only ever clear.
+// mutation) is seen through predecessorMutating, and by rotation admission
+// through the retiring list. A retired manager claims nothing new, so both
+// only ever clear.
 
 // promotionUnobservedLocked reports whether a promotion has finished but
 // no poll has yet observed its outcome. Must hold tm.mu.
@@ -150,106 +131,43 @@ func (tm *TopologyManager) beginAutoPromotionOf(target string) (began, rotationB
 	return tm.beginDeploymentTopologyChangeLocked(), false
 }
 
-// plannedPromotionRecord is a planned failover's completed promotion, kept
-// while that planned failover still holds its claim.
-type plannedPromotionRecord struct {
-	target string
-	gtid   string
-}
-
-// ownPlannedPromotion returns the promotion of target this manager already
-// completed for a planned failover, while a planned failover holds its
-// claim and no topology change was claimed since, or nil.
-// A re-run of Promoting (its Resuming status write was lost) finds it and
-// confirms instead of claiming again: no other actor can have promoted
-// since, because the planned failover's claim kept them all out.
-func (tm *TopologyManager) ownPlannedPromotion(target string) *plannedPromotionRecord {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	if !tm.plannedFailoverActive || tm.plannedPromotion == nil || tm.plannedPromotion.target != target {
-		return nil
-	}
-	rec := *tm.plannedPromotion
-	return &rec
-}
-
-// beginPlannedPromotionOf claims the topology-change window for a planned
-// failover's promotion of target. The planned failover must hold its own
-// claim (plannedFailoverActive), which kept every other actor out since its
-// fence; this refuses what that claim does not cover, and returns why.
-func (tm *TopologyManager) beginPlannedPromotionOf(target string) (why string, rotationBlocked bool) {
+// beginPromotionOf claims the topology-change window for a planned
+// failover's promotion of target, refusing (rotationBlocked) when target is
+// mid-keyring-rotation, durably or by reservation. The check and the claim
+// share mu with ReserveKeyringRotation, which refuses while a change is
+// claimed, so a rotation admitted before the claim stops the promotion and
+// one requested after it is refused. It refuses, too, while a replaced
+// manager's ordered update is still unwinding (beginDeploymentTopologyChange-
+// Locked): the planned failover then fails closed (see PlannedPromote).
+func (tm *TopologyManager) beginPromotionOf(target string) (began, rotationBlocked bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.keyringRotationBlockedLocked(target) {
 		tm.keyringRotationBlockedDirty = true
-		return "", true
+		return false, true
 	}
-	switch {
-	case tm.retired:
-		return "the topology manager is stopping", false
-	case !tm.plannedFailoverActive:
-		return "the planned failover no longer holds its claim on the sites", false
-	case tm.topologyFrozen:
-		return "an in-place restore is in progress", false
-	case !bootstrapIdlePhase(tm.bootstrapPhase):
-		return "a bootstrap clone is running", false
-	case tm.promotionUnobservedLocked() && tm.promotedSite == target:
-		return plannedPromoteRefusedTargetUnobserved, false
-	case tm.promotionUnobservedLocked():
-		return "another promotion has not been observed yet", false
-	case !tm.beginDeploymentTopologyChangeLocked():
-		return "another topology change is in progress", false
-	}
-	return "", false
+	return tm.beginDeploymentTopologyChangeLocked(), false
 }
 
-// claimPlannedPromotion takes PlannedPromote's claim, or returns the
-// promotion of target it already completed (see ownPlannedPromotion). It
-// waits, until ctx ends, for a predecessor still changing the sites, then
-// publishes the claim at the follower-mutation barrier, so a recovery step
-// admitted before the planned failover's flag was set has finished before
-// Execute starts.
-func (tm *TopologyManager) claimPlannedPromotion(ctx context.Context, target string) (*plannedPromotionRecord, error) {
-	if rec := tm.ownPlannedPromotion(target); rec != nil {
-		return rec, nil
-	}
-	for tm.predecessorMutating() {
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("%w: %v", errHandoffNotAdmitted, ctx.Err())
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
-	var why string
-	var rotationBlocked bool
-	if err := tm.admitTopologyHandoff(ctx, func() { why, rotationBlocked = tm.beginPlannedPromotionOf(target) }); err != nil {
-		return nil, fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
+// claimPlannedPromotion takes PlannedPromote's claim, published at the
+// follower-mutation barrier so a recovery step admitted before the planned
+// failover's flag was set has finished before Execute starts. It returns
+// errHandoffNotAdmitted if ctx ends first; nothing has then been sent.
+func (tm *TopologyManager) claimPlannedPromotion(ctx context.Context, target string) error {
+	var began, rotationBlocked bool
+	if err := tm.admitTopologyHandoff(ctx, func() { began, rotationBlocked = tm.beginPromotionOf(target) }); err != nil {
+		return fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
 	}
 	switch {
 	case rotationBlocked:
-		return nil, fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
-	case why != "" && tm.predecessorUpdateUnwinding():
-		return nil, errPredecessorUpdateInFlight
-	case why == plannedPromoteRefusedTargetUnobserved:
-		return nil, fmt.Errorf("%w: %s", errPlannedPromotionMaybeDone, why)
-	case why != "":
-		return nil, fmt.Errorf("%w: %s", errPlannedPromotionRefused, why)
+		return fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
+	case !began && tm.predecessorUpdateUnwinding():
+		return errPredecessorUpdateInFlight
+	case !began:
+		return fmt.Errorf("topology change already in progress")
 	}
-	return nil, nil
+	return nil
 }
-
-// plannedPromoteRefusedTargetUnobserved: a promotion of this very target
-// is recorded but not yet observed, and this manager has no record that it
-// was the planned failover's own (an operator restart lost it).
-const plannedPromoteRefusedTargetUnobserved = "a promotion of the target has not been observed yet"
-
-// errPlannedPromotionMaybeDone is a refused claim (nothing sent now) where
-// the target may already have been promoted by an earlier attempt.
-var errPlannedPromotionMaybeDone = fmt.Errorf("%w (it may already have happened)", errPlannedPromotionRefused)
-
-// errPlannedPromotionRefused is returned by PlannedPromote when its claim
-// on the sites is refused. Nothing has been sent to the target.
-var errPlannedPromotionRefused = errors.New("planned promote: the topology manager refused the promotion")
 
 // orderedUpdateClaimRefusedLocked reports whether an ordered update planned
 // at authority epoch against active may not claim now. Must hold tm.mu.
@@ -276,7 +194,6 @@ func (tm *TopologyManager) claimOrderedUpdate(ctx context.Context, epoch uint64,
 		}
 		tm.deploymentUpdateRunning = true
 		tm.deploymentChanging++
-		tm.plannedPromotion = nil
 		tm.authorityEpoch++
 		tm.deploymentTopologyPendingLocked()
 		claimed = true

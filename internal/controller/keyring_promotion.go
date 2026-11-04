@@ -260,7 +260,7 @@ func (r *TopologyManagerRunner) SetKeyringRotationBlocked(nn types.NamespacedNam
 //	                                                    its Run; retired managers start
 //	                                                    no update
 //	held   promotion claim (beginAutoPromotionOf,       claim refused; dirty bit re-armed
-//	       beginPlannedPromotionOf)                     (automatic promotions)
+//	       beginPromotionOf)                            (automatic promotions)
 //	any    claim taken / promotion unobserved           reserve refused until observed
 //	held   encryption disabled / group deleted          none
 //

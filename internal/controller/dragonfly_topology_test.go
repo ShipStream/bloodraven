@@ -38,10 +38,9 @@ type fakeDragonflyConn struct {
 
 	replicaOfNoOneErr error
 
-	replTakeoverErr   error
-	replTakeoverCalls int
-	saveCalls         int
-	saveErr           error
+	replTakeoverErr error
+	saveCalls       int
+	saveErr         error
 
 	clientKillTypes []string
 	clientKillErr   error
@@ -73,7 +72,6 @@ func (c *fakeDragonflyConn) ReplicaOf(_ context.Context, host string, port int32
 func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error { return c.replicaOfNoOneErr }
 
 func (c *fakeDragonflyConn) ReplTakeover(_ context.Context, _ time.Duration) error {
-	c.replTakeoverCalls++
 	return c.replTakeoverErr
 }
 

@@ -100,7 +100,6 @@ func TestRestoreReclonePending_PlannedPromoteOverrides(t *testing.T) {
 	h := newTestHarness(t)
 	h.pollN(2)
 	h.tm.SetRestoreReclonePending([]string{"dc2"})
-	h.tm.SetPlannedFailoverActive(true) // the planned failover's own claim
 	if _, err := h.tm.PlannedPromote(context.Background(), "dc2", "dc1"); err != nil {
 		t.Fatalf("PlannedPromote of a pending site: %v", err)
 	}

@@ -38,17 +38,6 @@ func plannedDrainRunner(nn types.NamespacedName, iad, pdx *mockMySQL) *TopologyM
 		logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		managers: make(map[types.NamespacedName]*managedTopology),
 	}
-	// Classify the sites as a poll would, so the manager names the
-	// writable one (if exactly one) as its primary.
-	for i, m := range []*mockMySQL{iad, pdx} {
-		m.mu.Lock()
-		ro := m.readOnly
-		m.mu.Unlock()
-		tm.sites[i].state = state.StateWritable
-		if ro {
-			tm.sites[i].state = state.StateReadOnly
-		}
-	}
 	runner.SetManagerForTest(nn, tm)
 	return runner
 }

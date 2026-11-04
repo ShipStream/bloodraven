@@ -166,21 +166,6 @@ func (r *TopologyManagerRunner) SetTopologyFrozen(nn types.NamespacedName, froze
 	return true
 }
 
-// ForgetPlannedPromotion drops the record of the last planned promotion
-// once its planned failover reached a terminal phase, so a later run never
-// mistakes it for its own (see ownPlannedPromotion).
-func (r *TopologyManagerRunner) ForgetPlannedPromotion(nn types.NamespacedName) {
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return
-	}
-	mt.tm.mu.Lock()
-	mt.tm.plannedPromotion = nil
-	mt.tm.mu.Unlock()
-}
-
 // SetPlannedFailoverActive toggles the planned-failover guard on the
 // managed TopologyManager so the automatic cross-site evaluator stands
 // down while the reconciler drives its own fence/promote sequence.
@@ -363,16 +348,6 @@ func (r *TopologyManagerRunner) PlannedFailoverPromote(ctx context.Context, nn t
 	return tm.PlannedPromote(ctx, target, source)
 }
 
-// PlannedFailoverConfirmPromotion confirms an already-recorded promotion
-// of target (see TopologyManager.ConfirmPlannedPromotion).
-func (r *TopologyManagerRunner) PlannedFailoverConfirmPromotion(ctx context.Context, nn types.NamespacedName, target, fencedGtid string, promotedAt time.Time, promotionGtid string) error {
-	tm, err := r.plannedFailoverManager(nn)
-	if err != nil {
-		return err
-	}
-	return tm.ConfirmPlannedPromotion(ctx, target, fencedGtid, promotedAt, promotionGtid)
-}
-
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
 // Topology polling and failover must only run on the leader.
 func (r *TopologyManagerRunner) NeedLeaderElection() bool {
@@ -537,7 +512,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		suppress := restoreInFlight(fg)
 		frozen := inPlaceRestoreFreezesTopology(fg)
-		plannedActive := plannedFailoverHoldsSites(fg.Status.PlannedFailover)
+		plannedActive := plannedFailoverInFlight(fg.Status.PlannedFailover)
 
 		if live && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
@@ -906,7 +881,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// Likewise the planned-failover guard: the RecoveryInProgress markers
 	// restored below would otherwise let the first Poll drain or recover
 	// sites a planned failover that survived the restart is using.
-	tm.SetPlannedFailoverActive(plannedFailoverHoldsSites(fg.Status.PlannedFailover))
+	tm.SetPlannedFailoverActive(plannedFailoverInFlight(fg.Status.PlannedFailover))
 	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 	tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
@@ -1321,19 +1296,6 @@ func (r *TopologyManagerRunner) retiringChangingSites(nn types.NamespacedName) b
 	return false
 }
 
-// OrderedUpdateUnwinding reports whether nn's running manager is still
-// deferring to a replaced manager's ordered update.
-func (r *TopologyManagerRunner) OrderedUpdateUnwinding(nn types.NamespacedName) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.RLock()
-	mt := r.managers[nn]
-	inFlight := r.retiringUpdateInFlightLocked(nn)
-	r.mu.RUnlock()
-	return inFlight || (mt != nil && mt.tm.predecessorUpdateUnwinding())
-}
-
 // retiringUpdateInFlightLocked reports whether a retiring manager of nn
 // still has a claimed ordered update. Caller holds r.mu.
 func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.NamespacedName) bool {
@@ -1343,63 +1305,6 @@ func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.Namespaced
 		}
 	}
 	return false
-}
-
-// ClaimPlannedFailover claims the group's sites for a planned failover
-// about to fence its source (see TopologyManager.ClaimPlannedFailover).
-// It also refuses while a retiring manager is still changing the sites: a
-// manager whose stop timed out is replaced anyway, and its Run may still
-// be inside a promotion. A retiring manager's claimed update gives up the
-// planned failover, as the current manager's does; a retiring promotion,
-// or no manager running yet, is retry=true: nothing is wrong, just early.
-func (r *TopologyManagerRunner) ClaimPlannedFailover(nn types.NamespacedName, source, target string) (ok bool, why string, retry bool) {
-	mt, ok, why, retry := r.plannedFailoverClaimTarget(nn)
-	if !ok {
-		return false, why, retry
-	}
-	return mt.tm.ClaimPlannedFailover(source, target)
-}
-
-// ClaimPlannedFailoverFencedSource is ClaimPlannedFailover for a planned
-// failover that may already have fenced its source (Draining before
-// drainStartTime was recorded) while the manager names no primary. It
-// claims only if a live probe finds the source read-only and every other
-// site confirmed read-only: what that fence leaves behind. Anything else,
-// a writable or unreadable site included, is refused for now.
-func (r *TopologyManagerRunner) ClaimPlannedFailoverFencedSource(ctx context.Context, nn types.NamespacedName, source, target string) (ok bool, why string, retry bool) {
-	mt, ok, why, retry := r.plannedFailoverClaimTarget(nn)
-	if !ok {
-		return false, why, retry
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	alone, detail := mt.tm.sourceFencedAlone(probeCtx, source)
-	cancel()
-	if !alone {
-		return false, fmt.Sprintf("%s (%s)", plannedClaimRefusedAuthorityUnsettled, detail), true
-	}
-	return mt.tm.claimPlannedFailover(source, target, true)
-}
-
-// plannedFailoverClaimTarget returns nn's manager for a planned-failover
-// claim, refusing while a retiring manager is still changing the sites.
-func (r *TopologyManagerRunner) plannedFailoverClaimTarget(nn types.NamespacedName) (mt *managedTopology, ok bool, why string, retry bool) {
-	r.mu.RLock()
-	mt = r.managers[nn]
-	retiringUpdate := r.retiringUpdateInFlightLocked(nn)
-	retiringPromotion := false
-	for _, old := range r.retiring[nn] {
-		retiringPromotion = retiringPromotion || old.tm.mutationClaimed()
-	}
-	r.mu.RUnlock()
-	switch {
-	case retiringUpdate:
-		return nil, false, plannedClaimRefusedPredecessorUpdate, false
-	case retiringPromotion:
-		return nil, false, plannedClaimRefusedPredecessorPromote, true
-	case mt == nil:
-		return nil, false, plannedClaimRefusedNoManager, true
-	}
-	return mt, true, "", false
 }
 
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.
