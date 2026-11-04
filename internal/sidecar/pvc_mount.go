@@ -177,11 +177,17 @@ func unescapeMountInfo(s string) string {
 func isOctal(c byte) bool { return c >= '0' && c <= '7' }
 
 // probePVCWritable proves the store can create objects under prefix by
-// writing a probe file in the deepest directory of root/prefix that
-// already exists. Probing there rather than at root keeps shared volumes
-// working whose root is not writable but whose prefix directory is. The
-// probe ends in ".part", which List skips, so one left behind by a crash
-// never becomes an archive object.
+// creating an empty probe file in the deepest directory of root/prefix
+// that already exists. Probing there rather than at root keeps shared
+// volumes working whose root is not writable but whose prefix directory
+// is. The probe ends in ".part", which List skips, so one left behind by
+// a crash never becomes an archive object.
+//
+// The probe writes no data on purpose. Creating the file already fails
+// on a permission problem (EACCES) or a read-only volume (EROFS). A full
+// volume is left to the running archiver, which reports it as
+// ArchiverError and keeps retrying pending retention deletes that can
+// free space; failing init on ENOSPC would stop that recovery.
 func probePVCWritable(root, prefix string) error {
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -234,11 +240,10 @@ func probePVCWritable(root, prefix string) error {
 		return fmt.Errorf("pvc archive store: %s is not writable: %w", dir, withoutPath(err))
 	}
 	name := f.Name()
-	_, writeErr := f.Write([]byte{0})
 	closeErr := f.Close()
 	removeErr := os.Remove(name)
-	if err := errors.Join(withoutPath(writeErr), withoutPath(closeErr)); err != nil {
-		return fmt.Errorf("pvc archive store: %s is not writable: %w", dir, err)
+	if closeErr != nil {
+		return fmt.Errorf("pvc archive store: %s is not writable: %w", dir, withoutPath(closeErr))
 	}
 	if removeErr != nil {
 		return fmt.Errorf("pvc archive store: remove write probe in %s: %w", dir, withoutPath(removeErr))
