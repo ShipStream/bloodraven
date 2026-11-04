@@ -1941,14 +1941,17 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 const ReasonOrderedUpdateStalled = "OrderedUpdateStalled"
 
 func orderedUpdateStalledMessage(stall string) string {
-	return fmt.Sprintf("Ordered update stalled: %s. No other site is rolled and the active site is not handed off until that pod is Ready; the update retries every %s",
-		stall, orderedUpdateStallRetry)
+	return fmt.Sprintf("Ordered update stalled: %s. No other site is rolled and the active site is not handed off until that pod has been Ready for %s; the update retries every %s",
+		stall, podStableFor, orderedUpdateStallRetry)
 }
 
 // emitOrderedUpdateStallEvent fires a Warning Event when the Updating
 // condition just written reports a stall that the previous status did not:
 // a new stall, or one with a different cause. A retry that finds the same
-// cause writes nothing and fires nothing.
+// cause writes nothing and fires nothing. The pod-readiness reasons are
+// worded to stay the same while the cause does (a crash loop reads the same
+// in every phase of the loop), which is what keeps this to one Event per
+// stall.
 func (r *TopologyManagerRunner) emitOrderedUpdateStallEvent(fg *v1alpha1.MysqlFailoverGroup, existingStatus *v1alpha1.MysqlFailoverGroupStatus) {
 	if r.recorder == nil {
 		return

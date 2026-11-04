@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -15,23 +16,28 @@ import (
 )
 
 // PodReadiness is whether the pod a site's Deployment runs for its current
-// pod template is Ready.
+// pod template is Ready, and has stayed Ready long enough to count.
 type PodReadiness struct {
 	// Ready is true when the Deployment has finished rolling out its
-	// current template and that template's pod reports Ready=True, which
+	// current template and that template's pod has been Ready=True, which
 	// takes every container (mysql, sidecar and any extra container)
-	// passing its readiness probe.
+	// passing its readiness probe, continuously for at least podStableFor.
+	// A crash-looping container passes its probe between crashes, so a pod
+	// that is Ready right now is not enough.
 	Ready bool
 	// Pod names the pod the verdict is about; empty when there is none.
 	Pod string
-	// Restarts is the pod's total container restart count. With Pod it
-	// tells two Ready observations of one container run from a crash and
-	// restart between them.
-	Restarts int32
 	// Reason explains a not-Ready verdict, for example
-	// "sidecar not ready: CrashLoopBackOff, last exit code 1 (Error)".
+	// "sidecar not ready: crash looping, last exit code 1 (Error)" or
+	// "pod Ready for less than 30s".
 	Reason string
 }
+
+// podStableFor is how long a pod must have been Ready, without a break and
+// without a container restart, before the ordered update counts it as
+// Ready. Every pod-readiness gate of the ordered update uses this one
+// definition.
+const podStableFor = 30 * time.Second
 
 // maxPodReasonLen bounds a not-Ready reason, which ends up in a condition
 // message and an Event.
@@ -60,11 +66,12 @@ func (r *MysqlFailoverGroupReconciler) SitePodReadiness(ctx context.Context, fgN
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
-	return deploymentPodReadiness(ctx, reader, types.NamespacedName{Namespace: fgName.Namespace, Name: resourceName(fgName.Name, siteName)})
+	return deploymentPodReadiness(ctx, reader, types.NamespacedName{Namespace: fgName.Namespace, Name: resourceName(fgName.Name, siteName)}, time.Now())
 }
 
-// deploymentPodReadiness reports the readiness of the pods of a
-// Deployment's current pod template.
+// deploymentPodReadiness reports the readiness, as of now, of the pods of a
+// Deployment's current pod template. A pod counts as Ready only once it has
+// been Ready for podStableFor (see podReadySince).
 //
 // The operator has no ReplicaSet access, so the current template's pods are
 // found through the Deployment status instead: once the controller has
@@ -74,7 +81,7 @@ func (r *MysqlFailoverGroupReconciler) SitePodReadiness(ctx context.Context, fgN
 // are skipped, so a replaced pod that is still Ready while it shuts down
 // is never mistaken for the new one, and pods of more than one ReplicaSet
 // read as a rollout still in progress.
-func deploymentPodReadiness(ctx context.Context, reader client.Reader, nn types.NamespacedName) (PodReadiness, error) {
+func deploymentPodReadiness(ctx context.Context, reader client.Reader, nn types.NamespacedName, now time.Time) (PodReadiness, error) {
 	var dep appsv1.Deployment
 	if err := reader.Get(ctx, nn, &dep); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -126,14 +133,80 @@ func deploymentPodReadiness(ctx context.Context, reader client.Reader, nn types.
 
 	verdict := PodReadiness{Ready: true}
 	for _, pod := range current {
-		restarts := containerRestarts(pod)
 		if !podReady(pod) {
-			return PodReadiness{Pod: pod.Name, Restarts: restarts, Reason: podNotReadyReason(pod)}, nil
+			return PodReadiness{Pod: pod.Name, Reason: podNotReadyReason(pod)}, nil
+		}
+		if now.Sub(podReadySince(pod)) < podStableFor {
+			return PodReadiness{Pod: pod.Name, Reason: podUnsettledReason(pod, now)}, nil
 		}
 		verdict.Pod = pod.Name
-		verdict.Restarts += restarts
 	}
 	return verdict, nil
+}
+
+// podReadySince is when a Ready pod's current Ready spell began, as far as
+// its status tells: the latest of the Ready condition's last transition and
+// the start of the current run of every container and every restartable
+// (native sidecar) init container. A container restart takes the pod out of
+// Ready; the start times also cover a restart the Ready condition has not
+// caught up with, for example a container without a readiness probe, which
+// is ready again as soon as it runs. A timestamp the kubelet left unset
+// adds nothing.
+//
+// The timestamps come from the node's clock and are compared with the
+// operator's. A node clock ahead of the operator's makes the pod look
+// Ready for less time than it has been (a start in the future reads as not
+// yet stable), so the verdict comes late by the skew; a node clock behind
+// it makes the verdict come early by the skew.
+func podReadySince(pod *corev1.Pod) time.Time {
+	var since time.Time
+	if c := podConditionOf(pod, corev1.PodReady); c != nil && c.Status == corev1.ConditionTrue {
+		since = c.LastTransitionTime.Time
+	}
+	later := func(cs corev1.ContainerStatus) {
+		if cs.State.Running != nil && cs.State.Running.StartedAt.After(since) {
+			since = cs.State.Running.StartedAt.Time
+		}
+	}
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if restartableInitContainer(pod, cs.Name) {
+			later(cs)
+		}
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		later(cs)
+	}
+	return since
+}
+
+// podUnsettledReason says why a pod that is Ready does not count as Ready
+// yet. A container that has restarted and whose current run is younger
+// than podStableFor is crash looping and is reported in the words
+// containerNotReadyReason uses for the other phases of the loop, so the
+// reason stays the same whichever phase a probe lands on. Otherwise the pod
+// has only not been Ready for long enough.
+func podUnsettledReason(pod *corev1.Pod, now time.Time) string {
+	var parts []string
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if restartableInitContainer(pod, cs.Name) && restartedWithin(cs, now) {
+			parts = append(parts, "init container "+crashLoopReason(cs))
+		}
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if restartedWithin(cs, now) {
+			parts = append(parts, crashLoopReason(cs))
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("pod Ready for less than %s", podStableFor)
+	}
+	return truncateReason(strings.Join(parts, "; "))
+}
+
+// restartedWithin reports whether a running container has restarted before
+// and its current run started less than podStableFor before now.
+func restartedWithin(cs corev1.ContainerStatus, now time.Time) bool {
+	return cs.RestartCount > 0 && cs.State.Running != nil && now.Sub(cs.State.Running.StartedAt.Time) < podStableFor
 }
 
 // deploymentReplicaSetOf returns the ReplicaSet of deployment that controls
@@ -161,24 +234,10 @@ func podConditionOf(pod *corev1.Pod, t corev1.PodConditionType) *corev1.PodCondi
 	return nil
 }
 
-// containerRestarts counts init container restarts too: a restartable
-// (native sidecar) init container from spec.extraInitContainers runs for
-// the pod's lifetime, and its crash between two probes must break the
-// Ready streak like any other container's.
-func containerRestarts(pod *corev1.Pod) int32 {
-	var n int32
-	for _, cs := range pod.Status.InitContainerStatuses {
-		n += cs.RestartCount
-	}
-	for _, cs := range pod.Status.ContainerStatuses {
-		n += cs.RestartCount
-	}
-	return n
-}
-
 // restartableInitContainer reports whether the named init container is a
-// native sidecar (restartPolicy: Always), the only kind with a readiness
-// probe.
+// native sidecar (restartPolicy: Always), which, unlike an ordinary init
+// container, runs for the pod's lifetime and can have a readiness probe.
+// spec.extraInitContainers can add one.
 func restartableInitContainer(pod *corev1.Pod, name string) bool {
 	for i := range pod.Spec.InitContainers {
 		c := &pod.Spec.InitContainers[i]
@@ -192,21 +251,22 @@ func restartableInitContainer(pod *corev1.Pod, name string) bool {
 // podNotReadyReason says why a pod is not Ready: the first init container
 // that has not completed, otherwise every container that is not ready,
 // otherwise the pod's scheduling or Ready condition. It leaves out restart
-// counts and back-off timers so the text stays the same while the cause
-// does, and a condition carrying it is not rewritten on every probe.
+// counts, back-off timers and the phase of a crash loop so the text stays
+// the same while the cause does, and a condition carrying it is not
+// rewritten, nor an Event fired, on every probe.
 func podNotReadyReason(pod *corev1.Pod) string {
 	var parts []string
 	for _, cs := range pod.Status.InitContainerStatuses {
-		if cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0 {
+		restartable := restartableInitContainer(pod, cs.Name)
+		if !restartable && cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0 {
 			continue
 		}
-		if cs.State.Running != nil && cs.Ready {
-			// A restartable (native sidecar) init container.
+		if restartable && cs.State.Running != nil && cs.Ready {
 			continue
 		}
-		if cs.State.Running != nil && !restartableInitContainer(pod, cs.Name) {
+		if !restartable && cs.State.Running != nil && cs.RestartCount == 0 {
 			// An ordinary init container has no readiness probe; running
-			// means the pod is still initializing.
+			// for the first time means the pod is still initializing.
 			parts = append(parts, "init container "+cs.Name+" not ready: still running")
 			break
 		}
@@ -232,7 +292,14 @@ func podNotReadyReason(pod *corev1.Pod) string {
 	return truncateReason(strings.Join(parts, "; "))
 }
 
+// containerNotReadyReason says why a container is not ready. A crash loop
+// reads the same in each of its phases (see crashLooping); any other
+// waiting reason keeps its message, which says what is wrong
+// (CreateContainerConfigError, ErrImagePull).
 func containerNotReadyReason(cs corev1.ContainerStatus) string {
+	if crashLooping(cs) {
+		return crashLoopReason(cs)
+	}
 	var s string
 	switch {
 	case cs.State.Waiting != nil:
@@ -241,10 +308,7 @@ func containerNotReadyReason(cs corev1.ContainerStatus) string {
 			reason = "waiting"
 		}
 		s = fmt.Sprintf("%s not ready: %s", cs.Name, reason)
-		// A CrashLoopBackOff message only repeats the back-off timer;
-		// others (CreateContainerConfigError, ErrImagePull) say what is
-		// wrong.
-		if msg := strings.TrimSpace(cs.State.Waiting.Message); msg != "" && reason != "CrashLoopBackOff" {
+		if msg := strings.TrimSpace(cs.State.Waiting.Message); msg != "" {
 			s += ": " + msg
 		}
 	case cs.State.Terminated != nil:
@@ -255,6 +319,39 @@ func containerNotReadyReason(cs corev1.ContainerStatus) string {
 		s = cs.Name + " not ready"
 	}
 	if t := cs.LastTerminationState.Terminated; t != nil && cs.State.Terminated == nil {
+		s += ", last exit " + exitText(t)
+	}
+	return s
+}
+
+// crashLooping reports whether a container that is not ready is in one of
+// the phases of a crash loop: waiting out CrashLoopBackOff, or, having
+// restarted before, running again or terminated again. The remaining
+// phase, ready again but for less than podStableFor, is podUnsettledReason's.
+// A probe can land on any of them, so they share one text.
+func crashLooping(cs corev1.ContainerStatus) bool {
+	switch {
+	case cs.State.Waiting != nil:
+		return cs.State.Waiting.Reason == "CrashLoopBackOff"
+	case cs.State.Running != nil, cs.State.Terminated != nil:
+		return cs.RestartCount > 0
+	}
+	return false
+}
+
+// crashLoopReason is the text for a crash-looping container: its name and
+// its most recent exit, from the current state while it is terminated and
+// from the last termination otherwise. It leaves out the restart count, the
+// back-off timer and the loop's phase, so it reads the same on every probe
+// while the loop lasts, for example
+// "sidecar not ready: crash looping, last exit code 1 (Error)".
+func crashLoopReason(cs corev1.ContainerStatus) string {
+	s := cs.Name + " not ready: crash looping"
+	t := cs.State.Terminated
+	if t == nil {
+		t = cs.LastTerminationState.Terminated
+	}
+	if t != nil {
 		s += ", last exit " + exitText(t)
 	}
 	return s

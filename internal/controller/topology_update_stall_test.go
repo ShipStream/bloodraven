@@ -7,6 +7,14 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -287,6 +295,146 @@ func TestCheckUpdate_RecheckClearsStallOfLastRolledSiteOncePodIsReady(t *testing
 	h.tm.mu.RUnlock()
 	if !retryAt.IsZero() {
 		t.Fatal("the back-off outlived the stall")
+	}
+}
+
+// A crash loop moves the stalled site's sidecar through waiting out its
+// back-off, running before its readiness probe passes, Ready for a few
+// seconds, and terminated again. Retries, and the background recheck, that
+// land on different phases must keep one stall: the same text, so one
+// status write, one condition message and one Warning Event, and the Ready
+// phase does not clear it. Only a pod Ready for podStableFor does.
+func TestUpdateStall_CrashLoopKeepsOneStallAcrossLoopPhases(t *testing.T) {
+	h := newStallHarness(t, []state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate})
+	var podMu sync.Mutex
+	var pod *corev1.Pod
+	setPod := func(p *corev1.Pod) {
+		podMu.Lock()
+		defer podMu.Unlock()
+		pod = p
+	}
+	probes := 0
+	h.tm.PodReady = func(ctx context.Context, site string) (PodReadiness, error) {
+		if site != "follower-a" {
+			return PodReadiness{Ready: true, Pod: "mysql-fg-" + site + "-1"}, nil
+		}
+		podMu.Lock()
+		p := pod.DeepCopy()
+		probes++
+		podMu.Unlock()
+		c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(rolledOut(), p).Build()
+		return deploymentPodReadiness(ctx, c, types.NamespacedName{Namespace: readinessNS, Name: readinessDeploy}, readinessNow)
+	}
+	probeCount := func() int {
+		podMu.Lock()
+		defer podMu.Unlock()
+		return probes
+	}
+	stall := func() string {
+		h.tm.mu.RLock()
+		defer h.tm.mu.RUnlock()
+		return h.tm.updateStall
+	}
+
+	// The status the poll loop writes carries the current stall.
+	fg := newTestFG()
+	c := fake.NewClientBuilder().WithScheme(testScheme()).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+	rec := record.NewFakeRecorder(20)
+	runner := &TopologyManagerRunner{client: c, recorder: rec, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{}}
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+	var events []string
+	writeStatus := func() *metav1.Condition {
+		t.Helper()
+		snap := TopologySnapshot{
+			Sites:         []SiteSnapshot{{Name: "dc1", State: state.StateWritable}, {Name: "dc2", State: state.StateReadOnly}},
+			ActiveSite:    "dc1",
+			UpdateStalled: stall(),
+		}
+		if err := runner.updateCRStatus(context.Background(), nn, snap); err != nil {
+			t.Fatalf("updateCRStatus() error = %v", err)
+		}
+		var got v1alpha1.MysqlFailoverGroup
+		if err := c.Get(context.Background(), nn, &got); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, drainRunnerEvents(rec)...)
+		return apimeta.FindStatusCondition(got.Status.Conditions, "Updating")
+	}
+
+	// The active site drifts; follower-a already runs the new template and
+	// is crash looping.
+	phases := crashLoopPhases()
+	setPod(sidecarCrashLoopPod(phases[0]))
+	h.tm.SetSpecDriftSites([]string{"primary"})
+	if !h.tm.checkUpdate(context.Background()) {
+		t.Fatal("checkUpdate did not try the update")
+	}
+	h.waitIdle(t)
+	want := "site follower-a already runs the new pod template but its pod mysql-lion-dc2-new-a is not Ready (" +
+		sidecarCrashLoop + "); not rolling another site"
+	if got := stall(); got != want {
+		t.Fatalf("stall = %q\nwant    %q", got, want)
+	}
+	cond := writeStatus()
+	if cond == nil || cond.Reason != ReasonOrderedUpdateStalled || len(events) != 1 {
+		t.Fatalf("Updating = %+v events %q, want the stall and one Event", cond, events)
+	}
+	message, snaps := cond.Message, h.snapshots()
+
+	same := func(when string) {
+		t.Helper()
+		if got := stall(); got != want {
+			t.Fatalf("%s: stall = %q, want it unchanged", when, got)
+		}
+		if h.snapshots() != snaps {
+			t.Fatalf("%s: the stall was written again", when)
+		}
+		if cond := writeStatus(); cond == nil || cond.Message != message || len(events) != 1 {
+			t.Fatalf("%s: Updating = %+v events %q, want the first message and Event only", when, cond, events)
+		}
+	}
+
+	// Update retries land on each phase in turn.
+	for _, phase := range phases[1:] {
+		setPod(sidecarCrashLoopPod(phase))
+		before := probeCount()
+		h.clk.Advance(orderedUpdateStallRetry)
+		if !h.tm.checkUpdate(context.Background()) {
+			t.Fatalf("retry on %s: checkUpdate did not retry", phase.name)
+		}
+		h.waitIdle(t)
+		if probeCount() == before {
+			t.Fatalf("retry on %s: follower-a was not probed", phase.name)
+		}
+		same("retry on " + phase.name)
+	}
+
+	// Nothing left to roll: the background recheck lands on each phase in
+	// turn, the Ready one included, and keeps the stall.
+	h.tm.SetSpecDriftSites(nil)
+	for _, phase := range phases {
+		setPod(sidecarCrashLoopPod(phase))
+		before := probeCount()
+		h.clk.Advance(orderedUpdateStallRetry)
+		h.tm.checkUpdate(context.Background())
+		h.waitIdle(t)
+		if probeCount() == before {
+			t.Fatalf("recheck on %s: follower-a was not probed", phase.name)
+		}
+		same("recheck on " + phase.name)
+	}
+
+	// A pod Ready for long enough clears it.
+	setPod(readinessPod("mysql-lion-dc2-new-a", "new"))
+	h.clk.Advance(orderedUpdateStallRetry)
+	h.tm.checkUpdate(context.Background())
+	h.waitIdle(t)
+	if got := stall(); got != "" {
+		t.Fatalf("stall = %q after the pod settled, want it cleared", got)
+	}
+	if cond := writeStatus(); cond == nil || cond.Reason != "NotUpdating" || len(events) != 1 {
+		t.Fatalf("Updating = %+v events %q after the stall cleared", cond, events)
 	}
 }
 

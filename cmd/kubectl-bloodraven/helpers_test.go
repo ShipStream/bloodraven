@@ -239,7 +239,7 @@ func TestPrintGroupStatus(t *testing.T) {
 }
 
 func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
-	msg := "Ordered update stalled: site pdx was updated but its pod mysql-orders-pdx-1 is not Ready (sidecar not ready: CrashLoopBackOff)"
+	msg := "Ordered update stalled: site pdx was updated but its pod mysql-orders-pdx-1 is not Ready (sidecar not ready: crash looping, last exit code 1 (Error))"
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
 		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},

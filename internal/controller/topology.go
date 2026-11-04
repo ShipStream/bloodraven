@@ -467,9 +467,10 @@ type TopologyManager struct {
 
 	// PodReady is a callback provided by the runner, wired together with
 	// ApplyUpdate, that reports whether a site's pod for its current pod
-	// template is Ready. The ordered update gates every roll and handoff
-	// on it (see UpdateTarget.PodReady). Nil turns that gate off; only
-	// tests leave it nil.
+	// template is Ready, and has been for podStableFor (see PodReadiness).
+	// The ordered update gates every roll and handoff on it (see
+	// UpdateTarget.PodReady). Nil turns that gate off; only tests leave it
+	// nil.
 	PodReady func(ctx context.Context, siteName string) (PodReadiness, error)
 
 	// updateStall is why the ordered update last stopped on a pod that is
@@ -3472,8 +3473,11 @@ func (tm *TopologyManager) clearUpdateStallLocked() bool {
 // have been the last one to roll (nothing drifts any more), or another
 // precondition keeps checkUpdate from starting. Without it the Updating
 // condition would keep reporting a stall that has resolved itself, for
-// example after a Secret the sidecar needed was fixed. It probes off the
-// poll loop, at most once per orderedUpdateStallRetry.
+// example after a Secret the sidecar needed was fixed. Ready is the probe's
+// verdict, Ready continuously for podStableFor, so a crash-looping pod
+// caught between crashes does not clear the stall. A probe that is not
+// Ready leaves the recorded stall text alone. It probes off the poll loop,
+// at most once per orderedUpdateStallRetry.
 func (tm *TopologyManager) recheckUpdateStall(ctx context.Context) {
 	tm.mu.Lock()
 	site, gen := tm.updateStallSite, tm.updateStallGen

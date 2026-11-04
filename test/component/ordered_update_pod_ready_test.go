@@ -67,7 +67,7 @@ func TestOrderedUpdate_DoesNotWalkTheGroupWhenRolledPodIsNotReady(t *testing.T) 
 		probes[site]++
 		pod := "mysql-lion-" + site + "-1"
 		if rolled[site] {
-			return controller.PodReadiness{Pod: pod, Reason: "sidecar not ready: CrashLoopBackOff, last exit code 1 (Error)"}, nil
+			return controller.PodReadiness{Pod: pod, Reason: "sidecar not ready: crash looping, last exit code 1 (Error)"}, nil
 		}
 		return controller.PodReadiness{Ready: true, Pod: pod}, nil
 	}
@@ -142,8 +142,8 @@ func TestOrderedUpdate_DoesNotWalkTheGroupWhenRolledPodIsNotReady(t *testing.T) 
 		t.Fatalf("active site = %q, want pdx", s.ActiveSite)
 	}
 	want := []string{
-		"site iad was updated but its pod mysql-lion-iad-1 is not Ready (sidecar not ready: CrashLoopBackOff, last exit code 1 (Error))",
-		"site iad already runs the new pod template but its pod mysql-lion-iad-1 is not Ready (sidecar not ready: CrashLoopBackOff, last exit code 1 (Error)); not rolling another site",
+		"site iad was updated but its pod mysql-lion-iad-1 is not Ready (sidecar not ready: crash looping, last exit code 1 (Error))",
+		"site iad already runs the new pod template but its pod mysql-lion-iad-1 is not Ready (sidecar not ready: crash looping, last exit code 1 (Error)); not rolling another site",
 	}
 	if strings.Join(stalls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("reported stalls:\n%s\nwant:\n%s", strings.Join(stalls, "\n"), strings.Join(want, "\n"))

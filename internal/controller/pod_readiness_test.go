@@ -19,6 +19,11 @@ const (
 	readinessDeploy = "mysql-lion-dc2"
 )
 
+// readinessNow is the time the fixtures are judged at.
+var readinessNow = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+func readinessAgo(d time.Duration) metav1.Time { return metav1.NewTime(readinessNow.Add(-d)) }
+
 func readinessDeployment(generation, observed int64, replicas, updated, total int32) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: readinessDeploy, Namespace: readinessNS, Generation: generation},
@@ -36,22 +41,32 @@ func readinessDeployment(generation, observed int64, replicas, updated, total in
 // fully rolled out to its one replica.
 func rolledOut() *appsv1.Deployment { return readinessDeployment(4, 4, 1, 1, 1) }
 
+// containerReady is a container that has been running, and ready, for ten
+// minutes without a restart.
 func containerReady(name string) corev1.ContainerStatus {
-	return corev1.ContainerStatus{Name: name, Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+	return corev1.ContainerStatus{Name: name, Ready: true, State: corev1.ContainerState{
+		Running: &corev1.ContainerStateRunning{StartedAt: readinessAgo(10 * time.Minute)},
+	}}
 }
 
-func crashLooping(name string, exitCode int32) corev1.ContainerStatus {
+func exited(code int32, reason string) *corev1.ContainerStateTerminated {
+	return &corev1.ContainerStateTerminated{ExitCode: code, Reason: reason}
+}
+
+// crashLoopBackOff is a container waiting out its crash-loop back-off.
+func crashLoopBackOff(name string, exitCode int32) corev1.ContainerStatus {
 	return corev1.ContainerStatus{
 		Name: name, RestartCount: 6,
 		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
 			Reason: "CrashLoopBackOff", Message: "back-off 2m40s restarting failed container=" + name,
 		}},
-		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exitCode, Reason: "Error"}},
+		LastTerminationState: corev1.ContainerState{Terminated: exited(exitCode, "Error")},
 	}
 }
 
 // readinessPod is a pod of the ReplicaSet with the given pod-template-hash.
-// Without status edits it is Running with both containers Ready.
+// Without status edits it is Running with both containers Ready, and has
+// been Ready for nine minutes.
 func readinessPod(name, hash string, edits ...func(*corev1.Pod)) *corev1.Pod {
 	controller := true
 	pod := &corev1.Pod{
@@ -66,8 +81,11 @@ func readinessPod(name, hash string, edits ...func(*corev1.Pod)) *corev1.Pod {
 			}},
 		},
 		Status: corev1.PodStatus{
-			Phase:             corev1.PodRunning,
-			Conditions:        []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}, {Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: readinessAgo(9 * time.Minute)},
+			},
 			ContainerStatuses: []corev1.ContainerStatus{containerReady("mysql"), containerReady("sidecar")},
 		},
 	}
@@ -87,6 +105,23 @@ func notReady(statuses ...corev1.ContainerStatus) func(*corev1.Pod) {
 	}
 }
 
+// readySince sets when the pod's Ready condition last turned True.
+func readySince(at metav1.Time) func(*corev1.Pod) {
+	return func(p *corev1.Pod) {
+		podConditionOf(p, corev1.PodReady).LastTransitionTime = at
+	}
+}
+
+// withNativeSidecar adds a restartable init container named proxy.
+func withNativeSidecar(status corev1.ContainerStatus) func(*corev1.Pod) {
+	return func(p *corev1.Pod) {
+		always := corev1.ContainerRestartPolicyAlways
+		p.Spec.InitContainers = []corev1.Container{{Name: "proxy", RestartPolicy: &always}}
+		status.Name = "proxy"
+		p.Status.InitContainerStatuses = []corev1.ContainerStatus{status}
+	}
+}
+
 func terminating(p *corev1.Pod) {
 	now := metav1.NewTime(time.Now())
 	p.DeletionTimestamp = &now
@@ -94,7 +129,23 @@ func terminating(p *corev1.Pod) {
 	p.Finalizers = []string{"test.shipstream.io/hold"}
 }
 
+func probeReadiness(t *testing.T, objs ...client.Object) PodReadiness {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).Build()
+	got, err := deploymentPodReadiness(context.Background(), c, types.NamespacedName{Namespace: readinessNS, Name: readinessDeploy}, readinessNow)
+	if err != nil {
+		t.Fatalf("deploymentPodReadiness() error = %v", err)
+	}
+	return got
+}
+
 func TestDeploymentPodReadiness(t *testing.T) {
+	restartedRecently := func(code int32, reason string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{Ready: true, RestartCount: 3,
+			State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: readinessAgo(5 * time.Second)}},
+			LastTerminationState: corev1.ContainerState{Terminated: exited(code, reason)},
+		}
+	}
 	for _, tc := range []struct {
 		name       string
 		objs       []client.Object
@@ -103,9 +154,58 @@ func TestDeploymentPodReadiness(t *testing.T) {
 		wantReason string
 	}{
 		{
-			name:      "pod of the current template Ready",
+			name:      "pod of the current template Ready for long enough",
 			objs:      []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new")},
 			wantReady: true, wantPod: "mysql-lion-dc2-new-a",
+		},
+		{
+			name:      "Ready for exactly the settle time",
+			objs:      []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", readySince(readinessAgo(podStableFor)))},
+			wantReady: true, wantPod: "mysql-lion-dc2-new-a",
+		},
+		{
+			name:       "Ready for 10s",
+			objs:       []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", readySince(readinessAgo(10*time.Second)))},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: "pod Ready for less than 30s",
+		},
+		{
+			// The node's clock runs ahead of the operator's.
+			name:       "Ready condition in the future",
+			objs:       []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", readySince(readinessAgo(-2*time.Minute)))},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: "pod Ready for less than 30s",
+		},
+		{
+			// The pod has been Ready for minutes as far as its condition
+			// says, but the sidecar crashed and came back 5s ago without
+			// the condition catching it.
+			name: "container restarted 5s ago under an old Ready condition",
+			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", func(p *corev1.Pod) {
+				sidecar := restartedRecently(1, "Error")
+				sidecar.Name = "sidecar"
+				p.Status.ContainerStatuses[1] = sidecar
+			})},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: "sidecar not ready: crash looping, last exit code 1 (Error)",
+		},
+		{
+			name: "native sidecar init container restarted 5s ago under an old Ready condition",
+			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new",
+				withNativeSidecar(restartedRecently(137, "OOMKilled")))},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: "init container proxy not ready: crash looping, last exit code 137 (OOMKilled)",
+		},
+		{
+			// A restart an hour ago is not a crash loop; the readiness probe
+			// failed and recovered since.
+			name: "Ready for 10s after a restart long ago",
+			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", readySince(readinessAgo(10*time.Second)), func(p *corev1.Pod) {
+				p.Status.ContainerStatuses[1].RestartCount = 4
+				p.Status.ContainerStatuses[1].LastTerminationState = corev1.ContainerState{Terminated: exited(1, "Error")}
+			})},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: "pod Ready for less than 30s",
 		},
 		{
 			// The case the rollout replaces a pod in: the old pod can
@@ -113,10 +213,10 @@ func TestDeploymentPodReadiness(t *testing.T) {
 			name: "replaced pod still Ready while terminating, new pod crash-looping",
 			objs: []client.Object{rolledOut(),
 				readinessPod("mysql-lion-dc2-old-a", "old", terminating),
-				readinessPod("mysql-lion-dc2-new-a", "new", notReady(containerReady("mysql"), crashLooping("sidecar", 1))),
+				readinessPod("mysql-lion-dc2-new-a", "new", notReady(containerReady("mysql"), crashLoopBackOff("sidecar", 1))),
 			},
 			wantPod:    "mysql-lion-dc2-new-a",
-			wantReason: "sidecar not ready: CrashLoopBackOff, last exit code 1 (Error)",
+			wantReason: "sidecar not ready: crash looping, last exit code 1 (Error)",
 		},
 		{
 			name:       "controller has not observed the new template, old pod Ready",
@@ -192,15 +292,16 @@ func TestDeploymentPodReadiness(t *testing.T) {
 			name: "init container crash-looping",
 			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", func(p *corev1.Pod) {
 				p.Status.Phase = corev1.PodPending
+				p.Spec.InitContainers = []corev1.Container{{Name: "keyring-init"}, {Name: "init"}}
 				p.Status.InitContainerStatuses = []corev1.ContainerStatus{
-					{Name: "keyring-init", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
-					crashLooping("init", 2),
+					{Name: "keyring-init", State: corev1.ContainerState{Terminated: exited(0, "Completed")}},
+					crashLoopBackOff("init", 2),
 				}
 				waiting := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}
 				notReady(corev1.ContainerStatus{Name: "mysql", State: waiting}, corev1.ContainerStatus{Name: "sidecar", State: waiting})(p)
 			})},
 			wantPod:    "mysql-lion-dc2-new-a",
-			wantReason: "init container init not ready: CrashLoopBackOff, last exit code 2 (Error)",
+			wantReason: "init container init not ready: crash looping, last exit code 2 (Error)",
 		},
 		{
 			// An ordinary init container has no readiness probe: running
@@ -219,15 +320,28 @@ func TestDeploymentPodReadiness(t *testing.T) {
 			wantReason: "init container keyring-init not ready: still running",
 		},
 		{
-			name: "native sidecar init container readiness probe failing",
+			// Running again after failing is a phase of its crash loop,
+			// not the pod still initializing.
+			name: "init container running again after failing",
 			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", func(p *corev1.Pod) {
-				always := corev1.ContainerRestartPolicyAlways
-				p.Spec.InitContainers = []corev1.Container{{Name: "proxy", RestartPolicy: &always}}
-				p.Status.InitContainerStatuses = []corev1.ContainerStatus{
-					{Name: "proxy", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
-				}
-				notReady(containerReady("mysql"), containerReady("sidecar"))(p)
+				p.Status.Phase = corev1.PodPending
+				p.Spec.InitContainers = []corev1.Container{{Name: "init"}}
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "init", RestartCount: 3,
+					State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: readinessAgo(2 * time.Second)}},
+					LastTerminationState: corev1.ContainerState{Terminated: exited(2, "Error")},
+				}}
+				waiting := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}
+				notReady(corev1.ContainerStatus{Name: "mysql", State: waiting}, corev1.ContainerStatus{Name: "sidecar", State: waiting})(p)
 			})},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: "init container init not ready: crash looping, last exit code 2 (Error)",
+		},
+		{
+			name: "native sidecar init container readiness probe failing",
+			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new",
+				withNativeSidecar(corev1.ContainerStatus{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}),
+				notReady(containerReady("mysql"), containerReady("sidecar")),
+			)},
 			wantPod:    "mysql-lion-dc2-new-a",
 			wantReason: "init container proxy not ready: running, readiness probe failing",
 		},
@@ -251,13 +365,20 @@ func TestDeploymentPodReadiness(t *testing.T) {
 			wantPod:    "mysql-lion-dc2-new-a",
 			wantReason: `sidecar not ready: CreateContainerConfigError: secret "lion-pitr" not found`,
 		},
+		{
+			name: "image pull failure keeps its message",
+			objs: []client.Object{rolledOut(), readinessPod("mysql-lion-dc2-new-a", "new", notReady(
+				containerReady("mysql"),
+				corev1.ContainerStatus{Name: "sidecar", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "ErrImagePull", Message: `failed to pull image "bloodraven-sidecar:v9": not found`,
+				}}},
+			))},
+			wantPod:    "mysql-lion-dc2-new-a",
+			wantReason: `sidecar not ready: ErrImagePull: failed to pull image "bloodraven-sidecar:v9": not found`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(tc.objs...).Build()
-			got, err := deploymentPodReadiness(context.Background(), c, types.NamespacedName{Namespace: readinessNS, Name: readinessDeploy})
-			if err != nil {
-				t.Fatalf("deploymentPodReadiness() error = %v", err)
-			}
+			got := probeReadiness(t, tc.objs...)
 			if got.Ready != tc.wantReady || got.Pod != tc.wantPod || got.Reason != tc.wantReason {
 				t.Fatalf("deploymentPodReadiness() = %+v, want ready=%v pod=%q reason=%q", got, tc.wantReady, tc.wantPod, tc.wantReason)
 			}
@@ -265,21 +386,98 @@ func TestDeploymentPodReadiness(t *testing.T) {
 	}
 }
 
-// The restart count lets the ordered update tell one container run that
-// stays Ready from a crash and restart between two Ready probes.
-func TestDeploymentPodReadinessCountsRestarts(t *testing.T) {
-	pod := readinessPod("mysql-lion-dc2-new-a", "new", func(p *corev1.Pod) {
-		p.Status.ContainerStatuses[0].RestartCount = 1
-		p.Status.ContainerStatuses[1].RestartCount = 4
-		// A native sidecar init container runs for the pod's lifetime, so
-		// its crashes count too.
-		p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "proxy", Ready: true, RestartCount: 2,
-			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+// crashLoopPhase is one phase a probe can find a crash-looping container in:
+// its status, and whether it, and with it the pod, is Ready.
+type crashLoopPhase struct {
+	name   string
+	status corev1.ContainerStatus
+	ready  bool
+}
+
+// crashLoopPhases are the phases of a crash loop whose last exit was code 1
+// (Error), as of readinessNow: waiting out the back-off, running again
+// before its readiness probe passes, Ready again for a few seconds, and
+// terminated again. In the terminated phase the last termination is the
+// crash before, which exited differently.
+func crashLoopPhases() []crashLoopPhase {
+	return []crashLoopPhase{
+		{name: "back-off", status: corev1.ContainerStatus{RestartCount: 6,
+			State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 2m40s restarting failed container"}},
+			LastTerminationState: corev1.ContainerState{Terminated: exited(1, "Error")},
+		}},
+		{name: "running, not ready yet", status: corev1.ContainerStatus{RestartCount: 7,
+			State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: readinessAgo(2 * time.Second)}},
+			LastTerminationState: corev1.ContainerState{Terminated: exited(1, "Error")},
+		}},
+		{name: "Ready for a few seconds", ready: true, status: corev1.ContainerStatus{RestartCount: 7, Ready: true,
+			State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: readinessAgo(12 * time.Second)}},
+			LastTerminationState: corev1.ContainerState{Terminated: exited(1, "Error")},
+		}},
+		{name: "terminated", status: corev1.ContainerStatus{RestartCount: 7,
+			State:                corev1.ContainerState{Terminated: exited(1, "Error")},
+			LastTerminationState: corev1.ContainerState{Terminated: exited(2, "Error")},
+		}},
+	}
+}
+
+// sidecarCrashLoopPod is a site pod whose sidecar container is in the given
+// phase of a crash loop. In a Ready phase the pod has been Ready for 4s.
+func sidecarCrashLoopPod(phase crashLoopPhase) *corev1.Pod {
+	cs := phase.status
+	cs.Name = "sidecar"
+	edit := notReady(containerReady("mysql"), cs)
+	if phase.ready {
+		edit = func(p *corev1.Pod) {
+			p.Status.ContainerStatuses[1] = cs
+			readySince(readinessAgo(4 * time.Second))(p)
+		}
+	}
+	return readinessPod("mysql-lion-dc2-new-a", "new", edit)
+}
+
+// nativeSidecarCrashLoopPod is a site pod whose restartable init container
+// is in the given phase of a crash loop.
+func nativeSidecarCrashLoopPod(phase crashLoopPhase) *corev1.Pod {
+	return readinessPod("mysql-lion-dc2-new-a", "new", withNativeSidecar(phase.status), func(p *corev1.Pod) {
+		if phase.ready {
+			readySince(readinessAgo(4 * time.Second))(p)
+		} else {
+			notReady(containerReady("mysql"), containerReady("sidecar"))(p)
+		}
 	})
-	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(rolledOut(), pod).Build()
-	got, err := deploymentPodReadiness(context.Background(), c, types.NamespacedName{Namespace: readinessNS, Name: readinessDeploy})
-	if err != nil || !got.Ready || got.Restarts != 7 {
-		t.Fatalf("deploymentPodReadiness() = %+v, %v; want Ready with 7 restarts", got, err)
+}
+
+// A probe can land on any phase of a crash loop. Each must read as the same
+// cause, or the stall it is reported in would be rewritten, and a Warning
+// Event fired, on almost every retry.
+func TestDeploymentPodReadinessCrashLoopReadsTheSameInEveryPhase(t *testing.T) {
+	for _, loop := range []struct {
+		name string
+		pod  func(crashLoopPhase) *corev1.Pod
+		want string
+	}{
+		{name: "container", pod: sidecarCrashLoopPod, want: sidecarCrashLoop},
+		{name: "native sidecar init container", pod: nativeSidecarCrashLoopPod,
+			want: "init container proxy not ready: crash looping, last exit code 1 (Error)"},
+	} {
+		for _, phase := range crashLoopPhases() {
+			t.Run(loop.name+"/"+phase.name, func(t *testing.T) {
+				got := probeReadiness(t, rolledOut(), loop.pod(phase))
+				if got.Ready || got.Reason != loop.want {
+					t.Fatalf("deploymentPodReadiness() = %+v, want not Ready with reason %q", got, loop.want)
+				}
+			})
+		}
+	}
+}
+
+// A crash-looping container that never left a termination record still
+// reads as crash looping, without an exit.
+func TestCrashLoopReasonWithoutExit(t *testing.T) {
+	got := containerNotReadyReason(corev1.ContainerStatus{Name: "sidecar", RestartCount: 2,
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}})
+	if want := "sidecar not ready: crash looping"; got != want {
+		t.Fatalf("containerNotReadyReason() = %q, want %q", got, want)
 	}
 }
 
@@ -288,7 +486,7 @@ func TestDeploymentPodReadinessCountsRestarts(t *testing.T) {
 func TestDeploymentPodReadinessReportsListErrors(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(rolledOut()).Build()
 	if _, err := deploymentPodReadiness(context.Background(), failingListReader{Reader: c},
-		types.NamespacedName{Namespace: readinessNS, Name: readinessDeploy}); err == nil {
+		types.NamespacedName{Namespace: readinessNS, Name: readinessDeploy}, readinessNow); err == nil {
 		t.Fatal("deploymentPodReadiness() error = nil, want the list failure")
 	}
 }
@@ -297,7 +495,7 @@ func TestDeploymentPodReadinessReportsListErrors(t *testing.T) {
 // through the uncached APIReader, whose view of a replaced pod is current.
 func TestSitePodReadinessReadsSiteDeploymentThroughAPIReader(t *testing.T) {
 	api := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(rolledOut(),
-		readinessPod("mysql-lion-dc2-new-a", "new", notReady(containerReady("mysql"), crashLooping("sidecar", 1)))).Build()
+		readinessPod("mysql-lion-dc2-new-a", "new", notReady(containerReady("mysql"), crashLoopBackOff("sidecar", 1)))).Build()
 	// The cached client still shows the replaced pod Ready.
 	cached := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(rolledOut(),
 		readinessPod("mysql-lion-dc2-new-a", "new")).Build()
@@ -306,7 +504,7 @@ func TestSitePodReadinessReadsSiteDeploymentThroughAPIReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SitePodReadiness() error = %v", err)
 	}
-	if got.Ready || !strings.Contains(got.Reason, "CrashLoopBackOff") {
+	if got.Ready || !strings.Contains(got.Reason, "crash looping") {
 		t.Fatalf("SitePodReadiness() = %+v, want the APIReader's crash-looping pod", got)
 	}
 }

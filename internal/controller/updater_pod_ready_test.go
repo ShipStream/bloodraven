@@ -14,24 +14,23 @@ import (
 	"github.com/shipstream/bloodraven/internal/testutil"
 )
 
-const sidecarCrashLoop = "sidecar not ready: CrashLoopBackOff, last exit code 1 (Error)"
+const sidecarCrashLoop = "sidecar not ready: crash looping, last exit code 1 (Error)"
 
-// fakeSitePod is a site's pod as the readiness probe reports it. A broken
-// pod reports not Ready until healAfter further probes have seen it broken
-// (never when healAfter is 0). A flapping pod reports Ready on every probe
-// but with one more restart each time: a crash loop sampled between crashes.
+// fakeSitePod is a site's pod as the readiness probe reports it. The probe
+// owns what Ready means (Ready for podStableFor), so the fake only says
+// Ready or not. A broken pod reports not Ready until healAfter further
+// probes have seen it broken (never when healAfter is 0). Queued script
+// verdicts (true for Ready) are reported first, one per probe.
 type fakeSitePod struct {
 	name string
 
 	mu        sync.Mutex
 	broken    bool
 	healAfter int
-	flapping  bool
 	err       error
-	restarts  int32
+	script    []bool
 	probes    int
-	readyRun  int // consecutive Ready reports
-	maxRun    int
+	readies   int // Ready reports
 }
 
 func (p *fakeSitePod) breakIt() {
@@ -45,29 +44,26 @@ func (p *fakeSitePod) probe(context.Context) (PodReadiness, error) {
 	defer p.mu.Unlock()
 	p.probes++
 	if p.err != nil {
-		p.readyRun = 0
 		return PodReadiness{}, p.err
 	}
-	if p.broken {
-		if p.healAfter > 0 {
-			p.healAfter--
-			p.broken = p.healAfter > 0
-		}
-		p.readyRun = 0
-		return PodReadiness{Pod: p.name, Restarts: p.restarts, Reason: sidecarCrashLoop}, nil
+	ready := !p.broken
+	if len(p.script) > 0 {
+		ready, p.script = p.script[0], p.script[1:]
+	} else if p.broken && p.healAfter > 0 {
+		p.healAfter--
+		p.broken = p.healAfter > 0
 	}
-	if p.flapping {
-		p.restarts++
+	if !ready {
+		return PodReadiness{Pod: p.name, Reason: sidecarCrashLoop}, nil
 	}
-	p.readyRun++
-	p.maxRun = max(p.maxRun, p.readyRun)
-	return PodReadiness{Ready: true, Pod: p.name, Restarts: p.restarts}, nil
+	p.readies++
+	return PodReadiness{Ready: true, Pod: p.name}, nil
 }
 
-func (p *fakeSitePod) longestReadyRun() int {
+func (p *fakeSitePod) readyReports() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.maxRun
+	return p.readies
 }
 
 func directReplicaOf(source string) *testutil.FakeMySQL {
@@ -138,8 +134,8 @@ func TestExecuteTargets_StopsOnRolledFollowerWhosePodIsNotReady(t *testing.T) {
 	}
 }
 
-// A pod that takes a few probes to come up passes once it has been Ready
-// twice in a row, and the rollout goes on to the handoff and the old active.
+// A pod that takes a few probes to come up passes once the probe reports it
+// Ready, and the rollout goes on to the handoff and the old active.
 func TestExecuteTargets_ProceedsOnceRolledPodIsReady(t *testing.T) {
 	source := newOldActive(handoffUUID+":1-100", handoffUUID+":1-100")
 	candidate := handoffCandidate(handoffUUID + ":1-100")
@@ -148,7 +144,7 @@ func TestExecuteTargets_ProceedsOnceRolledPodIsReady(t *testing.T) {
 	uc := podGateController()
 	uc.rolledSiteTimeout = 5 * time.Second
 	var applied []string
-	var readyRunAtHandoff int
+	var readyAtHandoff int
 	processed, err := uc.ExecuteTargets(context.Background(),
 		UpdateTarget{Name: "primary", Host: "primary-internal", Checker: source, Drifted: true, PodReady: activePod.probe},
 		[]UpdateTarget{{Name: "standby", Host: "standby-internal", Checker: candidate.Checker(), Promotable: true, Drifted: true,
@@ -164,7 +160,7 @@ func TestExecuteTargets_ProceedsOnceRolledPodIsReady(t *testing.T) {
 				source.restart()
 			}
 			return nil
-		}, func(string, string) { readyRunAtHandoff = standbyPod.longestReadyRun() })
+		}, func(string, string) { readyAtHandoff = standbyPod.readyReports() })
 	if err != nil {
 		t.Fatalf("ExecuteTargets() error = %v", err)
 	}
@@ -174,8 +170,10 @@ func TestExecuteTargets_ProceedsOnceRolledPodIsReady(t *testing.T) {
 	if got := strings.Join(applied, ","); got != "standby,primary" {
 		t.Fatalf("applied = %q", got)
 	}
-	if readyRunAtHandoff < 2 {
-		t.Fatalf("handoff ran after %d consecutive Ready probes of the rolled standby, want at least 2", readyRunAtHandoff)
+	// One Ready verdict ended the wait for the standby, and the check
+	// before the handoff probed it again.
+	if readyAtHandoff != 2 {
+		t.Fatalf("handoff ran after %d Ready reports of the rolled standby, want 2", readyAtHandoff)
 	}
 }
 
@@ -312,77 +310,63 @@ func TestExecuteTargets_DoesNotRollFollowerWhileUpdatedSiteIsNotReady(t *testing
 	}
 }
 
-// A container that crashes between probes can be Ready on every probe; the
-// restart count gives it away. It never counts as Ready, so the update
-// stops instead of moving on.
-func TestExecuteTargets_CrashLoopReadyBetweenProbesIsNotReady(t *testing.T) {
-	uc := podGateController()
-	pod := &fakeSitePod{name: "mysql-lion-a-1"}
-	var applied []string
-	_, err := uc.ExecuteTargets(context.Background(),
-		UpdateTarget{Name: "primary", Host: "primary-internal", Checker: &testutil.FakeMySQL{ReadOnlyVal: false}},
-		[]UpdateTarget{
-			{Name: "a", Checker: directReplicaOf("primary-internal"), Drifted: true, ExpectedSource: "primary-internal", PodReady: pod.probe},
-			{Name: "b", Checker: directReplicaOf("primary-internal"), Drifted: true, ExpectedSource: "primary-internal",
-				PodReady: (&fakeSitePod{name: "mysql-lion-b-1"}).probe},
-		},
-		func(_ context.Context, name string) error {
-			applied = append(applied, name)
-			if name == "a" {
-				pod.mu.Lock()
-				pod.flapping = true
-				pod.mu.Unlock()
-			}
-			return nil
-		}, nil)
-
-	stall := requirePodStall(t, err, "a", true)
-	if stall.Reason != "a container restarted between readiness probes" {
-		t.Fatalf("stall.Reason = %q", stall.Reason)
-	}
-	if got := strings.Join(applied, ","); got != "a" {
-		t.Fatalf("applied = %q, want only a", got)
-	}
-}
-
-func TestPodReadyStreak(t *testing.T) {
-	ready := func(pod string, restarts int32) PodReadiness {
-		return PodReadiness{Ready: true, Pod: pod, Restarts: restarts}
-	}
-	notReady := PodReadiness{Pod: "p", Reason: sidecarCrashLoop}
+// Every gate probes afresh, and the probe owns what Ready means (Ready for
+// podStableFor). A site whose wait ended on a Ready verdict is still
+// refused when the check before the next step finds it crash looping again:
+// one Ready reading between crash-loop readings does not carry the update
+// on to another site.
+func TestExecuteTargets_RechecksRolledPodBeforeTheNextStep(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		obs    []PodReadiness
-		errAt  int // 1-based observation that fails, 0 for none
-		stable bool
-		reason string
+		name         string
+		activeDrifts bool
+		next         string
 	}{
-		{name: "one Ready probe", obs: []PodReadiness{ready("p", 0)}, reason: "Ready for less than one probe interval"},
-		{name: "two Ready probes", obs: []PodReadiness{ready("p", 0), ready("p", 0)}, stable: true},
-		{name: "restart in between", obs: []PodReadiness{ready("p", 0), ready("p", 1)}, reason: "a container restarted between readiness probes"},
-		{name: "Ready again after the restart", obs: []PodReadiness{ready("p", 0), ready("p", 1), ready("p", 1)}, stable: true},
-		{name: "restart while not Ready", obs: []PodReadiness{{Pod: "p", Reason: sidecarCrashLoop}, ready("p", 1)}, reason: "a container restarted between readiness probes"},
-		{name: "pod replaced in between", obs: []PodReadiness{ready("p", 0), ready("q", 0)}, reason: "Ready for less than one probe interval"},
-		{name: "not Ready in between", obs: []PodReadiness{ready("p", 0), notReady, ready("p", 0)}, reason: "Ready for less than one probe interval"},
-		{name: "Ready after not Ready", obs: []PodReadiness{notReady, ready("p", 0), ready("p", 0)}, stable: true},
-		{name: "not Ready", obs: []PodReadiness{ready("p", 0), notReady}, reason: sidecarCrashLoop},
-		{name: "probe error", obs: []PodReadiness{ready("p", 0), {}}, errAt: 2, reason: "pod readiness unknown: apiserver unavailable"},
-		{name: "probe error in between", obs: []PodReadiness{ready("p", 0), {}, ready("p", 0)}, errAt: 2, reason: "Ready for less than one probe interval"},
+		{name: "before rolling the next follower", next: "updating follower b"},
+		{name: "before handing off the active site", activeDrifts: true, next: "handing off the active site primary"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var s podReadyStreak
-			for i, o := range tc.obs {
-				var err error
-				if i+1 == tc.errAt {
-					err = errors.New("apiserver unavailable")
-				}
-				s.observe(o, err)
+			uc := podGateController()
+			uc.rolledSiteTimeout = 5 * time.Second
+			active := &testutil.FakeMySQL{ReadOnlyVal: false}
+			podA := &fakeSitePod{name: "mysql-lion-a-1"}
+			followers := []UpdateTarget{{Name: "a", Host: "a-internal", Checker: directReplicaOf("primary-internal"), Promotable: true,
+				Drifted: true, ExpectedSource: "primary-internal", PodReady: podA.probe}}
+			if !tc.activeDrifts {
+				followers = append(followers, UpdateTarget{Name: "b", Checker: directReplicaOf("primary-internal"), Drifted: true,
+					ExpectedSource: "primary-internal", PodReady: (&fakeSitePod{name: "mysql-lion-b-1"}).probe})
 			}
-			if s.stable() != tc.stable {
-				t.Fatalf("stable() = %v, want %v", s.stable(), tc.stable)
+			var applied []string
+			processed, err := uc.ExecuteTargets(context.Background(),
+				UpdateTarget{Name: "primary", Host: "primary-internal", Checker: active, Drifted: tc.activeDrifts,
+					PodReady: (&fakeSitePod{name: "mysql-lion-primary-1"}).probe},
+				followers,
+				func(_ context.Context, name string) error {
+					applied = append(applied, name)
+					if name == "a" {
+						podA.mu.Lock()
+						// Crash looping, Ready (which ends the wait), crash
+						// looping again by the next check.
+						podA.script = []bool{false, true, false}
+						podA.mu.Unlock()
+					}
+					return nil
+				}, func(site, _ string) { t.Errorf("authority moved to %s", site) })
+
+			stall := requirePodStall(t, err, "a", false)
+			if stall.Next != tc.next || stall.Pod != "mysql-lion-a-1" || stall.Reason != sidecarCrashLoop {
+				t.Fatalf("stall = %+v, want a's crash loop refusing %q", stall, tc.next)
 			}
-			if !tc.stable && s.reason() != tc.reason {
-				t.Fatalf("reason() = %q, want %q", s.reason(), tc.reason)
+			if podA.readyReports() != 1 {
+				t.Fatalf("a reported Ready %d times, want once (the end of its wait)", podA.readyReports())
+			}
+			if got := strings.Join(processed, ","); got != "a" {
+				t.Fatalf("processed = %q, want a: its wait ended Ready", got)
+			}
+			if got := strings.Join(applied, ","); got != "a" {
+				t.Fatalf("applied = %q, want only a", got)
+			}
+			if fenced(active) {
+				t.Fatal("the active site was fenced")
 			}
 		})
 	}

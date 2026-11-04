@@ -48,7 +48,7 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 
 	cond, events := write(stalled)
 	wantMsg := "Ordered update stalled: " + stalled.UpdateStalled +
-		". No other site is rolled and the active site is not handed off until that pod is Ready; the update retries every 30s"
+		". No other site is rolled and the active site is not handed off until that pod has been Ready for 30s; the update retries every 30s"
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonOrderedUpdateStalled || cond.Message != wantMsg {
 		t.Fatalf("Updating = %+v, want False/%s %q", cond, ReasonOrderedUpdateStalled, wantMsg)
 	}

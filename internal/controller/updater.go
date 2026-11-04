@@ -87,7 +87,8 @@ type UpdateTarget struct {
 	DivergentTransactions int64
 	DivergentGtid         string
 	// PodReady reports whether the site's pod for its current pod
-	// template is Ready. The MySQL probes cannot tell: they reach MySQL
+	// template is Ready, by PodReadiness's definition: Ready continuously
+	// for podStableFor. The MySQL probes cannot tell: they reach MySQL
 	// through the -internal Service, which publishes not-ready addresses,
 	// so a pod whose sidecar crash-loops still answers them. Nil turns
 	// the pod-readiness gate off for this site; production always sets
@@ -266,7 +267,8 @@ func (u *UpdateController) Execute(ctx context.Context,
 // The returned names completed successfully and may be removed from drift.
 //
 // A rolled site counts as done only once its MySQL replicates directly from
-// the primary and its new pod is Ready. Before it takes any site out of
+// the primary and its new pod is Ready, which the probe reports only for a
+// pod Ready continuously for podStableFor. Before it takes any site out of
 // service (rolling a follower, handing off the active site) the update also
 // requires every site that already runs the new pod template to have a
 // Ready pod, so a template that breaks pods stops at the first site it
@@ -531,15 +533,17 @@ func (u *UpdateController) waitForReplicaReadyWatching(ctx context.Context, chec
 
 // waitForRolledSite is waitForReplicaReadyWatching for a site the update
 // just rolled, plus its pod when target.PodReady is set: the site is ready
-// once its MySQL is a read-only direct replica of expected and its new pod
-// has been Ready on two consecutive probes, one tick apart, with no
-// container restart in between. One Ready sample is not enough: a
-// crash-looping container passes its readiness probe between crashes.
+// once its MySQL is a read-only direct replica of expected and a probe
+// reports its new pod Ready. The probe owns what Ready means (Ready
+// continuously for podStableFor, see deploymentPodReadiness), so one Ready
+// verdict is enough here, and a crash-looping container caught passing its
+// readiness probe between crashes is not one.
 //
 // The primary probe runs for the whole wait, so a primary that dies while
 // a rolled pod is still starting ends the update as promptly as one that
 // dies while MySQL catches up. A pod that is not Ready when the wait times
-// out returns a *PodNotReadyError, whatever MySQL reported.
+// out returns a *PodNotReadyError carrying the last probe's reason,
+// whatever MySQL reported.
 func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateTarget, expected string, primary mysql.Checker, timeout time.Duration) error {
 	// N consecutive failed probes, one per tick, span (N-1) ticks between
 	// the first and last: the first failure opens the window rather than
@@ -551,14 +555,15 @@ func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateT
 		}
 	}
 	lost := 0
-	var pod podReadyStreak
+	var pod PodReadiness
+	var podErr error
 	deadline := time.Now().Add(timeout)
 	for {
 		replicating := directReplicaReady(ctx, target.Checker, expected)
 		podReady := true
 		if target.PodReady != nil {
-			pod.observe(u.probePod(ctx, target))
-			podReady = pod.stable()
+			pod, podErr = u.probePod(ctx, target)
+			podReady = podErr == nil && pod.Ready
 		}
 		if replicating && podReady {
 			return nil
@@ -584,8 +589,8 @@ func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateT
 		}
 		if time.Now().After(deadline) {
 			if !podReady {
-				return &PodNotReadyError{Site: target.Name, Pod: pod.last.Pod, Reason: pod.reason(),
-					Rolled: true, Waited: timeout, Err: pod.err}
+				return &PodNotReadyError{Site: target.Name, Pod: pod.Pod, Reason: podVerdictReason(pod, podErr),
+					Rolled: true, Waited: timeout, Err: podErr}
 			}
 			return fmt.Errorf("timeout waiting for direct replication")
 		}
@@ -623,46 +628,13 @@ func directReplicaReady(ctx context.Context, checker mysql.Checker, expected str
 	return rs.IORunning && rs.SQLRunning && canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected)
 }
 
-// podReadyStreak counts consecutive Ready observations of one container
-// run: the same pod with the same restart count.
-type podReadyStreak struct {
-	last  PodReadiness
-	err   error
-	ready int
-	// restarted records that the pod's restart count moved between the
-	// last two observations.
-	restarted bool
-}
-
-func (s *podReadyStreak) observe(pr PodReadiness, err error) {
+// podVerdictReason is the stall reason for a probe that did not report the
+// pod Ready: the probe's own reason, or why it could not tell.
+func podVerdictReason(pr PodReadiness, err error) string {
 	if err != nil {
-		s.last, s.err, s.ready, s.restarted = PodReadiness{}, err, 0, false
-		return
+		return "pod readiness unknown: " + err.Error()
 	}
-	s.restarted = s.last.Pod != "" && pr.Pod == s.last.Pod && pr.Restarts != s.last.Restarts
-	switch {
-	case !pr.Ready:
-		s.ready = 0
-	case s.ready > 0 && pr.Pod == s.last.Pod && !s.restarted:
-		s.ready++
-	default:
-		s.ready = 1
-	}
-	s.last, s.err = pr, nil
-}
-
-func (s *podReadyStreak) stable() bool { return s.ready >= 2 }
-
-func (s *podReadyStreak) reason() string {
-	switch {
-	case s.err != nil:
-		return "pod readiness unknown: " + s.err.Error()
-	case s.last.Ready && s.restarted:
-		return "a container restarted between readiness probes"
-	case s.last.Ready:
-		return "Ready for less than one probe interval"
-	}
-	return s.last.Reason
+	return pr.Reason
 }
 
 func (u *UpdateController) probePod(ctx context.Context, target UpdateTarget) (PodReadiness, error) {
@@ -694,6 +666,11 @@ func sitesOnTemplate(active UpdateTarget, followers []UpdateTarget) []UpdateTarg
 // drift left and would even be chosen for the handoff. next names the
 // refused step for the stall message. A probe error refuses too: the
 // update does not roll on an unknown.
+//
+// It probes each site afresh and trusts no earlier verdict, not even the
+// one that ended this attempt's wait for the site: a pod Ready then may
+// have crashed since. One probe is enough because Ready already means Ready
+// for podStableFor, so a crash loop caught between crashes is refused.
 func (u *UpdateController) requirePodsReady(ctx context.Context, sites []UpdateTarget, next string) error {
 	for _, s := range sites {
 		if s.PodReady == nil {
@@ -704,7 +681,7 @@ func (u *UpdateController) requirePodsReady(ctx context.Context, sites []UpdateT
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return &PodNotReadyError{Site: s.Name, Reason: "pod readiness unknown: " + err.Error(), Next: next, Err: err}
+			return &PodNotReadyError{Site: s.Name, Reason: podVerdictReason(pr, err), Next: next, Err: err}
 		}
 		if !pr.Ready {
 			return &PodNotReadyError{Site: s.Name, Pod: pr.Pod, Reason: pr.Reason, Next: next}
@@ -722,8 +699,10 @@ func (u *UpdateController) requireUpdatedPodsReady(ctx context.Context, active U
 }
 
 // rolloutError turns a rollout that did not complete into a pod-readiness
-// stall when the site's pod is what is missing. Other apply failures, and
-// any failure once ctx is done, are returned unchanged.
+// stall when the site's pod is what is missing. That includes a pod that
+// became Ready less than podStableFor ago; the next attempt finds the site
+// on the new template and probes it again. Other apply failures, and any
+// failure once ctx is done, are returned unchanged.
 func (u *UpdateController) rolloutError(ctx context.Context, target UpdateTarget, err error) error {
 	var incomplete *RolloutIncompleteError
 	if target.PodReady == nil || ctx.Err() != nil || !errors.As(err, &incomplete) {
