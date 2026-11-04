@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -12,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 )
 
@@ -257,24 +261,28 @@ func managerRotationBlocked(mt *managedTopology, site string) bool {
 	return mt.tm.keyringRotationBlockedLocked(site)
 }
 
-// A rotation admitted while no manager runs, or against a manager that is
-// then replaced, must block promotion on whichever manager runs next,
-// before its Run can claim an ordered update.
-func TestRotationReservationSurvivesManagerStartAndReplacement(t *testing.T) {
+// No manager can be asked about an ordered update, so a rotation is refused
+// (and retried) until one runs. A rotation admitted against a manager that
+// is then replaced must block promotion on the replacement before its Run
+// can claim an ordered update.
+func TestRotationReservationSurvivesManagerReplacement(t *testing.T) {
 	r, _, fg, _ := lifecycleRunner(t)
 	nn := FailoverGroupNamespacedName(fg)
 	ctx := context.Background()
 	cfg := CRConfigToTopologyConfig(fg)
 
-	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); !ok {
-		t.Fatalf("reservation with no manager refused: %s", why)
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedNoManager {
+		t.Fatalf("reservation with no manager = %v, %q; want refused until a manager runs", ok, why)
 	}
 	if err := r.startManager(ctx, fg, cfg, nil); err != nil {
 		t.Fatalf("startManager: %v", err)
 	}
 	first := registeredManager(r, nn)
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); !ok {
+		t.Fatalf("reservation refused with a running manager: %s", why)
+	}
 	if !managerRotationBlocked(first, "dc2") {
-		t.Fatal("a manager started after the reservation does not block dc2")
+		t.Fatal("the running manager does not block dc2")
 	}
 
 	// Replace the manager before the stamp is persisted.
@@ -324,4 +332,82 @@ func TestRefusedRotationReservationIsNotCarried(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("refused reservation recorded: %v", pending)
 	}
+}
+
+// The interleaving the retiring list exists for: a manager is replaced
+// while its ordered-update goroutine is still alive and about to hand the
+// active site off. Until that goroutine exits, a rotation must not be
+// admitted, whatever replaced the manager; the old worker's handoff and a
+// rotation of its target cannot both proceed.
+func TestRotationRefusedWhileRetiringManagerUpdateInFlight(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	r := &TopologyManagerRunner{logger: logger, managers: make(map[types.NamespacedName]*managedTopology)}
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+
+	primary := &mockMySQL{readOnly: false}
+	standby := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+	old, _, _ := newTestTopologyManagerWithBootstrap(primary, standby)
+	old.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	pollN(old, 4)
+
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	old.PodReady = func(context.Context, string) (PodReadiness, error) {
+		once.Do(func() {
+			close(entered)
+			<-unblock
+		})
+		return PodReadiness{Ready: true}, nil
+	}
+	// The old active's own update is where this test stops the worker.
+	old.ApplyUpdate = func(context.Context, string) error { return errors.New("stop after the handoff") }
+	r.SetManagerForTest(nn, old)
+	old.SetSpecDriftSites([]string{"dc1"})
+	if !old.checkUpdate(context.Background()) {
+		t.Fatal("setup: ordered update did not start")
+	}
+	<-entered
+
+	// sync replaces the manager: retire and unregister, as the runner does.
+	r.mu.Lock()
+	r.retireManagerLocked(nn, r.managers[nn])
+	r.mu.Unlock()
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedManagerRestarting {
+		t.Fatalf("rotation with the old update in flight and no replacement = %v, %q; want refused", ok, why)
+	}
+	replacement, _, _ := newTestTopologyManagerWithBootstrap(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	r.SetManagerForTest(nn, replacement)
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedManagerRestarting {
+		t.Fatalf("rotation with the old update in flight = %v, %q; want refused until it exits", ok, why)
+	}
+	if old.checkUpdate(context.Background()) {
+		t.Fatal("a retired manager started another ordered update")
+	}
+
+	close(unblock)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		r.mu.RLock()
+		retiring := len(r.retiring[nn])
+		r.mu.RUnlock()
+		if retiring == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the retired manager was never released after its update exited")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if standbyReadOnly(standby) {
+		t.Fatal("setup: the old worker did not hand off to dc2")
+	}
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); !ok {
+		t.Fatalf("rotation still refused after the old update exited: %s", why)
+	}
+}
+
+func standbyReadOnly(m *mockMySQL) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.readOnly
 }

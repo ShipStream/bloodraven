@@ -462,15 +462,17 @@ type TopologyManager struct {
 	// the active host means the primary was replaced under the same name,
 	// which also forces a pass. pendingDivergentPromotion is a promotion of a divergent
 	// site not yet persisted as the DivergentPromotion condition.
-	// lastDivergentStallLog rate-limits the ordered update's stall warning.
+	// lastDivergentStallLog rate-limits the ordered update's stall warning,
+	// lastFollowerDriftDeferredLog the follower-drift deferral notice.
 	// All protected by mu.
-	gtidAudit                 map[string]*gtidAuditSchedule
-	gtidAuditPrimary          string
-	gtidAuditPrimaryUUID      string
-	gtidAuditAuthority        uint64
-	gtidAuditSourceUUID       map[string]string
-	pendingDivergentPromotion *DivergentPromotion
-	lastDivergentStallLog     time.Time
+	gtidAudit                    map[string]*gtidAuditSchedule
+	gtidAuditPrimary             string
+	gtidAuditPrimaryUUID         string
+	gtidAuditAuthority           uint64
+	gtidAuditSourceUUID          map[string]string
+	pendingDivergentPromotion    *DivergentPromotion
+	lastDivergentStallLog        time.Time
+	lastFollowerDriftDeferredLog time.Time
 
 	// lastReassert is when checkPrimaryReassert last restored (or attempted
 	// to restore) writability on a fenced promoted primary. Rate-limits the
@@ -583,6 +585,13 @@ type TopologyManager struct {
 	// mutation has finished. Never entered while holding mu. See
 	// beginFollowerMutation.
 	followerMutationGate mutationGate
+
+	// retired is set when the runner stops or replaces this manager; a
+	// retired manager starts no further ordered update. updateWorkers
+	// tracks the ordered-update goroutines startUpdate launched, which
+	// outlive Run. Protected by mu (updateWorkers is self-synchronized).
+	retired       bool
+	updateWorkers sync.WaitGroup
 
 	// recoveryDeferred records that old-primary recovery is standing down
 	// for a handoff, so the deferral is logged once per transition.
@@ -3395,21 +3404,24 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 		// would be retained as unsafe by every attempt. Restarting such an
 		// attempt every poll would also keep old-primary recovery, which is
 		// what heals those sites, standing down for the update.
+		tm.noteFollowerDriftDeferred(activeName, driftSites)
 		return false
 	}
 
 	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
 		"driftSites", driftSites, "active", activeName)
 	tm.mu.Lock()
-	if tm.deploymentUpdatePending {
+	if tm.deploymentUpdatePending || tm.retired {
 		tm.mu.Unlock()
 		return false
 	}
 	tm.deploymentUpdatePending = true
+	tm.updateWorkers.Add(1)
 	tm.mu.Unlock()
 
 	applyUpdate := tm.ApplyUpdate
 	go func() {
+		defer tm.updateWorkers.Done()
 		defer func() {
 			tm.mu.Lock()
 			tm.deploymentUpdatePending = false
@@ -3628,6 +3640,22 @@ func (tm *TopologyManager) recheckUpdateStall(ctx context.Context) {
 // that the active site's update waits because every otherwise eligible
 // standby is divergent. The stall is intended: the update resumes once the
 // standby is recloned or the primary contains its extra transactions.
+// noteFollowerDriftDeferred logs, at most every recoveryRetryDelay, that
+// follower-only drift waits because no drifted follower is a healthy
+// direct replica of the active site.
+func (tm *TopologyManager) noteFollowerDriftDeferred(active string, driftSites []string) {
+	tm.mu.Lock()
+	quiet := !tm.lastFollowerDriftDeferredLog.IsZero() && tm.clock.Since(tm.lastFollowerDriftDeferredLog) < recoveryRetryDelay
+	if !quiet {
+		tm.lastFollowerDriftDeferredLog = tm.clock.Now()
+	}
+	tm.mu.Unlock()
+	if !quiet {
+		tm.logger.Info("ordered update: deferring follower update; no drifted follower is a healthy direct replica",
+			"active", active, "driftSites", driftSites)
+	}
+}
+
 func (tm *TopologyManager) warnDivergentUpdateStall(active string, standbys []UpdateTarget) {
 	tm.mu.Lock()
 	quiet := !tm.lastDivergentStallLog.IsZero() && tm.clock.Since(tm.lastDivergentStallLog) < recoveryRetryDelay

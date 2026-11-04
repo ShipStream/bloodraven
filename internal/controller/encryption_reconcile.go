@@ -195,27 +195,31 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	return requeue, nil
 }
 
-// settleKeyringRotationReservations resolves the reservations a pass made
-// when its status write did not succeed. Nothing written, or a write the API
-// server rejected, means the stamp is not persisted: release. Any other
-// error (a timeout, a dropped connection) may have committed, so an
-// uncached read decides, published as the authoritative view; if that read
-// fails too, the reservations stay (fail closed) and the requeued pass
-// settles them.
+// settleKeyringRotationReservations resolves reservations when a pass's
+// status write did not succeed. This pass's reservations are released when
+// nothing was written or the API server rejected the write. Any reservation
+// the runner still holds for the group after that (this pass's after an
+// ambiguous error such as a timeout, or an earlier pass's left by a failed
+// re-read) is settled against an uncached read, published as the
+// authoritative view; if that read fails too, they stay (fail closed) and
+// the requeued pass tries again.
 func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx context.Context, nn types.NamespacedName, reserved []string, writeErr error) {
-	if r.Runner == nil || len(reserved) == 0 {
+	if r.Runner == nil {
 		return
 	}
 	if writeErr == nil || statusWriteRejected(writeErr) {
 		r.Runner.ReleaseKeyringRotationReservations(nn, reserved)
+	}
+	held := r.Runner.PendingKeyringRotationReservations(nn)
+	if len(held) == 0 {
 		return
 	}
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	var latest v1alpha1.MysqlFailoverGroup
 	if err := r.authorityReader().Get(readCtx, nn, &latest); err != nil {
-		log.FromContext(ctx).Error(err, "keyring rotation: status write outcome unknown and re-read failed; keeping the promotion block",
-			"fg", nn, "sites", reserved)
+		log.FromContext(ctx).Error(err, "keyring rotation: cannot confirm whether held rotation stamps were persisted; keeping the promotion block",
+			"fg", nn, "sites", held)
 		return
 	}
 	r.Runner.PublishKeyringRotationBlocked(nn, rotationBlockedSites(&latest))
@@ -259,18 +263,25 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 	// the only transition that moves backwards out of Sealed.
 	if site.Phase == v1alpha1.KeyringPhaseSealed && rotateTarget == site.Name {
 		ok, why := r.rotationAllowed(fg, site.Name)
+		live := false
 		if ok && r.Runner != nil {
 			// status.updatePhase reaches the CR only through the topology
 			// snapshot, so an update that has just started is invisible
 			// above. The reservation is decided live against the update's
 			// claim and blocks promotion of the site from here on.
 			ok, why = r.Runner.ReserveKeyringRotation(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, site.Name)
+			live = true
 		}
 		if !ok {
+			// A live refusal clears without any status change to wake the
+			// reconciler (an update or a manager restart ending), so it is
+			// retried on the encryption requeue, with one event per reason.
+			if !live || site.Message != why {
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringRotationRefused",
+					"refusing to rotate keyring on site %s: %s", site.Name, why)
+			}
 			site.Message = why
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringRotationRefused",
-				"refusing to rotate keyring on site %s: %s", site.Name, why)
-			return false, nil
+			return live, nil
 		}
 		site.Phase = v1alpha1.KeyringPhaseUnsealed
 		site.UnsealReason = v1alpha1.UnsealReasonRotation

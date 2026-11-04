@@ -104,6 +104,10 @@ type TopologyManagerRunner struct {
 	mu            sync.RWMutex
 	leaderContext context.Context
 	managers      map[types.NamespacedName]*managedTopology
+	// retiring holds managers unregistered from managers whose ordered-
+	// update goroutines may still be running. Rotation admission consults
+	// them until those goroutines exit (see retireManagerLocked).
+	retiring map[types.NamespacedName][]*managedTopology
 	// dragonflyGates holds each group's Dragonfly ownership gate. Entries
 	// are never removed: a gate must outlive every manager that used it,
 	// including one whose stop timed out, so a recreated group cannot get a
@@ -526,7 +530,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			// next sync retries the start.
 			r.mu.Lock()
 			if r.managers[nn] == existing {
-				delete(r.managers, nn)
+				r.retireManagerLocked(nn, existing)
 			}
 			r.mu.Unlock()
 			// Wait for the old poll loop to exit before dropping its
@@ -581,7 +585,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	for nn, mt := range r.managers {
 		if _, ok := seen[nn]; !ok {
 			r.logger.Info("stopping topology manager for deleted fg", "fg", nn)
-			delete(r.managers, nn)
+			r.retireManagerLocked(nn, mt)
 			stopping = append(stopping, mt)
 		}
 	}
@@ -1157,9 +1161,9 @@ func (r *TopologyManagerRunner) stopAll() {
 	stopping := make([]*managedTopology, 0, len(r.managers))
 	for nn, mt := range r.managers {
 		r.logger.Info("stopping topology manager", "fg", nn)
+		r.retireManagerLocked(nn, mt)
 		stopping = append(stopping, mt)
 	}
-	r.managers = make(map[types.NamespacedName]*managedTopology)
 	r.mu.Unlock()
 	for _, mt := range stopping {
 		stopManagedTopology(mt)
@@ -1201,6 +1205,42 @@ func (r *TopologyManagerRunner) Ready() bool {
 	return false
 }
 
+// retireManagerLocked unregisters mt and keeps it admission-visible until
+// its mutation workers have exited. The manager is retired first, so it
+// starts no ordered update once it can no longer be found in managers;
+// one already running is found in retiring, and rotation admission refuses
+// while it is in flight. Caller holds r.mu.
+func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt *managedTopology) {
+	if mt == nil {
+		return
+	}
+	if mt.tm != nil {
+		mt.tm.retire()
+	}
+	if r.managers[nn] == mt {
+		delete(r.managers, nn)
+	}
+	if mt.tm == nil {
+		return
+	}
+	if r.retiring == nil {
+		r.retiring = make(map[types.NamespacedName][]*managedTopology)
+	}
+	r.retiring[nn] = append(r.retiring[nn], mt)
+	go func() {
+		if mt.done != nil {
+			<-mt.done
+		}
+		mt.tm.waitUpdateWorkers()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.retiring[nn] = slices.DeleteFunc(r.retiring[nn], func(m *managedTopology) bool { return m == mt })
+		if len(r.retiring[nn]) == 0 {
+			delete(r.retiring, nn)
+		}
+	}()
+}
+
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.
 func (r *TopologyManagerRunner) SetManagerForTest(nn types.NamespacedName, tm *TopologyManager) {
 	r.mu.Lock()
@@ -1225,7 +1265,7 @@ func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
 		return
 	}
 	r.logger.Info("stopping topology manager via StopManager", "fg", nn)
-	delete(r.managers, nn)
+	r.retireManagerLocked(nn, mt)
 	r.mu.Unlock()
 	stopManagedTopology(mt)
 	clearManagedSiteGauges(mt.tm)

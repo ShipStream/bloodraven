@@ -576,8 +576,14 @@ func TestReconcileEncryption_RefusesRotationWhileUpdatePendingLive(t *testing.T)
 	tm.deploymentUpdatePending = true
 	tm.mu.Unlock()
 
-	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+	requeue, err := r.reconcileEncryptionAtRest(context.Background(), fg)
+	if err != nil {
 		t.Fatalf("reconcile: %v", err)
+	}
+	// Nothing in status changes when the update ends, so the refusal must
+	// requeue itself.
+	if requeue == 0 {
+		t.Error("a live refusal did not requeue the rotation")
 	}
 	s := siteStatus(fg, "dc2")
 	if s.Phase != v1alpha1.KeyringPhaseSealed || s.UnsealReason != "" {
@@ -684,6 +690,71 @@ func TestReconcileEncryption_AmbiguousStatusWriteSettlesReservation(t *testing.T
 				t.Fatalf("dc2 promotion-blocked = %v, want %v", blocked, tc.wantBlocked)
 			}
 		})
+	}
+}
+
+// A reservation kept fail-closed (write outcome unknown, re-read failed)
+// must not outlive an unpersisted stamp just because later passes keep
+// failing before their own status write: those passes settle every
+// reservation the runner holds for the group.
+func TestReconcileEncryption_EarlyFailingPassSettlesHeldReservations(t *testing.T) {
+	fg := sealedGroupWithActive("dc1")
+	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+	seedEscrow(t, c, fg)
+	base := c.(client.WithWatch)
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+			return apierrors.NewTimeoutError("status write timed out", 1)
+		},
+	})
+	readFails := true
+	r.APIReader = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if readFails {
+				return errors.New("api server unreachable")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	tm := rotationRunner(r, c)
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	blocked := func() bool {
+		tm.mu.RLock()
+		defer tm.mu.RUnlock()
+		return tm.keyringRotationBlockedLocked("dc2")
+	}
+
+	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err == nil {
+		t.Fatal("first pass: want the status write error")
+	}
+	if !blocked() {
+		t.Fatal("first pass: an unconfirmed stamp must keep dc2 blocked")
+	}
+
+	// Later pass: the API server answers reads again, but the pass fails
+	// before its status write (the keyring token cannot be read).
+	readFails = false
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, secret := obj.(*corev1.Secret); secret {
+				return errors.New("secret read failed")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	var latest v1alpha1.MysqlFailoverGroup
+	if err := base.Get(context.Background(), nn, &latest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.reconcileEncryptionAtRest(context.Background(), &latest); err == nil {
+		t.Fatal("second pass: want the early error")
+	}
+	if blocked() {
+		t.Fatal("a reservation whose stamp was never persisted outlived a pass that could confirm it")
+	}
+	if held := r.Runner.PendingKeyringRotationReservations(nn); len(held) != 0 {
+		t.Fatalf("runner still holds %v", held)
 	}
 }
 

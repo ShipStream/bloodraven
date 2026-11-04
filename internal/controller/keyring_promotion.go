@@ -223,25 +223,54 @@ func (r *TopologyManagerRunner) SetKeyringRotationBlocked(nn types.NamespacedNam
 // reservationMu orders reservation changes against manager registration;
 // it is taken before r.mu and before any manager's mu.
 
-// ReserveKeyringRotation admits a rotation for nn's site. With a manager
-// running, the manager decides (see TopologyManager.ReserveKeyringRotation);
-// with none, the reservation is recorded and the next manager starts with
-// it.
+// ReserveKeyringRotation admits a rotation for nn's site. The group's
+// running manager decides (see TopologyManager.ReserveKeyringRotation).
+// It is refused, for the caller to retry, while no manager runs (one about
+// to start could not be asked) and while a retiring manager still has an
+// ordered update in flight: that update's handoff re-checked eligibility on
+// the old manager, which a reservation recorded now would never reach.
 func (r *TopologyManagerRunner) ReserveKeyringRotation(nn types.NamespacedName, site string) (bool, string) {
 	if r == nil {
 		return true, ""
 	}
 	r.reservationMu.Lock()
 	defer r.reservationMu.Unlock()
-	if mt := r.registered(nn); mt != nil {
-		if ok, why := mt.tm.ReserveKeyringRotation(site); !ok {
-			return false, why
+	r.mu.RLock()
+	mt := r.managers[nn]
+	retiring := append([]*managedTopology(nil), r.retiring[nn]...)
+	r.mu.RUnlock()
+	for _, old := range retiring {
+		if old.tm.orderedUpdateInFlight() {
+			return false, rotationRefusedManagerRestarting
 		}
+	}
+	if mt == nil {
+		return false, rotationRefusedNoManager
+	}
+	if ok, why := mt.tm.ReserveKeyringRotation(site); !ok {
+		return false, why
 	}
 	if pending := r.pendingKeyringRotationReservations(nn); !slices.Contains(pending, site) {
 		r.setPendingKeyringRotationReservations(nn, append(pending, site))
 	}
 	return true, ""
+}
+
+// Live rotation refusals that clear on their own; the encryption reconciler
+// requeues on them.
+const (
+	rotationRefusedManagerRestarting = "the topology manager is restarting with an ordered update still in flight; retrying"
+	rotationRefusedNoManager         = "no topology manager is running for the group yet; retrying"
+)
+
+// PendingKeyringRotationReservations returns nn's reservations.
+func (r *TopologyManagerRunner) PendingKeyringRotationReservations(nn types.NamespacedName) []string {
+	if r == nil {
+		return nil
+	}
+	r.reservationMu.Lock()
+	defer r.reservationMu.Unlock()
+	return r.pendingKeyringRotationReservations(nn)
 }
 
 // ReleaseKeyringRotationReservations drops nn's reservations for sites.

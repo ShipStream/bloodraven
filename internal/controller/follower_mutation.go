@@ -189,3 +189,26 @@ func (tm *TopologyManager) rewriteOldPrimary(ctx context.Context, oldPrimaryIdx,
 	tm.pauseRecoveryDrains()
 	tm.noteRecoveryDeferred(true)
 }
+
+// retire stops this manager from starting further ordered updates. The
+// runner calls it before unregistering the manager, so an update can only
+// be in flight on a retired manager if it began earlier, and rotation
+// admission can see it there (see orderedUpdateInFlight).
+func (tm *TopologyManager) retire() {
+	tm.mu.Lock()
+	tm.retired = true
+	tm.mu.Unlock()
+}
+
+// orderedUpdateInFlight reports whether an ordered-update goroutine of this
+// manager is pending or running.
+func (tm *TopologyManager) orderedUpdateInFlight() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.deploymentUpdatePending || tm.deploymentUpdateRunning
+}
+
+// waitUpdateWorkers blocks until every ordered-update goroutine has exited.
+func (tm *TopologyManager) waitUpdateWorkers() {
+	tm.updateWorkers.Wait()
+}
