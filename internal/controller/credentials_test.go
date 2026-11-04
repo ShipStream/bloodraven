@@ -163,6 +163,26 @@ func TestOpenAdminConnectionRootFallback(t *testing.T) {
 // runs ALTER USER plus global grants, and must fail closed before any SQL
 // when a resolved role username belongs to a live MysqlDatabase.
 func TestReconcileCredentialsRefusesTenantClaimedUsername(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim func(st *v1alpha1.MysqlDatabaseStatus)
+	}{
+		{"recorded owner", func(st *v1alpha1.MysqlDatabaseStatus) { st.OwnerUser = "tenant_app" }},
+		// An owner rotation target is written ahead before its first
+		// statement, so it is as much a tenant claim as the recorded owner.
+		{"pending owner", func(st *v1alpha1.MysqlDatabaseStatus) {
+			st.OwnerUser = "tenant_old"
+			st.PendingOwnerUser = "tenant_app"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testReconcileCredentialsRefusesTenantClaim(t, tc.claim)
+		})
+	}
+}
+
+func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1alpha1.MysqlDatabaseStatus)) {
+	t.Helper()
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
@@ -191,7 +211,7 @@ func TestReconcileCredentialsRefusesTenantClaimedUsername(t *testing.T) {
 			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 		},
 	}
-	mdb.Status.OwnerUser = "tenant_app"
+	claim(&mdb.Status)
 
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme()).
