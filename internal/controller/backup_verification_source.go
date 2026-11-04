@@ -61,6 +61,9 @@ func (r *MysqlBackupVerificationReconciler) resolvePinnedVerificationBackup(ctx 
 	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded || backup.Spec.FailoverGroupRef.Name != v.Spec.FailoverGroupRef.Name || backup.Spec.ProfileName != v.Spec.ProfileName {
 		return nil, fmt.Errorf("pinned backup %q is no longer a successful backup for this group/profile", ref.Name)
 	}
+	if !backup.DeletionTimestamp.IsZero() {
+		return nil, fmt.Errorf("pinned backup %q is being deleted", ref.Name)
+	}
 	backup.Status.Location = ref.Location
 	backup.Status.StorageType = ref.StorageType
 	return &backup, nil

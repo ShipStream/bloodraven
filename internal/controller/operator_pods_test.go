@@ -84,7 +84,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 
 	job, err = buildCleanupJob(cleanupJobInputs{
 		FailoverGroup: fg, Profile: &encProfile, Backup: seed,
-		CredsSecretName: "creds", ScriptsConfigMapName: "scripts",
+		Storage: &v1alpha1.BackupArtifactStorage{Bucket: "bloodraven-backups"},
 	})
 	addJob("cleanup", job, err)
 
@@ -131,6 +131,7 @@ func TestOperatorImageContainersUseAbsoluteBinaryPath(t *testing.T) {
 		"verification/encrypted": {"decrypt-download"},
 		"restore/bootstrap":      {restorePITRInitContainerName, "decrypt-download"},
 		"restore/in-place":       {"decrypt-download"},
+		"cleanup":                {cleanupContainerName},
 	}
 	for _, p := range pods {
 		var got []string

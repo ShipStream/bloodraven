@@ -362,6 +362,15 @@ var (
 		Help: "Total failures in the encrypt/decrypt data plane labelled by (group, profile, stage).",
 	}, []string{"group", "profile", "stage"})
 
+	// BackupArtifactCleanupFailuresTotal counts failed artifact-cleanup Jobs
+	// of deleted MysqlBackups, once per Job. reason is CleanupFailed
+	// (transient or unknown) or CleanupRejected (refusal or configuration).
+	// Use increase(): the counter resets when the operator restarts.
+	BackupArtifactCleanupFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_backup_artifact_cleanup_failures_total",
+		Help: "Failed artifact-cleanup Jobs of deleted MysqlBackups, counted once per Job, labelled by (group, profile, reason).",
+	}, []string{"group", "profile", "reason"})
+
 	// DragonflySiteUp is 1 when the operator's most recent poll
 	// successfully completed INFO replication against a site's
 	// Dragonfly instance, 0 otherwise.
@@ -530,7 +539,7 @@ func Register(reg prometheus.Registerer) {
 		ArchiverUploadFailures, ArchiverLastUploadTimestamp, ArchiverBacklogFiles,
 		HTTPRequestsTotal, HTTPRequestDurationSeconds,
 		BackupEncryptDurationSeconds, BackupDecryptDurationSeconds,
-		BackupEncryptBytesTotal, BackupEncryptFailuresTotal,
+		BackupEncryptBytesTotal, BackupEncryptFailuresTotal, BackupArtifactCleanupFailuresTotal,
 		DragonflySiteUp, DragonflyPromotionsTotal, DragonflyManagerPanicsTotal,
 		KeyringPhase, KeyringEscrowVersion, KeyringEscrowPushesTotal, KeyringRotationsTotal,
 		KeyringPromotionsBlockedTotal,

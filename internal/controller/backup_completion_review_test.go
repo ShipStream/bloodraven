@@ -35,6 +35,8 @@ func TestBackupMetadataReview_UnrecoverableHistoricalDestination(t *testing.T) {
 			}
 			mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
 			mb.Status.Location = ""
+			// A historical backup: no destination snapshot either.
+			mb.Status.ArtifactStorage = nil
 			if err := c.Status().Update(ctx, mb); err != nil {
 				t.Fatal(err)
 			}
@@ -105,7 +107,7 @@ func TestBackupMetadataReview_ReadyConditionPreservedDuringCleanup(t *testing.T)
 				t.Fatal(err)
 			}
 			original = *apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
-			if done, err := r.finalize(context.Background(), mb); err != nil || done {
+			if done, _, err := r.finalize(context.Background(), mb); err != nil || done {
 				t.Fatalf("expected artifact cleanup in progress: done=%v err=%v", done, err)
 			}
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
@@ -186,7 +188,7 @@ func TestBackupMetadataReview_RuntimeExpandedDestinations(t *testing.T) {
 						want = "s3://bloodraven-backups/" + want + "/"
 					}
 					if logs {
-						pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: mb.Namespace, Labels: map[string]string{labelMysqlBackup: mb.Name}}, Spec: job.Spec.Template.Spec, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
+						pod := backupJobPod("runtime", mb, &job, corev1.PodSucceeded)
 						if err := c.Create(context.Background(), pod); err != nil {
 							t.Fatal(err)
 						}

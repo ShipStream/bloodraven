@@ -134,7 +134,7 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					if _, err := verificationJobSource(v, verify); err != nil {
 						t.Errorf("verification source snapshot rejected the literal runtime source: %v", err)
 					}
-					cleanup, err := buildCleanupJob(cleanupJobInputs{FailoverGroup: fg, Profile: &fg.Spec.Backup.Profiles[0], Backup: mb, CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+					cleanup, err := buildCleanupJob(cleanupJobInputs{FailoverGroup: fg, Profile: &fg.Spec.Backup.Profiles[0], Backup: mb})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -220,12 +220,14 @@ func TestBackupMetadata_CleanupWarningWithoutJob(t *testing.T) {
 	}
 	mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
 	mb.Status.Location = ""
+	// A historical backup: no destination snapshot either.
+	mb.Status.ArtifactStorage = nil
 	if err := c.Status().Update(ctx, mb); err != nil {
 		t.Fatal(err)
 	}
 	recorder := record.NewFakeRecorder(20)
 	r.Recorder = recorder
-	if done, err := r.finalize(ctx, mb); err != nil || !done {
+	if done, _, err := r.finalize(ctx, mb); err != nil || !done {
 		t.Fatalf("missing producer blocked deletion: done=%v err=%v", done, err)
 	}
 	select {

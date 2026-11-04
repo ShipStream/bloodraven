@@ -941,3 +941,75 @@ Do not:
 - Restart the operator to push the update through: the new process repeats the same check on its first attempt.
 - Change the update strategy to `Recreate` to get past it: that rolls every site at once onto the template that broke one.
 - Promote the stalled site by hand: its pod is out of the application Services and, with a broken sidecar, cannot self-fence.
+
+## 35. Deleted `MysqlBackup` stuck Terminating (artifact cleanup)
+
+### Symptoms
+- A `MysqlBackup` deleted by hand or by retention stays Terminating with the `shipstream.io/mysqlbackup` finalizer.
+- `ArtifactCleanupFailed` or `ArtifactCleanupBlocked` Warning Events; `bloodraven_backup_artifact_cleanup_failures_total` rising.
+- After an upgrade from an operator whose cleanup ran `cleanup.py`: old Terminating S3 backups with Failed `mysqlbackup-<name>-cleanup` Jobs (new cleanup Jobs are named `mysqlcleanup-<name>`; an old-named Job counts only if the backup owns it). That script needed `util.rmdump`, which MySQL Shell does not have, so S3 cleanup never worked. The new operator replaces those Jobs on its own; let it.
+
+### Diagnostic steps
+1. Read the cause and the recorded destination (`scripts/triage.sh` section 8 prints both):
+   ```bash
+   kubectl get mysqlbackup <name> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="ArtifactCleanup")]}{"\n"}{.status.location}{"\n"}{.status.artifactStorage}{"\n"}'
+   kubectl get pods -n <ns> -l shipstream.io/resource=backup-cleanup,shipstream.io/mysqlbackup=<name> \
+     -o jsonpath='{range .items[*]}{.metadata.name}{" exit="}{.status.containerStatuses[0].state.terminated.exitCode}{" "}{.status.containerStatuses[0].state.terminated.message}{"\n"}{end}'
+   ```
+2. Reasons:
+   - `CleanupFailed`: exit 75 (storage error), a crash, deadline, eviction or no recorded exit. A new Job runs 5 minutes after the failure.
+   - `CleanupRejected`: exit 64. The message says why: missing credential keys, a refused path, a cross-bucket location, an invalid endpoint. A new Job runs 30 minutes after the failure.
+   - `CleanupPending`: the pod cannot start; the message carries the waiting reason (`ImagePullBackOff`: the operator image must be pullable in the backup namespace with `spec.backup.imagePullSecrets`), or since when it has been unscheduled or `ContainerCreating` (check `kubectl describe pod` for `FailedMount`/`FailedAttachVolume`, typically a ReadWriteOnce claim attached on another node).
+   - `ForegroundDeletion` / `OrphanDeletion`: deleted with `--cascade=foreground` (Argo CD's default prune) or `--cascade=orphan`; cleanup starts once the garbage collector has processed the backup's dependents.
+   - `CleanupJobInvalid`: the recorded destination cannot be turned into a Job (unknown storage type, no bucket or claim recorded). No Job ran; treat like `DestinationUnverified`.
+   - `CredentialsUnavailable`: the profile no longer has an S3 `credentialsSecret`.
+   - `OperatorImageUnset`: the operator cannot name its own image; check its Deployment.
+   - `DestinationUnverified`: no recorded `status.artifactStorage.location` (a backup from an older operator) and it cannot be recovered from the producing Job (gone, owned by something else, or its destination depends on runtime-only values), so the exact artifact is unknown.
+   - `DestinationMismatch`: `status.location` is not exactly `status.artifactStorage.location`, does not end in the backup name, is outside the recorded bucket or `/backups`, or differs from the producing Job's destination.
+   - `CleanupJobConflict`: a Job named `mysqlcleanup-<name>` exists but is not owned by this backup.
+   - A new backup stuck `Pending` with `Ready=False/BackupJobConflict` (not a cleanup problem): a `mysqlbackup-<name>` Job it does not own exists, usually orphaned by an earlier same-name backup deleted with `--cascade=orphan`. Delete that Job if nothing owns it; the backup fails after 30 minutes otherwise.
+   - `HeldByVerification`: a verification is still reading the artifact; see [playbook 36](#36-backup-kept-past-retention-or-deletion-waiting-on-a-verification).
+3. Cleanup deletes from `status.artifactStorage` (captured when the backup ran), never from the live profile. A changed profile bucket, endpoint or claim does not move the delete; only credentials come from the current profile.
+
+### Safe remediation
+1. For `CleanupFailed`, `CleanupRejected` and `CredentialsUnavailable`, fix the cause (Secret keys, IAM `s3:ListBucket`/`s3:DeleteObject` on the prefix, endpoint reachability, the operator image pull) and wait. Retries never stop, and a credential rotated inside the same Secret is picked up by the next Job. A replacement starts only after the failed Job's pods are gone.
+2. For `DestinationUnverified` and `DestinationMismatch`, find the artifact using the original Job inputs and storage inspection (see [playbook 13](#13-succeeded-backup-cannot-be-found-at-its-recorded-location)). Delete it by hand, then remove the finalizer:
+   ```bash
+   kubectl patch mysqlbackup <name> -n <ns> --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+   ```
+3. `ArtifactCleanupNothingFound` releases the finalizer without deleting anything. If the artifact should have existed, inspect the bucket or claim the backup actually used.
+
+Do not:
+- Remove the finalizer while the artifact is still in storage: nothing will clean it up later.
+- Edit `status.artifactStorage` or `status.location` to point cleanup somewhere else: the recursive delete would follow it.
+- Delete a running cleanup Job to hurry it: the operator replaces only failed Jobs, after their pods are gone.
+
+## 36. Backup kept past retention, or deletion waiting on a verification
+
+### Symptoms
+- A successful `MysqlBackup` outside its profile's `count`/`maxAgeDays` window is not pruned, with `RetentionDeferred` Events.
+- A deleted `MysqlBackup` stays Terminating with `ArtifactCleanup=False/HeldByVerification` and `ArtifactCleanupDeferred` Events.
+- A deleted `MysqlBackupVerification` stays Terminating.
+
+### Diagnostic steps
+1. List the holds on the backup and the verifications that reference it:
+   ```bash
+   kubectl get mysqlbackup <backup> -n <ns> -o json | jq '.metadata.annotations // {} | with_entries(select(.key | startswith("hold.verification.shipstream.io/")))'
+   kubectl get mysqlbackupverifications -n <ns> -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,BACKUP_UID:.status.backupRef.uid,JOB:.status.jobName
+   ```
+2. For each holding verification, check whether anything still runs:
+   ```bash
+   kubectl get job mysqlverify-<verification> -n <ns> -o jsonpath='{.status.conditions[*].type}{"\n"}'
+   kubectl get pods -n <ns> -l shipstream.io/mysqlbackup-verification=<verification> -o custom-columns=POD:.metadata.name,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp
+   ```
+3. A hold is live while the verification is not finished, or while its Job is unfinished, or while any labelled pod is `Pending` or `Running`. A hold whose verification is gone counts only while that verification's pods still run. An unfinished verification that is not yet pinned holds every successful backup of its group and profile.
+
+### Safe remediation
+1. During a run this is expected; retention and cleanup resume on their own after the run stops (the hold release triggers a backup reconcile).
+2. If a finished run still holds, it is usually a failed run kept by `keepOnFailure: true` whose pod is still running, or a pod stuck terminating on an unreachable node. Delete the verification (its finalizer waits for its pods) or resolve the stuck pod.
+3. A verification that stays Terminating is waiting for its pods to be gone; it releases its hold and finalizer once they are.
+
+Do not:
+- Remove a `hold.verification.shipstream.io/*` annotation by hand while a pod of that verification runs: retention or cleanup could then delete the artifact under it.
+- Remove the verification finalizer to hurry deletion. The hold then stays on the backup; it stops counting once the pods are gone, but retention only notices on its next pass.
+

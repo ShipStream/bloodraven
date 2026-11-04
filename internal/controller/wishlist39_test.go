@@ -133,13 +133,7 @@ func TestBuildCleanupJob_AppliesBackupResourcesAndDropsSAToken(t *testing.T) {
 			StorageType: v1alpha1.BackupStorageS3,
 		},
 	}
-	job, err := buildCleanupJob(cleanupJobInputs{
-		FailoverGroup:        fg,
-		Profile:              &profile,
-		Backup:               backup,
-		CredsSecretName:      "x",
-		ScriptsConfigMapName: "y",
-	})
+	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
 	if err != nil {
 		t.Fatalf("buildCleanupJob: %v", err)
 	}
@@ -178,13 +172,7 @@ func TestBuildCleanupJob_NilBackupSpec_UsesDefaultResources(t *testing.T) {
 			StorageType: v1alpha1.BackupStorageS3,
 		},
 	}
-	job, err := buildCleanupJob(cleanupJobInputs{
-		FailoverGroup:        fg,
-		Profile:              &profile,
-		Backup:               backup,
-		CredsSecretName:      "x",
-		ScriptsConfigMapName: "y",
-	})
+	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
 	if err != nil {
 		t.Fatalf("buildCleanupJob: %v", err)
 	}
@@ -207,13 +195,7 @@ func TestBuildCleanupJob_HardenedSecurityContextStillApplied(t *testing.T) {
 			StorageType: v1alpha1.BackupStorageS3,
 		},
 	}
-	job, err := buildCleanupJob(cleanupJobInputs{
-		FailoverGroup:        fg,
-		Profile:              &profile,
-		Backup:               backup,
-		CredsSecretName:      "x",
-		ScriptsConfigMapName: "y",
-	})
+	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
 	if err != nil {
 		t.Fatalf("buildCleanupJob: %v", err)
 	}

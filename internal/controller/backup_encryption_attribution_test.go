@@ -90,7 +90,8 @@ func TestMysqlBackupReconciler_EncryptionFollowsLaunchedJob(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.logs {
-				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "completed", Namespace: mb.Namespace, Labels: map[string]string{labelMysqlBackup: mb.Name}}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
+				pod := backupJobPod("completed", mb, &job, corev1.PodSucceeded)
+				pod.Spec = corev1.PodSpec{}
 				if err := c.Create(ctx, pod); err != nil {
 					t.Fatal(err)
 				}
