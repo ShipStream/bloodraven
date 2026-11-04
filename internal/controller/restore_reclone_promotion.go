@@ -99,40 +99,6 @@ func (tm *TopologyManager) recordRestoreReclonePromotionRefused(sites []string) 
 	tm.mu.Unlock()
 }
 
-// SetRestoreReclonePending pushes the pending set onto the managed
-// TopologyManager. Returns false when no manager is running; the next
-// sync or startManager call applies it.
-func (r *TopologyManagerRunner) SetRestoreReclonePending(nn types.NamespacedName, sites []string) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	mt.tm.SetRestoreReclonePending(sites)
-	return true
-}
-
-// SetRestoreRecloneBlocked pushes the blocked set onto the managed
-// TopologyManager. Returns false when no manager is running; the next
-// sync or startManager call applies it.
-func (r *TopologyManagerRunner) SetRestoreRecloneBlocked(nn types.NamespacedName, sites []string) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	mt.tm.SetRestoreRecloneBlocked(sites)
-	return true
-}
-
 // CloneInProgress reports the recipient of a clone the topology manager is
 // running now (any source), and whether a manager was there to ask.
 func (r *TopologyManagerRunner) CloneInProgress(nn types.NamespacedName) (site string, known bool) {

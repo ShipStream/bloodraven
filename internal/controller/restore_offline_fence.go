@@ -114,6 +114,11 @@ func (tm *TopologyManager) EnforceRestoreOfflineFence(ctx context.Context, site,
 	if err != nil {
 		return 0, nil, err
 	}
+	// Serialized with applyRestoreProtection, which also writes the fence
+	// guard: a guard application computed from a status read taken before
+	// the fence was recorded must not clear the fence this arms.
+	tm.restoreProtectionMu.Lock()
+	defer tm.restoreProtectionMu.Unlock()
 	tm.restoreFenceMu.Lock()
 	defer tm.restoreFenceMu.Unlock()
 	if owner == tm.restoreFenceReleased {
@@ -160,6 +165,8 @@ func (tm *TopologyManager) SetRestoreOfflineFence(site, owner string) {
 // was never applied and MySQL is not touched. On error nothing is
 // released, so the caller retries.
 func (tm *TopologyManager) ReleaseRestoreOfflineFence(ctx context.Context, site, owner string, prior *bool) error {
+	tm.restoreProtectionMu.Lock()
+	defer tm.restoreProtectionMu.Unlock()
 	tm.restoreFenceMu.Lock()
 	defer tm.restoreFenceMu.Unlock()
 	if prior != nil {

@@ -113,12 +113,38 @@ type restoreProtection struct {
 // restoreProtectionFromStatus derives the protection from status.
 func restoreProtectionFromStatus(fg *v1alpha1.MysqlFailoverGroup) restoreProtection {
 	held, restop := restorePeerHoldFromStatus(fg)
-	fenceSite, fenceOwner := restoreOfflineFenceSite(fg)
+	fenceSite, fenceOwner := restoreOfflineFenceGuard(fg)
 	return restoreProtection{
 		held: sortedSet(held), restop: sortedSet(restop), blocked: sortedSet(restoreRecloneBlockedSites(fg)),
 		pending: sortedSet(restoreReclonePendingSites(fg)), frozen: inPlaceRestoreFreezesTopology(fg),
 		fenceSite: fenceSite, fenceOwner: fenceOwner,
 	}
+}
+
+// restoreOfflineFenceGuard is the offline_mode fence the topology manager
+// must keep re-asserting. That is the recorded fence while its restore runs
+// (restoreOfflineFenceSite), and also after the restore ended for as long
+// as its reclone queue is still Armed: settlement can wait, with the fence
+// up, for the failed restore's Job pods to terminate, and a mysqld restart
+// in that window must not readmit applications while such a pod may still
+// drop schemas. It is separate from restoreOfflineFenceWanted, which
+// decides whether the fence may be released (settlement first, then
+// ReleaseRestoreOfflineFence); once the queue is settled the fence is
+// released in the same pass, and no longer re-asserted, so an
+// administrator who turns offline_mode OFF by hand after a failed release
+// is not overridden.
+func restoreOfflineFenceGuard(fg *v1alpha1.MysqlFailoverGroup) (site, owner string) {
+	if site, owner = restoreOfflineFenceSite(fg); site != "" {
+		return site, owner
+	}
+	q := fg.Status.RestoreOfflineFence
+	if q == nil || q.PriorOfflineMode == nil {
+		return "", ""
+	}
+	if rq := fg.Status.RestoreReclones; rq != nil && rq.Phase == v1alpha1.RestoreReclonesArmed {
+		return q.Site, fenceOwner(q)
+	}
+	return "", ""
 }
 
 // equal reports whether p and q are the same guards.
@@ -286,11 +312,14 @@ func (tm *TopologyManager) StopRestorePeerReplication(ctx context.Context, site,
 	if !tm.peerStartMu.TryLock() {
 		return RestorePeerStopOutcome{}, errRestorePeerStartBusy
 	}
+	// Serialized with applyRestoreProtection, which replaces the held set.
+	tm.restoreProtectionMu.Lock()
 	tm.mu.Lock()
 	if !slices.Contains(tm.restorePeerHeld, site) {
 		tm.restorePeerHeld = sortedUnion(tm.restorePeerHeld, []string{site})
 	}
 	tm.mu.Unlock()
+	tm.restoreProtectionMu.Unlock()
 	tm.peerStartMu.Unlock()
 
 	stopper, ok := s.mysql.(mysql.ReplicaIOStopper)
@@ -501,9 +530,9 @@ func (r *TopologyManagerRunner) RestoreMutationInFlight(nn types.NamespacedName,
 	return tm.restoreMutationInFlight(requireFrozen), nil
 }
 
-// applyRestoreProtection brings tm's restore protection (held, restop,
-// blocked) and the bloodraven_restore_reclone_pending gauge up to date
-// with fg. Every application is serialized per manager. Only a change
+// applyRestoreProtection brings tm's restore guards (restoreProtection:
+// held, restop, blocked, pending, the freeze and the offline_mode fence)
+// and the bloodraven_restore_reclone_pending gauge up to date with fg. Every application is serialized per manager. Only a change
 // that tightens the protection is taken from fg as given (the runner's
 // cached list may be stale, and a stale view that releases a hold, or
 // re-arms a re-stop after the queue moved on, would let a peer replicate a
@@ -528,8 +557,13 @@ func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *
 	}
 	if !written {
 		cur := tm.restoreProtectionSnapshot()
-		if want.equal(cur) || want.onlyTightens(cur) {
-			tm.setRestoreProtection(want)
+		if want.equal(cur) {
+			emitRestoreReclonePendingMetric(fg)
+			return nil
+		}
+		if want.onlyTightens(cur) {
+			// Additions only: nothing a concurrent writer set is cleared.
+			tm.tightenRestoreProtection(want)
 			emitRestoreReclonePendingMetric(fg)
 			return nil
 		}
@@ -552,7 +586,8 @@ func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *
 // replacement inherits every guard of the manager it replaces (tightened
 // with the cached view); a brand-new manager is not started (the next sync
 // retries). After start the guards change only through
-// applyRestoreProtection.
+// applyRestoreProtection and the restore's own serialized writes (see
+// TopologyManager.restoreProtectionMu).
 func (r *TopologyManagerRunner) initRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, prev *managedTopology) error {
 	tm.restoreProtectionMu.Lock()
 	defer tm.restoreProtectionMu.Unlock()

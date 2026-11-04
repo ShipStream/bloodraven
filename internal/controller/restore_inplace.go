@@ -367,7 +367,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 				return 0, fmt.Errorf("settle the previous in-place restore's reclone queue: %w", err)
 			}
 			if wait > 0 {
-				return wait, nil
+				// Not started yet, and nothing of this run exists: let the
+				// rest of the pass run (reconcileRestoreOfflineFence and
+				// reconcileRestoreReclones keep settling and requeue).
+				r.noteWaitingForPreviousQueue(fg, q.ConfirmToken, spec.Confirm)
+				return 0, nil
 			}
 		}
 		if err := validateInPlaceRestoreSpec(spec); err != nil {
@@ -444,6 +448,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 	// Unknown phase (forward compatibility): treat as fresh start.
 	r.setInPlaceRestoreStatus(ctx, fg, nil)
 	return 5 * time.Second, nil
+}
+
+// noteWaitingForPreviousQueue emits a RestoreInPlaceWaitingForPreviousQueue
+// Event once per (previous queue, requested confirm): the new run has not
+// started, so status.restoreInPlace still shows the previous run.
+func (r *MysqlFailoverGroupReconciler) noteWaitingForPreviousQueue(fg *v1alpha1.MysqlFailoverGroup, previous, requested string) {
+	nn := client.ObjectKeyFromObject(fg)
+	key := previous + "\x00" + requested
+	r.restorePeerStopMu.Lock()
+	if r.restoreSettleNoted == nil {
+		r.restoreSettleNoted = map[types.NamespacedName]string{}
+	}
+	seen := r.restoreSettleNoted[nn] == key
+	r.restoreSettleNoted[nn] = key
+	r.restorePeerStopMu.Unlock()
+	if !seen {
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceWaitingForPreviousQueue",
+			"in-place restore confirm=%s waits until the reclone queue of the previous restore (confirm=%s) is settled: "+
+				"its Job's pods may still be running, or the primary is briefly unreadable (at most ten minutes)", requested, previous)
+	}
 }
 
 // inPlacePreflight validates that the cluster is in a state where a
@@ -1059,21 +1083,17 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 	} else if apierrors.IsNotFound(err) {
 		return false
 	}
-	// Push the freeze state to the topology manager directly so it
-	// takes effect on the next poll cycle rather than waiting for the
-	// runner's 30-second re-sync tick. Without this step there is a
-	// window between status patch and runner re-sync in which the
-	// topology manager could still fire a cross-site action (promotion,
-	// auto-clone, recovery) against a cluster that is actively being
-	// restored. A return of false from SetTopologyFrozen is expected
-	// when no manager is running yet (fresh deploy) — the runner's
-	// startManager path reads status.restoreInPlace and applies the
-	// correct flag when it starts the manager.
+	// Bring the topology manager's restore guards (the freeze, the peer
+	// hold and re-stop, the clone block, the promotion exclusion and the
+	// offline_mode fence) up to date now, rather than at the runner's
+	// 30-second re-sync: otherwise the manager could fire a cross-site
+	// action (promotion, auto-clone, recovery) against a cluster that is
+	// being restored. They are applied from one snapshot confirmed by an
+	// uncached read (applyRestoreProtection). With no manager running yet
+	// (fresh deploy) there is nothing to update; the runner's
+	// startManager reads status uncached before the manager's first poll.
 	if r.Runner != nil {
 		r.Runner.hydrateDeploymentGeneration(fg)
-		// The phase decides the freeze and which held peers Poll keeps
-		// stopped; every restore guard is applied from one confirmed
-		// snapshot (applyRestoreProtection).
 		r.Runner.SetRestorePeerHold(ctx, fg)
 	}
 	return true

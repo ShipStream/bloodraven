@@ -135,30 +135,6 @@ func (r *TopologyManagerRunner) SetDeploymentReconciler(dr DeploymentReconciler)
 	r.deployReconciler = dr
 }
 
-// SetTopologyFrozen flips the topology-freeze flag on the managed
-// TopologyManager for the given CR, immediately (without waiting for
-// the runner's 30-second re-sync tick). The reconciler calls this at
-// every in-place restore phase transition so there is no window where
-// the topology manager could fire a cross-site action against a
-// cluster that is actively being restored.
-//
-// Returns true when the flag was applied; false when no manager is
-// running for this CR (for example during fresh deploy, operator
-// restart, or CR deletion). A return of false is expected in those
-// cases and is not an error — the runner's next re-sync will observe
-// status.restoreInPlace and apply the correct flag when it starts the
-// manager.
-func (r *TopologyManagerRunner) SetTopologyFrozen(nn types.NamespacedName, frozen bool) bool {
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	mt.tm.SetTopologyFrozen(frozen)
-	return true
-}
-
 // SetPlannedFailoverActive toggles the planned-failover guard on the
 // managed TopologyManager so the automatic cross-site evaluator stands
 // down while the reconciler drives its own fence/promote sequence.
@@ -1471,7 +1447,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Sites awaiting their post-restore reclone hold pre-restore data,
 	// are never promoted automatically and do not replicate until they
 	// are recloned, so the group runs without them as failover targets.
-	// Any other problem reported above takes precedence.
+	// Any other problem reported above takes precedence. It also applies
+	// during Initializing (turning Unknown into True): the queue is
+	// persisted status, not a topology observation, so it is known before
+	// the topology is classified, and True keeps the deployment API
+	// refusing leases while peers are held.
 	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == "Healthy" || reason == "Initializing") {
 		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, "Degraded"); degraded == nil || degraded.Status != metav1.ConditionTrue {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{

@@ -177,6 +177,10 @@ type MysqlFailoverGroupReconciler struct {
 	// (see stopRestorePeerReplication).
 	restorePeerStopMu    sync.Mutex
 	restorePeerStopStart map[types.NamespacedName]restorePeerStopWait
+	// restoreSettleNoted is the (previous queue, requested confirm) a
+	// RestoreInPlaceWaitingForPreviousQueue Event was last emitted for.
+	// Guarded by restorePeerStopMu.
+	restoreSettleNoted map[types.NamespacedName]string
 }
 
 type dragonflyRolloutKey struct {
@@ -2010,8 +2014,6 @@ func mutateServiceSpec(svc *corev1.Service, serviceType corev1.ServiceType, etp 
 	}
 }
 
-// syncPodLabels updates pod labels based on the CR status.
-// It updates replicas first, then primary, to prevent dual-primary in Service endpoints.
 // podsLabelled reports whether any of pods carries key=value.
 func podsLabelled(pods []corev1.Pod, key, value string) bool {
 	for i := range pods {
@@ -2022,6 +2024,8 @@ func podsLabelled(pods []corev1.Pod, key, value string) bool {
 	return false
 }
 
+// syncPodLabels updates pod labels based on the CR status.
+// It updates replicas first, then primary, to prevent dual-primary in Service endpoints.
 func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	logger := log.FromContext(ctx)
 

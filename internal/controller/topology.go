@@ -619,9 +619,14 @@ type TopologyManager struct {
 	restorePeerHeld   []string
 	restorePeerRestop []string
 	peerStartMu       sync.RWMutex
-	// restoreProtectionMu serializes applying restore protection
-	// (restorePeerHeld, restorePeerRestop, restoreRecloneBlocked) from
-	// status, including the uncached read that confirms a release.
+	// restoreProtectionMu serializes every write of the restore guards
+	// (restorePeerHeld, restorePeerRestop, restoreRecloneBlocked,
+	// restoreReclonePending, topologyFrozen and the offline_mode fence
+	// site/owner): applyRestoreProtection and initRestoreProtection (with
+	// the uncached read that confirms a release), and the restore's own
+	// writes (EnforceRestoreOfflineFence, ReleaseRestoreOfflineFence, the
+	// hold added by StopRestorePeerReplication). Taken before
+	// restoreFenceMu and mu.
 	restoreProtectionMu sync.Mutex
 	// bootstrapRefusedSite is the last recipient bootstrap admission
 	// refused for a restore hold, so the refusal is logged once.
