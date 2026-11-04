@@ -250,3 +250,78 @@ func TestStartManager_HydratesPlannedFailoverGuardBeforeRun(t *testing.T) {
 		t.Fatal("restored RecoveryInProgress sites are open to recovery during the planned failover")
 	}
 }
+
+func managerRotationBlocked(mt *managedTopology, site string) bool {
+	mt.tm.mu.RLock()
+	defer mt.tm.mu.RUnlock()
+	return mt.tm.keyringRotationBlockedLocked(site)
+}
+
+// A rotation admitted while no manager runs, or against a manager that is
+// then replaced, must block promotion on whichever manager runs next,
+// before its Run can claim an ordered update.
+func TestRotationReservationSurvivesManagerStartAndReplacement(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	nn := FailoverGroupNamespacedName(fg)
+	ctx := context.Background()
+	cfg := CRConfigToTopologyConfig(fg)
+
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); !ok {
+		t.Fatalf("reservation with no manager refused: %s", why)
+	}
+	if err := r.startManager(ctx, fg, cfg, nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	first := registeredManager(r, nn)
+	if !managerRotationBlocked(first, "dc2") {
+		t.Fatal("a manager started after the reservation does not block dc2")
+	}
+
+	// Replace the manager before the stamp is persisted.
+	r.StopManager(nn)
+	if err := r.startManager(ctx, fg, cfg, first); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	second := registeredManager(r, nn)
+	if second == first || !managerRotationBlocked(second, "dc2") {
+		t.Fatal("the replacement manager lost the rotation reservation")
+	}
+
+	// An authoritative view without the stamp ends the reservation for the
+	// running manager and for any later one.
+	r.PublishKeyringRotationBlocked(nn, nil)
+	if managerRotationBlocked(second, "dc2") {
+		t.Fatal("authoritative view did not end the reservation")
+	}
+	r.StopManager(nn)
+	if err := r.startManager(ctx, fg, cfg, second); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if managerRotationBlocked(registeredManager(r, nn), "dc2") {
+		t.Fatal("an ended reservation was carried onto a new manager")
+	}
+}
+
+// A reservation the running manager refuses is not recorded, so no later
+// manager inherits it.
+func TestRefusedRotationReservationIsNotCarried(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	nn := FailoverGroupNamespacedName(fg)
+	cfg := CRConfigToTopologyConfig(fg)
+	if err := r.startManager(context.Background(), fg, cfg, nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	mt := registeredManager(r, nn)
+	mt.tm.mu.Lock()
+	mt.tm.deploymentUpdatePending = true
+	mt.tm.mu.Unlock()
+	if ok, _ := r.ReserveKeyringRotation(nn, "dc2"); ok {
+		t.Fatal("reservation admitted while an ordered update is pending")
+	}
+	r.reservationMu.Lock()
+	pending := r.pendingKeyringRotationReservations(nn)
+	r.reservationMu.Unlock()
+	if len(pending) != 0 {
+		t.Fatalf("refused reservation recorded: %v", pending)
+	}
+}

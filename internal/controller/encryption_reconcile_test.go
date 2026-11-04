@@ -9,6 +9,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -588,7 +589,7 @@ func TestReconcileEncryption_RefusesRotationWhileUpdatePendingLive(t *testing.T)
 }
 
 func TestReconcileEncryption_RotationReservationFollowsStatusWrite(t *testing.T) {
-	t.Run("persisted stamp supersedes the reservation", func(t *testing.T) {
+	t.Run("persisted stamp keeps the reservation until the rotation ends", func(t *testing.T) {
 		fg := sealedGroupWithActive("dc1")
 		fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
 		r, c := encReconciler(t, scriptedKeyring(nil), fg)
@@ -600,8 +601,13 @@ func TestReconcileEncryption_RotationReservationFollowsStatusWrite(t *testing.T)
 		tm.mu.RLock()
 		durable, reserved := append([]string(nil), tm.keyringRotationBlocked...), append([]string(nil), tm.keyringRotationReserved...)
 		tm.mu.RUnlock()
-		if len(durable) != 1 || durable[0] != "dc2" || len(reserved) != 0 {
-			t.Fatalf("durable=%v reserved=%v, want the stamp pushed and the reservation gone", durable, reserved)
+		if len(durable) != 1 || durable[0] != "dc2" || len(reserved) != 1 || reserved[0] != "dc2" {
+			t.Fatalf("durable=%v reserved=%v, want the stamp pushed and the reservation kept", durable, reserved)
+		}
+		// A stale cache-derived push (runner sync) must not unblock it.
+		tm.SetKeyringRotationBlocked(nil)
+		if err := tm.liveHandoffRefusal("dc2")(); err == nil {
+			t.Fatal("a stale runner-sync push unblocked a site whose rotation is persisted")
 		}
 	})
 	t.Run("failed status write releases the reservation", func(t *testing.T) {
@@ -625,6 +631,60 @@ func TestReconcileEncryption_RotationReservationFollowsStatusWrite(t *testing.T)
 			t.Fatal("an unpersisted rotation left dc2 promotion-blocked")
 		}
 	})
+}
+
+// A status write can commit and still return an error. Only a rejection
+// proves the stamp is absent; otherwise an uncached read decides, and if
+// that fails the promotion block stays (fail closed).
+func TestReconcileEncryption_AmbiguousStatusWriteSettlesReservation(t *testing.T) {
+	timeout := apierrors.NewTimeoutError("status write timed out", 1)
+	forbidden := apierrors.NewForbidden(v1alpha1.GroupVersion.WithResource("mysqlfailovergroups").GroupResource(), "lion", errors.New("rbac"))
+	for _, tc := range []struct {
+		name        string
+		persist     bool
+		writeErr    error
+		readFails   bool
+		wantBlocked bool
+	}{
+		{"committed then timed out", true, timeout, false, true},
+		{"timed out without committing", false, timeout, false, false},
+		{"timed out and the re-read failed", false, timeout, true, true},
+		{"rejected", false, forbidden, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := sealedGroupWithActive("dc1")
+			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			r, c := encReconciler(t, scriptedKeyring(nil), fg)
+			seedEscrow(t, c, fg)
+			r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+					if tc.persist {
+						if err := cl.SubResource(sub).Update(ctx, obj, opts...); err != nil {
+							return err
+						}
+					}
+					return tc.writeErr
+				},
+			})
+			if tc.readFails {
+				r.APIReader = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						return errors.New("api server unreachable")
+					},
+				})
+			}
+			tm := rotationRunner(r, c)
+			if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err == nil {
+				t.Fatal("reconcile succeeded with a failing status write")
+			}
+			tm.mu.RLock()
+			blocked := tm.keyringRotationBlockedLocked("dc2")
+			tm.mu.RUnlock()
+			if blocked != tc.wantBlocked {
+				t.Fatalf("dc2 promotion-blocked = %v, want %v", blocked, tc.wantBlocked)
+			}
+		})
+	}
 }
 
 // --- clone gate -----------------------------------------------------

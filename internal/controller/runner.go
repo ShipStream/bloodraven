@@ -112,6 +112,12 @@ type TopologyManagerRunner struct {
 	// apiReader is the uncached reader the Dragonfly managers use for the
 	// group's authoritative state (see DragonflyManager.SetAuthorityReader).
 	apiReader client.Reader
+
+	// reservationMu guards rotationReservations, each group's admitted but
+	// not yet finished keyring rotations, and orders them against manager
+	// registration. Taken before mu. See ReserveKeyringRotation.
+	reservationMu        sync.Mutex
+	rotationReservations map[types.NamespacedName][]string
 }
 
 // NewTopologyManagerRunner creates a new runner.
@@ -564,6 +570,13 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 	// Stop managers for deleted CRs.
 	var stopping []*managedTopology
+	r.reservationMu.Lock()
+	for nn := range r.rotationReservations {
+		if _, ok := seen[nn]; !ok {
+			delete(r.rotationReservations, nn)
+		}
+	}
+	r.reservationMu.Unlock()
 	r.mu.Lock()
 	for nn, mt := range r.managers {
 		if _, ok := seen[nn]; !ok {
@@ -946,6 +959,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	done := make(chan struct{})
 	archiverDone := make(chan struct{})
+	// Register under reservationMu with the group's pending rotation
+	// reservations already applied: a rotation admitted while no manager
+	// ran, or against the manager this one replaces, must block promotion
+	// here before Run can claim an ordered update.
+	r.reservationMu.Lock()
+	tm.restoreKeyringRotationReservations(r.pendingKeyringRotationReservations(nn))
 	r.mu.Lock()
 	r.managers[nn] = &managedTopology{
 		tm:           tm,
@@ -957,6 +976,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		dragonfly:    dfMgr,
 	}
 	r.mu.Unlock()
+	r.reservationMu.Unlock()
 
 	go func() {
 		defer close(done)

@@ -36,10 +36,12 @@ func rotationBlockedSites(fg *v1alpha1.MysqlFailoverGroup) []string {
 }
 
 // SetKeyringRotationBlocked replaces the set of sites that must not be
-// promoted because they are mid-keyring-rotation. A change arms a dirty
-// bit so the next Poll re-runs applyCrossSiteAction even when no MySQL
-// state transition occurred — otherwise a 2-site refuse never heals
-// after the replica reaches Sealed.
+// promoted because they are mid-keyring-rotation, as read from a possibly
+// lagging informer cache (runner sync, manager start). A change arms a
+// dirty bit so the next Poll re-runs applyCrossSiteAction even when no
+// MySQL state transition occurred — otherwise a 2-site refuse never heals
+// after the replica reaches Sealed. It never drops a reservation: a cache
+// that has not caught up with a fresh stamp must not unblock the site.
 func (tm *TopologyManager) SetKeyringRotationBlocked(sites []string) {
 	if tm == nil {
 		return
@@ -48,49 +50,88 @@ func (tm *TopologyManager) SetKeyringRotationBlocked(sites []string) {
 	sort.Strings(cp)
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	// A durable stamp supersedes the reservation that admitted it.
-	if len(tm.keyringRotationReserved) > 0 {
-		kept := tm.keyringRotationReserved[:0]
-		for _, name := range tm.keyringRotationReserved {
-			if !slices.Contains(cp, name) {
-				kept = append(kept, name)
-			}
-		}
-		tm.keyringRotationReserved = kept
-	}
-	if stringSlicesEqual(tm.keyringRotationBlocked, cp) {
+	tm.setKeyringRotationBlockedLocked(cp)
+}
+
+// PublishKeyringRotationBlocked replaces the durable set from an
+// authoritative view: the encryption reconciler's own status write, or an
+// uncached read after an ambiguous one. Reservations the view does not
+// carry are over (their rotation finished or was never persisted) and are
+// dropped; the rest stay until such a view lacks them.
+func (tm *TopologyManager) PublishKeyringRotationBlocked(sites []string) {
+	if tm == nil {
 		return
 	}
-	tm.keyringRotationBlocked = cp
+	cp := append([]string(nil), sites...)
+	sort.Strings(cp)
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	kept := tm.keyringRotationReserved[:0]
+	for _, name := range tm.keyringRotationReserved {
+		if slices.Contains(cp, name) {
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) != len(tm.keyringRotationReserved) {
+		tm.keyringRotationBlockedDirty = true
+	}
+	tm.keyringRotationReserved = kept
+	tm.setKeyringRotationBlockedLocked(cp)
+}
+
+func (tm *TopologyManager) setKeyringRotationBlockedLocked(sorted []string) {
+	if stringSlicesEqual(tm.keyringRotationBlocked, sorted) {
+		return
+	}
+	tm.keyringRotationBlocked = sorted
 	tm.keyringRotationBlockedDirty = true
 }
 
 // ReserveKeyringRotation admits a keyring rotation on site before the
-// encryption reconciler persists UnsealReason=Rotation. It refuses while an
-// ordered update is pending or running: the update's handoff re-checks
-// eligibility live, and deciding both under mu means a rotation and a
-// handoff onto the same standby can never both be admitted. Once granted,
-// the site is promotion-blocked at once, exactly like a durable stamp,
-// until SetKeyringRotationBlocked carries the stamp or the reservation is
-// released.
+// encryption reconciler persists UnsealReason=Rotation. Decided under mu,
+// it refuses while an ordered update is pending or running (the update's
+// handoff re-checks eligibility live, so a rotation and a handoff onto the
+// same standby can never both be admitted), while a promotion is in flight
+// or not yet observed, and when site is the primary this manager observes:
+// status.activeSite, which rotationAllowed reads, lags a promotion. Once
+// granted, the site is promotion-blocked at once, exactly like a durable
+// stamp, until an authoritative view lacks it or it is released.
 func (tm *TopologyManager) ReserveKeyringRotation(site string) (bool, string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	if tm.deploymentUpdatePending || tm.deploymentUpdateRunning {
+	switch {
+	case tm.deploymentUpdatePending || tm.deploymentUpdateRunning:
 		return false, "an ordered update is in progress"
+	case tm.deploymentChanging > 0 || tm.promotedSite != "":
+		return false, "a promotion is in flight; retry once the new primary is observed"
+	case tm.activeSiteLocked() == site:
+		return false, "site is the active primary; rotate replicas first, then run a planned failover and rotate this site once it is a replica"
 	}
-	if tm.keyringRotationBlockedLocked(site) {
-		return true, ""
-	}
-	tm.keyringRotationReserved = append(tm.keyringRotationReserved, site)
-	sort.Strings(tm.keyringRotationReserved)
-	tm.keyringRotationBlockedDirty = true
+	tm.addKeyringRotationReservationsLocked([]string{site})
 	return true, ""
 }
 
+// restoreKeyringRotationReservations carries the runner's pending
+// reservations onto a manager before its Run starts.
+func (tm *TopologyManager) restoreKeyringRotationReservations(sites []string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.addKeyringRotationReservationsLocked(sites)
+}
+
+func (tm *TopologyManager) addKeyringRotationReservationsLocked(sites []string) {
+	for _, site := range sites {
+		if !slices.Contains(tm.keyringRotationReserved, site) {
+			tm.keyringRotationReserved = append(tm.keyringRotationReserved, site)
+			tm.keyringRotationBlockedDirty = true
+		}
+	}
+	sort.Strings(tm.keyringRotationReserved)
+}
+
 // ReleaseKeyringRotationReservations drops reservations whose stamp was
-// never persisted, so a failed status write does not keep a site
-// promotion-blocked.
+// definitely not persisted, so a rejected status write does not keep a
+// site promotion-blocked.
 func (tm *TopologyManager) ReleaseKeyringRotationReservations(sites []string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -174,34 +215,90 @@ func (r *TopologyManagerRunner) SetKeyringRotationBlocked(nn types.NamespacedNam
 	return true
 }
 
-// ReserveKeyringRotation admits a rotation on the managed TopologyManager
-// (see TopologyManager.ReserveKeyringRotation). With no manager running
-// there is no ordered update to exclude, so the rotation is admitted.
+// Rotation reservations are group-scoped on the runner as well as held by
+// the group's current manager: a manager started or replaced between a
+// reservation and the status write that persists it receives the pending
+// reservations before its Run begins (startManager), so no manager can
+// admit an ordered update onto a site whose rotation was already admitted.
+// reservationMu orders reservation changes against manager registration;
+// it is taken before r.mu and before any manager's mu.
+
+// ReserveKeyringRotation admits a rotation for nn's site. With a manager
+// running, the manager decides (see TopologyManager.ReserveKeyringRotation);
+// with none, the reservation is recorded and the next manager starts with
+// it.
 func (r *TopologyManagerRunner) ReserveKeyringRotation(nn types.NamespacedName, site string) (bool, string) {
 	if r == nil {
 		return true, ""
 	}
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return true, ""
+	r.reservationMu.Lock()
+	defer r.reservationMu.Unlock()
+	if mt := r.registered(nn); mt != nil {
+		if ok, why := mt.tm.ReserveKeyringRotation(site); !ok {
+			return false, why
+		}
 	}
-	return mt.tm.ReserveKeyringRotation(site)
+	if pending := r.pendingKeyringRotationReservations(nn); !slices.Contains(pending, site) {
+		r.setPendingKeyringRotationReservations(nn, append(pending, site))
+	}
+	return true, ""
 }
 
-// ReleaseKeyringRotationReservations drops unpersisted reservations on the
-// managed TopologyManager.
+// ReleaseKeyringRotationReservations drops nn's reservations for sites.
 func (r *TopologyManagerRunner) ReleaseKeyringRotationReservations(nn types.NamespacedName, sites []string) {
 	if r == nil || len(sites) == 0 {
 		return
 	}
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if ok {
+	r.reservationMu.Lock()
+	defer r.reservationMu.Unlock()
+	r.setPendingKeyringRotationReservations(nn, slices.DeleteFunc(r.pendingKeyringRotationReservations(nn), func(s string) bool {
+		return slices.Contains(sites, s)
+	}))
+	if mt := r.registered(nn); mt != nil {
 		mt.tm.ReleaseKeyringRotationReservations(sites)
 	}
+}
+
+// PublishKeyringRotationBlocked pushes an authoritative rotation-blocked
+// set (see TopologyManager.PublishKeyringRotationBlocked) and drops nn's
+// reservations it does not carry.
+func (r *TopologyManagerRunner) PublishKeyringRotationBlocked(nn types.NamespacedName, sites []string) {
+	if r == nil {
+		return
+	}
+	r.reservationMu.Lock()
+	defer r.reservationMu.Unlock()
+	r.setPendingKeyringRotationReservations(nn, slices.DeleteFunc(r.pendingKeyringRotationReservations(nn), func(s string) bool {
+		return !slices.Contains(sites, s)
+	}))
+	if mt := r.registered(nn); mt != nil {
+		mt.tm.PublishKeyringRotationBlocked(sites)
+	}
+}
+
+// pendingKeyringRotationReservations returns nn's reservations. Caller
+// holds reservationMu.
+func (r *TopologyManagerRunner) pendingKeyringRotationReservations(nn types.NamespacedName) []string {
+	return append([]string(nil), r.rotationReservations[nn]...)
+}
+
+// setPendingKeyringRotationReservations stores nn's reservations. Caller
+// holds reservationMu.
+func (r *TopologyManagerRunner) setPendingKeyringRotationReservations(nn types.NamespacedName, sites []string) {
+	if len(sites) == 0 {
+		delete(r.rotationReservations, nn)
+		return
+	}
+	if r.rotationReservations == nil {
+		r.rotationReservations = make(map[types.NamespacedName][]string)
+	}
+	r.rotationReservations[nn] = sites
+}
+
+func (r *TopologyManagerRunner) registered(nn types.NamespacedName) *managedTopology {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.managers[nn]
 }
 
 func stringSlicesEqual(a, b []string) bool {

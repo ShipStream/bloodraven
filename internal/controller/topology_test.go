@@ -2759,8 +2759,11 @@ func TestPoll_StatusCallbackFiresWhenReplicaStatusErrorsAfterHealthy(t *testing.
 	}
 }
 
-// TestCheckUpdate_RetainsUnhealthyStandbyDrift verifies an unsafe follower is
-// retained by the ordered plan without applying its Deployment update.
+// TestCheckUpdate_RetainsUnhealthyStandbyDrift verifies follower-only drift
+// on a site that is not a healthy direct replica is retained without
+// starting an update: every attempt would retain it as unsafe, and an
+// attempt restarted every poll would keep old-primary recovery, which is
+// what heals such a site, standing down.
 func TestCheckUpdate_RetainsUnhealthyStandbyDrift(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{
@@ -2781,17 +2784,12 @@ func TestCheckUpdate_RetainsUnhealthyStandbyDrift(t *testing.T) {
 
 	// Drift on standby — the classic trigger for an ordered update.
 	tm.SetSpecDriftSites([]string{"dc2"})
-	done := make(chan struct{})
-	tm.StatusCallback = func(TopologySnapshot) { close(done) }
 
-	started := tm.checkUpdate(context.Background())
-	if !started {
-		t.Fatal("checkUpdate must start so independently safe targets can be processed")
+	if tm.checkUpdate(context.Background()) {
+		t.Fatal("checkUpdate started an update whose only target would be retained as unsafe")
 	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("ordered plan did not complete")
+	if tm.isUpdating() {
+		t.Fatal("an update is running for drift no attempt can process")
 	}
 	select {
 	case site := <-applied:
@@ -2818,6 +2816,7 @@ func TestCheckUpdate_ProcessesHealthyCandidateBeforeUnhealthyReader(t *testing.T
 		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly,
 	}, primary, candidate, reader)
 	tm.sites[1].replicating = true
+	tm.sites[1].sourceHost = "mysql-primary-internal.ns.svc.cluster.local"
 	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
 	var applied []string
 	tm.ApplyUpdate = func(_ context.Context, site string) error {

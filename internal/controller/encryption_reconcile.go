@@ -67,7 +67,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 			}
 		}
 		if r.Runner != nil {
-			r.Runner.SetKeyringRotationBlocked(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, nil)
+			r.Runner.PublishKeyringRotationBlocked(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, nil)
 		}
 		return 0, nil
 	}
@@ -125,15 +125,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	requeue := time.Duration(0)
 	allSealed := true
 
-	// Rotations admitted this pass hold a topology-manager reservation
-	// until the stamp is persisted; release them if it never is, so a
-	// failed write does not leave the site promotion-blocked.
+	// Rotations admitted this pass hold a reservation that blocks their
+	// promotion until an authoritative view of the status lacks them. If
+	// the stamp never reaches the API server it is released; if the write
+	// outcome is unknown, an uncached read decides (see
+	// settleKeyringRotationReservations).
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	var reserved []string
 	persisted := false
+	var writeErr error
 	defer func() {
-		if !persisted && r.Runner != nil {
-			r.Runner.ReleaseKeyringRotationReservations(nn, reserved)
+		if !persisted {
+			r.settleKeyringRotationReservations(ctx, nn, reserved, writeErr)
 		}
 	}()
 
@@ -179,16 +182,51 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 
 	setEncryptionCondition(fg)
 	if err := r.patchEncryptionStatus(ctx, fg); err != nil {
+		writeErr = err
 		return 0, err
 	}
 	persisted = true
 	// Push immediately so the topology manager does not wait for the
-	// 30s runner sync before refusing (or unblocking) promotion. The push
-	// also supersedes this pass's reservations.
+	// 30s runner sync before refusing (or unblocking) promotion. This view
+	// is authoritative: reservations it lacks are over.
 	if r.Runner != nil {
-		r.Runner.SetKeyringRotationBlocked(nn, rotationBlockedSites(fg))
+		r.Runner.PublishKeyringRotationBlocked(nn, rotationBlockedSites(fg))
 	}
 	return requeue, nil
+}
+
+// settleKeyringRotationReservations resolves the reservations a pass made
+// when its status write did not succeed. Nothing written, or a write the API
+// server rejected, means the stamp is not persisted: release. Any other
+// error (a timeout, a dropped connection) may have committed, so an
+// uncached read decides, published as the authoritative view; if that read
+// fails too, the reservations stay (fail closed) and the requeued pass
+// settles them.
+func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx context.Context, nn types.NamespacedName, reserved []string, writeErr error) {
+	if r.Runner == nil || len(reserved) == 0 {
+		return
+	}
+	if writeErr == nil || statusWriteRejected(writeErr) {
+		r.Runner.ReleaseKeyringRotationReservations(nn, reserved)
+		return
+	}
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	var latest v1alpha1.MysqlFailoverGroup
+	if err := r.authorityReader().Get(readCtx, nn, &latest); err != nil {
+		log.FromContext(ctx).Error(err, "keyring rotation: status write outcome unknown and re-read failed; keeping the promotion block",
+			"fg", nn, "sites", reserved)
+		return
+	}
+	r.Runner.PublishKeyringRotationBlocked(nn, rotationBlockedSites(&latest))
+}
+
+// statusWriteRejected reports whether err proves the API server did not
+// apply the write.
+func statusWriteRejected(err error) bool {
+	return apierrors.IsConflict(err) || apierrors.IsInvalid(err) || apierrors.IsForbidden(err) ||
+		apierrors.IsUnauthorized(err) || apierrors.IsBadRequest(err) || apierrors.IsNotFound(err) ||
+		apierrors.IsMethodNotSupported(err) || apierrors.IsRequestEntityTooLargeError(err)
 }
 
 // reconcileSiteKeyring advances one site. Returns true when the site is

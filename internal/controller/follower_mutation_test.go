@@ -2,10 +2,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -180,10 +184,12 @@ func TestAdmitTopologyHandoffWaitsForAdmittedFollowerMutation(t *testing.T) {
 		t.Fatal("mutation refused with no handoff in flight")
 	}
 	published := make(chan struct{})
-	go tm.admitTopologyHandoff(func() {
-		tm.SetPlannedFailoverActive(true)
-		close(published)
-	})
+	go func() {
+		_ = tm.admitTopologyHandoff(context.Background(), func() {
+			tm.SetPlannedFailoverActive(true)
+			close(published)
+		})
+	}()
 	select {
 	case <-published:
 		t.Fatal("handoff published while a follower mutation was still running")
@@ -281,5 +287,200 @@ func TestPlannedPromote_MidPromotionPollDoesNotDrainTarget(t *testing.T) {
 	tm.checkRecovery(context.Background(), repl)
 	if site1.killConnectionCalls != 0 {
 		t.Fatalf("recovery drained the new primary from pre-promotion observations: %d kills", site1.killConnectionCalls)
+	}
+}
+
+// The RecoveryInProgress status write runs outside any admitted section: a
+// stalled API server must not hold a planned promotion at the barrier, and
+// a handoff admitted during the write defers the rewrite to a later poll.
+func TestRecoveryStatusWriteDoesNotHoldHandoffBarrier(t *testing.T) {
+	gtid := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: gtid}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	setRecoveredTopology(tm)
+
+	entered := make(chan struct{})
+	unblock := make(chan struct{})
+	var once sync.Once
+	tm.StatusCallback = func(TopologySnapshot) {
+		once.Do(func() {
+			close(entered)
+			<-unblock
+		})
+	}
+	recoveryDone := make(chan struct{})
+	go func() {
+		defer close(recoveryDone)
+		tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
+	}()
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := tm.admitTopologyHandoff(ctx, func() { tm.SetPlannedFailoverActive(true) }); err != nil {
+		t.Fatalf("handoff waited on a blocked status write: %v", err)
+	}
+	close(unblock)
+	<-recoveryDone
+	site1.mu.Lock()
+	changes := site1.changeSourceCalls
+	site1.mu.Unlock()
+	if changes != 0 {
+		t.Fatalf("recovery rewrote the old primary after a handoff was admitted: %d CHANGE SOURCE", changes)
+	}
+
+	tm.SetPlannedFailoverActive(false)
+	tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
+	if got := site1.startReplicaCallCount(); got != 1 {
+		t.Fatalf("deferred rewrite did not run on the next poll: %d sequences", got)
+	}
+}
+
+// A promotion whose context ends while an admitted recovery step still
+// runs returns errHandoffNotAdmitted without touching MySQL, and leaves the
+// gate usable.
+func TestPlannedPromote_CancelledWhileRecoveryHoldsGate(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	tm.mu.Lock()
+	tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
+	tm.mu.Unlock()
+
+	release, ok := tm.beginFollowerMutation()
+	if !ok {
+		t.Fatal("setup: mutation refused")
+	}
+	tm.SetPlannedFailoverActive(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := tm.PlannedPromote(ctx, "dc2", "dc1")
+	if !errors.Is(err, errHandoffNotAdmitted) {
+		t.Fatalf("PlannedPromote = %v, want errHandoffNotAdmitted", err)
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Fatalf("PlannedPromote ignored its context for %v", waited)
+	}
+	site0.mu.Lock()
+	fenced := site0.superReadOnlyCalls
+	site0.mu.Unlock()
+	if fenced != 0 || site1.promoted {
+		t.Fatal("a promotion that was never admitted touched MySQL")
+	}
+	release()
+
+	tm.SetPlannedFailoverActive(false)
+	again, ok := tm.beginFollowerMutation()
+	if !ok {
+		t.Fatal("the abandoned handoff left the gate closed")
+	}
+	again()
+	if err := tm.admitTopologyHandoff(context.Background(), func() {}); err != nil {
+		t.Fatalf("gate refused a later handoff: %v", err)
+	}
+}
+
+// The planned-failover reconciler rolls an unadmitted promotion back: the
+// source is unfenced and nothing was sent to the target.
+func TestPlannedFailoverPromoting_RollsBackWhenHandoffNotAdmitted(t *testing.T) {
+	fg := plannedFailoverFG("")
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+	}
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tm.followerMutationGate.enter() {
+		t.Fatal("setup: gate refused")
+	}
+	defer tm.followerMutationGate.exit()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.reconcilePlannedFailover(ctx, fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "RecoveryInFlight" {
+		t.Fatalf("phase=%q reason=%q (%s), want Failed/RecoveryInFlight", pf.Phase, pf.Reason, pf.Message)
+	}
+	if iad.superReadOnly || iad.readOnly || !pdx.readOnly {
+		t.Errorf("iad super_read_only=%v read_only=%v, pdx read_only=%v; want iad unfenced and pdx untouched",
+			iad.superReadOnly, iad.readOnly, pdx.readOnly)
+	}
+}
+
+// A promotion that fails after admission releases everything: once the
+// planned failover ends, the next poll drains and clears the recovering
+// replica.
+func TestPlannedPromote_FailureAfterAdmissionReleasesRecovery(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true, stopReplicaErr: errors.New("stop replica failed"),
+		replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	pollN(tm, 4)
+	tm.mu.Lock()
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateInProgress}
+	tm.mu.Unlock()
+
+	tm.SetPlannedFailoverActive(true)
+	if _, err := tm.PlannedPromote(context.Background(), "dc2", ""); err == nil {
+		t.Fatal("setup: promotion should fail at STOP REPLICA")
+	}
+	tm.SetPlannedFailoverActive(false)
+	pollN(tm, 2)
+
+	tm.mu.RLock()
+	rec := tm.recovery["dc2"]
+	tm.mu.RUnlock()
+	if rec != nil {
+		t.Fatalf("recovery did not resume after the failed promotion: %+v", rec)
+	}
+	if site1.killConnectionCalls != 1 {
+		t.Fatalf("drain passes = %d, want 1", site1.killConnectionCalls)
+	}
+}
+
+// Behavioural: a wrong-source follower is left alone while an ordered
+// update owns the sites.
+func TestSourceConvergence_LeavesFollowerToRunningUpdate(t *testing.T) {
+	primary := &mockMySQL{gtidExecuted: convergenceTestGTID}
+	follower := &mockMySQL{readOnly: true, gtidExecuted: convergenceTestGTID,
+		replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "wrong"}}
+	tm := newConvergenceManager(t, []state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly}, primary, follower)
+	tm.mu.Lock()
+	tm.deploymentUpdateRunning = true
+	tm.mu.Unlock()
+	tm.checkSourceConvergence(context.Background(), []*mysql.ReplicaStatus{nil, follower.replicaStatusVal})
+	if follower.stopReplicaCalls != 0 || follower.changeSourceCalls != 0 || follower.startReplicaCalls != 0 {
+		t.Fatalf("convergence mutated a follower during an ordered update: stop=%d change=%d start=%d",
+			follower.stopReplicaCalls, follower.changeSourceCalls, follower.startReplicaCalls)
+	}
+	if tm.sites[1].sourceConvergenceState != sourceConvergencePending {
+		t.Fatalf("source convergence state = %s, want Pending", tm.sites[1].sourceConvergenceState)
+	}
+}
+
+// What startManager hydrates (planned-failover flag, RecoveryInProgress)
+// holds on the first polls: nothing is drained, fenced or repointed.
+func TestFirstPollsAfterRestartLeavePlannedFailoverSitesAlone(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	tm.SetPlannedFailoverActive(true)
+	tm.SetRecoveryInProgress("dc2")
+	pollN(tm, 4)
+	if site1.killConnectionCalls != 0 || site1.superReadOnlyCalls != 0 || site1.changeSourceCalls != 0 {
+		t.Fatalf("first polls mutated the planned failover's target: kill=%d fence=%d changeSource=%d",
+			site1.killConnectionCalls, site1.superReadOnlyCalls, site1.changeSourceCalls)
 	}
 }

@@ -75,7 +75,7 @@ Check the core conditions and status fields:
 - `.status.conditions`:
   - `Ready == True`?
   - `Bootstrapping == False`?
-  - `RecoveryInProgress == False`? (It is expected to stay set while a planned failover, Dragonfly snapshot upgrade or ordered update is in flight: recovery stands down until the handoff ends.)
+  - `RecoveryInProgress == False`? (It is expected to stay set while a planned failover or ordered update is in flight: recovery stands down until the handoff ends. A Dragonfly snapshot upgrade defers it only intermittently, so a site stuck through a whole upgrade is a real stall.)
   - `RecoveryBlocked == False`?
 - Pod status: `kubectl get pods -n <namespace> -l app.kubernetes.io/instance=<group-name>`
 - Recent events: `kubectl get events -n <namespace> --sort-by=.lastTimestamp`

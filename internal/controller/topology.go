@@ -576,13 +576,13 @@ type TopologyManager struct {
 	// planned_failover_reconciler.go.
 	plannedFailoverActive bool
 
-	// followerMutationMu is the admission barrier between follower
-	// mutations (recovery drain, old-primary recovery, source convergence),
-	// which hold it shared, and topology handoffs (planned promotion,
-	// ordered-update claim), which publish their suppression flag while
-	// holding it exclusively. Never acquired while holding mu. See
+	// followerMutationGate is the admission barrier between follower
+	// mutations (recovery drain, old-primary recovery, source convergence)
+	// and topology handoffs (planned promotion, ordered-update claim),
+	// which publish their suppression flag only once every admitted
+	// mutation has finished. Never entered while holding mu. See
 	// beginFollowerMutation.
-	followerMutationMu sync.RWMutex
+	followerMutationGate mutationGate
 
 	// recoveryDeferred records that old-primary recovery is standing down
 	// for a handoff, so the deferral is logged once per transition.
@@ -3036,7 +3036,9 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	// set may still be killing sessions on the target, and Execute must
 	// not start until it has finished.
 	var began bool
-	tm.admitTopologyHandoff(func() { began = tm.beginDeploymentTopologyChange() })
+	if err := tm.admitTopologyHandoff(ctx, func() { began = tm.beginDeploymentTopologyChange() }); err != nil {
+		return "", fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
+	}
 	if !began {
 		return "", fmt.Errorf("topology change already in progress")
 	}
@@ -3263,6 +3265,23 @@ func (tm *TopologyManager) crossSiteRetryReady() bool {
 		!tm.bootstrapBlocksCrossSite() && !tm.isUpdating()
 }
 
+// hasUpdatableFollower reports whether a drifted non-active site can be
+// rolled now. It matches requireDirectReplica: threads up and pointed at
+// the current primary. A wrong-source replica is "healthy" in the debounce
+// sense but is retained as unsafe.
+func (tm *TopologyManager) hasUpdatableFollower(activeName, activeHost string, drifted map[string]bool) bool {
+	for i := range tm.sites {
+		if tm.sites[i].name == activeName || !drifted[tm.sites[i].name] {
+			continue
+		}
+		if tm.sites[i].isHealthyReplica() &&
+			canonicalSourceHost(tm.sites[i].sourceHost) == canonicalSourceHost(activeHost) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkUpdate detects spec drift and triggers an ordered rolling
 // update. Returns true if an update was started this cycle.
 //
@@ -3363,21 +3382,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			// unreachable, threads down) will fail requireDirectReplica and
 			// must not keep restarting the plan every poll. Only a replica
 			// that can actually be rolled unblocks this path.
-			updatableFollower := false
-			for i := range tm.sites {
-				if tm.sites[i].name == activeName || !drifted[tm.sites[i].name] {
-					continue
-				}
-				// Match requireDirectReplica: threads up and pointed at
-				// the current primary. A wrong-source replica is "healthy"
-				// in the debounce sense but will be retained as unsafe.
-				if tm.sites[i].isHealthyReplica() &&
-					canonicalSourceHost(tm.sites[i].sourceHost) == canonicalSourceHost(activeSite.host) {
-					updatableFollower = true
-					break
-				}
-			}
-			if !updatableFollower {
+			if !tm.hasUpdatableFollower(activeName, activeSite.host, drifted) {
 				tm.logger.Info("ordered update: deferring active-site update; no healthy promotable standby",
 					"active", activeName, "driftSites", driftSites)
 				return false
@@ -3385,6 +3390,12 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			tm.logger.Info("ordered update: updating drifted followers; active site has no healthy promotable standby",
 				"active", activeName, "driftSites", driftSites)
 		}
+	} else if !tm.hasUpdatableFollower(activeName, activeSite.host, drifted) {
+		// Follower-only drift on sites that are not healthy direct replicas
+		// would be retained as unsafe by every attempt. Restarting such an
+		// attempt every poll would also keep old-primary recovery, which is
+		// what heals those sites, standing down for the update.
+		return false
 	}
 
 	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
@@ -3428,7 +3439,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 		// recovery drain, old-primary recovery or source repoint admitted
 		// before it is still running when the update touches MySQL.
 		claimed := false
-		tm.admitTopologyHandoff(func() {
+		admitErr := tm.admitTopologyHandoff(ctx, func() {
 			tm.mu.Lock()
 			defer tm.mu.Unlock()
 			if ctx.Err() != nil || tm.authorityEpoch != updateAuthorityEpoch || tm.activeSiteLocked() != activeName || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation || tm.topologyFrozen || tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) {
@@ -3440,7 +3451,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			tm.deploymentTopologyPendingLocked()
 			claimed = true
 		})
-		if !claimed {
+		if admitErr != nil || !claimed {
 			return
 		}
 		defer func() {
@@ -4593,10 +4604,23 @@ func (tm *TopologyManager) checkRecoveryWithConvergence(ctx context.Context, sit
 			tm.noteRecoveryDeferred(true)
 			return false
 		}
+		tm.mu.RLock()
+		decidedEpoch := tm.authorityEpoch
+		tm.mu.RUnlock()
 		attemptCtx, cancel := context.WithTimeout(ctx, recoveryAttemptTimeout)
-		changed, acted := tm.initiateRecovery(attemptCtx, i, activeIdx, siteRepl)
+		changed, acted, rewrite := tm.initiateRecovery(attemptCtx, i, activeIdx, siteRepl)
 		cancel()
 		release()
+		if rewrite {
+			// Persist RecoveryInProgress before the rewrite starts, so an
+			// operator restart inside STOP/RESET/CHANGE/START finds it. The
+			// write runs outside the admitted section: a slow API server
+			// must not hold a handoff at the barrier.
+			if tm.StatusCallback != nil {
+				tm.StatusCallback(tm.buildSnapshot(siteRepl))
+			}
+			tm.rewriteOldPrimary(ctx, i, activeIdx, decidedEpoch)
+		}
 		if acted {
 			return changed
 		}
@@ -5105,7 +5129,9 @@ func (tm *TopologyManager) sharesHistory(ctx context.Context, gtid mysql.GTIDSet
 // mutation-per-poll budget — the caller continues scanning other sites, so a
 // persistently-skipped site can never starve a divergent site behind it in
 // scan order. changed=true means recovery state changed this cycle.
-func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int, siteRepl []*mysql.ReplicaStatus) (changed, acted bool) {
+// rewrite=true means no divergence was found and RecoveryInProgress was
+// recorded: the caller persists it and then runs rewriteOldPrimary.
+func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int, siteRepl []*mysql.ReplicaStatus) (changed, acted, rewrite bool) {
 	oldPrimary := &tm.sites[oldPrimaryIdx]
 	newPrimary := &tm.sites[newPrimaryIdx]
 
@@ -5124,7 +5150,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		// The scan still advances past this site — acted=false — so a site that
 		// cannot answer the pre-probe never starves a divergent site behind it.
 		tm.stampRecoveryBackoff(oldPrimary.name)
-		return false, false
+		return false, false, false
 	}
 	empty := false
 	if preGtid, parseErr := mysql.ParseGTIDSet(preGtidStr); parseErr == nil {
@@ -5150,7 +5176,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		}
 	}
 	if empty {
-		return false, false
+		return false, false, false
 	}
 
 	tm.mu.RLock()
@@ -5166,7 +5192,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		if err := oldPrimary.mysql.SetSuperReadOnly(ctx, true); err != nil {
 			tm.logger.Error("recovery: failed to fence old primary", "site", oldPrimary.name, "error", err)
 			tm.stampRecoveryBackoff(oldPrimary.name)
-			return false, true
+			return false, true, false
 		}
 	}
 
@@ -5175,7 +5201,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	// drain pass; GTID comparison and recovery mutation resume only after the
 	// drain completes or its best-effort timeout expires.
 	if !tm.advanceSiteAppConnectionDrain(ctx, oldPrimary) {
-		return false, true
+		return false, true, false
 	}
 	// Re-read after the fence: this is the authoritative set the divergence
 	// comparison runs against (the fence guarantees it can no longer grow).
@@ -5183,26 +5209,26 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	if err != nil {
 		tm.logger.Error("recovery: failed to get old primary GTID", "site", oldPrimary.name, "error", err)
 		tm.stampRecoveryBackoff(oldPrimary.name)
-		return false, true
+		return false, true, false
 	}
 	newGtidStr, err := newPrimary.mysql.GetGtidExecuted(ctx)
 	if err != nil {
 		tm.logger.Error("recovery: failed to get new primary GTID", "site", newPrimary.name, "error", err)
 		tm.stampRecoveryBackoff(oldPrimary.name)
-		return false, true
+		return false, true, false
 	}
 
 	oldGtid, err := mysql.ParseGTIDSet(oldGtidStr)
 	if err != nil {
 		tm.logger.Error("recovery: failed to parse old primary GTID", "site", oldPrimary.name, "error", err)
 		tm.stampRecoveryBackoff(oldPrimary.name)
-		return false, true
+		return false, true, false
 	}
 	newGtid, err := mysql.ParseGTIDSet(newGtidStr)
 	if err != nil {
 		tm.logger.Error("recovery: failed to parse new primary GTID", "site", newPrimary.name, "error", err)
 		tm.stampRecoveryBackoff(oldPrimary.name)
-		return false, true
+		return false, true, false
 	}
 
 	if oldGtid.IsEmpty() {
@@ -5210,7 +5236,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		// backoff the site would be re-fenced at poll frequency (the pre-probe
 		// empty guard above is what normally keeps empty sites off this path).
 		tm.stampRecoveryBackoff(oldPrimary.name)
-		return false, false
+		return false, false, false
 	}
 
 	if newGtid.Contains(oldGtid) {
@@ -5228,15 +5254,9 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		rec.detectedBy, rec.comparedTo = "", ""
 		tm.mu.Unlock()
 		metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
-		// Persist RecoveryInProgress before RecoverOldPrimary starts. The
-		// poll-level callback also fires after initiateRecovery returns, but this
-		// early write is the durable handoff for operator restarts that happen
-		// inside the STOP/RESET/CHANGE/START sequence.
-		if tm.StatusCallback != nil {
-			tm.StatusCallback(tm.buildSnapshot(siteRepl))
-		}
-		tm.executeRecovery(ctx, oldPrimaryIdx, newPrimaryIdx)
-		return true, true
+		// The caller persists RecoveryInProgress and then runs the rewrite
+		// (rewriteOldPrimary) as its own admitted section.
+		return true, true, true
 	}
 
 	divergent := oldGtid.Subtract(newGtid)
@@ -5282,13 +5302,15 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	tm.mu.Unlock()
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(float64(count))
-	return !sameReport, true
+	return !sameReport, true, false
 }
 
 // executeRecovery reconfigures the old primary as a replica of the new primary.
 func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int) {
 	oldPrimary := &tm.sites[oldPrimaryIdx]
 	newPrimaryHost := tm.sites[newPrimaryIdx].host
+	ctx, cancel := context.WithTimeout(ctx, recoveryAttemptTimeout)
+	defer cancel()
 
 	err := tm.failover.RecoverOldPrimary(ctx, oldPrimary.mysql, newPrimaryHost,
 		tm.bootstrapCfg.ReplUser, tm.bootstrapCfg.ReplPassword, tm.bootstrapCfg.UseSSL)

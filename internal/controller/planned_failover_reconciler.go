@@ -711,6 +711,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 					cur.Target),
 				"rejected")
 		}
+		if errors.Is(err, errHandoffNotAdmitted) {
+			return r.plannedFailoverRollback(ctx, fg, nn, "RecoveryInFlight",
+				fmt.Sprintf("%v before the promotion deadline; nothing was sent to %q; source %q unfenced, re-annotate to retry",
+					err, cur.Target, cur.SourcePrimary),
+				"failed_other")
+		}
 		if errors.Is(err, errDivergentTarget) {
 			return r.plannedFailoverRollback(ctx, fg, nn, "DivergentTarget",
 				fmt.Sprintf("%v; reclone it or make the primary contain the set before it can be promoted; source %q unfenced",

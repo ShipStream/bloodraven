@@ -1,21 +1,92 @@
 package controller
 
-import "time"
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+)
 
-// recoveryAttemptTimeout bounds one old-primary recovery attempt (pre-probe,
-// defensive fence, one drain pass, GTID comparison and the replication
-// rewrite). The attempt runs as an admitted follower mutation, so this is
-// also the longest a planned promotion or an ordered-update claim can wait
-// at the admission barrier behind a hung old primary.
+// recoveryAttemptTimeout bounds each admitted old-primary recovery section:
+// the decision (pre-probe, defensive fence, one drain pass, GTID comparison)
+// and, separately, the replication rewrite. The status write between them
+// runs outside any admitted section, so a slow API server never holds a
+// handoff at the barrier.
 const recoveryAttemptTimeout = 30 * time.Second
 
+// errHandoffNotAdmitted is returned by PlannedPromote when its context ended
+// while it waited for an admitted follower mutation to finish. Nothing has
+// been sent to the target, so the planned failover can roll back.
+var errHandoffNotAdmitted = errors.New("planned promote: a recovery or source-convergence step on the sites was still running")
+
+// mutationGate is the admission barrier between follower mutations
+// (recovery drain, old-primary recovery, source convergence) and topology
+// handoffs (planned promotion, ordered-update claim). Mutations enter and
+// exit; a handoff blocks new entries, waits, cancellably, until every
+// admitted mutation has exited, then publishes the flag that keeps later
+// mutations out. The zero value is ready to use.
+type mutationGate struct {
+	mu      sync.Mutex
+	active  int           // admitted mutation sections
+	pending int           // handoffs waiting to publish
+	idle    chan struct{} // closed when active drops to zero; nil while zero
+}
+
+func (g *mutationGate) enter() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pending > 0 {
+		return false
+	}
+	if g.active == 0 {
+		g.idle = make(chan struct{})
+	}
+	g.active++
+	return true
+}
+
+func (g *mutationGate) exit() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.active--
+	if g.active == 0 {
+		close(g.idle)
+		g.idle = nil
+	}
+}
+
+// admit waits for every admitted section to exit, refusing new ones
+// meanwhile, then runs publish. It gives up when ctx ends.
+func (g *mutationGate) admit(ctx context.Context, publish func()) error {
+	g.mu.Lock()
+	g.pending++
+	idle := g.idle
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.pending--
+		g.mu.Unlock()
+	}()
+	if idle != nil {
+		select {
+		case <-idle:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	publish()
+	return nil
+}
+
 // followerMutationSuppressedLocked reports whether another actor owns the
-// sites or authority is still moving: a planned failover (or Dragonfly
-// snapshot upgrade, which drives the same flag), an ordered update, a
-// promotion in flight or not yet observed writable, an in-place restore, or
-// an auto-bootstrap. Old-primary recovery, the recovery connection drain and
-// replication-source convergence all stand down while it holds: they kill
-// sessions and rewrite replication on the very sites a handoff is using.
+// sites or authority is still moving: a planned failover (the Dragonfly
+// snapshot upgrade writes the same flag, but the runner's planned-failover
+// sync clears it, so an upgrade defers mutations only intermittently), an
+// ordered update, a promotion in flight or not yet observed writable, an
+// in-place restore, or an auto-bootstrap. Old-primary recovery, the recovery
+// connection drain and replication-source convergence all stand down while
+// it holds: they kill sessions and rewrite replication on the very sites a
+// handoff is using.
 //
 // promotedSite is the end-of-handoff barrier: recordFailover sets it, and it
 // clears only once a poll observes the target writable (or its TTL lapses),
@@ -34,31 +105,29 @@ func (tm *TopologyManager) followerMutationSuppressed() bool {
 }
 
 // beginFollowerMutation admits one follower-mutation section (a recovery
-// drain pass, an old-primary recovery attempt, a source repoint). It returns
-// ok=false, holding nothing, when mutation is suppressed. Otherwise the
-// caller must call release when the section's MySQL statements are done.
-//
-// The shared hold pairs with admitTopologyHandoff: a handoff publishes its
-// suppression flag while holding followerMutationMu exclusively, so it
-// first waits out every admitted section, and every section admitted later
-// sees the flag. Sections must not nest; a nested RLock deadlocks against a
-// waiting writer.
+// drain pass, an old-primary recovery step, a source repoint). It returns
+// ok=false, holding nothing, when a handoff is waiting at the gate or
+// mutation is suppressed. Otherwise the caller must call release when the
+// section's MySQL statements are done. Every section must be bounded by a
+// deadline and must not write CR status: its duration is how long a handoff
+// waits.
 func (tm *TopologyManager) beginFollowerMutation() (release func(), ok bool) {
-	tm.followerMutationMu.RLock()
-	if tm.followerMutationSuppressed() {
-		tm.followerMutationMu.RUnlock()
+	if !tm.followerMutationGate.enter() {
 		return nil, false
 	}
-	return tm.followerMutationMu.RUnlock, true
+	if tm.followerMutationSuppressed() {
+		tm.followerMutationGate.exit()
+		return nil, false
+	}
+	return tm.followerMutationGate.exit, true
 }
 
 // admitTopologyHandoff runs publish, which must set a flag that
-// followerMutationSuppressedLocked observes, after every admitted follower
-// mutation has finished. Callers must not hold tm.mu.
-func (tm *TopologyManager) admitTopologyHandoff(publish func()) {
-	tm.followerMutationMu.Lock()
-	defer tm.followerMutationMu.Unlock()
-	publish()
+// followerMutationSuppressedLocked observes, once every admitted follower
+// mutation has finished. It returns ctx's error, without publishing, if ctx
+// ends first. Callers must not hold tm.mu.
+func (tm *TopologyManager) admitTopologyHandoff(ctx context.Context, publish func()) error {
+	return tm.followerMutationGate.admit(ctx, publish)
 }
 
 // pauseRecoveryDrains restarts the budget of every unfinished recovery
@@ -91,4 +160,32 @@ func (tm *TopologyManager) noteRecoveryDeferred(deferred bool) {
 	} else {
 		tm.logger.Debug("recovery resumed after topology handoff", "fg", tm.cfg.Name)
 	}
+}
+
+// rewriteOldPrimary runs the replication rewrite that initiateRecovery
+// decided on, after RecoveryInProgress was persisted. It is a separate
+// admitted section: a handoff claimed while the status write ran (the
+// authority epoch moved) or still in flight defers it, and the next poll
+// re-decides from fresh observations without waiting out the retry delay.
+func (tm *TopologyManager) rewriteOldPrimary(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int, decidedEpoch uint64) {
+	name := tm.sites[oldPrimaryIdx].name
+	release, admitted := tm.beginFollowerMutation()
+	if admitted {
+		tm.mu.RLock()
+		moved := tm.authorityEpoch != decidedEpoch
+		tm.mu.RUnlock()
+		if !moved {
+			tm.executeRecovery(ctx, oldPrimaryIdx, newPrimaryIdx)
+			release()
+			return
+		}
+		release()
+	}
+	tm.mu.Lock()
+	if rec := tm.recovery[name]; rec != nil {
+		rec.retryAfter = time.Time{}
+	}
+	tm.mu.Unlock()
+	tm.pauseRecoveryDrains()
+	tm.noteRecoveryDeferred(true)
 }

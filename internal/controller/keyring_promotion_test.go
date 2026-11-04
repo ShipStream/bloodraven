@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/state"
 )
 
 func TestRotationBlockedSites(t *testing.T) {
@@ -86,15 +87,21 @@ func TestReserveKeyringRotation_BlocksPromotionUntilStampedOrReleased(t *testing
 		t.Fatalf("PlannedPromote onto a reserved site: err = %v, want errKeyringRotationBlocked", err)
 	}
 
-	// The durable stamp supersedes the reservation; clearing the stamp
-	// then unblocks the site.
-	tm.SetKeyringRotationBlocked([]string{"dc2"})
+	// A cache-derived push never drops a reservation, even one that lacks
+	// the site: the cache may not have caught up with the stamp yet.
 	tm.SetKeyringRotationBlocked(nil)
+	if err := tm.liveHandoffRefusal("dc2")(); err == nil {
+		t.Fatal("a cache-derived push dropped the reservation")
+	}
+	// An authoritative view carrying the stamp keeps it; one lacking it
+	// (rotation finished) ends it.
+	tm.PublishKeyringRotationBlocked([]string{"dc2"})
+	tm.PublishKeyringRotationBlocked(nil)
 	tm.mu.RLock()
 	blocked := tm.keyringRotationBlockedLocked("dc2")
 	tm.mu.RUnlock()
 	if blocked {
-		t.Fatal("reservation outlived the durable stamp that superseded it")
+		t.Fatal("reservation outlived the authoritative view that ended the rotation")
 	}
 
 	// A reservation whose stamp never persisted is released explicitly.
@@ -128,5 +135,41 @@ func TestHandoffBlockErr(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// status.activeSite lags a promotion, so the live admission refuses the
+// site this manager observes as primary, and any rotation while a
+// promotion is in flight or not yet observed.
+func TestReserveKeyringRotation_RefusesLivePrimaryAndPromotionInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(tm *TopologyManager)
+		site string
+	}{
+		{"observed primary", func(tm *TopologyManager) {
+			tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
+		}, "dc1"},
+		{"promotion not yet observed", func(tm *TopologyManager) { tm.promotedSite = "dc2" }, "dc2"},
+		{"promotion in flight", func(tm *TopologyManager) { tm.deploymentChanging = 1 }, "dc2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+			tm.mu.Lock()
+			tc.set(tm)
+			tm.mu.Unlock()
+			if ok, why := tm.ReserveKeyringRotation(tc.site); ok {
+				t.Fatalf("rotation of %s admitted", tc.site)
+			} else if why == "" {
+				t.Fatal("refusal carries no reason")
+			}
+		})
+	}
+	tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+	tm.mu.Lock()
+	tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
+	tm.mu.Unlock()
+	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
+		t.Fatalf("rotation of a settled replica refused: %s", why)
 	}
 }
