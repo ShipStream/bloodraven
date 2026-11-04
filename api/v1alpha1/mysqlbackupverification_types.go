@@ -130,13 +130,22 @@ type MysqlBackupVerificationSpec struct {
 // known-good point, or as a regression check that archives covering a
 // past incident still replay cleanly.
 type PointInTimeVerificationSpec struct {
+	// Sites are the archive site names to replay. Defaults to this group's sites.
+	// Set when the source archive's sites differ, or to include a removed site.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9-]+$`
+	Sites []string `json:"sites,omitempty"`
+
 	// Mode selects the replay behavior.
 	// +kubebuilder:default=none
 	// +kubebuilder:validation:Enum=none;latest;timestamp
 	Mode string `json:"mode,omitempty"`
 
 	// Timestamp is an RFC3339 instant; replay stops just before the
-	// first binlog event after this time. Required when Mode=timestamp;
+	// first binlog event at or after this time. Required when Mode=timestamp;
 	// ignored otherwise.
 	// +optional
 	Timestamp string `json:"timestamp,omitempty"`

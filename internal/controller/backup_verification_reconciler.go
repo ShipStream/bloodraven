@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -259,6 +258,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	}
 	// Observe the Job. Status translation reuses the backup helper.
 	phase, message := jobPhase(job, "verification")
+	jobFailed := phase == v1alpha1.BackupPhaseFailed
 	if phase == "" {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
@@ -274,9 +274,8 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		completion = metav1.Now()
 	}
 
-	// Parse the verify.sh log sentinels for PITR replay + sanity check
-	// details. Nil sentinels (missing Clientset, older Jobs) leave the
-	// status fields at zero value and do not fail the reconcile.
+	// The verify.sh log sentinels add best-effort replay and sanity detail.
+	// A PITR verification is certified only by its termination verdict.
 	sentinels := r.tailVerificationSentinels(ctx, v, job)
 	if sentinels.Replay != nil {
 		next.ReplayedThroughBinlog = sentinels.Replay
@@ -284,23 +283,54 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	if sentinels.Sanity != nil {
 		next.SanityCheck = sentinels.Sanity
 	}
-
+	pitr := jobHasPITR(job)
+	var pod *corev1.Pod
+	if pitr {
+		if pod, err = latestJobPod(ctx, r.Client, job); err != nil {
+			return ctrl.Result{}, fmt.Errorf("list verification Job pods: %w", err)
+		}
+	}
+	if pitr && phase == v1alpha1.BackupPhaseSucceeded {
+		verdict, err := pitrJobVerdict(pod, job)
+		if err != nil {
+			phase = v1alpha1.BackupPhaseFailed
+			message = "PITRCoverageInvalid: " + err.Error()
+		} else {
+			mark := &v1alpha1.BinlogReplayMark{File: verdict.LastFile}
+			if next.ReplayedThroughBinlog != nil {
+				mark.Position = next.ReplayedThroughBinlog.Position
+			}
+			if verdict.NewestEventTime != "" {
+				if t, err := time.Parse(time.RFC3339, verdict.NewestEventTime); err == nil {
+					stamp := metav1.NewTime(t)
+					mark.Timestamp = &stamp
+				}
+			}
+			next.ReplayedThroughBinlog = mark
+		}
+	}
+	if pitr && jobFailed {
+		if detail := pitrJobFailure(pod); detail != "" {
+			message = detail
+		}
+	}
 	reason := "Succeeded"
 	if phase == v1alpha1.BackupPhaseSucceeded {
 		next.Phase = v1alpha1.VerificationPhaseSucceeded
 	} else {
 		next.Phase = v1alpha1.VerificationPhaseFailed
 		reason = "Failed"
-		// Attribute the failure to the sanity-check phase when the
-		// sentinel tells us that's where we stopped. Operators get a
-		// distinct reason they can filter on (SanityCheckFailed vs the
-		// generic RestoreFailed) without having to grep pod logs.
-		if sentinels.Sanity != nil && sentinels.Sanity.Error != "" {
-			if strings.EqualFold(sentinels.Sanity.Error, "timeout") {
-				reason = "SanityCheckTimeout"
-			} else {
-				reason = "SanityCheckFailed"
-			}
+		// Attribute the failure to the sanity-check phase when verify.sh
+		// says that's where it stopped. Operators get a distinct reason they
+		// can filter on (SanityCheckFailed vs the generic RestoreFailed)
+		// without having to grep pod logs.
+		switch {
+		case pitrFailureReason(message) != "":
+			reason = pitrFailureReason(message)
+		case strings.HasPrefix(message, "SanityCheckTimeout"), sentinels.Sanity != nil && strings.EqualFold(sentinels.Sanity.Error, "timeout"):
+			reason = "SanityCheckTimeout"
+		case strings.HasPrefix(message, "SanityCheckFailed"), sentinels.Sanity != nil && sentinels.Sanity.Error != "":
+			reason = "SanityCheckFailed"
 		}
 	}
 	conditionStatus := metav1.ConditionTrue
@@ -348,7 +378,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	if profile := job.Spec.Template.Labels[labelBackupProfile]; profile != "" {
 		execution.Spec.ProfileName = profile
 	}
-	r.emitTerminalMetrics(execution)
+	r.emitTerminalMetrics(execution, verificationJobPITRMode(job))
 
 	if next.Phase == v1alpha1.VerificationPhaseSucceeded {
 		r.Recorder.Eventf(v, corev1.EventTypeNormal, "VerificationSucceeded",
@@ -557,7 +587,7 @@ func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context
 		return ctrl.Result{}, fmt.Errorf("patch failed status: %w", err)
 	}
 	r.Recorder.Eventf(v, corev1.EventTypeWarning, reason, "%s", message)
-	r.emitTerminalMetrics(v)
+	r.emitTerminalMetrics(v, "")
 	requeue, cerr := r.maybeCleanupAfterTerminal(ctx, v)
 	if cerr != nil {
 		log.FromContext(ctx).Error(cerr, "post-terminal cleanup")
@@ -669,7 +699,24 @@ func hasCondition(conds []metav1.Condition, t string) bool {
 // emitTerminalMetrics publishes the verification Prometheus metrics for
 // a single terminal observation. Called at most once per terminal CR
 // via the semantic-equality short-circuit upstream.
-func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.MysqlBackupVerification) {
+// verificationJobPITRMode returns the PITR mode rendered into the Job, or ""
+// when the Job replays no archive.
+func verificationJobPITRMode(job *batchv1.Job) string {
+	for _, init := range job.Spec.Template.Spec.InitContainers {
+		if init.Name != restorePITRInitContainerName {
+			continue
+		}
+		for _, env := range init.Env {
+			if env.Name == "BLOODRAVEN_PITR_MODE" && env.Value != "" {
+				return env.Value
+			}
+		}
+		return "timestamp"
+	}
+	return ""
+}
+
+func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.MysqlBackupVerification, pitrMode string) {
 	group := v.Spec.FailoverGroupRef.Name
 	profile := v.Spec.ProfileName
 	result := "failure"
@@ -694,8 +741,9 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 		bmetrics.BackupVerificationDurationSeconds.WithLabelValues(group, profile).
 			Observe(end.Sub(v.Status.StartTime.Time).Seconds())
 	}
-	// Replay lag is only meaningful on success with PITR coordinates.
-	if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded &&
+	// Replay lag measures archive freshness, so only a latest drill sets
+	// it; a timestamp drill's newest event is its historical target.
+	if pitrMode == "latest" && v.Status.Phase == v1alpha1.VerificationPhaseSucceeded &&
 		v.Status.ReplayedThroughBinlog != nil &&
 		v.Status.ReplayedThroughBinlog.Timestamp != nil &&
 		!end.IsZero() {
@@ -708,9 +756,8 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 }
 
 // verifySentinels bundles the parsed output of the verify.sh post-load
-// sentinels. Either field may be nil when the corresponding phase did
-// not run (no pointInTime, no sanityCheck) or when log tailing is
-// unavailable (no Clientset).
+// sentinels. Either field may be nil when the phase did not run or the log
+// is unreadable; neither decides the outcome.
 type verifySentinels struct {
 	Replay *v1alpha1.BinlogReplayMark
 	Sanity *v1alpha1.SanityCheckResult
@@ -719,8 +766,8 @@ type verifySentinels struct {
 // tailVerificationSentinels reads the verification Job pod's logs and
 // parses the trailing BLOODRAVEN_VERIFY_REPLAY_COMPLETE and
 // BLOODRAVEN_VERIFY_SANITY_COMPLETE sentinels into structured status
-// fragments. Returns zero-value sentinels on any failure path so the
-// caller cleanly leaves status at its existing values.
+// fragments. LogsRead is true only after the complete bounded log scan;
+// a read failure cannot certify either present or absent completion metadata.
 func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) verifySentinels {
 	out := verifySentinels{}
 	if r.Clientset == nil {
@@ -738,6 +785,9 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 	var chosen *corev1.Pod
 	for i := range pods.Items {
 		p := &pods.Items[i]
+		if job.UID != "" && !podBelongsToJob(p, job) {
+			continue
+		}
 		if p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
 			continue
 		}
@@ -759,21 +809,27 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 	}
 	defer func() { _ = stream.Close() }()
 
-	sc := bufio.NewScanner(io.LimitReader(stream, 64*1024))
+	// TailLines bounds the read; long GTID lines need a larger buffer.
+	sc := bufio.NewScanner(stream)
+	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	var replay *v1alpha1.BinlogReplayMark
+	var sanity *v1alpha1.SanityCheckResult
 	for sc.Scan() {
 		line := sc.Text()
 		if mark, ok := parseReplaySentinel(line); ok {
-			out.Replay = mark
+			replay = mark
 			continue
 		}
-		if sanity, ok := parseSanitySentinel(line); ok {
-			out.Sanity = sanity
+		if parsed, ok := parseSanitySentinel(line); ok {
+			sanity = parsed
 		}
 	}
 	if err := sc.Err(); err != nil {
 		log.FromContext(ctx).Error(err, "failed to scan verification sentinel log output",
 			"pod", chosen.Name, "namespace", job.Namespace, "job", job.Name)
+		return out
 	}
+	out.Replay, out.Sanity = replay, sanity
 	return out
 }
 
@@ -794,7 +850,10 @@ func parseReplaySentinel(line string) (*v1alpha1.BinlogReplayMark, bool) {
 			continue
 		}
 		key := f[:eq]
-		val := f[eq+1:]
+		val, valid := decodeRestoreToken(f[eq+1:])
+		if !valid {
+			continue
+		}
 		switch key {
 		case "file":
 			mark.File = val

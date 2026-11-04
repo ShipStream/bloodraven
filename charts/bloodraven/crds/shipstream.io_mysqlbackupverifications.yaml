@@ -135,10 +135,21 @@ spec:
                     - latest
                     - timestamp
                     type: string
+                  sites:
+                    description: |-
+                      Sites are the archive site names to replay. Defaults to this group's sites.
+                      Set when the source archive's sites differ, or to include a removed site.
+                    items:
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9-]+$
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
                   timestamp:
                     description: |-
                       Timestamp is an RFC3339 instant; replay stops just before the
-                      first binlog event after this time. Required when Mode=timestamp;
+                      first binlog event at or after this time. Required when Mode=timestamp;
                       ignored otherwise.
                     type: string
                 type: object

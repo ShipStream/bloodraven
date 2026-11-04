@@ -89,7 +89,7 @@ func (a *BinlogArchiver) archivedOrigins(ctx context.Context, entry ManifestEntr
 			}
 			_, _ = fmt.Fprintf(queries, "%d:%s%d:%s", len(q.Schema), q.Schema, len(q.Query), q.Query)
 		}
-	})
+	}, binlogInspection{})
 	finish()
 	if err != nil {
 		return result, "", err
