@@ -91,6 +91,41 @@ func GetObject(ctx context.Context, endpoint, bucket, key string, creds Credenti
 	return body, true, nil
 }
 
+// ListKeys returns every key under prefix. It pages through ListObjectsV2
+// with a small page size, so a dump spans several pages and the listing
+// exercises pagination against the real store.
+func ListKeys(ctx context.Context, endpoint, bucket, prefix string, creds Credentials) ([]string, error) {
+	if bucket == "" {
+		return nil, fmt.Errorf("bucket is required")
+	}
+	client, err := newS3Client(endpoint, creds)
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	pages := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(listPageSize),
+	})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list %q/%q: %w", bucket, prefix, err)
+		}
+		for _, obj := range page.Contents {
+			if obj.Key != nil {
+				keys = append(keys, *obj.Key)
+			}
+		}
+	}
+	return keys, nil
+}
+
+// listPageSize keeps ListKeys pages small enough that a backup's objects
+// span several of them.
+const listPageSize = 5
+
 func newS3Client(endpoint string, creds Credentials) (*s3.Client, error) {
 	if creds.AccessKey == "" || creds.SecretKey == "" {
 		return nil, fmt.Errorf("access key and secret key are required")

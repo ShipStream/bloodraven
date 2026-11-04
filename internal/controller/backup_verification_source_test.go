@@ -146,6 +146,10 @@ func TestVerificationSource_BuildsFromPinnedDestination(t *testing.T) {
 	v := verifyCR("pinned", fg.Name, "nightly-s3")
 	r, c := newVerificationReconciler(t, fg, a, v, dsnSecret())
 	provisionVerificationSource(t, r, c, v)
+	// The verification stamped its hold on the backup; start from that copy.
+	if err := c.Get(ctx, client.ObjectKeyFromObject(a), a); err != nil {
+		t.Fatal(err)
+	}
 	a.Status.Location = "changed/artifact"
 	a.Status.StorageType = v1alpha1.BackupStoragePVC
 	if err := c.Status().Update(ctx, a); err != nil {

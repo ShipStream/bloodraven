@@ -1,4 +1,10 @@
 #!/usr/bin/env mysqlsh --py -f
+# DEPRECATED: no longer run. Artifact cleanup is `bloodraven artifact-cleanup`
+# from the operator image (cmd/bloodraven/artifact_cleanup.go). This file stays
+# in the scripts ConfigMap for one release so cleanup Jobs created by an older
+# operator can finish; its S3 path never worked because MySQL Shell has no
+# util.rmdump. Remove it in the following release.
+#
 # Bloodraven artifact cleanup script. Executed inside the finalizer's
 # cleanup Job when a MysqlBackup CR is being deleted. Dispatches on the
 # BLOODRAVEN_STORAGE_TYPE env var and deletes the underlying dump

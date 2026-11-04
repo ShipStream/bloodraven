@@ -112,6 +112,41 @@ spec:
                   this to emit an InFlightFailover warning when the group's active
                   site drifts while the backup is running.
                 type: string
+              artifactStorage:
+                description: |-
+                  ArtifactStorage records the storage destination the producing Job
+                  wrote to: the exact artifact location, plus bucket, endpoint and
+                  region for S3 or the claim for PVC. It is captured from the Job when
+                  the Job is created and never follows later profile edits, so artifact
+                  cleanup cannot be redirected to another bucket, claim or prefix. Once
+                  its location is recorded it is immutable. Credentials are
+                  deliberately not recorded: cleanup reads them from the profile's
+                  current credentialsSecret.
+                properties:
+                  bucket:
+                    description: Bucket is the S3 bucket the artifact was written
+                      to.
+                    type: string
+                  claimName:
+                    description: ClaimName is the PersistentVolumeClaim the artifact
+                      was written to.
+                    type: string
+                  endpointURL:
+                    description: |-
+                      EndpointURL is the S3 endpoint override in effect for the producing
+                      Job, empty for the AWS default endpoint.
+                    type: string
+                  location:
+                    description: |-
+                      Location is the artifact location the producing Job wrote, in the
+                      form of MysqlBackupStatus.Location. Cleanup refuses to run unless the
+                      two are identical.
+                    type: string
+                  region:
+                    description: Region is the S3 region in effect for the producing
+                      Job.
+                    type: string
+                type: object
               attempt:
                 description: |-
                   Attempt is the retry attempt number for scheduled CRs: 1 for the
@@ -283,6 +318,12 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: status.artifactStorage cannot be changed or removed once its location
+            is recorded
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location)
+            || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage
+            == oldSelf.status.artifactStorage)'
     served: true
     storage: true
     subresources:
