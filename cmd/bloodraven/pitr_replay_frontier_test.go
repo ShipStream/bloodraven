@@ -245,6 +245,7 @@ func TestPITRAuditedDivergentLastRowMustNotReplay(t *testing.T) {
 }
 func TestPITRAcknowledgedHistoryPreservesOlderBackupWindows(t *testing.T) {
 	ctx := context.Background()
+	useTempDirMountVerifier(t)
 	root := t.TempDir()
 	t.Setenv("BLOODRAVEN_PITR_STORAGE_TYPE", "PVC")
 	t.Setenv("BLOODRAVEN_PITR_PVC_MOUNT_PATH", root)
@@ -254,6 +255,7 @@ func TestPITRAcknowledgedHistoryPreservesOlderBackupWindows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.PVC.MountVerifier = sidecar.TempDirMountVerifierForTest
 	store, err := sidecar.NewArchiveStore(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)

@@ -96,7 +96,7 @@ func TestPITRCoverageArchiveCases(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	for _, name := range []string{"zero manifests", "zero files", "exact barrier", "native barrier", "forged timestamp", "beyond tail", "partial empty", "renamed source", "omitted removed", "included old", "listing failure", "latest empty", "latest replay", "latest covered by backup", "partial corruption", "partial gap", "partial divergence", "partial quarantine"} {
 		t.Run(name, func(t *testing.T) {
-			store, _ := sidecar.NewArchiveStore(context.Background(), &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+			store, _ := sidecar.NewArchiveStore(context.Background(), &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 			sites := []string{"iad"}
 			start := retentionTestSID + ":1-10"
 			partial := false

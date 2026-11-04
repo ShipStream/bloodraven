@@ -143,7 +143,7 @@ func TestEncryptAndUploadRoundTrip(t *testing.T) {
 	passphrase := []byte("m12 round trip passphrase")
 	cfg := &sidecar.PITRConfig{
 		StorageType: "PVC",
-		PVC:         &sidecar.PITRPVCConfig{MountPath: bucket},
+		PVC:         &sidecar.PITRPVCConfig{MountPath: bucket, MountVerifier: sidecar.TempDirMountVerifierForTest},
 	}
 	rawStore, err := sidecar.NewArchiveStore(ctx, cfg)
 	if err != nil {
@@ -156,9 +156,9 @@ func TestEncryptAndUploadRoundTrip(t *testing.T) {
 	// Stage a small plaintext dump tree.
 	src := t.TempDir()
 	files := map[string][]byte{
-		"dump.json":             []byte(`{"k":"v"}`),
-		"schemas/foo.sql":       []byte("CREATE TABLE foo (id INT);\n"),
-		"schemas/bar.sql":       bytes.Repeat([]byte("abc"), 3000), // spans GCM chunk boundary
+		"dump.json":                 []byte(`{"k":"v"}`),
+		"schemas/foo.sql":           []byte("CREATE TABLE foo (id INT);\n"),
+		"schemas/bar.sql":           bytes.Repeat([]byte("abc"), 3000), // spans GCM chunk boundary
 		"BLOODRAVEN_DUMP_META.json": []byte(`{"gtidExecuted":""}`),
 	}
 	for rel, body := range files {
@@ -240,7 +240,7 @@ func TestEncryptAndUploadRejectsSymlink(t *testing.T) {
 	passphrase := []byte("symlink rejection passphrase")
 	cfg := &sidecar.PITRConfig{
 		StorageType: "PVC",
-		PVC:         &sidecar.PITRPVCConfig{MountPath: bucket},
+		PVC:         &sidecar.PITRPVCConfig{MountPath: bucket, MountVerifier: sidecar.TempDirMountVerifierForTest},
 	}
 	rawStore, err := sidecar.NewArchiveStore(ctx, cfg)
 	if err != nil {

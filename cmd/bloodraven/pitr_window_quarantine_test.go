@@ -19,7 +19,7 @@ import (
 func archiveBinlogFixtures(t *testing.T, payloads ...[]byte) (sidecar.ArchiveStore, []sidecar.ManifestEntry) {
 	t.Helper()
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,6 +169,7 @@ func TestPITRLowerCutReleasesStagingImmediately(t *testing.T) {
 
 func TestPITRQuarantineCommandAppliesAndUndoesPVCMetadata(t *testing.T) {
 	ctx := context.Background()
+	useTempDirMountVerifier(t)
 	root := t.TempDir()
 	t.Setenv("BLOODRAVEN_PITR_STORAGE_TYPE", "PVC")
 	t.Setenv("BLOODRAVEN_PITR_PVC_MOUNT_PATH", root)
@@ -178,6 +179,7 @@ func TestPITRQuarantineCommandAppliesAndUndoesPVCMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.PVC.MountVerifier = sidecar.TempDirMountVerifierForTest
 	store, err := sidecar.NewArchiveStore(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)

@@ -60,7 +60,7 @@ func TestArchiveStoreListPrefixes(t *testing.T) {
 		"binlogs/iad/mysql-bin.000001", "binlogs/manifest-iad.json.extra",
 		"binlogs2/manifest-other.json", "unrelated/file",
 	}
-	pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestArchiveStoreListPrefixes(t *testing.T) {
 func TestPVCStoreListNormalizationAndVisibility(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	pvc, err := newPVCStore(&PITRPVCConfig{MountPath: root})
+	pvc, err := newPVCStore(testPVCConfig(root), "")
 	if err != nil {
 		t.Fatal(err)
 	}

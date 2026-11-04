@@ -112,7 +112,7 @@ func TestPITRCommittedNativeWindows(t *testing.T) {
 		t.Run(tc.Stop+"/"+tc.Exclude, func(t *testing.T) {
 			rows, payloads := nativeCasePayloads(t, rows, payloads, tc.Rollback)
 			ctx := context.Background()
-			store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+			store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 			if err != nil {
 				t.Fatal(err)
 			}

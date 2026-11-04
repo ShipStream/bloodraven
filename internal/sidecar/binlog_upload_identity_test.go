@@ -43,7 +43,7 @@ func TestUploadedBytesStayBoundToIdentityAndCoverage(t *testing.T) {
 		for _, replaceSource := range []bool{false, true} {
 			t.Run(fmt.Sprintf("encrypted=%v/source=%v", encrypted, replaceSource), func(t *testing.T) {
 				ctx := context.Background()
-				pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+				pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 				if err != nil {
 					t.Fatal(err)
 				}

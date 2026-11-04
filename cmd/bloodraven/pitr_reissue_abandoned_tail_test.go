@@ -22,7 +22,7 @@ func TestPITRActiveReissueMustNotReplayAbandonedTail(t *testing.T) {
 		dir = t.TempDir()
 	}
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: dir}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: dir, MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}

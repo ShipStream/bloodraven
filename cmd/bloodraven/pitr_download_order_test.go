@@ -19,7 +19,7 @@ import (
 
 func TestPITRDownloadOrdersGTIDPredecessorsBeforeSuccessors(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestPITRDownloadOrdersGTIDPredecessorsBeforeSuccessors(t *testing.T) {
 
 func TestPITRDownloadKeepsFileSequenceAcrossClockRollback(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestPITRDownloadKeepsFileSequenceAcrossClockRollback(t *testing.T) {
 
 func TestPITRDownloadRecoversIDStrippedRows(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestPITRDownloadRecoversIDStrippedRows(t *testing.T) {
 
 func TestPITRLegacyStreamKeepsSequenceAcrossClockRollback(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestPITRDownloadRejectsAmbiguousIncarnations(t *testing.T) {
 	for _, predecessors := range [][]string{{"", ""}, {"u:1-10", "u:1-10"}, {"u:1-10", "v:1-11"}, {"invalid", "u:1-10"}, {"u:1-5", "u:1-10", "u:1-10"}} {
 		t.Run(strings.Join(predecessors, "/"), func(t *testing.T) {
 			ctx := context.Background()
-			store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+			store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 			if err != nil {
 				t.Fatal(err)
 			}

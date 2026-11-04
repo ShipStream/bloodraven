@@ -63,7 +63,7 @@ func TestRotationPreemptsColdHistory(t *testing.T) {
 	defer cancel()
 	dir := t.TempDir()
 	cfg := &PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Millisecond}
-	base, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	base, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatal(err)
 	}

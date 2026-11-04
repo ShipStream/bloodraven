@@ -14,7 +14,7 @@ func TestMissingLegacyRowIsReplaced(t *testing.T) {
 	ctx := context.Background()
 	local := t.TempDir()
 	cfg := &PITRConfig{BinlogDir: local, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}
-	pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,12 +56,12 @@ func TestMissingLegacyRowIsReplaced(t *testing.T) {
 
 // An upload must not depend on a writable $TMPDIR.
 func TestUploadWorksWithoutWritableTmp(t *testing.T) {
-	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "absent-read-only-root"))
 	ctx := context.Background()
-	pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "absent-read-only-root"))
 	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, pvc, slog.Default())
 	file := "testdata/incarnation-a.bin"
 	id, err := a.localBinlogID(file)

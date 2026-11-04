@@ -141,7 +141,7 @@ func putLostTailBinlog(t *testing.T, store sidecar.ArchiveStore, name string, da
 // quarantined rows at all.
 func TestPITRQuarantinedLostTailDoesNotBlockCanonicalWindow(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestPITRQuarantinedLostTailDoesNotBlockCanonicalWindow(t *testing.T) {
 // skipped before they are compared with any barrier.
 func TestPITRQuarantinedLostTailLatestWindow(t *testing.T) {
 	ctx := context.Background()
-	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}

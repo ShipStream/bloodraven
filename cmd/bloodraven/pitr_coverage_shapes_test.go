@@ -83,7 +83,7 @@ func patchEventTimestamp(t *testing.T, raw []byte, kind byte, ts uint32) []byte 
 
 func coverageArchive(t *testing.T, streams map[string][][]byte) sidecar.ArchiveStore {
 	t.Helper()
-	store, err := sidecar.NewArchiveStore(context.Background(), &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	store, err := sidecar.NewArchiveStore(context.Background(), &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
 		t.Fatal(err)
 	}
