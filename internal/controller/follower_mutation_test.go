@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
@@ -932,7 +935,7 @@ func TestPlannedFailoverValidating_ClaimRacesUpdate(t *testing.T) {
 	// The other order: the planned failover claims first, then no update
 	// may start.
 	other, _, _ := newTestTopologyManager(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
-	if ok, why := other.ClaimPlannedFailover(); !ok {
+	if ok, why, _ := other.ClaimPlannedFailover(); !ok {
 		t.Fatalf("claim refused: %s", why)
 	}
 	other.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
@@ -940,5 +943,227 @@ func TestPlannedFailoverValidating_ClaimRacesUpdate(t *testing.T) {
 	other.SetSpecDriftSites([]string{"dc1"})
 	if other.startUpdate(context.Background()) {
 		t.Fatal("an ordered update started while a planned failover owns the sites")
+	}
+}
+
+// validatingPF returns a planned-failover group in Validating, iad -> pdx.
+func validatingPF() *v1alpha1.MysqlFailoverGroup {
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg := plannedFailoverFG("")
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhaseValidating, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+	}
+	return fg
+}
+
+// retireForTest retires nn's current manager as a runner sync does, keeping
+// it on the retiring list (its Run has not returned) until the test ends,
+// and registers replacement in its place.
+func retireForTest(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedName, replacement *TopologyManager) *TopologyManager {
+	t.Helper()
+	r.mu.Lock()
+	mt := r.managers[nn]
+	done := make(chan struct{})
+	mt.done = done
+	r.retireManagerLocked(nn, mt)
+	r.mu.Unlock()
+	t.Cleanup(func() { close(done) })
+	if replacement != nil {
+		r.SetManagerForTest(nn, replacement)
+	}
+	return mt.tm
+}
+
+// Opus round 10, Minor 1: a Validating status write whose response is lost
+// may still have committed Draining. The claim is kept (no update can claim
+// before the fence), and Draining claims again before fencing, so an update
+// that claimed anyway is never fenced beside.
+func TestPlannedFailoverValidating_LostWriteKeepsClaimAndDrainingReclaims(t *testing.T) {
+	fg := validatingPF()
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: false}
+	pdx := &mockMySQL{readOnly: true}
+	r, c := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lost := false
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if err := cl.SubResource(sub).Patch(ctx, obj, patch, opts...); err != nil {
+				return err
+			}
+			if pf := obj.(*v1alpha1.MysqlFailoverGroup).Status.PlannedFailover; !lost && pf != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseDraining {
+				lost = true
+				return apierrors.NewTimeoutError("status write timed out", 1)
+			}
+			return nil
+		},
+	})
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err == nil || !lost {
+		t.Fatalf("setup: err=%v lost=%v; want the Draining write committed with a lost response", err, lost)
+	}
+	tm.mu.RLock()
+	guard := tm.plannedFailoverActive
+	tm.mu.RUnlock()
+	if !guard {
+		t.Fatal("claim dropped on an ambiguous status write: an update could claim before the fence")
+	}
+
+	// An update holds the sites anyway (as one would after a restart that
+	// re-derived the guard from status).
+	tm.mu.Lock()
+	tm.deploymentUpdateRunning = true
+	tm.mu.Unlock()
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "ConcurrentOperation" {
+		t.Fatalf("phase=%q reason=%q (%s), want Failed/ConcurrentOperation", pf.Phase, pf.Reason, pf.Message)
+	}
+	if superReadOnlyCallCount(iad) != 0 {
+		t.Fatal("source fenced beside a claimed ordered update")
+	}
+}
+
+// Opus round 10, Minor 2: a replaced manager whose stop timed out may still
+// be inside a promotion. The planned failover waits (nothing fenced) until
+// it is out, then proceeds.
+func TestPlannedFailoverValidating_WaitsForRetiringPromotion(t *testing.T) {
+	fg := validatingPF()
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: false}
+	pdx := &mockMySQL{readOnly: true}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	replacement, err := plannedDrainRunner(nn, iad, pdx).plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.mu.Lock()
+	old.deploymentChanging = 1
+	old.mu.Unlock()
+	retireForTest(t, r.Runner, nn, replacement)
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseValidating || pf.RetryAfter == nil || !strings.Contains(pf.Message, plannedClaimRefusedPredecessorPromote) {
+		t.Fatalf("phase=%q retryAfter=%v (%s); want Validating waiting on the retiring promotion", pf.Phase, pf.RetryAfter, pf.Message)
+	}
+	if superReadOnlyCallCount(iad) != 0 {
+		t.Fatal("source fenced while a replaced manager was still promoting")
+	}
+
+	old.mu.Lock()
+	old.deploymentChanging = 0
+	old.mu.Unlock()
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseDraining || pf.RetryAfter != nil {
+		t.Fatalf("phase=%q retryAfter=%v (%s); want Draining once the promotion is out", pf.Phase, pf.RetryAfter, pf.Message)
+	}
+}
+
+// Opus round 10, Minor 2: rotation admission refuses while a retiring
+// manager's ordered update has claimed the sites.
+func TestRotationRefusedWhileRetiringManagerUpdateClaimed(t *testing.T) {
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+	r := plannedDrainRunner(nn, &mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	old, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settleAuthority(old)
+	old.mu.Lock()
+	old.deploymentUpdateRunning = true
+	old.mu.Unlock()
+	replacement, err := plannedDrainRunner(nn, &mockMySQL{readOnly: false}, &mockMySQL{readOnly: true}).plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settleAuthority(replacement)
+	retireForTest(t, r, nn, replacement)
+	if ok, why := r.ReserveKeyringRotation(nn, "pdx"); ok || why != rotationRefusedManagerRestarting {
+		t.Fatalf("rotation beside a retiring manager's claimed update = %v, %q; want refused", ok, why)
+	}
+	old.mu.Lock()
+	old.deploymentUpdateRunning = false
+	old.mu.Unlock()
+	if ok, why := r.ReserveKeyringRotation(nn, "pdx"); !ok {
+		t.Fatalf("rotation still refused once the retiring update is out: %s", why)
+	}
+}
+
+// Opus round 10, Minor 3: refusals that clear on their own are waited out
+// visibly (message, retryAfter deadline), then fail without fencing.
+func TestPlannedFailoverValidating_TransientRefusalsWaitThenFail(t *testing.T) {
+	cases := []struct {
+		name, why, reason string
+		setup             func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName)
+	}{
+		{"no topology manager", plannedClaimRefusedNoManager, "TopologyManagerUnavailable",
+			func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) {
+				r.Runner.mu.Lock()
+				delete(r.Runner.managers, nn)
+				r.Runner.mu.Unlock()
+			}},
+		{"promotion in flight", plannedClaimRefusedPromotion, "ConcurrentOperation",
+			func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) {
+				tm, err := r.Runner.plannedFailoverManager(nn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tm.mu.Lock()
+				tm.deploymentChanging = 1
+				tm.mu.Unlock()
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := validatingPF()
+			nn := fgNN(fg)
+			iad := &mockMySQL{readOnly: false}
+			r, c := newReconciler(fg)
+			r.Runner = plannedDrainRunner(nn, iad, &mockMySQL{readOnly: true})
+			tc.setup(t, r, nn)
+			if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			cur := fetchFG(t, r, nn)
+			pf := cur.Status.PlannedFailover
+			if pf.Phase != v1alpha1.PlannedFailoverPhaseValidating || pf.RetryAfter == nil || !strings.Contains(pf.Message, tc.why) {
+				t.Fatalf("phase=%q retryAfter=%v (%s); want a visible wait with a deadline", pf.Phase, pf.RetryAfter, pf.Message)
+			}
+			if d := time.Until(pf.RetryAfter.Time); d < plannedFailoverClaimWait-time.Minute || d > plannedFailoverClaimWait {
+				t.Fatalf("deadline in %s, want ~%s", d, plannedFailoverClaimWait)
+			}
+
+			past := metav1.NewTime(time.Now().Add(-time.Second))
+			cur.Status.PlannedFailover.RetryAfter = &past
+			if err := c.Status().Update(context.Background(), cur); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			pf = fetchFG(t, r, nn).Status.PlannedFailover
+			if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != tc.reason || !strings.Contains(pf.Message, "source not fenced") {
+				t.Fatalf("phase=%q reason=%q (%s); want Failed/%s past the deadline", pf.Phase, pf.Reason, pf.Message, tc.reason)
+			}
+			if superReadOnlyCallCount(iad) != 0 {
+				t.Fatal("source fenced")
+			}
+		})
 	}
 }

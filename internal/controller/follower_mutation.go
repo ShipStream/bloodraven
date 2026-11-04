@@ -214,25 +214,46 @@ func (tm *TopologyManager) orderedUpdateClaimed() bool {
 	return tm.deploymentUpdateRunning
 }
 
+// mutationClaimed reports whether this manager is already changing the
+// sites: an ordered update has claimed its window, or a promotion
+// (emergency failover, re-assert) is in flight. Unlike mutationInFlight it
+// ignores a pending update that has not claimed, which has touched nothing.
+func (tm *TopologyManager) mutationClaimed() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.deploymentUpdateRunning || tm.deploymentChanging > 0
+}
+
+// Refusals of a planned failover's claim on the sites.
+const (
+	plannedClaimRefusedUpdateRunning      = "an ordered update is running"
+	plannedClaimRefusedPromotion          = "a promotion is in flight"
+	plannedClaimRefusedPredecessorUpdate  = "a replaced topology manager's ordered update is still finishing"
+	plannedClaimRefusedPredecessorPromote = "a replaced topology manager is still inside a promotion"
+	plannedClaimRefusedNoManager          = "no topology manager is running for the group yet"
+)
+
 // ClaimPlannedFailover sets the planned-failover guard for a planned
 // failover about to fence its source. Decided under mu against the
 // ordered-update claim (which refuses while the guard is set), it refuses
 // while this manager has an update claimed or a topology change in flight,
 // or still defers to a replaced manager's update. Either the update or the
-// planned failover owns the sites, never both.
-func (tm *TopologyManager) ClaimPlannedFailover() (bool, string) {
+// planned failover owns the sites, never both. retry marks a refusal that
+// clears on its own within seconds (a promotion finishing); an ordered
+// update can run for much longer, so the planned failover gives up on it.
+func (tm *TopologyManager) ClaimPlannedFailover() (ok bool, why string, retry bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	switch {
 	case tm.deploymentUpdateRunning:
-		return false, "an ordered update is running"
+		return false, plannedClaimRefusedUpdateRunning, false
 	case tm.deploymentChanging > 0:
-		return false, "a promotion is in flight"
+		return false, plannedClaimRefusedPromotion, true
 	case tm.predecessorUpdateInFlight:
-		return false, "a replaced topology manager's ordered update is still finishing"
+		return false, plannedClaimRefusedPredecessorUpdate, false
 	}
 	tm.plannedFailoverActive = true
-	return true, ""
+	return true, "", false
 }
 
 // mutationInFlight reports whether this manager has an ordered update

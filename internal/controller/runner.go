@@ -1303,21 +1303,29 @@ func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.Namespaced
 
 // ClaimPlannedFailover claims the group's sites for a planned failover
 // about to fence its source (see TopologyManager.ClaimPlannedFailover).
-// It also refuses while a retiring manager still has a claimed update,
-// and while no manager runs (retry=true: nothing is wrong, just early).
+// It also refuses while a retiring manager is still changing the sites: a
+// manager whose stop timed out is replaced anyway, and its Run may still
+// be inside a promotion. A retiring manager's claimed update gives up the
+// planned failover, as the current manager's does; a retiring promotion,
+// or no manager running yet, is retry=true: nothing is wrong, just early.
 func (r *TopologyManagerRunner) ClaimPlannedFailover(nn types.NamespacedName) (ok bool, why string, retry bool) {
 	r.mu.RLock()
 	mt := r.managers[nn]
-	retiring := r.retiringUpdateInFlightLocked(nn)
+	retiringUpdate := r.retiringUpdateInFlightLocked(nn)
+	retiringPromotion := false
+	for _, old := range r.retiring[nn] {
+		retiringPromotion = retiringPromotion || old.tm.mutationClaimed()
+	}
 	r.mu.RUnlock()
-	if retiring {
-		return false, "a replaced topology manager's ordered update is still finishing", false
+	switch {
+	case retiringUpdate:
+		return false, plannedClaimRefusedPredecessorUpdate, false
+	case retiringPromotion:
+		return false, plannedClaimRefusedPredecessorPromote, true
+	case mt == nil:
+		return false, plannedClaimRefusedNoManager, true
 	}
-	if mt == nil {
-		return false, "no topology manager is running for the group yet", true
-	}
-	ok, why = mt.tm.ClaimPlannedFailover()
-	return ok, why, false
+	return mt.tm.ClaimPlannedFailover()
 }
 
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.

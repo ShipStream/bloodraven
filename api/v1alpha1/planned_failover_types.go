@@ -146,7 +146,7 @@ type PlannedFailoverStatus struct {
 	// Reason is a machine-readable tag on Failed outcomes. Examples:
 	// "CooldownActive", "LagTimeout", "InvalidGTID", "SourceCrashed",
 	// "ExecuteFailed", "InvalidAnnotation", "ConcurrentOperation",
-	// "UnknownSite".
+	// "TopologyManagerUnavailable", "UnknownSite".
 	Reason string `json:"reason,omitempty"`
 
 	// Message is a human-readable status line suitable for
@@ -175,14 +175,18 @@ type PlannedFailoverStatus struct {
 	// +optional
 	LagWaitStartTime *metav1.Time `json:"lagWaitStartTime,omitempty"`
 
-	// RetryAfter has two uses. On the Deferred phase it is the earliest
+	// RetryAfter has three uses. On the Deferred phase it is the earliest
 	// time the state machine will retry validation, derived from
 	// status.lastFailover + spec.failoverCooldown (or the deployment
-	// hold's expiry); it clears on transition out of Deferred. On the
-	// Promoting phase with reason PredecessorUpdateInFlight it is the
-	// deadline for a replaced topology manager's ordered update to exit
-	// and a manager to be running; past it, the planned failover fails
-	// with the source left fenced.
+	// hold's expiry); it clears on transition out of Deferred. Before the
+	// source is fenced (Pending, Validating, or Draining before its fence)
+	// it is the deadline for claiming the sites while a promotion finishes
+	// or the topology manager starts; past it, the planned failover fails
+	// with nothing fenced. On any phase from the fence on, with reason
+	// PredecessorUpdateInFlight, it is the deadline for a replaced
+	// topology manager's ordered update to exit and a manager to be
+	// running; past it, the planned failover fails with the source left
+	// fenced.
 	// +optional
 	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
 

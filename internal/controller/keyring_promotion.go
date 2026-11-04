@@ -245,10 +245,14 @@ func (r *TopologyManagerRunner) SetKeyringRotationBlocked(nn types.NamespacedNam
 //	none   reserve refused                              none; request kept and retried,
 //	                                                    except for the active primary
 //	held   status write ok, view carries the stamp      held (also durable)
-//	held   status write ok, view lacks it               none (never stamped, or done)
-//	held   pass ends without a successful write,        as the two rows above, with
-//	       uncached read ok                             the read as the view
-//	held   ... uncached read fails                      held (fail closed)
+//	held   status write ok, view lacks it               settled (a no-op write does not
+//	                                                    move the resourceVersion, so an
+//	                                                    earlier lost write may still land)
+//	held   pass ends without a successful write         settled
+//	held   settle: uncached read carries the stamp      held (also durable)
+//	held   settle: read lacks it, conditional           none (never stamped, or done;
+//	       metadata fence ok                            no lost write can land now)
+//	held   settle: read or fence fails                  held (fail closed)
 //	held   stale cache push (runner sync, start)        held; only the durable set moves
 //	held   manager replaced or retired                  copied to the replacement before
 //	                                                    its Run; retired managers start
@@ -257,9 +261,10 @@ func (r *TopologyManagerRunner) SetKeyringRotationBlocked(nn types.NamespacedNam
 //	any    claim taken / promotion unobserved           reserve refused until observed
 //	held   encryption disabled / group deleted          none
 //
-// The only way a hold outlives its need (fail-stuck) is every encryption
-// pass failing while every uncached read also fails, i.e. the API server
-// being unreachable; the first pass that reaches it settles the hold.
+// The only way a hold outlives its need (fail-stuck) is every settlement
+// failing its uncached read or its fence, i.e. the API server being
+// unreachable or the object changing under every fence; the first
+// settlement that gets through ends the hold.
 
 // ReserveKeyringRotation admits a rotation for nn's site. The group's
 // running manager decides (see TopologyManager.ReserveKeyringRotation).

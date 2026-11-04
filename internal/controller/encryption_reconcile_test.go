@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -1662,4 +1663,149 @@ func TestReconcileEncryption_LateCommittingStampCannotOutliveItsHold(t *testing.
 			}
 		})
 	}
+}
+
+// GPT round 10: the API server answers an Update that changes nothing with
+// success and the same resourceVersion. A later pass that only reproduces
+// the persisted (deferred) status therefore does not invalidate an earlier
+// rotation-stamp PUT whose response was lost: the stamp can still land at
+// that version. The successful no-op write must not end the hold on its
+// own; settlement fences first, so the late PUT is rejected, or, if it
+// cannot fence, the hold stays.
+func TestReconcileEncryption_NoOpStatusWriteDoesNotEndHoldBesideLostWrite(t *testing.T) {
+	for _, fenceFails := range []bool{false, true} {
+		name := "fence succeeds: the late PUT is rejected"
+		if fenceFails {
+			name = "fence fails: the hold stays"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fg := sealedGroupWithActive("dc1")
+			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			digest := siteStatus(fg, "dc2").KeyringDigest
+			r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+				"dc1": liveKeyring(digest, true), "dc2": liveKeyring(digest, true),
+			}), fg)
+			seedEscrow(t, c, fg)
+			base := c.(client.WithWatch)
+			tm := rotationRunner(r, c)
+			nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+			setUpdatePending := func(v bool) {
+				tm.mu.Lock()
+				tm.deploymentUpdatePending = v
+				tm.mu.Unlock()
+			}
+
+			var (
+				loseWrite, failFence bool
+				inFlight             client.Object
+				noOps                int
+			)
+			r.Client = interceptor.NewClient(base, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+					if loseWrite {
+						inFlight = obj.DeepCopyObject().(client.Object)
+						return apierrors.NewTimeoutError("status write timed out", 1)
+					}
+					// As the API server does: an Update that changes
+					// nothing succeeds without a new resourceVersion.
+					var stored v1alpha1.MysqlFailoverGroup
+					if err := cl.Get(ctx, client.ObjectKeyFromObject(obj), &stored); err != nil {
+						return err
+					}
+					sent := obj.(*v1alpha1.MysqlFailoverGroup)
+					if sent.ResourceVersion == stored.ResourceVersion && mustJSON(t, sent.Status) == mustJSON(t, stored.Status) {
+						noOps++
+						stored.DeepCopyInto(sent)
+						return nil
+					}
+					return cl.SubResource(sub).Update(ctx, obj, opts...)
+				},
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if failFence {
+						return errors.New("api server unreachable")
+					}
+					return cl.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			pass := func() error {
+				t.Helper()
+				var latest v1alpha1.MysqlFailoverGroup
+				if err := base.Get(ctx, nn, &latest); err != nil {
+					t.Fatal(err)
+				}
+				_, err := r.reconcileEncryptionAtRest(ctx, &latest)
+				return err
+			}
+
+			// A deferred request, persisted; a second deferral reproduces
+			// it exactly.
+			setUpdatePending(true)
+			for i := 0; i < 2; i++ {
+				if err := pass(); err != nil {
+					t.Fatalf("deferring pass: %v", err)
+				}
+			}
+			if noOps != 1 {
+				t.Fatalf("setup: %d no-op writes, want the repeated deferral to be one", noOps)
+			}
+
+			// Admitted: the stamp's PUT loses its response, and settlement
+			// cannot fence, so the hold stays.
+			setUpdatePending(false)
+			loseWrite, failFence = true, true
+			if err := pass(); err == nil {
+				t.Fatal("want the lost-response error")
+			}
+			if inFlight == nil {
+				t.Fatal("setup: no stamp write was attempted")
+			}
+			if tm.liveHandoffRefusal("dc2")() == nil {
+				t.Fatal("setup: the hold ended with its stamp still in flight")
+			}
+
+			// Deferred again: the write succeeds and changes nothing.
+			setUpdatePending(true)
+			loseWrite, failFence = false, fenceFails
+			if err := pass(); err != nil {
+				t.Fatalf("deferring pass: %v", err)
+			}
+			if noOps != 2 {
+				t.Fatalf("setup: %d no-op writes, want the second deferral to be one too", noOps)
+			}
+
+			// The delayed PUT reaches the API server.
+			lateErr := base.Status().Update(ctx, inFlight)
+			var stored v1alpha1.MysqlFailoverGroup
+			if err := base.Get(ctx, nn, &stored); err != nil {
+				t.Fatal(err)
+			}
+			stamped := siteStatus(&stored, "dc2").UnsealReason == v1alpha1.UnsealReasonRotation
+			handoffErr := tm.liveHandoffRefusal("dc2")()
+			if stamped && handoffErr == nil {
+				t.Fatal("the late stamp landed after a no-op write ended its hold: a rotation can run beside a handoff")
+			}
+			if fenceFails {
+				if handoffErr == nil {
+					t.Fatal("hold released without a fence")
+				}
+				return
+			}
+			if !apierrors.IsConflict(lateErr) || stamped {
+				t.Fatalf("late PUT after the fence: err=%v, stamped=%v; want a conflict and no stamp", lateErr, stamped)
+			}
+			if handoffErr != nil {
+				t.Fatalf("hold kept although the stamp can no longer land: %v", handoffErr)
+			}
+		})
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

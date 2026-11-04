@@ -8,9 +8,11 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
@@ -283,4 +285,80 @@ func createNamespace(t *testing.T, prefix string) string {
 		t.Fatalf("create namespace: %v", err)
 	}
 	return ns.Name
+}
+
+// TestNoOpStatusUpdateDoesNotInvalidateLostWrite pins the API server
+// behavior the rotation-hold settlement depends on. A status Update that
+// changes nothing succeeds without a new resourceVersion, so an earlier
+// rotation-stamp PUT conditioned on that version (one whose response was
+// lost) still commits afterwards: a successful no-op write is no proof the
+// stamp cannot land. The conditional metadata write settlement uses
+// (the shipstream.io/encryption-status-fence annotation, optimistic lock)
+// does move the version, and the stale PUT is then rejected.
+func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
+	ns := createNamespace(t, "enc-noop")
+	stampAt := func(name string) (stale *v1alpha1.MysqlFailoverGroup, rv string) {
+		t.Helper()
+		fg := newEncryptionFG(ns, name)
+		if err := k8sClient.Create(ctx, fg); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
+			Sealed: true,
+			Sites: []v1alpha1.SiteEncryptionStatus{
+				{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed, Message: "rotation deferred: an ordered update is in flight"},
+				{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed},
+			},
+		}
+		if err := k8sClient.Status().Update(ctx, fg); err != nil {
+			t.Fatalf("seed status: %v", err)
+		}
+		// The rotation stamp's PUT, prepared at this version; its
+		// response will be "lost".
+		stale = fg.DeepCopy()
+		stale.Status.EncryptionAtRest.Sites[1].Phase = v1alpha1.KeyringPhaseUnsealed
+		stale.Status.EncryptionAtRest.Sites[1].UnsealReason = v1alpha1.UnsealReasonRotation
+		stale.Status.EncryptionAtRest.Sealed = false
+
+		// A later pass reproduces the persisted status: success, same
+		// resourceVersion.
+		noop := fg.DeepCopy()
+		if err := k8sClient.Status().Update(ctx, noop); err != nil {
+			t.Fatalf("no-op status update: %v", err)
+		}
+		if noop.ResourceVersion != fg.ResourceVersion {
+			t.Fatalf("no-op status update moved resourceVersion %s -> %s; the premise no longer holds", fg.ResourceVersion, noop.ResourceVersion)
+		}
+		return stale, noop.ResourceVersion
+	}
+	stamped := func(name string) bool {
+		t.Helper()
+		var got v1alpha1.MysqlFailoverGroup
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got.Status.EncryptionAtRest.Sites[1].UnsealReason == v1alpha1.UnsealReasonRotation
+	}
+
+	stale, _ := stampAt("unfenced")
+	if err := k8sClient.Status().Update(ctx, stale); err != nil || !stamped("unfenced") {
+		t.Fatalf("lost PUT after a no-op write: err=%v stamped=%v; want it to commit", err, stamped("unfenced"))
+	}
+
+	stale, _ = stampAt("fenced")
+	var read v1alpha1.MysqlFailoverGroup
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "fenced"}, &read); err != nil {
+		t.Fatal(err)
+	}
+	fence := read.DeepCopy()
+	if fence.Annotations == nil {
+		fence.Annotations = map[string]string{}
+	}
+	fence.Annotations["shipstream.io/encryption-status-fence"] = "1"
+	if err := k8sClient.Patch(ctx, fence, client.MergeFromWithOptions(read.DeepCopy(), client.MergeFromWithOptimisticLock{})); err != nil {
+		t.Fatalf("fence: %v", err)
+	}
+	if err := k8sClient.Status().Update(ctx, stale); !apierrors.IsConflict(err) || stamped("fenced") {
+		t.Fatalf("lost PUT after the fence: err=%v stamped=%v; want a conflict", err, stamped("fenced"))
+	}
 }

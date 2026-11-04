@@ -203,10 +203,24 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	fg.Status.EncryptionAtRest = written
 	// Push immediately so the topology manager does not wait for the
 	// 30s runner sync before refusing (or unblocking) promotion. This is
-	// the persisted result, so it is authoritative: reservations it lacks
-	// are over.
+	// the persisted result, so it is authoritative for what it carries.
+	//
+	// Releasing a hold it lacks needs more. A write whose response was
+	// lost on an earlier pass may still be in flight, and this write does
+	// not necessarily invalidate it: an Update that changes nothing
+	// succeeds without moving the resourceVersion, so a stale write
+	// conditioned on that version can still commit afterwards. Holds are
+	// therefore only ever ended by settlement, which fences such writes
+	// before it publishes. It costs a read and a metadata write each time
+	// a hold ends, once per rotation.
 	if r.Runner != nil {
-		r.Runner.PublishKeyringRotationBlocked(nn, rotationBlockedSites(fg))
+		blocked := rotationBlockedSites(fg)
+		held := r.Runner.PendingKeyringRotationReservations(nn)
+		if slices.ContainsFunc(held, func(s string) bool { return !slices.Contains(blocked, s) }) {
+			r.settleKeyringRotationReservations(ctx, nn)
+		} else {
+			r.Runner.PublishKeyringRotationBlocked(nn, blocked)
+		}
 	}
 
 	// Clear a consumed rotation annotation once the target site is back
@@ -223,9 +237,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 }
 
 // settleKeyringRotationReservations resolves the reservations the runner
-// holds for the group when a pass ends without a successful status write:
-// nothing written, a rejected write, or one whose outcome is unknown (a
-// timeout may have committed). Which of these happened does not matter. A
+// holds for the group. It runs when a pass ends without a successful status
+// write: nothing written, a rejected write, or one whose outcome is unknown
+// (a timeout may have committed). Which of these happened does not matter.
+// It also runs after a successful write that would end a hold, since that
+// write need not have invalidated an earlier one still in flight. A
 // reservation is never dropped on the strength of this pass's own failure,
 // because the same site may hold an earlier, possibly persisted stamp; an
 // uncached read decides, published as the authoritative view. If that read
