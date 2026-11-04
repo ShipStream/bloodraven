@@ -30,7 +30,7 @@ func round4PrefixPayload(events ...*replication.BinlogEvent) *replication.Binlog
 	event.RawData = append(event.RawData, 0, 1)
 	return event
 }
-func TestRound4CompletedPrefixBodyForms(t *testing.T) {
+func TestCompletedPrefixBodyForms(t *testing.T) {
 	begin := round4PrefixQuery("BEGIN")
 	xid := round4PrefixEvent(replication.XID_EVENT)
 	commit := round4PrefixQuery("COMMIT")
@@ -62,6 +62,17 @@ func TestRound4CompletedPrefixBodyForms(t *testing.T) {
 		{"payload interrupted", []*replication.BinlogEvent{round4PrefixPayload(begin, round4PrefixQuery("SAVEPOINT `s1`"))}, false},
 		{"payload unknown", []*replication.BinlogEvent{round4PrefixPayload(begin, unknown, xid)}, false},
 		{"payload rolled back", []*replication.BinlogEvent{round4PrefixPayload(begin, round4PrefixQuery("ROLLBACK"), xid)}, false},
+		{"start transaction", []*replication.BinlogEvent{round4PrefixQuery("START TRANSACTION"), round4PrefixQuery("INSERT INTO replay.markers VALUES (1)"), xid}, true},
+		{"standalone start", []*replication.BinlogEvent{round4PrefixQuery("START REPLICA")}, true},
+		{"rollback work to savepoint", []*replication.BinlogEvent{begin, round4PrefixQuery("ROLLBACK WORK TO SAVEPOINT `s1`"), xid}, true},
+		{"savepoint rollback outside transaction", []*replication.BinlogEvent{round4PrefixQuery("ROLLBACK TO SAVEPOINT `s1`"), xid}, false},
+		{"hash comment", []*replication.BinlogEvent{round4PrefixQuery("# note\nCREATE TABLE replay.other (id INT)")}, true},
+		{"unterminated comment", []*replication.BinlogEvent{round4PrefixQuery("/* note CREATE TABLE replay.other (id INT)"), xid}, false},
+		{"unterminated line comment", []*replication.BinlogEvent{round4PrefixQuery("-- only a comment"), xid}, false},
+		{"empty query", []*replication.BinlogEvent{round4PrefixQuery("  ;"), xid}, false},
+		{"query event without body", []*replication.BinlogEvent{round4PrefixEvent(replication.QUERY_EVENT), xid}, false},
+		{"payload XA", []*replication.BinlogEvent{round4PrefixPayload(round4PrefixQuery("XA START 'x'"), xid)}, false},
+		{"payload ending without commit", []*replication.BinlogEvent{round4PrefixPayload(begin, round4PrefixEvent(replication.WRITE_ROWS_EVENTv2))}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := replayPrefixCollector{committed: make(internalmysql.GTIDSet)}

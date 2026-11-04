@@ -22,7 +22,7 @@ func TestReplayPrefixRequiresCompletedTransaction(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			evidence, err := InspectBinlog(bytes.NewReader(data), time.Time{})
+			evidence, err := InspectBinlogForReplay(bytes.NewReader(data), time.Time{}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -231,36 +231,18 @@ If one group's status stops changing and the operator logs `failed to start topo
 - **Probe**: inspect explicit `mysql.db` rows separately from `mysql.user.User_attributes` restrictions through an approved admin connection. `PartialRevokeLifted` reports repair of an impossible legacy escaped schema name, not general restoration of global access. A restricted grantor prevents repair on that spelling for every account; repair errors warn and continue normal apply/deletion.
 - **Action**: upgrade to row-derived tenant revokes. Review restrictions on real schema names with the privilege owner; metadata alone cannot identify who created them. Use a separate unrestricted administrator when the operator account restricted itself. Preserve the intentional `app` restriction on `mysql.*`. See [playbook 10](./references/troubleshooting_playbooks.md#10-shared-principal-loses-global-access-to-a-tenant-schema).
 
-For `PITRTargetNotCovered`, `PITRArchiveSiteOmitted`, `PITRArchiveListFailed`,
-`PITRNoArchivedReplay`, `PITRCrossSiteOrder`, `PITRBackupBoundUnknown`,
-`PointInTimePartial` or `PointInTimeCrossSiteUnverified`, read restore or
-verification status first. See [playbook 32](./references/troubleshooting_playbooks.md#32-pitr-restore-or-verification-failed-with-pitrtargetnotcovered-or-pitrarchivesiteomitted).
-Do not drop manifest sites or treat either override as verified completeness.
-For post-failover targets, use a full backup taken after that failover and
-before the target for a single-site window. For refused pre-failover targets,
-restore-only `allowUnverifiedCrossSite` is the only option; it is correct when
-the first-sorted site holds the complete pre-target history. Verification cannot
-cover those windows until #206. The opt-in Warning reports staged sites in
-replay order. Complete replica-era history can replay correctly for one
-failover, but failback,
-reclone or local/replicated clock inversion can skip transactions (#206).
-Missing lower-edge bytes and stale-writer containment still fail under both
-overrides. A distinct "archived file lacks verifiable transaction evidence"
-anchorReason means existing prefix bytes need proof, not object recovery; use
-a trusted backup covering the transactions at a compatible point. A compressed
-inner cut or decoding failure names its GTID and refuses under both flags.
-Preserve archives and source timestamp evidence; never rewrite timestamps.
-Whole parsed XA/checksum-off predecessors count independently of retention
-completeness. Empty source GTID bounds require trustworthy backup metadata.
-Idle anchored windows can succeed without a newest replay time. WARN
-`promotion binlog rotation failed` identifies the candidate whose best-effort
-one-second rotation failed; inspect permission/archive health without repeating
-promotion. Completion logs wait at most ten minutes; no pod is permanent.
-Failure detail retries are bounded to ten minutes from completion. A first
-observation always gets one 15-second attempt even after that deadline.
-Enrichment resolves on any readable log/termination message; a missing pod preserves generic failure.
-Resolved detail is cached by Job UID. Review status flags and named staged
-sites independently from newest replay-prefix timestamps.
+### 10. PITR restore or verification refused or downgraded
+
+- **Symptom**: `status.restore.reason` or the verification `Verified` condition reports `PITRTargetNotCovered`, `PITRArchiveSiteOmitted`, `PITRArchiveListFailed`, `PITRNoArchivedReplay`, `PITRCrossSiteOrder`, `PITRBackupBoundUnknown` or `PITRCoverageInvalid`, or a restore completed with `PointInTimePartial` or `PointInTimeCrossSiteUnverified`.
+- **Probe**: read the status message and `anchorReason` first. The operator decides PITR outcomes from the main container's termination-message verdict (`BLOODRAVEN_PITR_VERDICT v=1 …`); logs carry only GTID coordinates. `PITRCoverageInvalid` with "pod is gone" means the Job's pod was deleted before the operator read it, which is final; with a verdict mismatch it means the Job was rendered by another operator version. `pitrNewestEventTime` is empty when nothing was replayed.
+- **Rules to apply**:
+  - Only one site may replay. `PITRCrossSiteOrder` means two or more sites hold transactions to replay, typically after a failover, planned switchover or ordered update. For a target after the handoff, use a full backup taken after it and before the target. For an earlier target, restore-only `allowUnverifiedCrossSite` is the only option; it can skip transactions held by later-sorted sites and never certifies verification (#206).
+  - The target must be at or after the backup's `completionTime`, or the request is refused at render time with `PITRTargetNotCovered`.
+  - Missing lower-edge bytes, a foreign lineage ("replayed history does not continue the backup bound"), an older commit after the stop event ("replay would not apply it"), a bound that already holds post-target commits, and a compressed transaction cut by the target refuse under both overrides. "archived file lacks verifiable transaction evidence" means existing bytes need proof, not object recovery; use a trusted backup covering those transactions at a compatible point.
+  - "stop reached only on a server-local event" means the archive head ends with a rotation the site's own writes cannot prove; rotate again after a write on the source (`FLUSH BINARY LOGS`) or accept `allowPartial`.
+  - `allowPartial` relaxes only upper coverage. It also admits an unknown backup bound, which the restore then checks against the loaded dump, and such a restore is always `PointInTimePartial`.
+  - Restoring another group's archive into renamed sites should use `pointInTime.archiveProfileName`; otherwise the restored group archives into the source's prefix and `PITRArchiveSiteOmitted` follows for both groups (`PITRSharedArchivePrefix` Warning).
+- **Action**: do not drop manifest sites, rewrite archived timestamps, or treat either override as verified completeness. A failed bootstrap restore may already have loaded the dump; empty the target before retrying. See [playbook 32](./references/troubleshooting_playbooks.md#32-pitr-restore-or-verification-failed-with-pitrtargetnotcovered-or-pitrarchivesiteomitted).
 
 ## Phase 4: Standard Diagnostic Report Format
 

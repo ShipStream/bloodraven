@@ -92,7 +92,7 @@ func (q pitrNodeQueue) Swap(i, j int) { q[i], q[j] = q[j], q[i] }
 func (q *pitrNodeQueue) Push(v any)   { *q = append(*q, v.(*pitrWindowNode)) }
 func (q *pitrNodeQueue) Pop() any     { old := *q; n := old[len(old)-1]; *q = old[:len(old)-1]; return n }
 
-func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, site string, stop time.Time, outDir, start string, logger *slog.Logger) (pitrSiteCoverage, error) {
+func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, site string, stop time.Time, outDir, start, exclude string, logger *slog.Logger) (pitrSiteCoverage, error) {
 	result := pitrSiteCoverage{Site: site, Staged: []pitrStagedFile{}}
 	if !isSafeBasename(site) {
 		return result, fmt.Errorf("reject unsafe site name %q", site)
@@ -102,6 +102,12 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 	if err != nil {
 		return result, fmt.Errorf("invalid START_GTIDS: %w", err)
 	}
+	explicit, err := internalmysql.ParseGTIDSet(exclude)
+	if err != nil {
+		return result, fmt.Errorf("invalid pointInTime.excludeGtids: %w", err)
+	}
+	// mysqlbinlog receives the bound plus explicit exclusions.
+	excluded := sidecar.UnionBinlogGTIDs(baseline, explicit)
 	m, err := sidecar.LoadManifest(ctx, store, prefix, site)
 	if err != nil {
 		return result, err
@@ -241,13 +247,13 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		var source io.Reader = reader
 		part := filepath.Join(dir, fmt.Sprintf(".entry-%d.part", n.index))
 		if stage {
-			out, err = os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+			out, err = os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 			if err != nil {
 				return err
 			}
 			source = io.TeeReader(reader, out)
 		}
-		evidence, readErr := sidecar.InspectBinlogForReplay(source, stop, baseline)
+		evidence, readErr := sidecar.InspectBinlogForReplay(source, stop, excluded)
 		if out != nil {
 			closeErr := out.Close()
 			if readErr == nil {
@@ -256,7 +262,9 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		}
 		if readErr != nil {
 			_ = os.Remove(part)
-			if evidence.ReplayRefusal != "" {
+			// Only an undecodable payload is a coverage refusal; earlier
+			// payload refusals must not mask framing or read errors.
+			if evidence.PayloadUndecodable {
 				identity := pitrNodeID(n.entry)
 				if identity != "" && !sidecar.MatchesBinlogDigest(store, identity, evidence.Digest) {
 					return pitrFailure(site, n, "content identity mismatch")
@@ -311,7 +319,7 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		}
 		defer r.Close()
 		part := filepath.Join(dir, fmt.Sprintf(".entry-%d.part", n.index))
-		out, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+		out, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 		if err != nil {
 			return err
 		}
@@ -355,6 +363,26 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		return n != nil && !baseline.IsEmpty() && (n.previous.Contains(baseline) || (baseline.Contains(n.previous) && n.execution.Contains(baseline)))
 	}
 	barrierTransactions := 0
+	// stopNode is the first file whose events reach the stop: the staged
+	// barrier, or a dump-covered file when nothing after the bound is staged.
+	// Its proof is decided by the commits that follow its stop event.
+	var stopNode *pitrWindowNode
+	proof := pitrStopProofNone
+	proofDetail := ""
+	anchorSearchDone := false
+	postStop := make(internalmysql.GTIDSet)
+	setStop := func(n *pitrWindowNode) {
+		stopNode = n
+		postStop = sidecar.UnionBinlogGTIDs(n.evidence.PostStopGTIDs)
+		switch {
+		case n.evidence.PostStopEarlyCommit != "":
+			proof, proofDetail = pitrStopProofRefused, n.evidence.PostStopEarlyCommit
+		case n.evidence.PostStopProof:
+			proof = pitrStopProofProven
+		default:
+			proof = pitrStopProofPending
+		}
+	}
 	// Only changed predecessor evidence can invalidate the already validated
 	// prefix. Correctly hinted histories make one forward pass through the heap.
 	resetPrefix := func() {
@@ -367,6 +395,55 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		barrier = nil
 		coverageBarrier = nil
 		barrierTransactions = 0
+		stopNode = nil
+		proof, proofDetail = pitrStopProofNone, ""
+		anchorSearchDone = false
+		postStop = make(internalmysql.GTIDSet)
+	}
+	// verify authenticates a newly fetched node and requeues it so it is
+	// placed by its verified Previous_gtids.
+	verify := func(n *pitrWindowNode, prior string) (bool, error) {
+		if other := aliasNode(n.entry); other != nil && other != n {
+			changed := n.divergent != "" || len(n.quarantines) > 0
+			mergePITRSafety(other, n)
+			if n.path != "" {
+				_ = os.Remove(n.path)
+				n.path = ""
+			}
+			n.active = false
+			if changed {
+				resetPrefix()
+			}
+			return false, nil
+		}
+		n.entry.GTIDCoverage = n.evidence.Metadata.GTIDCoverage
+		binding := n.entry.ID
+		if binding == "" {
+			binding = n.entry.ContentID
+		}
+		n.entry.GTIDCoverage.ContentID = binding
+		for _, id := range issued.Overlaps(n.evidence.GTIDs) {
+			other := verifiedNodes[id]
+			if !other.active || other.evidence.Digest == n.evidence.Digest {
+				continue
+			}
+			overlap := n.evidence.GTIDs.Subtract(n.evidence.GTIDs.Subtract(other.evidence.GTIDs))
+			reuse, err := sidecar.CheckArchiveIssuance(ctx, store, prefix, site, other.entry, n.entry, overlap)
+			if err != nil {
+				return false, pitrFailure(site, n, "unable to verify overlapping issuance: "+err.Error())
+			}
+			if reuse != nil {
+				return false, pitrFailure(site, n, "verified GTID namespace reuse: "+reuse.GTIDs+"; "+reuse.Proof)
+			}
+		}
+		issued.Add(n.index, n.evidence.GTIDs)
+		verifiedNodes[n.index] = n
+		register(n)
+		if prior != n.entry.PreviousGTIDs {
+			resetPrefix()
+		}
+		heap.Push(&queue, n)
+		return true, nil
 	}
 	for queue.Len() > 0 {
 		if err := ctx.Err(); err != nil {
@@ -380,84 +457,80 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 			warnQuarantine(n)
 			continue
 		}
-		if barrier != nil && !n.previous.Contains(barrier.previous) {
+		if stopNode != nil && !n.previous.Contains(stopNode.previous) {
 			return result, pitrFailure(site, n, "branch incomparable with stop barrier")
 		}
-		if barrier != nil && (baseline.IsEmpty() || anchors(barrier) || coverageBarrier != nil) && n.entry.PreviousGTIDs != barrier.entry.PreviousGTIDs {
+		if stopNode != nil && n.entry.PreviousGTIDs != stopNode.entry.PreviousGTIDs {
+			// Successors are never staged. They are read only to find a
+			// transaction-free anchor for an unanchored barrier, or the first
+			// later commit that decides a pending stop proof.
+			needAnchor := barrier != nil && !baseline.IsEmpty() && !anchors(barrier) && coverageBarrier == nil && !anchorSearchDone
+			needProof := proof == pitrStopProofPending
+			if !needAnchor && !needProof {
+				continue
+			}
+			if n.evidence == nil {
+				prior := n.entry.PreviousGTIDs
+				if err := fetch(n, false); err != nil {
+					if needAnchor {
+						return result, err
+					}
+					// A file after the stop is evidence only; an unreadable
+					// one ends the scan and the stop stays unproven.
+					logger.Warn("stop proof scan ended at unreadable successor", "site", site, "name", n.entry.Name, "error", err)
+					proof = pitrStopProofScanEnded
+					continue
+				}
+				if _, err := verify(n, prior); err != nil {
+					return result, err
+				}
+				continue
+			}
+			if !n.previous.Contains(stopNode.execution) {
+				return result, pitrFailure(site, n, "successor does not continue replay barrier history")
+			}
+			if needAnchor {
+				if !n.evidence.GTIDs.IsEmpty() || len(n.quarantines) > 0 || n.divergent != "" {
+					// A later file that carries transactions cannot anchor the
+					// barrier; coverage policy decides the unanchored chain.
+					anchorSearchDone = true
+				} else if anchors(n) && n.evidence.StopReached {
+					coverageBarrier = n
+				}
+			}
+			if needProof {
+				postStop = sidecar.UnionBinlogGTIDs(postStop, n.evidence.LateCommitGTIDs)
+				switch {
+				case n.evidence.EarlyCommit != "":
+					proof, proofDetail = pitrStopProofRefused, n.evidence.EarlyCommit
+				case !n.evidence.LateCommitGTIDs.IsEmpty():
+					proof = pitrStopProofProven
+				}
+			}
 			continue
 		}
 
 		if n.evidence == nil {
 			prior := n.entry.PreviousGTIDs
-			if err := fetch(n, barrier == nil); err != nil {
+			if err := fetch(n, stopNode == nil); err != nil {
 				return result, err
 			}
-			if other := aliasNode(n.entry); other != nil && other != n {
-				changed := n.divergent != "" || len(n.quarantines) > 0
-				mergePITRSafety(other, n)
-				if n.path != "" {
-					_ = os.Remove(n.path)
-					n.path = ""
-				}
-				n.active = false
-				if changed {
-					resetPrefix()
-				}
-				continue
-			}
-			n.entry.GTIDCoverage = n.evidence.Metadata.GTIDCoverage
-			binding := n.entry.ID
-			if binding == "" {
-				binding = n.entry.ContentID
-			}
-			n.entry.GTIDCoverage.ContentID = binding
-			for _, id := range issued.Overlaps(n.evidence.GTIDs) {
-				other := verifiedNodes[id]
-				if !other.active || other.evidence.Digest == n.evidence.Digest {
-					continue
-				}
-				overlap := n.evidence.GTIDs.Subtract(n.evidence.GTIDs.Subtract(other.evidence.GTIDs))
-				proof, err := sidecar.CheckArchiveIssuance(ctx, store, prefix, site, other.entry, n.entry, overlap)
-				if err != nil {
-					return result, pitrFailure(site, n, "unable to verify overlapping issuance: "+err.Error())
-				}
-				if proof != nil {
-					return result, pitrFailure(site, n, "verified GTID namespace reuse: "+proof.GTIDs+"; "+proof.Proof)
-				}
-			}
-			issued.Add(n.index, n.evidence.GTIDs)
-			verifiedNodes[n.index] = n
-			register(n)
-			if prior != n.entry.PreviousGTIDs {
-				resetPrefix()
-			}
-			heap.Push(&queue, n)
-			continue
-		}
-		if barrier != nil && n.entry.PreviousGTIDs != barrier.entry.PreviousGTIDs {
-			if !n.previous.Contains(barrier.execution) {
-				return result, pitrFailure(site, n, "successor does not continue replay barrier history")
-			}
-			if !n.evidence.GTIDs.IsEmpty() || len(n.quarantines) > 0 || n.divergent != "" {
-				return result, pitrFailure(site, n, "cannot use an ambiguous transaction-bearing successor to anchor replay")
-			}
-			if anchors(n) && n.evidence.StopReached {
-				coverageBarrier = n
+			if _, err := verify(n, prior); err != nil {
+				return result, err
 			}
 			continue
 		}
-
 		if !baseline.IsEmpty() && baseline.Contains(n.execution) {
-			if n.evidence.StopReached {
-				result.StopReached = true
-				if anchors(n) {
-					if len(selected) > 0 {
-						previous := selected[len(selected)-1]
-						if missing := previous.execution.Subtract(n.previous); !missing.IsEmpty() {
-							return result, pitrFailure(site, previous, "divergent boundary before idle barrier: "+missing.String())
-						}
+			if n.evidence.StopReached && anchors(n) {
+				if len(selected) > 0 {
+					previous := selected[len(selected)-1]
+					if missing := previous.execution.Subtract(n.previous); !missing.IsEmpty() {
+						return result, pitrFailure(site, previous, "divergent boundary before idle barrier: "+missing.String())
 					}
-					coverageBarrier = n
+				}
+				coverageBarrier = n
+				if stopNode == nil {
+					setStop(n)
 				}
 			}
 			if n.path != "" {
@@ -475,6 +548,17 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		}
 
 		if barrier != nil {
+			// A later file with the barrier's history follows it in replay
+			// order when the barrier carries no transactions.
+			if proof == pitrStopProofPending && n != barrier {
+				postStop = sidecar.UnionBinlogGTIDs(postStop, n.evidence.LateCommitGTIDs)
+				switch {
+				case n.evidence.EarlyCommit != "":
+					proof, proofDetail = pitrStopProofRefused, n.evidence.EarlyCommit
+				case !n.evidence.LateCommitGTIDs.IsEmpty():
+					proof = pitrStopProofProven
+				}
+			}
 			if !n.evidence.GTIDs.IsEmpty() {
 				barrierTransactions++
 				if barrierTransactions > 1 {
@@ -511,6 +595,9 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 			if !n.evidence.GTIDs.IsEmpty() {
 				barrierTransactions = 1
 			}
+			if stopNode == nil {
+				setStop(n)
+			}
 		}
 	}
 	for _, n := range selected {
@@ -520,12 +607,12 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 	}
 	if barrier != nil || coverageBarrier != nil {
 		result.StopReached = true
-		proof := barrier
-		if proof == nil || !anchors(proof) {
-			proof = coverageBarrier
+		proofNode := barrier
+		if proofNode == nil || !anchors(proofNode) {
+			proofNode = coverageBarrier
 		}
-		result.Anchored = anchors(proof)
-		checkpointBarrier := proof
+		result.Anchored = anchors(proofNode)
+		checkpointBarrier := proofNode
 		if checkpointBarrier == nil {
 			checkpointBarrier = barrier
 		}
@@ -546,6 +633,47 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 			result.AnchorReason = "chain does not straddle or follow the trusted backup bound"
 		}
 	}
+	if stopNode != nil {
+		if proof == pitrStopProofPending || proof == pitrStopProofScanEnded {
+			// At the archive head, a server-local stop event proves the stop
+			// only when that same server wrote the preceding transactions:
+			// its later commits follow its own rotation. Replica-era and
+			// transaction-free histories stay unproven.
+			origin := stopNode.evidence.LastOriginServerID
+			if origin == 0 {
+				var newest int64 = -1
+				for _, other := range nodes {
+					if other == stopNode || other.evidence == nil || !other.active || other.evidence.LastOriginServerID == 0 || !stopNode.previous.Contains(other.execution) {
+						continue
+					}
+					if count := other.execution.TransactionCount(); count > newest {
+						newest, origin = count, other.evidence.LastOriginServerID
+					}
+				}
+			}
+			if origin != 0 && origin == stopNode.evidence.StopLatchServerID {
+				proof = pitrStopProofProven
+			}
+		}
+		result.postStopGTIDs = postStop
+		result.PostStopGTIDs = postStop.String()
+		if dumped := postStop.Subtract(postStop.Subtract(baseline)); !dumped.IsEmpty() {
+			result.Anchored = false
+			result.AnchorReason = "the backup already contains transactions committed at or after the target: " + dumped.String()
+			return result, fmt.Errorf("PITRTargetNotCovered: site %s: %s; use a backup that completed before the target", site, result.AnchorReason)
+		}
+		switch proof {
+		case pitrStopProofRefused:
+			result.Anchored = false
+			result.AnchorReason = fmt.Sprintf("transaction %s, before the target, comes after the stop event at %s in %s; replay would not apply it", proofDetail, stopNode.evidence.StopLatchTime.Format(time.RFC3339), stopNode.entry.Name)
+			return result, fmt.Errorf("PITRTargetNotCovered: site %s: %s; the archive orders an older commit (lagging replica, interrupted transaction or clock step) after the stop, so choose a target outside that file or use a backup taken after it", site, result.AnchorReason)
+		case pitrStopProofPending, pitrStopProofScanEnded:
+			if result.Anchored {
+				result.Anchored = false
+				result.AnchorReason = "stop reached only on a server-local event, and no archived transaction shows that this site's history passed the target (replica-era or transaction-free files)"
+			}
+		}
+	}
 	for ordinal, n := range selected {
 		// Keep predecessor gaps visible even without an upper barrier (allowPartial).
 		result.checkpoint = sidecar.UnionBinlogGTIDs(result.checkpoint, n.previous)
@@ -562,6 +690,7 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		} else {
 			result.lowerGTIDs = sidecar.UnionBinlogGTIDs(result.lowerGTIDs, n.evidence.GTIDs)
 		}
+		result.LowerGTIDs = result.lowerGTIDs.String()
 		name := fmt.Sprintf("mysql-bin.%020d.%s", ordinal, n.entry.Name)
 		if n.entry.ID != "" {
 			name += "." + n.entry.ID
@@ -571,6 +700,7 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		}
 		n.path = ""
 		result.Staged = append(result.Staged, pitrStagedFile{Path: filepath.ToSlash(filepath.Join(site, name)), Digest: n.evidence.Digest,
+			PreviousGTIDs: n.previous.String(), GTIDs: n.evidence.GTIDs.String(),
 			FirstEventTime: n.evidence.FirstVerifiedEventTime, LastEventTime: n.evidence.NewestEventTime,
 			FirstTransactionEventTime: n.evidence.FirstTransactionEventTime, LastTransactionEventTime: n.evidence.LastTransactionEventTime,
 			TimestampsComplete: n.evidence.TimestampsComplete})
@@ -583,10 +713,27 @@ func planPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, sit
 		if n.evidence.NewestReplayEventTime.After(result.NewestReplayEventTime) {
 			result.NewestReplayEventTime = n.evidence.NewestReplayEventTime
 		}
-		if !n.evidence.BeforeStopGTIDs.Subtract(baseline).IsEmpty() {
+		if replay := n.evidence.BeforeStopGTIDs.Subtract(excluded); !replay.IsEmpty() {
+			if !result.HasReplayTransactions && !baseline.IsEmpty() && !n.execution.Contains(baseline) {
+				// Replay must continue the backup: the first file that applies
+				// a transaction has to reach the bound, or it is another branch.
+				result.Anchored = false
+				result.AnchorReason = fmt.Sprintf("replayed history does not continue the backup bound: %s ends at %s", n.entry.Name, n.execution.String())
+				return result, fmt.Errorf("PITRTargetNotCovered: site %s: %s; use a backup taken on this archive's lineage", site, result.AnchorReason)
+			}
 			result.HasReplayTransactions = true
 		}
 		logger.Info("archived binlog downloaded", "site", site, "name", n.entry.Name, "size", n.entry.Size, "first_event", n.entry.FirstEventTime.Format(time.RFC3339))
 	}
 	return result, nil
 }
+
+type pitrStopProof int
+
+const (
+	pitrStopProofNone pitrStopProof = iota
+	pitrStopProofPending
+	pitrStopProofProven
+	pitrStopProofRefused
+	pitrStopProofScanEnded
+)

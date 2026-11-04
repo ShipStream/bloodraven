@@ -2,14 +2,17 @@ package sidecar
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/replication"
 )
 
-func TestRound5RealCompressedRetentionAndPrefix(t *testing.T) {
+func TestRealCompressedRetentionAndPrefix(t *testing.T) {
 	raw, err := os.ReadFile("testdata/native/compressed-session.bin")
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +30,7 @@ func TestRound5RealCompressedRetentionAndPrefix(t *testing.T) {
 			}
 			multi = multi || writes > 1
 		}
-	})
+	}, binlogInspection{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +66,31 @@ func TestRound5PayloadLengthEncodingBoundaries(t *testing.T) {
 	for _, wire := range [][]byte{nil, {0xfb}, {0xff}, {0xfc, 1}, {0xfd, 1, 2}, {0xfe, 1, 2, 3, 4, 5, 6, 7}} {
 		if _, _, err := payloadLengthEncodedInt(wire); err == nil {
 			t.Fatalf("invalid encoding accepted: %x", wire)
+		}
+	}
+}
+
+// The retained cut captures keep their recorded identity and decoded SQL.
+func TestNativeCutCapturesMatchCatalog(t *testing.T) {
+	catalog, err := os.ReadFile("testdata/native/compressed-cut-catalog.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(catalog)), "\n") {
+		fields := strings.Split(line, "\t")
+		raw, err := os.ReadFile("testdata/native/" + fields[0] + ".bin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sum := sha256.Sum256(raw); hex.EncodeToString(sum[:]) != fields[3] {
+			t.Fatalf("%s bytes differ from the catalog", fields[0])
+		}
+		evidence, err := InspectBinlog(bytes.NewReader(raw), time.Time{})
+		if err != nil || evidence.Metadata.PreviousGTIDs != fields[4] {
+			t.Fatalf("%s Previous_gtids %q differ from the catalog: %v", fields[0], evidence.Metadata.PreviousGTIDs, err)
+		}
+		if sql, err := os.ReadFile("testdata/native/" + fields[0] + ".sql"); err != nil || !strings.Contains(string(sql), "server v "+fields[1]) {
+			t.Fatalf("%s decoded SQL missing or from another server version: %v", fields[0], err)
 		}
 	}
 }

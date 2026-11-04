@@ -92,9 +92,10 @@ func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
 			ProfileName:      profile,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Phase:          v1alpha1.BackupPhaseSucceeded,
-			GtidExecuted:   "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
-			CompletionTime: &metav1.Time{Time: time.Now()},
+			Phase:        v1alpha1.BackupPhaseSucceeded,
+			GtidExecuted: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
+			// Completed before the fixed PITR targets the tests request.
+			CompletionTime: &metav1.Time{Time: time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC)},
 			Location:       "lion/nightly/name/",
 			StorageType:    v1alpha1.BackupStorageS3,
 			SizeBytes:      1 * 1024 * 1024 * 1024,

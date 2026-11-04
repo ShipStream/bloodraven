@@ -5569,15 +5569,28 @@ spec:
                         default: false
                         description: |-
                           AllowPartial permits restoring to the newest archived point when the target
-                          is not covered. It never bypasses archive safety or site omission checks.
+                          is not covered, and admits a backup with an unknown GTID bound, which the
+                          restore then checks against the loaded dump. It never bypasses archive
+                          safety, site omission, lower-edge or lineage checks.
                         type: boolean
                       allowUnverifiedCrossSite:
                         default: false
                         description: |-
-                          AllowUnverifiedCrossSite permits overlapping site streams without proving
-                          cross-site completeness. Failback, reclone, or inverted replica clocks can
-                          skip transactions. This never bypasses archive or coverage safety checks.
+                          AllowUnverifiedCrossSite replays archives from more than one site in site
+                          name order, one mysqlbinlog run, without proving cross-site completeness.
+                          mysqlbinlog stops at the first event at or after the target in any site,
+                          so later sites' earlier transactions can be skipped. This never bypasses
+                          archive, payload, lower-edge or stop-proof checks.
                         type: boolean
+                      archiveProfileName:
+                        description: |-
+                          ArchiveProfileName names the spec.backup.profiles entry whose binlog
+                          archive the restore reads. Defaults to spec.backup.pitr.profileName.
+                          Set it when restoring another group's archive, for example into renamed
+                          sites, so this group keeps archiving into its own prefix instead of
+                          adding foreign manifests to the source's prefix.
+                        minLength: 1
+                        type: string
                       excludeGtids:
                         description: |-
                           ExcludeGtids is an optional GTID set passed verbatim to
@@ -6165,15 +6178,28 @@ spec:
                         default: false
                         description: |-
                           AllowPartial permits restoring to the newest archived point when the target
-                          is not covered. It never bypasses archive safety or site omission checks.
+                          is not covered, and admits a backup with an unknown GTID bound, which the
+                          restore then checks against the loaded dump. It never bypasses archive
+                          safety, site omission, lower-edge or lineage checks.
                         type: boolean
                       allowUnverifiedCrossSite:
                         default: false
                         description: |-
-                          AllowUnverifiedCrossSite permits overlapping site streams without proving
-                          cross-site completeness. Failback, reclone, or inverted replica clocks can
-                          skip transactions. This never bypasses archive or coverage safety checks.
+                          AllowUnverifiedCrossSite replays archives from more than one site in site
+                          name order, one mysqlbinlog run, without proving cross-site completeness.
+                          mysqlbinlog stops at the first event at or after the target in any site,
+                          so later sites' earlier transactions can be skipped. This never bypasses
+                          archive, payload, lower-edge or stop-proof checks.
                         type: boolean
+                      archiveProfileName:
+                        description: |-
+                          ArchiveProfileName names the spec.backup.profiles entry whose binlog
+                          archive the restore reads. Defaults to spec.backup.pitr.profileName.
+                          Set it when restoring another group's archive, for example into renamed
+                          sites, so this group keeps archiving into its own prefix instead of
+                          adding foreign manifests to the source's prefix.
+                        minLength: 1
+                        type: string
                       excludeGtids:
                         description: |-
                           ExcludeGtids is an optional GTID set passed verbatim to
@@ -7237,16 +7263,16 @@ spec:
                   newestArchivedTime:
                     description: |-
                       NewestArchivedTime is the latest last-event timestamp across all
-                      archived binlogs. Together with OldestArchivedTime this is the
-                      window available for restores.
+                      archived binlogs. It measures archive freshness. Whether a target
+                      is covered is decided per restore from verified archive bytes, a
+                      single replaying site and a proven stop event.
                     format: date-time
                     type: string
                   oldestArchivedTime:
                     description: |-
                       OldestArchivedTime is the earliest first-event timestamp across
-                      all archived binlogs still present in storage. Together with a
-                      full backup's completion time this is the earliest recoverable
-                      point.
+                      all archived binlogs still present in storage. It bounds archive
+                      retention; it does not prove that a target can be restored.
                     format: date-time
                     type: string
                   profileName:
@@ -7454,15 +7480,6 @@ spec:
                       terminal state.
                     format: date-time
                     type: string
-                  failureDetailLastAttemptTime:
-                    description: FailureDetailLastAttemptTime bounds retries of unresolved
-                      Job failure logs.
-                    format: date-time
-                    type: string
-                  failureDetailResolved:
-                    description: FailureDetailResolved means failure logs were read
-                      or enrichment ended.
-                    type: boolean
                   jobName:
                     description: JobName is the name of the batchv1.Job performing
                       the restore.

@@ -144,7 +144,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validatePITRBackupStart(pitFromVerification, backup.Status.StartTime); err != nil {
+	if err := validatePITRBackupBefore(pitFromVerification, backup.Status); err != nil {
 		return nil, err
 	}
 	if err := validatePITRBackupBound(pitFromVerification, backup.Status.GtidExecuted, true); err != nil {
@@ -493,13 +493,14 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		}
 		initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
 		initContainers = append(initContainers, corev1.Container{
-			Name:            "decrypt-download",
-			Image:           operatorImageFromEnv,
-			Command:         operatorCommand("decrypt-download"),
-			Env:             decEnv,
-			Resources:       initResources,
-			VolumeMounts:    decMounts,
-			SecurityContext: initSC,
+			Name:                     "decrypt-download",
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+			Image:                    operatorImageFromEnv,
+			Command:                  operatorCommand("decrypt-download"),
+			Env:                      decEnv,
+			Resources:                initResources,
+			VolumeMounts:             decMounts,
+			SecurityContext:          initSC,
 		})
 	}
 
@@ -552,8 +553,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{
-							Name:  backupJobContainerName,
-							Image: image,
+							Name: backupJobContainerName,
+							// verify.sh publishes restore.py's PITR verdict and its
+							// own failures here; others fall back to the log tail.
+							TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+							Image:                    image,
 							// verify.sh is mounted as executable via the
 							// scripts ConfigMap default mode 0555.
 							Command:         []string{"/bin/bash", backupScriptsMountPath + "/verify.sh"},

@@ -56,6 +56,11 @@ func downloadSiteBinlogs(
 }
 
 func downloadPITRWindow(ctx context.Context, store sidecar.ArchiveStore, prefix, site string, stop time.Time, outDir, start string, logger *slog.Logger) (int, error) {
-	result, err := planPITRWindow(ctx, store, prefix, site, stop, outDir, start, logger)
+	result, err := planPITRWindow(ctx, store, prefix, site, stop, outDir, start, "", logger)
 	return len(result.Staged), err
+}
+
+// downloadPITRArchive is the positional form used by archive-level tests.
+func downloadPITRArchive(ctx context.Context, store sidecar.ArchiveStore, prefix string, sites []string, stop time.Time, outDir, start string, allowPartial, allowUnverifiedCrossSite bool, mode string, logger *slog.Logger) (pitrCoverage, error) {
+	return planPITRArchive(ctx, store, pitrRequest{prefix: prefix, sites: sites, stop: stop, outDir: outDir, start: start, allowPartial: allowPartial, allowUnverifiedCrossSite: allowUnverifiedCrossSite, mode: mode}, logger)
 }

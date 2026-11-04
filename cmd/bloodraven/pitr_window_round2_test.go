@@ -100,9 +100,15 @@ func TestRound2RejectsGTIDSelfOverlap(t *testing.T) {
 func TestRound2LowerGTIDCutSkipsCoveredFiles(t *testing.T) {
 	store, _ := round2Archive(t, pitrFixture(t, "incarnation-a.bin"), pitrFixture(t, "review-clock-b.bin"))
 	t.Setenv("BLOODRAVEN_PITR_START_GTIDS", retentionTestSID+":1-11")
-	n, err := downloadSiteBinlogs(context.Background(), store, "binlogs", "iad", time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC), t.TempDir(), slog.Default())
+	// Both files end before 09:00:02. S:11 commits at 09:00:00, so a target at
+	// that second would leave the backup bound holding post-target history.
+	n, err := downloadSiteBinlogs(context.Background(), store, "binlogs", "iad", time.Date(2026, 4, 15, 9, 0, 2, 0, time.UTC), t.TempDir(), slog.Default())
 	if err != nil || n != 1 {
 		t.Fatalf("lower cut: %d, %v", n, err)
+	}
+	_, err = downloadSiteBinlogs(context.Background(), store, "binlogs", "iad", time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC), t.TempDir(), slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "the backup already contains transactions committed at or after the target") {
+		t.Fatalf("post-target backup bound certified: %v", err)
 	}
 }
 func TestRound2QuarantineCommandRequiresConfirmation(t *testing.T) {

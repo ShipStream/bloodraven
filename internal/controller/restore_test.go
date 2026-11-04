@@ -31,7 +31,8 @@ func fgInitFromMysqlBackup() *v1alpha1.MysqlFailoverGroup {
 // succeededSeedBackup is a previously-completed MysqlBackup the restore
 // can use as its source.
 func succeededSeedBackup() *v1alpha1.MysqlBackup {
-	now := metav1.NewTime(time.Now())
+	// Completed before the fixed PITR targets the tests request.
+	now := metav1.NewTime(time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC))
 	return &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "seed", Namespace: "ns",

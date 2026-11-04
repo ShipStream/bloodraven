@@ -68,9 +68,7 @@ func (c *binlogCoverageCollector) observe(e *replication.BinlogEvent) {
 			c.valid = false
 			break
 		}
-		var decodedBytes uint64
 		for _, inner := range payload.Events {
-			decodedBytes += uint64(len(inner.RawData))
 			switch inner.Header.EventType {
 			case replication.QUERY_EVENT, replication.XID_EVENT, replication.TABLE_MAP_EVENT,
 				replication.WRITE_ROWS_EVENTv0, replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2,
@@ -82,9 +80,6 @@ func (c *binlogCoverageCollector) observe(e *replication.BinlogEvent) {
 			default:
 				c.valid = false
 			}
-		}
-		if len(payload.Events) == 0 || decodedBytes != payload.UncompressedSize || uint64(len(payload.Payload)) != payload.Size {
-			c.valid = false
 		}
 	case replication.QUERY_EVENT, replication.XID_EVENT, replication.TABLE_MAP_EVENT,
 		replication.WRITE_ROWS_EVENTv0, replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2,

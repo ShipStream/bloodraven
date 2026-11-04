@@ -116,29 +116,54 @@ func round1Archive(t *testing.T, streams map[string][][]byte) sidecar.ArchiveSto
 }
 
 func TestRound1IdleCoverage(t *testing.T) {
-	for _, shape := range []string{"idle sealed file", "backed-up transaction then idle rotation"} {
+	for _, shape := range []string{"idle sealed file", "backed-up transaction then idle rotation", "backed-up transaction then idle file", "replica-era transaction then idle rotation"} {
 		t.Run(shape, func(t *testing.T) {
 			idle := round1Stream(t, 11, round1Time(9, 0, 0), true, false)
 			idle = round1PatchTimestamp(t, idle, 3, uint32(round1Time(9, 31, 0).Unix()))
+			old := round1PatchTimestamp(t, pitrFixture(t, "incarnation-a.bin"), 3, uint32(round1Time(9, 31, 0).Unix()))
 			files := [][]byte{idle}
-			if shape != "idle sealed file" {
-				old := round1PatchTimestamp(t, pitrFixture(t, "incarnation-a.bin"), 3, uint32(round1Time(9, 31, 0).Unix()))
-				files = append([][]byte{old}, files...)
+			switch shape {
+			case "backed-up transaction then idle rotation":
+				files = [][]byte{old, idle}
+			case "backed-up transaction then idle file":
+				files = [][]byte{pitrFixture(t, "incarnation-a.bin"), idle}
+			case "replica-era transaction then idle rotation":
+				// The sealed file's transaction came from another server, so
+				// the local rotation cannot show that replication reached it.
+				events := round4Events(old)
+				for _, event := range events {
+					if event[4] == 33 || event[4] == 2 {
+						binary.LittleEndian.PutUint32(event[5:9], 2)
+					}
+				}
+				files = [][]byte{round4Reframe(events)}
 			}
+			// A transaction-free chain cannot show which server wrote it,
+			// so its server-local stop event proves nothing on its own.
+			covered := shape == "backed-up transaction then idle rotation" || shape == "backed-up transaction then idle file"
 			store := round1Archive(t, map[string][][]byte{"iad": files})
 			for _, partial := range []bool{false, true} {
 				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-11", partial, false, "timestamp", slog.Default())
-				if err != nil || !result.TargetCovered || result.Partial || len(result.Sites[0].Staged) != 0 {
+				if covered && (err != nil || !result.TargetCovered || result.Partial || len(result.Sites[0].Staged) != 0) {
 					t.Fatalf("idle window lost verified coverage: %+v %v", result, err)
+				}
+				if !covered && (result.TargetCovered || (partial && (err != nil || !result.Partial)) || (!partial && (err == nil || !strings.Contains(err.Error(), "PITRTargetNotCovered")))) {
+					t.Fatalf("unproven server-local stop certified: %+v %v", result, err)
+				}
+				if !covered && !strings.Contains(result.Sites[0].AnchorReason, "stop reached only on a server-local event") {
+					t.Fatalf("unproven stop lacks its reason: %+v", result.Sites[0])
 				}
 			}
 		})
 	}
 }
 
-func TestRound1ChronologicalGuard(t *testing.T) {
+// Under the single-site rule, two sites holding transactions to replay always
+// refuse, whatever their event order. A site that replays nothing before the
+// target is left out, so it neither refuses nor ends replay early.
+func TestRound1TwoReplayingSitesAlwaysRefuse(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	for _, name := range []string{"ordered failover", "reverse failover", "failback", "overlap", "equal boundary", "foreign barrier", "interrupted transaction", "nontransaction barrier", "missing timestamp"} {
+	for _, name := range []string{"ordered failover", "reverse failover", "failback", "overlap", "equal boundary", "missing timestamp", "foreign barrier", "nontransaction barrier"} {
 		t.Run(name, func(t *testing.T) {
 			early := round1Stream(t, 10, round1Time(9, 0, 0), false, false)
 			late := round1Stream(t, 11, round1Time(11, 0, 0), false, false)
@@ -152,37 +177,57 @@ func TestRound1ChronologicalGuard(t *testing.T) {
 				streams["iad"] = [][]byte{round1Stream(t, 11, round1Time(9, 0, 1), false, false)}
 			case "equal boundary":
 				streams["iad"] = [][]byte{round1Stream(t, 11, round1Time(9, 0, 2), false, false)}
-			case "foreign barrier":
-				streams["iad"] = [][]byte{early}
-				streams["east"] = [][]byte{round1Stream(t, 10, round1Time(12, 0, 0), false, true)}
-			case "interrupted transaction":
-				streams = map[string][][]byte{"east": {round1PatchTimestamp(t, early, 2, uint32(round1Time(11, 0, 2).Unix()))}, "iad": {early}}
-			case "nontransaction barrier":
-				streams["iad"] = [][]byte{round1Stream(t, 10, round1Time(11, 0, 0), false, false)}
-				streams["east"] = [][]byte{round1Stream(t, 10, round1Time(12, 0, 0), true, true)}
 			case "missing timestamp":
 				streams["iad"] = [][]byte{round1Stream(t, 10, round1Time(11, 0, 0), false, false)}
 				streams["east"] = [][]byte{round1PatchTimestamp(t, early, 15, 0)}
+			case "foreign barrier":
+				streams["iad"] = [][]byte{early}
+				streams["east"] = [][]byte{round1Stream(t, 10, round1Time(12, 0, 0), false, true)}
+			case "nontransaction barrier":
+				streams["iad"] = [][]byte{round1Stream(t, 10, round1Time(11, 0, 0), false, false)}
+				streams["east"] = [][]byte{round1Stream(t, 10, round1Time(12, 0, 0), true, true)}
 			}
 			store := round1Archive(t, streams)
 			for _, partial := range []bool{false, true} {
-				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "east"}, round1Time(11, 0, 2), t.TempDir(), retentionTestSID+":1-10", partial, false, "timestamp", logger)
-				if name == "foreign barrier" && result.TargetCovered {
-					t.Fatal("foreign barrier certified an uncovered source archive")
-				}
-				if name == "ordered failover" {
-					if err != nil || !result.TargetCovered {
-						t.Fatalf("ordered failover refused: %+v %v", result, err)
-					}
+				for _, unverified := range []bool{false, true} {
+					result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "east"}, round1Time(11, 0, 2), t.TempDir(), retentionTestSID+":1-10", partial, unverified, "timestamp", logger)
+					replaying := 0
 					for _, site := range result.Sites {
-						if len(site.Staged) != 1 || !site.HasReplayTransactions {
-							t.Fatalf("ordered failover did not include both transaction prefixes: %+v", result)
+						if site.HasReplayTransactions {
+							replaying++
+						} else if len(site.Staged) > 0 && err == nil {
+							t.Fatalf("site without replay kept in the replay: %+v", result.Sites)
 						}
 					}
-					continue
-				}
-				if err == nil || !strings.Contains(err.Error(), "PITRCrossSiteOrder") {
-					t.Fatalf("unsafe order accepted: %+v %v", result, err)
+					switch name {
+					case "foreign barrier":
+						// Only iad replays; it never reaches the target.
+						if result.TargetCovered || (partial != (err == nil)) {
+							t.Fatalf("foreign site certified iad's uncovered tail: %+v %v", result, err)
+						}
+						continue
+					case "nontransaction barrier":
+						// Only iad replays, and its own stop covers the target.
+						if err != nil || !result.TargetCovered || result.CrossSiteUnverified || result.ProofSite != "iad" {
+							t.Fatalf("single replaying site refused: %+v %v", result, err)
+						}
+						continue
+					}
+					if replaying < 2 {
+						t.Fatalf("fixture needs two replaying sites: %+v", result.Sites)
+					}
+					if unverified && err == nil {
+						if !result.CrossSiteUnverified {
+							t.Fatalf("cross-site replay not labelled unverified: %+v", result)
+						}
+						continue
+					}
+					if err == nil || !(strings.Contains(err.Error(), "PITRCrossSiteOrder") || strings.Contains(err.Error(), "PITRTargetNotCovered")) || result.TargetCovered && !unverified {
+						t.Fatalf("cross-site window certified: %+v %v", result, err)
+					}
+					if !unverified && !partial && strings.Contains(err.Error(), "PITRCrossSiteOrder") && !strings.Contains(err.Error(), "allowUnverifiedCrossSite") {
+						t.Fatalf("refusal lost its remedy: %v", err)
+					}
 				}
 			}
 		})
@@ -226,12 +271,18 @@ func TestRound1UnanchoredCoverage(t *testing.T) {
 	}
 }
 
-func TestRound1OpaquePayloadChronologyRefused(t *testing.T) {
+func TestRound1CompressedPayloadTimesAreDiagnostic(t *testing.T) {
 	compressed := pitrFixture(t, "compressed-transaction.bin")
-	store := round1Archive(t, map[string][][]byte{"east": {compressed}, "iad": {round1Stream(t, 10, round1Time(11, 0, 0), false, false)}})
-	_, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"east", "iad"}, round1Time(11, 0, 1), t.TempDir(), retentionTestSID+":1-10", true, false, "timestamp", slog.Default())
+	// Decoded inner headers keep event-time diagnostics complete; a
+	// compressed transaction alone no longer decides multi-site policy.
+	evidence, err := sidecar.InspectBinlog(bytes.NewReader(compressed), time.Time{})
+	if err != nil || !evidence.TimestampsComplete {
+		t.Fatalf("decoded payload marked timestamps incomplete: %+v %v", evidence, err)
+	}
+	store := round1Archive(t, map[string][][]byte{"east": {compressed}, "iad": {round1Stream(t, 10, round1Time(9, 0, 0), false, false)}})
+	_, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"east", "iad"}, round1Time(11, 0, 1), t.TempDir(), retentionTestSID+":1-10", true, false, "timestamp", slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "PITRCrossSiteOrder") {
-		t.Fatalf("outer payload time certified inner event order: %v", err)
+		t.Fatalf("two replaying sites certified: %v", err)
 	}
 	// A single staged site retains the existing native payload replay rules.
 	store = round1Archive(t, map[string][][]byte{"iad": {compressed}})
@@ -250,10 +301,19 @@ func TestRound1NativeIdleRotationCoverage(t *testing.T) {
 	if !evidence.GTIDs.IsEmpty() || evidence.Metadata.PreviousGTIDs == "" {
 		t.Fatal("fixture must model an idle rotation after existing transactions")
 	}
+	// A transaction-free file cannot show which server wrote the history, so
+	// its server-local rotation alone does not prove the stop.
 	store := round1Archive(t, map[string][][]byte{"iad": {data}})
 	result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, evidence.NewestEventTime, t.TempDir(), evidence.Metadata.PreviousGTIDs, false, false, "timestamp", slog.Default())
-	if err != nil || !result.TargetCovered || result.Partial || len(result.Sites[0].Staged) != 0 {
-		t.Fatalf("FLUSH BINARY LOGS did not establish idle coverage: %+v %v", result, err)
+	if err == nil || result.TargetCovered || !strings.Contains(result.Sites[0].AnchorReason, "stop reached only on a server-local event") {
+		t.Fatalf("transaction-free rotation certified: %+v %v", result, err)
+	}
+	// With the writer's file archived, its commits share the rotation's
+	// second: they are after a target at that second, yet in the bound.
+	store = round1Archive(t, map[string][][]byte{"iad": {pitrFixture(t, "native/initial.bin"), data}})
+	_, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, evidence.NewestEventTime, t.TempDir(), evidence.Metadata.PreviousGTIDs, false, false, "timestamp", slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "the backup already contains transactions committed at or after the target") {
+		t.Fatalf("post-target bound certified: %v", err)
 	}
 }
 

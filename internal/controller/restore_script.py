@@ -44,6 +44,8 @@
 #                                     (RFC 3339 or MySQL form).
 #   BLOODRAVEN_PITR_ALLOW_PARTIAL     true permits an uncovered earlier point
 #   BLOODRAVEN_PITR_MODE              timestamp (default) or latest verification
+#   BLOODRAVEN_PITR_VERDICT_PATH      where the success verdict is written;
+#                                     defaults to /dev/termination-log
 #   BLOODRAVEN_PITR_EXCLUDE_GTIDS     optional mysqlbinlog --exclude-gtids set.
 #   BLOODRAVEN_PITR_LOCAL_DIR         local directory populated by the
 #                                     `bloodraven pitr-download` init
@@ -66,6 +68,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -332,9 +335,9 @@ def _maybe_preflight_drops(session):
 # PITR: binlog replay on top of the loaded dump
 # --------------------------------------------------------------------
 #
-# The `bloodraven pitr-download` init container has already fetched
-# every archived binlog that could contribute to the replay window and
-# dropped them into BLOODRAVEN_PITR_LOCAL_DIR, organized per site:
+# The `bloodraven pitr-download` init container has already staged the
+# replaying site's window, verified against the backup bound, and written
+# coverage.json beside it in BLOODRAVEN_PITR_LOCAL_DIR, organized per site:
 #
 #   /pitr-binlogs/
 #   ├── us-east-1a/
@@ -344,33 +347,59 @@ def _maybe_preflight_drops(session):
 #       └── mysql-bin.000001
 #
 # Files replay in site and file order through one mysqlbinlog invocation.
-# The default refuses overlapping or unproved cross-site event ranges. Explicit
-# allowUnverifiedCrossSite restores retain this legacy ordering and report a
-# warning: the first stop event can skip later sites after failback, reclone or
-# local/replicated clock inversion. GTID dedup prevents duplicate application;
-# it does not prove cross-site completeness. The dump GTIDs enter gtid_purged
-# through updateGtidSet:"replace" with skipBinlog:true before replay.
+# Normally only one site is staged; the planner refuses a window in which two
+# sites replay. Explicit allowUnverifiedCrossSite restores stage several sites
+# and report a warning: the first stop event ends the run, so later-sorted
+# sites can be skipped. GTID dedup prevents duplicate application; it does not
+# prove cross-site completeness. The dump GTIDs enter gtid_purged through
+# updateGtidSet:"replace" with skipBinlog:true before replay.
+
+
+_PITR_TARGET = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?"
+    r"(Z|[+-]\d{2}:?\d{2})?$", re.IGNORECASE)
 
 
 def _parse_pitr_target(s):
     """Normalize the user-provided datetime to mysqlbinlog's expected
     'YYYY-MM-DD HH:MM:SS' form. Accepts RFC 3339 ("2026-04-15T09:30:00Z"
-    or with offset) for k8s-style timestamp pasting."""
+    or with offset) for k8s-style timestamp pasting. The parse does not
+    depend on the Python version's fromisoformat, and like the Go planner it
+    rejects more than nine fractional digits."""
     s = s.strip()
+    m = _PITR_TARGET.match(s)
+    if not m:
+        raise ValueError("unrecognized PITR stop datetime {!r}".format(s))
+    year, month, day, hour, minute, second = (int(v) for v in m.group(1, 2, 3, 4, 5, 6))
+    dt = datetime.datetime(year, month, day, hour, minute, second)
+    zone = m.group(8)
+    if zone and zone.upper() != "Z":
+        sign = 1 if zone[0] == "+" else -1
+        digits = zone[1:].replace(":", "")
+        dt -= sign * datetime.timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    # Binlog event timestamps have one-second resolution. Rounding a
+    # fractional ceiling up preserves every event strictly before it.
+    if any(c != "0" for c in (m.group(7) or "")):
+        dt += datetime.timedelta(seconds=1)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _write_termination(message, path=None):
+    """Record a compact message for the controller. The kubelet keeps only
+    the last 4096 bytes, so the stable reason comes first and stays short."""
+    if len(message) > 3072:
+        message = message[:3072] + " ... (truncated; see container log)"
     try:
-        dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-        # Binlog event timestamps have one-second resolution. Rounding a
-        # fractional ceiling up preserves every event strictly before it.
-        fraction = s.split(".", 1)[1] if "." in s else ""
-        fraction = fraction.split("+", 1)[0].split("-", 1)[0].rstrip("Z")
-        if dt.microsecond or any(c in "123456789" for c in fraction):
-            dt = dt.replace(microsecond=0) + datetime.timedelta(seconds=1)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError:
+        with open(path or os.environ.get("BLOODRAVEN_TERMINATION_LOG", "/dev/termination-log"), "w") as f:
+            f.write(message)
+    except OSError:
         pass
-    return s
+
+
+def _fail(message):
+    print(message, file=sys.stderr, flush=True)
+    _write_termination(message)
+    sys.exit(2)
 
 
 def _collect_binlogs(local_dir):
@@ -431,8 +460,9 @@ def _read_pitr_coverage(local_dir, stop_datetime):
             raise ValueError("unexpected partial outcome")
         if coverage.get("refusalReason"):
             raise ValueError(coverage["refusalReason"])
-        if mode == "timestamp" and coverage["targetCovered"] != any(site["stopReached"] and site["anchored"] for site in coverage["sites"]):
-            raise ValueError("inconsistent per-site stop barriers")
+        proof = [site for site in coverage["sites"] if site["site"] == coverage.get("proofSite", "")]
+        if mode == "timestamp" and coverage["targetCovered"] != bool(proof and proof[0]["stopReached"] and proof[0]["anchored"]):
+            raise ValueError("inconsistent proof site stop barrier")
         files = []
         newest = ""
         reached_barrier = False
@@ -467,8 +497,7 @@ def _read_pitr_coverage(local_dir, stop_datetime):
         coverage["newestReplayedEventTime"] = newest
         return coverage
     except (OSError, ValueError, KeyError, TypeError) as e:
-        print("PITRCoverageInvalid: {}".format(e), file=sys.stderr, flush=True)
-        sys.exit(2)
+        _fail("PITRCoverageInvalid: {}".format(e))
 
 
 def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_dir,
@@ -492,7 +521,11 @@ def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_di
     source_gtids = os.environ.get("BLOODRAVEN_SOURCE_GTID_EXECUTED", "").strip()
     if source_gtids:
         exclude_gtids = source_gtids + ("," + exclude_gtids if exclude_gtids else "")
-    binlog_cmd = ["mysqlbinlog", "--stop-datetime=" + stop_datetime]
+    # latest replays every staged file: mysqlbinlog emits no transaction at
+    # all for a year-9999 --stop-datetime, so latest passes no stop.
+    binlog_cmd = ["mysqlbinlog"]
+    if coverage["mode"] != "latest":
+        binlog_cmd.append("--stop-datetime=" + stop_datetime)
     if exclude_gtids:
         binlog_cmd += ["--exclude-gtids=" + exclude_gtids]
     if filter_database:
@@ -528,16 +561,88 @@ def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_di
     rc2 = p2.wait()
     rc1 = p1.wait()
     if rc1 != 0:
-        print("BLOODRAVEN_PITR_FAILED: mysqlbinlog exit={}".format(rc1),
-              file=sys.stderr, flush=True)
-        sys.exit(2)
+        _fail("BLOODRAVEN_PITR_FAILED: mysqlbinlog exit={}".format(rc1))
     if rc2 != 0:
-        print("BLOODRAVEN_PITR_FAILED: mysql exit={}".format(rc2),
-              file=sys.stderr, flush=True)
-        sys.exit(2)
+        _fail("BLOODRAVEN_PITR_FAILED: mysql exit={}".format(rc2))
     print("BLOODRAVEN_PITR_COMPLETE stop_datetime={}".format(stop_datetime),
           flush=True)
     return files[-1], len(files)
+
+
+def _gtid_union(*sets):
+    return ",".join(s for s in sets if s)
+
+
+def _gtid_query(session, sql, *args):
+    row = session.run_sql(sql, list(args)).fetch_one()
+    return "" if row is None or row[0] is None else str(row[0]).replace("\n", "")
+
+
+def _verify_loaded_dump(session, coverage, exclude_gtids):
+    """Check the staged replay against the loaded dump's own gtid_executed.
+
+    The source bound is read before mysqlsh takes its consistent snapshot,
+    so the dump can hold more than the bound. With an unknown bound, this is
+    the only lower-edge and lineage check. Runs before any replay."""
+    executed = _gtid_query(session, "SELECT @@global.gtid_executed")
+    applied = _gtid_union(executed, exclude_gtids)
+    for site in coverage["sites"]:
+        post = site.get("postStopGTIDs", "")
+        if post:
+            dumped = _gtid_query(session, "SELECT GTID_SUBTRACT(?, GTID_SUBTRACT(?, ?))", post, post, executed)
+            if dumped:
+                _fail("PITRTargetNotCovered: site {}: the backup already contains transactions committed at or after the target: {}; use a backup that completed before the target".format(site["site"], dumped))
+    replays = False
+    unknown_bound = not os.environ.get("BLOODRAVEN_SOURCE_GTID_EXECUTED", "").strip()
+    for site in coverage["sites"]:
+        if not site["staged"]:
+            continue
+        window = site.get("inWindowGTIDs", "")
+        if window and _gtid_query(session, "SELECT GTID_SUBTRACT(?, ?)", window, applied):
+            replays = True
+        if not unknown_bound:
+            continue
+        earlier = ""
+        anchored = False
+        for staged in site["staged"]:
+            previous, gtids = staged["previousGTIDs"], staged["gtids"]
+            missing = _gtid_query(session, "SELECT GTID_SUBTRACT(?, ?)", previous, _gtid_union(executed, earlier))
+            if missing:
+                _fail("PITRTargetNotCovered: site {}: archive does not contain transactions between the loaded backup and {}".format(site["site"], missing))
+            if not anchored and gtids and _gtid_query(session, "SELECT GTID_SUBTRACT(?, ?)", gtids, applied):
+                if _gtid_query(session, "SELECT GTID_SUBTRACT(?, ?)", executed, _gtid_union(previous, gtids)):
+                    _fail("PITRTargetNotCovered: site {}: replayed history does not continue the loaded backup".format(site["site"]))
+                anchored = True
+            earlier = _gtid_union(earlier, gtids)
+    if coverage["mode"] == "latest" and not replays:
+        _fail("PITRNoArchivedReplay: every archived transaction after the backup is already in the loaded dump; rotate the active binlog on the source (FLUSH BINARY LOGS)")
+
+
+def _bounded(items, limit=8):
+    items = list(items)
+    if len(items) > limit:
+        items = items[:limit] + ["+{}".format(len(items) - limit)]
+    return ",".join(items)
+
+
+def _write_pitr_verdict(coverage, stop_datetime, last_file, count):
+    """The controller certifies a PITR Job only from this verdict, read from
+    the container's termination message. It is written last, after policy
+    checks and replay, and carries no GTID sets."""
+    parts = [
+        "BLOODRAVEN_PITR_VERDICT",
+        "v=1",
+        "mode={}".format(coverage["mode"]),
+        "stop={}".format(_escape_token(stop_datetime)),
+        "targetCovered={}".format(str(coverage["targetCovered"]).lower()),
+        "partial={}".format(str(coverage["partial"]).lower()),
+        "crossSiteUnverified={}".format(str(coverage.get("crossSiteUnverified", False)).lower()),
+        "newest={}".format(_escape_token(coverage["newestReplayedEventTime"])),
+        "files={}".format(int(count or 0)),
+        "lastFile={}".format(_escape_token(os.path.basename(last_file or "")[:255])),
+        "sites={}".format(_escape_token(_bounded(coverage.get("replaySites", [])))),
+    ]
+    _write_termination(" ".join(parts), os.environ.get("BLOODRAVEN_PITR_VERDICT_PATH"))
 
 
 # --------------------------------------------------------------------
@@ -740,6 +845,19 @@ def main():
     if _ssl_ca:
         conn["ssl-ca"] = _ssl_ca
 
+    # Every coverage refusal is known before the load: validate it while the
+    # target is still untouched.
+    stop_dt = os.environ.get("BLOODRAVEN_PITR_STOP_DATETIME")
+    pitr_stop_datetime = ""
+    coverage = None
+    local_dir = os.environ.get("BLOODRAVEN_PITR_LOCAL_DIR", "/pitr-binlogs")
+    if stop_dt:
+        try:
+            pitr_stop_datetime = _parse_pitr_target(stop_dt)
+        except ValueError as e:
+            _fail("PITRCoverageInvalid: {}".format(e))
+        coverage = _read_pitr_coverage(local_dir, pitr_stop_datetime)
+
     print("BLOODRAVEN_LOAD_START host={} input={}".format(host, input_url),
           flush=True)
 
@@ -780,23 +898,22 @@ def main():
     print("BLOODRAVEN_LOAD_COMPLETE input={}".format(input_url), flush=True)
 
     # Optional PITR replay on top of the loaded dump.
-    stop_dt = os.environ.get("BLOODRAVEN_PITR_STOP_DATETIME")
-    pitr_stop_datetime = ""
     pitr_file = ""
     pitr_count = 0
-    coverage = None
-    if stop_dt:
-        stop_dt_mysql = _parse_pitr_target(stop_dt)
-        pitr_stop_datetime = stop_dt_mysql
+    if coverage is not None:
         exclude_gtids = os.environ.get("BLOODRAVEN_PITR_EXCLUDE_GTIDS", "")
-        local_dir = os.environ.get("BLOODRAVEN_PITR_LOCAL_DIR", "/pitr-binlogs")
         filter_db = os.environ.get("BLOODRAVEN_PITR_FILTER_DATABASE", "")
-        coverage = _read_pitr_coverage(local_dir, stop_dt_mysql)
+        try:
+            _verify_loaded_dump(session, coverage, exclude_gtids)
+        except Exception as e:  # noqa: BLE001
+            _fail("PITRCoverageInvalid: cannot check replay against the loaded dump: {}".format(e))
         pitr_file, pitr_count = _run_pitr(host_only, port, user, password,
-                                          stop_dt_mysql, exclude_gtids,
+                                          pitr_stop_datetime, exclude_gtids,
                                           local_dir, filter_db, coverage)
 
     _print_restore_complete(session, pitr_stop_datetime, pitr_file, pitr_count, coverage)
+    if coverage is not None:
+        _write_pitr_verdict(coverage, pitr_stop_datetime, pitr_file, pitr_count)
 
 
 if __name__ == "__main__":

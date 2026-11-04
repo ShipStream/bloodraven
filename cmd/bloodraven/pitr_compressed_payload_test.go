@@ -51,11 +51,14 @@ func round5IdleAfter(t *testing.T, raw []byte, at time.Time) []byte {
 		}
 	}
 	events := round4Events(round1Stream(t, 0, at, true, false))
+	// A real rotation keeps the writer's server_id.
+	server := round4Events(raw)[0][5:9]
 	for i, event := range events {
 		if event[4] == 35 {
 			event = append(bytes.Clone(event[:19]), body...)
 			events[i] = append(event, make([]byte, 4)...)
 		}
+		copy(events[i][5:9], server)
 	}
 	return round4Reframe(events)
 }
@@ -176,7 +179,8 @@ func TestRound5DumpCoveredPayloadDoesNotReplay(t *testing.T) {
 	}
 	bound := sidecar.UnionBinlogGTIDs(baseline, evidence.GTIDs).String()
 	// All its GTIDs are in the dump; neither site supplies staged replay files.
-	store := round1Archive(t, map[string][][]byte{"iad": {first}, "pdx": {raw}})
+	// iad's own copy shows which server wrote the idle rotation.
+	store := round1Archive(t, map[string][][]byte{"iad": {raw, first}, "pdx": {raw}})
 	result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, round1Time(9, 30, 0), t.TempDir(), bound, false, false, "timestamp", slog.Default())
 	if err != nil || !result.TargetCovered {
 		t.Fatalf("dump-covered payload incorrectly treated as replayed: %+v %v", result, err)
@@ -192,10 +196,13 @@ func TestRound5UnverifiablePrefixDiagnostic(t *testing.T) {
 		}
 	}
 	opaque := round1PatchTimestamp(t, round4Reframe(events), 3, uint32(round1Time(9, 35, 0).Unix()))
-	store := round1Archive(t, map[string][][]byte{"iad": {opaque}, "pdx": {raw}})
+	// iad ends replay inside an unverifiable S:11 prefix; pdx's history
+	// needs S:11, which exists only in that unverifiable form.
+	later := round1Stream(t, 11, round1Time(9, 10, 0), false, false)
+	store := round1Archive(t, map[string][][]byte{"iad": {opaque}, "pdx": {later}})
 	for _, partial := range []bool{false, true} {
 		result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, true, "timestamp", slog.Default())
-		if err == nil || !strings.Contains(err.Error(), pitrUnverifiableAnchorReason) || result.Sites[0].AnchorReason != pitrUnverifiableAnchorReason || strings.Contains(err.Error(), "archive does not contain transactions") {
+		if err == nil || !strings.Contains(err.Error(), pitrUnverifiableAnchorReason) || result.Sites[1].AnchorReason != pitrUnverifiableAnchorReason || strings.Contains(err.Error(), "archive does not contain transactions") {
 			t.Fatalf("unverifiable evidence diagnosed as missing bytes: %+v %v", result, err)
 		}
 	}

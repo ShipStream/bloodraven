@@ -64,7 +64,16 @@ func TestRereview3LaggingReplicaLocalStop(t *testing.T) {
 	// pdx primary era.
 	p := round2Join(t, round2Retag(t, round1Stream(t, 12, round1Time(9, 42, 0), false, false), 1), round2Retag(t, round1Stream(t, 12, round1Time(9, 50, 0), false, false), 2))
 	store := round1Archive(t, map[string][][]byte{"iad": {a}, "pdx": {r0, r1, r2, p}})
-	round3CheckCrossSite(t, store)
+	// pdx's rotation at 09:35 ends replay before S:12 (09:20), so no override
+	// may certify or replay this window.
+	for _, partial := range []bool{false, true} {
+		for _, unverified := range []bool{false, true} {
+			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, unverified, "timestamp", slog.Default())
+			if err == nil || !strings.Contains(err.Error(), "replay would not apply it") || result.TargetCovered {
+				t.Fatalf("lagging replica stop accepted: %+v %v", result, err)
+			}
+		}
+	}
 }
 func round3CheckCrossSite(t *testing.T, store sidecar.ArchiveStore) {
 	t.Helper()
@@ -131,10 +140,22 @@ func TestRound3InterruptedBodyCannotCertifyOtherSite(t *testing.T) {
 	}
 }
 
+// A foreign writer's archive never reached the backup bound, so replaying it
+// would apply another lineage on top of the dump.
 func TestRound3ForeignWriterCannotUsePartialForMissingLowerHistory(t *testing.T) {
 	file := round1PatchTimestamp(t, round1Stream(t, 10, round1Time(9, 10, 0), false, true), 3, uint32(round1Time(9, 31, 0).Unix()))
 	store := round1Archive(t, map[string][][]byte{"iad": {file}})
-	round3CheckLowerGap(t, store, []string{"iad"})
+	for _, partial := range []bool{false, true} {
+		for _, mode := range []string{"timestamp", "latest"} {
+			if mode == "latest" && partial {
+				continue
+			}
+			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, false, mode, slog.Default())
+			if err == nil || !strings.Contains(err.Error(), "replayed history does not continue the backup bound") || result.TargetCovered {
+				t.Fatalf("foreign lineage replayed: %+v %v", result, err)
+			}
+		}
+	}
 }
 
 func TestRound3OverridesRemainIndependent(t *testing.T) {

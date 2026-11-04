@@ -5848,15 +5848,28 @@ spec:
                                 default: false
                                 description: |-
                                   AllowPartial permits restoring to the newest archived point when the target
-                                  is not covered. It never bypasses archive safety or site omission checks.
+                                  is not covered, and admits a backup with an unknown GTID bound, which the
+                                  restore then checks against the loaded dump. It never bypasses archive
+                                  safety, site omission, lower-edge or lineage checks.
                                 type: boolean
                               allowUnverifiedCrossSite:
                                 default: false
                                 description: |-
-                                  AllowUnverifiedCrossSite permits overlapping site streams without proving
-                                  cross-site completeness. Failback, reclone, or inverted replica clocks can
-                                  skip transactions. This never bypasses archive or coverage safety checks.
+                                  AllowUnverifiedCrossSite replays archives from more than one site in site
+                                  name order, one mysqlbinlog run, without proving cross-site completeness.
+                                  mysqlbinlog stops at the first event at or after the target in any site,
+                                  so later sites' earlier transactions can be skipped. This never bypasses
+                                  archive, payload, lower-edge or stop-proof checks.
                                 type: boolean
+                              archiveProfileName:
+                                description: |-
+                                  ArchiveProfileName names the spec.backup.profiles entry whose binlog
+                                  archive the restore reads. Defaults to spec.backup.pitr.profileName.
+                                  Set it when restoring another group's archive, for example into renamed
+                                  sites, so this group keeps archiving into its own prefix instead of
+                                  adding foreign manifests to the source's prefix.
+                                minLength: 1
+                                type: string
                               excludeGtids:
                                 description: |-
                                   ExcludeGtids is an optional GTID set passed verbatim to
@@ -6448,15 +6461,28 @@ spec:
                                 default: false
                                 description: |-
                                   AllowPartial permits restoring to the newest archived point when the target
-                                  is not covered. It never bypasses archive safety or site omission checks.
+                                  is not covered, and admits a backup with an unknown GTID bound, which the
+                                  restore then checks against the loaded dump. It never bypasses archive
+                                  safety, site omission, lower-edge or lineage checks.
                                 type: boolean
                               allowUnverifiedCrossSite:
                                 default: false
                                 description: |-
-                                  AllowUnverifiedCrossSite permits overlapping site streams without proving
-                                  cross-site completeness. Failback, reclone, or inverted replica clocks can
-                                  skip transactions. This never bypasses archive or coverage safety checks.
+                                  AllowUnverifiedCrossSite replays archives from more than one site in site
+                                  name order, one mysqlbinlog run, without proving cross-site completeness.
+                                  mysqlbinlog stops at the first event at or after the target in any site,
+                                  so later sites' earlier transactions can be skipped. This never bypasses
+                                  archive, payload, lower-edge or stop-proof checks.
                                 type: boolean
+                              archiveProfileName:
+                                description: |-
+                                  ArchiveProfileName names the spec.backup.profiles entry whose binlog
+                                  archive the restore reads. Defaults to spec.backup.pitr.profileName.
+                                  Set it when restoring another group's archive, for example into renamed
+                                  sites, so this group keeps archiving into its own prefix instead of
+                                  adding foreign manifests to the source's prefix.
+                                minLength: 1
+                                type: string
                               excludeGtids:
                                 description: |-
                                   ExcludeGtids is an optional GTID set passed verbatim to

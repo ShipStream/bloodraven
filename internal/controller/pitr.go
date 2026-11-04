@@ -340,16 +340,21 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	if pit.StopDatetime == "" {
 		return out, fmt.Errorf("pointInTime.stopDatetime is required")
 	}
-	if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
-		return out, fmt.Errorf(
-			"pointInTime is set but spec.backup.pitr.enabled=false; " +
-				"PITR restore requires the failover group to have continuous binlog " +
-				"archival configured on the source")
+	// archiveProfileName reads a source archive that this group does not
+	// archive into, so a restored group never writes into the source prefix.
+	profileName := pit.ArchiveProfileName
+	if profileName == "" {
+		if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
+			return out, fmt.Errorf(
+				"pointInTime is set but spec.backup.pitr.enabled=false; " +
+					"PITR restore requires the failover group to have continuous binlog " +
+					"archival configured on the source, or pointInTime.archiveProfileName")
+		}
+		profileName = fg.Spec.Backup.PITR.ProfileName
 	}
-	pitr := fg.Spec.Backup.PITR
-	profile := findProfile(fg, pitr.ProfileName)
+	profile := findProfile(fg, profileName)
 	if profile == nil {
-		return out, fmt.Errorf("pitr profile %q not found in spec.backup.profiles", pitr.ProfileName)
+		return out, fmt.Errorf("pitr profile %q not found in spec.backup.profiles", profileName)
 	}
 
 	// Shared emptyDir volume. Init container writes; main container
@@ -537,9 +542,10 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 		{Name: "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", Value: strconv.FormatBool(pit.AllowUnverifiedCrossSite)},
 	}
 	if pit.ExcludeGtids != "" {
-		mainEnv = append(mainEnv, corev1.EnvVar{
-			Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: pit.ExcludeGtids,
-		})
+		// The planner must exempt exactly what mysqlbinlog --exclude-gtids skips.
+		exclude := corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: pit.ExcludeGtids}
+		mainEnv = append(mainEnv, exclude)
+		init.Env = append(init.Env, exclude)
 	}
 
 	return restorePITRFragments{

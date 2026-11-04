@@ -83,3 +83,18 @@ is fully before the target. The regression covers that bound and a `:1-2`
 control, plus a later non-excluded inner cut in the same file. Authentication
 and decoding still run for every transaction; only the dump-covered inner-time
 veto is omitted, matching the bound passed to mysqlbinlog's GTID exclusion.
+
+Both cut captures predate `capture.sh`'s reproducible modes and are kept as
+untouched bytes. Their decoded SQL (`compressed-inner-cut.sql`,
+`compressed-excluded-cut.sql`) comes from the official 8.4.11 client in the
+utility image. `compressed-cut-catalog.tsv` records each file's label, server
+version (from its FORMAT_DESCRIPTION event), server_id, SHA-256 and
+Previous_gtids. The client version matches
+`compressed-session-client-version.txt`. Regenerate the SQL with:
+
+```sh
+for f in compressed-inner-cut compressed-excluded-cut; do
+  docker run --rm --network none -e TZ=UTC -v "$PWD:/fixtures:ro" bloodraven-pitr-mysqlbinlog:8.4 \
+    --no-defaults --verify-binlog-checksum /fixtures/$f.bin > $f.sql
+done
+```

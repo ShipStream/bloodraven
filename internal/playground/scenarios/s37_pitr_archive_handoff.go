@@ -28,8 +28,8 @@ func scenario37PITRArchiveHandoff() runner.Scenario {
 	return runner.Scenario{
 		ID:    s37ID,
 		Title: "PITR archive handoff refuses unverified cross-site replay",
-		Hypothesis: "Both primary archives survive failover and reclone/failback, but overlapping replica-era histories " +
-			"fail timestamp verification with PITRCrossSiteOrder until chronological replay is available (#206).",
+		Hypothesis: "Both primary archives survive failover and reclone/failback, but a window in which two sites hold " +
+			"transactions to replay fails timestamp verification with PITRCrossSiteOrder until cross-site replay is available (#206).",
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#37-pitr-archive-handoff-across-failover",
 		Timeout:           40 * time.Minute,
@@ -427,10 +427,12 @@ func s37VerifyTimestampReplay() runner.Step {
 			if err != nil {
 				return err
 			}
-			if !strings.Contains(v.Status.Message, "PITRCrossSiteOrder") {
+			// Two sites replay, and the clone base names B without B's bytes:
+			// either the single-site rule or the lower edge refuses first.
+			if !strings.Contains(v.Status.Message, "PITRCrossSiteOrder") && !strings.Contains(v.Status.Message, "PITRTargetNotCovered") {
 				return fmt.Errorf("expected conservative reclone refusal, got %s", verificationStatusSummary(v))
 			}
-			env.Capture.Note("reclone/failback refused safely: clone base contains B, but the retained target-site files do not contain B's replay bytes; chronological replay remains #206")
+			env.Capture.Note("reclone/failback refused safely: clone base contains B, but the retained target-site files do not contain B's replay bytes; cross-site windows remain #206")
 			return nil
 		},
 	}
@@ -577,9 +579,9 @@ func s37VerifyInitialHandoff() runner.Step {
 			return err
 		}
 		if !strings.Contains(v.Status.Message, "PITRCrossSiteOrder") {
-			return fmt.Errorf("initial failover did not refuse unverified cross-site order: %s", verificationStatusSummary(v))
+			return fmt.Errorf("initial failover did not refuse a two-site window: %s", verificationStatusSummary(v))
 		}
-		env.Capture.Note("initial failover verification safely refused overlapping replica-era streams")
+		env.Capture.Note("initial failover verification safely refused a window in which two sites replay")
 		return nil
 	}}
 }

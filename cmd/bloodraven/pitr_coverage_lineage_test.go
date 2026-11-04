@@ -76,30 +76,24 @@ func TestRound2StraddlingLineage(t *testing.T) {
 	}
 }
 
-func TestRound2BarrierMustCoverWriter(t *testing.T) {
-	for _, nonwriter := range []string{"iad", "zzz"} {
-		for _, partial := range []bool{false, true} {
-			t.Run(nonwriter+map[bool]string{false: " strict", true: " partial"}[partial], func(t *testing.T) {
-				writer := round2Join(t, round2Retag(t, round1Stream(t, 10, round1Time(9, 0, 0), false, false), 1), round2Retag(t, round1Stream(t, 10, round1Time(9, 10, 0), false, false), 2))
-				streams := map[string][][]byte{nonwriter: {round1Stream(t, 10, round1Time(10, 0, 0), true, false)}, "pdx": {writer}}
-				store := round1Archive(t, streams)
-				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{nonwriter, "pdx"}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, false, "timestamp", slog.Default())
-				if err == nil || !strings.Contains(err.Error(), "PITRTargetNotCovered") || result.TargetCovered {
-					t.Fatalf("idle stale copy certified writer's missing tail: %+v %v", result, err)
-				}
-			})
-		}
-	}
-}
-
-func TestRound2InterruptedBarrierOrderRefused(t *testing.T) {
+// A stop that falls inside a transaction committed before the target drops
+// that transaction's body, so the stop cannot certify coverage.
+func TestPITRInterruptedEarlyCommitRefused(t *testing.T) {
 	old := round1Stream(t, 10, round1Time(9, 0, 0), false, false)
 	interrupted := round1PatchTimestamp(t, old, 2, uint32(round1Time(9, 30, 0).Unix()))
 	interrupted = round1PatchTimestamp(t, interrupted, 3, uint32(round1Time(9, 31, 0).Unix()))
-	store := round1Archive(t, map[string][][]byte{"east": {interrupted}, "iad": {old}})
-	_, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"east", "iad"}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", false, false, "timestamp", slog.Default())
-	if err == nil || !strings.Contains(err.Error(), "PITRCrossSiteOrder") {
-		t.Fatalf("announced transaction used to prune committed copy: %v", err)
+	for _, streams := range []map[string][][]byte{{"east": {interrupted}}, {"east": {interrupted}, "iad": {old}}} {
+		var sites []string
+		for site := range streams {
+			sites = append(sites, site)
+		}
+		store := round1Archive(t, streams)
+		for _, partial := range []bool{false, true} {
+			_, err := downloadPITRArchive(context.Background(), store, "binlogs", sites, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, true, "timestamp", slog.Default())
+			if err == nil || !strings.Contains(err.Error(), "replay would not apply it") {
+				t.Fatalf("interrupted pre-target commit certified: %v", err)
+			}
+		}
 	}
 }
 
@@ -123,7 +117,7 @@ func TestRound2ReclonedSparseHistoryRefused(t *testing.T) {
 	}
 	for _, partial := range []bool{false, true} {
 		_, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, round1Time(11, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, false, "timestamp", slog.Default())
-		if err == nil || !strings.Contains(err.Error(), "PITRCrossSiteOrder") {
+		if err == nil || !strings.Contains(err.Error(), "archive does not contain transactions between the backup bound and") {
 			t.Fatalf("clone checkpoint pruned absent transaction bytes: %v", err)
 		}
 	}
