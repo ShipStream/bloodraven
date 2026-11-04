@@ -149,7 +149,7 @@ func (r *resetter) normalizeFreshBaseline(ctx context.Context, sites []v1alpha1.
 func (r *resetter) normalizationPhases() []resetPhase {
 	return []resetPhase{
 		{"scale operator down", r.scaleOperatorDown},
-		{"clear MFG status", r.clearMFGStatus},
+		{"clear MFG failover status", r.clearMFGFailoverStatus},
 		{"start operator", r.startOperator},
 		{"wait healthy baseline", r.waitBaseline},
 	}
@@ -356,7 +356,32 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec
 	return err
 }
 
+// mfgStatusFieldsToClear lists the MFG status fields a reset removes. The
+// wipe pass clears everything, encryptionAtRest included, because the data
+// and keyrings it describes are gone. The normalization pass runs against a
+// live, converged cluster: its encryptionAtRest records the escrow Secret
+// each site's keyring is projected from, and dropping it would make the
+// restarted operator treat encrypted sites as a fresh bootstrap.
+func mfgStatusFieldsToClear(keepEncryption bool) []string {
+	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "updatePhase", "recovery", "dragonfly"}
+	if !keepEncryption {
+		fields = append(fields, "encryptionAtRest")
+	}
+	return fields
+}
+
+// clearMFGStatus is the wipe pass's status clear.
 func (r *resetter) clearMFGStatus(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+	return r.clearMFGStatusFields(ctx, mfgStatusFieldsToClear(false))
+}
+
+// clearMFGFailoverStatus is the normalization pass's status clear. It keeps
+// encryptionAtRest; see mfgStatusFieldsToClear.
+func (r *resetter) clearMFGFailoverStatus(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+	return r.clearMFGStatusFields(ctx, mfgStatusFieldsToClear(true))
+}
+
+func (r *resetter) clearMFGStatusFields(ctx context.Context, names []string) error {
 	mfg, err := r.k.GetMFGNamed(ctx, r.namespace, r.fg)
 	if apierrors.IsNotFound(err) {
 		r.warn("MFG %s not found; skipping status clear", r.fg)
@@ -377,7 +402,7 @@ func (r *resetter) clearMFGStatus(ctx context.Context, _ []v1alpha1.SiteSpec) er
 		return err
 	}
 	var ops []pgkube.JSONPatchOp
-	for _, field := range []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "updatePhase", "recovery", "dragonfly", "encryptionAtRest"} {
+	for _, field := range names {
 		if _, ok := fields[field]; ok {
 			ops = append(ops, pgkube.JSONPatchOp{Op: "remove", Path: "/status/" + field})
 		}
