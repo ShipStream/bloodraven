@@ -49,9 +49,21 @@ var dsnParamKey = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
 // failingDSNParam returns the name of the first query parameter the driver
 // rejects on its own, or "" when none does. Like the driver, it takes the
 // parameters from after the first "?" that follows the last "/".
+//
+// A password may itself contain "/" and "?", and then the "parameters" are
+// a fragment of the password. So a name is reported only when the text
+// before that "/" ends where a well-formed DSN's address ends: at ")" (a
+// net(addr) address), at "@" (credentials with the default address), or at
+// the start of the DSN, with no "@" after it.
 func failingDSNParam(dsn string) string {
 	slash := strings.LastIndexByte(dsn, '/')
 	if slash < 0 {
+		return ""
+	}
+	if slash > 0 && dsn[slash-1] != ')' && dsn[slash-1] != '@' {
+		return ""
+	}
+	if strings.LastIndexByte(dsn, '@') > slash {
 		return ""
 	}
 	_, params, ok := strings.Cut(dsn[slash+1:], "?")

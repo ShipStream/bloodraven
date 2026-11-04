@@ -78,6 +78,23 @@ func TestParseDSNNamesTheFailingParameter(t *testing.T) {
 	}
 }
 
+// A password containing "/" and "?" puts part of itself where the driver
+// looks for parameters; that fragment must not be reported as a name.
+func TestParseDSNDoesNotNameAPasswordFragment(t *testing.T) {
+	for _, dsn := range []string{
+		"op:Ab/c?K3yPart=%G1@tcp(127.0.0.1:3306)",
+		"op:Ab/c?K3yPart=%G1",
+	} {
+		_, err := ParseDSN(dsn)
+		if err == nil {
+			t.Fatalf("ParseDSN(%q) succeeded; want an error", dsn)
+		}
+		if strings.Contains(err.Error(), "K3yPart") || strings.Contains(err.Error(), "parameter") {
+			t.Fatalf("error names a password fragment: %q", err)
+		}
+	}
+}
+
 // Without a failing parameter the error stays generic.
 func TestParseDSNDoesNotBlameAValidParameter(t *testing.T) {
 	_, err := ParseDSN("op:s3cr3t-pw/mysql?parseTime=true")

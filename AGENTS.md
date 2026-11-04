@@ -9,7 +9,7 @@ Run commands from the repository root:
 - `make build` builds the operator binary at `bin/bloodraven`.
 - `go build ./cmd/sidecar` builds the sidecar binary.
 - `make build-kubectl-plugin` builds `bin/kubectl-bloodraven` (the day-2 `kubectl` plugin). Override `KUBECTL_PLUGIN_VERSION=<tag>` to stamp a release; `make install-kubectl-plugin` drops the binary onto `$PATH`.
-- `make test` runs the fast PR gate: `test-unit` (`go test -race ./internal/... ./cmd/... ./charts/...`), `test-component` and `test-license-roundtrip`. The chart render tests in `charts/bloodraven` need `helm` on `PATH`; they skip without it locally and fail under `CI`.
+- `make test` runs the fast PR gate: `test-unit` (`go test -race ./internal/... ./cmd/... ./charts/...`), `test-component` and `test-license-roundtrip`. The chart render tests in `charts/bloodraven` need `helm` on `PATH`; they skip without it locally and fail under `CI`. The `cmd/bloodraven` PITR coverage contract test needs `python3` on `PATH` and fails without it, locally too.
 - `make test-e2e` runs the release profile of real-cluster E2E tests against the current playground cluster (requires kind/k3d/minikube context prepared with `./playground/setup.sh`; CI creates kind and runs setup first).
 - `make test-e2e-smoke` runs the smoke profile (~3 scenarios, fast feedback).
 - `make vet` runs `go vet ./...`.
