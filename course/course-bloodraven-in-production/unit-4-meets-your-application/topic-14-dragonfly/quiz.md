@@ -47,7 +47,7 @@ A Dragonfly pod is wedged and answers nothing. Your MySQL primary then dies. The
 
 **Explanation:**
 
-The opposite is true: MySQL failover is never delayed by cache. The Dragonfly attempt runs after MySQL has already been promoted, under a hard-coded 10 s budget, and by explicit design it never returns an error to its caller, never blocks longer than that budget, and never leaves Dragonfly in a state that affects MySQL durability. The tempting reasoning — "co-managed subsystems must be waited on" — is exactly what the 10 s bound and the best-effort contract exist to refuse. (objective 10)
+The opposite is true: MySQL failover is never delayed by cache. MySQL only queues the Dragonfly promotion after it has already been promoted; the Dragonfly manager runs it on its own goroutine, every step under its own hard-coded bound, and by explicit design it never returns an error to its caller and never leaves Dragonfly in a state that affects MySQL durability. The tempting reasoning — "co-managed subsystems must be waited on" — is exactly what the queue, the bounded steps and the best-effort contract exist to refuse. (objective 10)
 
 ## Question 4
 
