@@ -45,6 +45,11 @@ type UpdateController struct {
 	// during a follower wait before the ordered update aborts.
 	primaryLossWindow time.Duration
 
+	// rolledSiteTimeout bounds each wait for a site ExecuteTargets rolled:
+	// its MySQL to replicate and its new pod to be Ready. Exposed for
+	// tests; production uses 5 minutes.
+	rolledSiteTimeout time.Duration
+
 	// handoff bounds the maintenance handoff of the active site. Zero
 	// values use the ExecuteHandoff defaults; tests shorten them.
 	handoff HandoffOptions
@@ -81,7 +86,65 @@ type UpdateTarget struct {
 	DivergenceBlocked     bool
 	DivergentTransactions int64
 	DivergentGtid         string
+	// PodReady reports whether the site's pod for its current pod
+	// template is Ready. The MySQL probes cannot tell: they reach MySQL
+	// through the -internal Service, which publishes not-ready addresses,
+	// so a pod whose sidecar crash-loops still answers them. Nil turns
+	// the pod-readiness gate off for this site; production always sets
+	// it together with ApplyUpdate.
+	PodReady func(context.Context) (PodReadiness, error)
 }
+
+// podReadinessProbeTimeout bounds one pod-readiness probe.
+const podReadinessProbeTimeout = 5 * time.Second
+
+// PodNotReadyError reports that the ordered update stopped on a site whose
+// pod is not Ready. It rolls no further site and hands nothing off; the
+// remaining drift stays queued and the update retries later.
+type PodNotReadyError struct {
+	Site   string
+	Pod    string
+	Reason string
+	// Rolled is true when this update rolled the site and its new pod did
+	// not become Ready afterwards. The site's Deployment carries the new
+	// pod template either way, so the site has no spec drift left. False
+	// when the site already ran the new template and the update refused
+	// to take another site out of service.
+	Rolled bool
+	// Waited is how long the update waited for the pod; zero when it
+	// checked once.
+	Waited time.Duration
+	// Next names the step the update did not take.
+	Next string
+	// Err is the underlying failure, if any (a rollout that did not
+	// complete, a probe error).
+	Err error
+}
+
+func (e *PodNotReadyError) Error() string {
+	pod := "pod"
+	if e.Pod != "" {
+		pod = "pod " + e.Pod
+	}
+	var b strings.Builder
+	switch {
+	case e.Rolled && e.Waited > 0:
+		fmt.Fprintf(&b, "site %s was updated but its %s did not become Ready within %s", e.Site, pod, e.Waited)
+	case e.Rolled:
+		fmt.Fprintf(&b, "site %s was updated but its %s is not Ready", e.Site, pod)
+	default:
+		fmt.Fprintf(&b, "site %s already runs the new pod template but its %s is not Ready", e.Site, pod)
+	}
+	if e.Reason != "" {
+		fmt.Fprintf(&b, " (%s)", e.Reason)
+	}
+	if e.Next != "" {
+		fmt.Fprintf(&b, "; not %s", e.Next)
+	}
+	return b.String()
+}
+
+func (e *PodNotReadyError) Unwrap() error { return e.Err }
 
 // NewUpdateController creates a new UpdateController.
 func NewUpdateController(failover *FailoverController, logger *slog.Logger) *UpdateController {
@@ -91,6 +154,7 @@ func NewUpdateController(failover *FailoverController, logger *slog.Logger) *Upd
 		tickInterval:      5 * time.Second,
 		failFastDuration:  30 * time.Second,
 		primaryLossWindow: defaultActivePrimaryLossWindow,
+		rolledSiteTimeout: 5 * time.Minute,
 	}
 }
 
@@ -112,6 +176,11 @@ func (u *UpdateController) Phase() UpdatePhase {
 // activeSiteName and standbySiteName identify which site is currently active/standby.
 // standbyChecker and activeChecker are the MySQL connections for each site.
 // applyUpdate is a callback that applies the spec change to a specific site's deployment.
+//
+// Execute is the original two-site path. The operator runs ExecuteTargets;
+// only tests call Execute. It has none of ExecuteTargets' later gates (the
+// pod-readiness gate, direct-source checks, the old-active GTID check), so
+// new callers must use ExecuteTargets.
 func (u *UpdateController) Execute(ctx context.Context,
 	activeSiteName, standbySiteName string,
 	standbyChecker, activeChecker mysql.Checker,
@@ -195,6 +264,14 @@ func (u *UpdateController) Execute(ctx context.Context,
 // ExecuteTargets updates every drifted follower sequentially, then updates the
 // active site only after handing authority to a healthy promotable standby.
 // The returned names completed successfully and may be removed from drift.
+//
+// A rolled site counts as done only once its MySQL replicates directly from
+// the primary and its new pod is Ready. Before it takes any site out of
+// service (rolling a follower, handing off the active site) the update also
+// requires every site that already runs the new pod template to have a
+// Ready pod, so a template that breaks pods stops at the first site it
+// broke, in this run or an earlier one. Such a stop returns an error that
+// wraps a *PodNotReadyError.
 func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarget, followers []UpdateTarget,
 	applyUpdate func(context.Context, string) error, onPromoted func(string, string)) (processed []string, err error) {
 	u.mu.Lock()
@@ -211,6 +288,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		u.mu.Unlock()
 	}()
 
+	onTemplate := sitesOnTemplate(active, followers)
 	for _, follower := range followers {
 		if !follower.Drifted {
 			continue
@@ -219,21 +297,32 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 			u.logger.Warn("ordered update: retaining unsafe follower drift", "site", follower.Name, "error", err)
 			continue
 		}
+		if err := u.requirePodsReady(ctx, onTemplate, "updating follower "+follower.Name); err != nil {
+			return processed, err
+		}
 		u.setPhase(UpdatePhaseUpdateReplica)
 		u.logger.Info("ordered update: updating follower", "site", follower.Name)
 		if err := applyUpdate(ctx, follower.Name); err != nil {
-			return processed, fmt.Errorf("update follower %s: %w", follower.Name, err)
+			return processed, fmt.Errorf("update follower %s: %w", follower.Name, u.rolloutError(ctx, follower, err))
 		}
 		u.setPhase(UpdatePhaseWaitReplica)
-		if err := u.waitForReplicaReadyWatching(ctx, follower.Checker, follower.ExpectedSource, active.Checker, 5*time.Minute); err != nil {
+		if err := u.waitForRolledSite(ctx, follower, follower.ExpectedSource, active.Checker, u.rolledSiteTimeout); err != nil {
 			return processed, fmt.Errorf("wait for follower %s: %w", follower.Name, err)
 		}
 		processed = append(processed, follower.Name)
+		onTemplate = append(onTemplate, follower)
 	}
 
 	if !active.Drifted {
 		u.setPhase(UpdatePhaseComplete)
 		return processed, nil
+	}
+
+	// The handoff is where the active site leaves service, and the
+	// standby it picks must itself be Ready: it runs the new template,
+	// either from the start or because it was just rolled.
+	if err := u.requirePodsReady(ctx, onTemplate, "handing off the active site "+active.Name); err != nil {
+		return processed, err
 	}
 
 	processedFollowers := make(map[string]struct{}, len(processed))
@@ -309,7 +398,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	}
 	u.setPhase(UpdatePhaseUpdateOldPrimary)
 	if err := applyUpdate(ctx, active.Name); err != nil {
-		return processed, fmt.Errorf("update old active %s: %w", active.Name, err)
+		return processed, fmt.Errorf("update old active %s: %w", active.Name, u.rolloutError(ctx, active, err))
 	}
 	if err := u.requireOldActiveContained(ctx, active, *handoff); err != nil {
 		return processed, err
@@ -321,7 +410,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	// The new primary is the source now. If it dies while the old active
 	// catches up, end the update so emergency failover is not held off for
 	// the full wait.
-	if err := u.waitForReplicaReadyWatching(ctx, active.Checker, handoff.Host, handoff.Checker, 5*time.Minute); err != nil {
+	if err := u.waitForRolledSite(ctx, active, handoff.Host, handoff.Checker, u.rolledSiteTimeout); err != nil {
 		return processed, fmt.Errorf("wait for old active %s to replicate from %s: %w", active.Name, handoff.Name, err)
 	}
 	processed = append(processed, active.Name)
@@ -437,6 +526,21 @@ func (u *UpdateController) waitForReplicaReadyExpected(ctx context.Context, chec
 // rotation-blocked standby, not even refused) until the 5 minute timeout.
 // A nil primary disables the probe.
 func (u *UpdateController) waitForReplicaReadyWatching(ctx context.Context, checker mysql.Checker, expected string, primary mysql.Checker, timeout time.Duration) error {
+	return u.waitForRolledSite(ctx, UpdateTarget{Checker: checker}, expected, primary, timeout)
+}
+
+// waitForRolledSite is waitForReplicaReadyWatching for a site the update
+// just rolled, plus its pod when target.PodReady is set: the site is ready
+// once its MySQL is a read-only direct replica of expected and its new pod
+// has been Ready on two consecutive probes, one tick apart, with no
+// container restart in between. One Ready sample is not enough: a
+// crash-looping container passes its readiness probe between crashes.
+//
+// The primary probe runs for the whole wait, so a primary that dies while
+// a rolled pod is still starting ends the update as promptly as one that
+// dies while MySQL catches up. A pod that is not Ready when the wait times
+// out returns a *PodNotReadyError, whatever MySQL reported.
+func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateTarget, expected string, primary mysql.Checker, timeout time.Duration) error {
 	// N consecutive failed probes, one per tick, span (N-1) ticks between
 	// the first and last: the first failure opens the window rather than
 	// consuming part of it.
@@ -447,27 +551,17 @@ func (u *UpdateController) waitForReplicaReadyWatching(ctx context.Context, chec
 		}
 	}
 	lost := 0
+	var pod podReadyStreak
 	deadline := time.Now().Add(timeout)
 	for {
-		readOnly, roleErr := checker.CheckReadOnly(ctx)
-		if roleErr == nil && !readOnly {
-			// MySQL does not persist SET GLOBAL read_only across a pod
-			// replacement. Re-fence the updated follower before restarting
-			// its retained replication configuration.
-			if err := checker.SetSuperReadOnly(ctx, true); err == nil {
-				if err := checker.SetReadOnly(ctx, true); err == nil {
-					readOnly = true
-				}
-			}
+		replicating := directReplicaReady(ctx, target.Checker, expected)
+		podReady := true
+		if target.PodReady != nil {
+			pod.observe(u.probePod(ctx, target))
+			podReady = pod.stable()
 		}
-		rs, err := checker.ShowReplicaStatus(ctx)
-		if roleErr == nil && readOnly && err == nil && rs != nil {
-			if canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) && (!rs.IORunning || !rs.SQLRunning) {
-				_ = checker.StartReplica(ctx)
-			}
-			if rs.IORunning && rs.SQLRunning && canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) {
-				return nil
-			}
+		if replicating && podReady {
+			return nil
 		}
 		if primary != nil {
 			perr := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
@@ -489,6 +583,10 @@ func (u *UpdateController) waitForReplicaReadyWatching(ctx context.Context, chec
 			}
 		}
 		if time.Now().After(deadline) {
+			if !podReady {
+				return &PodNotReadyError{Site: target.Name, Pod: pod.last.Pod, Reason: pod.reason(),
+					Rolled: true, Waited: timeout, Err: pod.err}
+			}
 			return fmt.Errorf("timeout waiting for direct replication")
 		}
 		select {
@@ -497,6 +595,145 @@ func (u *UpdateController) waitForReplicaReadyWatching(ctx context.Context, chec
 		case <-time.After(u.tickInterval):
 		}
 	}
+}
+
+// directReplicaReady reports whether checker is a read-only replica whose
+// threads run against expected. It re-fences a follower whose pod
+// replacement left it writable and restarts a stopped channel that already
+// points at expected.
+func directReplicaReady(ctx context.Context, checker mysql.Checker, expected string) bool {
+	readOnly, roleErr := checker.CheckReadOnly(ctx)
+	if roleErr == nil && !readOnly {
+		// MySQL does not persist SET GLOBAL read_only across a pod
+		// replacement. Re-fence the updated follower before restarting
+		// its retained replication configuration.
+		if err := checker.SetSuperReadOnly(ctx, true); err == nil {
+			if err := checker.SetReadOnly(ctx, true); err == nil {
+				readOnly = true
+			}
+		}
+	}
+	rs, err := checker.ShowReplicaStatus(ctx)
+	if roleErr != nil || !readOnly || err != nil || rs == nil {
+		return false
+	}
+	if canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) && (!rs.IORunning || !rs.SQLRunning) {
+		_ = checker.StartReplica(ctx)
+	}
+	return rs.IORunning && rs.SQLRunning && canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected)
+}
+
+// podReadyStreak counts consecutive Ready observations of one container
+// run: the same pod with the same restart count.
+type podReadyStreak struct {
+	last  PodReadiness
+	err   error
+	ready int
+	// restarted records that the pod's restart count moved between the
+	// last two observations.
+	restarted bool
+}
+
+func (s *podReadyStreak) observe(pr PodReadiness, err error) {
+	if err != nil {
+		s.last, s.err, s.ready, s.restarted = PodReadiness{}, err, 0, false
+		return
+	}
+	s.restarted = s.last.Pod != "" && pr.Pod == s.last.Pod && pr.Restarts != s.last.Restarts
+	switch {
+	case !pr.Ready:
+		s.ready = 0
+	case s.ready > 0 && pr.Pod == s.last.Pod && !s.restarted:
+		s.ready++
+	default:
+		s.ready = 1
+	}
+	s.last, s.err = pr, nil
+}
+
+func (s *podReadyStreak) stable() bool { return s.ready >= 2 }
+
+func (s *podReadyStreak) reason() string {
+	switch {
+	case s.err != nil:
+		return "pod readiness unknown: " + s.err.Error()
+	case s.last.Ready && s.restarted:
+		return "a container restarted between readiness probes"
+	case s.last.Ready:
+		return "Ready for less than one probe interval"
+	}
+	return s.last.Reason
+}
+
+func (u *UpdateController) probePod(ctx context.Context, target UpdateTarget) (PodReadiness, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, podReadinessProbeTimeout)
+	defer cancel()
+	return target.PodReady(probeCtx)
+}
+
+// sitesOnTemplate returns the sites that already run the new pod template
+// when an update starts: those without spec drift.
+func sitesOnTemplate(active UpdateTarget, followers []UpdateTarget) []UpdateTarget {
+	var sites []UpdateTarget
+	if !active.Drifted {
+		sites = append(sites, active)
+	}
+	for _, f := range followers {
+		if !f.Drifted {
+			sites = append(sites, f)
+		}
+	}
+	return sites
+}
+
+// requirePodsReady refuses to take another site out of service while a site
+// that already runs the new pod template has a pod that is not Ready. A
+// template that breaks pods (a sidecar that cannot start, say) leaves MySQL
+// answering through the -internal Service, so the MySQL checks alone would
+// walk it across the whole group: an earlier attempt's rolled site has no
+// drift left and would even be chosen for the handoff. next names the
+// refused step for the stall message. A probe error refuses too: the
+// update does not roll on an unknown.
+func (u *UpdateController) requirePodsReady(ctx context.Context, sites []UpdateTarget, next string) error {
+	for _, s := range sites {
+		if s.PodReady == nil {
+			continue
+		}
+		pr, err := u.probePod(ctx, s)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &PodNotReadyError{Site: s.Name, Reason: "pod readiness unknown: " + err.Error(), Next: next, Err: err}
+		}
+		if !pr.Ready {
+			return &PodNotReadyError{Site: s.Name, Pod: pr.Pod, Reason: pr.Reason, Next: next}
+		}
+	}
+	return nil
+}
+
+// requireUpdatedPodsReady is the start-of-update form of requirePodsReady:
+// the topology manager runs it before it claims the update window, so a
+// stalled update that has nothing it may roll does not go through lease
+// admission on every retry.
+func (u *UpdateController) requireUpdatedPodsReady(ctx context.Context, active UpdateTarget, followers []UpdateTarget) error {
+	return u.requirePodsReady(ctx, sitesOnTemplate(active, followers), "rolling another site")
+}
+
+// rolloutError turns a rollout that did not complete into a pod-readiness
+// stall when the site's pod is what is missing. Other apply failures, and
+// any failure once ctx is done, are returned unchanged.
+func (u *UpdateController) rolloutError(ctx context.Context, target UpdateTarget, err error) error {
+	var incomplete *RolloutIncompleteError
+	if target.PodReady == nil || ctx.Err() != nil || !errors.As(err, &incomplete) {
+		return err
+	}
+	pr, perr := u.probePod(ctx, target)
+	if perr != nil || pr.Ready {
+		return err
+	}
+	return &PodNotReadyError{Site: target.Name, Pod: pr.Pod, Reason: pr.Reason, Rolled: true, Err: err}
 }
 
 func (u *UpdateController) setPhase(p UpdatePhase) {

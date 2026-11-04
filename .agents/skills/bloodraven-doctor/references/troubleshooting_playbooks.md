@@ -586,6 +586,7 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
    - `no longer contains the fenced source set` (after `STOP REPLICA` or `RESET REPLICA ALL`): the standby's server lost history after the catch-up proof, for example a replaced pod. Treat it as a suspect replica and compare its data before anything else.
    - `transactions the source lacks` (on WARN `maintenance handoff refused; candidate has transactions the source lacks`, or in an `aborted` error after `STOP REPLICA` / `RESET REPLICA ALL`): the standby is divergent. Never promote it to get the update through: use playbook 33.
    - `is divergent (N transactions the primary lacks); reclone or reconcile before the active site can be updated` (on `ordered update failed`, or WARN `ordered update: active-site update stalled; standby is divergent`): the operator has recorded the divergence and does not pick the standby. Playbook 33.
+   - `is not Ready` or `did not become Ready` (on `ordered update failed`, or WARN `ordered update: stalled; site pod not Ready`): a pod, not MySQL, holds the update. Playbook 34.
    - `candidate SQL thread error`: the applier stopped.
    - `unparseable GTID set`, or a read error.
 2. Compare the sets. The standby's set should contain the active site's:
@@ -803,7 +804,7 @@ A PVC volume left out of the pod spec does not fail store construction (only an 
 - `ArchiverError`: follow the error text (storage reachability, credentials, playbook 26 for authentication or BRV1 errors).
 - `AwaitingRollout`: let the ordered update finish; check `status.updatePhase`. If it stays, the update is blocked (operator log `ordered update: deferring active-site update`, for example no healthy promotable standby). After 30 minutes the condition turns `False`/`ArchiverDisabled` with `ordered update still pending after 30m`; unblock the update (restore the standby) rather than restarting pods by hand.
 - `ArchiverDisabled`: if it persists after the rollout, check that `spec.backup.pitr.profileName` names an existing profile (look for a `BackupPITRInvalid` Event). With an empty or unknown profile the operator renders no PITR configuration into the sidecar, so it reports archiving disabled indefinitely.
-- `SidecarUnreachable` on an older sidecar image: upgrade the sidecar image; the operator rolls it through the ordered update. The ordered update waits only on MySQL replication, so watch `PITRArchiveReady` site by site instead of assuming a finished rollout means archiving works.
+- `SidecarUnreachable` on an older sidecar image: upgrade the sidecar image; the operator rolls it through the ordered update. The ordered update stops on a rolled pod that is not Ready (playbook 34), but a current sidecar stays Ready through archive failures, so watch `PITRArchiveReady` site by site instead of assuming a finished rollout means archiving works.
 - Recovery to `True` needs 2 consecutive clean poll rounds (about a minute) and emits a Normal `PITRArchiveReady` Event. Binlogs sealed during the outage are uploaded once the archiver runs, as long as MySQL still has them; check `backlogFiles` and the coverage fields afterwards.
 
 ---
@@ -865,3 +866,36 @@ kubectl get mysqlfailovergroup <group> -n <ns> -o json | jq '.status.conditions 
 kubectl patch mysqlfailovergroup <group> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/conditions/<index>"}]'
 ```
 The operator does not set it again for the same promotion.
+
+---
+
+## 34. Ordered update stalled on a pod that is not Ready (`OrderedUpdateStalled`)
+
+The ordered update reaches MySQL through each site's `-internal` Service, which publishes not-ready addresses, so MySQL can answer and replicate while the pod is out of every application Service. A rolled site therefore counts as updated only when its new pod is also `Ready` (every container, on two consecutive checks with no restart in between). Before it rolls another site or hands off the active site, the operator also requires every site that already runs the new pod template to be `Ready`, including one an earlier attempt rolled. A template that breaks pods stops at the first site it broke.
+
+### Symptoms
+- `Updating=False` with reason `OrderedUpdateStalled`; the message names the site, the pod and why it is not Ready, for example `site iad was updated but its pod mysql-<group>-iad-<hash> did not become Ready within 5m0s (sidecar not ready: CrashLoopBackOff, last exit code 1 (Error))` or `site iad already runs the new pod template but its pod ... is not Ready (...); not handing off the active site pdx`.
+- A Warning Event `OrderedUpdateStalled` with the same text, once per stall; operator log WARN `ordered update: stalled; site pod not Ready` (fields `site`, `pod`, `reason`, `error`) on every retry, about every 30s, sometimes after an `ordered update failed` carrying the same text.
+- Argo CD shows the group **Degraded**. `Ready` may still be `True`: the active site keeps serving.
+- The stalled site's pod is `NotReady` or crash-looping and out of its Services. With a broken sidecar it also has no self-fencing.
+
+### Diagnostic steps
+1. Read the cause from the condition message (`scripts/triage.sh` prints it), then look at the pod it names:
+   ```bash
+   kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="Updating")].message}{"\n"}'
+   kubectl describe pod -n <ns> <pod>
+   kubectl logs -n <ns> <pod> -c sidecar --previous   # or -c mysql, or the init container the reason names
+   ```
+2. `pod readiness unknown: ...` means the operator could not read the Deployment or its pods; check the API server and the operator's RBAC for pods and deployments. It does not roll on an unknown.
+3. `pod not scheduled: ...` is a scheduling problem (zone selector, capacity, taints), not the template's containers.
+4. Compare the rendered template with the previous one (`kubectl rollout history deploy/mysql-<group>-<site> -n <ns> --revision=<n>`) to find what the spec change altered: image, Secret references, probe paths, resources.
+
+### Safe remediation
+1. Fix the cause the pod reports: a missing or unreadable Secret, a wrong image tag, an invalid setting in the spec. A crash-looping container picks a fixed Secret up on its next restart; deleting the pod skips the back-off. The operator retries every 30s and resumes on its own once the pod is Ready; the condition then returns to `NotUpdating` (INFO `ordered update: stalled site pod is Ready` when nothing was left to roll).
+2. If the template itself is wrong, fix or revert the spec. The broken site then drifts again and the update rolls it like any other site.
+3. Leave the active site alone: it was not rolled or fenced, and it keeps serving.
+
+Do not:
+- Restart the operator to push the update through: the new process repeats the same check on its first attempt.
+- Change the update strategy to `Recreate` to get past it: that rolls every site at once onto the template that broke one.
+- Promote the stalled site by hand: its pod is out of the application Services and, with a broken sidecar, cannot self-fence.

@@ -57,6 +57,12 @@ if bootstrapping ~= nil and bootstrapping.status == "True" then
   return hs
 end
 
+if updating ~= nil and updating.status == "False" and updating.reason == "OrderedUpdateStalled" then
+  hs.status = "Degraded"
+  hs.message = "OrderedUpdateStalled: " .. (updating.message or "Ordered update stalled")
+  return hs
+end
+
 if updating ~= nil and updating.status == "True" then
   hs.status = "Progressing"
   hs.message = updating.message or "Ordered update in progress"
