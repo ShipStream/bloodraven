@@ -77,7 +77,7 @@ type MysqlDatabaseList struct {
 // and produces a better error message than an equivalent CEL rule. The CEL
 // rules on MysqlDatabaseSpec cover only what an enum cannot — composition
 // constraints between entries.
-// +kubebuilder:validation:Enum="ALL PRIVILEGES";SELECT;INSERT;UPDATE;DELETE;CREATE;"CREATE TEMPORARY TABLES";"CREATE VIEW";DROP;ALTER;INDEX;REFERENCES;"LOCK TABLES";"SHOW VIEW";TRIGGER;EVENT;EXECUTE
+// +kubebuilder:validation:Enum="ALL PRIVILEGES";SELECT;INSERT;UPDATE;DELETE;CREATE;"CREATE TEMPORARY TABLES";"CREATE VIEW";DROP;ALTER;INDEX;REFERENCES;"LOCK TABLES";"SHOW VIEW";TRIGGER;EVENT;EXECUTE;"CREATE ROUTINE";"ALTER ROUTINE"
 // +kubebuilder:validation:MaxLength=32
 type MysqlPrivilege string
 
@@ -118,6 +118,11 @@ const (
 	PrivilegeEvent MysqlPrivilege = "EVENT"
 	// PrivilegeExecute is EXECUTE.
 	PrivilegeExecute MysqlPrivilege = "EXECUTE"
+	// PrivilegeCreateRoutine is CREATE ROUTINE.
+	PrivilegeCreateRoutine MysqlPrivilege = "CREATE ROUTINE"
+	// PrivilegeAlterRoutine is ALTER ROUTINE, which also covers DROP
+	// PROCEDURE and DROP FUNCTION.
+	PrivilegeAlterRoutine MysqlPrivilege = "ALTER ROUTINE"
 )
 
 // DeploymentClient identifies a ServiceAccount allowed to deploy this database.
@@ -302,7 +307,7 @@ type MysqlDatabaseOwner struct {
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=17
+	// +kubebuilder:validation:MaxItems=19
 	Privileges []MysqlPrivilege `json:"privileges,omitempty"`
 
 	// Hosts restricts where the owner may connect from: the MySQL host
@@ -348,7 +353,7 @@ type MysqlDatabaseUser struct {
 	// consumer of users[] is a SELECT-only reader. Widening the allowlist
 	// later is compatible; narrowing it would not be.
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=17
+	// +kubebuilder:validation:MaxItems=19
 	// +listType=atomic
 	Privileges []MysqlPrivilege `json:"privileges"`
 
@@ -411,7 +416,7 @@ type MysqlDatabaseGrant struct {
 
 	// Privileges granted to this user ON <databaseName>.*.
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=17
+	// +kubebuilder:validation:MaxItems=19
 	// +listType=atomic
 	Privileges []MysqlPrivilege `json:"privileges"`
 }

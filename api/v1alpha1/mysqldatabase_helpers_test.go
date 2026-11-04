@@ -164,6 +164,36 @@ func TestDeploymentPrivileges(t *testing.T) {
 	}
 }
 
+func TestRoutinePrivileges(t *testing.T) {
+	privs := []MysqlPrivilege{PrivilegeAlterRoutine, PrivilegeExecute, PrivilegeCreateRoutine, PrivilegeSelect, PrivilegeAlterRoutine}
+	got, err := CanonicalPrivileges("privileges", privs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "SELECT, EXECUTE, CREATE ROUTINE, ALTER ROUTINE"; strings.Join(got, ", ") != want {
+		t.Fatalf("canonical privileges = %v, want %s", got, want)
+	}
+	spec := MysqlDatabaseSpec{
+		DatabaseName: "acme_wms",
+		Owner:        MysqlDatabaseOwner{SecretName: "owner", Privileges: privs},
+		Users:        []MysqlDatabaseUser{{SecretName: "deploy", Privileges: privs}},
+		Grants:       []MysqlDatabaseGrant{{Username: "reporting", Privileges: privs}},
+	}
+	if err := spec.Validate("owner", map[string]string{"deploy": "deploy_user"}); err != nil {
+		t.Fatalf("routine privileges rejected: %v", err)
+	}
+	for _, p := range []MysqlPrivilege{PrivilegeCreateRoutine, PrivilegeAlterRoutine} {
+		if _, err := CanonicalPrivileges("privileges", []MysqlPrivilege{PrivilegeAllPrivileges, p}); err == nil {
+			t.Fatalf("ALL PRIVILEGES combined with %s was accepted", p)
+		}
+	}
+	for _, p := range []MysqlPrivilege{"CREATE ROUTINE WITH GRANT OPTION", "ALTER ROUTINE; GRANT ALL", "create routine"} {
+		if _, err := CanonicalPrivileges("privileges", []MysqlPrivilege{p}); err == nil {
+			t.Fatalf("CanonicalPrivileges(%q) = nil error, want rejection", p)
+		}
+	}
+}
+
 func TestDeploymentClientsDeepCopy(t *testing.T) {
 	original := &MysqlDatabase{Spec: MysqlDatabaseSpec{
 		DeploymentClients: []DeploymentClient{{Namespace: "tenant", ServiceAccount: "deploy"}},
