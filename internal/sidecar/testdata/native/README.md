@@ -57,8 +57,8 @@ fixture compatibility. That historical capture used SET GLOBAL in the same
 session and contains no compressed payload; compression proof tests use the
 new session pair. The full capture path now also uses SET SESSION.
 
-`compressed-inner-cut.bin` is the untouched 507-byte MySQL 8.4.11 capture
-retained in GPT re-review 5. SHA-256:
+`compressed-inner-cut.bin` is an untouched 507-byte MySQL 8.4.11 capture.
+SHA-256:
 `c13ba1b4fbe14e478eacc0e94e5428306022e8384bdf6ef290a63258d1546fda`.
 Its transaction `b5e6ac37-d371-11f1-8b67-65731305df52:9` has outer GTID/payload
 and inner XID at 09:00 UTC, but inner BEGIN/table-map/write-rows at 09:30 UTC
@@ -74,8 +74,8 @@ BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run 'TestPITRNativeMysql
 ```
 
 
-`compressed-excluded-cut.bin` is GPT re-review 6's untouched 772-byte native
-MySQL 8.4.11 straddling-file reproduction. SHA-256:
+`compressed-excluded-cut.bin` is an untouched 772-byte native MySQL 8.4.11
+straddling-file reproduction. SHA-256:
 `8fe0c4785b0af740db890a970cf9224a933aed5dd5a374d953ca8d928373949f`.
 Transaction `7f4a1927-d377-11f1-a983-f6bbc6ad1253:3` has an inner cut but is
 already covered by the trusted `:1-3` backup bound; required transaction `:4`

@@ -16,10 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func retentionRound2Group() *v1alpha1.MysqlFailoverGroup {
+func cutoffTestGroup() *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "fg"}, Spec: v1alpha1.MysqlFailoverGroupSpec{Backup: &v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p"}}}}
 }
-func retentionRound2Request(t *testing.T, h http.Handler, caller, query string) (int, map[string]any) {
+func cutoffRequest(t *testing.T, h http.Handler, caller, query string) (int, map[string]any) {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&profile=p&coverage=gtid-v1"+query, nil)
 	r.RemoteAddr = caller
@@ -33,14 +33,14 @@ func retentionRound2Request(t *testing.T, h http.Handler, caller, query string) 
 }
 func TestPITRCutoffJunkKeysDoNotStarveLegitimateGroups(t *testing.T) {
 	backup := retentionBoundaryBackup("retained", retentionTestSID+":1-20", time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
-	reader := &retentionReviewReader{Reader: retentionReviewClient(t, retentionRound2Group(), backup)}
+	reader := &countingBackupReader{Reader: cutoffTestClient(t, cutoffTestGroup(), backup)}
 	h := newAuxMux(nil, platform.NewHub(slog.Default()), reader)
 	for i := 0; i < pitrCutoffCacheMaxEntries; i++ {
 		r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/pitr-cutoff?namespace=x&group=g%d&profile=p&coverage=gtid-v1", i), nil)
 		r.RemoteAddr = "192.0.2.1:2000"
 		h.ServeHTTP(httptest.NewRecorder(), r)
 	}
-	status, body := retentionRound2Request(t, h, "192.0.2.2:3000", "")
+	status, body := cutoffRequest(t, h, "192.0.2.2:3000", "")
 	if status != http.StatusOK || body["cutoffTime"] == nil {
 		t.Fatalf("legitimate group refused after junk keys: HTTP %d %v", status, body)
 	}
@@ -50,32 +50,32 @@ func TestPITRCutoffJunkKeysDoNotStarveLegitimateGroups(t *testing.T) {
 }
 func TestPITRCutoffCallerCannotReserveAnotherSitesProof(t *testing.T) {
 	backup := retentionBoundaryBackup("retained", retentionTestSID+":1-20", time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
-	c := retentionReviewClient(t, retentionRound2Group(), backup)
+	c := cutoffTestClient(t, cutoffTestGroup(), backup)
 	h := newAuxMux(nil, platform.NewHub(slog.Default()), c)
-	if status, body := retentionRound2Request(t, h, "192.0.2.1:2000", ""); status != 200 || body["cutoffTime"] == nil {
+	if status, body := cutoffRequest(t, h, "192.0.2.1:2000", ""); status != 200 || body["cutoffTime"] == nil {
 		t.Fatal(status, body)
 	}
 	for i := 0; i < 5; i++ {
-		retentionRound2Request(t, h, "192.0.2.1:2000", "")
+		cutoffRequest(t, h, "192.0.2.1:2000", "")
 	}
 	// A newly observed lagging backup must appear in the other site's fresh proof.
 	lagging := retentionBoundaryBackup("lagging", retentionTestSID+":1-10", time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC))
 	if err := c.Create(context.Background(), lagging); err != nil {
 		t.Fatal(err)
 	}
-	status, body := retentionRound2Request(t, h, "192.0.2.2:3000", "")
+	status, body := cutoffRequest(t, h, "192.0.2.2:3000", "")
 	sets, _ := body["retainedGTIDs"].([]any)
 	if status != 200 || len(sets) != 2 {
 		t.Fatalf("caller stole another site's admission or hid lagging backup: HTTP %d %v", status, body)
 	}
 }
 
-type retentionRound2FailReader struct {
+type failingBackupListReader struct {
 	client.Reader
 	fail bool
 }
 
-func (r *retentionRound2FailReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+func (r *failingBackupListReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	if r.fail {
 		return fmt.Errorf("injected lookup failure")
 	}
@@ -83,14 +83,14 @@ func (r *retentionRound2FailReader) List(ctx context.Context, list client.Object
 }
 func TestPITRFailedCutoffLookupCannotBlockAnotherCaller(t *testing.T) {
 	backup := retentionBoundaryBackup("retained", retentionTestSID+":1-20", time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
-	reader := &retentionRound2FailReader{Reader: retentionReviewClient(t, retentionRound2Group(), backup), fail: true}
+	reader := &failingBackupListReader{Reader: cutoffTestClient(t, cutoffTestGroup(), backup), fail: true}
 	h := newAuxMux(nil, platform.NewHub(slog.Default()), reader)
-	status, _ := retentionRound2Request(t, h, "192.0.2.1:2000", "")
+	status, _ := cutoffRequest(t, h, "192.0.2.1:2000", "")
 	if status != 500 {
 		t.Fatalf("failure became a safe deferral: HTTP %d", status)
 	}
 	reader.fail = false
-	status, body := retentionRound2Request(t, h, "192.0.2.2:3000", "")
+	status, body := cutoffRequest(t, h, "192.0.2.2:3000", "")
 	if status != 200 || body["cutoffTime"] == nil {
 		t.Fatalf("failed caller blocked healthy lookup: HTTP %d %v", status, body)
 	}
@@ -98,7 +98,7 @@ func TestPITRFailedCutoffLookupCannotBlockAnotherCaller(t *testing.T) {
 
 func TestPITRInvalidProfileAndForwardingHeaderCannotConsumeOtherAdmission(t *testing.T) {
 	backup := retentionBoundaryBackup("retained", retentionTestSID+":1-20", time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
-	reader := &retentionReviewReader{Reader: retentionReviewClient(t, backup)}
+	reader := &countingBackupReader{Reader: cutoffTestClient(t, backup)}
 	h := newAuxMux(nil, platform.NewHub(slog.Default()), reader)
 	request := func(profile, forwarded string) int {
 		r := httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&profile="+profile+"&coverage=gtid-v1", nil)
@@ -138,7 +138,7 @@ func TestPITRDisconnectedCallerDoesNotCancelSharedCutoffLookup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	backup := retentionBoundaryBackup("retained", retentionTestSID+":1-20", time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
-	reader := &retentionCanceledCallerReader{Reader: retentionReviewClient(t, backup), cancel: cancel}
+	reader := &retentionCanceledCallerReader{Reader: cutoffTestClient(t, backup), cancel: cancel}
 	h := newAuxMux(nil, platform.NewHub(slog.Default()), reader)
 	r := httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&profile=p&coverage=gtid-v1", nil).WithContext(ctx)
 	r.RemoteAddr = "192.0.2.1:2000"
@@ -150,7 +150,7 @@ func TestPITRDisconnectedCallerDoesNotCancelSharedCutoffLookup(t *testing.T) {
 	if ctx.Err() == nil {
 		t.Fatal("test did not disconnect the first caller")
 	}
-	status, body := retentionRound2Request(t, h, "192.0.2.2:3000", "")
+	status, body := cutoffRequest(t, h, "192.0.2.2:3000", "")
 	if status != 200 || body["cutoffTime"] == nil {
 		t.Fatalf("disconnected caller disabled a later site: %d %v", status, body)
 	}

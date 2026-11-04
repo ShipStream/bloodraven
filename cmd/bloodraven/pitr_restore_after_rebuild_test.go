@@ -41,9 +41,13 @@ func (s *rebuildMaintenanceStore) Get(ctx context.Context, key string) ([]byte, 
 	}
 	return data, exists, err
 }
+
+// With BLOODRAVEN_PITR_REBUILD_STORE set, the test restores from the archive
+// the sidecar half (TestFreshPVCBeforeCloneLeavesNoPermanentDivergence) left
+// there instead of building its own.
 func TestPITRPreRebuildBackupRestoresAfterRebuild(t *testing.T) {
 	ctx := context.Background()
-	dir := os.Getenv("RR4_STORE")
+	dir := os.Getenv("BLOODRAVEN_PITR_REBUILD_STORE")
 	if dir == "" {
 		dir = t.TempDir()
 	}
@@ -51,7 +55,7 @@ func TestPITRPreRebuildBackupRestoresAfterRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if os.Getenv("RR4_STORE") == "" {
+	if os.Getenv("BLOODRAVEN_PITR_REBUILD_STORE") == "" {
 		data := pitrFixture(t, "incarnation-b.bin")
 		e, err := sidecar.InspectBinlog(bytes.NewReader(data), time.Time{})
 		if err != nil {

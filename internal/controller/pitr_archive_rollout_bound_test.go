@@ -22,7 +22,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
-// Re-review N1 (GPT), N6 (Opus): the listed copy still carries a False
+// The listed copy still carries a False
 // that has since recovered, the uncached read fails and nothing is
 // handed over. The replacement must not write that False back or fire a
 // Warning, whether its first round misses a site or is clean.
@@ -94,7 +94,7 @@ func pitrRolloutServers(t *testing.T) []*internalmysql.SidecarClient {
 	return []*internalmysql.SidecarClient{internalmysql.NewSidecarClient(iad.URL), internalmysql.NewSidecarClient(pdx.URL)}
 }
 
-// Re-review N2 (GPT): a PITR spec that cannot render an archiver (here a
+// A PITR spec that cannot render an archiver (here a
 // profile that does not exist) is never "awaiting rollout", even while
 // the site's ordered update stays blocked.
 func TestPITRArchiveInvalidProfileIsNotMaskedByBlockedRollout(t *testing.T) {
@@ -119,7 +119,7 @@ func TestPITRArchiveInvalidProfileIsNotMaskedByBlockedRollout(t *testing.T) {
 	}
 }
 
-// Re-review N1 (Opus), N2 (GPT): a valid PITR rollout that never
+// A valid PITR rollout that never
 // completes stops being AwaitingRollout after 30 minutes.
 func TestPITRArchiveBlockedRolloutBecomesDisabledAfterBound(t *testing.T) {
 	fg := pitrArchiveFG(nil)
@@ -149,7 +149,7 @@ func TestPITRArchiveBlockedRolloutBecomesDisabledAfterBound(t *testing.T) {
 	}
 }
 
-// Re-review N2 (Opus): archivePollInterval raised while the manager runs.
+// ArchivePollInterval raised while the manager runs.
 // A single failed scan stays visible for one 15m scan interval and must
 // not reach the stuck bound computed from the old 60s interval.
 func TestPITRArchiveStuckBoundFollowsCurrentScanInterval(t *testing.T) {
@@ -171,7 +171,7 @@ func TestPITRArchiveStuckBoundFollowsCurrentScanInterval(t *testing.T) {
 	}
 }
 
-// Re-review N3 (Opus): while a site has been silent since the restart,
+// While a site has been silent since the restart,
 // counts and the oldest time stay as recorded, but the newest and last
 // archived times follow the sites that answer.
 func TestPITRArchiveNewestCoverageAdvancesDuringLongSilence(t *testing.T) {

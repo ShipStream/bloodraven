@@ -222,7 +222,7 @@ func TestRetentionWaitsForBackfilledIssuance(t *testing.T) {
 	if err := saveManifest(ctx, store, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
-	a := retentionReviewArchiver(t, store, slog.Default(), retentionReviewProof())
+	a := retentionProofArchiver(t, store, slog.Default(), retentionCutoffProof())
 	a.maybeRunRetention(ctx)
 	m, err := loadManifest(ctx, store, "binlogs", "iad")
 	if err != nil {
@@ -244,7 +244,7 @@ func TestRetentionWaitsForBackfilledIssuance(t *testing.T) {
 
 func TestFailedIssuanceInspectionCoolsDown(t *testing.T) {
 	ctx := context.Background()
-	store := &retentionRound2Store{ArchiveStore: newMemStore(), reads: make(map[string]int)}
+	store := &inspectionFailureStore{ArchiveStore: newMemStore(), reads: make(map[string]int)}
 	data, err := os.ReadFile("testdata/incarnation-a.bin")
 	if err != nil {
 		t.Fatal(err)

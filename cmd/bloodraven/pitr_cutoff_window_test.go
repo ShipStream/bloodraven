@@ -25,16 +25,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-type retentionReviewReader struct {
+type countingBackupReader struct {
 	client.Reader
 	lists atomic.Int32
 }
 
-func (c *retentionReviewReader) List(ctx context.Context, obj client.ObjectList, opts ...client.ListOption) error {
+func (c *countingBackupReader) List(ctx context.Context, obj client.ObjectList, opts ...client.ListOption) error {
 	c.lists.Add(1)
 	return c.Reader.List(ctx, obj, opts...)
 }
-func retentionReviewClient(t *testing.T, backups ...client.Object) client.Client {
+func cutoffTestClient(t *testing.T, backups ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -47,11 +47,11 @@ func retentionReviewClient(t *testing.T, backups ...client.Object) client.Client
 		}
 	}
 	if !hasGroup {
-		backups = append(backups, retentionRound2Group())
+		backups = append(backups, cutoffTestGroup())
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlBackup{}).WithObjects(backups...).Build()
 }
-func retentionReviewRead(t *testing.T, handler http.Handler) (int, map[string]any) {
+func readCutoff(t *testing.T, handler http.Handler) (int, map[string]any) {
 	t.Helper()
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&profile=p&coverage=gtid-v1", nil))
@@ -63,10 +63,10 @@ func retentionReviewRead(t *testing.T, handler http.Handler) (int, map[string]an
 }
 func TestPITRCutoffBoundsRepeatedPositiveLookups(t *testing.T) {
 	backup := retentionBoundaryBackup("retained", retentionTestSID+":1-20", time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
-	reader := &retentionReviewReader{Reader: retentionReviewClient(t, backup)}
+	reader := &countingBackupReader{Reader: cutoffTestClient(t, backup)}
 	handler := newAuxMux(nil, platform.NewHub(slog.Default()), reader)
 	for i := 0; i < 20; i++ {
-		status, body := retentionReviewRead(t, handler)
+		status, body := readCutoff(t, handler)
 		if status != 200 && status != 429 {
 			t.Fatalf("HTTP %d: %v", status, body)
 		}
@@ -87,8 +87,8 @@ func TestPITRCutoffIncludesAllGroupProfilesAndInFlightBackups(t *testing.T) {
 			other.Spec.ProfileName = "weekly-offsite"
 			other.Labels = nil
 			other.Status.Phase = phase
-			c := retentionReviewClient(t, first, other)
-			_, body := retentionReviewRead(t, newAuxMux(nil, platform.NewHub(slog.Default()), c))
+			c := cutoffTestClient(t, first, other)
+			_, body := readCutoff(t, newAuxMux(nil, platform.NewHub(slog.Default()), c))
 			if phase == v1alpha1.BackupPhaseSucceeded {
 				sets, ok := body["retainedGTIDs"].([]any)
 				if !ok || len(sets) != 2 {
@@ -106,7 +106,7 @@ func TestPITRRunningBackupKeepsReplayWindowThroughCompletion(t *testing.T) {
 	running := retentionBoundaryBackup("overlapping", "", start.Add(-96*time.Hour))
 	running.Status.Phase = v1alpha1.BackupPhaseRunning
 	running.Status.CompletionTime = nil
-	c := retentionReviewClient(t, recent, running)
+	c := cutoffTestClient(t, recent, running)
 	ctx := context.Background()
 	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
 	if err != nil {

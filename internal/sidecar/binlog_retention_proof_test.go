@@ -18,17 +18,17 @@ import (
 	"time"
 )
 
-type retentionReviewStore struct {
+type retentionProofStore struct {
 	ArchiveStore
 	reads int
 }
 
-func (s *retentionReviewStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+func (s *retentionProofStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 	s.reads++
 	return s.ArchiveStore.Open(ctx, key)
 }
 
-func retentionReviewArchiver(t *testing.T, store ArchiveStore, logger *slog.Logger, response map[string]any) *BinlogArchiver {
+func retentionProofArchiver(t *testing.T, store ArchiveStore, logger *slog.Logger, response map[string]any) *BinlogArchiver {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(response) }))
 	t.Cleanup(server.Close)
@@ -36,7 +36,7 @@ func retentionReviewArchiver(t *testing.T, store ArchiveStore, logger *slog.Logg
 	a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
 	return a
 }
-func retentionReviewProof() map[string]any {
+func retentionCutoffProof() map[string]any {
 	return map[string]any{"coverage": PITRGTIDCoverageProtocol, "retainedGTIDs": []string{coverageTestSID + ":1-11"}, "cutoffTime": "2026-04-17T00:00:00Z"}
 }
 func TestRetentionBindsExistingProofToArchivedBytes(t *testing.T) {
@@ -52,7 +52,7 @@ func TestRetentionBindsExistingProofToArchivedBytes(t *testing.T) {
 				if encrypted {
 					backend = WrapWithEncryption(backend, []byte("random archive identity key"))
 				}
-				store := &retentionReviewStore{ArchiveStore: backend}
+				store := &retentionProofStore{ArchiveStore: backend}
 				original, err := fileContentID("testdata/incarnation-a.bin")
 				if err != nil {
 					t.Fatal(err)
@@ -79,7 +79,7 @@ func TestRetentionBindsExistingProofToArchivedBytes(t *testing.T) {
 				if err := appendManifestEntry(ctx, store, "binlogs", "iad", row); err != nil {
 					t.Fatal(err)
 				}
-				a := retentionReviewArchiver(t, store, slog.Default(), retentionReviewProof())
+				a := retentionProofArchiver(t, store, slog.Default(), retentionCutoffProof())
 				a.maybeRunRetention(ctx)
 				if _, exists, err := store.Get(ctx, key); err != nil || !exists {
 					t.Fatalf("transaction 21 deleted using stale transaction-11 proof: %t, %v", exists, err)
@@ -106,7 +106,7 @@ func TestRetentionBackfillIsBoundedAndPersistent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &retentionReviewStore{ArchiveStore: pvc}
+	store := &retentionProofStore{ArchiveStore: pvc}
 	payload, err := os.ReadFile("testdata/incarnation-b.bin")
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestRetentionBackfillIsBoundedAndPersistent(t *testing.T) {
 		t.Fatal(err)
 	}
 	create := func() *BinlogArchiver {
-		return retentionReviewArchiver(t, store, slog.Default(), retentionReviewProof())
+		return retentionProofArchiver(t, store, slog.Default(), retentionCutoffProof())
 	}
 	create().maybeRunRetention(ctx)
 	if store.reads == 0 || store.reads > 8 {
@@ -163,7 +163,7 @@ func TestRetentionLogsDeferralReasonAndLevel(t *testing.T) {
 			var logs bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&logs, nil))
 			store := newMemStore()
-			a := retentionReviewArchiver(t, store, logger, map[string]any{"coverage": PITRGTIDCoverageProtocol, "retentionDeferredReason": tc.reason})
+			a := retentionProofArchiver(t, store, logger, map[string]any{"coverage": PITRGTIDCoverageProtocol, "retentionDeferredReason": tc.reason})
 			a.maybeRunRetention(context.Background())
 			var record map[string]any
 			if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
@@ -185,8 +185,8 @@ func TestEmptyAndCompressedBinlogsHaveCompleteCoverage(t *testing.T) {
 			if meta.GTIDCoverage == nil || !meta.GTIDCoverage.Complete || meta.GTIDCoverage.GTIDs != tc.gtids {
 				t.Fatalf("valid sealed file cannot retire: %+v", meta.GTIDCoverage)
 			}
-			proof := retentionReviewProof()
-			a := retentionReviewArchiver(t, newMemStore(), slog.Default(), proof)
+			proof := retentionCutoffProof()
+			a := retentionProofArchiver(t, newMemStore(), slog.Default(), proof)
 			parsed, err := a.fetchRetentionCutoff(context.Background())
 			if err != nil {
 				t.Fatal(err)

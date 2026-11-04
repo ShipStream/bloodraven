@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// R9 repair: the legacy row with a missing object stays beside the new
+// Legacy-row repair: the legacy row with a missing object stays beside the new
 // <name>.<id> row, and both carry the same Previous_gtids.
 func TestMissingLegacyRowIsReplaced(t *testing.T) {
 	ctx := context.Background()

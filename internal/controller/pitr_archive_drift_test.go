@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Re-review N4 (Opus): a new topology manager has not computed its
+// A new topology manager has not computed its
 // spec-drift set until the runner's next sync. Until then a disabled
 // sidecar is treated as awaiting rollout, not as ArchiverDisabled.
 func TestPITRArchiveDriftNotYetComputedIsAwaitingRollout(t *testing.T) {

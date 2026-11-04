@@ -190,9 +190,10 @@ func TestPITRQuarantinedLostTailLatestWindow(t *testing.T) {
 	}
 }
 
-// Mixed-version shape from GPT R22, at scale: every ID-aware row also has an
-// unverified legacy alias (no contentId). Each late alias discovery now calls
-// resetPrefix(), which re-queues the whole validated prefix.
+// Mixed-version shape at scale: every ID-aware row also has an unverified
+// legacy alias (no contentId), and each late alias discovery calls
+// resetPrefix(), which re-queues the whole validated prefix. Planning must
+// stay roughly linear.
 func TestPITRLateAliasDiscoveryPlannerCost(t *testing.T) {
 	run := func(n int) time.Duration {
 		store := buildPlannerChain(t, n)

@@ -48,7 +48,7 @@ func TestCorruptLegacyRowDoesNotHaltAllRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	a := retentionReviewArchiver(t, store, slog.New(slog.NewJSONHandler(&logs, nil)), retentionReviewProof())
+	a := retentionProofArchiver(t, store, slog.New(slog.NewJSONHandler(&logs, nil)), retentionCutoffProof())
 	defer func() {
 		if a.reuseWork != nil {
 			a.reuseWork.close()

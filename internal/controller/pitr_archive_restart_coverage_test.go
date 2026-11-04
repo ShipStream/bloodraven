@@ -19,7 +19,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
-// Review R2 (GPT): after a restart one site answers and the other has
+// After a restart one site answers and the other has
 // never answered in this process. The persisted aggregate coverage must
 // stay as it was instead of shrinking to the answering site's share.
 func TestPITRArchiveCoverageKeptWhenASiteHasNoSampleAfterRestart(t *testing.T) {
@@ -56,7 +56,7 @@ func TestPITRArchiveCoverageKeptWhenASiteHasNoSampleAfterRestart(t *testing.T) {
 	}
 }
 
-// Review R5 (Opus): a persistent error whose text changes every scan
+// A persistent error whose text changes every scan
 // (S3 RequestID/HostID) must not rewrite the status every poll.
 func TestPITRArchiveMessageOnlyChangesAreRateLimited(t *testing.T) {
 	fg := pitrArchiveFG(nil)
@@ -112,7 +112,7 @@ func TestPITRArchiveMessageOnlyChangesAreRateLimited(t *testing.T) {
 	}
 }
 
-// Review R2 (Opus): the topology writer runs between its two Gets while
+// The topology writer runs between its two Gets while
 // the poller writer persists a newer condition. It must not replay its
 // stale copy, and its Event baseline must be the object it fetched.
 func TestPITRArchiveTopologyWriterInterleavedWithPollerWrite(t *testing.T) {
@@ -193,7 +193,7 @@ func TestPITRArchiveTopologyWriterInterleavedWithPollerWrite(t *testing.T) {
 	}
 }
 
-// Review R1 (Opus), behaviour common to every sidecar version: one
+// Behaviour common to every sidecar version: one
 // failed archiver scan stays visible to two 30s polls with the default
 // 60s scan interval, and must not be ArchiverError.
 func TestPITRArchiveOneFailedScanSeenTwiceStaysTrue(t *testing.T) {

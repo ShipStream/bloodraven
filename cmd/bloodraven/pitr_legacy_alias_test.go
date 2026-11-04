@@ -34,7 +34,7 @@ func TestPITRLegacyAliasKeepsDurableDivergence(t *testing.T) {
 }
 
 func TestPITRUnrecordedLegacyReuseRefusesPreReuseBackup(t *testing.T) {
-	// These are the same two streams used by the real archiver-side probe:
+	// These are the same two streams the archiver-side test uses:
 	// incarnation-a and same-header issue different queries as GTID 11.
 	store, rows := archiveBinlogFixtures(t, pitrFixture(t, "incarnation-a.bin"), pitrFixture(t, "same-header.bin"))
 	raw := pitrFixture(t, "incarnation-a.bin")

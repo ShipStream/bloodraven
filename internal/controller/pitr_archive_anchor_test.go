@@ -12,7 +12,7 @@ import (
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
-// Re-review 3 N1 (GPT, Opus): a predecessor that never managed an
+// A predecessor that never managed an
 // uncached read hands over an unanchored tracker. Ownership changing is
 // not an authoritative read: the replacement must not overwrite the
 // persisted False with Unknown, recover after one clean round, or fire a
@@ -91,7 +91,7 @@ func TestPITRArchiveUnanchoredHandoffStaysUnanchored(t *testing.T) {
 	}
 }
 
-// Re-review 3 N2 (Opus): a failing uncached read is logged once per
+// A failing uncached read is logged once per
 // episode, and its recovery once.
 func TestPITRArchiveAnchorReadFailureLoggedOncePerEpisode(t *testing.T) {
 	fg := pitrArchiveFG(nil)

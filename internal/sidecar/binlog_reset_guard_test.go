@@ -39,8 +39,9 @@ func copyBinlogFixture(t *testing.T, src, dst string) {
 }
 
 // A transient failure of an older sealed file, followed by successful upload of
-// the next one, makes the retry look like a "numbering restart behind archived
-// execution" and persists a permanent epoch.resetReason on an ordinary history.
+// the next one, must not make the retry look like a "numbering restart behind
+// archived execution" and persist a permanent epoch.resetReason on an ordinary
+// history.
 func TestTransientUploadFailureDoesNotSetResetGuard(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -66,8 +67,8 @@ func TestTransientUploadFailureDoesNotSetResetGuard(t *testing.T) {
 	}
 }
 
-// The R13 repair path (missing legacy object replaced from surviving local
-// bytes) for any row that is not the newest name trips the same guard.
+// The legacy repair path (missing legacy object replaced from surviving local
+// bytes) for a row that is not the newest name must not trip the same guard.
 func TestLegacyRepairDoesNotSetResetGuard(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -111,7 +112,7 @@ func TestLegacyRepairDoesNotSetResetGuard(t *testing.T) {
 		t.Logf("row %s id=%q contentId=%q", f.Name, f.ID, f.ContentID)
 	}
 	if m.Epoch != nil && m.Epoch.ResetReason != "" {
-		t.Fatalf("R13 repair persisted a permanent reset guard: %s", m.Epoch.ResetReason)
+		t.Fatalf("legacy repair persisted a permanent reset guard: %s", m.Epoch.ResetReason)
 	}
 }
 

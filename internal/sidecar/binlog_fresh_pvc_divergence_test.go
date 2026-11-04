@@ -14,11 +14,12 @@ import (
 // transaction (the donor had them), so nothing is divergent. Persisted
 // evidence must not outlive that transient pre-clone state.
 //
-// RR4_STORE=<dir> keeps the resulting PVC-layout archive for the cmd/bloodraven
-// half of the probe (TestPITRPreRebuildBackupRestoresAfterRebuild).
+// BLOODRAVEN_PITR_REBUILD_STORE=<dir> keeps the resulting PVC-layout archive
+// for the cmd/bloodraven half of this scenario
+// (TestPITRPreRebuildBackupRestoresAfterRebuild).
 func TestFreshPVCBeforeCloneLeavesNoPermanentDivergence(t *testing.T) {
 	ctx := context.Background()
-	dir := os.Getenv("RR4_STORE")
+	dir := os.Getenv("BLOODRAVEN_PITR_REBUILD_STORE")
 	if dir == "" {
 		dir = t.TempDir()
 	}

@@ -12,9 +12,10 @@ import (
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
-// Port the rereview probes through the actual downloader with native captures,
-// including the purged donor base of the final physically cloned incarnation.
-func downloadNativeProbe(t *testing.T, indices ...int) {
+// downloadNativeRows runs the selected native capture rows through the actual
+// downloader, including the purged donor base of the final physically cloned
+// incarnation.
+func downloadNativeRows(t *testing.T, indices ...int) {
 	t.Helper()
 	rows, payloads, _ := nativePITRRows(t)
 	ctx := context.Background()
@@ -52,9 +53,9 @@ func downloadNativeProbe(t *testing.T, indices ...int) {
 }
 func TestPITRFreshFirstBinlogWithReuse(t *testing.T) {
 	rows, _, _ := nativePITRRows(t)
-	downloadNativeProbe(t, 0, 1, len(rows)-1)
+	downloadNativeRows(t, 0, 1, len(rows)-1)
 }
 func TestPITREmptyRotationWithReuse(t *testing.T) {
 	rows, _, _ := nativePITRRows(t)
-	downloadNativeProbe(t, 0, 1, 2, len(rows)-1)
+	downloadNativeRows(t, 0, 1, 2, len(rows)-1)
 }

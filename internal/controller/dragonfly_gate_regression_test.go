@@ -16,7 +16,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
-// --- round 6 (Opus probes) ---------------------------------------------------
+// --- Dragonfly gate and follow regressions -----------------------------------
 
 // P1: a snapshot SAVE holding the gate does not wedge the manager: the
 // MySQL callback returns, other writers time out cleanly, Stop joins.
@@ -216,7 +216,7 @@ func (h *msgRecorder) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-// From TestRereview6InFlightTickPromotionDropsPublishedMySQLFollow: a Tick
+// A Tick
 // drift promotion of dc2 is already in flight on Run when MySQL fails back
 // to dc1 and publishes it. Tick's dc2 stamp lands in a later second than
 // the queued dc1 request. MySQL names dc1, so the request is its latest

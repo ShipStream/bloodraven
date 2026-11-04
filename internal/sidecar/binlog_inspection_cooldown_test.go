@@ -19,7 +19,7 @@ func TestUninspectableRowDoesNotHotLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &retentionReviewStore{ArchiveStore: pvc}
+	store := &retentionProofStore{ArchiveStore: pvc}
 	payload, err := os.ReadFile("testdata/incarnation-b.bin")
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +33,7 @@ func TestUninspectableRowDoesNotHotLoop(t *testing.T) {
 	if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
 		t.Fatal(err)
 	}
-	a := retentionReviewArchiver(t, store, slog.Default(), retentionReviewProof())
+	a := retentionProofArchiver(t, store, slog.Default(), retentionCutoffProof())
 	for i := 0; i < 5; i++ {
 		a.maybeRunRetention(ctx)
 		next := time.Until(a.lastRetentionRun.Add(a.retentionCfg.Interval))
@@ -45,22 +45,22 @@ func TestUninspectableRowDoesNotHotLoop(t *testing.T) {
 	}
 }
 
-type retentionRound2Store struct {
+type inspectionFailureStore struct {
 	ArchiveStore
 	reads map[string]int
 	deny  string
 }
 
-func (s *retentionRound2Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+func (s *inspectionFailureStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 	s.reads[key]++
 	if key == s.deny {
 		return nil, os.ErrPermission
 	}
 	return s.ArchiveStore.Open(ctx, key)
 }
-func retentionRound2Failures(t *testing.T, mode string, logger *slog.Logger) (*BinlogArchiver, *retentionRound2Store, ManifestEntry, string) {
+func archiverWithInspectionFailures(t *testing.T, mode string, logger *slog.Logger) (*BinlogArchiver, *inspectionFailureStore, ManifestEntry, string) {
 	t.Helper()
-	store := &retentionRound2Store{ArchiveStore: newMemStore(), reads: make(map[string]int)}
+	store := &inspectionFailureStore{ArchiveStore: newMemStore(), reads: make(map[string]int)}
 	row := ManifestEntry{Name: "mysql-bin.000000", ContentID: strings.Repeat("c", 64), LastEventTime: time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC)}
 	if mode == "corrupt" {
 		row.ContentID = ""
@@ -87,12 +87,12 @@ func retentionRound2Failures(t *testing.T, mode string, logger *slog.Logger) (*B
 	if err := saveManifest(context.Background(), store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
 		t.Fatal(err)
 	}
-	return retentionReviewArchiver(t, store, logger, retentionReviewProof()), store, row, key
+	return retentionProofArchiver(t, store, logger, retentionCutoffProof()), store, row, key
 }
 func TestFailedInspectionsCoolDownWithoutAuthorizingRetirement(t *testing.T) {
 	for _, mode := range []string{"mismatch", "corrupt", "missing", "permission"} {
 		t.Run(mode, func(t *testing.T) {
-			a, store, _, key := retentionRound2Failures(t, mode, slog.Default())
+			a, store, _, key := archiverWithInspectionFailures(t, mode, slog.Default())
 			for i := 0; i < 5; i++ {
 				a.lastRetentionRun = time.Time{}
 				a.maybeRunRetention(context.Background())
@@ -120,7 +120,7 @@ func TestFailedInspectionsCoolDownWithoutAuthorizingRetirement(t *testing.T) {
 }
 func TestFailedRowDoesNotRepeatDuringHealthyBackfill(t *testing.T) {
 	var logs bytes.Buffer
-	a, store, row, badKey := retentionRound2Failures(t, "mismatch", slog.New(slog.NewJSONHandler(&logs, nil)))
+	a, store, row, badKey := archiverWithInspectionFailures(t, "mismatch", slog.New(slog.NewJSONHandler(&logs, nil)))
 	payload, err := os.ReadFile("testdata/incarnation-b.bin")
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestFailedRowDoesNotRepeatDuringHealthyBackfill(t *testing.T) {
 	}
 }
 func TestInspectionFailureStateFollowsManifestIdentity(t *testing.T) {
-	a, store, row, key := retentionRound2Failures(t, "mismatch", slog.Default())
+	a, store, row, key := archiverWithInspectionFailures(t, "mismatch", slog.Default())
 	a.maybeRunRetention(context.Background())
 	actual, err := fileContentID("testdata/incarnation-b.bin")
 	if err != nil {

@@ -13,8 +13,11 @@ import (
 	"time"
 )
 
+// With BLOODRAVEN_PITR_REISSUE_STORE set, the test restores from the archive
+// the sidecar half (TestActiveReissueMustNotEraseLostTailEvidence) left there
+// instead of building its own.
 func TestPITRActiveReissueMustNotReplayAbandonedTail(t *testing.T) {
-	dir := os.Getenv("RR5_STORE")
+	dir := os.Getenv("BLOODRAVEN_PITR_REISSUE_STORE")
 	if dir == "" {
 		dir = t.TempDir()
 	}
@@ -23,7 +26,7 @@ func TestPITRActiveReissueMustNotReplayAbandonedTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if os.Getenv("RR5_STORE") == "" {
+	if os.Getenv("BLOODRAVEN_PITR_REISSUE_STORE") == "" {
 		row := putLostTailBinlog(t, store, "mysql-bin.000001", pitrFixture(t, "incarnation-a.bin"))
 		saveArchiveManifest(t, store, sidecar.Manifest{Site: "iad", Files: []sidecar.ManifestEntry{row}})
 		logs := t.TempDir()

@@ -40,7 +40,7 @@ func countPITREvents(events []string) (warnings, normals int) {
 	return warnings, normals
 }
 
-// Review R1 (GPT): sync lists the group (True), the old poller then
+// Sync lists the group (True), the old poller then
 // persists False, and the replacement is built from the listed copy. The
 // replacement must neither overwrite that False with Unknown (and later
 // re-fire the Warning) nor certify True after one clean round.
@@ -160,7 +160,7 @@ func scanObs(scanAt time.Time, failed *int64, lastErr string) pitrObs {
 
 func pitrInt(v int64) *int64 { return &v }
 
-// Review R1 (Opus): debounce ArchiverError on archiver scans. The operator
+// Debounce ArchiverError on archiver scans. The operator
 // polls every 30s and the archiver scans every 60s by default, so one
 // failed scan is seen by two polls.
 func TestPITRArchiveErrorDebouncesOnScans(t *testing.T) {
@@ -218,7 +218,7 @@ func TestPITRArchiveErrorDebouncesOnScans(t *testing.T) {
 	}
 }
 
-// Review R3 (Opus): a fresh deploy or a site whose sidecar has never
+// A fresh deploy or a site whose sidecar has never
 // answered gets a 5 minute grace before SidecarUnreachable; a crash
 // looping old sidecar still surfaces after it.
 func TestPITRArchiveNeverAnsweredSiteGetsLongerGrace(t *testing.T) {
@@ -236,7 +236,7 @@ func TestPITRArchiveNeverAnsweredSiteGetsLongerGrace(t *testing.T) {
 	}
 }
 
-// Review R3 (Opus): ArchiverDisabled while the site's ordered update is
+// ArchiverDisabled while the site's ordered update is
 // still pending is AwaitingRollout, without a Warning; once the rollout is
 // no longer pending it is False/ArchiverDisabled.
 func TestPITRArchiveDisabledDuringPendingRolloutIsAwaitingRollout(t *testing.T) {
@@ -301,7 +301,7 @@ func TestPITRArchiveAwaitingRolloutKeepsKnownFalse(t *testing.T) {
 	}
 }
 
-// Review R7 (Opus): a round is stamped with the time the poll started, so
+// A round is stamped with the time the poll started, so
 // a slow first poll does not shorten the unreachable span.
 func TestPITRArchiveRoundStampedWithTickTime(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
