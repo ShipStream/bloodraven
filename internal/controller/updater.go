@@ -311,6 +311,9 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	if err := applyUpdate(ctx, active.Name); err != nil {
 		return processed, fmt.Errorf("update old active %s: %w", active.Name, err)
 	}
+	if err := u.requireOldActiveContained(ctx, active, *handoff); err != nil {
+		return processed, err
+	}
 	if err := u.failover.RecoverOldPrimary(ctx, active.Checker, handoff.Host, active.ReplUser, active.ReplPassword, active.UseSSL); err != nil {
 		return processed, fmt.Errorf("configure old active %s as replica of %s: %w", active.Name, handoff.Name, err)
 	}
@@ -324,6 +327,54 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	processed = append(processed, active.Name)
 	u.setPhase(UpdatePhaseComplete)
 	return processed, nil
+}
+
+// requireOldActiveContained refuses to repoint the old active at the new
+// primary unless the new primary has executed every transaction the old
+// active holds. ExecuteHandoff already proved that on the fenced set before
+// promoting, so this is defense in depth for the step issue #202 went wrong
+// at: CHANGE REPLICATION SOURCE on a site with transactions its new source
+// lacks leaves them as errant GTIDs on a replica whose threads look
+// healthy. The replica GTID audit reports such a replica, but only once the
+// update has ended (it does not run during one), and until then the site
+// counts as a clean replica. Left fenced with no replication channel, the
+// site goes to old-primary recovery instead, which compares the sets and
+// reports any divergence (status.sites[].divergentGtid). A failed fence or
+// a GTID set that cannot be read or parsed also refuses.
+//
+// The old active is fenced again before its set is read. Its pod was just
+// replaced and mysqld boots with read_only only, so without the fence a
+// privileged write could land after the read and before RecoverOldPrimary
+// fences it, pass the comparison, and be left as an errant GTID. The fence
+// also keeps a refused site fenced.
+func (u *UpdateController) requireOldActiveContained(ctx context.Context, active, handoff UpdateTarget) error {
+	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		return active.Checker.SetSuperReadOnly(probeCtx, true)
+	}); err != nil {
+		return fmt.Errorf("fence old active %s before repointing it at %s: %w", active.Name, handoff.Name, err)
+	}
+	oldRaw, oldSet, err := readGTIDSetRaw(ctx, active.Checker)
+	if err != nil {
+		return fmt.Errorf("read old active %s GTID set before repointing it at %s: %w", active.Name, handoff.Name, err)
+	}
+	newRaw, newSet, err := readGTIDSetRaw(ctx, handoff.Checker)
+	if err != nil {
+		return fmt.Errorf("read new primary %s GTID set before repointing %s: %w", handoff.Name, active.Name, err)
+	}
+	divergent := oldSet.Subtract(newSet)
+	if divergent.IsEmpty() {
+		return nil
+	}
+	err = fmt.Errorf("old active %s has %d transactions new primary %s lacks (%s); left fenced for old-primary recovery to report",
+		active.Name, divergent.TransactionCount(), handoff.Name, truncateGtidHint(divergent.String()))
+	u.logger.Error("ordered update: old active has transactions the new primary lacks; not repointing it",
+		"site", active.Name, "newPrimary", handoff.Name,
+		"divergentTransactions", divergent.TransactionCount(),
+		"divergentGtid", truncateGtidSet(divergent.String()),
+		"oldPrimaryGtid", oldRaw,
+		"newPrimaryGtid", newRaw,
+		"error", err)
+	return err
 }
 
 // divergentStandbyMessage explains why a standby with recorded divergence

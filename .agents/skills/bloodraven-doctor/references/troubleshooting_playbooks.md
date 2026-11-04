@@ -576,6 +576,7 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
 ### Symptoms
 - Operator log: WARN `maintenance handoff refused; source not fenced` (refused before any write pause, usually a lagging standby) or `maintenance handoff aborted; source unfenced` (aborted after the fence), followed by `ordered update failed`, repeating on later reconciles. The active site's Deployment hash stays stale.
 - Or ERROR `maintenance handoff: rollback failed: source may be left read-only`: the abort could not give the active site its writes back.
+- Or, after a successful handoff, ERROR `ordered update: old active has transactions the new primary lacks; not repointing it`, or an `ordered update failed` error containing `before repointing`. The new primary is serving; the old active is fenced (`super_read_only=ON`, unless the error is `fence old active ... before repointing`) and is not replicating.
 
 ### Diagnostic steps
 1. Read the reason from the `error` field:
@@ -604,6 +605,10 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
    - Confirm its `@@GLOBAL.gtid_executed` is a subset of the active site's: `SELECT GTID_SUBSET('<standby set>', '<active set>')` on the active site returns 1.
    - If it is, run on the standby: `CHANGE REPLICATION SOURCE TO SOURCE_HOST='<active internal host>', SOURCE_USER='<repl user>', SOURCE_PASSWORD='<repl password>', SOURCE_AUTO_POSITION=1; START REPLICA;`. Add `SOURCE_SSL=1, SOURCE_SSL_CA='/etc/mysql/tls/ca.crt'` when `spec.tls` is set, otherwise `GET_SOURCE_PUBLIC_KEY=1`.
    - If it is not a subset, the standby has errant transactions: reclone it (`kubectl bloodraven reclone <group> <site> -n <ns>`) instead, or see playbook 33.
+5. Old active not repointed after the handoff (`not repointing it` or `before repointing`). Leave it fenced and do not run `CHANGE REPLICATION SOURCE` on it by hand. Old-primary recovery picks it up on a later poll:
+   - If the fence failed or a set was only unreadable, recovery fences the site itself, compares the sets, and rejoins it as a replica when nothing is missing from the new primary. Until then a site whose fence failed has `read_only=ON` but may lack `super_read_only`: check `SELECT @@GLOBAL.super_read_only, @@GLOBAL.read_only` on it.
+   - If it really holds transactions the new primary lacks, recovery reports them in `status.sites[].divergentGtid` (`divergenceDetectedBy=OldPrimaryRecovery`) and blocks: follow playbook 2 to extract or replay them before recloning the site.
+   - If the old active came back on an empty datadir (a replaced or wiped PVC), its set holds only server-init transactions under a new `server_uuid`. The rollout still refuses and pages, but recovery treats the site as empty and leaves it to auto-clone: no `divergentGtid` appears. Confirm with `SELECT @@server_uuid, @@GLOBAL.gtid_executed` on it (no UUID shared with the new primary) and let the clone run.
 
 ## 24. One group stopped updating (no running topology manager)
 
