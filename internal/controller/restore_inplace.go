@@ -354,6 +354,22 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 	// Preflight. Keeping the initial transition in one place makes the
 	// phase-dispatch below trivially table-driven.
 	if cur == nil {
+		// The previous run's reclone queue must be settled against that
+		// run's own (terminal) status before a new run replaces it: once
+		// the new run's status is written, a Job the previous run created
+		// is no longer visible to the settlement, which would then read
+		// "never executed" and resume peers the previous restore may have
+		// damaged. Settlement waits (with the previous fence up) while it
+		// cannot decide yet; the new run waits with it.
+		if q := fg.Status.RestoreReclones; q != nil && q.Phase == v1alpha1.RestoreReclonesArmed {
+			wait, err := r.settleArmedRestoreReclones(ctx, fg)
+			if err != nil {
+				return 0, fmt.Errorf("settle the previous in-place restore's reclone queue: %w", err)
+			}
+			if wait > 0 {
+				return wait, nil
+			}
+		}
 		if err := validateInPlaceRestoreSpec(spec); err != nil {
 			// Pure validation rejection: nothing executed, so do not
 			// consume the confirm (keeping the last executed one preserves
@@ -558,6 +574,9 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		wait, err := r.Runner.RestoreMutationInFlight(client.ObjectKeyFromObject(fg), false)
 		if err != nil {
 			wait, err = fmt.Sprintf("waiting for the topology manager: %v", err), nil
+		}
+		if wait == "" && plannedFailoverInFlight(fg.Status.PlannedFailover) {
+			wait = "waiting for the planned failover to finish"
 		}
 		if wait == "" {
 			wait, err = r.restoreReclonesReadyForNewRestore(ctx, fg)
@@ -1052,11 +1071,9 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 	// correct flag when it starts the manager.
 	if r.Runner != nil {
 		r.Runner.hydrateDeploymentGeneration(fg)
-		r.Runner.SetTopologyFrozen(
-			types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name},
-			inPlaceRestoreFreezesTopology(fg),
-		)
-		// The phase decides which held peers Poll keeps stopped.
+		// The phase decides the freeze and which held peers Poll keeps
+		// stopped; every restore guard is applied from one confirmed
+		// snapshot (applyRestoreProtection).
 		r.Runner.SetRestorePeerHold(ctx, fg)
 	}
 	return true

@@ -489,16 +489,12 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		}
 
 		suppress := restoreInFlight(fg)
-		frozen := inPlaceRestoreFreezesTopology(fg)
 		plannedActive := plannedFailoverInFlight(fg.Status.PlannedFailover)
 
 		if live && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
-			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
-			existing.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
-			existing.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 			_ = r.applyRestoreProtection(ctx, existing.tm, fg, false)
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
@@ -552,11 +548,8 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 		if started {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
-			mt.tm.SetTopologyFrozen(frozen)
 			mt.tm.SetPlannedFailoverActive(plannedActive)
 			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
-			mt.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
-			mt.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 			_ = r.applyRestoreProtection(ctx, mt.tm, fg, false)
 			if mt.dragonfly != nil {
 				mt.dragonfly.SetPaused(dragonflyMaintenanceActive(fg))

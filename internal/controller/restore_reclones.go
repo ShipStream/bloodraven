@@ -145,7 +145,6 @@ func (r *MysqlFailoverGroupReconciler) mutateRestoreReclones(ctx context.Context
 		return false, err
 	}
 	if changed && r.Runner != nil {
-		r.Runner.SetRestoreReclonePending(client.ObjectKeyFromObject(fg), restoreReclonePendingSites(fg))
 		r.Runner.SetRestorePeerHold(ctx, fg)
 	}
 	return changed, nil
@@ -856,8 +855,11 @@ func (r *MysqlFailoverGroupReconciler) restorePrimaryUnchanged(ctx context.Conte
 		if since < restoreSettleBound {
 			return false, restoreSettleRetryWait
 		}
-		log.FromContext(ctx).Info("holding the reclone queue: the failed restore's Job pods did not terminate in time",
-			"fg", fg.Name, "job", jobName, "error", err)
+		kv := []any{"fg", fg.Name, "job", jobName}
+		if err != nil {
+			kv = append(kv, "error", err)
+		}
+		log.FromContext(ctx).Info("holding the reclone queue: the failed restore's Job pods did not terminate in time", kv...)
 		return false, 0
 	}
 	now, err := r.Runner.RestoreGtidExecuted(ctx, client.ObjectKeyFromObject(fg), rip.TargetSite)
@@ -948,10 +950,9 @@ func (r *MysqlFailoverGroupReconciler) writeRecloneAnnotation(ctx context.Contex
 // other queued sites go first.
 func (r *TopologyManagerRunner) recordRestoreRecloneOutcome(ctx context.Context, nn types.NamespacedName, site string, outcome RecloneOutcome) error {
 	var (
-		event     func(fg *v1alpha1.MysqlFailoverGroup)
-		remaining []string
-		updated   bool
-		written   *v1alpha1.MysqlFailoverGroup
+		event   func(fg *v1alpha1.MysqlFailoverGroup)
+		updated bool
+		written *v1alpha1.MysqlFailoverGroup
 	)
 	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		event, updated = nil, false
@@ -998,7 +999,6 @@ func (r *TopologyManagerRunner) recordRestoreRecloneOutcome(ctx context.Context,
 		}
 		updated = true
 		written = fresh.DeepCopy()
-		remaining = restoreReclonePendingSites(&fresh)
 		if event != nil && r.recorder != nil {
 			event(&fresh)
 		}
@@ -1011,7 +1011,6 @@ func (r *TopologyManagerRunner) recordRestoreRecloneOutcome(ctx context.Context,
 		return err
 	}
 	if updated {
-		r.SetRestoreReclonePending(nn, remaining)
 		r.SetRestorePeerHold(ctx, written)
 	}
 	return nil

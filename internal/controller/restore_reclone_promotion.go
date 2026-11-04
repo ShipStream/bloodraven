@@ -65,9 +65,13 @@ func (tm *TopologyManager) restoreRecloneBlockedSite(site string) bool {
 }
 
 // restoreReclonePendingLocked reports whether site is waiting for its
-// post-restore reclone. Caller holds tm.mu.
+// post-restore reclone: in the pending set, or held with its replication
+// stopped (the two come from the same queue; either alone is enough to
+// keep a site that may lack the restore, or hold a failed restore's
+// pre-restore data, from being promoted automatically). Caller holds
+// tm.mu.
 func (tm *TopologyManager) restoreReclonePendingLocked(site string) bool {
-	return slices.Contains(tm.restoreReclonePending, site)
+	return slices.Contains(tm.restoreReclonePending, site) || slices.Contains(tm.restorePeerHeld, site)
 }
 
 // restoreReclonePendingCandidates returns the read-only primary-candidates

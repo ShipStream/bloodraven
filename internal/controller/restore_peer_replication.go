@@ -96,31 +96,47 @@ func sortedSet(a []string) []string {
 	return slices.Compact(out)
 }
 
-// restoreProtection is the part of a restore's state the topology manager
-// enforces locally: held (no operator-issued replication start), restop
-// (Poll re-stops the receiver) and blocked (no clone into the site).
+// restoreProtection is every restore safety guard the topology manager
+// enforces locally, derived from status as one snapshot:
+//   - held: no operator-issued replication start (restorePeerHeld);
+//   - restop: Poll re-stops the receiver (restorePeerRestop);
+//   - blocked: no clone into the site (restoreRecloneBlocked);
+//   - pending: no automatic promotion (restoreReclonePending);
+//   - frozen: no cross-site action (topologyFrozen);
+//   - fenceSite/fenceOwner: offline_mode re-asserted on the primary.
 type restoreProtection struct {
-	held, restop, blocked []string
+	held, restop, blocked, pending []string
+	frozen                         bool
+	fenceSite, fenceOwner          string
 }
 
 // restoreProtectionFromStatus derives the protection from status.
 func restoreProtectionFromStatus(fg *v1alpha1.MysqlFailoverGroup) restoreProtection {
 	held, restop := restorePeerHoldFromStatus(fg)
-	return restoreProtection{held: sortedSet(held), restop: sortedSet(restop), blocked: sortedSet(restoreRecloneBlockedSites(fg))}
+	fenceSite, fenceOwner := restoreOfflineFenceSite(fg)
+	return restoreProtection{
+		held: sortedSet(held), restop: sortedSet(restop), blocked: sortedSet(restoreRecloneBlockedSites(fg)),
+		pending: sortedSet(restoreReclonePendingSites(fg)), frozen: inPlaceRestoreFreezesTopology(fg),
+		fenceSite: fenceSite, fenceOwner: fenceOwner,
+	}
 }
 
-// equal reports whether p and q protect the same sites.
+// equal reports whether p and q are the same guards.
 func (p restoreProtection) equal(q restoreProtection) bool {
-	return slices.Equal(p.held, q.held) && slices.Equal(p.restop, q.restop) && slices.Equal(p.blocked, q.blocked)
+	return slices.Equal(p.held, q.held) && slices.Equal(p.restop, q.restop) && slices.Equal(p.blocked, q.blocked) &&
+		slices.Equal(p.pending, q.pending) && p.frozen == q.frozen && p.fenceSite == q.fenceSite && p.fenceOwner == q.fenceOwner
 }
 
-// onlyTightens reports whether moving from cur to p only adds held or
-// blocked sites: a change that keeps replication stopped and clones out,
-// which is safe to apply from a possibly stale view. Any removal, and any
-// change to restop (which actively stops a receiver, and may stop one a
-// legitimate reclone started), is not.
+// onlyTightens reports whether moving from cur to p only adds guards: more
+// held, blocked or pending sites, a freeze, or an offline_mode fence where
+// none was set. That keeps replication stopped, clones and promotion out
+// and applications fenced, so it is safe to apply from a possibly stale
+// view. Any release, and any change to restop (which actively stops a
+// receiver, and may stop one a legitimate reclone started), is not.
 func (p restoreProtection) onlyTightens(cur restoreProtection) bool {
-	return slices.Equal(p.restop, cur.restop) && isSubset(cur.held, p.held) && isSubset(cur.blocked, p.blocked)
+	fenceOK := (p.fenceSite == cur.fenceSite && p.fenceOwner == cur.fenceOwner) || (cur.fenceSite == "" && p.fenceSite != "")
+	return slices.Equal(p.restop, cur.restop) && isSubset(cur.held, p.held) && isSubset(cur.blocked, p.blocked) &&
+		isSubset(cur.pending, p.pending) && (p.frozen || !cur.frozen) && fenceOK
 }
 
 func isSubset(sub, set []string) bool {
@@ -132,31 +148,58 @@ func isSubset(sub, set []string) bool {
 	return true
 }
 
-// restoreProtectionSnapshot returns a copy of the manager's protection.
+// restoreProtectionSnapshot returns a copy of the manager's guards.
 func (tm *TopologyManager) restoreProtectionSnapshot() restoreProtection {
+	tm.restoreFenceMu.Lock()
+	fenceSite, fenceOwner := tm.restoreFenceSite, tm.restoreFenceOwner
+	tm.restoreFenceMu.Unlock()
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return restoreProtection{
-		held:    append([]string(nil), tm.restorePeerHeld...),
-		restop:  append([]string(nil), tm.restorePeerRestop...),
-		blocked: append([]string(nil), tm.restoreRecloneBlocked...),
+		held:      append([]string(nil), tm.restorePeerHeld...),
+		restop:    append([]string(nil), tm.restorePeerRestop...),
+		blocked:   append([]string(nil), tm.restoreRecloneBlocked...),
+		pending:   append([]string(nil), tm.restoreReclonePending...),
+		frozen:    tm.topologyFrozen,
+		fenceSite: fenceSite, fenceOwner: fenceOwner,
 	}
 }
 
-// setRestoreProtection replaces the manager's protection.
+// setRestoreProtection replaces the manager's guards.
 func (tm *TopologyManager) setRestoreProtection(p restoreProtection) {
 	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	tm.restorePeerHeld, tm.restorePeerRestop, tm.restoreRecloneBlocked = sortedSet(p.held), sortedSet(p.restop), sortedSet(p.blocked)
+	held := sortedSet(p.held)
+	if !slices.Equal(held, tm.restorePeerHeld) {
+		// Held sites are excluded from promotion: re-run the decision.
+		tm.keyringRotationBlockedDirty = true
+	}
+	tm.restorePeerHeld, tm.restorePeerRestop, tm.restoreRecloneBlocked = held, sortedSet(p.restop), sortedSet(p.blocked)
+	tm.mu.Unlock()
+	tm.SetRestoreReclonePending(p.pending)
+	tm.SetTopologyFrozen(p.frozen)
+	tm.SetRestoreOfflineFence(p.fenceSite, p.fenceOwner)
 }
 
-// tightenRestoreProtection adds p's held and blocked sites, leaving
-// restop and every existing site alone.
+// tightenRestoreProtection adds p's guards (held, blocked and pending
+// sites, a freeze, a fence where none is set) and releases nothing;
+// restop is left alone.
 func (tm *TopologyManager) tightenRestoreProtection(p restoreProtection) {
+	cur := tm.restoreProtectionSnapshot()
 	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	tm.restorePeerHeld = sortedUnion(tm.restorePeerHeld, p.held)
+	held := sortedUnion(tm.restorePeerHeld, p.held)
+	if !slices.Equal(held, tm.restorePeerHeld) {
+		tm.keyringRotationBlockedDirty = true
+	}
+	tm.restorePeerHeld = held
 	tm.restoreRecloneBlocked = sortedUnion(tm.restoreRecloneBlocked, p.blocked)
+	tm.mu.Unlock()
+	tm.SetRestoreReclonePending(sortedUnion(cur.pending, p.pending))
+	if p.frozen {
+		tm.SetTopologyFrozen(true)
+	}
+	if cur.fenceSite == "" && p.fenceSite != "" {
+		tm.SetRestoreOfflineFence(p.fenceSite, p.fenceOwner)
+	}
 }
 
 // SetRestorePeerHold sets the held and re-stop sets directly (blocked is
@@ -166,13 +209,15 @@ func (tm *TopologyManager) SetRestorePeerHold(held, restop []string, authoritati
 	if tm == nil {
 		return
 	}
-	cur := tm.restoreProtectionSnapshot()
 	if authoritative {
-		cur.held, cur.restop = held, restop
-		tm.setRestoreProtection(cur)
+		tm.mu.Lock()
+		tm.restorePeerHeld, tm.restorePeerRestop = sortedSet(held), sortedSet(restop)
+		tm.mu.Unlock()
 		return
 	}
-	tm.tightenRestoreProtection(restoreProtection{held: held})
+	tm.mu.Lock()
+	tm.restorePeerHeld = sortedUnion(tm.restorePeerHeld, held)
+	tm.mu.Unlock()
 }
 
 // restorePeerHoldSets returns copies of the held and re-stop sets.
@@ -492,7 +537,7 @@ func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *
 	var fresh v1alpha1.MysqlFailoverGroup
 	if err := r.apiReader.Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil {
 		tm.tightenRestoreProtection(want)
-		r.logger.Warn("could not confirm a restore peer replication hold release; keeping the hold", "fg", client.ObjectKeyFromObject(fg).String(), "error", err)
+		r.logger.Warn("could not confirm a restore protection change; applying additions only", "fg", client.ObjectKeyFromObject(fg).String(), "error", err)
 		return err
 	}
 	tm.setRestoreProtection(restoreProtectionFromStatus(&fresh))
@@ -500,14 +545,14 @@ func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *
 	return nil
 }
 
-// initRestoreProtection sets a new topology manager's restore protection
-// (and the restore state it reads with it: the reclone-pending set, the
-// offline_mode fence and the freeze) before it starts, from a read through
-// the uncached API reader: the runner's cached list may predate the
-// restore queue, and the new manager has no hold of its own to keep. If
-// the read fails, a replacement keeps the manager it replaces' protection
-// (tightened with the cached view); a brand-new manager is not started
-// (the next sync retries).
+// initRestoreProtection sets every restore guard of a new topology manager
+// (restoreProtection) before it starts, from a read through the uncached
+// API reader: the runner's cached list may predate the restore queue, and
+// the new manager has no guard of its own to keep. If the read fails, a
+// replacement inherits every guard of the manager it replaces (tightened
+// with the cached view); a brand-new manager is not started (the next sync
+// retries). After start the guards change only through
+// applyRestoreProtection.
 func (r *TopologyManagerRunner) initRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, prev *managedTopology) error {
 	tm.restoreProtectionMu.Lock()
 	defer tm.restoreProtectionMu.Unlock()
@@ -527,9 +572,6 @@ func (r *TopologyManagerRunner) initRestoreProtection(ctx context.Context, tm *T
 		view = &fresh
 	}
 	tm.setRestoreProtection(restoreProtectionFromStatus(view))
-	tm.SetRestoreReclonePending(restoreReclonePendingSites(view))
-	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(view))
-	tm.SetTopologyFrozen(inPlaceRestoreFreezesTopology(view))
 	emitRestoreReclonePendingMetric(view)
 	return nil
 }
@@ -667,8 +709,8 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 	}
 
 	// The freeze normally reached the topology manager when Fencing was
-	// entered; push it again in case that manager was (re)started since.
-	r.Runner.SetTopologyFrozen(nn, inPlaceRestoreFreezesTopology(fg))
+	// entered; confirm it again in case that manager was (re)started since.
+	r.Runner.SetRestorePeerHold(ctx, fg)
 	if wait, err := r.Runner.RestoreMutationInFlight(nn, true); err != nil || wait != "" {
 		if err != nil {
 			wait = fmt.Sprintf("waiting for the topology manager: %v", err)
