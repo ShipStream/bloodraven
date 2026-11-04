@@ -28,9 +28,13 @@ func requireHelm(t *testing.T) {
 func TestWSMaxClientsChart(t *testing.T) {
 	requireHelm(t)
 	const wantError = "auxiliary.service.wsMaxClients must be a whole number from 0 (unlimited) to 2147483647"
+	const key = "auxiliary.service.wsMaxClients"
 	for _, tt := range []struct {
 		name, values, want string
-		wantError          bool
+		// args are extra helm flags; --set parses integers as int64 rather
+		// than the float64 a values file yields.
+		args      []string
+		wantError bool
 	}{
 		{name: "default", want: "100"},
 		{name: "zero is unlimited", values: "0", want: "0"},
@@ -48,13 +52,22 @@ func TestWSMaxClientsChart(t *testing.T) {
 		{name: "boolean", values: "false", wantError: true},
 		{name: "overflow", values: "2147483648", wantError: true},
 		{name: "overflow string", values: `"99999999999"`, wantError: true},
+		{name: "--set zero is unlimited", args: []string{"--set", key + "=0"}, want: "0"},
+		{name: "--set integer", args: []string{"--set", key + "=250"}, want: "250"},
+		{name: "--set negative", args: []string{"--set", key + "=-1"}, wantError: true},
+		{name: "--set overflow", args: []string{"--set", key + "=2147483648"}, wantError: true},
+		{name: "--set boolean", args: []string{"--set", key + "=false"}, wantError: true},
+		{name: "--set-string numeric", args: []string{"--set-string", key + "=5"}, want: "5"},
+		{name: "--set-string empty keeps default", args: []string{"--set-string", key + "="}, want: "100"},
+		{name: "--set-string non-numeric", args: []string{"--set-string", key + "=abc"}, wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			values := ""
 			if tt.values != "" {
 				values = "auxiliary:\n  service:\n    wsMaxClients: " + tt.values + "\n"
 			}
-			cmd := exec.Command("helm", "template", "test", ".", "--namespace", "operator-system", "--values", "-")
+			args := append([]string{"template", "test", ".", "--namespace", "operator-system", "--values", "-"}, tt.args...)
+			cmd := exec.Command("helm", args...)
 			cmd.Stdin = strings.NewReader(values)
 			out, err := cmd.CombinedOutput()
 			if tt.wantError {

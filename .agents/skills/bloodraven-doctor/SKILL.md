@@ -209,7 +209,7 @@ An ERROR `ordered update: old active has transactions the new primary lacks; not
 
 ### 7c. One group frozen while the operator is healthy
 
-If one group's status stops changing and the operator logs `failed to start topology manager` for it (or the group carries a `TopologyManagerStartFailed` Warning Event), that group has no running topology manager: no polling, no status writes, no failover. The error names the Secret to fix, and the runner retries every 30s. A WARN `connection material unreadable; keeping the running topology manager` means a Secret is being replaced and the existing manager is still running. See [playbook 24](./references/troubleshooting_playbooks.md#24-one-group-stopped-updating-no-running-topology-manager).
+If one group's status stops changing and the operator is still logging `failed to start topology manager` for it, that group has no running topology manager: no polling, no status writes, no failover. The error names the Secret to fix, and the runner retries every 30s. A WARN `connection material unreadable; keeping the running topology manager` means a Secret is being replaced and the existing manager is still running. The `TopologyManagerStartFailed`/`TopologyManagerStarted` Events are history, not current state: they are throttled and forgotten on an operator restart, so confirm with the log in the last couple of minutes and with `status.sites[].lastSeen` before declaring the manager absent. See [playbook 24](./references/troubleshooting_playbooks.md#24-one-group-stopped-updating-no-running-topology-manager).
 
 ### 8. Tenant database pending, adoption refused or account cleanup skipped
 

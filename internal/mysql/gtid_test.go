@@ -440,7 +440,9 @@ func TestGTIDSet_HasCommonUUIDs(t *testing.T) {
 		{name: "untagged vs tagged same uuid", a: "uuid1:1-5", b: "uuid1:app:1-3", want: true},
 		{name: "tagged vs untagged same uuid", a: "uuid1:app:1-3", b: "uuid1:1-5", want: true},
 		{name: "different tags same uuid", a: "uuid1:app:1-3", b: "uuid1:ops:1-3", want: true},
-		{name: "tag case is normalized", a: "uuid1:App:1-3", b: "uuid1:app:7-9", want: true},
+		// Tags are ignored here, so tag case cannot matter; ParseGTIDSet's
+		// lower-casing is covered by TestParseGTIDSet_TaggedGroupsWithinOneUUIDEntry.
+		{name: "mixed-case tags, same uuid", a: "uuid1:App:1-3", b: "uuid1:OPS:7-9", want: true},
 		{name: "tagged vs different uuid", a: "uuid1:app:1-3", b: "uuid2:app:1-3,uuid2:1-5", want: false},
 	}
 	for _, tt := range tests {

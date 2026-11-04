@@ -43,6 +43,15 @@ type startFailureState struct {
 	emittedErr string
 }
 
+// startWarning records when a group object was last sent a
+// TopologyManagerStartFailed Warning. The floor applies per object: client-go
+// throttles Events per involved object UID, so a group deleted and recreated
+// under the same name starts with a fresh floor.
+type startWarning struct {
+	uid types.UID
+	at  time.Time
+}
+
 func (r *TopologyManagerRunner) clockNow() time.Time {
 	if r.now != nil {
 		return r.now()
@@ -64,7 +73,7 @@ func (r *TopologyManagerRunner) noteStartFailure(fg *v1alpha1.MysqlFailoverGroup
 		r.startFailures = make(map[types.NamespacedName]*startFailureState)
 	}
 	if r.lastStartWarning == nil {
-		r.lastStartWarning = make(map[types.NamespacedName]time.Time)
+		r.lastStartWarning = make(map[types.NamespacedName]startWarning)
 	}
 	st := r.startFailures[nn]
 	if st == nil || st.uid != fg.UID {
@@ -77,7 +86,8 @@ func (r *TopologyManagerRunner) noteStartFailure(fg *v1alpha1.MysqlFailoverGroup
 	emit := false
 	if st.hadManager || st.count >= 2 {
 		last, warnedBefore := r.lastStartWarning[nn]
-		since := now.Sub(last)
+		warnedBefore = warnedBefore && last.uid == fg.UID
+		since := now.Sub(last.at)
 		if !warnedBefore || since >= startFailureWarningFloor {
 			emit = !st.warned || msg != st.emittedErr || since >= startFailureWarningHeartbeat
 		}
@@ -85,7 +95,7 @@ func (r *TopologyManagerRunner) noteStartFailure(fg *v1alpha1.MysqlFailoverGroup
 	if emit {
 		st.warned = true
 		st.emittedErr = msg
-		r.lastStartWarning[nn] = now
+		r.lastStartWarning[nn] = startWarning{uid: fg.UID, at: now}
 	}
 	r.mu.Unlock()
 

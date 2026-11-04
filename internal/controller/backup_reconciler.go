@@ -9,7 +9,6 @@ import (
 	"sort"
 	"time"
 
-	mysqldriver "github.com/go-sql-driver/mysql"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -28,6 +27,7 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // Condition types on MysqlBackup.status.conditions.
@@ -694,7 +694,7 @@ func (r *MysqlBackupReconciler) ensureDerivedCredsSecret(ctx context.Context, fg
 		if !ok {
 			return fmt.Errorf("secret %s missing 'dsn' key", backupSecretName)
 		}
-		parsed, err := mysqldriver.ParseDSN(string(dsnBytes))
+		parsed, err := internalmysql.ParseDSN(string(dsnBytes))
 		if err != nil {
 			return fmt.Errorf("parse dsn: %w", err)
 		}

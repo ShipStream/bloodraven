@@ -117,7 +117,7 @@ type TopologyManagerRunner struct {
 	// and lastStartWarning when each was last warned about; both drive the
 	// rate-limited TopologyManagerStartFailed Event. Guarded by mu.
 	startFailures    map[types.NamespacedName]*startFailureState
-	lastStartWarning map[types.NamespacedName]time.Time
+	lastStartWarning map[types.NamespacedName]startWarning
 	// now is the clock for start-failure Events; nil means time.Now.
 	now func() time.Time
 }
@@ -2371,7 +2371,7 @@ func removeCondition(conditions *[]metav1.Condition, condType string) {
 // sets require_secure_transport=ON — would have every site probe fail
 // with Error 3159, and no failover could ever run.
 func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsConfigName string) (string, error) {
-	parsed, err := mysql.ParseDSN(baseDSN)
+	parsed, err := internalmysql.ParseDSN(baseDSN)
 	if err != nil {
 		return "", fmt.Errorf("parse DSN: %w", err)
 	}

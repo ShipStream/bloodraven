@@ -295,20 +295,70 @@ func TestStartFailureEvent_DeletedGroupPruned(t *testing.T) {
 	}
 }
 
-// Event messages are readable by anyone who can list Events in the
-// namespace, so a DSN parse failure must not carry the password.
-func TestStartFailureEvent_MessageOmitsDSNPassword(t *testing.T) {
+// A group deleted and recreated under the same name between two resyncs is
+// a new object: client-go throttles Events per object UID, so the old
+// object's floor must not hold back the new one's first Warning.
+func TestStartFailureEvent_RecreatedWithinOneSyncGetsFreshFloor(t *testing.T) {
 	h := newStartEventHarness(t)
-	h.setDSN(map[string][]byte{"dsn": []byte("op:s3cr3t-pw@tcp(127.0.0.1:1/mysql")})
+	ctx := context.Background()
+	h.breakSecret()
 	h.sync()
-	ev := h.sync()
-	if startFailureWarnings(ev) != 1 {
-		t.Fatalf("want a Warning for the malformed DSN, got %v", ev)
+	if ev := h.sync(); startFailureWarnings(ev) != 1 {
+		t.Fatalf("want a Warning, got %v", ev)
 	}
-	if !strings.Contains(ev[0], "DSN") {
-		t.Fatalf("Warning does not name the DSN failure: %q", ev[0])
+
+	var cur v1alpha1.MysqlFailoverGroup
+	if err := h.c.Get(ctx, client.ObjectKeyFromObject(h.fg), &cur); err != nil {
+		t.Fatalf("get fg: %v", err)
 	}
-	if strings.Contains(ev[0], "s3cr3t-pw") {
-		t.Fatalf("Warning leaks the DSN password: %q", ev[0])
+	if err := h.c.Delete(ctx, &cur); err != nil {
+		t.Fatalf("delete fg: %v", err)
+	}
+	recreated := h.fg.DeepCopy()
+	recreated.ResourceVersion = ""
+	recreated.UID = "test-uid-recreated"
+	if err := h.c.Create(ctx, recreated); err != nil {
+		t.Fatalf("recreate fg: %v", err)
+	}
+
+	if ev := h.sync(); len(ev) != 0 {
+		t.Fatalf("recreated group's first failure: want no events, got %v", ev)
+	}
+	// One minute after the old object's Warning: well inside its floor.
+	if ev := h.sync(); startFailureWarnings(ev) != 1 {
+		t.Fatalf("recreated group's second failure: want one Warning despite the old object's floor, got %v", ev)
+	}
+}
+
+// Event messages are readable by anyone who can list Events in the
+// namespace, so no DSN parse failure may carry the password. The driver's own
+// errors can quote the DSN: without "@" the user:password is reported as an
+// unknown network name, and bad parameter values are echoed.
+func TestStartFailureEvent_MessageOmitsDSNPassword(t *testing.T) {
+	const secret = "s3cr3t-pw"
+	for _, tc := range []struct{ name, dsn string }{
+		{"unterminated address", "op:" + secret + "@tcp(127.0.0.1:1/mysql"},
+		{"missing @", "op:" + secret + "/mysql"},
+		{"password only", secret + "/mysql"},
+		{"bad bool param", "op:" + secret + "@tcp(127.0.0.1:1)/mysql?parseTime=" + secret},
+		{"unknown tls config", "op:" + secret + "@tcp(127.0.0.1:1)/mysql?tls=" + secret},
+		{"bad duration", "op:" + secret + "@tcp(127.0.0.1:1)/mysql?timeout=" + secret},
+		{"bad dbname escape", "op:" + secret + "@tcp(127.0.0.1:1)/" + secret + "%zz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newStartEventHarness(t)
+			h.setDSN(map[string][]byte{"dsn": []byte(tc.dsn)})
+			h.sync()
+			ev := h.sync()
+			if startFailureWarnings(ev) != 1 {
+				t.Fatalf("want a Warning for the malformed DSN, got %v", ev)
+			}
+			if !strings.Contains(ev[0], "build site dc1 DSN") || !strings.Contains(ev[0], "DSN") {
+				t.Fatalf("Warning lost the site and DSN context: %q", ev[0])
+			}
+			if strings.Contains(ev[0], secret) {
+				t.Fatalf("Warning leaks the DSN password: %q", ev[0])
+			}
+		})
 	}
 }

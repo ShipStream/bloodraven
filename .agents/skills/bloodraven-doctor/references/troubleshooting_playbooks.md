@@ -619,13 +619,17 @@ A healthy operator pod does not guarantee that every group has a live topology m
 - One group's `status.sites[]` and conditions stop changing while other groups keep updating.
 - Losing the primary does not trigger failover.
 - Operator log: ERROR `failed to start topology manager` for that `fg`, repeating every 30s.
-- Warning Event `TopologyManagerStartFailed` on the group, carrying the same error. It is rate-limited (at once when a running manager was torn down, otherwise after one 30s retry, then at most every 5 minutes), so read the log for the latest attempt. A Normal `TopologyManagerStarted` Event marks the recovery.
+- Warning Event `TopologyManagerStartFailed` on the group, carrying the same error. It is rate-limited (at once when a running manager was torn down, otherwise after one 30s retry, then at most every 5 minutes), so read the log for the latest attempt. A Normal `TopologyManagerStarted` Event marks a recovery the same operator process saw.
+- These Events are history, not current state, in either direction. A group that recovered and broke again within 5 minutes can still show `TopologyManagerStarted` last. The operator forgets a failure episode when it restarts, so a group fixed after an operator restart never gets `TopologyManagerStarted` and can still show `TopologyManagerStartFailed` last. Before declaring the manager absent, confirm it from current evidence: the ERROR repeating every 30s in the last couple of minutes of operator log, and `status.sites[].lastSeen` no longer advancing.
 
 ### Diagnostic steps
 1. Read the error:
    ```bash
    kubectl get events -n <ns> --field-selector involvedObject.name=<group>,reason=TopologyManagerStartFailed
    kubectl logs -n bloodraven deploy/bloodraven | grep -E 'failed to start topology manager|topology manager exited|connection material unreadable' | grep '<ns>/<group>'
+   # Current state: a line every 30s here means no manager right now.
+   kubectl logs -n bloodraven deploy/bloodraven --since=2m | grep 'failed to start topology manager' | grep '<ns>/<group>'
+   kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{range .status.sites[*]}{.name}{" lastSeen="}{.lastSeen}{"\n"}{end}'
    ```
 2. Typical causes:
    - The operator Secret is missing (`get operator secret ... not found`).
