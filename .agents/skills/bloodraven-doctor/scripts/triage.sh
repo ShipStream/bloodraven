@@ -143,6 +143,15 @@ kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME" -o wi
 echo ""
 echo "--- 6. Recent Anomalous Events (Last 10) ---"
 kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -n 10 || echo "No events found."
+# An aggregated, rate-limited Event can fall out of the last 10: ask for the
+# "no topology manager running" pair directly.
+MANAGER_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.name=$MFG_NAME" --sort-by=.lastTimestamp \
+    -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
+    | grep -E 'TopologyManagerStart(ed|Failed)' || true)
+if [[ -n "$MANAGER_EVENTS" ]]; then
+    echo "Topology manager start events for $MFG_NAME (a trailing TopologyManagerStartFailed means no polling, status writes or failover; see playbook 24):"
+    echo "$MANAGER_EVENTS"
+fi
 
 echo ""
 echo "--- 7. Deployment Coordination ---"
