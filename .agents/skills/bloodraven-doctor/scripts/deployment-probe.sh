@@ -13,7 +13,7 @@ for tool in kubectl jq; do
 done
 
 echo "--- Deployment topology and planned operations ---"
-kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o json | jq '{
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o json | jq '{
     group: .metadata.name, namespace: .metadata.namespace,
     activeSite: .status.activeSite, topologyGeneration: .status.topologyGeneration,
     plannedFailover: .status.plannedFailover, updatePhase: .status.updatePhase,

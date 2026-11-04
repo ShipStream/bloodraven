@@ -136,11 +136,12 @@ var (
 
 	// --- Recovery metrics -----------------------------------------------
 
-	// DivergentTransactions is the number of divergent transactions on a
-	// site pending recovery after an emergency failover. 0 when healthy.
+	// DivergentTransactions is the number of transactions on a site that the
+	// primary lacks: a returning old primary after an emergency failover, or a
+	// follower found by the replica GTID audit. 0 when healthy.
 	DivergentTransactions = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_divergent_transactions",
-		Help: "Number of divergent transactions on a site pending recovery. 0 when healthy.",
+		Help: "Number of transactions on a site that the primary lacks (old-primary recovery or replica GTID audit). 0 when healthy.",
 	}, []string{"site"})
 
 	// RecloneOperations counts admin-triggered reclone operations per site.

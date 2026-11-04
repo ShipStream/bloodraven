@@ -4,6 +4,7 @@
 # Called by:
 #   .github/workflows/e2e.yml (nightly, manual, PR label)
 #   .github/workflows/release.yml (release gate)
+# Images can come from .github/workflows/_e2e-images.yml or a local build.
 name: E2E (reusable)
 
 on:
@@ -32,6 +33,11 @@ on:
         required: false
         default: false
         type: boolean
+      images-artifact:
+        description: "Same-run artifact holding e2e-images.tar from _e2e-images.yml; empty builds images locally"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -60,13 +66,27 @@ jobs:
       - name: Build playground-chaos
         run: make build-playground-chaos
 
+      - name: Download prebuilt E2E images
+        id: dl
+        if: inputs.images-artifact != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.images-artifact }}
+          path: ${{ runner.temp }}/e2e-images
+      - name: Load prebuilt E2E images
+        id: load
+        if: steps.dl.outcome == 'success'
+        continue-on-error: true
+        run: docker load -i "$RUNNER_TEMP/e2e-images/e2e-images.tar"
       - name: Build Docker images
+        # Rebuild if no artifact was requested, or downloading/loading it failed.
+        if: steps.load.outcome != 'success'
+        env:
+          REQUESTED: ${{ inputs.images-artifact }}
         run: |
-          docker build --target bloodraven -t bloodraven:playground .
-          docker build --target sidecar -t bloodraven-sidecar:playground .
-          docker build -t bloodraven-counter:playground playground/counter-app
-          docker build -t bloodraven-dashboard:playground playground/dashboard
-          docker build -t bloodraven-dns-webhook:playground playground/dns-webhook
+          [ -z "$REQUESTED" ] || echo "::warning::prebuilt images artifact '$REQUESTED' unavailable; building locally"
+          make e2e-images
 
       - name: Create kind cluster
         uses: helm/kind-action@v1.15.1
@@ -153,6 +173,7 @@ jobs:
           name: e2e-${{ inputs.profile }}-junit
           path: playground/chaos-results/e2e-${{ inputs.profile }}-junit.xml
           retention-days: 30
+          overwrite: true
 
       - name: Upload chaos forensics
         if: failure()

@@ -31,9 +31,9 @@ const (
 
 // HandoffOptions bounds a maintenance handoff. Zero values use the defaults.
 type HandoffOptions struct {
-	// PreFenceCatchUp bounds the wait, before the source is fenced, for the
-	// candidate to reach the source's current GTID set. Writes continue
-	// during this wait.
+	// PreFenceCatchUp bounds everything before the source is fenced: the
+	// candidate and source GTID reads and the wait for the candidate to
+	// reach the source's current set. Writes continue during this phase.
 	PreFenceCatchUp time.Duration
 	// CatchUp bounds the fenced phase: from the fence, through evicting
 	// application connections and reading the fenced GTID set, to the
@@ -79,9 +79,11 @@ func (o HandoffOptions) withDefaults() HandoffOptions {
 //
 // The sequence:
 //  1. Confirm the source is writable (that is the state an abort restores).
-//  2. Read the source's GTID_EXECUTED and wait, unfenced, for the candidate
-//     to contain it, so the fenced phase below is normally short. A
-//     refusal here pauses no writes.
+//  2. Read the candidate's GTID_EXECUTED, then the source's, and refuse a
+//     candidate holding transactions the source lacks: promoting it would
+//     make that history authoritative. Then wait, unfenced, for the
+//     candidate to contain the source's set, so the fenced phase below is
+//     normally short. A refusal here pauses no writes.
 //  3. Fence the source with super_read_only=ON. A failed fence aborts.
 //  4. Kill application connections on the source (best effort).
 //  5. Read the fenced source's GTID_EXECUTED; nothing can be added to it now.
@@ -89,7 +91,8 @@ func (o HandoffOptions) withDefaults() HandoffOptions {
 //     an unreadable or unparseable set, or the CatchUp budget, which runs
 //     from step 3, aborts.
 //  7. Promote the candidate, re-checking after STOP REPLICA and after
-//     RESET REPLICA ALL that it still contains the fenced set.
+//     RESET REPLICA ALL that its set equals the fenced set: nothing
+//     missing, nothing extra.
 //
 // Both waits probe the source too: if it stops answering for
 // SourceLossWindow, the handoff ends with errActivePrimaryLost so emergency
@@ -113,11 +116,33 @@ func (f *FailoverController) ExecuteHandoff(ctx context.Context, candidate, sour
 		return "", f.refuseHandoff(candidateSite, errors.New("maintenance handoff: source is read-only; refusing to hand off from a fenced primary"))
 	}
 
-	current, err := readGTIDSet(ctx, source)
+	// Everything before the fence (both reads and the catch-up wait) shares
+	// one PreFenceCatchUp deadline, so a slow candidate cannot hold the
+	// update, and with it emergency failover, for longer than that.
+	preFenceCtx, cancelPreFence := context.WithTimeout(ctx, opts.PreFenceCatchUp)
+	defer cancelPreFence()
+	// Candidate first, then source: a transaction the candidate applies
+	// between the two reads is already in the source's set when the source
+	// is read, so anything left over is history the source never had.
+	candidateSet, err := readGTIDSet(preFenceCtx, candidate)
+	if err != nil {
+		return "", f.refuseHandoff(candidateSite, fmt.Errorf("maintenance handoff: read candidate GTID set: %w", err))
+	}
+	current, err := readGTIDSet(preFenceCtx, source)
 	if err != nil {
 		return "", f.refuseHandoff(candidateSite, fmt.Errorf("maintenance handoff: read source GTID set: %w", err))
 	}
-	if err := f.waitForCandidateGTIDs(ctx, candidate, source, current, opts.PreFenceCatchUp, opts); err != nil {
+	if extra := candidateSet.Subtract(current); !extra.IsEmpty() {
+		divergent := newDivergentCandidateError(candidateSite, extra)
+		f.logger.Warn("maintenance handoff refused; candidate has transactions the source lacks",
+			"candidate", candidateSite, "extraTransactions", divergent.Transactions, "extraGtid", divergent.Gtid)
+		return "", fmt.Errorf("maintenance handoff: %w", divergent)
+	}
+	remaining := opts.PreFenceCatchUp
+	if deadline, ok := preFenceCtx.Deadline(); ok {
+		remaining = max(time.Until(deadline).Round(time.Millisecond), 0)
+	}
+	if err := f.waitForCandidateGTIDs(preFenceCtx, candidate, source, current, remaining, opts); err != nil {
 		return "", f.refuseHandoff(candidateSite,
 			fmt.Errorf("maintenance handoff: candidate %s did not reach the source GTID set before fencing: %w", candidateSite, err))
 	}
@@ -315,6 +340,41 @@ func (f *FailoverController) waitForCandidateGTIDs(ctx context.Context, candidat
 }
 
 var errUnparseableGTID = errors.New("unparseable GTID set")
+
+// DivergentCandidateError reports a maintenance handoff refused because the
+// candidate holds transactions the source never committed. Promoting it
+// would make that history authoritative, so the handoff never does.
+type DivergentCandidateError struct {
+	Candidate string
+	// Transactions and Gtid describe the candidate's extra set (Gtid may
+	// be truncated for very long sets).
+	Transactions int64
+	Gtid         string
+}
+
+func (e *DivergentCandidateError) Error() string {
+	return fmt.Sprintf("candidate %s has %d transactions the source lacks (%s); reclone it or make the source contain them",
+		e.Candidate, e.Transactions, e.Gtid)
+}
+
+func newDivergentCandidateError(candidate string, extra mysql.GTIDSet) *DivergentCandidateError {
+	return &DivergentCandidateError{
+		Candidate:    candidate,
+		Transactions: extra.TransactionCount(),
+		Gtid:         truncateGtidSet(extra.String()),
+	}
+}
+
+// maxLoggedGtidSet bounds a GTID set copied into a log record or error:
+// a long-diverged site can carry thousands of intervals.
+const maxLoggedGtidSet = 1024
+
+func truncateGtidSet(s string) string {
+	if len(s) <= maxLoggedGtidSet {
+		return s
+	}
+	return s[:maxLoggedGtidSet] + "…"
+}
 
 func readGTIDSet(ctx context.Context, c gtidExecutedReader) (mysql.GTIDSet, error) {
 	_, set, err := readGTIDSetRaw(ctx, c)

@@ -67,6 +67,31 @@ func TestGetArchiverStatusDecodesPayload(t *testing.T) {
 	}
 }
 
+// An older sidecar never sends storeReady; that must decode as "not
+// reported", never as an explicit false (which means the store failed).
+func TestGetArchiverStatusStoreReadyAbsentIsNotFalse(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want *bool
+	}{
+		{`{"enabled":true}`, nil},
+		{`{"enabled":true,"storeReady":false,"lastError":"archive store init: x"}`, new(false)},
+		{`{"enabled":true,"storeReady":true}`, new(true)},
+	} {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		got, err := NewSidecarClient(ts.URL).GetArchiverStatus(context.Background())
+		ts.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		if (got.StoreReady == nil) != (tc.want == nil) || (got.StoreReady != nil && *got.StoreReady != *tc.want) {
+			t.Fatalf("%s: StoreReady = %v, want %v", tc.body, got.StoreReady, tc.want)
+		}
+	}
+}
+
 func TestGetArchiverStatusNon200Errors(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

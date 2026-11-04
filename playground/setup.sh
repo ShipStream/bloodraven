@@ -412,6 +412,9 @@ if [[ "$READY" -lt "$EXPECTED_SITE_COUNT" ]]; then
 fi
 
 info "Creating replication user on every MySQL site..."
+# Run the per-site user setup with sql_log_bin=0: binlogged, it would give
+# each site a local GTID the others lack, which the operator's replica GTID
+# audit reports as divergence and which blocks ordered updates.
 REPL_USER=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_USER}' | base64 -d)
 REPL_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_PASSWORD}' | base64 -d)
 ROOT_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | base64 -d)
@@ -425,7 +428,7 @@ for site in "${SITE_NAMES[@]}"; do
       env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT @@global.super_read_only" 2>/dev/null || echo 0)
     LAST_ERR=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
       env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -e \
-      "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; \
+      "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; SET SESSION sql_log_bin=0; \
        INSTALL PLUGIN clone SONAME 'mysql_clone.so'; \
        CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
        GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
@@ -433,7 +436,7 @@ for site in "${SITE_NAMES[@]}"; do
     if [[ "$CREATED" != "true" ]] && grep -Eq "(Function|Plugin) 'clone' already exists|already installed" <<<"$LAST_ERR"; then
       LAST_ERR=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
         env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -e \
-        "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; \
+        "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; SET SESSION sql_log_bin=0; \
          CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
          GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
          FLUSH PRIVILEGES;" 2>&1) && CREATED=true || CREATED=false

@@ -8,6 +8,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=mfg;mfgs,categories=bloodraven;mysql
 // +kubebuilder:printcolumn:name="Active",type=string,JSONPath=`.status.activeSite`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
@@ -625,11 +626,12 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	LastBackupTime *metav1.Time `json:"lastBackupTime,omitempty"`
 
-	// PITR is the API surface for surfacing a summary of the
-	// continuous binary-log archive (oldest/newest archived events,
-	// count, bytes). Reserved: the v1alpha1 controller does not yet
-	// populate this field. Live archiver health is exposed via the
-	// sidecar's /archiver/status endpoint in the meantime.
+	// PITR summarizes the continuous binary-log archive (oldest/newest
+	// archived events, count, bytes, per-site errors). The operator
+	// populates it from its periodic polls of each sidecar's
+	// /archiver/status endpoint while spec.backup.pitr.enabled is true.
+	// Whether archiving is currently running is reported by the
+	// PITRArchiveReady condition.
 	// +optional
 	PITR *PITRStatus `json:"pitr,omitempty"`
 
@@ -675,21 +677,38 @@ type SiteStatus struct {
 	// RecoveryState tracks old-primary recovery progress after failover.
 	// Empty when no recovery is needed. RecoveryInProgress means the site is
 	// being reconfigured, or is stabilizing, as a replica of the current primary.
-	// RecoveryBlocked means divergent transactions were detected and the site
-	// must be re-cloned.
+	// RecoveryBlocked means the site holds transactions the primary lacks
+	// (see DivergenceDetectedBy): it is not promoted by an ordered update or
+	// a planned failover, and it must be recloned or the primary made to
+	// contain the set. Replication may still be running.
 	// +kubebuilder:validation:Enum="";RecoveryInProgress;RecoveryBlocked
 	// +optional
 	RecoveryState string `json:"recoveryState,omitempty"`
 
 	// DivergentGtid is the GTID set of transactions on this site that
-	// diverge from the current primary. Populated when RecoveryState is
-	// RecoveryBlocked.
+	// the primary named by DivergenceComparedTo lacks. Populated when
+	// RecoveryState is RecoveryBlocked.
 	// +optional
 	DivergentGtid string `json:"divergentGtid,omitempty"`
 
 	// DivergentTransactionCount is the number of divergent transactions.
 	// +optional
 	DivergentTransactionCount *int64 `json:"divergentTransactionCount,omitempty"`
+
+	// DivergenceDetectedBy names the check that recorded DivergentGtid:
+	// OldPrimaryRecovery (a returning former primary was compared with
+	// the new primary) or ReplicaAudit (a replica, possibly replicating
+	// normally, was found to hold transactions the primary lacks).
+	// Populated when RecoveryState is RecoveryBlocked.
+	// +kubebuilder:validation:Enum="";OldPrimaryRecovery;ReplicaAudit
+	// +optional
+	DivergenceDetectedBy string `json:"divergenceDetectedBy,omitempty"`
+
+	// DivergenceComparedTo is the site whose GTID set DivergentGtid was
+	// computed against: the primary at the time of the comparison.
+	// Populated when RecoveryState is RecoveryBlocked.
+	// +optional
+	DivergenceComparedTo string `json:"divergenceComparedTo,omitempty"`
 
 	// SourceHost is the replication source reported by MySQL.
 	// +optional

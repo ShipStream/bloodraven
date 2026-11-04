@@ -30,9 +30,13 @@ type ReplicaStatus struct {
 	// thread, or on a multithreaded replica the coordinator, which also
 	// reports worker failures. A non-empty value means the applier stopped
 	// and cannot apply the relay log without intervention.
-	LastSQLErrno     int
-	LastSQLError     string
-	SourceHost       string
+	LastSQLErrno int
+	LastSQLError string
+	SourceHost   string
+	// SourceUUID is the server_uuid of the source the receiver last
+	// connected to (Source_UUID). It changes when the source server is
+	// replaced, even under the same host name.
+	SourceUUID       string
 	ExecutedGtidSet  string
 	RetrievedGtidSet string
 }
@@ -180,6 +184,13 @@ func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
 	}
 	if v, ok := colMap["Master_Host"]; ok && v.Valid && rs.SourceHost == "" {
 		rs.SourceHost = v.String
+	}
+
+	if v, ok := colMap["Source_UUID"]; ok && v.Valid {
+		rs.SourceUUID = strings.TrimSpace(v.String)
+	}
+	if v, ok := colMap["Master_UUID"]; ok && v.Valid && rs.SourceUUID == "" {
+		rs.SourceUUID = strings.TrimSpace(v.String)
 	}
 
 	if v, ok := colMap["Executed_Gtid_Set"]; ok && v.Valid {

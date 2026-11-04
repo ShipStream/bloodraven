@@ -84,7 +84,7 @@ echo "📦 Collecting Bloodraven Support Bundle..."
 echo "Group: $MFG_NAME | Namespace: $NAMESPACE | Destination: $OUTPUT_FILE"
 
 # 1. Capture CR specification & status (redacting obvious passwords/secrets if any)
-kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o yaml 2>/dev/null | \
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o yaml 2>/dev/null | \
     sed -E 's/(password|secret|key|token): .*/\1: "[REDACTED]"/g' > "$OUTPUT_DIR/mfg.yaml" || true
 
 # 2. Capture Pods & PVCs

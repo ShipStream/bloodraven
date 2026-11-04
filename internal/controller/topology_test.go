@@ -1923,7 +1923,7 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 	pollN(tm, 2)
 
 	tm.mu.Lock()
-	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateBlocked, divergentGtid: "aaaa:50-55", divergentCount: 6}
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateInProgress}
 	tm.lastFailoverTarget = ""
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
 	tm.mu.Unlock()
@@ -1941,6 +1941,36 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 	tm.mu.RUnlock()
 	if rec != nil {
 		t.Fatalf("recovery state not cleared: %+v", rec)
+	}
+}
+
+// Issue #202: a replica with healthy threads can still hold transactions
+// the primary lacks. Thread health never clears a divergence block; only
+// a fresh containment proof (the replica audit) does.
+func TestCheckRecovery_HealthyReplicationDoesNotClearDivergenceBlock(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	tm.autoBootstrapSuppressed = true
+
+	pollN(tm, 2)
+
+	tm.mu.Lock()
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateBlocked, divergentGtid: "aaaa:50-55", divergentCount: 6}
+	tm.lastFailoverTarget = ""
+	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
+	tm.mu.Unlock()
+
+	tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{
+		nil,
+		{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"},
+	})
+
+	tm.mu.RLock()
+	rec := tm.recovery["dc2"]
+	tm.mu.RUnlock()
+	if rec == nil || rec.state != recoveryStateBlocked || rec.divergentGtid != "aaaa:50-55" {
+		t.Fatalf("divergence block cleared on thread health: %+v", rec)
 	}
 }
 

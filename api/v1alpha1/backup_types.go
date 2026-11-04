@@ -150,8 +150,10 @@ type PITRSpec struct {
 }
 
 // PITRStatus is the observed summary of continuous binlog archival for
-// a failover group. Populated by the operator from periodic scans of
-// the per-site manifest files in storage.
+// a failover group. Populated by the operator from periodic polls of
+// each sidecar's /archiver/status endpoint, which reports aggregates of
+// that site's manifest. While a sidecar does not answer, its last
+// reported coverage is kept and Message says so.
 type PITRStatus struct {
 	// Enabled mirrors spec.backup.pitr.enabled so consumers (status
 	// widgets, `kubectl get -o wide`) can see at a glance whether
@@ -183,8 +185,10 @@ type PITRStatus struct {
 	// binlog file was uploaded (archivedAt on the manifest entry).
 	LastArchivedTime *metav1.Time `json:"lastArchivedTime,omitempty"`
 
-	// Message is a human-readable status string (e.g. a parse error
-	// from the last manifest read). Empty on the happy path.
+	// Message lists per-site problems as "site: error" joined with "; "
+	// (for example an archive store that cannot be initialized, a
+	// manifest read error, or an unreachable sidecar, in which case the
+	// coverage fields are last-known). Empty on the happy path.
 	Message string `json:"message,omitempty"`
 }
 

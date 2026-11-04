@@ -216,6 +216,19 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 			"planned-failover: no observed status for site %q yet; retry after the operator completes its first poll cycle",
 			req.Site)
 	}
+	// A target holding transactions the primary lacks is refused before
+	// anything is fenced: promoting it would make that history
+	// authoritative. Reject, do not defer: a human resolves it (reclone, or
+	// make the primary contain the set) and re-annotates.
+	if targetStatus.RecoveryState == "RecoveryBlocked" {
+		var count int64
+		if targetStatus.DivergentTransactionCount != nil {
+			count = *targetStatus.DivergentTransactionCount
+		}
+		return PlannedFailoverReject, "DivergentTarget", fmt.Errorf(
+			"planned-failover: site %q is divergent (%d transactions the primary lacks: %s); reclone it or make the primary contain them before it can be promoted",
+			req.Site, count, truncateGtidSet(targetStatus.DivergentGtid))
+	}
 	if targetStatus.State != "read-only" {
 		return PlannedFailoverReject, "TargetUnhealthy", fmt.Errorf(
 			"planned-failover: site %q is in state %q; target must be a healthy read-only replica",

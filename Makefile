@@ -1,7 +1,7 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 GOLANGCI_LINT_VERSION := v2.14.0
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration test-license-roundtrip dst dst-repro fmt vet install-lint lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-check course-drift
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration test-license-roundtrip dst dst-repro fmt vet install-lint golangci-lint-version lint docker-build e2e-images chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-verify-only course-check course-drift
 
 ##@ General
 
@@ -66,6 +66,13 @@ docker-build: ## Build Docker images for both operator and sidecar
 	docker build --target bloodraven -t bloodraven .
 	docker build --target sidecar -t bloodraven-sidecar .
 
+e2e-images: ## Build the five playground images the E2E suite loads into kind
+	docker build --target bloodraven -t bloodraven:playground .
+	docker build --target sidecar -t bloodraven-sidecar:playground .
+	docker build -t bloodraven-counter:playground playground/counter-app
+	docker build -t bloodraven-dashboard:playground playground/dashboard
+	docker build -t bloodraven-dns-webhook:playground playground/dns-webhook
+
 ##@ Code Generation
 
 generate: ## Regenerate deep copy code
@@ -124,6 +131,9 @@ vet: ## Run go vet
 
 install-lint: ## Install the pinned golangci-lint into bin/ (also used by CI)
 	GOBIN="$(CURDIR)/bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+golangci-lint-version: ## Print the pinned golangci-lint version (CI cache key)
+	@echo $(GOLANGCI_LINT_VERSION)
 
 lint: ## Run golangci-lint (install with make install-lint first)
 	./bin/golangci-lint run ./...
@@ -191,9 +201,11 @@ course-serve: course-build ## Serve the built course site for review (production
 		python3 -m http.server $(COURSE_SERVE_PORT) --bind $(COURSE_SERVE_ADDR)
 
 course-verify: course-build ## Run the course content gates and runtime tests
-	@# Both run against dist/, so the build above is a real dependency, not
-	@# just ordering: `verify` reads the built pages and `test` drives them in
-	@# jsdom.
+	@# Recursive invocation orders build before verification even under -j.
+	@$(MAKE) --no-print-directory course-verify-only
+
+course-verify-only: ## Run the course gates and runtime tests against the existing build (no rebuild)
+	@test -d $(COURSE_DIR)/$(COURSE_SLUG)/dist || { echo "ERROR: no course build; run 'make course-build' first."; exit 1; }
 	cd $(COURSE_DIR) && bun run verify && bun run test
 
 course-check: course ## Fail if site/public/courses is stale relative to the course source

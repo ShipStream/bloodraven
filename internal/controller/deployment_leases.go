@@ -292,10 +292,28 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 	if s := fg.Status.RestoreInPlace; s != nil && s.Phase != v1alpha1.RestoreInPlaceSucceeded && s.Phase != v1alpha1.RestoreInPlaceFailed && s.Phase != "" {
 		return "RestoreInPlace"
 	}
+	auditOnly := divergenceIsReplicaAuditOnly(fg)
 	for _, name := range []string{"Degraded", "RecoveryPending", "Bootstrapping"} {
 		if c := apimeta.FindStatusCondition(fg.Status.Conditions, name); c != nil && c.Status == metav1.ConditionTrue {
 			if name == "Degraded" && c.Reason == "ReplicationLagging" {
 				continue
+			}
+			// A replica-audit divergence report is an integrity warning
+			// about a site that keeps replicating; like lag it does not
+			// make the group unstable for deployments. Anything it could
+			// hide is still checked below (Ready, per-site replication and
+			// source convergence). A returning old primary's report still
+			// gates, as it always has.
+			if c.Reason == "DivergentTransactions" && (name == "Degraded" || auditOnly) {
+				continue
+			}
+			// RecoveryPending summarizes one site. When it names a
+			// replica's divergence but another site's recovery is what
+			// gates, report that site's state instead.
+			if name == "RecoveryPending" && c.Reason == "DivergentTransactions" {
+				if reason := gatingRecoveryState(fg); reason != "" {
+					return reason
+				}
 			}
 			if c.Reason != "" {
 				return c.Reason
@@ -325,7 +343,7 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 		if s.Name != fg.Status.ActiveSite && s.State != "read-only" {
 			return "SiteNotReady"
 		}
-		if s.RecoveryState != "" {
+		if s.RecoveryState != "" && !(s.RecoveryState == recoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit) {
 			return s.RecoveryState
 		}
 		if s.SourceConvergenceState == v1alpha1.SourceConvergencePending || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
@@ -333,6 +351,40 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 		}
 		if s.Name != fg.Status.ActiveSite && !s.Replicating {
 			return "ReplicationNotRunning"
+		}
+	}
+	return ""
+}
+
+// divergenceIsReplicaAuditOnly reports whether every site in recovery
+// carries a replica-audit divergence report, so RecoveryPending describes
+// nothing but those. A report restored without provenance (an older CRD
+// pruned the field) counts as an old primary's.
+func divergenceIsReplicaAuditOnly(fg *v1alpha1.MysqlFailoverGroup) bool {
+	for _, s := range fg.Status.Sites {
+		if s.RecoveryState == "" {
+			continue
+		}
+		if s.RecoveryState != recoveryStateBlocked || s.DivergenceDetectedBy != divergenceDetectedByAudit {
+			return false
+		}
+	}
+	return true
+}
+
+// gatingRecoveryState returns the recovery state of the first site whose
+// recovery gates the deployment API (anything but a replica-audit
+// divergence report), as a reason: "DivergentTransactions" for an old
+// primary's block (or one without provenance), otherwise the state.
+func gatingRecoveryState(fg *v1alpha1.MysqlFailoverGroup) string {
+	for _, s := range fg.Status.Sites {
+		switch {
+		case s.RecoveryState == "":
+		case s.RecoveryState == recoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit:
+		case s.RecoveryState == recoveryStateBlocked:
+			return "DivergentTransactions"
+		default:
+			return s.RecoveryState
 		}
 	}
 	return ""

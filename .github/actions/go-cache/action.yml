@@ -1,0 +1,55 @@
+name: Restore Go caches
+description: Restore shared modules and a per-flavour build cache; jobs save explicitly on main.
+inputs:
+  flavor:
+    description: Build-cache flavour (race, plain, codegen, or lint)
+    required: true
+  extra-paths:
+    description: Extra newline-separated paths cached alongside GOCACHE
+    default: ''
+outputs:
+  gocache:
+    description: Go build cache path
+    value: ${{ steps.env.outputs.gocache }}
+  gomodcache:
+    description: Go module cache path
+    value: ${{ steps.env.outputs.gomodcache }}
+  build-key:
+    description: Primary build cache key
+    value: ${{ steps.build.outputs.cache-primary-key }}
+  build-hit:
+    description: Whether the primary build cache key matched
+    value: ${{ steps.build.outputs.cache-hit }}
+  mod-key:
+    description: Primary module cache key
+    value: ${{ steps.mod.outputs.cache-primary-key }}
+  mod-hit:
+    description: Whether the primary module cache key matched
+    value: ${{ steps.mod.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - id: env
+      shell: bash
+      run: |
+        {
+          echo "gocache=$(go env GOCACHE)"
+          echo "gomodcache=$(go env GOMODCACHE)"
+          echo "gover=$(go env GOVERSION)"
+          echo "week=$(date -u +%G-W%V)"
+        } >> "$GITHUB_OUTPUT"
+    - id: mod
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.env.outputs.gomodcache }}
+        key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+    - id: build
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ${{ steps.env.outputs.gocache }}
+          ${{ inputs.extra-paths }}
+        key: gobuild-${{ runner.os }}-${{ runner.arch }}-${{ steps.env.outputs.gover }}-${{ inputs.flavor }}-${{ hashFiles('go.sum') }}-${{ steps.env.outputs.week }}
+        restore-keys: |
+          gobuild-${{ runner.os }}-${{ runner.arch }}-${{ steps.env.outputs.gover }}-${{ inputs.flavor }}-${{ hashFiles('go.sum') }}-
+          gobuild-${{ runner.os }}-${{ runner.arch }}-${{ steps.env.outputs.gover }}-${{ inputs.flavor }}-

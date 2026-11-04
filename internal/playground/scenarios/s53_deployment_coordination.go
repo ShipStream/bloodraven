@@ -28,6 +28,33 @@ type deployScenarioState struct {
 	grant           deployClientRecord
 	expiry          time.Time
 	leaseTTL        time.Duration
+	// leasesRevoked is set once the verify step has seen every lease this
+	// client holds answered 409 revoked and the client stop. The operator
+	// writes the revocation durably before answering 409, and a revoked
+	// operation can never be granted again.
+	leasesRevoked bool
+	// lastGrantExpiry is recorded in expiry mode only, once both grants are
+	// logged: that client never renews or re-grants, so the later grant
+	// expiry is when both leases are dead server-side.
+	lastGrantExpiry time.Time
+}
+
+// leaseSettleSkew covers operator/runner clock skew.
+const leaseSettleSkew = 2 * time.Second
+
+// leaseSettleWait is how long cleanup must wait after killing the client
+// before removing authorization. Uncertainty never shortens it: only a
+// server-confirmed revocation, or passed grant expiries for a client that
+// never renews, bring it below the full TTL.
+func (s *deployScenarioState) leaseSettleWait(now time.Time) time.Duration {
+	switch {
+	case s.leasesRevoked:
+		return 0
+	case !s.lastGrantExpiry.IsZero():
+		return max(0, s.lastGrantExpiry.Add(leaseSettleSkew).Sub(now))
+	default: // crash mode, or a run that failed before establishing evidence
+		return s.leaseTTL + time.Second
+	}
 }
 
 type deployClientRecord struct {
@@ -129,6 +156,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 			}); err != nil {
 				return err
 			}
+			state.leasesRevoked = true
 		}
 		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
@@ -199,11 +227,15 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 	s.podCreated = true
 	return s.waitClient(ctx, env, func(records []deployClientRecord) bool {
 		granted, renewed := map[string]bool{}, map[string]bool{}
+		var lastGrantExpiry time.Time
 		for _, r := range records {
 			if r.Action == "grant" && r.Status == 201 {
 				granted[r.Kind] = r.Body.ExpiresAt.After(r.At) && !r.At.IsZero()
 				if r.Kind == "migration" {
 					s.grant = r
+				}
+				if r.Body.ExpiresAt.After(lastGrantExpiry) {
+					lastGrantExpiry = r.Body.ExpiresAt
 				}
 			}
 			if r.Action == "renew" && r.Status == 200 {
@@ -216,7 +248,13 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 		if mode == "renew" {
 			return granted["migration"] && renewed["migration"]
 		}
-		return granted["migration"] && granted["failover-hold"] && (mode == "expiry" || (renewed["migration"] && renewed["failover-hold"]))
+		done := granted["migration"] && granted["failover-hold"] && (mode == "expiry" || (renewed["migration"] && renewed["failover-hold"]))
+		if done && mode == "expiry" {
+			// Only with both grants logged: a grant still in flight could
+			// outlive an earlier recorded expiry.
+			s.lastGrantExpiry = lastGrantExpiry
+		}
+		return done
 	})
 }
 
@@ -361,12 +399,18 @@ func (s *deployScenarioState) cleanup(ctx context.Context, env *runner.Env) erro
 		if err != nil && !apierrors.IsNotFound(err) {
 			errs = append(errs, err)
 		}
-		// A crash intentionally leaves durable leases; let the last TTL elapse
-		// before removing authorization. Never delete another client's leases.
-		select {
-		case <-ctx.Done():
-			errs = append(errs, ctx.Err())
-		case <-time.After(s.leaseTTL + time.Second):
+		// A crash intentionally leaves durable leases; wait until none can be
+		// live before removing authorization. Never delete another client's leases.
+		wait := s.leaseSettleWait(time.Now())
+		if env.Capture != nil {
+			env.Capture.Note(fmt.Sprintf("deploy client %s: waiting %s for leases to settle before removing authorization", s.name, wait.Round(time.Second)))
+		}
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				errs = append(errs, ctx.Err())
+			case <-time.After(wait):
+			}
 		}
 	}
 	for i := len(s.objects) - 1; i >= 0; i-- {
