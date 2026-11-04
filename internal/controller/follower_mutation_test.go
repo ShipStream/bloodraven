@@ -935,7 +935,7 @@ func TestPlannedFailoverValidating_ClaimRacesUpdate(t *testing.T) {
 	// The other order: the planned failover claims first, then no update
 	// may start.
 	other, _, _ := newTestTopologyManager(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
-	if ok, why, _ := other.ClaimPlannedFailover(); !ok {
+	if ok, why, _ := other.ClaimPlannedFailover("dc1", "dc2"); !ok {
 		t.Fatalf("claim refused: %s", why)
 	}
 	other.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
@@ -946,12 +946,15 @@ func TestPlannedFailoverValidating_ClaimRacesUpdate(t *testing.T) {
 	}
 }
 
-// validatingPF returns a planned-failover group in Validating, iad -> pdx.
-func validatingPF() *v1alpha1.MysqlFailoverGroup {
+// preFencePF returns a planned-failover group, iad -> pdx, in phase before
+// its fence. Pending is what production writes on accepting a request
+// (Validating is dispatched the same way but never persisted); Draining
+// with no drainStartTime is the re-claim before the fence.
+func preFencePF(phase v1alpha1.PlannedFailoverPhase) *v1alpha1.MysqlFailoverGroup {
 	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
 	fg := plannedFailoverFG("")
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhaseValidating, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+		Phase: phase, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
 	}
 	return fg
 }
@@ -979,7 +982,7 @@ func retireForTest(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedNa
 // before the fence), and Draining claims again before fencing, so an update
 // that claimed anyway is never fenced beside.
 func TestPlannedFailoverValidating_LostWriteKeepsClaimAndDrainingReclaims(t *testing.T) {
-	fg := validatingPF()
+	fg := preFencePF(v1alpha1.PlannedFailoverPhasePending)
 	nn := fgNN(fg)
 	iad := &mockMySQL{readOnly: false}
 	pdx := &mockMySQL{readOnly: true}
@@ -1032,7 +1035,7 @@ func TestPlannedFailoverValidating_LostWriteKeepsClaimAndDrainingReclaims(t *tes
 // be inside a promotion. The planned failover waits (nothing fenced) until
 // it is out, then proceeds.
 func TestPlannedFailoverValidating_WaitsForRetiringPromotion(t *testing.T) {
-	fg := validatingPF()
+	fg := preFencePF(v1alpha1.PlannedFailoverPhasePending)
 	nn := fgNN(fg)
 	iad := &mockMySQL{readOnly: false}
 	pdx := &mockMySQL{readOnly: true}
@@ -1057,8 +1060,8 @@ func TestPlannedFailoverValidating_WaitsForRetiringPromotion(t *testing.T) {
 		}
 	}
 	pf := fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseValidating || pf.RetryAfter == nil || !strings.Contains(pf.Message, plannedClaimRefusedPredecessorPromote) {
-		t.Fatalf("phase=%q retryAfter=%v (%s); want Validating waiting on the retiring promotion", pf.Phase, pf.RetryAfter, pf.Message)
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePending || pf.RetryAfter == nil || !strings.Contains(pf.Message, plannedClaimRefusedPredecessorPromote) {
+		t.Fatalf("phase=%q retryAfter=%v (%s); want Pending waiting on the retiring promotion", pf.Phase, pf.RetryAfter, pf.Message)
 	}
 	if superReadOnlyCallCount(iad) != 0 {
 		t.Fatal("source fenced while a replaced manager was still promoting")
@@ -1105,64 +1108,159 @@ func TestRotationRefusedWhileRetiringManagerUpdateClaimed(t *testing.T) {
 	}
 }
 
-// Opus round 10, Minor 3: refusals that clear on their own are waited out
-// visibly (message, retryAfter deadline), then fail without fencing.
-func TestPlannedFailoverValidating_TransientRefusalsWaitThenFail(t *testing.T) {
+// Opus rounds 10 and 11: refusals that clear on their own are waited out
+// visibly before the fence (message, retryAfter deadline) from Pending, the
+// phase production uses, and from Draining before its fence. Once the
+// refusal clears the run goes on (Draining fences and drops the deadline);
+// past the deadline it fails without fencing.
+func TestPlannedFailoverPreFence_TransientRefusalsWaitThenProceedOrFail(t *testing.T) {
+	type setupFn func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) (undo func())
+	tmOf := func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) *TopologyManager {
+		tm, err := r.Runner.plannedFailoverManager(nn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tm
+	}
 	cases := []struct {
 		name, why, reason string
-		setup             func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName)
+		setup             setupFn
 	}{
 		{"no topology manager", plannedClaimRefusedNoManager, "TopologyManagerUnavailable",
-			func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) {
+			func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) func() {
+				tm := tmOf(t, r, nn)
 				r.Runner.mu.Lock()
 				delete(r.Runner.managers, nn)
 				r.Runner.mu.Unlock()
+				return func() { r.Runner.SetManagerForTest(nn, tm) }
 			}},
 		{"promotion in flight", plannedClaimRefusedPromotion, "ConcurrentOperation",
-			func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) {
-				tm, err := r.Runner.plannedFailoverManager(nn)
-				if err != nil {
-					t.Fatal(err)
-				}
+			func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) func() {
+				tm := tmOf(t, r, nn)
 				tm.mu.Lock()
 				tm.deploymentChanging = 1
 				tm.mu.Unlock()
+				return func() {
+					tm.mu.Lock()
+					tm.deploymentChanging = 0
+					tm.mu.Unlock()
+				}
+			}},
+		{"promotion not yet observed", plannedClaimRefusedUnobserved, "ConcurrentOperation",
+			func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) func() {
+				tm := tmOf(t, r, nn)
+				tm.mu.Lock()
+				tm.promotedSite, tm.deploymentAwaitingObservation = "iad", true
+				tm.mu.Unlock()
+				return func() {
+					tm.mu.Lock()
+					tm.promotedSite, tm.deploymentAwaitingObservation = "", false
+					tm.mu.Unlock()
+				}
 			}},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			fg := validatingPF()
-			nn := fgNN(fg)
-			iad := &mockMySQL{readOnly: false}
-			r, c := newReconciler(fg)
-			r.Runner = plannedDrainRunner(nn, iad, &mockMySQL{readOnly: true})
-			tc.setup(t, r, nn)
-			if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
-				t.Fatalf("reconcile: %v", err)
-			}
-			cur := fetchFG(t, r, nn)
-			pf := cur.Status.PlannedFailover
-			if pf.Phase != v1alpha1.PlannedFailoverPhaseValidating || pf.RetryAfter == nil || !strings.Contains(pf.Message, tc.why) {
-				t.Fatalf("phase=%q retryAfter=%v (%s); want a visible wait with a deadline", pf.Phase, pf.RetryAfter, pf.Message)
-			}
-			if d := time.Until(pf.RetryAfter.Time); d < plannedFailoverClaimWait-time.Minute || d > plannedFailoverClaimWait {
-				t.Fatalf("deadline in %s, want ~%s", d, plannedFailoverClaimWait)
-			}
+	for _, phase := range []v1alpha1.PlannedFailoverPhase{v1alpha1.PlannedFailoverPhasePending, v1alpha1.PlannedFailoverPhaseDraining} {
+		for _, tc := range cases {
+			for _, clears := range []bool{true, false} {
+				outcome := "deadline passes"
+				if clears {
+					outcome = "refusal clears"
+				}
+				t.Run(string(phase)+"/"+tc.name+"/"+outcome, func(t *testing.T) {
+					fg := preFencePF(phase)
+					nn := fgNN(fg)
+					iad := &mockMySQL{readOnly: false}
+					r, c := newReconciler(fg)
+					r.Runner = plannedDrainRunner(nn, iad, &mockMySQL{readOnly: true})
+					undo := tc.setup(t, r, nn)
+					for i := 0; i < 2; i++ {
+						if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+							t.Fatalf("reconcile: %v", err)
+						}
+					}
+					cur := fetchFG(t, r, nn)
+					pf := cur.Status.PlannedFailover
+					if pf.Phase != phase || pf.DrainStartTime != nil || pf.RetryAfter == nil || !strings.Contains(pf.Message, tc.why) {
+						t.Fatalf("phase=%q drainStart=%v retryAfter=%v (%s); want %s waiting with a deadline", pf.Phase, pf.DrainStartTime, pf.RetryAfter, pf.Message, phase)
+					}
+					if d := time.Until(pf.RetryAfter.Time); d < plannedFailoverClaimWait-time.Minute || d > plannedFailoverClaimWait {
+						t.Fatalf("deadline in %s, want ~%s", d, plannedFailoverClaimWait)
+					}
+					if superReadOnlyCallCount(iad) != 0 {
+						t.Fatal("source fenced while waiting to claim the sites")
+					}
 
-			past := metav1.NewTime(time.Now().Add(-time.Second))
-			cur.Status.PlannedFailover.RetryAfter = &past
-			if err := c.Status().Update(context.Background(), cur); err != nil {
+					if clears {
+						undo()
+						if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+							t.Fatalf("reconcile: %v", err)
+						}
+						pf = fetchFG(t, r, nn).Status.PlannedFailover
+						if pf.RetryAfter != nil {
+							t.Fatalf("retryAfter=%v kept after the claim; a later wait would inherit the old deadline", pf.RetryAfter)
+						}
+						switch phase {
+						case v1alpha1.PlannedFailoverPhasePending:
+							if pf.Phase != v1alpha1.PlannedFailoverPhaseDraining || superReadOnlyCallCount(iad) != 0 {
+								t.Fatalf("phase=%q (%s); want Draining, not yet fenced", pf.Phase, pf.Message)
+							}
+						default:
+							if pf.Phase != v1alpha1.PlannedFailoverPhaseDraining || pf.DrainStartTime == nil || superReadOnlyCallCount(iad) == 0 {
+								t.Fatalf("phase=%q drainStart=%v (%s); want the fence applied", pf.Phase, pf.DrainStartTime, pf.Message)
+							}
+						}
+						return
+					}
+
+					past := metav1.NewTime(time.Now().Add(-time.Second))
+					cur.Status.PlannedFailover.RetryAfter = &past
+					if err := c.Status().Update(context.Background(), cur); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+						t.Fatalf("reconcile: %v", err)
+					}
+					pf = fetchFG(t, r, nn).Status.PlannedFailover
+					if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != tc.reason || !strings.Contains(pf.Message, "source not fenced") {
+						t.Fatalf("phase=%q reason=%q (%s); want Failed/%s past the deadline", pf.Phase, pf.Reason, pf.Message, tc.reason)
+					}
+					if superReadOnlyCallCount(iad) != 0 {
+						t.Fatal("source fenced")
+					}
+				})
+			}
+		}
+	}
+}
+
+// Opus round 11, Minor 2: an emergency promotion moved authority off the
+// source after the request was validated. Once the manager observes the new
+// primary, neither Pending nor Draining fences the old source; the request
+// fails for good.
+func TestPlannedFailoverPreFence_SourceNoLongerPrimaryRefuses(t *testing.T) {
+	for _, phase := range []v1alpha1.PlannedFailoverPhase{v1alpha1.PlannedFailoverPhasePending, v1alpha1.PlannedFailoverPhaseDraining} {
+		t.Run(string(phase), func(t *testing.T) {
+			fg := preFencePF(phase)
+			nn := fgNN(fg)
+			iad := &mockMySQL{readOnly: true}
+			r, _ := newReconciler(fg)
+			r.Runner = plannedDrainRunner(nn, iad, &mockMySQL{readOnly: false})
+			tm, err := r.Runner.plannedFailoverManager(nn)
+			if err != nil {
 				t.Fatal(err)
 			}
+			tm.mu.Lock()
+			tm.sites[0].state, tm.sites[1].state = state.StateReadOnly, state.StateWritable
+			tm.mu.Unlock()
 			if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
 				t.Fatalf("reconcile: %v", err)
 			}
-			pf = fetchFG(t, r, nn).Status.PlannedFailover
-			if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != tc.reason || !strings.Contains(pf.Message, "source not fenced") {
-				t.Fatalf("phase=%q reason=%q (%s); want Failed/%s past the deadline", pf.Phase, pf.Reason, pf.Message, tc.reason)
+			pf := fetchFG(t, r, nn).Status.PlannedFailover
+			if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "ConcurrentOperation" || !strings.Contains(pf.Message, "active primary is now") {
+				t.Fatalf("phase=%q reason=%q (%s); want Failed: the source is no longer primary", pf.Phase, pf.Reason, pf.Message)
 			}
 			if superReadOnlyCallCount(iad) != 0 {
-				t.Fatal("source fenced")
+				t.Fatal("old source fenced after authority moved")
 			}
 		})
 	}

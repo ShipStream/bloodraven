@@ -71,7 +71,7 @@ kubectl bloodraven status <group-name> -n <namespace>
 Check the core conditions and status fields:
 - `.status.activeSite`: Is there an active primary site?
 - `.status.topologyGeneration`: Has authoritative topology changed since the deployment's grant or the start of this investigation? This is durable across restarts, not the CR generation.
-- `.status.plannedFailover`: `Deferred/DeploymentHold` normally means a live deployment hold, not a failed promotion. Inspect `retryAfter` and the message's operation ID and instance. If it remains deferred past expiry, check operator logs for Lease persistence errors. `retryAfter` on `Validating` (message `waiting to claim the sites: ...`) is a claim wait with nothing fenced; with `reason=PredecessorUpdateInFlight` on a later phase it is a wait with the source fenced (see the matrix).
+- `.status.plannedFailover`: `Deferred/DeploymentHold` normally means a live deployment hold, not a failed promotion. Inspect `retryAfter` and the message's operation ID and instance. If it remains deferred past expiry, check operator logs for Lease persistence errors. `retryAfter` on `Pending` (or `Draining` with no `drainStartTime`; message `waiting to claim the sites: ...`) is a claim wait with nothing fenced; with `reason=PredecessorUpdateInFlight` on a later phase it is a wait with the source fenced (see the matrix).
 - `.status.conditions`:
   - `Ready == True`?
   - `Bootstrapping == False`?

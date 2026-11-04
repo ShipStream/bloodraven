@@ -1274,7 +1274,26 @@ func (r *TopologyManagerRunner) registerManager(nn types.NamespacedName, mt *man
 	if r.retiringUpdateInFlightLocked(nn) {
 		mt.tm.setPredecessorUpdateInFlight(true)
 	}
+	if len(r.retiring[nn]) > 0 {
+		mt.tm.mu.Lock()
+		mt.tm.predecessorBusy = func() bool { return r.retiringChangingSites(nn) }
+		mt.tm.mu.Unlock()
+	}
 	r.managers[nn] = mt
+}
+
+// retiringChangingSites reports whether a retiring manager of nn is still
+// changing the sites (see TopologyManager.changingSites).
+func (r *TopologyManagerRunner) retiringChangingSites(nn types.NamespacedName) bool {
+	r.mu.RLock()
+	retiring := append([]*managedTopology(nil), r.retiring[nn]...)
+	r.mu.RUnlock()
+	for _, mt := range retiring {
+		if mt.tm.changingSites() {
+			return true
+		}
+	}
+	return false
 }
 
 // OrderedUpdateUnwinding reports whether nn's running manager is still
@@ -1308,7 +1327,7 @@ func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.Namespaced
 // be inside a promotion. A retiring manager's claimed update gives up the
 // planned failover, as the current manager's does; a retiring promotion,
 // or no manager running yet, is retry=true: nothing is wrong, just early.
-func (r *TopologyManagerRunner) ClaimPlannedFailover(nn types.NamespacedName) (ok bool, why string, retry bool) {
+func (r *TopologyManagerRunner) ClaimPlannedFailover(nn types.NamespacedName, source, target string) (ok bool, why string, retry bool) {
 	r.mu.RLock()
 	mt := r.managers[nn]
 	retiringUpdate := r.retiringUpdateInFlightLocked(nn)
@@ -1325,7 +1344,7 @@ func (r *TopologyManagerRunner) ClaimPlannedFailover(nn types.NamespacedName) (o
 	case mt == nil:
 		return false, plannedClaimRefusedNoManager, true
 	}
-	return mt.tm.ClaimPlannedFailover()
+	return mt.tm.ClaimPlannedFailover(source, target)
 }
 
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.

@@ -1809,3 +1809,58 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+// Opus round 11, Minor 3: a successful write that would end a hold
+// settles it, and if settlement cannot fence, the pass requeues: with
+// every site Sealed nothing else would bring the group back soon, and the
+// site would stay promotion-blocked.
+func TestReconcileEncryption_SuccessPathSettlementFailureRequeues(t *testing.T) {
+	ctx := context.Background()
+	fg := sealedGroupWithActive("dc1")
+	digest := siteStatus(fg, "dc2").KeyringDigest
+	r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+		"dc1": liveKeyring(digest, true), "dc2": liveKeyring(digest, true),
+	}), fg)
+	seedEscrow(t, c, fg)
+	tm := rotationRunner(r, c)
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	failFence := true
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if failFence {
+				return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("mysqlfailovergroups").GroupResource(), obj.GetName(), errors.New("modified"))
+			}
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	// A hold whose stamp never landed (its write was lost).
+	if ok, why := r.Runner.ReserveKeyringRotation(nn, "dc2"); !ok {
+		t.Fatalf("setup: %s", why)
+	}
+	pass := func() time.Duration {
+		t.Helper()
+		var latest v1alpha1.MysqlFailoverGroup
+		if err := c.Get(ctx, nn, &latest); err != nil {
+			t.Fatal(err)
+		}
+		requeue, err := r.reconcileEncryptionAtRest(ctx, &latest)
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		return requeue
+	}
+
+	if requeue := pass(); requeue <= 0 {
+		t.Fatalf("requeue=%s with a hold settlement could not end; want a retry", requeue)
+	}
+	if tm.liveHandoffRefusal("dc2")() == nil {
+		t.Fatal("hold ended without a fence")
+	}
+	failFence = false
+	if requeue := pass(); requeue != 0 {
+		t.Fatalf("requeue=%s once settled; want none (every site Sealed)", requeue)
+	}
+	if err := tm.liveHandoffRefusal("dc2")(); err != nil {
+		t.Fatalf("hold kept after a successful settlement: %v", err)
+	}
+}

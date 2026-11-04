@@ -2459,8 +2459,12 @@ func TestPrimaryReassert_CooldownRateLimits(t *testing.T) {
 	}
 
 	// The sidecar fenced the target again for a persistent reason: the
-	// operator must not fight it at poll frequency.
+	// operator must not fight it at poll frequency. (A poll observes the
+	// re-assert in between, as it would in Run.)
 	site0.setReadOnly(true)
+	tm.mu.Lock()
+	tm.deploymentAwaitingObservation = false
+	tm.mu.Unlock()
 	clk.Advance(5 * time.Second)
 	if tm.checkPrimaryReassert(context.Background()) {
 		t.Fatal("re-assert must be rate-limited by the failover cooldown")

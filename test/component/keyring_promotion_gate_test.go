@@ -158,6 +158,7 @@ func TestKeyringPromotion_PlannedPromoteRefusesRotatingTarget(t *testing.T) {
 	h := newTestHarness(t)
 	h.pollN(2)
 	h.tm.SetKeyringRotationBlocked([]string{"dc2"})
+	h.tm.SetPlannedFailoverActive(true) // the planned failover's own claim
 	_, err := h.tm.PlannedPromote(context.Background(), "dc2", "dc1")
 	if err == nil || !strings.Contains(err.Error(), "mid-keyring-rotation") {
 		t.Fatalf("PlannedPromote err = %v, want mid-keyring-rotation", err)
@@ -170,6 +171,7 @@ func TestKeyringPromotion_PlannedPromoteRefusesRotatingTarget(t *testing.T) {
 func TestKeyringPromotion_PlannedPromoteAllowsSealedTarget(t *testing.T) {
 	h := newTestHarness(t)
 	h.pollN(2)
+	h.tm.SetPlannedFailoverActive(true) // the planned failover's own claim
 	if _, err := h.tm.PlannedPromote(context.Background(), "dc2", "dc1"); err != nil {
 		t.Fatalf("PlannedPromote sealed target: %v", err)
 	}

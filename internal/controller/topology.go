@@ -603,8 +603,13 @@ type TopologyManager struct {
 
 	// beforePromotionClaim, when set (tests only), runs between the
 	// emergency failover's or primary re-assert's eligibility checks and
-	// their beginPromotionOf claim.
+	// their beginAutoPromotionOf claim.
 	beforePromotionClaim func(target string)
+
+	// predecessorBusy, set by the runner when this manager replaced
+	// another, reports whether a replaced manager is still changing the
+	// sites (see predecessorMutating). Protected by mu.
+	predecessorBusy func() bool
 
 	// recoveryDeferred records that old-primary recovery is standing down
 	// for a handoff, so the deferral is logged once per transition.
@@ -2458,10 +2463,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		if tm.beforePromotionClaim != nil {
 			tm.beforePromotionClaim(candidate.name)
 		}
-		began, rotationBlocked := tm.beginPromotionOf(candidate.name)
+		began, rotationBlocked := tm.beginAutoPromotionOf(candidate.name)
 		if rotationBlocked {
 			// A rotation was admitted after the eligibility check above;
-			// beginPromotionOf re-armed the dirty bit, so the next poll
+			// beginAutoPromotionOf re-armed the dirty bit, so the next poll
 			// re-runs the decision without this candidate.
 			tm.logger.Warn("promotion refused: candidate is mid-keyring-rotation",
 				"site", candidate.name, "unsealReason", "Rotation")
@@ -2470,6 +2475,9 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			return
 		}
 		if !began {
+			// Another actor claimed the sites after the checks above;
+			// decide again once it has let go.
+			tm.armCrossSiteRetry()
 			return
 		}
 		defer tm.finishDeploymentTopologyChange()
@@ -3096,18 +3104,8 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	// recovery drain pass admitted before the planned-failover flag was
 	// set may still be killing sessions on the target, and Execute must
 	// not start until it has finished.
-	var began, rotationBlocked bool
-	if err := tm.admitTopologyHandoff(ctx, func() { began, rotationBlocked = tm.beginPromotionOf(target) }); err != nil {
-		return "", fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
-	}
-	if rotationBlocked {
-		return "", fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
-	}
-	if !began && tm.predecessorUpdateUnwinding() {
-		return "", errPredecessorUpdateInFlight
-	}
-	if !began {
-		return "", fmt.Errorf("topology change already in progress")
+	if err := tm.claimPlannedPromotion(ctx, target); err != nil {
+		return "", err
 	}
 	defer tm.finishDeploymentTopologyChange()
 	promotionGtid, err := tm.failover.Execute(ctx, targetSite.mysql, sourceChecker, target)
@@ -3513,19 +3511,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 		// The claim is published at the follower-mutation barrier, so no
 		// recovery drain, old-primary recovery or source repoint admitted
 		// before it is still running when the update touches MySQL.
-		claimed := false
-		admitErr := tm.admitTopologyHandoff(ctx, func() {
-			tm.mu.Lock()
-			defer tm.mu.Unlock()
-			if ctx.Err() != nil || tm.retired || tm.authorityEpoch != updateAuthorityEpoch || tm.activeSiteLocked() != activeName || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation || tm.topologyFrozen || tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) {
-				return
-			}
-			tm.deploymentUpdateRunning = true
-			tm.deploymentChanging++
-			tm.authorityEpoch++
-			tm.deploymentTopologyPendingLocked()
-			claimed = true
-		})
+		claimed, admitErr := tm.claimOrderedUpdate(ctx, updateAuthorityEpoch, activeName)
 		if admitErr != nil || !claimed {
 			return
 		}
@@ -4222,6 +4208,15 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		tm.emitBootstrapStatus()
 		return false
 	}
+	// While another actor holds the sites, wait quietly (it logs its own
+	// progress) and do not unseal the recipient for a clone that would be
+	// refused; claimBootstrap below decides.
+	tm.mu.RLock()
+	busy := tm.bootstrapClaimRefusedLocked() != ""
+	tm.mu.RUnlock()
+	if busy {
+		return false
+	}
 	if source != "fresh-deploy" {
 		confirmed, err := tm.confirmedActivePrimary(ctx)
 		if err != nil || confirmed.name != donorSite.name {
@@ -4248,21 +4243,12 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 			return false
 		}
 	}
-	tm.mu.Lock()
-	recloneOwner := ""
-	if source == "reclone" && tm.reclonePendingSite == recipient {
-		recloneOwner = tm.reclonePendingOwner
+	recloneOwner, why := tm.claimBootstrap(recipient, source)
+	if why != "" {
+		tm.logger.Info("bootstrap deferred: another topology change holds the sites",
+			"recipient", recipient, "source", source, "reason", why)
+		return false
 	}
-	tm.bootstrapPhase = BootstrapPhaseCloning
-	tm.bootstrapErr = nil
-	tm.bootstrapSource = source
-	tm.bootstrapRecipient = recipient
-	// A leftover release from a previous attempt must not fire while
-	// this clone is running — that would reseal the pod mid-CLONE.
-	if tm.cloneHoldReleaseSite == recipient {
-		tm.cloneHoldReleaseSite = ""
-	}
-	tm.mu.Unlock()
 
 	tm.logger.Info("starting bootstrap",
 		"source", source,
@@ -4922,11 +4908,11 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	// change touches no MySQL state, so charging it against the cooldown would
 	// block the next poll for failoverCooldown without an attempt having run.
 	// It re-checks the rotation block in the same critical section as the
-	// claim (see beginPromotionOf).
+	// claim (see beginAutoPromotionOf).
 	if tm.beforePromotionClaim != nil {
 		tm.beforePromotionClaim(target)
 	}
-	began, rotationBlocked := tm.beginPromotionOf(target)
+	began, rotationBlocked := tm.beginAutoPromotionOf(target)
 	if rotationBlocked {
 		tm.logger.Warn("primary re-assert refused: target is mid-keyring-rotation",
 			"site", target, "unsealReason", "Rotation")

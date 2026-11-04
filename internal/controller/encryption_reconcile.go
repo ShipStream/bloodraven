@@ -217,7 +217,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		blocked := rotationBlockedSites(fg)
 		held := r.Runner.PendingKeyringRotationReservations(nn)
 		if slices.ContainsFunc(held, func(s string) bool { return !slices.Contains(blocked, s) }) {
-			r.settleKeyringRotationReservations(ctx, nn)
+			// Nothing else may reconcile this group again soon (every
+			// site Sealed means no requeue), so a hold settlement could
+			// not end is retried here.
+			if !r.settleKeyringRotationReservations(ctx, nn) {
+				requeue = minPositiveDuration(requeue, encryptionRequeue)
+			}
 		} else {
 			r.Runner.PublishKeyringRotationBlocked(nn, blocked)
 		}
@@ -253,14 +258,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 // read (patchEncryptionStatus), so before any hold ends the object is moved
 // past the version just read (fenceEncryptionStatusWrites); from then on no
 // such write can commit, and the read is final. If the fence fails, the
-// holds stay.
-func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx context.Context, nn types.NamespacedName) {
+// holds stay. It returns false when the read or the fence failed, so the
+// caller can make sure a later pass retries.
+func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx context.Context, nn types.NamespacedName) bool {
 	if r.Runner == nil {
-		return
+		return true
 	}
 	held := r.Runner.PendingKeyringRotationReservations(nn)
 	if len(held) == 0 {
-		return
+		return true
 	}
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
@@ -268,7 +274,7 @@ func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx con
 	if err := r.authorityReader().Get(readCtx, nn, &latest); err != nil {
 		log.FromContext(ctx).Error(err, "keyring rotation: cannot confirm whether held rotation stamps were persisted; keeping the promotion block",
 			"fg", nn, "sites", held)
-		return
+		return false
 	}
 	persisted := rotationBlockedSites(&latest)
 	ending := slices.DeleteFunc(slices.Clone(held), func(s string) bool { return slices.Contains(persisted, s) })
@@ -276,10 +282,11 @@ func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx con
 		if err := r.fenceEncryptionStatusWrites(readCtx, &latest); err != nil {
 			log.FromContext(ctx).Error(err, "keyring rotation: cannot rule out a rotation stamp still in flight; keeping the promotion block",
 				"fg", nn, "sites", ending)
-			return
+			return false
 		}
 	}
 	r.Runner.PublishKeyringRotationBlocked(nn, persisted)
+	return true
 }
 
 // encryptionStatusFenceAnnotation is bumped by fenceEncryptionStatusWrites.

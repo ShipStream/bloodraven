@@ -469,7 +469,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 	// from here on no update can claim, and one already claimed refuses
 	// this planned failover.
 	if r.Runner != nil {
-		if ok, why, retry := r.Runner.ClaimPlannedFailover(nn); !ok {
+		if ok, why, retry := r.Runner.ClaimPlannedFailover(nn, cur.SourcePrimary, cur.Target); !ok {
 			return r.plannedFailoverClaimRefused(ctx, fg, why, retry)
 		}
 	}
@@ -503,8 +503,11 @@ const plannedFailoverClaimWait = 2 * time.Minute
 func (r *MysqlFailoverGroupReconciler) plannedFailoverClaimRefused(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, why string, retry bool) (time.Duration, error) {
 	cur := fg.Status.PlannedFailover
 	reason := "ConcurrentOperation"
-	if why == plannedClaimRefusedNoManager {
+	switch why {
+	case plannedClaimRefusedNoManager:
 		reason = "TopologyManagerUnavailable"
+	case plannedClaimRefusedRotation:
+		reason = "KeyringRotation"
 	}
 	if !retry {
 		return r.plannedFailoverFail(ctx, fg, reason,
@@ -578,7 +581,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 		// (an operator restart, or a Validating write whose response was
 		// lost) rather than claimed against the ordered-update claim, so
 		// an update may have claimed meanwhile. The claim is idempotent.
-		if ok, why, retry := r.Runner.ClaimPlannedFailover(nn); !ok {
+		if ok, why, retry := r.Runner.ClaimPlannedFailover(nn, cur.SourcePrimary, cur.Target); !ok {
 			return r.plannedFailoverClaimRefused(ctx, fg, why, retry)
 		}
 		fenceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

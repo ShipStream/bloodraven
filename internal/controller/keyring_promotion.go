@@ -92,7 +92,7 @@ func (tm *TopologyManager) setKeyringRotationBlockedLocked(sorted []string) {
 // it refuses while an ordered update is pending or running (the update's
 // handoff re-checks eligibility live, so a rotation and a handoff onto the
 // same standby can never both be admitted), while a promotion is claimed,
-// in flight or not yet observed (beginPromotionOf decides the other side
+// in flight or not yet observed (the promotion claims decide the other side
 // under the same lock), and unless this manager currently observes a
 // unique writable primary other than site with site read-only, and while a
 // planned failover is in flight:
@@ -105,6 +105,8 @@ func (tm *TopologyManager) ReserveKeyringRotation(site string) (bool, string) {
 	defer tm.mu.Unlock()
 	active := tm.activeSiteLocked()
 	switch {
+	case tm.retired || tm.predecessorUpdateInFlight:
+		return false, rotationRefusedManagerRestarting
 	case tm.deploymentUpdatePending || tm.deploymentUpdateRunning:
 		return false, "an ordered update is in progress"
 	case tm.plannedFailoverActive:
@@ -257,7 +259,8 @@ func (r *TopologyManagerRunner) SetKeyringRotationBlocked(nn types.NamespacedNam
 //	held   manager replaced or retired                  copied to the replacement before
 //	                                                    its Run; retired managers start
 //	                                                    no update
-//	held   promotion claim (beginPromotionOf)           claim refused; dirty bit re-armed
+//	held   promotion claim (beginAutoPromotionOf,       claim refused; dirty bit re-armed
+//	       beginPlannedPromotionOf)                     (automatic promotions)
 //	any    claim taken / promotion unobserved           reserve refused until observed
 //	held   encryption disabled / group deleted          none
 //

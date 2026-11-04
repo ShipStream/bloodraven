@@ -62,24 +62,6 @@ func (tm *TopologyManager) beginDeploymentTopologyChangeLocked() bool {
 	return true
 }
 
-// beginPromotionOf claims the topology-change window for making target
-// writable, refusing (rotationBlocked) when target is mid-keyring-rotation,
-// durably or by reservation. The check and the claim share mu with
-// ReserveKeyringRotation, which refuses while a change is claimed, so a
-// rotation admitted before the claim stops the promotion and one requested
-// after it is refused: the two can never both proceed.
-func (tm *TopologyManager) beginPromotionOf(target string) (began, rotationBlocked bool) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.keyringRotationBlockedLocked(target) {
-		// Re-run the cross-site decision on the next poll even if the
-		// caller cleared the dirty bit after the reservation set it.
-		tm.keyringRotationBlockedDirty = true
-		return false, true
-	}
-	return tm.beginDeploymentTopologyChangeLocked(), false
-}
-
 func (tm *TopologyManager) finishDeploymentTopologyChange() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()

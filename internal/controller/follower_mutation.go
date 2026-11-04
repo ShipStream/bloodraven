@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -43,6 +44,13 @@ func (g *mutationGate) enter() bool {
 	}
 	g.active++
 	return true
+}
+
+// busy reports whether an admitted section has not exited yet.
+func (g *mutationGate) busy() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.active > 0
 }
 
 func (g *mutationGate) exit() {
@@ -89,14 +97,15 @@ func (g *mutationGate) admit(ctx context.Context, publish func()) error {
 // handoff is using.
 //
 // predecessorUpdateInFlight covers a replaced manager's ordered update,
-// which outlives that manager's Run.
+// which outlives that manager's Run; beginFollowerMutation also checks
+// predecessorMutating, anything else a replaced manager is still doing.
 //
 // promotedSite is the end-of-handoff barrier: recordFailover sets it, and it
 // clears only once a poll observes the target writable (or its TTL lapses),
 // so a poll still carrying pre-promotion observations cannot act on them.
 // Must hold tm.mu.
 func (tm *TopologyManager) followerMutationSuppressedLocked() bool {
-	return tm.promotedSite != "" || tm.topologyFrozen || tm.plannedFailoverActive ||
+	return tm.retired || tm.promotedSite != "" || tm.topologyFrozen || tm.plannedFailoverActive ||
 		!bootstrapIdlePhase(tm.bootstrapPhase) ||
 		tm.deploymentUpdateRunning || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation ||
 		tm.predecessorUpdateInFlight
@@ -116,6 +125,9 @@ func (tm *TopologyManager) followerMutationSuppressed() bool {
 // deadline and must not write CR status: its duration is how long a handoff
 // waits.
 func (tm *TopologyManager) beginFollowerMutation() (release func(), ok bool) {
+	if tm.predecessorMutating() {
+		return nil, false
+	}
 	if !tm.followerMutationGate.enter() {
 		return nil, false
 	}
@@ -228,29 +240,52 @@ func (tm *TopologyManager) mutationClaimed() bool {
 const (
 	plannedClaimRefusedUpdateRunning      = "an ordered update is running"
 	plannedClaimRefusedPromotion          = "a promotion is in flight"
+	plannedClaimRefusedUnobserved         = "a promotion has not been observed yet"
 	plannedClaimRefusedPredecessorUpdate  = "a replaced topology manager's ordered update is still finishing"
 	plannedClaimRefusedPredecessorPromote = "a replaced topology manager is still inside a promotion"
 	plannedClaimRefusedNoManager          = "no topology manager is running for the group yet"
+	plannedClaimRefusedRestore            = "an in-place restore is in progress"
+	plannedClaimRefusedBootstrap          = "a bootstrap clone is running"
+	plannedClaimRefusedRotation           = "the target is mid-keyring-rotation"
 )
 
+// plannedClaimRefusedSourceMoved is the refusal when the manager observes
+// a different primary than the planned failover's source.
+func plannedClaimRefusedSourceMoved(active, source string) string {
+	return fmt.Sprintf("the active primary is now %q, not the source %q", active, source)
+}
+
 // ClaimPlannedFailover sets the planned-failover guard for a planned
-// failover about to fence its source. Decided under mu against the
-// ordered-update claim (which refuses while the guard is set), it refuses
-// while this manager has an update claimed or a topology change in flight,
-// or still defers to a replaced manager's update. Either the update or the
-// planned failover owns the sites, never both. retry marks a refusal that
-// clears on its own within seconds (a promotion finishing); an ordered
-// update can run for much longer, so the planned failover gives up on it.
-func (tm *TopologyManager) ClaimPlannedFailover() (ok bool, why string, retry bool) {
+// failover about to fence source and promote target. Decided under mu
+// against every other claim (see the matrix in topology_claims.go), so
+// either another actor or the planned failover owns the sites, never
+// both. retry marks a refusal that clears on its own within seconds (a
+// promotion finishing or being observed); the rest fail the request. A
+// manager that observes a primary other than source refuses for good: a
+// promotion moved authority since the request was validated. Idempotent.
+func (tm *TopologyManager) ClaimPlannedFailover(source, target string) (ok bool, why string, retry bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	switch {
+	case tm.retired:
+		return false, plannedClaimRefusedNoManager, true
 	case tm.deploymentUpdateRunning:
 		return false, plannedClaimRefusedUpdateRunning, false
-	case tm.deploymentChanging > 0:
-		return false, plannedClaimRefusedPromotion, true
 	case tm.predecessorUpdateInFlight:
 		return false, plannedClaimRefusedPredecessorUpdate, false
+	case tm.topologyFrozen:
+		return false, plannedClaimRefusedRestore, false
+	case !bootstrapIdlePhase(tm.bootstrapPhase):
+		return false, plannedClaimRefusedBootstrap, false
+	case tm.keyringRotationBlockedLocked(target):
+		return false, plannedClaimRefusedRotation, false
+	case tm.deploymentChanging > 0:
+		return false, plannedClaimRefusedPromotion, true
+	case tm.promotionUnobservedLocked():
+		return false, plannedClaimRefusedUnobserved, true
+	}
+	if active := tm.activeSiteLocked(); active != "" && active != source {
+		return false, plannedClaimRefusedSourceMoved(active, source), false
 	}
 	tm.plannedFailoverActive = true
 	return true, "", false
@@ -263,6 +298,13 @@ func (tm *TopologyManager) mutationInFlight() bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return tm.deploymentUpdatePending || tm.deploymentUpdateRunning || tm.deploymentChanging > 0
+}
+
+// changingSites reports whether this manager is changing the sites now: a
+// promotion or ordered update claimed, or a follower mutation admitted.
+// On a retired manager it only ever goes from true to false.
+func (tm *TopologyManager) changingSites() bool {
+	return tm.mutationClaimed() || tm.followerMutationGate.busy()
 }
 
 // waitUpdateWorkers blocks until every ordered-update goroutine has exited.

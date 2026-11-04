@@ -193,14 +193,14 @@ func TestBeginPromotionOf_ExcludesRotationAdmission(t *testing.T) {
 	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
 		t.Fatalf("setup: %s", why)
 	}
-	if began, blocked := tm.beginPromotionOf("dc2"); began || !blocked {
-		t.Fatalf("beginPromotionOf after a reservation = began %v, blocked %v; want refused", began, blocked)
+	if began, blocked := tm.beginAutoPromotionOf("dc2"); began || !blocked {
+		t.Fatalf("beginAutoPromotionOf after a reservation = began %v, blocked %v; want refused", began, blocked)
 	}
 	tm.PublishKeyringRotationBlocked(nil)
 
-	began, blocked := tm.beginPromotionOf("dc2")
+	began, blocked := tm.beginAutoPromotionOf("dc2")
 	if !began || blocked {
-		t.Fatalf("beginPromotionOf = began %v, blocked %v; want claimed", began, blocked)
+		t.Fatalf("beginAutoPromotionOf = began %v, blocked %v; want claimed", began, blocked)
 	}
 	if ok, _ := tm.ReserveKeyringRotation("dc2"); ok {
 		t.Fatal("rotation admitted while a promotion of the site is claimed")
