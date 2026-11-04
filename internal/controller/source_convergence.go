@@ -44,12 +44,15 @@ func (tm *TopologyManager) confirmedActivePrimary(ctx context.Context) (*siteTra
 	return site, nil
 }
 
+// sourceConvergenceSuppressed reports whether convergence must leave
+// replication alone this poll. Beyond the shared follower-mutation gate
+// it also yields to restore-driven bootstrap suppression and to the
+// updater itself, which restarts replication on the sites it rolls.
 func (tm *TopologyManager) sourceConvergenceSuppressed() bool {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	return tm.promotedSite != "" || tm.autoBootstrapSuppressed || tm.topologyFrozen ||
-		tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) ||
-		(tm.updater != nil && tm.updater.IsUpdating())
+	suppressed := tm.autoBootstrapSuppressed || tm.followerMutationSuppressedLocked()
+	tm.mu.RUnlock()
+	return suppressed || (tm.updater != nil && tm.updater.IsUpdating())
 }
 
 // checkSourceConvergence converges followers with existing replication
@@ -88,6 +91,14 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 			changed = tm.setSourceConvergence(site, repl, sourceConvergencePending, sourceReasonSourceMismatch, active.host) || changed
 			continue
 		}
+		// The mutation runs as an admitted follower mutation, so a handoff
+		// that claims the sites meanwhile waits for it to finish.
+		release, admitted := tm.beginFollowerMutation()
+		if !admitted {
+			suppressed = true
+			changed = tm.setSourceConvergence(site, repl, sourceConvergencePending, sourceReasonSourceMismatch, active.host) || changed
+			continue
+		}
 
 		opCtx, cancel := context.WithTimeout(ctx, sourceConvergenceOperationTimeout)
 		if current == expected {
@@ -96,6 +107,7 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 			err = tm.repointReplica(opCtx, active, site, repl.SourceHost)
 		}
 		if err != nil {
+			release()
 			cancel()
 			stateValue, reason := sourceConvergencePending, sourceReasonMutationFailed
 			if strings.Contains(err.Error(), sourceReasonGTIDDiverged) {
@@ -108,6 +120,7 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 		}
 
 		verified, verifyErr := tm.verifyDirectReplica(opCtx, site, active.host)
+		release()
 		cancel()
 		if verifyErr != nil {
 			tm.logSourceFailure(site, active, "verify", verifyErr)

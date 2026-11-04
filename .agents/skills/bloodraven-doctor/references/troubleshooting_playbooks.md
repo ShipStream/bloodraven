@@ -78,19 +78,43 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
 > If the keyring escrow Secret in Kubernetes is deleted or corrupt while the pod is running with an in-memory or unsealed keyring, restarting the pod will cause total loss of the tablespace encryption master key, rendering the database files unrecoverable.
 
 ### Diagnostic Steps
-1. Check sidecar keyring status:
+1. Check sidecar keyring status (metadata and digests only; `/keyring/status` never returns key material):
    ```bash
    ./.agents/skills/bloodraven-doctor/scripts/sidecar-probe.sh -n <ns> <group> keyring
    ```
-2. Check escrow Secret:
+2. Find the site's escrow Secret through the CR, not by guessing its name. Escrow Secrets are named `mysql-<group>-<site>-keyring-v<N>` (immutable, one per keyring version):
    ```bash
-   kubectl get secret -n <ns> <group>-keyring-escrow -o yaml
+   SECRET=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringSecret}')
+   VERSION=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringVersion}')
+   DIGEST=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringDigest}')
+   kubectl get secret -n <ns> "$SECRET"
+   kubectl get secret -n <ns> -l shipstream.io/failover-group=<group>,app.kubernetes.io/name=mysql-keyring
    ```
 
 ### Safe Remediation Steps
-1. If the pod is still running, query the sidecar `/keyring/status` endpoint to extract the active keyring digest and key metadata.
-2. Re-populate the escrow Secret using operator credentials or backup keys.
-3. Once the escrow Secret is restored, verify that `status.encryptionAtRest.sites[].phase` settles to `Sealed`.
+The only surviving copy of a sealed site's keys is the keyring file in its running pod's `mysql` container (`$KEYRING_DIR/keyring`; `KEYRING_DIR` is `spec.encryptionAtRest.keyring.dataFileDir`, default `/run/mysql-keyring`). Do not delete, restart, evict or drain that pod, and do not force an unseal or rollout.
+
+1. Recreate the exact missing Secret from that file and verify it against the recorded digest. Refuse to continue on a mismatch:
+   ```bash
+   set -o pipefail
+   POD=$(kubectl get pod -n <ns> -l shipstream.io/failover-group=<group>,shipstream.io/site=<site> \
+     -o jsonpath='{.items[0].metadata.name}')
+   KEYRING_DIR=$(kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{.spec.encryptionAtRest.keyring.dataFileDir}')
+   KEYRING_DIR=${KEYRING_DIR:-/run/mysql-keyring}
+   kubectl exec -n <ns> "$POD" -c mysql -- cat "$KEYRING_DIR/keyring" | \
+     kubectl create secret generic "$SECRET" -n <ns> --from-file=keyring=/dev/stdin
+   ACTUAL=$(kubectl get secret "$SECRET" -n <ns> -o jsonpath='{.data.keyring}' | base64 -d | sha256sum | cut -d' ' -f1)
+   if [[ "sha256:${ACTUAL}" != "$DIGEST" ]]; then
+     kubectl delete secret "$SECRET" -n <ns>
+     echo "restored keyring digest does not match status; refusing to continue" >&2
+     exit 1
+   fi
+   ```
+2. Finish with the canonical runbook, which adds the labels (including `shipstream.io/keyring-version=$VERSION`), the digest annotation, the ownerReference and `immutable: true`, then patches the site's `status.encryptionAtRest.sites[].phase` back to `Sealed`: "Keyring escrow lost" in `site/content/docs/6.operations/4.runbooks.md` (also "Disaster recovery" in `site/content/docs/4.configuration/8.encryption-at-rest.md`).
+3. Verify the site stays `Sealed` and the `KeyringEscrowMissing` / `KeyringEscrowCorrupt` events stop.
 
 ---
 

@@ -846,6 +846,10 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// Must land before Run: the first Poll otherwise sees an empty
 	// blocked set and can promote a mid-rotation replica.
 	tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
+	// Likewise the planned-failover guard: the RecoveryInProgress markers
+	// restored below would otherwise let the first Poll drain or recover
+	// sites a planned failover that survived the restart is using.
+	tm.SetPlannedFailoverActive(plannedFailoverInFlight(fg.Status.PlannedFailover))
 	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 	tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))

@@ -94,6 +94,12 @@ type UpdateTarget struct {
 	// the pod-readiness gate off for this site; production always sets
 	// it together with ApplyUpdate.
 	PodReady func(context.Context) (PodReadiness, error)
+	// HandoffBlocked, when set, reports the site's handoff eligibility
+	// (keyring rotation, pending reclone, divergence) at the moment the
+	// handoff target is chosen. The flags above are a snapshot taken when
+	// the update was planned, which can be minutes older after follower
+	// rollouts. Production always sets it; nil skips the live check.
+	HandoffBlocked func() error
 }
 
 // podReadinessProbeTimeout bounds one pod-readiness probe.
@@ -332,7 +338,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		processedFollowers[name] = struct{}{}
 	}
 	var handoff *UpdateTarget
-	var rotatingStandby, pendingStandby, divergentStandby []string
+	var rotatingStandby, pendingStandby, divergentStandby, liveBlocked []string
 	for i := range followers {
 		if !followers[i].Promotable {
 			continue
@@ -348,6 +354,12 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		if followers[i].DivergenceBlocked {
 			divergentStandby = append(divergentStandby, divergentStandbyMessage(followers[i]))
 			continue
+		}
+		if followers[i].HandoffBlocked != nil {
+			if err := followers[i].HandoffBlocked(); err != nil {
+				liveBlocked = append(liveBlocked, err.Error())
+				continue
+			}
 		}
 		if followers[i].Drifted {
 			if _, updated := processedFollowers[followers[i].Name]; !updated {
@@ -368,6 +380,9 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		}
 		if len(divergentStandby) > 0 {
 			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s", strings.Join(divergentStandby, "; "))
+		}
+		if len(liveBlocked) > 0 {
+			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s", strings.Join(liveBlocked, "; "))
 		}
 		return processed, fmt.Errorf("no healthy promotable standby available for active-site update")
 	}

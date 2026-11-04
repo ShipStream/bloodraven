@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
@@ -539,6 +541,90 @@ func TestReconcileEncryption_RefusesRotationDuringOrderedUpdate(t *testing.T) {
 	if s := siteStatus(fg, "dc2"); s.Phase != v1alpha1.KeyringPhaseSealed {
 		t.Fatalf("phase = %q: rotation must not race an ordered update", s.Phase)
 	}
+}
+
+// rotationRunner wires a topology manager for the test group into r, so
+// rotation admission goes through the live reservation.
+func rotationRunner(r *MysqlFailoverGroupReconciler, c client.Client) *TopologyManager {
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+	tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+	r.Runner = &TopologyManagerRunner{client: c, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{nn: {tm: tm}}}
+	return tm
+}
+
+func seedEscrow(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup) {
+	t.Helper()
+	store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
+	for _, s := range []string{"dc1", "dc2"} {
+		if _, err := store.put(context.Background(), fg, s, []byte("k")); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+}
+
+// status.updatePhase reaches the CR only through the topology snapshot, so
+// an update that has just started is invisible to the status check; the
+// live reservation must refuse the rotation.
+func TestReconcileEncryption_RefusesRotationWhileUpdatePendingLive(t *testing.T) {
+	fg := sealedGroupWithActive("dc1")
+	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+	seedEscrow(t, c, fg)
+	tm := rotationRunner(r, c)
+	tm.mu.Lock()
+	tm.deploymentUpdatePending = true
+	tm.mu.Unlock()
+
+	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	s := siteStatus(fg, "dc2")
+	if s.Phase != v1alpha1.KeyringPhaseSealed || s.UnsealReason != "" {
+		t.Fatalf("site = %+v: rotation admitted while an ordered update was pending", s)
+	}
+	if s.Message != "an ordered update is in progress" {
+		t.Errorf("message = %q", s.Message)
+	}
+}
+
+func TestReconcileEncryption_RotationReservationFollowsStatusWrite(t *testing.T) {
+	t.Run("persisted stamp supersedes the reservation", func(t *testing.T) {
+		fg := sealedGroupWithActive("dc1")
+		fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+		r, c := encReconciler(t, scriptedKeyring(nil), fg)
+		seedEscrow(t, c, fg)
+		tm := rotationRunner(r, c)
+		if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		tm.mu.RLock()
+		durable, reserved := append([]string(nil), tm.keyringRotationBlocked...), append([]string(nil), tm.keyringRotationReserved...)
+		tm.mu.RUnlock()
+		if len(durable) != 1 || durable[0] != "dc2" || len(reserved) != 0 {
+			t.Fatalf("durable=%v reserved=%v, want the stamp pushed and the reservation gone", durable, reserved)
+		}
+	})
+	t.Run("failed status write releases the reservation", func(t *testing.T) {
+		fg := sealedGroupWithActive("dc1")
+		fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+		r, c := encReconciler(t, scriptedKeyring(nil), fg)
+		seedEscrow(t, c, fg)
+		r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+			SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+				return errors.New("status write denied")
+			},
+		})
+		tm := rotationRunner(r, c)
+		if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err == nil {
+			t.Fatal("reconcile succeeded with a failing status write")
+		}
+		tm.mu.RLock()
+		blocked := tm.keyringRotationBlockedLocked("dc2")
+		tm.mu.RUnlock()
+		if blocked {
+			t.Fatal("an unpersisted rotation left dc2 promotion-blocked")
+		}
+	})
 }
 
 // --- clone gate -----------------------------------------------------

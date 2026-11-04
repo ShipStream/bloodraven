@@ -224,3 +224,29 @@ func TestConnectionMaterialHash_UnreadableSecretIsAnError(t *testing.T) {
 		t.Fatalf("missing TLS secret: hash %q, want an error", h)
 	}
 }
+
+// A manager started while a planned failover is in flight (an operator
+// restart mid-switchover) must carry the planned-failover guard before its
+// first poll: the RecoveryInProgress markers startManager restores would
+// otherwise let that poll drain or recover the sites the switchover uses.
+func TestStartManager_HydratesPlannedFailoverGuardBeforeRun(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	nn := FailoverGroupNamespacedName(fg)
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "dc2"}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc2", RecoveryState: recoveryStateInProgress}}
+
+	cfg := CRConfigToTopologyConfig(fg)
+	if err := r.startManager(context.Background(), fg, cfg, nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	mt := registeredManager(r, nn)
+	if mt == nil {
+		t.Fatal("no manager registered")
+	}
+	if !mt.tm.isPlannedFailoverActive() {
+		t.Fatal("planned-failover guard not set when Run started")
+	}
+	if !mt.tm.followerMutationSuppressed() {
+		t.Fatal("restored RecoveryInProgress sites are open to recovery during the planned failover")
+	}
+}

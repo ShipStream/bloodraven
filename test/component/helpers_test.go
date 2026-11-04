@@ -48,6 +48,7 @@ type mockMySQL struct {
 	gtidExecuted          string
 	killConnectionResults []int
 	killConnectionCalls   int
+	changeSourceCalls     int
 	setReadOnlyFalseN     int
 	setSuperROFalseN      int
 
@@ -189,6 +190,7 @@ func (m *mockMySQL) ChangeReplicationSource(_ context.Context, opts mysql.Replic
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.replicationSourceSet = true
+	m.changeSourceCalls++
 	m.changeReplicationOpts = opts
 	if m.replicaStatus == nil {
 		m.replicaStatus = &mysql.ReplicaStatus{}

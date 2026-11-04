@@ -576,6 +576,19 @@ type TopologyManager struct {
 	// planned_failover_reconciler.go.
 	plannedFailoverActive bool
 
+	// followerMutationMu is the admission barrier between follower
+	// mutations (recovery drain, old-primary recovery, source convergence),
+	// which hold it shared, and topology handoffs (planned promotion,
+	// ordered-update claim), which publish their suppression flag while
+	// holding it exclusively. Never acquired while holding mu. See
+	// beginFollowerMutation.
+	followerMutationMu sync.RWMutex
+
+	// recoveryDeferred records that old-primary recovery is standing down
+	// for a handoff, so the deferral is logged once per transition.
+	// Protected by mu.
+	recoveryDeferred bool
+
 	// keyringRotationBlocked is the set of sites whose UnsealReason is
 	// Rotation. They stay in topology tallies but must not be promoted.
 	// keyringRotationBlockedDirty is set when the set changes so Poll
@@ -583,6 +596,14 @@ type TopologyManager struct {
 	// transition. Protected by mu.
 	keyringRotationBlocked      []string
 	keyringRotationBlockedDirty bool
+
+	// keyringRotationReserved is the set of sites whose rotation the
+	// encryption reconciler has admitted but whose UnsealReason=Rotation
+	// is not yet in keyringRotationBlocked. A reservation blocks promotion
+	// exactly like the durable set and is decided under mu against the
+	// ordered-update claim, so a rotation and an update handoff can never
+	// both be admitted. Protected by mu.
+	keyringRotationReserved []string
 
 	// restoreReclonePending is the set of sites an in-place restore still
 	// has to reclone (status.restoreReclones.pending). They hold pre-restore
@@ -1901,15 +1922,11 @@ func (tm *TopologyManager) MarkStatusWriteResult(err error) {
 func (tm *TopologyManager) observations() []state.SiteObservation {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	blocked := make(map[string]struct{}, len(tm.keyringRotationBlocked))
-	for _, name := range tm.keyringRotationBlocked {
-		blocked[name] = struct{}{}
-	}
 	out := make([]state.SiteObservation, len(tm.sites))
 	for i := range tm.sites {
 		obs := tm.sites[i].observation()
 		obs.ClassificationOverdue = tm.classificationOverdueLocked(&tm.sites[i])
-		if _, rotating := blocked[tm.sites[i].name]; rotating {
+		if tm.keyringRotationBlockedLocked(tm.sites[i].name) {
 			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedRotation
 		} else if tm.restoreReclonePendingLocked(tm.sites[i].name) {
 			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedPendingReclone
@@ -3014,7 +3031,13 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 		}
 	}
 
-	if !tm.beginDeploymentTopologyChange() {
+	// Publish the topology change at the follower-mutation barrier: a
+	// recovery drain pass admitted before the planned-failover flag was
+	// set may still be killing sessions on the target, and Execute must
+	// not start until it has finished.
+	var began bool
+	tm.admitTopologyHandoff(func() { began = tm.beginDeploymentTopologyChange() })
+	if !began {
 		return "", fmt.Errorf("topology change already in progress")
 	}
 	defer tm.finishDeploymentTopologyChange()
@@ -3294,20 +3317,16 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			continue
 		}
 		tm.mu.RLock()
-		rotationBlocked := tm.keyringRotationBlockedLocked(site.name)
-		reclonePending := tm.restoreReclonePendingLocked(site.name)
-		var divergence siteRecovery
-		if rec := tm.recovery[site.name]; rec != nil && rec.state == recoveryStateBlocked {
-			divergence = *rec
-		}
+		block := tm.handoffBlockLocked(site.name)
 		tm.mu.RUnlock()
 		followers = append(followers, UpdateTarget{
 			Name: site.name, Host: site.host, Checker: site.mysql, Promotable: site.isPromotable(),
 			Drifted: drifted[site.name], ExpectedSource: activeSite.host,
-			RotationBlocked: rotationBlocked, ReclonePending: reclonePending,
-			DivergenceBlocked:     divergence.state == recoveryStateBlocked,
-			DivergentTransactions: divergence.divergentCount, DivergentGtid: divergence.divergentGtid,
-			PodReady: tm.podReadyProbe(site.name),
+			RotationBlocked: block.rotation, ReclonePending: block.reclonePending,
+			DivergenceBlocked:     block.divergence.state == recoveryStateBlocked,
+			DivergentTransactions: block.divergence.divergentCount, DivergentGtid: block.divergence.divergentGtid,
+			PodReady:       tm.podReadyProbe(site.name),
+			HandoffBlocked: tm.liveHandoffRefusal(site.name),
 		})
 	}
 	if drifted[activeName] {
@@ -3324,9 +3343,9 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 				continue
 			}
 			tm.mu.RLock()
-			blocked := tm.keyringRotationBlockedLocked(tm.sites[i].name) || tm.restoreReclonePendingLocked(tm.sites[i].name)
+			block := tm.handoffBlockLocked(tm.sites[i].name)
 			tm.mu.RUnlock()
-			if blocked {
+			if block.rotation || block.reclonePending {
 				continue
 			}
 			if target := followerTarget(followers, tm.sites[i].name); target != nil && target.DivergenceBlocked {
@@ -3403,18 +3422,27 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			return
 		}
 		defer endDeploymentUpdate()
-		tm.mu.Lock()
-		if ctx.Err() != nil || tm.authorityEpoch != updateAuthorityEpoch || tm.activeSiteLocked() != activeName || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation || tm.topologyFrozen || tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) {
-			tm.mu.Unlock()
-			return
-		}
 		// Claim the MySQL mutation window only after slow lease admission. An
 		// emergency that ran while admission waited invalidates this plan.
-		tm.deploymentUpdateRunning = true
-		tm.deploymentChanging++
-		tm.authorityEpoch++
-		tm.deploymentTopologyPendingLocked()
-		tm.mu.Unlock()
+		// The claim is published at the follower-mutation barrier, so no
+		// recovery drain, old-primary recovery or source repoint admitted
+		// before it is still running when the update touches MySQL.
+		claimed := false
+		tm.admitTopologyHandoff(func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			if ctx.Err() != nil || tm.authorityEpoch != updateAuthorityEpoch || tm.activeSiteLocked() != activeName || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation || tm.topologyFrozen || tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) {
+				return
+			}
+			tm.deploymentUpdateRunning = true
+			tm.deploymentChanging++
+			tm.authorityEpoch++
+			tm.deploymentTopologyPendingLocked()
+			claimed = true
+		})
+		if !claimed {
+			return
+		}
 		defer func() {
 			tm.finishDeploymentTopologyChange()
 			tm.mu.Lock()
@@ -4484,6 +4512,16 @@ func (tm *TopologyManager) checkRecoveryWithConvergence(ctx context.Context, sit
 	// primary must exist, empty sites are left to bootstrap/auto-clone, and
 	// the GTID comparison in initiateRecovery blocks on any divergence.
 
+	// Recovery fences, kills sessions and rewrites replication. Stand down
+	// while a handoff owns the sites or a promotion is not yet observed;
+	// each attempt below re-checks under the admission barrier.
+	if tm.followerMutationSuppressed() {
+		tm.pauseRecoveryDrains()
+		tm.noteRecoveryDeferred(true)
+		return false
+	}
+	tm.noteRecoveryDeferred(false)
+
 	// Recovery is destructive to replication metadata, so it uses the same
 	// unique, directly confirmed, promotable authority gate as convergence and
 	// clone/reclone paths.
@@ -4549,7 +4587,17 @@ func (tm *TopologyManager) checkRecoveryWithConvergence(ctx context.Context, sit
 		// failed pre-probe) must NOT consume the cycle — `continue`, so a
 		// persistently-skipped site cannot starve a divergent site behind
 		// it in scan order out of ever being reported.
-		if changed, acted := tm.initiateRecovery(ctx, i, activeIdx, siteRepl); acted {
+		release, admitted := tm.beginFollowerMutation()
+		if !admitted {
+			tm.pauseRecoveryDrains()
+			tm.noteRecoveryDeferred(true)
+			return false
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, recoveryAttemptTimeout)
+		changed, acted := tm.initiateRecovery(attemptCtx, i, activeIdx, siteRepl)
+		cancel()
+		release()
+		if acted {
 			return changed
 		}
 	}
@@ -4905,8 +4953,24 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 		if tm.sites[i].sourceConvergenceState != sourceConvergenceConverged {
 			continue
 		}
-		if !tm.advanceSiteAppConnectionDrain(ctx, &tm.sites[i]) {
-			continue
+		tm.mu.RLock()
+		drained := rec.drainComplete
+		tm.mu.RUnlock()
+		if !drained {
+			// A kill pass is a follower mutation: it must not run while a
+			// planned failover or ordered update is using this site's
+			// sessions. The drain resumes, with a fresh budget, afterwards.
+			release, admitted := tm.beginFollowerMutation()
+			if !admitted {
+				tm.pauseRecoveryDrains()
+				tm.noteRecoveryDeferred(true)
+				continue
+			}
+			done := tm.advanceSiteAppConnectionDrain(ctx, &tm.sites[i])
+			release()
+			if !done {
+				continue
+			}
 		}
 		tm.mu.Lock()
 		delete(tm.recovery, name)

@@ -125,11 +125,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	requeue := time.Duration(0)
 	allSealed := true
 
+	// Rotations admitted this pass hold a topology-manager reservation
+	// until the stamp is persisted; release them if it never is, so a
+	// failed write does not leave the site promotion-blocked.
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	var reserved []string
+	persisted := false
+	defer func() {
+		if !persisted && r.Runner != nil {
+			r.Runner.ReleaseKeyringRotationReservations(nn, reserved)
+		}
+	}()
+
 	for i := range st.Sites {
 		site := &st.Sites[i]
 		before := *site
 
 		wantRequeue, err := r.reconcileSiteKeyring(ctx, fg, site, store, fetch, rotateTarget)
+		if before.UnsealReason != v1alpha1.UnsealReasonRotation && site.UnsealReason == v1alpha1.UnsealReasonRotation {
+			reserved = append(reserved, site.Name)
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -166,10 +181,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	if err := r.patchEncryptionStatus(ctx, fg); err != nil {
 		return 0, err
 	}
+	persisted = true
 	// Push immediately so the topology manager does not wait for the
-	// 30s runner sync before refusing (or unblocking) promotion.
+	// 30s runner sync before refusing (or unblocking) promotion. The push
+	// also supersedes this pass's reservations.
 	if r.Runner != nil {
-		r.Runner.SetKeyringRotationBlocked(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, rotationBlockedSites(fg))
+		r.Runner.SetKeyringRotationBlocked(nn, rotationBlockedSites(fg))
 	}
 	return requeue, nil
 }
@@ -203,7 +220,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 	// An admin-requested rotation on a site that is currently sealed is
 	// the only transition that moves backwards out of Sealed.
 	if site.Phase == v1alpha1.KeyringPhaseSealed && rotateTarget == site.Name {
-		if ok, why := r.rotationAllowed(fg, site.Name); !ok {
+		ok, why := r.rotationAllowed(fg, site.Name)
+		if ok && r.Runner != nil {
+			// status.updatePhase reaches the CR only through the topology
+			// snapshot, so an update that has just started is invisible
+			// above. The reservation is decided live against the update's
+			// claim and blocks promotion of the site from here on.
+			ok, why = r.Runner.ReserveKeyringRotation(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, site.Name)
+		}
+		if !ok {
 			site.Message = why
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringRotationRefused",
 				"refusing to rotate keyring on site %s: %s", site.Name, why)

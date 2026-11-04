@@ -71,6 +71,10 @@ type mockMySQL struct {
 	evictCalls        int
 	evictKeepUsers    []string
 	fenceErr          error
+	// onKill and onStopReplica, when set, run at the start of the call
+	// without m.mu held, so a test can interleave another goroutine.
+	onKill        func()
+	onStopReplica func()
 }
 
 func (m *mockMySQL) MissingRestoreFencePrivileges(_ context.Context) ([]string, error) {
@@ -279,6 +283,9 @@ func TestEmitStatusSnapshotPreservesPersistentTopologyDegradation(t *testing.T) 
 	}
 }
 func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
+	if m.onKill != nil {
+		m.onKill()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := m.killConnectionCalls
@@ -294,6 +301,9 @@ func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
 	return killed, err
 }
 func (m *mockMySQL) StopReplica(_ context.Context) error {
+	if m.onStopReplica != nil {
+		m.onStopReplica()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopReplicaCalls++
