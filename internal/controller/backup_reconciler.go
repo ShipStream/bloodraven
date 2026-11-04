@@ -724,7 +724,14 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		if err != nil {
 			return false, 0, fmt.Errorf("read cleanup pod: %w", err)
 		}
-		if waiting := cleanupPodStuck(pod, time.Now()); waiting != "" {
+		waiting := cleanupPodStuck(pod, time.Now())
+		if created := cleanupJob.CreationTimestamp; pod == nil && !created.IsZero() && time.Since(created.Time) >= cleanupStartGrace {
+			// The Job controller could not create a pod (ResourceQuota,
+			// Pod Security admission): only the Job's events say why.
+			waiting = fmt.Sprintf("no pod created since %s; check the Job's FailedCreate events (kubectl describe job %s)",
+				created.UTC().Format(time.RFC3339), cleanupJob.Name)
+		}
+		if waiting != "" {
 			// The text is stable for a given pod and cause, so this
 			// writes only when the reason or the pod changes.
 			if err := r.setArtifactCleanupCondition(ctx, backup, cleanupReasonPending,
@@ -1386,6 +1393,7 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 		return ti.After(tj)
 	})
 	cutoff := time.Now().Add(-maxAge)
+	var checker *BackupReadChecker
 	for i, b := range bucket {
 		// Safety floor.
 		if int32(i) < minKeep {
@@ -1405,7 +1413,10 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 		// Not kept by any policy check => delete, unless a verification
 		// may still be reading the artifact.
 		victim := b
-		if err := r.deleteUnreadBackup(ctx, &victim); err != nil {
+		if checker == nil {
+			checker = NewBackupReadChecker(r.apiReader())
+		}
+		if err := r.deleteUnreadBackup(ctx, &victim, checker); err != nil {
 			return err
 		}
 	}

@@ -19,6 +19,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -519,13 +520,9 @@ func backupArtifactPrefix(b *v1alpha1.MysqlBackup) (bucket, prefix string, ok bo
 	if storage == nil || storage.Location == "" || storage.Bucket == "" {
 		return "", "", false, fmt.Errorf("succeeded S3 backup has no recorded status.artifactStorage")
 	}
-	key := storage.Location
-	if rest, found := strings.CutPrefix(key, "s3://"); found {
-		locBucket, k, _ := strings.Cut(rest, "/")
-		if locBucket != storage.Bucket {
-			return "", "", false, fmt.Errorf("location bucket %q differs from recorded bucket %q", locBucket, storage.Bucket)
-		}
-		key = k
+	locBucket, key, inBucket := backupmeta.SplitS3Location(storage.Location)
+	if inBucket && locBucket != storage.Bucket {
+		return "", "", false, fmt.Errorf("location bucket %q differs from recorded bucket %q", locBucket, storage.Bucket)
 	}
 	key = strings.TrimRight(key, "/")
 	if key == "" {

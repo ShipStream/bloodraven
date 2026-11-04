@@ -173,6 +173,10 @@ func artifactReaderRefs(ctx context.Context, reader client.Reader, backup *v1alp
 func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, list *v1alpha1.MysqlBackupVerificationList) ([]artifactReader, error) {
 	readers := map[string]string{}
 	seen := map[types.UID]bool{}
+	// An unpinned verification only ever pins a live Succeeded backup
+	// (resolveBackup skips Terminating ones and stampVerificationHold
+	// refuses them), so it is a prospective reader of nothing else.
+	pickable := backup.DeletionTimestamp.IsZero() && backup.Status.Phase == v1alpha1.BackupPhaseSucceeded
 	for key, name := range backup.Annotations {
 		uid, ok := strings.CutPrefix(key, annotationVerificationHoldPrefix)
 		if !ok {
@@ -202,7 +206,7 @@ func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backu
 			if reading {
 				readers[v.Name] = string(v.UID)
 			}
-		case ref == nil && v.DeletionTimestamp.IsZero() && !verificationTerminal(v.Status.Phase) &&
+		case ref == nil && pickable && v.DeletionTimestamp.IsZero() && !verificationTerminal(v.Status.Phase) &&
 			v.Spec.FailoverGroupRef.Name == backup.Spec.FailoverGroupRef.Name &&
 			v.Spec.ProfileName == backup.Spec.ProfileName &&
 			(v.Spec.BackupRef == nil || v.Spec.BackupRef.Name == "" || v.Spec.BackupRef.Name == backup.Name):
@@ -279,16 +283,21 @@ func NewBackupReadChecker(reader client.Reader) *BackupReadChecker {
 
 // BeingRead reports whether any verification may still read the backup.
 func (c *BackupReadChecker) BeingRead(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
+	readers, err := c.readers(ctx, backup)
+	return len(readers) > 0, err
+}
+
+// readers returns the verifications that may still read the backup.
+func (c *BackupReadChecker) readers(ctx context.Context, backup *v1alpha1.MysqlBackup) ([]artifactReader, error) {
 	list, ok := c.lists[backup.Namespace]
 	if !ok {
 		list = &v1alpha1.MysqlBackupVerificationList{}
 		if err := c.reader.List(ctx, list, client.InNamespace(backup.Namespace)); err != nil {
-			return false, fmt.Errorf("list verifications: %w", err)
+			return nil, fmt.Errorf("list verifications: %w", err)
 		}
 		c.lists[backup.Namespace] = list
 	}
-	readers, err := artifactReaderRefsFromList(ctx, c.reader, backup, list)
-	return len(readers) > 0, err
+	return artifactReaderRefsFromList(ctx, c.reader, backup, list)
 }
 
 // stampVerificationHold records v's hold on its pinned backup. The patch
@@ -402,8 +411,11 @@ func (r *MysqlBackupReconciler) apiReader() client.Reader {
 // deleteUnreadBackup deletes a retention victim unless a verification may
 // still be reading it. It re-reads the victim uncached, refuses to act on
 // a same-name replacement, and deletes with UID and resourceVersion
-// preconditions so a hold stamped after the read wins.
-func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *v1alpha1.MysqlBackup) error {
+// preconditions so a hold stamped after the read wins. checker is shared
+// across one prune pass so the namespace's verifications are listed once;
+// a verification that pins after that List must stamp a hold (bumping the
+// resourceVersion) before it reads, so the precondition still protects it.
+func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *v1alpha1.MysqlBackup, checker *BackupReadChecker) error {
 	var fresh v1alpha1.MysqlBackup
 	if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(victim), &fresh); err != nil {
 		return client.IgnoreNotFound(err)
@@ -411,7 +423,7 @@ func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *
 	if fresh.UID != victim.UID || !fresh.DeletionTimestamp.IsZero() || fresh.Status.Phase != v1alpha1.BackupPhaseSucceeded {
 		return nil
 	}
-	readers, err := artifactReaderRefs(ctx, r.apiReader(), &fresh)
+	readers, err := checker.readers(ctx, &fresh)
 	if err != nil {
 		return fmt.Errorf("check readers of backup %s: %w", fresh.Name, err)
 	}

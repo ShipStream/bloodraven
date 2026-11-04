@@ -501,3 +501,34 @@ func TestPruneSuccessful_LogsHeldBackup(t *testing.T) {
 	}
 	t.Fatalf("missing structured log line; got %q", lines)
 }
+
+// TestArtifactReaders_UnpinnedIgnoresUnpickableBackups pins that a
+// not-yet-pinned verification is a prospective reader only of a live
+// Succeeded backup: it can never pin a Terminating or unsuccessful one, so
+// it must not hold that backup's artifact cleanup or PITR coverage.
+func TestArtifactReaders_UnpinnedIgnoresUnpickableBackups(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*v1alpha1.MysqlBackup)
+	}{
+		{name: "terminating", mutate: func(b *v1alpha1.MysqlBackup) {
+			now := metav1.Now()
+			b.DeletionTimestamp = &now
+			b.Finalizers = []string{mysqlBackupFinalizer}
+		}},
+		{name: "failed", mutate: func(b *v1alpha1.MysqlBackup) { b.Status.Phase = v1alpha1.BackupPhaseFailed }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backup := heldBackup()
+			tc.mutate(backup)
+			c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(backup, holdVerification("pending", "", "")).Build()
+			got, err := artifactReaders(context.Background(), c, backup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("readers = %v, want none", got)
+			}
+		})
+	}
+}

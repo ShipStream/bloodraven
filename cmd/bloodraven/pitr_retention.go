@@ -45,6 +45,11 @@ func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, na
 		// run stops, and so must be the binlogs a PITR replay reads after
 		// it. A stamped hold is enough; otherwise (a run started by an
 		// older operator) ask the API server, and fail closed on errors.
+		// Holds are only taken on Succeeded backups, so a deleted backup in
+		// any other phase is skipped without asking the API server.
+		if !b.DeletionTimestamp.IsZero() && b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+			continue
+		}
 		if !b.DeletionTimestamp.IsZero() && !controller.BackupHasVerificationHold(b) {
 			if readers == nil {
 				readers = controller.NewBackupReadChecker(holdReader)

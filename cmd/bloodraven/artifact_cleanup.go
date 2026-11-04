@@ -167,13 +167,9 @@ func cleanupS3Prefix(location, bucket, name string) (string, *cleanupError) {
 	if bucket == "" {
 		return "", rejected("S3 cleanup requires a bucket")
 	}
-	key := location
-	if rest, ok := strings.CutPrefix(location, "s3://"); ok {
-		locBucket, k, _ := strings.Cut(rest, "/")
-		if locBucket != bucket {
-			return "", rejected("refusing cross-bucket delete: location bucket %q, artifact bucket %q", locBucket, bucket)
-		}
-		key = k
+	locBucket, key, inBucket := backupmeta.SplitS3Location(location)
+	if inBucket && locBucket != bucket {
+		return "", rejected("refusing cross-bucket delete: location bucket %q, artifact bucket %q", locBucket, bucket)
 	}
 	if strings.HasPrefix(key, "/") {
 		return "", rejected("S3 location %q has an absolute key", location)

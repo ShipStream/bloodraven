@@ -59,3 +59,15 @@ func CleanupArtifactName(location string) string {
 	}
 	return path.Base(trimmed)
 }
+
+// SplitS3Location splits an S3 status.location into its bucket and object
+// key. Plain dumps record a bucket-relative key (inBucket is false and key is
+// the location); encrypted dumps record s3://<bucket>/<key>/.
+func SplitS3Location(location string) (bucket, key string, inBucket bool) {
+	rest, ok := strings.CutPrefix(location, "s3://")
+	if !ok {
+		return "", location, false
+	}
+	bucket, key, _ = strings.Cut(rest, "/")
+	return bucket, key, true
+}

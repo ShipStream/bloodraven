@@ -347,10 +347,8 @@ func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.Bac
 	}
 	switch backup.Status.StorageType {
 	case v1alpha1.BackupStorageS3:
-		if rest, ok := strings.CutPrefix(location, "s3://"); ok {
-			if bucket, _, _ := strings.Cut(rest, "/"); bucket != storage.Bucket {
-				return fmt.Sprintf("location bucket %q differs from the recorded bucket %q", bucket, storage.Bucket)
-			}
+		if bucket, _, inBucket := backupmeta.SplitS3Location(location); inBucket && bucket != storage.Bucket {
+			return fmt.Sprintf("location bucket %q differs from the recorded bucket %q", bucket, storage.Bucket)
 		}
 	case v1alpha1.BackupStoragePVC:
 		if !strings.HasPrefix(location, backupPVCMountPath+"/") {
