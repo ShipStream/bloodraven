@@ -131,8 +131,10 @@ func TestTopologyClaimMatrix(t *testing.T) {
 				t.Fatal("setup: auto promotion not claimed")
 			}
 		}},
+		// The promotion's own claim, without the planned-failover guard
+		// (that is the next row), so the row fails if the claim stops
+		// holding the sites.
 		{"PlannedPromote", "RRRRR", func(t *testing.T, f *claimFixture) {
-			f.tm.SetPlannedFailoverActive(true) // derived from status, as the reconciler does
 			if err := f.tm.claimPlannedPromotion(ctx, "dc2"); err != nil {
 				t.Fatalf("setup: %v", err)
 			}

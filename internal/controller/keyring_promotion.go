@@ -110,10 +110,9 @@ func (tm *TopologyManager) ReserveKeyringRotation(site string) (bool, string) {
 	case tm.deploymentUpdatePending || tm.deploymentUpdateRunning:
 		return false, "an ordered update is in progress"
 	case tm.plannedFailoverActive:
-		// Set from Validating on, before status.plannedFailover reaches
-		// the cache rotationAllowed reads; admitting a rotation of the
-		// target now would roll back a failover that already fenced the
-		// source.
+		// Set while a planned failover is in flight (from Pending
+		// on); admitting a rotation of the target now could roll back a
+		// failover that already fenced the source.
 		return false, rotationRefusedPlannedFailover
 	case tm.deploymentChanging > 0 || tm.promotedSite != "" || tm.deploymentAwaitingObservation:
 		return false, rotationRefusedPromotionInFlight

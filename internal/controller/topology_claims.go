@@ -30,7 +30,7 @@ import (
 // plannedFailoverActive guard from status (from Pending until the run
 // ends), and its promotion (PlannedPromote, claimPlannedPromotion) claims
 // only against rotation, a running change and a replaced manager's
-// update. Making its side a real claim is tracked separately.
+// update. Making its side a real claim is tracked in issue #235.
 //
 // Held claim (rows) against claimant: R refused, W refused for now and
 // retried by the claimant on a later poll (Upd: it waits at the follower

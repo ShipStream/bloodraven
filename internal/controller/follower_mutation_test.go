@@ -421,6 +421,43 @@ func TestPlannedFailoverPromoting_RollsBackWhenHandoffNotAdmitted(t *testing.T) 
 	}
 }
 
+// The same deadline beside a site that is already writable: the rollback
+// leaves the source fenced, and the stamped message says only that (it
+// does not also claim the source was unfenced).
+func TestPlannedFailoverPromoting_RecoveryInFlightBesideWritablePeerStaysFenced(t *testing.T) {
+	fg := plannedFailoverFG("")
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+	}
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true}
+	pdx := &mockMySQL{readOnly: false}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tm.followerMutationGate.enter() {
+		t.Fatal("setup: gate refused")
+	}
+	defer tm.followerMutationGate.exit()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.reconcilePlannedFailover(ctx, fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "RecoveryInFlight" ||
+		!strings.Contains(pf.Message, `source "iad" left fenced`) || strings.Contains(pf.Message, "unfenced") {
+		t.Fatalf("phase=%q reason=%q (%s); want RecoveryInFlight saying only that the source was left fenced", pf.Phase, pf.Reason, pf.Message)
+	}
+	if !iad.superReadOnly || !iad.readOnly {
+		t.Fatal("source unfenced beside a writable site")
+	}
+}
+
 // A promotion that fails after admission releases everything: once the
 // planned failover ends, the next poll drains and clears the recovering
 // replica.
@@ -488,8 +525,9 @@ func TestFirstPollsAfterRestartLeavePlannedFailoverSitesAlone(t *testing.T) {
 }
 
 // A replaced manager's ordered update may still be fencing or promoting on
-// the sites. The replacement's planned promotion takes no claim, touches no
-// MySQL, and the planned failover rolls back without blaming Execute.
+// the sites. The replacement's planned promotion takes no claim and touches
+// no MySQL (the planned failover then fails closed; see
+// TestPlannedFailoverPromoting_PredecessorUpdateFailsClosed).
 func TestPlannedPromote_RefusedWhilePredecessorUpdateUnwinding(t *testing.T) {
 	source := &mockMySQL{readOnly: false}
 	target := &mockMySQL{readOnly: true}
@@ -585,15 +623,32 @@ func TestPlannedFailoverRollback_UnreadablePeerStillUnfences(t *testing.T) {
 }
 
 // While a planned failover holds the topology guard no ordered update
-// starts (its claim would be refused anyway).
+// starts (its claim would be refused anyway). The control shows the same
+// update starts with the guard clear, so the refusal is the guard's.
 func TestStartUpdate_RefusedWhilePlannedFailoverGuardSet(t *testing.T) {
-	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
-	settleAuthority(tm)
-	tm.SetPlannedFailoverActive(true)
-	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
-	tm.ApplyUpdate = func(context.Context, string) error { return nil }
-	tm.SetSpecDriftSites([]string{"dc1"})
-	if tm.startUpdate(context.Background()) {
+	eligible := func(guard bool) *TopologyManager {
+		t.Helper()
+		primary := &mockMySQL{readOnly: false}
+		standby := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+		tm, _, _ := newTestTopologyManagerWithBootstrap(primary, standby)
+		tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+		pollN(tm, 4)
+		// Stop the worker before it touches anything; only whether the
+		// update starts matters here.
+		tm.PodReady = func(context.Context, string) (PodReadiness, error) {
+			return PodReadiness{}, errors.New("stop here")
+		}
+		tm.ApplyUpdate = func(context.Context, string) error { return nil }
+		tm.SetPlannedFailoverActive(guard)
+		tm.SetSpecDriftSites([]string{"dc1"})
+		return tm
+	}
+	control := eligible(false)
+	if !control.startUpdate(context.Background()) {
+		t.Fatal("setup: the update did not start with the guard clear")
+	}
+	control.waitUpdateWorkers()
+	if eligible(true).startUpdate(context.Background()) {
 		t.Fatal("an ordered update started while a planned failover owns the sites")
 	}
 }
@@ -643,5 +698,47 @@ func TestRotationRefusedWhileRetiringManagerUpdateClaimed(t *testing.T) {
 	old.mu.Unlock()
 	if ok, why := r.ReserveKeyringRotation(nn, "pdx"); !ok {
 		t.Fatalf("rotation still refused once the retiring update is out: %s", why)
+	}
+}
+
+// The one deliberate deviation from main's planned-failover flow: a
+// planned failover that reaches Promoting while a replaced manager's
+// ordered update is still finishing fails closed. It is stamped
+// ExecuteFailed with the message the doctor matches on, nothing is sent to
+// the target, and the source stays fenced (no rollback, which would
+// unfence beside an update that may still promote a site).
+func TestPlannedFailoverPromoting_PredecessorUpdateFailsClosed(t *testing.T) {
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg := plannedFailoverFG("")
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+		DrainStartTime: &start,
+	}
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.setPredecessorUpdateInFlight(true)
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "ExecuteFailed" ||
+		!strings.Contains(pf.Message, "a replaced topology manager's ordered update is still finishing on the sites") {
+		t.Fatalf("phase=%q reason=%q (%s); want Failed/ExecuteFailed naming the replaced manager's update", pf.Phase, pf.Reason, pf.Message)
+	}
+	iad.mu.Lock()
+	fenced := iad.readOnly && iad.superReadOnly
+	iad.mu.Unlock()
+	pdx.mu.Lock()
+	touched := !pdx.readOnly || pdx.stopReplicaCalls > 0
+	pdx.mu.Unlock()
+	if !fenced || touched {
+		t.Fatalf("source fenced=%v, target touched=%v; want the source left fenced and nothing sent", fenced, touched)
 	}
 }
