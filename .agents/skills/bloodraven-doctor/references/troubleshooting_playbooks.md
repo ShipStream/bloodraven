@@ -784,7 +784,7 @@ Upgrade older sidecars that ignore retirement records, restore archive access or
 
 ### Cause
 Binlog archiving has stopped on at least one site. Archiving state is deliberately not coupled to pod readiness or liveness: an archive problem never removes a pod from Services or stops self-fencing. The condition reason names the class:
-- `ArchiveStoreInitFailed`: the sidecar cannot build its archive store (unreadable passphrase or S3 credentials file, invalid S3 endpoint URL, empty PVC mount path). Immediate; the sidecar retries on its own with backoff from 5 s up to 5 min.
+- `ArchiveStoreInitFailed`: the sidecar cannot build its archive store (unreadable passphrase or S3 credentials file, invalid S3 endpoint URL, empty PVC mount path, PVC mount path that is not a mount point or not writable). Immediate; the sidecar retries on its own with backoff from 5 s up to 5 min.
 - `ArchiverError`: the store is up but uploads or manifest reads fail on 2 consecutive archiver scans (`consecutiveFailedScans` ≥ 2 in `/archiver/status`), or the same error stays for 10 minutes without a scan completing. A single failed scan never sets it.
 - `ArchiverDisabled`: the sidecar reports PITR disabled on 2 consecutive polls while the spec enables it, and no ordered update is pending for the site, or the PITR spec cannot render an archiver (empty or unknown `profileName`), or the rollout has been pending for 30 minutes. While a valid rollout is pending, for up to 30 minutes, the condition is `Unknown`/`AwaitingRollout` instead, with no Event; the same applies for the first sync after a topology manager starts, before its drift set is computed.
 - `SidecarUnreachable`: the operator's poll of `/archiver/status` failed 3 times over at least 60 s, or over at least 5 minutes for a sidecar that has not answered since the operator process started. With a sidecar image older than this behaviour, this is how an archive init crash loop shows up.
@@ -799,7 +799,7 @@ Expected, self-clearing Warning `PITRArchiveNotReady` → Normal `PITRArchiveRea
 - MySQL taking more than about a minute to accept connections after a pod start, for example a long InnoDB crash recovery (`ArchiverError` with `role check: ...`);
 - a valid ordered update that is still progressing 30 minutes after a site first reported archiving disabled, for example a slow multi-site rollout after enabling PITR (`ArchiverDisabled` with `ordered update still pending after 30m`, then a Normal once the site rolls).
 
-A PVC volume left out of the pod spec does not fail store construction (only an empty mount path does): the archiver then writes to the container filesystem without error, so `PITRArchiveReady` can be `True` while nothing is on the PVC, or it fails later as `ArchiverError` if that path is not writable. A declared volume whose claim cannot be bound or mounted leaves the pod Pending, which shows as `SidecarUnreachable`. `PITRArchiveReady=True` does not prove the archive is on a PVC: check the pod's actual volumes and mounts.
+The PVC store checks its volume when it is built: the mount path must be a mount point in the sidecar's `/proc/self/mountinfo`, and the sidecar must be able to create a file under the archive prefix. A PVC volume left out of the pod spec therefore fails as `ArchiveStoreInitFailed` with `pvc archive store: <path> is not a mount point (it does not exist)` (the image has no such directory) or `... is not a mount point (it is inside <mount>, fstype <type>)`; an unwritable volume fails with `... is not writable`. A declared volume whose claim cannot be bound or mounted leaves the pod Pending, which shows as `SidecarUnreachable`. `PITRArchiveReady=True` still does not prove the archive is on a PVC: any volume mounted at the path passes (an `emptyDir` too), and the check runs only when the store is built, so check the pod's volume source and claim.
 
 ### Diagnostic steps
 1. Read the condition and the per-site message:
@@ -812,7 +812,7 @@ A PVC volume left out of the pod spec does not fail store construction (only an 
 5. For `SidecarUnreachable`, check `kubectl get pod <pod> -n <ns>` restart counts and `kubectl logs <pod> -c sidecar --previous`, and the sidecar image tag.
 
 ### Safe remediation
-- `ArchiveStoreInitFailed`: fix what the error names (Secret projection mode or content, endpoint URL, PVC mount path). The next retry picks it up; look for `archive store initialized after retries`. No pod restart is needed. For passphrase `permission denied`, see playbook 25. Do not change an existing archive's passphrase to make the error go away; see playbook 26.
+- `ArchiveStoreInitFailed`: fix what the error names (Secret projection mode or content, endpoint URL, PVC mount path). The next retry picks it up; look for `archive store initialized after retries`. No pod restart is needed for Secret or endpoint fixes. For `is not a mount point`, compare the pod's `volumes`/`volumeMounts` with the Deployment's pod template: the operator always renders the `pitr-archive` volume, so a missing one was removed by a mutating webhook, policy engine or manual edit. Fix that; restoring the volume changes the pod spec and restarts the pod, which also restarts MySQL, so on the primary site run a planned failover away from it first (`kubectl bloodraven promote <group> <other-site>`). For `is not writable`, the error ends with the cause: `permission denied` means ownership or fsGroup (compare the volume's owner with the sidecar UID, 999 unless overridden); `read-only file system` means the claim's access mode or a filesystem the kernel remounted read-only after an I/O error (check the node's `dmesg`); `no space left on device` means the volume has no free inodes (expand or prune it). The probe creates an empty file, so a volume that is only out of data blocks does not fail init; it shows as `ArchiverError` while retention keeps freeing space. For passphrase `permission denied`, see playbook 25. Do not change an existing archive's passphrase to make the error go away; see playbook 26.
 - `ArchiverError`: follow the error text (storage reachability, credentials, playbook 26 for authentication or BRV1 errors).
 - `AwaitingRollout`: let the ordered update finish; check `status.updatePhase`. If it stays, the update is blocked (operator log `ordered update: deferring active-site update`, for example no healthy promotable standby). After 30 minutes the condition turns `False`/`ArchiverDisabled` with `ordered update still pending after 30m`; unblock the update (restore the standby) rather than restarting pods by hand.
 - `ArchiverDisabled`: if it persists after the rollout, check that `spec.backup.pitr.profileName` names an existing profile (look for a `BackupPITRInvalid` Event). With an empty or unknown profile the operator renders no PITR configuration into the sidecar, so it reports archiving disabled indefinitely.
@@ -947,3 +947,75 @@ Do not:
 - Restart the operator to push the update through: the new process repeats the same check on its first attempt.
 - Change the update strategy to `Recreate` to get past it: that rolls every site at once onto the template that broke one.
 - Promote the stalled site by hand: its pod is out of the application Services and, with a broken sidecar, cannot self-fence.
+
+## 35. Deleted `MysqlBackup` stuck Terminating (artifact cleanup)
+
+### Symptoms
+- A `MysqlBackup` deleted by hand or by retention stays Terminating with the `shipstream.io/mysqlbackup` finalizer.
+- `ArtifactCleanupFailed` or `ArtifactCleanupBlocked` Warning Events; `bloodraven_backup_artifact_cleanup_failures_total` rising.
+- After an upgrade from an operator whose cleanup ran `cleanup.py`: old Terminating S3 backups with Failed `mysqlbackup-<name>-cleanup` Jobs (new cleanup Jobs are named `mysqlcleanup-<name>`; an old-named Job counts only if the backup owns it). That script needed `util.rmdump`, which MySQL Shell does not have, so S3 cleanup never worked. The new operator replaces those Jobs on its own; let it.
+
+### Diagnostic steps
+1. Read the cause and the recorded destination (`scripts/triage.sh` section 8 prints both):
+   ```bash
+   kubectl get mysqlbackup <name> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="ArtifactCleanup")]}{"\n"}{.status.location}{"\n"}{.status.artifactStorage}{"\n"}'
+   kubectl get pods -n <ns> -l shipstream.io/resource=backup-cleanup,shipstream.io/mysqlbackup=<name> \
+     -o jsonpath='{range .items[*]}{.metadata.name}{" exit="}{.status.containerStatuses[0].state.terminated.exitCode}{" "}{.status.containerStatuses[0].state.terminated.message}{"\n"}{end}'
+   ```
+2. Reasons:
+   - `CleanupFailed`: exit 75 (storage error), a crash, deadline, eviction or no recorded exit. A new Job runs 5 minutes after the failure.
+   - `CleanupRejected`: exit 64. The message says why: missing credential keys, a refused path, a cross-bucket location, an invalid endpoint. A new Job runs 30 minutes after the failure.
+   - `CleanupPending`: the pod cannot start; the message carries the waiting reason (`ImagePullBackOff`: the operator image must be pullable in the backup namespace with `spec.backup.imagePullSecrets`), or since when it has been unscheduled or `ContainerCreating` (check `kubectl describe pod` for `FailedMount`/`FailedAttachVolume`, typically a ReadWriteOnce claim attached on another node).
+   - `ForegroundDeletion` / `OrphanDeletion`: deleted with `--cascade=foreground` (Argo CD's default prune) or `--cascade=orphan`; cleanup starts once the garbage collector has processed the backup's dependents.
+   - `CleanupJobInvalid`: the recorded destination cannot be turned into a Job (unknown storage type, no bucket or claim recorded). No Job ran; treat like `DestinationUnverified`.
+   - `CredentialsUnavailable`: the profile no longer has an S3 `credentialsSecret`.
+   - `OperatorImageUnset`: the operator cannot name its own image; check its Deployment.
+   - `DestinationUnverified`: no recorded `status.artifactStorage.location` (a backup from an older operator) and it cannot be recovered from the producing Job (gone, owned by something else, or its destination depends on runtime-only values), so the exact artifact is unknown.
+   - `DestinationMismatch`: `status.location` is not exactly `status.artifactStorage.location`, does not end in the backup name, is outside the recorded bucket or `/backups`, or differs from the producing Job's destination.
+   - `CleanupJobConflict`: a Job named `mysqlcleanup-<name>` exists but is not owned by this backup.
+   - A new backup stuck `Pending` with `Ready=False/BackupJobConflict` (not a cleanup problem): a `mysqlbackup-<name>` Job it does not own exists, usually orphaned by an earlier same-name backup deleted with `--cascade=orphan`. Delete that Job if nothing owns it; the backup fails after 30 minutes otherwise.
+   - `HeldByVerification`: a verification is still reading the artifact; see [playbook 36](#36-backup-kept-past-retention-or-deletion-waiting-on-a-verification).
+3. Cleanup deletes from `status.artifactStorage` (captured when the backup ran), never from the live profile. A changed profile bucket, endpoint or claim does not move the delete; only credentials come from the current profile.
+
+### Safe remediation
+1. For `CleanupFailed`, `CleanupRejected` and `CredentialsUnavailable`, fix the cause (Secret keys, IAM `s3:ListBucket`/`s3:DeleteObject` on the prefix, endpoint reachability, the operator image pull) and wait. Retries never stop, and a credential rotated inside the same Secret is picked up by the next Job. A replacement starts only after the failed Job's pods are gone.
+2. For `DestinationUnverified` and `DestinationMismatch`, find the artifact using the original Job inputs and storage inspection (see [playbook 13](#13-succeeded-backup-cannot-be-found-at-its-recorded-location)). Delete it by hand, then remove the finalizer:
+   ```bash
+   kubectl patch mysqlbackup <name> -n <ns> --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+   ```
+3. `ArtifactCleanupNothingFound` releases the finalizer without deleting anything. If the artifact should have existed, inspect the bucket or claim the backup actually used.
+
+Do not:
+- Remove the finalizer while the artifact is still in storage: nothing will clean it up later.
+- Edit `status.artifactStorage` or `status.location` to point cleanup somewhere else: the recursive delete would follow it.
+- Delete a running cleanup Job to hurry it: the operator replaces only failed Jobs, after their pods are gone.
+
+## 36. Backup kept past retention, or deletion waiting on a verification
+
+### Symptoms
+- A successful `MysqlBackup` outside its profile's `count`/`maxAgeDays` window is not pruned, with `RetentionDeferred` Events.
+- A deleted `MysqlBackup` stays Terminating with `ArtifactCleanup=False/HeldByVerification` and `ArtifactCleanupDeferred` Events.
+- A deleted `MysqlBackupVerification` stays Terminating.
+
+### Diagnostic steps
+1. List the holds on the backup and the verifications that reference it:
+   ```bash
+   kubectl get mysqlbackup <backup> -n <ns> -o json | jq '.metadata.annotations // {} | with_entries(select(.key | startswith("hold.verification.shipstream.io/")))'
+   kubectl get mysqlbackupverifications -n <ns> -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,BACKUP_UID:.status.backupRef.uid,JOB:.status.jobName
+   ```
+2. For each holding verification, check whether anything still runs:
+   ```bash
+   kubectl get job mysqlverify-<verification> -n <ns> -o jsonpath='{.status.conditions[*].type}{"\n"}'
+   kubectl get pods -n <ns> -l shipstream.io/mysqlbackup-verification=<verification> -o custom-columns=POD:.metadata.name,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp
+   ```
+3. A hold is live while the verification is not finished, or while its Job is unfinished, or while any labelled pod is `Pending` or `Running`. A hold whose verification is gone counts only while that verification's pods still run. An unfinished verification that is not yet pinned holds every successful backup of its group and profile.
+
+### Safe remediation
+1. During a run this is expected; retention and cleanup resume on their own after the run stops (the hold release triggers a backup reconcile).
+2. If a finished run still holds, it is usually a failed run kept by `keepOnFailure: true` whose pod is still running, or a pod stuck terminating on an unreachable node. Delete the verification (its finalizer waits for its pods) or resolve the stuck pod.
+3. A verification that stays Terminating is waiting for its pods to be gone; it releases its hold and finalizer once they are.
+
+Do not:
+- Remove a `hold.verification.shipstream.io/*` annotation by hand while a pod of that verification runs: retention or cleanup could then delete the artifact under it.
+- Remove the verification finalizer to hurry deletion. The hold then stays on the backup; it stops counting once the pods are gone, but retention only notices on its next pass.
+

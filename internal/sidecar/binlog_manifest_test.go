@@ -13,7 +13,7 @@ import (
 // to test without a mock — it's just io to a temp dir.
 func TestManifestRoundTripPVC(t *testing.T) {
 	tmp := t.TempDir()
-	store, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	store, err := newPVCStore(testPVCConfig(tmp), "")
 	if err != nil {
 		t.Fatalf("newPVCStore: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestManifestRoundTripPVC(t *testing.T) {
 // derived from prefix/site/Name, never a manifest-supplied RemotePath
 // that could point at unrelated objects in the bucket.
 func TestPruneManifestIgnoresRemotePath(t *testing.T) {
-	store, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	store, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatalf("newPVCStore: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestPruneManifestIgnoresRemotePath(t *testing.T) {
 // redirect the next manifest write to another key.
 func TestLoadManifestForcesSite(t *testing.T) {
 	tmp := t.TempDir()
-	store, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	store, err := newPVCStore(testPVCConfig(tmp), "")
 	if err != nil {
 		t.Fatalf("newPVCStore: %v", err)
 	}

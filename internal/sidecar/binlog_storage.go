@@ -112,7 +112,7 @@ func NewArchiveStore(ctx context.Context, cfg *PITRConfig) (ArchiveStore, error)
 		if cfg.PVC == nil {
 			return nil, fmt.Errorf("archive store: PVC config is nil")
 		}
-		s, err := newPVCStore(cfg.PVC)
+		s, err := newPVCStore(cfg.PVC, cfg.ManifestPrefix)
 		if err != nil {
 			return nil, err
 		}
@@ -153,6 +153,11 @@ func validateS3EndpointURL(endpoint string) error {
 	}
 	return nil
 }
+
+// defaultS3CompatibleRegion signs requests to an S3-compatible endpoint
+// when no region is configured anywhere. The SDK refuses to sign without a
+// region; MinIO, RustFS, Ceph and similar accept us-east-1.
+const defaultS3CompatibleRegion = "us-east-1"
 
 func newS3Store(ctx context.Context, cfg *PITRS3Config) (*s3Store, error) {
 	if cfg.EndpointURL != "" {
@@ -209,6 +214,14 @@ func newS3Store(ctx context.Context, cfg *PITRS3Config) (*s3Store, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
+	}
+	if awsCfg.Region == "" {
+		switch {
+		case cfg.DefaultRegion != "":
+			awsCfg.Region = cfg.DefaultRegion
+		case cfg.EndpointURL != "":
+			awsCfg.Region = defaultS3CompatibleRegion
+		}
 	}
 
 	clientOpts := []func(*s3.Options){}
@@ -315,6 +328,16 @@ func (s *s3Store) GetFile(ctx context.Context, key, dst string) error {
 // ListObjectsV2 under the hood so large archives aren't truncated.
 func (s *s3Store) List(ctx context.Context, prefix string) ([]string, error) {
 	var out []string
+	err := s.ListPages(ctx, prefix, func(keys []string) error {
+		out = append(out, keys...)
+		return nil
+	})
+	return out, err
+}
+
+// ListPages calls fn with each ListObjectsV2 page of keys under prefix, so
+// a caller can act on a large prefix without holding every key in memory.
+func (s *s3Store) ListPages(ctx context.Context, prefix string, fn func(keys []string) error) error {
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucket),
 		Prefix: aws.String(prefix),
@@ -322,15 +345,19 @@ func (s *s3Store) List(ctx context.Context, prefix string) ([]string, error) {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("s3 list %s: %w", prefix, err)
+			return fmt.Errorf("s3 list %s: %w", prefix, err)
 		}
+		keys := make([]string, 0, len(page.Contents))
 		for _, obj := range page.Contents {
 			if obj.Key != nil {
-				out = append(out, *obj.Key)
+				keys = append(keys, *obj.Key)
 			}
 		}
+		if err := fn(keys); err != nil {
+			return err
+		}
 	}
-	return out, nil
+	return nil
 }
 
 func (s *s3Store) Delete(ctx context.Context, key string) error {
@@ -367,13 +394,35 @@ type pvcStore struct {
 	root string
 }
 
-func newPVCStore(cfg *PITRPVCConfig) (*pvcStore, error) {
+// newPVCStore verifies that cfg.MountPath is a mounted volume and, for
+// writers, that the store can create objects under cfg.WritePrefix and
+// defaultWritePrefix (the manifest prefix), or under the root when both
+// are empty. Put creates the directory tree below the verified root
+// lazily. The checks run once here; they do not detect a later unmount.
+func newPVCStore(cfg *PITRPVCConfig, defaultWritePrefix string) (*pvcStore, error) {
 	if cfg.MountPath == "" {
 		return nil, fmt.Errorf("pvc archive store: empty mount path")
 	}
-	// MountPath is the PVC mount root; binlog objects live under
-	// <mount>/binlogs/. We lazily create the directory tree on each
-	// Put, so no work needed here.
+	verify := cfg.MountVerifier
+	if verify == nil {
+		verify = verifyPVCMountPoint
+	}
+	if err := verify(cfg.MountPath); err != nil {
+		return nil, err
+	}
+	if cfg.Writable {
+		prefixes := []string{cfg.WritePrefix}
+		if cfg.WritePrefix == "" {
+			prefixes[0] = defaultWritePrefix
+		} else if defaultWritePrefix != "" && defaultWritePrefix != cfg.WritePrefix {
+			prefixes = append(prefixes, defaultWritePrefix)
+		}
+		for _, prefix := range prefixes {
+			if err := probePVCWritable(cfg.MountPath, prefix); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return &pvcStore{root: cfg.MountPath}, nil
 }
 

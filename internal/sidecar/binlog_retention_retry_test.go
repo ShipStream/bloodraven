@@ -71,7 +71,7 @@ func readRetentionPendingRows(t *testing.T, store ArchiveStore) []retentionPendi
 func newRetentionRetryFixture(t *testing.T, legacy bool) (*retentionFaultStore, func() *BinlogArchiver, *atomic.Int32, []ManifestEntry, []string) {
 	t.Helper()
 	ctx := context.Background()
-	pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 	if err != nil {
 		t.Fatal(err)
 	}

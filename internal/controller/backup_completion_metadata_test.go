@@ -53,11 +53,35 @@ func backupMetadataFixture(t *testing.T, encrypted bool) (*MysqlBackupReconciler
 	if err := c.Status().Update(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "metadata-pod", Namespace: mb.Namespace, Labels: map[string]string{labelMysqlBackup: mb.Name}}, Spec: job.Spec.Template.Spec, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
+	pod := backupJobPod("metadata-pod", mb, &job, corev1.PodSucceeded)
 	if err := c.Create(context.Background(), pod); err != nil {
 		t.Fatal(err)
 	}
 	return r, c, fg, mb, &job
+}
+
+// backupJobPod returns a pod that job owns, labelled as the Job controller
+// and the backup template label it.
+func backupJobPod(name string, mb *v1alpha1.MysqlBackup, job *batchv1.Job, phase corev1.PodPhase) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: mb.Namespace,
+			Labels: map[string]string{
+				labelMysqlBackup:               mb.Name,
+				"batch.kubernetes.io/job-name": job.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "batch/v1",
+				Kind:       "Job",
+				Name:       job.Name,
+				UID:        job.UID,
+				Controller: boolPtr(true),
+			}},
+		},
+		Spec:   job.Spec.Template.Spec,
+		Status: corev1.PodStatus{Phase: phase},
+	}
 }
 
 func backupMetadataLogs(t *testing.T, r *MysqlBackupReconciler, handler http.HandlerFunc) {
@@ -72,6 +96,8 @@ func backupMetadataLogs(t *testing.T, r *MysqlBackupReconciler, handler http.Han
 }
 
 func TestMysqlBackupReconciler_RecoversCompletionAfterLogFailure(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
 	r, c, fg, mb, job := backupMetadataFixture(t, false)
 	var available atomic.Bool
 	var requests atomic.Int32
@@ -136,7 +162,7 @@ func TestMysqlBackupReconciler_RecoversCompletionAfterLogFailure(t *testing.T) {
 	if successEvents != 1 {
 		t.Fatalf("BackupSucceeded events=%d, want 1", successEvents)
 	}
-	cleanup, err := buildCleanupJob(cleanupJobInputs{FailoverGroup: fg, Profile: &fg.Spec.Backup.Profiles[0], Backup: mb, CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+	cleanup, err := buildCleanupJob(cleanupJobInputs{FailoverGroup: fg, Profile: &fg.Spec.Backup.Profiles[0], Backup: mb})
 	if err != nil || envMap(cleanup.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_OUTPUT_URL"] != location {
 		t.Fatalf("cleanup did not use recovered artifact: err=%v", err)
 	}
@@ -288,6 +314,8 @@ func TestMysqlBackupReconciler_CompletionFallbackUsesJob(t *testing.T) {
 }
 
 func TestMysqlBackupReconciler_RecoversLocationBeforeFinalization(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
 	for _, mode := range []string{"empty", "legacy-space-corruption", "failed-job"} {
 		t.Run(mode, func(t *testing.T) {
 			r, c, _, mb, job := backupMetadataFixture(t, false)
@@ -305,7 +333,7 @@ func TestMysqlBackupReconciler_RecoversLocationBeforeFinalization(t *testing.T) 
 			if err := c.Status().Update(context.Background(), mb); err != nil {
 				t.Fatal(err)
 			}
-			done, err := r.finalize(context.Background(), mb)
+			done, _, err := r.finalize(context.Background(), mb)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -376,5 +404,155 @@ func TestMysqlBackupReconciler_UnknownDestinationNeverBecomesReady(t *testing.T)
 	ready := apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
 	if mb.Status.Phase == v1alpha1.BackupPhaseSucceeded || ready == nil || ready.Status != metav1.ConditionFalse {
 		t.Fatalf("unknown artifact became usable: %+v", mb.Status)
+	}
+}
+
+// TestTailJobCompletion_ReadsOnlyOwnedPods pins issue #211: the backup label
+// is shared by the artifact-cleanup Job's pods and by pods of a recreated
+// same-name backup, so log tailing must select by Job ownership.
+func TestTailJobCompletion_ReadsOnlyOwnedPods(t *testing.T) {
+	type podSpec struct {
+		name  string
+		owner string // "job", "cleanup", or "stale"
+		phase corev1.PodPhase
+		age   time.Duration
+	}
+	tests := []struct {
+		name    string
+		pods    []podSpec
+		want    string
+		wantErr string
+	}{
+		{
+			name: "cleanup pod with backup label is ignored",
+			pods: []podSpec{
+				{name: "dump", owner: "job", phase: corev1.PodSucceeded, age: time.Hour},
+				{name: "cleanup", owner: "cleanup", phase: corev1.PodSucceeded},
+			},
+			want: "dump",
+		},
+		{
+			name: "pod of a different Job with the same name is ignored",
+			pods: []podSpec{
+				{name: "dump", owner: "job", phase: corev1.PodSucceeded, age: time.Hour},
+				{name: "a-previous", owner: "stale", phase: corev1.PodSucceeded},
+			},
+			want: "dump",
+		},
+		{
+			name: "newest owned Succeeded pod wins",
+			pods: []podSpec{
+				{name: "a-older", owner: "job", phase: corev1.PodSucceeded, age: time.Hour},
+				{name: "z-newer", owner: "job", phase: corev1.PodSucceeded, age: time.Minute},
+				{name: "failed", owner: "job", phase: corev1.PodFailed},
+			},
+			want: "z-newer",
+		},
+		{
+			name: "no owned Succeeded pod",
+			pods: []podSpec{
+				{name: "cleanup", owner: "cleanup", phase: corev1.PodSucceeded},
+				{name: "a-previous", owner: "stale", phase: corev1.PodSucceeded},
+				{name: "failed", owner: "job", phase: corev1.PodFailed},
+			},
+			wantErr: "completed backup pod not visible",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, c, _, mb, job := backupMetadataFixture(t, false)
+			if err := c.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "metadata-pod", Namespace: mb.Namespace}}); err != nil {
+				t.Fatal(err)
+			}
+			job.UID = types.UID("backup-job-uid")
+			cleanup := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: cleanupJobName(mb.Name), Namespace: mb.Namespace, UID: types.UID("cleanup-job-uid")}}
+			cleanup.Spec.Template.Spec = job.Spec.Template.Spec
+			stale := job.DeepCopy()
+			stale.UID = types.UID("stale-job-uid")
+			owners := map[string]*batchv1.Job{"job": job, "cleanup": cleanup, "stale": stale}
+			now := time.Now()
+			for _, p := range tc.pods {
+				pod := backupJobPod(p.name, mb, owners[p.owner], p.phase)
+				pod.CreationTimestamp = metav1.NewTime(now.Add(-p.age))
+				if err := c.Create(ctx, pod); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var read []string
+			backupMetadataLogs(t, r, func(w http.ResponseWriter, req *http.Request) {
+				parts := strings.Split(req.URL.Path, "/")
+				pod := parts[len(parts)-2]
+				read = append(read, pod)
+				_, _ = fmt.Fprintln(w, backupmeta.FormatDumpComplete(backupmeta.DumpComplete{Location: pod}))
+			})
+			meta, found, err := r.tailJobCompletion(ctx, mb, job)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				if len(read) != 0 {
+					t.Fatalf("read logs of foreign pods %v", read)
+				}
+				return
+			}
+			if err != nil || !found {
+				t.Fatalf("found=%v err=%v", found, err)
+			}
+			if meta.Location != tc.want || len(read) != 1 {
+				t.Fatalf("read %v (location %q), want only %q", read, meta.Location, tc.want)
+			}
+		})
+	}
+}
+
+// TestFinalize_DoesNotAdoptCleanupPodLog drives the deletion path that
+// triggered #211 item 3: while completion metadata is still retryable,
+// finalize re-tails the backup Job's log, and a Succeeded cleanup pod carries
+// the same backup label. Only the producing Job's own pod may be read.
+func TestFinalize_DoesNotAdoptCleanupPodLog(t *testing.T) {
+	ctx := context.Background()
+	r, c, _, mb, job := backupMetadataFixture(t, false)
+	if err := c.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "metadata-pod", Namespace: mb.Namespace}}); err != nil {
+		t.Fatal(err)
+	}
+	_, location, err := backupJobDestination(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.Now()
+	mb.Status.Phase, mb.Status.Location, mb.Status.CompletionTime = v1alpha1.BackupPhaseSucceeded, location, &now
+	setCondition(&mb.Status.Conditions, metav1.Condition{Type: ConditionBackupMetadataComplete, Status: metav1.ConditionFalse,
+		Reason: "SentinelUnavailable", Message: "logs not read yet", LastTransitionTime: now})
+	if err := c.Status().Update(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+	cleanupJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: cleanupJobName(mb.Name), Namespace: mb.Namespace, UID: "cleanup-uid"}}
+	cleanupJob.Spec.Template.Spec = job.Spec.Template.Spec
+	if err := c.Create(ctx, backupJobPod("cleanup-pod", mb, cleanupJob, corev1.PodSucceeded)); err != nil {
+		t.Fatal(err)
+	}
+	var read []string
+	backupMetadataLogs(t, r, func(w http.ResponseWriter, req *http.Request) {
+		parts := strings.Split(req.URL.Path, "/")
+		read = append(read, parts[len(parts)-2])
+		_, _ = fmt.Fprintln(w, backupmeta.FormatDumpComplete(backupmeta.DumpComplete{Location: "foreign/cleanup"}))
+	})
+	if _, _, err := r.finalize(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+	for _, pod := range read {
+		if pod == "cleanup-pod" {
+			t.Fatal("finalize read the cleanup pod's log as backup completion metadata")
+		}
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
+		t.Fatal(err)
+	}
+	if mb.Status.Location != location {
+		t.Fatalf("location changed to %q", mb.Status.Location)
 	}
 }
