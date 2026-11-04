@@ -227,8 +227,37 @@ func (tm *TopologyManager) waitUpdateWorkers() {
 	tm.updateWorkers.Wait()
 }
 
+// errPredecessorUpdateInFlight is returned by PlannedPromote while a
+// replaced manager's ordered update is still unwinding on the sites.
+// Nothing has been sent to the target.
+var errPredecessorUpdateInFlight = errors.New("planned promote: a replaced topology manager's ordered update is still finishing on the sites")
+
+// setPredecessorUpdateInFlight sets or clears the predecessor guard and
+// logs each transition, since while it holds this manager takes no
+// failover, re-assert, recovery or update and status shows no update.
 func (tm *TopologyManager) setPredecessorUpdateInFlight(v bool) {
 	tm.mu.Lock()
+	was := tm.predecessorUpdateInFlight
 	tm.predecessorUpdateInFlight = v
+	var heldFor time.Duration
+	if v && !was {
+		tm.predecessorUpdateSince = tm.clock.Now()
+	} else if !v && was {
+		heldFor = tm.clock.Since(tm.predecessorUpdateSince)
+	}
 	tm.mu.Unlock()
+	switch {
+	case v && !was:
+		tm.logger.Info("topology manager deferring to its predecessor's ordered update; no failover, recovery or update until it exits",
+			"fg", tm.cfg.Name)
+	case !v && was:
+		tm.logger.Info("predecessor's ordered update exited; topology manager resuming",
+			"fg", tm.cfg.Name, "heldFor", heldFor.String())
+	}
+}
+
+func (tm *TopologyManager) predecessorUpdateUnwinding() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.predecessorUpdateInFlight
 }

@@ -436,6 +436,14 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 	if result != PlannedFailoverAccept {
 		return r.plannedFailoverFail(ctx, fg, reason, err.Error(), "failed_other")
 	}
+	// A restarted topology manager clears status.updatePhase while its
+	// predecessor's ordered update may still be unwinding on the sites;
+	// the check above cannot see that one. Refuse before fencing.
+	if r.Runner != nil && r.Runner.OrderedUpdateUnwinding(nn) {
+		return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
+			"planned-failover: a replaced topology manager's ordered update is still finishing; retry once it has exited",
+			"failed_other")
+	}
 
 	// Advance to Draining on the next reconcile so status transitions
 	// are observable one at a time.
@@ -709,6 +717,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 			return r.plannedFailoverRollback(ctx, fg, nn, "KeyringRotation",
 				fmt.Sprintf("planned-failover: site %q is mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted",
 					cur.Target),
+				"rejected")
+		}
+		if errors.Is(err, errPredecessorUpdateInFlight) {
+			return r.plannedFailoverRollback(ctx, fg, nn, "ConcurrentOperation",
+				fmt.Sprintf("%v; nothing was sent to %q; source %q unfenced, re-annotate to retry",
+					err, cur.Target, cur.SourcePrimary),
 				"rejected")
 		}
 		if errors.Is(err, errHandoffNotAdmitted) {

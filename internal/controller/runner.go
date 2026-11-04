@@ -1262,6 +1262,19 @@ func (r *TopologyManagerRunner) registerManager(nn types.NamespacedName, mt *man
 	r.managers[nn] = mt
 }
 
+// OrderedUpdateUnwinding reports whether nn's running manager is still
+// deferring to a replaced manager's ordered update.
+func (r *TopologyManagerRunner) OrderedUpdateUnwinding(nn types.NamespacedName) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	mt := r.managers[nn]
+	inFlight := r.retiringUpdateInFlightLocked(nn)
+	r.mu.RUnlock()
+	return inFlight || (mt != nil && mt.tm.predecessorUpdateUnwinding())
+}
+
 // retiringUpdateInFlightLocked reports whether a retiring manager of nn
 // still has an ordered update pending or running. Caller holds r.mu.
 func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.NamespacedName) bool {

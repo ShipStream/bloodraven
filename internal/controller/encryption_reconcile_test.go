@@ -1243,9 +1243,9 @@ func TestReconcileEncryption_RetryableRefusalKeepsRotationRequest(t *testing.T) 
 
 // GPT round 4: a stale pass must not drop an earlier hold. Pass 1's write
 // commits but times out and its re-read fails (held, fail closed). Pass 2
-// starts from the stale Sealed snapshot, re-reserves the same site and has
-// its write rejected. Only an uncached read may end the hold, and it shows
-// the stamp persisted, so dc2 stays blocked.
+// starts from the stale Sealed snapshot and fails to write (its baseline
+// moved, or the write is rejected). Only an uncached read may end the hold,
+// and it shows the stamp persisted, so dc2 stays blocked.
 func TestReconcileEncryption_StaleRejectedPassKeepsEarlierPersistedHold(t *testing.T) {
 	ctx := context.Background()
 	fg := sealedGroupWithActive("dc1")
@@ -1292,9 +1292,9 @@ func TestReconcileEncryption_StaleRejectedPassKeepsEarlierPersistedHold(t *testi
 				return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("mysqlfailovergroups").GroupResource(), "lion", errors.New("stale"))
 			},
 		})
-		if _, err := r.reconcileEncryptionAtRest(ctx, stale.DeepCopy()); err == nil {
-			t.Fatal("pass 2: want the rejected write")
-		}
+		// The stale pass now stops at its baseline check before writing;
+		// either way it must not end the hold.
+		_, _ = r.reconcileEncryptionAtRest(ctx, stale.DeepCopy())
 		if !blocked() {
 			t.Fatalf("pass 2 (re-read ok=%v) dropped the hold on a persisted rotation", read)
 		}
@@ -1375,5 +1375,160 @@ func TestReconcileEncryption_LiveActivePrimaryRefusalConsumesRequest(t *testing.
 	}
 	if _, kept := latest.Annotations[RotateKeyringAnnotation]; kept {
 		t.Error("an active-primary request was kept for retry")
+	}
+}
+
+// GPT round 5: a SUCCESSFUL stale pass must not erase a persisted rotation.
+// The rotation is persisted and held; a reconcile starts from the stale
+// Sealed snapshot while an ordered update is pending, so the request is
+// deferred and the site stays Sealed in memory. Its status write would
+// succeed, but it is conditioned on the baseline the pass read: the stamp
+// survives in the API server and the promotion block survives with it.
+func TestReconcileEncryption_StaleSuccessfulPassKeepsPersistedRotation(t *testing.T) {
+	ctx := context.Background()
+	fg := sealedGroupWithActive("dc1")
+	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	stale := fg.DeepCopy()
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+	seedEscrow(t, c, fg)
+	tm := rotationRunner(r, c)
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+
+	// Pass 1 persists the rotation stamp and holds the reservation.
+	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	var persisted v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if s := persisted.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2"); s.UnsealReason != v1alpha1.UnsealReasonRotation {
+		t.Fatalf("setup: dc2 = %+v, want the rotation persisted", s)
+	}
+
+	// Pass 2: stale Sealed input, live update refusal, writes allowed.
+	tm.mu.Lock()
+	tm.deploymentUpdatePending = true
+	tm.mu.Unlock()
+	if _, err := r.reconcileEncryptionAtRest(ctx, stale.DeepCopy()); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+
+	var after v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &after); err != nil {
+		t.Fatal(err)
+	}
+	if s := after.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2"); s.UnsealReason != v1alpha1.UnsealReasonRotation {
+		t.Fatalf("stale pass erased the persisted rotation: dc2 = %+v", s)
+	}
+	tm.mu.RLock()
+	blocked := tm.keyringRotationBlockedLocked("dc2")
+	tm.mu.RUnlock()
+	if !blocked {
+		t.Fatal("stale pass dropped the promotion block on a persisted rotation")
+	}
+	if _, kept := after.Annotations[RotateKeyringAnnotation]; !kept {
+		t.Error("stale pass consumed the rotation request")
+	}
+}
+
+// The conditioned write still merges the clone gate's own transitions.
+func TestEncryptionStatusMoved(t *testing.T) {
+	base := &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{
+		{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed, KeyringSecret: "s1"},
+		{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed, KeyringSecret: "s2"},
+	}}
+	mod := func(f func(st *v1alpha1.EncryptionAtRestStatus)) *v1alpha1.EncryptionAtRestStatus {
+		st := base.DeepCopy()
+		f(st)
+		return st
+	}
+	for _, tc := range []struct {
+		name   string
+		latest *v1alpha1.EncryptionAtRestStatus
+		moved  bool
+	}{
+		{"unchanged", base.DeepCopy(), false},
+		{"clone hold", mod(func(st *v1alpha1.EncryptionAtRestStatus) {
+			st.Sites[1].Phase, st.Sites[1].UnsealReason = v1alpha1.KeyringPhaseUnsealed, v1alpha1.UnsealReasonClone
+		}), false},
+		{"rotation stamped", mod(func(st *v1alpha1.EncryptionAtRestStatus) {
+			st.Sites[1].Phase, st.Sites[1].UnsealReason = v1alpha1.KeyringPhaseUnsealed, v1alpha1.UnsealReasonRotation
+		}), true},
+		{"failed", mod(func(st *v1alpha1.EncryptionAtRestStatus) { st.Sites[0].Phase = v1alpha1.KeyringPhaseFailed }), true},
+		{"site added", mod(func(st *v1alpha1.EncryptionAtRestStatus) {
+			st.Sites = append(st.Sites, v1alpha1.SiteEncryptionStatus{Name: "dc3"})
+		}), true},
+		{"status created", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := encryptionStatusMoved(base, tc.latest); got != tc.moved {
+				t.Fatalf("moved = %v, want %v", got, tc.moved)
+			}
+		})
+	}
+	if encryptionStatusMoved(nil, nil) {
+		t.Fatal("nil baseline and nil latest moved")
+	}
+}
+
+// The deferral note goes when the request does, and a later request
+// blocked for the same reason raises its event again.
+func TestReconcileEncryption_DeferralNoteClearsWithRequest(t *testing.T) {
+	ctx := context.Background()
+	fg := sealedGroupWithActive("dc1")
+	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+	seedEscrow(t, c, fg)
+	tm := rotationRunner(r, c)
+	tm.mu.Lock()
+	tm.deploymentUpdatePending = true
+	tm.mu.Unlock()
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	refusals := func(rec *record.FakeRecorder) int {
+		n := 0
+		for {
+			select {
+			case e := <-rec.Events:
+				if strings.Contains(e, "KeyringRotationRefused") {
+					n++
+				}
+			default:
+				return n
+			}
+		}
+	}
+	pass := func(annotated bool) (*v1alpha1.MysqlFailoverGroup, int) {
+		t.Helper()
+		var latest v1alpha1.MysqlFailoverGroup
+		if err := c.Get(ctx, nn, &latest); err != nil {
+			t.Fatal(err)
+		}
+		if annotated {
+			latest.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+		} else {
+			delete(latest.Annotations, RotateKeyringAnnotation)
+		}
+		if err := c.Update(ctx, &latest); err != nil {
+			t.Fatal(err)
+		}
+		rec := record.NewFakeRecorder(50)
+		r.Recorder = rec
+		if _, err := r.reconcileEncryptionAtRest(ctx, &latest); err != nil {
+			t.Fatal(err)
+		}
+		return &latest, refusals(rec)
+	}
+
+	got, events := pass(true)
+	if !strings.Contains(siteStatus(got, "dc2").Message, rotationDeferredNote) || events != 1 {
+		t.Fatalf("deferred pass: message %q, %d refusal events", siteStatus(got, "dc2").Message, events)
+	}
+	got, _ = pass(false)
+	if msg := siteStatus(got, "dc2").Message; strings.Contains(msg, rotationDeferredNote) {
+		t.Fatalf("deferral note outlived the request: %q", msg)
+	}
+	if _, events = pass(true); events != 1 {
+		t.Fatalf("re-annotated request under the same block raised %d refusal events, want 1", events)
 	}
 }

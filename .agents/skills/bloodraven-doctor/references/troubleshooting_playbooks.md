@@ -48,7 +48,7 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
 - `SHOW REPLICA STATUS` shows replication stopped with GTID error (e.g. error 1236).
 - A replica that is still replicating normally can be divergent too (`divergenceDetectedBy=ReplicaAudit`): use playbook 33.
 
-Before treating a site stuck in `RecoveryInProgress` (or an old primary that has not rejoined) as a stall, check whether a handoff owns the sites. Old-primary recovery, its connection drain and replication-source convergence stand down while a planned failover or ordered update is in flight (`.status.plannedFailover.phase`, `.status.updatePhase`) and resume, with a fresh drain budget, once it ends. A Dragonfly snapshot upgrade defers them only intermittently, so it does not explain a stall that lasts the whole upgrade. A planned failover that ends with `reason: RecoveryInFlight` hit its promotion deadline while such a step was still running on the sites; nothing was promoted and the source was unfenced.
+Before treating a site stuck in `RecoveryInProgress` (or an old primary that has not rejoined) as a stall, check whether a handoff owns the sites. Old-primary recovery, its connection drain and replication-source convergence stand down while a planned failover or ordered update is in flight (`.status.plannedFailover.phase`, `.status.updatePhase`) and resume, with a fresh drain budget, once it ends. A Dragonfly snapshot upgrade defers them only intermittently, so it does not explain a stall that lasts the whole upgrade. A planned failover that ends with `reason: RecoveryInFlight` hit its promotion deadline while such a step was still running on the sites; nothing was promoted and the source was unfenced. After an operator config or credential change restarts a group's topology manager mid-update, the new manager takes no failover, re-assert, recovery or update, and refuses planned failovers (`reason: ConcurrentOperation`), until the old manager's ordered update exits; `status.updatePhase` is empty meanwhile. The operator log brackets this window with `topology manager deferring to its predecessor's ordered update; no failover, recovery or update until it exits` and `predecessor's ordered update exited; topology manager resuming` (`heldFor`).
 
 ### Diagnostic Steps
 1. Inspect GTID executed sets:
@@ -99,23 +99,12 @@ Before treating a site stuck in `RecoveryInProgress` (or an old primary that has
 ### Safe Remediation Steps
 The only surviving copy of a sealed site's keys is the keyring file in its running pod's `mysql` container (`$KEYRING_DIR/keyring`; `KEYRING_DIR` is `spec.encryptionAtRest.keyring.dataFileDir`, default `/run/mysql-keyring`). Do not delete, restart, evict or drain that pod, and do not force an unseal or rollout.
 
-1. Recreate the exact missing Secret from that file and verify it against the recorded digest. Refuse to continue on a mismatch:
+1. `KeyringEscrowMissing` (the Secret is gone): recreate it from the running pod with the helper. It reads the pod's keyring and checks it against `status…keyringDigest` before writing anything, refuses if the Secret exists, never deletes a Secret, then adds the labels (including `shipstream.io/keyring-version`), the digest annotation, the ownerReference and `immutable: true`, and sets the site's phase back to `Sealed`:
    ```bash
-   set -o pipefail
-   POD=$(kubectl get pod -n <ns> -l shipstream.io/failover-group=<group>,shipstream.io/site=<site> \
-     -o jsonpath='{.items[0].metadata.name}')
-   KEYRING_DIR=$(kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{.spec.encryptionAtRest.keyring.dataFileDir}')
-   KEYRING_DIR=${KEYRING_DIR:-/run/mysql-keyring}
-   kubectl exec -n <ns> "$POD" -c mysql -- cat "$KEYRING_DIR/keyring" | \
-     kubectl create secret generic "$SECRET" -n <ns> --from-file=keyring=/dev/stdin
-   ACTUAL=$(kubectl get secret "$SECRET" -n <ns> -o jsonpath='{.data.keyring}' | base64 -d | sha256sum | cut -d' ' -f1)
-   if [[ "sha256:${ACTUAL}" != "$DIGEST" ]]; then
-     kubectl delete secret "$SECRET" -n <ns>
-     echo "restored keyring digest does not match status; refusing to continue" >&2
-     exit 1
-   fi
+   ./.agents/skills/bloodraven-doctor/scripts/keyring-escrow-recover.sh -n <ns> <group> <site>
    ```
-2. Finish with the canonical runbook, which adds the labels (including `shipstream.io/keyring-version=$VERSION`), the digest annotation, the ownerReference and `immutable: true`, then patches the site's `status.encryptionAtRest.sites[].phase` back to `Sealed`: "Keyring escrow lost" in `site/content/docs/6.operations/4.runbooks.md` (also "Disaster recovery" in `site/content/docs/4.configuration/8.encryption-at-rest.md`).
+2. `KeyringEscrowCorrupt` (the Secret exists but no longer hashes to the recorded digest): the helper refuses by default and changes nothing. Replacing the Secret is a separate, explicit step: re-run it with `--replace-corrupt <secret-name>`, repeating the exact Secret name. It then confirms the existing Secret really fails the digest check and the pod's keyring passes it, writes a backup to `./keyring-escrow-backup-<secret>-<timestamp>.yaml`, and only then deletes and recreates that one Secret. Get the human operator's go-ahead before passing `--replace-corrupt`.
+   The canonical procedure is "Keyring escrow lost" in `site/content/docs/6.operations/4.runbooks.md` (also "Disaster recovery" in `site/content/docs/4.configuration/8.encryption-at-rest.md`).
 3. Verify the site stays `Sealed` and the `KeyringEscrowMissing` / `KeyringEscrowCorrupt` events stop.
 
 ---

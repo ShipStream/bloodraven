@@ -599,6 +599,7 @@ type TopologyManager struct {
 	// mutates no follower and starts no update until the runner clears
 	// it when the goroutine exits. Protected by mu.
 	predecessorUpdateInFlight bool
+	predecessorUpdateSince    time.Time
 
 	// beforePromotionClaim, when set (tests only), runs between the
 	// emergency failover's or primary re-assert's eligibility checks and
@@ -3076,6 +3077,9 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	}
 	if rotationBlocked {
 		return "", fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
+	}
+	if !began && tm.predecessorUpdateUnwinding() {
+		return "", errPredecessorUpdateInFlight
 	}
 	if !began {
 		return "", fmt.Errorf("topology change already in progress")

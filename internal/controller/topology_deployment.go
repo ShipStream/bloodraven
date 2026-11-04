@@ -51,7 +51,9 @@ func (tm *TopologyManager) beginDeploymentTopologyChange() bool {
 }
 
 func (tm *TopologyManager) beginDeploymentTopologyChangeLocked() bool {
-	if tm.deploymentUpdateRunning || tm.deploymentChanging > 0 {
+	// A replaced manager's ordered update may still be fencing, promoting
+	// or rolling back on these sites.
+	if tm.deploymentUpdateRunning || tm.deploymentChanging > 0 || tm.predecessorUpdateInFlight {
 		return false
 	}
 	tm.authorityEpoch++

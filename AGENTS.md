@@ -114,4 +114,4 @@ The repository includes an AI diagnostic copilot skill located at `.agents/skill
   1. `.agents/skills/bloodraven-doctor/SKILL.md`
   2. `.agents/skills/bloodraven-doctor/references/alert_runbook_matrix.md`
   3. `.agents/skills/bloodraven-doctor/references/troubleshooting_playbooks.md`
-  4. Diagnostic helper scripts in `.agents/skills/bloodraven-doctor/scripts/` (`triage.sh`, `gtid-audit.sh`, `sidecar-probe.sh`, `deployment-probe.sh`, `support-bundle.sh`).
+  4. Diagnostic helper scripts in `.agents/skills/bloodraven-doctor/scripts/` (`triage.sh`, `gtid-audit.sh`, `sidecar-probe.sh`, `deployment-probe.sh`, `support-bundle.sh`, `keyring-escrow-recover.sh`, whose escrow-safety paths are tested in `internal/doctorscripts`).

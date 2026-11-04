@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -62,7 +64,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 				metrics.DeleteKeyringSiteMetrics(fg.Namespace, fg.Name, fg.Status.EncryptionAtRest.Sites[i].Name)
 			}
 			fg.Status.EncryptionAtRest = nil
-			if err := r.patchEncryptionStatus(ctx, fg); err != nil {
+			// Unconditional: encryption is off, whatever the lifecycle
+			// reached meanwhile.
+			if _, err := r.patchEncryptionStatus(ctx, fg, nil, true); err != nil {
 				return 0, err
 			}
 		}
@@ -90,11 +94,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 				"acknowledge partial coverage with the annotation %s=confirm.",
 			fg.Status.ActiveSite, AdoptEncryptionAnnotation)
 		setEncryptionRefusedCondition(fg)
-		if err := r.patchEncryptionStatus(ctx, fg); err != nil {
+		if _, err := r.patchEncryptionStatus(ctx, fg, nil, false); err != nil {
+			if errors.Is(err, errEncryptionStatusMoved) {
+				return encryptionMovedRequeue, nil
+			}
 			return 0, err
 		}
 		return 0, nil
 	}
+
+	// baseline is the persisted lifecycle this pass decides from. The
+	// status write is conditioned on it: if another write moved it
+	// meanwhile, this pass's decisions are stale and are recomputed rather
+	// than copied over the newer state (see patchEncryptionStatus).
+	baseline := fg.Status.EncryptionAtRest.DeepCopy()
 
 	if fg.Status.EncryptionAtRest == nil {
 		fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{}
@@ -166,28 +179,36 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 
 	st.Sealed = allSealed
 
+	setEncryptionCondition(fg)
+	written, err := r.patchEncryptionStatus(ctx, fg, baseline, false)
+	if errors.Is(err, errEncryptionStatusMoved) {
+		// Not persisted: the deferred settle publishes what is.
+		logger.V(1).Info("encryption status changed since this pass read it; recomputing")
+		return encryptionMovedRequeue, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	persisted = true
+	fg.Status.EncryptionAtRest = written
+	// Push immediately so the topology manager does not wait for the
+	// 30s runner sync before refusing (or unblocking) promotion. This is
+	// the persisted result, so it is authoritative: reservations it lacks
+	// are over.
+	if r.Runner != nil {
+		r.Runner.PublishKeyringRotationBlocked(nn, rotationBlockedSites(fg))
+	}
+
 	// Clear a consumed rotation annotation once the target site is back
-	// to Sealed, so the admin can trigger the next rotation without
-	// having to remove the annotation by hand. A deferred request has not
-	// been consumed.
+	// to Sealed, as persisted, so the admin can trigger the next rotation
+	// without having to remove the annotation by hand. A deferred request
+	// has not been consumed.
 	if rotateTarget != "" && !rotationDeferred {
-		if s := st.SiteEncryptionStatusByName(rotateTarget); s != nil && s.Phase == v1alpha1.KeyringPhaseSealed && s.UnsealReason == "" {
+		if s := written.SiteEncryptionStatusByName(rotateTarget); s != nil && s.Phase == v1alpha1.KeyringPhaseSealed && s.UnsealReason == "" {
 			if err := r.clearRotateAnnotation(ctx, fg); err != nil {
 				logger.Error(err, "failed to clear rotate-keyring annotation")
 			}
 		}
-	}
-
-	setEncryptionCondition(fg)
-	if err := r.patchEncryptionStatus(ctx, fg); err != nil {
-		return 0, err
-	}
-	persisted = true
-	// Push immediately so the topology manager does not wait for the
-	// 30s runner sync before refusing (or unblocking) promotion. This view
-	// is authoritative: reservations it lacks are over.
-	if r.Runner != nil {
-		r.Runner.PublishKeyringRotationBlocked(nn, rotationBlockedSites(fg))
 	}
 	return requeue, nil
 }
@@ -277,7 +298,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 			if rotationDeferred != nil {
 				*rotationDeferred = true
 			}
-			deferred := "rotation deferred: " + why
+			deferred := rotationDeferredNote + why
 			if !strings.Contains(site.Message, deferred) {
 				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringRotationRefused",
 					"refusing to rotate keyring on site %s: %s", site.Name, why)
@@ -318,7 +339,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 		return r.advanceEscrowedSite(ctx, fg, site, fetch)
 
 	case v1alpha1.KeyringPhaseSealed:
-		return r.verifySealedSite(ctx, fg, site, store, fetch)
+		requeue, err := r.verifySealedSite(ctx, fg, site, store, fetch)
+		// No rotation is deferred on this pass (the request is gone or was
+		// admitted elsewhere), so a deferral note from an earlier pass is
+		// stale; clearing it also lets a later refusal for the same reason
+		// raise its event again.
+		if err == nil && site.Phase == v1alpha1.KeyringPhaseSealed && strings.Contains(site.Message, rotationDeferredNote) {
+			site.Message = fmt.Sprintf("sealed against %s", site.KeyringSecret)
+		}
+		return requeue, err
 	}
 	return false, nil
 }
@@ -978,11 +1007,30 @@ func setEncryptionCondition(fg *v1alpha1.MysqlFailoverGroup) {
 	setCondition(&fg.Status.Conditions, cond)
 }
 
-// patchEncryptionStatus writes .status.encryptionAtRest and the
-// encryption condition back, retrying on conflict. It re-reads the
-// object each attempt so it does not clobber concurrent status writes
-// from the topology runner.
-func (r *MysqlFailoverGroupReconciler) patchEncryptionStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+// errEncryptionStatusMoved means the persisted encryption lifecycle
+// changed after the reconcile read its baseline, by a write other than the
+// clone gate's: the pass's decisions are stale and must be recomputed from
+// the new state, never copied over it.
+var errEncryptionStatusMoved = errors.New("encryption status changed since this reconcile read it")
+
+// rotationDeferredNote prefixes the reason in a Sealed site's message while
+// its requested rotation waits.
+const rotationDeferredNote = "rotation deferred: "
+
+// encryptionMovedRequeue is how soon a pass whose baseline moved retries.
+const encryptionMovedRequeue = 2 * time.Second
+
+// patchEncryptionStatus writes fg's encryption status and returns what was
+// persisted. Unless unconditional, the write is conditioned on baseline,
+// the encryption status the pass read: the Update carries the
+// resourceVersion of the object it re-read, so it cannot land over a newer
+// version, and that re-read must still show baseline's lifecycle, apart
+// from the clone gate's holds and releases, which are merged. Anything
+// else returns errEncryptionStatusMoved without writing: a pass that read
+// a cache older than a rotation stamp must not write Sealed over it.
+func (r *MysqlFailoverGroupReconciler) patchEncryptionStatus(
+	ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, baseline *v1alpha1.EncryptionAtRestStatus, unconditional bool,
+) (*v1alpha1.EncryptionAtRestStatus, error) {
 	desired := fg.Status.EncryptionAtRest.DeepCopy()
 	var desiredCond *metav1.Condition
 	for i := range fg.Status.Conditions {
@@ -993,12 +1041,16 @@ func (r *MysqlFailoverGroupReconciler) patchEncryptionStatus(ctx context.Context
 		}
 	}
 
-	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+	var written *v1alpha1.EncryptionAtRestStatus
+	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var latest v1alpha1.MysqlFailoverGroup
 		if err := r.Get(ctx, types.NamespacedName{
 			Namespace: fg.Namespace, Name: fg.Name,
 		}, &latest); err != nil {
 			return err
+		}
+		if !unconditional && encryptionStatusMoved(baseline, latest.Status.EncryptionAtRest) {
+			return errEncryptionStatusMoved
 		}
 		latest.Status.EncryptionAtRest = mergeEncryptionStatus(desired, latest.Status.EncryptionAtRest)
 		if latest.Spec.EncryptionEnabled() && latest.Status.EncryptionAtRest != nil {
@@ -1006,8 +1058,44 @@ func (r *MysqlFailoverGroupReconciler) patchEncryptionStatus(ctx context.Context
 		} else if desiredCond != nil {
 			setCondition(&latest.Status.Conditions, *desiredCond)
 		}
-		return r.Status().Update(ctx, &latest)
+		if err := r.Status().Update(ctx, &latest); err != nil {
+			return err
+		}
+		written = latest.Status.EncryptionAtRest.DeepCopy()
+		return nil
 	})
+	return written, err
+}
+
+// encryptionStatusMoved reports whether latest's per-site lifecycle differs
+// from baseline in any way other than a clone-gate hold or release.
+func encryptionStatusMoved(baseline, latest *v1alpha1.EncryptionAtRestStatus) bool {
+	sites := func(st *v1alpha1.EncryptionAtRestStatus) []v1alpha1.SiteEncryptionStatus {
+		if st == nil {
+			return nil
+		}
+		return st.Sites
+	}
+	b, l := sites(baseline), sites(latest)
+	if len(b) != len(l) {
+		return true
+	}
+	for i := range b {
+		live := latest.SiteEncryptionStatusByName(b[i].Name)
+		if live == nil {
+			return true
+		}
+		if reflect.DeepEqual(b[i], *live) {
+			continue
+		}
+		// The clone gate writes these through mutateSiteEncryption;
+		// mergeEncryptionStatus keeps the live side.
+		if (b[i].UnsealReason == v1alpha1.UnsealReasonClone) != (live.UnsealReason == v1alpha1.UnsealReasonClone) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // mergeEncryptionStatus applies a reconciler snapshot without undoing a

@@ -120,7 +120,7 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
   ./.agents/skills/bloodraven-doctor/scripts/sidecar-probe.sh -n <namespace> <group-name> keyring
   ```
 - **CRITICAL SAFETY RULE**: If `KeyringEscrowMissing` or `KeyringEscrowCorrupt` is detected on a sealed pod, **DO NOT delete, restart, or reschedule the pod**. Recover the escrow Secret first.
-- **Escrow Secret**: named by `status.encryptionAtRest.sites[].keyringSecret` (`mysql-<group>-<site>-keyring-v<N>`). `/keyring/status` returns metadata and digests only; the recoverable copy is the keyring file in the running pod. Follow [playbook 3](./references/troubleshooting_playbooks.md#3-keyring--encryption-at-rest-troubleshooting).
+- **Escrow Secret**: named by `status.encryptionAtRest.sites[].keyringSecret` (`mysql-<group>-<site>-keyring-v<N>`). `/keyring/status` returns metadata and digests only; the recoverable copy is the keyring file in the running pod. Recreate a missing Secret with `./.agents/skills/bloodraven-doctor/scripts/keyring-escrow-recover.sh -n <namespace> <group-name> <site>`; it never deletes or overwrites an existing Secret unless re-run with `--replace-corrupt <secret-name>` after a human confirms. Follow [playbook 3](./references/troubleshooting_playbooks.md#3-keyring--encryption-at-rest-troubleshooting).
 
 ### 4. Dragonfly Cache & Session Degradation
 - **Symptom**: `status.dragonfly.phase=Degraded`, `DragonflyPromotionFailed`, or active cache service has no endpoints.
