@@ -22,7 +22,7 @@ func TestRR4ProbeFreshPVCBeforeCloneLeavesPermanentDivergence(t *testing.T) {
 	if dir == "" {
 		dir = t.TempDir()
 	}
-	store, err := NewArchiveStore(ctx, &PITRConfig{StorageType: "PVC", PVC: &PITRPVCConfig{MountPath: dir}})
+	store, err := NewArchiveStore(ctx, &PITRConfig{StorageType: "PVC", PVC: testPVCConfig(dir)})
 	if err != nil {
 		t.Fatal(err)
 	}

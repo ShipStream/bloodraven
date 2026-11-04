@@ -44,7 +44,7 @@ func TestRound2NoScratchAcrossEncryptionAndInspection(t *testing.T) {
 			ctx := context.Background()
 			root, local := t.TempDir(), t.TempDir()
 			destination := filepath.Join(t.TempDir(), "download")
-			base, err := newPVCStore(&PITRPVCConfig{MountPath: root})
+			base, err := newPVCStore(testPVCConfig(root), "")
 			if err != nil {
 				t.Fatal(err)
 			}
