@@ -88,6 +88,7 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
 
 ### 1. Topology & Split-Brain Triage
 - **Symptom**: `NoPrimary` (both sites read-only) or multiple sites accepting writes (`read_only=OFF`).
+- **Not a symptom**: `Ready`/`Degraded` `Unknown` with reason `Initializing` right after an operator restart or leader change. The operator has not confirmed the primary's writable answer yet; it clears on the next poll and nothing is promoted or fenced meanwhile (see the alert matrix).
 - **Probe**:
   ```bash
   # Check read_only state on all sites

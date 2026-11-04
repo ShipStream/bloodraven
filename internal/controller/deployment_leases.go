@@ -272,6 +272,9 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 		return "DeploymentRevocationPending"
 	}
 	if fg.Status.ActiveSite == "" {
+		if c := apimeta.FindStatusCondition(fg.Status.Conditions, "Ready"); c != nil && c.Reason == "Initializing" {
+			return "Initializing"
+		}
 		return "NoPrimary"
 	}
 	if plannedFailoverInFlight(fg.Status.PlannedFailover) || (fg.Status.PlannedFailover != nil && fg.Status.PlannedFailover.Phase == v1alpha1.PlannedFailoverPhaseDeferred) {

@@ -132,9 +132,19 @@ function renderSites(msg) {
   const unreachableCount = sites.filter(s => s.state === 'unreachable').length;
 
   let healthClass = 'healthy', healthText = 'Healthy';
-  if (writableCount > 1) {
+  const alert = msg.alert || '';
+  if (writableCount > 1 || alert.startsWith('SPLIT BRAIN')) {
+    // The alert also covers a second writable answer the operator has not
+    // confirmed yet (that site's state is still unknown).
     healthClass = 'critical';
     healthText = 'SPLIT BRAIN \u2014 multiple sites writable';
+  } else if (writableCount === 0 && !alert && sites.some(s => (s.state || 'unknown') === 'unknown' && (s.role || 'primary-candidate') === 'primary-candidate')) {
+    // The operator reports Initializing, not NoPrimary, until it has
+    // classified every primary-candidate since it started. Initializing
+    // never carries an alert; a promotion refusal with an unclassified
+    // site does, and is a real NoPrimary.
+    healthClass = 'warning';
+    healthText = 'INITIALIZING \u2014 classifying sites after operator start';
   } else if (writableCount === 0 && sites.length > 0) {
     healthClass = 'critical';
     healthText = 'NO PRIMARY \u2014 no writable site';
