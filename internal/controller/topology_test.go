@@ -77,6 +77,8 @@ type mockMySQL struct {
 	stopIOIgnored     bool
 	missingIOStopPriv []string
 	ioStopPrivErr     error
+	// offlineAtGTIDRead records offline_mode at each GetGtidExecuted.
+	offlineAtGTIDRead []bool
 }
 
 func (m *mockMySQL) MissingReplicaIOStopPrivileges(_ context.Context) ([]string, error) {
@@ -388,6 +390,7 @@ func (m *mockMySQL) GetGtidExecuted(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, m.gtidExecutedHadDeadline = ctx.Deadline()
+	m.offlineAtGTIDRead = append(m.offlineAtGTIDRead, m.offlineMode)
 	if m.respectContext && ctx.Err() != nil {
 		return "", ctx.Err()
 	}

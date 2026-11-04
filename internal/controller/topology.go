@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -225,6 +226,11 @@ type TopologySnapshot struct {
 	// yet (status.restoreReclones.pending). Used by the runner to emit
 	// Events; not persisted on the CR.
 	RestoreReclonePromotionRefused []string
+
+	// BootstrapRefusedRestoreHold is the last site a clone into was
+	// refused because an in-place restore holds it ("" once a clone
+	// started). Used by the runner to emit an Event; not persisted.
+	BootstrapRefusedRestoreHold string
 }
 
 // siteTracker tracks debounce counters and current state for one site.
@@ -613,10 +619,17 @@ type TopologyManager struct {
 	restorePeerHeld   []string
 	restorePeerRestop []string
 	peerStartMu       sync.RWMutex
+	// restoreProtectionMu serializes applying restore protection
+	// (restorePeerHeld, restorePeerRestop, restoreRecloneBlocked) from
+	// status, including the uncached read that confirms a release.
+	restoreProtectionMu sync.Mutex
 	// bootstrapRefusedSite is the last recipient bootstrap admission
 	// refused for a restore hold, so the refusal is logged once.
-	// Protected by mu.
+	// bootstrapAdmitting is the recipient whose admission is in progress
+	// (between the reservation and bootstrapPhase=Cloning). Protected by
+	// mu.
 	bootstrapRefusedSite string
+	bootstrapAdmitting   string
 
 	// restoreFenceSite/Owner name the site whose offline_mode fence an
 	// in-place restore (owner = its confirm token) holds; Poll re-asserts
@@ -2014,6 +2027,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		KeyringPromotionRefused: append([]string(nil), tm.keyringPromotionRefused...),
 
 		RestoreReclonePromotionRefused: append([]string(nil), tm.restoreReclonePromotionRefused...),
+		BootstrapRefusedRestoreHold:    tm.bootstrapRefusedSite,
 	}
 	if tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation {
 		snap.DeploymentEpoch = 0
@@ -4109,20 +4123,30 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		tm.logger.Error("bootstrap aborted: unknown site", "donor", donor, "recipient", recipient)
 		return false
 	}
-	// A site queued by an in-place restore whose queue is Armed (the
-	// restore runs) or Held (the primary is no trusted donor) keeps its
-	// data and its replication stopped, whoever asks to clone it. A
-	// Draining site's clone is the reclone that takes it over.
-	if tm.restoreRecloneBlockedSite(recipient) {
-		tm.mu.Lock()
-		first := tm.bootstrapRefusedSite != recipient
-		tm.bootstrapRefusedSite = recipient
+	// Reserve the admission under mu before the slow donor confirmation
+	// and keyring unseal below. An in-place restore's quiescence check
+	// (restoreMutationInFlight) sees the reservation and waits, and the
+	// commit below re-checks the freeze and the restore block under the
+	// same lock, so a clone can never start after a restore has frozen the
+	// topology or queued the recipient.
+	tm.mu.Lock()
+	if refused := tm.bootstrapAdmissionRefusedLocked(recipient); refused || tm.bootstrapAdmitting != "" {
 		tm.mu.Unlock()
-		if first {
-			tm.logger.Warn("bootstrap refused: the recipient is held by an in-place restore", "recipient", recipient, "source", source)
+		if refused {
+			tm.noteBootstrapRefused(recipient, source)
 		}
 		return false
 	}
+	tm.bootstrapAdmitting = recipient
+	tm.mu.Unlock()
+	committed := false
+	defer func() {
+		if !committed {
+			tm.mu.Lock()
+			tm.bootstrapAdmitting = ""
+			tm.mu.Unlock()
+		}
+	}()
 	if donorSite.host == "" {
 		err := fmt.Errorf("bootstrap: donor host not configured for site %s", donor)
 		tm.mu.Lock()
@@ -4159,6 +4183,13 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		}
 	}
 	tm.mu.Lock()
+	if tm.bootstrapAdmissionRefusedLocked(recipient) {
+		tm.mu.Unlock()
+		tm.noteBootstrapRefused(recipient, source)
+		return false
+	}
+	committed = true
+	tm.bootstrapAdmitting = ""
 	recloneOwner := ""
 	if source == "reclone" && tm.reclonePendingSite == recipient {
 		recloneOwner = tm.reclonePendingOwner
@@ -5196,6 +5227,12 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	}
 
 	if newGtid.Contains(oldGtid) {
+		if tm.restorePeerHeldSite(oldPrimary.name) {
+			// Awaiting its post-restore reclone, replication held stopped:
+			// do not record a recovery that the replication gate refuses.
+			tm.logger.Info("old primary recovery deferred: replication held by an in-place restore", "site", oldPrimary.name)
+			return false, false
+		}
 		tm.logger.Info("no GTID divergence, auto-recovering old primary as replica", "site", oldPrimary.name)
 		tm.mu.Lock()
 		rec := tm.recovery[oldPrimary.name]
@@ -5287,6 +5324,28 @@ func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, n
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
 	tm.logger.Info("old primary recovery complete", "site", oldPrimary.name, "source", newPrimaryHost)
+}
+
+// bootstrapAdmissionRefusedLocked reports whether a clone into recipient
+// must not start: an in-place restore froze the topology, or queued the
+// recipient in an Armed (the restore runs) or Held (the primary is no
+// trusted donor) queue. A Draining site's clone is the reclone that takes
+// it over. Caller holds tm.mu.
+func (tm *TopologyManager) bootstrapAdmissionRefusedLocked(recipient string) bool {
+	return tm.topologyFrozen || slices.Contains(tm.restoreRecloneBlocked, recipient)
+}
+
+// noteBootstrapRefused logs a refused clone once per site and surfaces it
+// to the runner, which emits a BootstrapRefusedRestoreHold Event.
+func (tm *TopologyManager) noteBootstrapRefused(recipient, source string) {
+	tm.mu.Lock()
+	first := tm.bootstrapRefusedSite != recipient
+	tm.bootstrapRefusedSite = recipient
+	tm.mu.Unlock()
+	if first {
+		tm.logger.Warn("bootstrap refused: the recipient is held by an in-place restore", "recipient", recipient, "source", source)
+		tm.emitStatusSnapshot()
+	}
 }
 
 // releaseCloneHold retries NotifyCloneComplete after a bootstrap whose

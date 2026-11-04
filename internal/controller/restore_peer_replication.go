@@ -96,35 +96,89 @@ func sortedSet(a []string) []string {
 	return slices.Compact(out)
 }
 
-// SetRestorePeerHold sets the held and re-stop sets. A non-authoritative
-// update (from a possibly stale cached view) only adds sites; removing a
-// site needs an authoritative one (a view read through the API server, or
-// written by this operator), because a stale view that drops a held site
-// would let replication restart and pull a restore's DROP statements.
-// It reports whether the update left sites the caller wanted removed.
-func (tm *TopologyManager) SetRestorePeerHold(held, restop []string, authoritative bool) (removalPending bool) {
-	if tm == nil {
-		return false
+// restoreProtection is the part of a restore's state the topology manager
+// enforces locally: held (no operator-issued replication start), restop
+// (Poll re-stops the receiver) and blocked (no clone into the site).
+type restoreProtection struct {
+	held, restop, blocked []string
+}
+
+// restoreProtectionFromStatus derives the protection from status.
+func restoreProtectionFromStatus(fg *v1alpha1.MysqlFailoverGroup) restoreProtection {
+	held, restop := restorePeerHoldFromStatus(fg)
+	return restoreProtection{held: sortedSet(held), restop: sortedSet(restop), blocked: sortedSet(restoreRecloneBlockedSites(fg))}
+}
+
+// equal reports whether p and q protect the same sites.
+func (p restoreProtection) equal(q restoreProtection) bool {
+	return slices.Equal(p.held, q.held) && slices.Equal(p.restop, q.restop) && slices.Equal(p.blocked, q.blocked)
+}
+
+// onlyTightens reports whether moving from cur to p only adds held or
+// blocked sites: a change that keeps replication stopped and clones out,
+// which is safe to apply from a possibly stale view. Any removal, and any
+// change to restop (which actively stops a receiver, and may stop one a
+// legitimate reclone started), is not.
+func (p restoreProtection) onlyTightens(cur restoreProtection) bool {
+	return slices.Equal(p.restop, cur.restop) && isSubset(cur.held, p.held) && isSubset(cur.blocked, p.blocked)
+}
+
+func isSubset(sub, set []string) bool {
+	for _, s := range sub {
+		if !slices.Contains(set, s) {
+			return false
+		}
 	}
-	held, restop = sortedSet(held), sortedSet(restop)
+	return true
+}
+
+// restoreProtectionSnapshot returns a copy of the manager's protection.
+func (tm *TopologyManager) restoreProtectionSnapshot() restoreProtection {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return restoreProtection{
+		held:    append([]string(nil), tm.restorePeerHeld...),
+		restop:  append([]string(nil), tm.restorePeerRestop...),
+		blocked: append([]string(nil), tm.restoreRecloneBlocked...),
+	}
+}
+
+// setRestoreProtection replaces the manager's protection.
+func (tm *TopologyManager) setRestoreProtection(p restoreProtection) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	if authoritative {
-		tm.restorePeerHeld, tm.restorePeerRestop = held, restop
-		return false
+	tm.restorePeerHeld, tm.restorePeerRestop, tm.restoreRecloneBlocked = sortedSet(p.held), sortedSet(p.restop), sortedSet(p.blocked)
+}
+
+// tightenRestoreProtection adds p's held and blocked sites, leaving
+// restop and every existing site alone.
+func (tm *TopologyManager) tightenRestoreProtection(p restoreProtection) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.restorePeerHeld = sortedUnion(tm.restorePeerHeld, p.held)
+	tm.restoreRecloneBlocked = sortedUnion(tm.restoreRecloneBlocked, p.blocked)
+}
+
+// SetRestorePeerHold sets the held and re-stop sets directly (blocked is
+// left alone). authoritative replaces them; otherwise held sites are only
+// added. The runner uses applyRestoreProtection; this is for tests.
+func (tm *TopologyManager) SetRestorePeerHold(held, restop []string, authoritative bool) {
+	if tm == nil {
+		return
 	}
-	nextHeld := sortedUnion(tm.restorePeerHeld, held)
-	nextRestop := sortedUnion(tm.restorePeerRestop, restop)
-	removalPending = len(nextHeld) != len(held) || len(nextRestop) != len(restop)
-	tm.restorePeerHeld, tm.restorePeerRestop = nextHeld, nextRestop
-	return removalPending
+	cur := tm.restoreProtectionSnapshot()
+	if authoritative {
+		cur.held, cur.restop = held, restop
+		tm.setRestoreProtection(cur)
+		return
+	}
+	tm.tightenRestoreProtection(restoreProtection{held: held})
 }
 
 // restorePeerHoldSets returns copies of the held and re-stop sets.
 func (tm *TopologyManager) restorePeerHoldSets() (held, restop []string) {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	return append([]string(nil), tm.restorePeerHeld...), append([]string(nil), tm.restorePeerRestop...)
+	p := tm.restoreProtectionSnapshot()
+	return p.held, p.restop
 }
 
 // restorePeerHeldSite reports whether site's replication is held.
@@ -303,10 +357,13 @@ func (tm *TopologyManager) restoreMutationInFlight(requireFrozen bool) string {
 	planned := tm.plannedFailoverActive
 	phase := tm.bootstrapPhase
 	recipient := tm.bootstrapRecipient
+	admitting := tm.bootstrapAdmitting
 	tm.mu.RUnlock()
 	switch {
 	case requireFrozen && !frozen:
 		return "waiting for the topology manager to observe the restore freeze"
+	case admitting != "":
+		return fmt.Sprintf("waiting for the clone admission of %s to finish", admitting)
 	case tm.isUpdating():
 		return "waiting for the running ordered update to finish"
 	case planned:
@@ -399,47 +456,98 @@ func (r *TopologyManagerRunner) RestoreMutationInFlight(nn types.NamespacedName,
 	return tm.restoreMutationInFlight(requireFrozen), nil
 }
 
-// applyRestorePeerHold pushes fg's peer replication hold onto tm and the
-// bloodraven_restore_reclone_pending gauge. A non-authoritative view (the
-// runner's cached list) that would remove held sites is confirmed through
-// the uncached API reader first.
-func (r *TopologyManagerRunner) applyRestorePeerHold(ctx context.Context, tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, authoritative bool) {
+// applyRestoreProtection brings tm's restore protection (held, restop,
+// blocked) and the bloodraven_restore_reclone_pending gauge up to date
+// with fg. Every application is serialized per manager. Only a change
+// that tightens the protection is taken from fg as given (the runner's
+// cached list may be stale, and a stale view that releases a hold, or
+// re-arms a re-stop after the queue moved on, would let a peer replicate a
+// restore's DROP statements or stop a legitimate reclone's replication);
+// any other change is applied from a read through the uncached API reader
+// taken under the lock, so applications never go back in time. written
+// marks an object this operator just wrote; it is still confirmed, because
+// two writers' pushes may arrive out of order. When the read fails the
+// change is only tightened and the error returned; the next sync retries.
+// Without an uncached reader (tests) fg is the only view there is.
+func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, written bool) error {
 	if r == nil || tm == nil || fg == nil {
-		return
+		return nil
 	}
-	if !authoritative && r.apiReader == nil {
-		// No uncached reader (tests): the view is the only one there is.
-		authoritative = true
-	}
-	held, restop := restorePeerHoldFromStatus(fg)
-	if !tm.SetRestorePeerHold(held, restop, authoritative) {
+	tm.restoreProtectionMu.Lock()
+	defer tm.restoreProtectionMu.Unlock()
+	want := restoreProtectionFromStatus(fg)
+	if r.apiReader == nil {
+		tm.setRestoreProtection(want)
 		emitRestoreReclonePendingMetric(fg)
-		return
+		return nil
+	}
+	if !written {
+		cur := tm.restoreProtectionSnapshot()
+		if want.equal(cur) || want.onlyTightens(cur) {
+			tm.setRestoreProtection(want)
+			emitRestoreReclonePendingMetric(fg)
+			return nil
+		}
 	}
 	var fresh v1alpha1.MysqlFailoverGroup
 	if err := r.apiReader.Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil {
+		tm.tightenRestoreProtection(want)
 		r.logger.Warn("could not confirm a restore peer replication hold release; keeping the hold", "fg", client.ObjectKeyFromObject(fg).String(), "error", err)
-		return
+		return err
 	}
-	held, restop = restorePeerHoldFromStatus(&fresh)
-	tm.SetRestorePeerHold(held, restop, true)
+	tm.setRestoreProtection(restoreProtectionFromStatus(&fresh))
 	emitRestoreReclonePendingMetric(&fresh)
+	return nil
 }
 
-// SetRestorePeerHold pushes fg's hold onto its running topology manager,
-// as the authoritative view: callers pass an object they just wrote.
+// initRestoreProtection sets a new topology manager's restore protection
+// (and the restore state it reads with it: the reclone-pending set, the
+// offline_mode fence and the freeze) before it starts, from a read through
+// the uncached API reader: the runner's cached list may predate the
+// restore queue, and the new manager has no hold of its own to keep. If
+// the read fails, a replacement keeps the manager it replaces' protection
+// (tightened with the cached view); a brand-new manager is not started
+// (the next sync retries).
+func (r *TopologyManagerRunner) initRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, prev *managedTopology) error {
+	tm.restoreProtectionMu.Lock()
+	defer tm.restoreProtectionMu.Unlock()
+	view := fg
+	if r.apiReader != nil {
+		var fresh v1alpha1.MysqlFailoverGroup
+		if err := r.apiReader.Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil {
+			if prev == nil || prev.tm == nil {
+				return fmt.Errorf("read the group uncached to initialise its restore protection: %w", err)
+			}
+			tm.setRestoreProtection(prev.tm.restoreProtectionSnapshot())
+			tm.tightenRestoreProtection(restoreProtectionFromStatus(fg))
+			r.logger.Warn("could not read the group uncached; the new topology manager keeps its predecessor's restore protection",
+				"fg", client.ObjectKeyFromObject(fg).String(), "error", err)
+			return nil
+		}
+		view = &fresh
+	}
+	tm.setRestoreProtection(restoreProtectionFromStatus(view))
+	tm.SetRestoreReclonePending(restoreReclonePendingSites(view))
+	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(view))
+	tm.SetTopologyFrozen(inPlaceRestoreFreezesTopology(view))
+	emitRestoreReclonePendingMetric(view)
+	return nil
+}
+
+// SetRestorePeerHold brings fg's running topology manager's restore
+// protection up to date after this operator wrote fg.
 func (r *TopologyManagerRunner) SetRestorePeerHold(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) {
 	if r == nil || fg == nil {
 		return
 	}
-	emitRestoreReclonePendingMetric(fg)
 	r.mu.RLock()
 	mt, ok := r.managers[client.ObjectKeyFromObject(fg)]
 	r.mu.RUnlock()
 	if !ok {
+		emitRestoreReclonePendingMetric(fg)
 		return
 	}
-	r.applyRestorePeerHold(ctx, mt.tm, fg, true)
+	_ = r.applyRestoreProtection(ctx, mt.tm, fg, true)
 }
 
 // emitRestoreReclonePendingMetric mirrors status.restoreReclones.pending
@@ -651,9 +759,23 @@ func (r *MysqlFailoverGroupReconciler) inPlacePeerStopRejection(ctx context.Cont
 				restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), site,
 				fg.Spec.EffectiveOperatorSecretName()), nil
 		}
+		if errors.Is(err, errReplicaIOStopUnsupported) {
+			return fmt.Sprintf("restoreInPlace rejected: the operator cannot stop the replication receiver of peer %s (its MySQL checker does not "+
+				"support STOP REPLICA IO_THREAD); a full-instance restore stops every peer's receiver so the restore's DROP statements do not reach them", site), nil
+		}
 		if err != nil {
-			return "", fmt.Errorf("peer %s: %w", site, err)
+			return "", &restorePeerWaitError{site: site, err: err}
 		}
 	}
 	return "", nil
 }
+
+// restorePeerWaitError is a peer that could not be checked before a
+// full-instance restore (unreachable): Preflight waits for it.
+type restorePeerWaitError struct {
+	site string
+	err  error
+}
+
+func (e *restorePeerWaitError) Error() string { return fmt.Sprintf("peer %s: %v", e.site, e.err) }
+func (e *restorePeerWaitError) Unwrap() error { return e.err }

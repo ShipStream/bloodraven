@@ -257,7 +257,11 @@ func TestReconcileInPlaceRestore_PreflightWaitsForUnreachablePeerAndUpdates(t *t
 		setup func(tm *TopologyManager, peer *mockMySQL)
 		want  string
 	}{
-		{"unreachable peer", func(_ *TopologyManager, peer *mockMySQL) { peer.ioStopPrivErr = errors.New("connection refused") }, "peer"},
+		{"unreachable peer", func(_ *TopologyManager, peer *mockMySQL) { peer.ioStopPrivErr = errors.New("connection refused") }, "to be reachable"},
+		{"clone running", func(tm *TopologyManager, _ *mockMySQL) {
+			tm.bootstrapPhase, tm.bootstrapRecipient = BootstrapPhaseCloning, "pdx"
+		}, "clone of pdx"},
+		{"clone admission in progress", func(tm *TopologyManager, _ *mockMySQL) { tm.bootstrapAdmitting = "pdx" }, "clone admission of pdx"},
 		{"ordered update running", func(tm *TopologyManager, _ *mockMySQL) { tm.deploymentUpdateRunning = true }, "ordered update"},
 		{"planned failover running", func(tm *TopologyManager, _ *mockMySQL) { tm.plannedFailoverActive = true }, "planned failover"},
 	} {
@@ -464,13 +468,13 @@ func TestRunner_StaleViewDoesNotReleasePeerHold(t *testing.T) {
 	runner := &TopologyManagerRunner{client: c, apiReader: c, logger: testLogger()}
 	tm, _, _ := heldTopologyManager(t)
 
-	runner.applyRestorePeerHold(context.Background(), tm, fg, false)
+	_ = runner.applyRestoreProtection(context.Background(), tm, fg, false)
 	if !tm.restorePeerHeldSite("pdx") {
 		t.Fatal("pdx not held")
 	}
 	stale := fg.DeepCopy()
 	stale.Status.RestoreReclones = nil
-	runner.applyRestorePeerHold(context.Background(), tm, stale, false)
+	_ = runner.applyRestoreProtection(context.Background(), tm, stale, false)
 	if !tm.restorePeerHeldSite("pdx") {
 		t.Fatal("a stale view released the hold while the API server still has the queue")
 	}
@@ -483,7 +487,7 @@ func TestRunner_StaleViewDoesNotReleasePeerHold(t *testing.T) {
 	if err := c.Status().Update(context.Background(), fresh); err != nil {
 		t.Fatal(err)
 	}
-	runner.applyRestorePeerHold(context.Background(), tm, stale, false)
+	_ = runner.applyRestoreProtection(context.Background(), tm, stale, false)
 	if tm.restorePeerHeldSite("pdx") {
 		t.Fatal("hold kept after the API server confirmed the queue is gone")
 	}
@@ -506,6 +510,35 @@ func TestStartBootstrap_RefusesArmedOrHeldRecipient(t *testing.T) {
 	}
 	if peer.cloneCalls != 0 {
 		t.Fatal("cloned into a held recipient")
+	}
+	// Frozen refuses too, for any recipient.
+	tm.SetRestoreRecloneBlocked(nil)
+	tm.SetTopologyFrozen(true)
+	if tm.startBootstrapByName(context.Background(), "dc1", "dc2", "auto-clone") {
+		t.Fatal("bootstrap started while an in-place restore froze the topology")
+	}
+	// A Draining site (pending but not blocked) is admitted: its clone is
+	// the reclone that takes it over.
+	tm.SetTopologyFrozen(false)
+	tm.SetRestoreReclonePending([]string{"dc2"})
+	tm.SetRestorePeerHold([]string{"dc2"}, nil, true)
+	if !tm.startBootstrapByName(context.Background(), "dc1", "dc2", "reclone") {
+		t.Fatal("the reclone of a Draining site must be admitted")
+	}
+	waitBootstrapIdle(t, tm)
+	if tm.restoreMutationInFlight(false) != "" {
+		t.Fatalf("admission state left behind: %q", tm.restoreMutationInFlight(false))
+	}
+}
+
+func waitBootstrapIdle(t *testing.T, tm *TopologyManager) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for !bootstrapIdlePhase(BootstrapPhase(tm.BootstrapPhase())) {
+		if time.Now().After(deadline) {
+			t.Fatalf("bootstrap did not finish (phase %s)", tm.BootstrapPhase())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -531,7 +564,7 @@ func TestSettle_FailedRestoreThatChangedPrimaryHoldsPeers(t *testing.T) {
 	r, c := newReconciler(fg, dsnSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].gtidExecuted = peerGTID("1-14") // the Job's DROPs
-	if err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
+	if _, err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
 	q := getFG(t, c, fg).Status.RestoreReclones
@@ -548,7 +581,7 @@ func TestSettle_FailedRestoreThatLeftPrimaryUnchangedResumesPeers(t *testing.T) 
 	r, c := newReconciler(fg, dsnSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].gtidExecuted = peerGTID("1-10")
-	if err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
+	if _, err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
 	if q := getFG(t, c, fg).Status.RestoreReclones; q != nil {
@@ -574,7 +607,7 @@ func TestSettle_UnreadablePrimaryOrMissingSnapshotHolds(t *testing.T) {
 			r, c := newReconciler(fg, dsnSecret())
 			_, mocks := withFenceRunner(r, c, fg)
 			mocks["iad"].gtidExecuted, mocks["iad"].gtidExecutedErr = peerGTID("1-10"), tc.gtidEr
-			if err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
+			if _, err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
 				t.Fatal(err)
 			}
 			if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesHeld {
@@ -601,6 +634,10 @@ func TestReleaseFence_SettlesQueueFirst(t *testing.T) {
 	fresh := getFG(t, c, fg)
 	if fresh.Status.RestoreReclones != nil || fresh.Status.RestoreOfflineFence != nil || primary.offlineMode {
 		t.Fatalf("queue %+v fence %+v offline=%v, want the queue settled and the fence released", fresh.Status.RestoreReclones, fresh.Status.RestoreOfflineFence, primary.offlineMode)
+	}
+	// The settlement compared gtid_executed while offline_mode was still ON.
+	if len(primary.offlineAtGTIDRead) == 0 || slices.Contains(primary.offlineAtGTIDRead, false) {
+		t.Fatalf("offline_mode at the gtid_executed reads = %v, want every read made under the fence", primary.offlineAtGTIDRead)
 	}
 }
 

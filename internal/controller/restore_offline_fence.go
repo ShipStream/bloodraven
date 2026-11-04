@@ -459,8 +459,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreOfflineFence(ctx context.
 	// depends on the primary's gtid_executed being what it was when their
 	// receivers were stopped.
 	if rq := fg.Status.RestoreReclones; rq != nil && rq.Phase == v1alpha1.RestoreReclonesArmed {
-		if err := r.settleArmedRestoreReclones(ctx, fg); err != nil {
+		wait, err := r.settleArmedRestoreReclones(ctx, fg)
+		if err != nil {
 			return 0, fmt.Errorf("settle the in-place restore reclone queue before releasing its fence: %w", err)
+		}
+		if wait > 0 {
+			// Not decidable yet (the Job's pods may still run, or the
+			// primary is unreadable): keep the fence up meanwhile.
+			return wait, nil
 		}
 		if q = fg.Status.RestoreOfflineFence; q == nil || restoreOfflineFenceWanted(fg) {
 			return 0, nil

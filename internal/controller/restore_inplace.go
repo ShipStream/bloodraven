@@ -530,6 +530,10 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		}
 		if waitErr != nil {
 			wait := fmt.Sprintf("waiting to verify the operator account's privileges on %s: %v", target, waitErr)
+			var peerWait *restorePeerWaitError
+			if errors.As(waitErr, &peerWait) {
+				wait = fmt.Sprintf("waiting for peer %s to be reachable: %v", peerWait.site, peerWait.err)
+			}
 			if errors.Is(waitErr, errPreviousRestoreFence) {
 				wait = fmt.Sprintf("waiting for the offline_mode fence of the previous restore on %s to be released",
 					fg.Status.RestoreOfflineFence.Site)
@@ -570,7 +574,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 			}
 			return 15 * time.Second, nil
 		}
-		if err := r.armRestoreReclones(ctx, fg, target, spec.Confirm); err != nil {
+		if err := r.armRestoreReclones(ctx, fg, target, spec.Confirm, cur.RunConfirm); err != nil {
 			return 0, fmt.Errorf("record in-place restore reclone queue: %w", err)
 		}
 		if err := r.recordRestoreOfflineFence(ctx, fg, target, spec.Confirm, cur.RunID); err != nil {

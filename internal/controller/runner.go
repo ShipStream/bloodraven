@@ -71,6 +71,9 @@ type managedTopology struct {
 	// lastRestoreReclonePromotionRefused is the same for promotions
 	// refused because the candidates await their post-restore reclone.
 	lastRestoreReclonePromotionRefused []string
+	// lastBootstrapRefusedRestoreHold is the last site a
+	// BootstrapRefusedRestoreHold Event was emitted for.
+	lastBootstrapRefusedRestoreHold string
 
 	// materialUnreadable is set while sync keeps this manager running
 	// because its connection secrets cannot be read, so the warning is
@@ -494,10 +497,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
-			existing.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 			existing.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 			existing.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
-			r.applyRestorePeerHold(ctx, existing.tm, fg, false)
+			_ = r.applyRestoreProtection(ctx, existing.tm, fg, false)
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			if existing.dragonfly != nil {
@@ -553,10 +555,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetTopologyFrozen(frozen)
 			mt.tm.SetPlannedFailoverActive(plannedActive)
 			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
-			mt.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 			mt.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 			mt.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
-			r.applyRestorePeerHold(ctx, mt.tm, fg, false)
+			_ = r.applyRestoreProtection(ctx, mt.tm, fg, false)
 			if mt.dragonfly != nil {
 				mt.dragonfly.SetPaused(dragonflyMaintenanceActive(fg))
 			}
@@ -848,12 +849,15 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// Must land before Run: the first Poll otherwise sees an empty
 	// blocked set and can promote a mid-rotation replica.
 	tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
-	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
-	tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
-	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
-	// Must land before Run, like the sets above: a held peer's stopped
-	// receiver must not be restarted by the first poll.
-	r.applyRestorePeerHold(ctx, tm, fg, false)
+	// Must land before Run, like the set above: a held peer's stopped
+	// receiver must not be restarted, nor a held site cloned into, by the
+	// first poll. Read uncached: the cached list may predate the queue.
+	if err := r.initRestoreProtection(ctx, tm, fg, prev); err != nil {
+		for _, c := range siteMySQL {
+			c.Close()
+		}
+		return err
+	}
 
 	r.restoreFailoverState(tm, fg, nn)
 	for _, site := range fg.Status.Sites {
@@ -2037,6 +2041,15 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 				strings.Join(snap.RestoreReclonePromotionRefused, ", "))
 		}
 		mt.lastRestoreReclonePromotionRefused = append([]string(nil), snap.RestoreReclonePromotionRefused...)
+	}
+	if snap.BootstrapRefusedRestoreHold != mt.lastBootstrapRefusedRestoreHold {
+		if snap.BootstrapRefusedRestoreHold != "" {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "BootstrapRefusedRestoreHold",
+				"refused to clone into %s: an in-place restore holds it (status.restoreReclones is Armed or Held, or the topology is frozen); "+
+					"its data and stopped replication are kept until the restore queue is resolved",
+				snap.BootstrapRefusedRestoreHold)
+		}
+		mt.lastBootstrapRefusedRestoreHold = snap.BootstrapRefusedRestoreHold
 	}
 }
 
