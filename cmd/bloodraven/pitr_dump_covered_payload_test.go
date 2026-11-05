@@ -15,7 +15,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func TestRound6DumpCoveredInnerCut(t *testing.T) {
+func TestPITRDumpCoveredInnerCut(t *testing.T) {
 	raw := pitrFixture(t, "native/compressed-excluded-cut.bin")
 	digest := sha256.Sum256(raw)
 	if len(raw) != 772 || hex.EncodeToString(digest[:]) != "8fe0c4785b0af740db890a970cf9224a933aed5dd5a374d953ca8d928373949f" {
@@ -24,10 +24,10 @@ func TestRound6DumpCoveredInnerCut(t *testing.T) {
 	sid := "7f4a1927-d377-11f1-a983-f6bbc6ad1253"
 	for _, last := range []string{"3", "2"} {
 		t.Run("bound through "+last, func(t *testing.T) {
-			store := round1Archive(t, map[string][][]byte{"iad": {raw}})
+			store := coverageArchive(t, map[string][][]byte{"iad": {raw}})
 			for _, partial := range []bool{false, true} {
 				for _, cross := range []bool{false, true} {
-					result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(9, 30, 0), t.TempDir(), sid+":1-"+last, partial, cross, "timestamp", slog.Default())
+					result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, coverageTime(9, 30, 0), t.TempDir(), sid+":1-"+last, partial, cross, "timestamp", slog.Default())
 					if last == "3" {
 						if err != nil || !result.TargetCovered || result.Partial || len(result.Sites) != 1 || len(result.Sites[0].Staged) != 1 {
 							t.Fatalf("dump-covered transaction vetoed needed same-file replay: %+v %v", result, err)
@@ -41,7 +41,7 @@ func TestRound6DumpCoveredInnerCut(t *testing.T) {
 	}
 }
 
-func TestRound6LaterRequiredInnerCutStillRefuses(t *testing.T) {
+func TestPITRLaterRequiredInnerCutStillRefuses(t *testing.T) {
 	raw := pitrFixture(t, "native/compressed-excluded-cut.bin")
 	parser := replication.NewBinlogParser()
 	parser.SetVerifyChecksum(true)
@@ -60,7 +60,7 @@ func TestRound6LaterRequiredInnerCutStillRefuses(t *testing.T) {
 		for _, inner := range payload.Events {
 			data := bytes.Clone(inner.RawData)
 			if inner.Header.EventType == replication.XID_EVENT {
-				binary.LittleEndian.PutUint32(data[:4], uint32(round1Time(9, 30, 0).Unix()))
+				binary.LittleEndian.PutUint32(data[:4], uint32(coverageTime(9, 30, 0).Unix()))
 			}
 			body = append(body, data...)
 		}
@@ -91,7 +91,7 @@ func TestRound6LaterRequiredInnerCutStillRefuses(t *testing.T) {
 	if payloads != 2 || replacement == nil {
 		t.Fatal("native fixture must contain both transactions")
 	}
-	events := round4Events(raw)
+	events := splitBinlogEvents(raw)
 	payloads = 0
 	for i, event := range events {
 		if event[4] == 40 {
@@ -101,12 +101,12 @@ func TestRound6LaterRequiredInnerCutStillRefuses(t *testing.T) {
 			}
 		}
 	}
-	raw = round4Reframe(events)
+	raw = reframeBinlogEvents(events)
 	sid := "7f4a1927-d377-11f1-a983-f6bbc6ad1253"
-	store := round1Archive(t, map[string][][]byte{"iad": {raw}})
+	store := coverageArchive(t, map[string][][]byte{"iad": {raw}})
 	for _, partial := range []bool{false, true} {
 		for _, cross := range []bool{false, true} {
-			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(9, 30, 0), t.TempDir(), sid+":1-3", partial, cross, "timestamp", slog.Default())
+			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, coverageTime(9, 30, 0), t.TempDir(), sid+":1-3", partial, cross, "timestamp", slog.Default())
 			if err == nil || !strings.Contains(err.Error(), "compressed transaction "+sid+":4 has events at or after the target") {
 				t.Fatalf("a later non-excluded cut was lost: %+v %v", result, err)
 			}

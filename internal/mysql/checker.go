@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/go-sql-driver/mysql"
 )
 
 // Checker checks MySQL read_only status and manages replication.
@@ -125,7 +123,7 @@ func NewCheckerFromPools(db, cloneDB *sql.DB) Checker {
 // primaryDSN derives the primary pool's DSN from the operational DSN by
 // stamping a hard dial/read/write deadline (statusNetTimeout) onto it.
 func primaryDSN(dsn string) (string, error) {
-	cfg, err := mysql.ParseDSN(dsn)
+	cfg, err := ParseDSN(dsn)
 	if err != nil {
 		return "", fmt.Errorf("parse dsn: %w", err)
 	}
@@ -166,7 +164,7 @@ func openPrimaryDB(dsn string) (*sql.DB, error) {
 // an explicit caller dial timeout is preserved and a default supplied when the
 // DSN sets none.
 func cloneDSN(dsn string) (string, error) {
-	cfg, err := mysql.ParseDSN(dsn)
+	cfg, err := ParseDSN(dsn)
 	if err != nil {
 		return "", fmt.Errorf("parse clone dsn: %w", err)
 	}

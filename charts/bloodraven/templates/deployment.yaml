@@ -114,7 +114,7 @@ spec:
             - name: BLOODRAVEN_WS_ALLOWED_ORIGINS
               value: {{ .Values.auxiliary.service.wsAllowedOrigins | default "" | quote }}
             - name: BLOODRAVEN_WS_MAX_CLIENTS
-              value: {{ .Values.auxiliary.service.wsMaxClients | default 100 | quote }}
+              value: {{ include "bloodraven.wsMaxClients" . | quote }}
             {{- if .Values.license }}
             - name: BLOODRAVEN_LICENSE
               value: {{ .Values.license | quote }}
