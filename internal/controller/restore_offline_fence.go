@@ -43,6 +43,11 @@ import (
 // stamped a terminal status); the caller stops.
 var errInPlaceRunEnded = errors.New("in-place restore run ended")
 
+// errNoTopologyManager means no topology manager runs for the group yet
+// (operator start, manager replacement): the caller waits for the next
+// runner sync rather than treating the site as unreadable.
+var errNoTopologyManager = errors.New("no topology manager running")
+
 // errRestoreFenceUnsupported means the site's checker cannot apply the
 // database fence (test doubles that do not implement mysql.RestoreFencer).
 var errRestoreFenceUnsupported = errors.New("the site's MySQL checker cannot apply the restore offline_mode fence")
@@ -114,6 +119,11 @@ func (tm *TopologyManager) EnforceRestoreOfflineFence(ctx context.Context, site,
 	if err != nil {
 		return 0, nil, err
 	}
+	// Serialized with applyRestoreProtection, which also writes the fence
+	// guard: a guard application computed from a status read taken before
+	// the fence was recorded must not clear the fence this arms.
+	tm.restoreProtectionMu.Lock()
+	defer tm.restoreProtectionMu.Unlock()
 	tm.restoreFenceMu.Lock()
 	defer tm.restoreFenceMu.Unlock()
 	if owner == tm.restoreFenceReleased {
@@ -160,6 +170,8 @@ func (tm *TopologyManager) SetRestoreOfflineFence(site, owner string) {
 // was never applied and MySQL is not touched. On error nothing is
 // released, so the caller retries.
 func (tm *TopologyManager) ReleaseRestoreOfflineFence(ctx context.Context, site, owner string, prior *bool) error {
+	tm.restoreProtectionMu.Lock()
+	defer tm.restoreProtectionMu.Unlock()
 	tm.restoreFenceMu.Lock()
 	defer tm.restoreFenceMu.Unlock()
 	if prior != nil {
@@ -208,13 +220,13 @@ func (tm *TopologyManager) reassertRestoreOfflineFence(ctx context.Context) {
 
 func (r *TopologyManagerRunner) restoreFenceManager(nn types.NamespacedName) (*TopologyManager, error) {
 	if r == nil {
-		return nil, fmt.Errorf("no topology runner")
+		return nil, fmt.Errorf("%w: no topology runner", errNoTopologyManager)
 	}
 	r.mu.RLock()
 	mt, ok := r.managers[nn]
 	r.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("no topology manager running for %s", nn)
+		return nil, fmt.Errorf("%w for %s", errNoTopologyManager, nn)
 	}
 	return mt.tm, nil
 }
@@ -453,6 +465,24 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreOfflineFence(ctx context.
 	q := fg.Status.RestoreOfflineFence
 	if q == nil || restoreOfflineFenceWanted(fg) {
 		return 0, nil
+	}
+	// Settle the finished restore's reclone queue while the fence still
+	// keeps application writes out: whether the peers resume or are held
+	// depends on the primary's gtid_executed being what it was when their
+	// receivers were stopped.
+	if rq := fg.Status.RestoreReclones; rq != nil && rq.Phase == v1alpha1.RestoreReclonesArmed {
+		wait, err := r.settleArmedRestoreReclones(ctx, fg)
+		if err != nil {
+			return 0, fmt.Errorf("settle the in-place restore reclone queue before releasing its fence: %w", err)
+		}
+		if wait > 0 {
+			// Not decidable yet (the Job's pods may still run, or the
+			// primary is unreadable): keep the fence up meanwhile.
+			return wait, nil
+		}
+		if q = fg.Status.RestoreOfflineFence; q == nil || restoreOfflineFenceWanted(fg) {
+			return 0, nil
+		}
 	}
 	restoreOff := q.PriorOfflineMode != nil && !*q.PriorOfflineMode
 	if q.PriorOfflineMode == nil {

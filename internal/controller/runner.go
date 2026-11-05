@@ -71,6 +71,9 @@ type managedTopology struct {
 	// lastRestoreReclonePromotionRefused is the same for promotions
 	// refused because the candidates await their post-restore reclone.
 	lastRestoreReclonePromotionRefused []string
+	// lastBootstrapRefusedRestoreHold is the last site a
+	// BootstrapRefusedRestoreHold Event was emitted for.
+	lastBootstrapRefusedRestoreHold string
 
 	// materialUnreadable is set while sync keeps this manager running
 	// because its connection secrets cannot be read, so the warning is
@@ -138,30 +141,6 @@ func NewTopologyManagerRunner(c client.Client, clientset kubernetes.Interface, h
 // the runner and reconciler are constructed.
 func (r *TopologyManagerRunner) SetDeploymentReconciler(dr DeploymentReconciler) {
 	r.deployReconciler = dr
-}
-
-// SetTopologyFrozen flips the topology-freeze flag on the managed
-// TopologyManager for the given CR, immediately (without waiting for
-// the runner's 30-second re-sync tick). The reconciler calls this at
-// every in-place restore phase transition so there is no window where
-// the topology manager could fire a cross-site action against a
-// cluster that is actively being restored.
-//
-// Returns true when the flag was applied; false when no manager is
-// running for this CR (for example during fresh deploy, operator
-// restart, or CR deletion). A return of false is expected in those
-// cases and is not an error — the runner's next re-sync will observe
-// status.restoreInPlace and apply the correct flag when it starts the
-// manager.
-func (r *TopologyManagerRunner) SetTopologyFrozen(nn types.NamespacedName, frozen bool) bool {
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	mt.tm.SetTopologyFrozen(frozen)
-	return true
 }
 
 // SetPlannedFailoverActive toggles the planned-failover guard on the
@@ -494,17 +473,13 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		}
 
 		suppress := restoreInFlight(fg)
-		frozen := inPlaceRestoreFreezesTopology(fg)
 		plannedActive := plannedFailoverInFlight(fg.Status.PlannedFailover)
 
 		if live && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
-			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
-			existing.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
-			existing.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
-			existing.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
+			_ = r.applyRestoreProtection(ctx, existing.tm, fg, false)
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			if existing.dragonfly != nil {
@@ -560,12 +535,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 		if started {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
-			mt.tm.SetTopologyFrozen(frozen)
 			mt.tm.SetPlannedFailoverActive(plannedActive)
 			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
-			mt.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
-			mt.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
-			mt.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
+			_ = r.applyRestoreProtection(ctx, mt.tm, fg, false)
 			if mt.dragonfly != nil {
 				mt.dragonfly.SetPaused(dragonflyMaintenanceActive(fg))
 			}
@@ -858,9 +830,15 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// Must land before Run: the first Poll otherwise sees an empty
 	// blocked set and can promote a mid-rotation replica.
 	tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
-	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
-	tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
-	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
+	// Must land before Run, like the set above: a held peer's stopped
+	// receiver must not be restarted, nor a held site cloned into, by the
+	// first poll. Read uncached: the cached list may predate the queue.
+	if err := r.initRestoreProtection(ctx, tm, fg, prev); err != nil {
+		for _, c := range siteMySQL {
+			c.Close()
+		}
+		return err
+	}
 
 	r.restoreFailoverState(tm, fg, nn)
 	for _, site := range fg.Status.Sites {
@@ -1230,6 +1208,7 @@ func clearManagedSiteGauges(tm *TopologyManager) {
 	for i := range tm.sites {
 		metrics.DeleteSiteGauges(tm.cfg.Namespace, tm.cfg.Name, tm.sites[i].name)
 	}
+	metrics.SetRestoreReclonePending(tm.cfg.Namespace, tm.cfg.Name, "", nil)
 }
 
 // managerStopWait bounds how long stopManagedTopology waits for Run to
@@ -1383,6 +1362,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		readyMessage = "No site is writable"
 	} else if !replicationHealthy {
 		readyMessage = "Replication is not healthy"
+		if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 {
+			readyMessage = fmt.Sprintf("Replication is not healthy; %s await their post-restore reclone with replication stopped",
+				strings.Join(q.Pending, ", "))
+		}
 	}
 	degradedStatus, degradedMessage := metav1.ConditionTrue, snap.Alert
 	switch reason {
@@ -1416,6 +1399,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	for _, s := range snap.Sites {
 		if s.Role == state.SiteRoleReadOnly {
+			continue
+		}
+		if restoreReclonePending(&freshFG, s.Name) {
+			// Awaiting its post-restore reclone with replication held
+			// stopped by design; RestoreReclonePending below reports it.
 			continue
 		}
 		// Evaluate source convergence before the nil-replication guard: a
@@ -1466,6 +1454,26 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				LastTransitionTime: now,
 				Reason:             "ReplicationError",
 				Message:            fmt.Sprintf("Replication error on %s: %s", siteName, repl.LastError),
+			})
+		}
+	}
+
+	// Sites awaiting their post-restore reclone hold pre-restore data,
+	// are never promoted automatically and do not replicate until they
+	// are recloned, so the group runs without them as failover targets.
+	// Any other problem reported above takes precedence. It also applies
+	// during Initializing (turning Unknown into True): the queue is
+	// persisted status, not a topology observation, so it is known before
+	// the topology is classified, and True keeps the deployment API
+	// refusing leases while peers are held.
+	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == "Healthy" || reason == "Initializing") {
+		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, "Degraded"); degraded == nil || degraded.Status != metav1.ConditionTrue {
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
+				Type: "Degraded", Status: metav1.ConditionTrue,
+				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				Reason: "RestoreReclonePending",
+				Message: fmt.Sprintf("%s await their post-restore reclone (status.restoreReclones phase %s); their replication is stopped until then",
+					strings.Join(q.Pending, ", "), q.Phase),
 			})
 		}
 	}
@@ -2020,6 +2028,15 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 				strings.Join(snap.RestoreReclonePromotionRefused, ", "))
 		}
 		mt.lastRestoreReclonePromotionRefused = append([]string(nil), snap.RestoreReclonePromotionRefused...)
+	}
+	if snap.BootstrapRefusedRestoreHold != mt.lastBootstrapRefusedRestoreHold {
+		if snap.BootstrapRefusedRestoreHold != "" {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "BootstrapRefusedRestoreHold",
+				"refused to clone into %s: an in-place restore holds it (status.restoreReclones is Armed or Held, or the topology is frozen); "+
+					"its data and stopped replication are kept until the restore queue is resolved",
+				snap.BootstrapRefusedRestoreHold)
+		}
+		mt.lastBootstrapRefusedRestoreHold = snap.BootstrapRefusedRestoreHold
 	}
 }
 

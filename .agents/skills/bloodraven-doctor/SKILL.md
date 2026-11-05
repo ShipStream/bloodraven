@@ -167,7 +167,7 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
   kubectl bloodraven backup <group-name> -n <namespace>
   kubectl bloodraven verify-backup <group-name> -n <namespace>
   ```
-- **After a full-instance in-place restore**: `status.restoreReclones.pending` lists the peers not yet recloned from the restored primary. They are excluded from automatic promotion and removed from the `-replica` and read-only Services until their clone succeeds. See [playbook 20](./references/troubleshooting_playbooks.md#20-peers-not-yet-recloned-after-a-full-instance-in-place-restore).
+- **After a full-instance in-place restore**: `status.restoreReclones.pending` lists the peers not yet recloned from the restored primary. They are excluded from automatic promotion and removed from the `-replica` and read-only Services until their clone succeeds, and their replication receiver (IO thread) is stopped by design until then: `Degraded`/deployment API reason `RestoreReclonePending`, `sourceConvergenceReason: RestorePeerHold`, and `bloodraven_restore_reclone_pending{phase}=1` are expected, not a replication fault. Never `START REPLICA` on a queued site: after a failed restore (`phase: Held`) that replicates the restore's `DROP` statements into the only intact copies. See [playbook 20](./references/troubleshooting_playbooks.md#20-peers-not-yet-recloned-after-a-full-instance-in-place-restore).
 
 ### 6. DNS & Application Traffic
 - **Symptom**: App writes hitting wrong site, DNS records not updating after failover, or a hostname rename that never reached DNS.

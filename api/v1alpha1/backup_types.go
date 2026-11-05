@@ -853,8 +853,13 @@ const (
 	// full-instance restores, stripping the primary role label (the
 	// -primary Service stops taking new connections) and setting
 	// offline_mode=ON on the primary, which disconnects and refuses every
-	// session without CONNECTION_ADMIN or SUPER. The restore Job is created
-	// only once no client session from before the fence remains.
+	// session without CONNECTION_ADMIN or SUPER. A full-instance restore
+	// also stops the replication receiver (STOP REPLICA IO_THREAD) on every
+	// peer in status.restoreReclones, so the restore's DROP and load never
+	// reach them. The restore Job is created only once no client session
+	// from before the fence remains and every peer's receiver is verified
+	// stopped; a peer that cannot be stopped within two minutes ends the
+	// run Failed without a Job.
 	RestoreInPlaceFencing RestoreInPlacePhase = "Fencing"
 
 	// RestoreInPlaceRestoring means the restore Job is running the
@@ -883,21 +888,28 @@ type RestoreReclonesPhase string
 const (
 	// RestoreReclonesArmed means the owning full-instance restore was
 	// accepted and is still running. Nothing is recloned yet; the queued
-	// peers are already excluded from promotion and the reader Services.
+	// peers are already excluded from promotion and the reader Services,
+	// and their replication receivers are stopped before the restore Job
+	// is created.
 	RestoreReclonesArmed RestoreReclonesPhase = "Armed"
 
 	// RestoreReclonesDraining means the owning restore succeeded and the
 	// queued peers are being recloned from the restored primary, one at
-	// a time.
+	// a time. A queued peer's replication is started again only by its
+	// own reclone.
 	RestoreReclonesDraining RestoreReclonesPhase = "Draining"
 
 	// RestoreReclonesHeld means the queue's sites still need recloning
-	// but the primary is no trusted donor: a later full-instance restore
-	// ran its Job on it and failed. The sites stay excluded from
-	// promotion and the reader Services and nothing is cloned until an
-	// administrator sets the phase to Draining (the primary's data is
-	// good again), a new full-instance restore succeeds, or the queue is
-	// removed.
+	// but the primary is no trusted donor: a full-instance restore ran its
+	// Job on it, failed, and the primary's gtid_executed moved past the
+	// value recorded when the peers were stopped (or could not be
+	// compared). The sites keep their replication receivers stopped, so
+	// they keep the data they had before that restore. They stay excluded
+	// from promotion and the reader Services and nothing is cloned or
+	// replicated into them until an administrator sets the phase to
+	// Draining (the primary's data is good again), a new full-instance
+	// restore succeeds, or the queue is removed (which resumes their
+	// replication from the current primary).
 	RestoreReclonesHeld RestoreReclonesPhase = "Held"
 )
 
@@ -906,16 +918,27 @@ const (
 // fixes the recipient set when it is accepted, before any destructive
 // work. A site leaves Pending only after its reclone completes
 // successfully; a failed reclone is retried. The queue is cleared once
-// every peer is recloned, or discarded if the owning restore fails.
+// every peer is recloned. If the owning restore fails it is discarded
+// when the restore never changed the primary (no Job, or gtid_executed
+// still at FencedGtidExecuted), and put Held otherwise.
 type RestoreReclonesStatus struct {
 	// ConfirmToken is the spec.restoreInPlace.confirm value of the
 	// restore that owns this queue.
 	ConfirmToken string `json:"confirmToken"`
 
 	// Phase is Armed while the owning restore runs and Draining after it
-	// succeeded. Held means a later restore that replaced this queue ran
-	// on the primary and failed, so nothing is cloned from it.
+	// succeeded. Held means a restore ran on the primary and failed, so
+	// nothing is cloned from it.
 	Phase RestoreReclonesPhase `json:"phase"`
+
+	// FencedGtidExecuted is the primary's @@GLOBAL.gtid_executed when the
+	// owning restore stopped the peers' replication receivers, after the
+	// offline_mode fence evicted application sessions. If the restore
+	// fails and the primary still reports this set, the restore changed
+	// nothing that replication could carry, so the queue is discarded and
+	// the peers resume replicating instead of being held.
+	// +optional
+	FencedGtidExecuted string `json:"fencedGtidExecuted,omitempty"`
 
 	// Pending lists the peer sites still to be recloned, in the order
 	// they are recloned (primary-candidate sites first). Pending sites

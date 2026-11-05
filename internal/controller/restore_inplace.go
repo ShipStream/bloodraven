@@ -354,6 +354,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 	// Preflight. Keeping the initial transition in one place makes the
 	// phase-dispatch below trivially table-driven.
 	if cur == nil {
+		// The previous run's reclone queue must be settled against that
+		// run's own (terminal) status before a new run replaces it: once
+		// the new run's status is written, a Job the previous run created
+		// is no longer visible to the settlement, which would then read
+		// "never executed" and resume peers the previous restore may have
+		// damaged. Settlement waits (with the previous fence up) while it
+		// cannot decide yet; the new run waits with it.
+		if q := fg.Status.RestoreReclones; q != nil && q.Phase == v1alpha1.RestoreReclonesArmed {
+			wait, err := r.settleArmedRestoreReclones(ctx, fg)
+			if err != nil {
+				return 0, fmt.Errorf("settle the previous in-place restore's reclone queue: %w", err)
+			}
+			if wait > 0 {
+				// Not started yet, and nothing of this run exists: let the
+				// rest of the pass run (reconcileRestoreOfflineFence and
+				// reconcileRestoreReclones keep settling and requeue).
+				r.noteWaitingForPreviousQueue(fg, q.ConfirmToken, spec.Confirm)
+				return 0, nil
+			}
+		}
 		if err := validateInPlaceRestoreSpec(spec); err != nil {
 			// Pure validation rejection: nothing executed, so do not
 			// consume the confirm (keeping the last executed one preserves
@@ -428,6 +448,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 	// Unknown phase (forward compatibility): treat as fresh start.
 	r.setInPlaceRestoreStatus(ctx, fg, nil)
 	return 5 * time.Second, nil
+}
+
+// noteWaitingForPreviousQueue emits a RestoreInPlaceWaitingForPreviousQueue
+// Event once per (previous queue, requested confirm): the new run has not
+// started, so status.restoreInPlace still shows the previous run.
+func (r *MysqlFailoverGroupReconciler) noteWaitingForPreviousQueue(fg *v1alpha1.MysqlFailoverGroup, previous, requested string) {
+	nn := client.ObjectKeyFromObject(fg)
+	key := previous + "\x00" + requested
+	r.restorePeerStopMu.Lock()
+	if r.restoreSettleNoted == nil {
+		r.restoreSettleNoted = map[types.NamespacedName]string{}
+	}
+	seen := r.restoreSettleNoted[nn] == key
+	r.restoreSettleNoted[nn] = key
+	r.restorePeerStopMu.Unlock()
+	if !seen {
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceWaitingForPreviousQueue",
+			"in-place restore confirm=%s waits until the reclone queue of the previous restore (confirm=%s) is settled: "+
+				"its Job's pods may still be running, or the primary is briefly unreadable (at most ten minutes)", requested, previous)
+	}
 }
 
 // inPlacePreflight validates that the cluster is in a state where a
@@ -530,6 +570,10 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		}
 		if waitErr != nil {
 			wait := fmt.Sprintf("waiting to verify the operator account's privileges on %s: %v", target, waitErr)
+			var peerWait *restorePeerWaitError
+			if errors.As(waitErr, &peerWait) {
+				wait = fmt.Sprintf("waiting for peer %s to be reachable: %v", peerWait.site, peerWait.err)
+			}
 			if errors.Is(waitErr, errPreviousRestoreFence) {
 				wait = fmt.Sprintf("waiting for the offline_mode fence of the previous restore on %s to be released",
 					fg.Status.RestoreOfflineFence.Site)
@@ -548,7 +592,19 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 	// destroyed: from here on they are not promoted automatically. Its
 	// offline_mode fence is recorded before anything touches offline_mode.
 	if schema == "" {
-		wait, err := r.restoreReclonesReadyForNewRestore(ctx, fg)
+		// An ordered update, planned failover or clone that is running may
+		// start a peer's replication; let it finish before the fence goes
+		// up (Fencing re-checks, bounded, once the topology is frozen).
+		wait, err := r.Runner.RestoreMutationInFlight(client.ObjectKeyFromObject(fg), false)
+		if err != nil {
+			wait, err = fmt.Sprintf("waiting for the topology manager: %v", err), nil
+		}
+		if wait == "" && plannedFailoverInFlight(fg.Status.PlannedFailover) {
+			wait = "waiting for the planned failover to finish"
+		}
+		if wait == "" {
+			wait, err = r.restoreReclonesReadyForNewRestore(ctx, fg)
+		}
 		if err != nil {
 			return 0, fmt.Errorf("prepare in-place restore reclone queue: %w", err)
 		}
@@ -561,7 +617,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 			}
 			return 15 * time.Second, nil
 		}
-		if err := r.armRestoreReclones(ctx, fg, target, spec.Confirm); err != nil {
+		if err := r.armRestoreReclones(ctx, fg, target, spec.Confirm, cur.RunConfirm); err != nil {
 			return 0, fmt.Errorf("record in-place restore reclone queue: %w", err)
 		}
 		if err := r.recordRestoreOfflineFence(ctx, fg, target, spec.Confirm, cur.RunID); err != nil {
@@ -601,6 +657,13 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencing(ctx context.Context, fg *v
 	// entered Fencing this tick), requeue briefly.
 	_, schema := inPlaceRunScope(fg)
 	isFullInstance := schema == ""
+	// A peer added since the restore was accepted ends the run before
+	// offline_mode goes up: the re-run fences once, with the current peers,
+	// instead of evicting applications twice. (A run whose queue is not
+	// armed yet, from an older operator, is checked once it is armed.)
+	if q := fg.Status.RestoreReclones; isFullInstance && q != nil && q.Phase == v1alpha1.RestoreReclonesArmed && r.cancelOnPeerSetChange(ctx, fg) {
+		return 0, nil
+	}
 	if isFullInstance && !r.primaryPodLabelFenced(ctx, fg) {
 		return 2 * time.Second, nil
 	}
@@ -609,6 +672,26 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencing(ctx context.Context, fg *v
 	// application session from before it remains.
 	if isFullInstance {
 		wait, err := r.enforceRestoreOfflineFence(ctx, fg)
+		if errors.Is(err, errInPlaceRunEnded) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if wait != "" {
+			cur = fg.Status.RestoreInPlace
+			if cur.Message != wait {
+				next := cur.DeepCopy()
+				next.Message = wait
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 2 * time.Second, nil
+		}
+		// offline_mode does not stop replication (the replication account
+		// may hold CONNECTION_ADMIN, and a disconnected one reconnects when
+		// the fence is released), so stop every peer's receiver before the
+		// Job can drop anything.
+		wait, err = r.stopRestorePeerReplication(ctx, fg)
 		if errors.Is(err, errInPlaceRunEnded) {
 			return 0, nil
 		}
@@ -1007,22 +1090,18 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 	} else if apierrors.IsNotFound(err) {
 		return false
 	}
-	// Push the freeze state to the topology manager directly so it
-	// takes effect on the next poll cycle rather than waiting for the
-	// runner's 30-second re-sync tick. Without this step there is a
-	// window between status patch and runner re-sync in which the
-	// topology manager could still fire a cross-site action (promotion,
-	// auto-clone, recovery) against a cluster that is actively being
-	// restored. A return of false from SetTopologyFrozen is expected
-	// when no manager is running yet (fresh deploy) — the runner's
-	// startManager path reads status.restoreInPlace and applies the
-	// correct flag when it starts the manager.
+	// Bring the topology manager's restore guards (the freeze, the peer
+	// hold and re-stop, the clone block, the promotion exclusion and the
+	// offline_mode fence) up to date now, rather than at the runner's
+	// 30-second re-sync: otherwise the manager could fire a cross-site
+	// action (promotion, auto-clone, recovery) against a cluster that is
+	// being restored. They are applied from one snapshot confirmed by an
+	// uncached read (applyRestoreProtection). With no manager running yet
+	// (fresh deploy) there is nothing to update; the runner's
+	// startManager reads status uncached before the manager's first poll.
 	if r.Runner != nil {
 		r.Runner.hydrateDeploymentGeneration(fg)
-		r.Runner.SetTopologyFrozen(
-			types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name},
-			inPlaceRestoreFreezesTopology(fg),
-		)
+		r.Runner.SetRestorePeerHold(ctx, fg)
 	}
 	return true
 }
@@ -1109,7 +1188,12 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencePrivilegeRejection(ctx contex
 			restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), target,
 			fg.Spec.EffectiveOperatorSecretName()), nil
 	}
-	return "", err
+	if err != nil {
+		return "", err
+	}
+	// Every peer's replication receiver is stopped in Fencing; check it
+	// can be before anything is fenced.
+	return r.inPlacePeerStopRejection(ctx, fg, target)
 }
 
 // restorePrivilegeRejectionPrefix starts the status message of a

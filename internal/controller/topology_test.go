@@ -71,6 +71,35 @@ type mockMySQL struct {
 	evictCalls        int
 	evictKeepUsers    []string
 	fenceErr          error
+	// restore peer receiver stop (mysql.ReplicaIOStopper)
+	stopIOCalls       int
+	stopIOErr         error
+	stopIOIgnored     bool
+	missingIOStopPriv []string
+	ioStopPrivErr     error
+	// offlineAtGTIDRead records offline_mode at each GetGtidExecuted.
+	offlineAtGTIDRead []bool
+}
+
+func (m *mockMySQL) MissingReplicaIOStopPrivileges(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.missingIOStopPriv...), m.ioStopPrivErr
+}
+
+func (m *mockMySQL) StopReplicaIOThread(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopIOCalls++
+	if m.stopIOErr != nil {
+		return m.stopIOErr
+	}
+	if m.replicaStatusVal != nil && !m.stopIOIgnored {
+		rs := *m.replicaStatusVal
+		rs.IORunning, rs.IOConnecting = false, false
+		m.replicaStatusVal = &rs
+	}
+	return nil
 }
 
 func (m *mockMySQL) MissingRestoreFencePrivileges(_ context.Context) ([]string, error) {
@@ -361,6 +390,7 @@ func (m *mockMySQL) GetGtidExecuted(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, m.gtidExecutedHadDeadline = ctx.Deadline()
+	m.offlineAtGTIDRead = append(m.offlineAtGTIDRead, m.offlineMode)
 	if m.respectContext && ctx.Err() != nil {
 		return "", ctx.Err()
 	}

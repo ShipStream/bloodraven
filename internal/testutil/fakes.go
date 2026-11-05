@@ -31,6 +31,7 @@ type FakeMySQL struct {
 	Promoted              bool
 	SuperReadOnlySet      bool
 	StoppedReplica        bool
+	StoppedReplicaIO      bool
 	ResetReplicaAllCalled bool
 	ReplicationSourceSet  bool
 	ReplicaStarted        bool
@@ -58,6 +59,10 @@ type FakeMySQL struct {
 	CloneErr        error
 	// PartialRevokesErr is returned by EnsurePartialRevokes.
 	PartialRevokesErr error
+	// StopReplicaIOErr is returned by StopReplicaIOThread, and
+	// MissingIOStopPrivs by MissingReplicaIOStopPrivileges.
+	StopReplicaIOErr   error
+	MissingIOStopPrivs []string
 
 	// Call tracking
 	Calls []string
@@ -121,6 +126,31 @@ func (m *FakeMySQL) StopReplica(_ context.Context) error {
 	}
 	m.StoppedReplica = true
 	return nil
+}
+
+// StopReplicaIOThread implements mysql.ReplicaIOStopper. It stops only the
+// receiver in ReplicaStatusVal, if set.
+func (m *FakeMySQL) StopReplicaIOThread(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("StopReplicaIOThread")
+	if m.StopReplicaIOErr != nil {
+		return m.StopReplicaIOErr
+	}
+	m.StoppedReplicaIO = true
+	if m.ReplicaStatusVal != nil {
+		rs := *m.ReplicaStatusVal
+		rs.IORunning, rs.IOConnecting = false, false
+		m.ReplicaStatusVal = &rs
+	}
+	return nil
+}
+
+// MissingReplicaIOStopPrivileges implements mysql.ReplicaIOStopper.
+func (m *FakeMySQL) MissingReplicaIOStopPrivileges(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.MissingIOStopPrivs...), nil
 }
 
 func (m *FakeMySQL) ResetReplicaAll(_ context.Context) error {
