@@ -3,15 +3,12 @@ package controller
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -384,80 +381,6 @@ func TestPlannedPromote_CancelledWhileRecoveryHoldsGate(t *testing.T) {
 	}
 }
 
-// The planned-failover reconciler rolls an unadmitted promotion back: the
-// source is unfenced and nothing was sent to the target.
-func TestPlannedFailoverPromoting_RollsBackWhenHandoffNotAdmitted(t *testing.T) {
-	fg := plannedFailoverFG("")
-	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
-	}
-	nn := fgNN(fg)
-	iad := &mockMySQL{readOnly: true, superReadOnly: true}
-	pdx := &mockMySQL{readOnly: true, superReadOnly: true}
-	r, _ := newReconciler(fg)
-	r.Runner = plannedDrainRunner(nn, iad, pdx)
-	tm, err := r.Runner.plannedFailoverManager(nn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !tm.followerMutationGate.enter() {
-		t.Fatal("setup: gate refused")
-	}
-	defer tm.followerMutationGate.exit()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := r.reconcilePlannedFailover(ctx, fetchFG(t, r, nn)); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	pf := fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "RecoveryInFlight" {
-		t.Fatalf("phase=%q reason=%q (%s), want Failed/RecoveryInFlight", pf.Phase, pf.Reason, pf.Message)
-	}
-	if iad.superReadOnly || iad.readOnly || !pdx.readOnly {
-		t.Errorf("iad super_read_only=%v read_only=%v, pdx read_only=%v; want iad unfenced and pdx untouched",
-			iad.superReadOnly, iad.readOnly, pdx.readOnly)
-	}
-}
-
-// The same deadline beside a site that is already writable: the rollback
-// leaves the source fenced, and the stamped message says only that (it
-// does not also claim the source was unfenced).
-func TestPlannedFailoverPromoting_RecoveryInFlightBesideWritablePeerStaysFenced(t *testing.T) {
-	fg := plannedFailoverFG("")
-	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
-	}
-	nn := fgNN(fg)
-	iad := &mockMySQL{readOnly: true, superReadOnly: true}
-	pdx := &mockMySQL{readOnly: false}
-	r, _ := newReconciler(fg)
-	r.Runner = plannedDrainRunner(nn, iad, pdx)
-	tm, err := r.Runner.plannedFailoverManager(nn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !tm.followerMutationGate.enter() {
-		t.Fatal("setup: gate refused")
-	}
-	defer tm.followerMutationGate.exit()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := r.reconcilePlannedFailover(ctx, fetchFG(t, r, nn)); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	pf := fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "RecoveryInFlight" ||
-		!strings.Contains(pf.Message, `source "iad" left fenced`) || strings.Contains(pf.Message, "unfenced") {
-		t.Fatalf("phase=%q reason=%q (%s); want RecoveryInFlight saying only that the source was left fenced", pf.Phase, pf.Reason, pf.Message)
-	}
-	if !iad.superReadOnly || !iad.readOnly {
-		t.Fatal("source unfenced beside a writable site")
-	}
-}
-
 // A promotion that fails after admission releases everything: once the
 // planned failover ends, the next poll drains and clears the recovering
 // replica.
@@ -548,80 +471,6 @@ func TestPlannedPromote_RefusedWhilePredecessorUpdateUnwinding(t *testing.T) {
 	}
 }
 
-// A rollback never unfences the source while another site is writable:
-// unfencing would make a split brain. A peer that merely cannot be probed
-// does not block an ordinary rollback (a down third site must not keep
-// writes out).
-func TestPlannedFailoverRollback_LeavesSourceFencedWhenPeerWritable(t *testing.T) {
-	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
-	for _, tc := range []struct {
-		name  string
-		setup func(tm *TopologyManager)
-	}{
-		{"rotation refusal rollback", func(tm *TopologyManager) { tm.restoreKeyringRotationReservations([]string{"pdx"}) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fg := plannedFailoverFG("")
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-				Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
-			}
-			nn := fgNN(fg)
-			iad := &mockMySQL{readOnly: true, superReadOnly: true}
-			pdx := &mockMySQL{readOnly: false}
-			r, _ := newReconciler(fg)
-			r.Runner = plannedDrainRunner(nn, iad, pdx)
-			tm, err := r.Runner.plannedFailoverManager(nn)
-			if err != nil {
-				t.Fatal(err)
-			}
-			tc.setup(tm)
-			if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
-				t.Fatalf("reconcile: %v", err)
-			}
-			pf := fetchFG(t, r, nn).Status.PlannedFailover
-			if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || !strings.Contains(pf.Message, "manual recovery required") {
-				t.Fatalf("phase=%q (%s), want Failed asking for manual recovery", pf.Phase, pf.Message)
-			}
-			iad.mu.Lock()
-			fenced := iad.superReadOnly && iad.readOnly
-			iad.mu.Unlock()
-			if !fenced {
-				t.Fatal("source unfenced while pdx is writable: two writable primaries")
-			}
-		})
-	}
-}
-
-func TestPlannedFailoverRollback_UnreadablePeerStillUnfences(t *testing.T) {
-	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
-	fg := plannedFailoverFG("")
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
-	}
-	nn := fgNN(fg)
-	iad := &mockMySQL{readOnly: true, superReadOnly: true}
-	pdx := &mockMySQL{readOnly: true, err: errors.New("probe timeout")}
-	r, _ := newReconciler(fg)
-	r.Runner = plannedDrainRunner(nn, iad, pdx)
-	tm, err := r.Runner.plannedFailoverManager(nn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tm.restoreKeyringRotationReservations([]string{"pdx"})
-	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "KeyringRotation" {
-		t.Fatalf("phase=%q reason=%q (%s), want Failed/KeyringRotation", pf.Phase, pf.Reason, pf.Message)
-	}
-	iad.mu.Lock()
-	unfenced := !iad.superReadOnly && !iad.readOnly
-	iad.mu.Unlock()
-	if !unfenced {
-		t.Fatal("an unreadable peer kept an ordinary rollback from unfencing the source")
-	}
-}
-
 // While a planned failover holds the topology guard no ordered update
 // starts (its claim would be refused anyway). The control shows the same
 // update starts with the guard clear, so the refusal is the guard's.
@@ -698,47 +547,5 @@ func TestRotationRefusedWhileRetiringManagerUpdateClaimed(t *testing.T) {
 	old.mu.Unlock()
 	if ok, why := r.ReserveKeyringRotation(nn, "pdx"); !ok {
 		t.Fatalf("rotation still refused once the retiring update is out: %s", why)
-	}
-}
-
-// The one deliberate deviation from main's planned-failover flow: a
-// planned failover that reaches Promoting while a replaced manager's
-// ordered update is still finishing fails closed. It is stamped
-// ExecuteFailed with the message the doctor matches on, nothing is sent to
-// the target, and the source stays fenced (no rollback, which would
-// unfence beside an update that may still promote a site).
-func TestPlannedFailoverPromoting_PredecessorUpdateFailsClosed(t *testing.T) {
-	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
-	fg := plannedFailoverFG("")
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
-		DrainStartTime: &start,
-	}
-	nn := fgNN(fg)
-	iad := &mockMySQL{readOnly: true, superReadOnly: true}
-	pdx := &mockMySQL{readOnly: true, superReadOnly: true}
-	r, _ := newReconciler(fg)
-	r.Runner = plannedDrainRunner(nn, iad, pdx)
-	tm, err := r.Runner.plannedFailoverManager(nn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tm.setPredecessorUpdateInFlight(true)
-	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	pf := fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "ExecuteFailed" ||
-		!strings.Contains(pf.Message, "a replaced topology manager's ordered update is still finishing on the sites") {
-		t.Fatalf("phase=%q reason=%q (%s); want Failed/ExecuteFailed naming the replaced manager's update", pf.Phase, pf.Reason, pf.Message)
-	}
-	iad.mu.Lock()
-	fenced := iad.readOnly && iad.superReadOnly
-	iad.mu.Unlock()
-	pdx.mu.Lock()
-	touched := !pdx.readOnly || pdx.stopReplicaCalls > 0
-	pdx.mu.Unlock()
-	if !fenced || touched {
-		t.Fatalf("source fenced=%v, target touched=%v; want the source left fenced and nothing sent", fenced, touched)
 	}
 }

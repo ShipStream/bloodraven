@@ -282,7 +282,7 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			deployError(w, err)
 			return
 		}
-		deployJSON(w, 200, deployGroupResponse(fresh, leases))
+		deployJSON(w, 200, deployGroupResponse(fresh, leases, h.leases.UnstableReason(fresh)))
 	case "grant":
 		result, err := h.leases.Grant(ctx, fg, kind, operationID, instance, identity.namespace, identity.serviceAccount, req.TTLSeconds)
 		if err != nil {
@@ -328,8 +328,7 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.DeploymentLeaseView) map[string]any {
-	reason := controller.DeploymentUnstableReason(fg)
+func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.DeploymentLeaseView, reason string) map[string]any {
 	ready := apimeta.IsStatusConditionTrue(fg.Status.Conditions, "Ready")
 	degraded := ""
 	if c := apimeta.FindStatusCondition(fg.Status.Conditions, "Degraded"); c != nil && c.Status == metav1.ConditionTrue {
@@ -350,7 +349,7 @@ func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.De
 	}
 	planned := map[string]string{"phase": "", "reason": ""}
 	if p := fg.Status.PlannedFailover; p != nil {
-		planned["phase"], planned["reason"] = string(p.Phase), p.Reason
+		planned["phase"], planned["reason"] = string(p.Phase), plannedFailoverOperationReason(p)
 	}
 	restore, dragonfly := "", ""
 	if s := fg.Status.RestoreInPlace; s != nil {
@@ -360,4 +359,18 @@ func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.De
 		dragonfly = string(d.Upgrade.Phase)
 	}
 	return map[string]any{"group": fg.Name, "namespace": fg.Namespace, "activeSite": fg.Status.ActiveSite, "topologyGeneration": fg.Status.TopologyGeneration, "health": map[string]any{"ready": ready, "degradedReason": degraded, "replicationRunning": replicating, "replicationLagSeconds": lag, "recoveryPending": recovery}, "operations": map[string]any{"plannedFailover": planned, "updatePhase": fg.Status.UpdatePhase, "restoreInPlace": restore, "dragonflyUpgrade": dragonfly}, "stable": reason == "", "unstableReason": reason, "leases": leases}
+}
+
+// plannedFailoverOperationReason is operations.plannedFailover.reason: the
+// run's result reason, else its admission wait or defer reason.
+func plannedFailoverOperationReason(p *v1alpha1.PlannedFailoverStatus) string {
+	switch {
+	case p.Result != nil && p.Result.Reason != "":
+		return string(p.Result.Reason)
+	case p.Admission != nil && p.Admission.WaitReason != "":
+		return string(p.Admission.WaitReason)
+	case p.Admission != nil && p.Admission.DeferReason != "":
+		return string(p.Admission.DeferReason)
+	}
+	return ""
 }

@@ -636,7 +636,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 	}
 
 	if activeDrift != nil {
-		if plannedFailoverInFlight(fg.Status.PlannedFailover) {
+		// A planned-failover run that owns the sites, or a held claim (a
+		// provisional grant or a hold), owns the active Dragonfly too. A
+		// request that is only waiting owns nothing.
+		if plannedFailoverOwnsSites(fg) || r.plannedClaimHeld(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}) {
 			return requeueAfter, nil
 		}
 		promotionTarget := ""
@@ -1000,25 +1003,18 @@ func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1
 // effectiveDragonflyMasterSite returns the site name whose Dragonfly pod
 // should currently carry dragonfly-role=master.
 //
-// Normally that's status.activeSite. During the planned-failover window
-// where we have promoted the target Dragonfly but have not yet flipped
-// status.activeSite (PromotingDragonfly through Resuming), the target
-// already holds the master, so we return the target instead. A
+// Normally that's status.activeSite. Once a planned-failover run's
+// Dragonfly takeover has succeeded, the target already holds the master
+// while the run is in PromotingDragonfly, Promoting, Publishing or
+// RollingBack, so we return the target instead. A
 // Dragonfly-only emergency promotion can also intentionally diverge from
 // MySQL; in that case status.dragonfly.activeSite is authoritative for
 // cache routing until a later MySQL/Dragonfly promotion moves it again.
 // Without these branches syncDragonflyPodLabels would re-apply the label
 // to the stale source and fight the promotion path.
 func effectiveDragonflyMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
-	if pf := fg.Status.PlannedFailover; pf != nil {
-		switch pf.Phase {
-		case v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-			v1alpha1.PlannedFailoverPhasePromoting,
-			v1alpha1.PlannedFailoverPhaseResuming:
-			if pf.Target != "" && pf.Dragonfly != nil && pf.Dragonfly.PromotionMethod != "" {
-				return pf.Target
-			}
-		}
+	if plannedDragonflyTakeoverSucceeded(fg) {
+		return fg.Status.PlannedFailover.Target
 	}
 	if fg.Status.Dragonfly != nil && fg.Status.Dragonfly.ActiveSite != "" {
 		return fg.Status.Dragonfly.ActiveSite

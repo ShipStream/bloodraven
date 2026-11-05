@@ -536,7 +536,7 @@ func TestDragonflyMaintenanceActive(t *testing.T) {
 func TestPlannedFailoverPromotingDragonfly_ReportsGateWait(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("proceed")
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
+	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	cb, nn := newDragonflyFakeClient(fg)
 	c := cb.Build()
 	runner := &TopologyManagerRunner{}
@@ -549,8 +549,7 @@ func TestPlannedFailoverPromotingDragonfly_ReportsGateWait(t *testing.T) {
 	defer release()
 
 	for range 2 {
-		live := getFGByKey(t, c, nn)
-		if requeue, err := r.plannedFailoverPromotingDragonfly(context.Background(), live, nn); err != nil || requeue != dragonflyGateRetry {
+		if requeue, err := pfDragonflyTakeoverPass(t, r, context.Background(), nn); err != nil || requeue != dragonflyGateRetry {
 			t.Fatalf("planned phase with the gate held = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
 		}
 	}

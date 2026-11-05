@@ -746,7 +746,7 @@ func (r *MysqlFailoverGroupReconciler) rotationAllowed(fg *v1alpha1.MysqlFailove
 	if fg.Status.UpdatePhase != "" {
 		return false, "an ordered update is in progress", true
 	}
-	if fg.Status.PlannedFailover != nil && !plannedFailoverTerminal(fg.Status.PlannedFailover) {
+	if plannedFailoverActive(fg) {
 		return false, "a planned failover is in progress", true
 	}
 	return true, "", false

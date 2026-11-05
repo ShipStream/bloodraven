@@ -157,6 +157,9 @@ func main() {
 	runner.SetAPIReader(mgr.GetAPIReader())
 	deploymentLeases := controller.NewDeploymentLeaseManager(mgr.GetClient(), mgr.GetAPIReader(), recorder)
 	runner.SetDeploymentLeases(deploymentLeases)
+	// Admission and stability also exclude a held planned-failover claim
+	// (a provisional grant or an automation hold) that status does not show.
+	deploymentLeases.SetPlannedClaimHeld(runner.PlannedClaimHeld)
 
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)

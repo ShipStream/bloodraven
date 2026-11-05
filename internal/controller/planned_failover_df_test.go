@@ -3,8 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
-	"sync"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,12 +17,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
-// plannedFailoverFGWithDragonfly returns a fixture that's mid-flight
-// with PlannedFailoverPhaseWaitingForDragonflySync queued. Two sites,
-// active=iad, target=pdx, source already fenced, MySQL caught up.
+// plannedFailoverFGWithDragonfly returns a fixture whose run (run-1) is
+// in WaitingForDragonflySync: two sites, active=iad, target=pdx, source
+// fenced, MySQL caught up, accepted with the Dragonfly settings.
 func plannedFailoverFGWithDragonfly(activePolicy string) *v1alpha1.MysqlFailoverGroup {
 	fg := plannedFailoverFG("")
 	fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{
@@ -40,20 +40,19 @@ func plannedFailoverFGWithDragonfly(activePolicy string) *v1alpha1.MysqlFailover
 		},
 	}
 	now := metav1.Now()
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase:             v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		Target:            "pdx",
-		SourcePrimary:     "iad",
-		SourceGtidAtFence: "uuid:1-100",
-		StartTime:         &now,
-		LagWaitStartTime:  &now,
-	}
+	pf := pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, now.Time)
+	pf.Phase = v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync
+	pf.LagWait.CaughtUpAt = &now
+	settings := plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: "pdx"})
+	pf.Settings = &settings
+	pf.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{SyncWaitStartTime: &now}
+	fg.Status.PlannedFailover = pf
 	return fg
 }
 
 // installFakeDragonflyConn wires a fake connector returning the given
 // per-site connections.
-func installFakeDragonflyConn(t *testing.T, r *MysqlFailoverGroupReconciler, byAddr map[string]*fakeDragonflyConn) {
+func installFakeDragonflyConn(t *testing.T, r *MysqlFailoverGroupReconciler, byAddr map[string]DragonflyConnection) {
 	t.Helper()
 	r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
 		if c, ok := byAddr[addr]; ok {
@@ -63,659 +62,339 @@ func installFakeDragonflyConn(t *testing.T, r *MysqlFailoverGroupReconciler, byA
 	}
 }
 
-func TestPlannedFailoverWaitingForDragonflySync_DisabledSkips(t *testing.T) {
-	fg := plannedFailoverFG("") // no spec.dragonfly
-	now := metav1.Now()
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase:             v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		Target:            "pdx",
-		SourcePrimary:     "iad",
-		SourceGtidAtFence: "uuid:1-100",
-		StartTime:         &now,
+const (
+	pfDFPdx = "lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379"
+	pfDFIad = "lion-dragonfly-iad.shared-lion.svc.cluster.local:6379"
+)
+
+// pfTakeoverConn is a target replica that becomes master on REPLTAKEOVER.
+type pfTakeoverConn struct {
+	*fakeDragonflyConn
+	takeovers int
+}
+
+func (c *pfTakeoverConn) ReplTakeover(ctx context.Context, timeout time.Duration) error {
+	c.takeovers++
+	if err := c.fakeDragonflyConn.ReplTakeover(ctx, timeout); err != nil {
+		return err
 	}
-	r, _ := newReconciler(fg)
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromoting {
-		t.Errorf("phase = %q, want Promoting (skipped)", got.Status.PlannedFailover.Phase)
+	c.info.Role = "master"
+	return nil
+}
+
+// pfDFReconciler returns a reconciler over fg (and objs) whose engine runs
+// with the production Dragonfly operations and a scripted MySQL facade
+// holding run-1's claim.
+func pfDFReconciler(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, objs ...client.Object) (*MysqlFailoverGroupReconciler, client.Client, *pfFakeTopology) {
+	t.Helper()
+	r, c := newReconciler(append([]client.Object{fg}, objs...)...)
+	r.Recorder = record.NewFakeRecorder(64)
+	topo := newPFFakeTopology()
+	topo.setHeld("run-1", false)
+	r.PlannedTopology = topo
+	r.plannedClock = clock.NewFakeClock(time.Now())
+	return r, c, topo
+}
+
+func pfDFPass(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) {
+	t.Helper()
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("pass: %v", err)
 	}
 }
 
-func TestPlannedFailoverWaitingForDragonflySync_HappyPath(t *testing.T) {
+func TestPlannedFailoverDragonflySync_DisabledSkips(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("proceed")
-	r, _ := newReconciler(fg)
-
-	dc1 := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}
-	dc2 := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{
-		Role:             "slave",
-		MasterLinkStatus: "up",
-		SlaveReplOffset:  100,
-	}}
-	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
-		"lion-dragonfly-iad.shared-lion.svc.cluster.local:6379": dc1,
-		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": dc2,
-	})
-
-	// Tick 1: initialise dragonfly status.
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("tick1: %v", err)
-	}
-	fg = fetchFG(t, r, fgNN(fg))
-	// Tick 2: capture source offset.
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("tick2: %v", err)
-	}
-	fg = fetchFG(t, r, fgNN(fg))
-	if fg.Status.PlannedFailover.Dragonfly == nil || fg.Status.PlannedFailover.Dragonfly.SourceOffsetAtDrain == nil {
-		t.Fatalf("source offset not captured: %+v", fg.Status.PlannedFailover.Dragonfly)
-	}
-	if got := *fg.Status.PlannedFailover.Dragonfly.SourceOffsetAtDrain; got != 100 {
-		t.Errorf("source offset = %d, want 100", got)
-	}
-	// Tick 3: poll target — caught up → advance to PromotingDragonfly.
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("tick3: %v", err)
-	}
-	fg = fetchFG(t, r, fgNN(fg))
-	if fg.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly {
-		t.Errorf("phase = %q, want PromotingDragonfly", fg.Status.PlannedFailover.Phase)
+	fg.Spec.Dragonfly = nil
+	r, _, _ := pfDFReconciler(t, fg)
+	pfDFPass(t, r, fgNN(fg))
+	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly == nil || pf.Dragonfly.Takeover != nil {
+		t.Fatalf("block = %+v", pf)
 	}
 }
 
-// TestPlannedFailoverWaitingForDragonflySync_StampsFreshStartTime
-// regression-tests B2: the previous code computed the maxSyncWait
-// budget against LagWaitStartTime, which is stamped on entry to
-// WaitingForLag (not WaitingForDragonflySync). When the MySQL lag wait
-// took longer than the Dragonfly budget the sync window was
-// pre-expired on the first poll, silently breaking session
-// preservation under proceed mode and causing spurious rollback under
-// fail mode.
-//
-// We simulate the scenario by setting LagWaitStartTime far enough in
-// the past that the budget would be exhausted, but with no Dragonfly
-// status block yet. The first reconcile must stamp a fresh
-// SyncWaitStartTime; subsequent reconciles must measure elapsed
-// against that stamp, not against the borrowed lag-wait clock.
-func TestPlannedFailoverWaitingForDragonflySync_StampsFreshStartTime(t *testing.T) {
+// Capture the source offset, see the target in sync, then take over: the
+// MySQL Promoting intent records the takeover's success.
+func TestPlannedFailoverDragonfly_HappyPath(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("proceed")
-	// Lag-wait was long: borrowing this clock would pre-expire the
-	// 100ms maxSyncWait budget set by plannedFailoverFGWithDragonfly.
-	longAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-	fg.Status.PlannedFailover.LagWaitStartTime = &longAgo
-	fg.Status.PlannedFailover.StartTime = &longAgo
-	r, _ := newReconciler(fg)
-
-	// Tick 1: initialise the dragonfly status block. Must stamp
-	// SyncWaitStartTime to ~now.
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("tick1: %v", err)
-	}
-	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Dragonfly == nil || got.Status.PlannedFailover.Dragonfly.SyncWaitStartTime == nil {
-		t.Fatalf("SyncWaitStartTime not stamped: %+v", got.Status.PlannedFailover.Dragonfly)
-	}
-	stamped := got.Status.PlannedFailover.Dragonfly.SyncWaitStartTime.Time
-	if age := time.Since(stamped); age > 5*time.Second {
-		t.Errorf("SyncWaitStartTime is %s old; expected ~now (lag-wait stamp must NOT be borrowed)", age)
-	}
-}
-
-func TestPlannedFailoverWaitingForDragonflySync_TimeoutProceedAdvances(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
-	// Force the lag-wait start far enough in the past that the budget
-	// has elapsed regardless of how fast the test runs.
-	past := metav1.NewTime(time.Now().Add(-5 * time.Second))
-	fg.Status.PlannedFailover.LagWaitStartTime = &past
-	fg.Status.PlannedFailover.StartTime = &past
-	// Pre-populate the dragonfly sub-status so the handler skips the
-	// initialisation/source-offset captures and reaches the budget check.
-	srcOffset := int64(1000)
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{
-		Enabled:             true,
-		SourceOffsetAtDrain: &srcOffset,
-	}
-	r, _ := newReconciler(fg)
-
-	// Target is behind: never catches up.
-	dc2 := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{
-		Role:             "slave",
-		MasterLinkStatus: "up",
-		SlaveReplOffset:  0,
-	}}
-	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
-		"lion-dragonfly-iad.shared-lion.svc.cluster.local:6379": {info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 1_000}},
-		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": dc2,
-	})
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly {
-		t.Errorf("phase = %q, want PromotingDragonfly (timeout proceed)", got.Status.PlannedFailover.Phase)
-	}
-	if got.Status.PlannedFailover.Dragonfly == nil || got.Status.PlannedFailover.Dragonfly.SessionsPreserved == nil ||
-		*got.Status.PlannedFailover.Dragonfly.SessionsPreserved {
-		t.Errorf("expected sessionsPreserved=false on timeout proceed: %+v", got.Status.PlannedFailover.Dragonfly)
-	}
-	if got.Status.PlannedFailover.Dragonfly.Reason != ReasonDragonflySyncTimeout {
-		t.Errorf("reason = %q, want %q", got.Status.PlannedFailover.Dragonfly.Reason, ReasonDragonflySyncTimeout)
-	}
-}
-
-// TestPlannedFailoverWaitingForDragonflySync_OffsetCaptureFails_ProceedsWithSessionsLost
-// regression-tests B6: the previous code stamped SourceOffsetAtDrain=0
-// when the source dial or INFO replication failed at drain capture.
-// CandidateSyncReady(target offset, persistence, sourceOffset=0)
-// returned true unconditionally because target offset >= 0 always
-// holds — so the state machine advanced to PromotingDragonfly with
-// sessionsPreserved=true, falsely claiming session continuity.
-//
-// The fix flags OffsetCaptureFailed instead. The proceed-mode
-// timeout handler sets sessionsPreserved=false and advances; the
-// fail-mode handler rolls back. We verify the proceed branch here.
-func TestPlannedFailoverWaitingForDragonflySync_OffsetCaptureFails_ProceedsWithSessionsLost(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
-	// Pre-populate the Dragonfly status block (skipping the init tick).
-	now := metav1.Now()
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{
-		Enabled:           true,
-		SyncWaitStartTime: &now,
-	}
-	r, _ := newReconciler(fg)
-	// No connector programmed for the source addr → dial fails.
-	r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
-		return nil, errors.New("source unreachable: " + addr)
-	}
-
-	// Tick: capture step. Must mark OffsetCaptureFailed and not stamp a
-	// misleading zero offset.
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("tick capture: %v", err)
-	}
-	fg = fetchFG(t, r, fgNN(fg))
-	if !fg.Status.PlannedFailover.Dragonfly.OffsetCaptureFailed {
-		t.Fatalf("OffsetCaptureFailed not set: %+v", fg.Status.PlannedFailover.Dragonfly)
-	}
-	if fg.Status.PlannedFailover.Dragonfly.SourceOffsetAtDrain != nil {
-		t.Errorf("SourceOffsetAtDrain stamped despite capture-fail: %v", *fg.Status.PlannedFailover.Dragonfly.SourceOffsetAtDrain)
-	}
-
-	// Tick: with capture-failed sentinel set, we must skip the
-	// sync-readiness gate entirely and route through the timeout
-	// handler. proceed mode → sessionsPreserved=false, advance to
-	// PromotingDragonfly.
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("tick post-capture: %v", err)
-	}
-	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly {
-		t.Errorf("phase = %q, want PromotingDragonfly (proceed after capture-fail)", got.Status.PlannedFailover.Phase)
-	}
-	if got.Status.PlannedFailover.Dragonfly.SessionsPreserved == nil || *got.Status.PlannedFailover.Dragonfly.SessionsPreserved {
-		t.Errorf("expected sessionsPreserved=false on capture-fail proceed; got %+v", got.Status.PlannedFailover.Dragonfly)
-	}
-}
-
-func TestPlannedFailoverWaitingForDragonflySync_TimeoutFailRollsBack(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("fail")
-	past := metav1.NewTime(time.Now().Add(-5 * time.Second))
-	fg.Status.PlannedFailover.LagWaitStartTime = &past
-	fg.Status.PlannedFailover.StartTime = &past
-	srcOffset := int64(1000)
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{
-		Enabled:             true,
-		SourceOffsetAtDrain: &srcOffset,
-	}
-	r, _ := newReconciler(fg)
-	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
-		"lion-dragonfly-iad.shared-lion.svc.cluster.local:6379": {info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 1_000}},
-		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": {info: dragonfly.ReplicationInfo{
-			Role:             "slave",
-			MasterLinkStatus: "up",
-			SlaveReplOffset:  0,
-		}},
-	})
-	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseFailed {
-		t.Errorf("phase = %q, want Failed (timeout fail)", got.Status.PlannedFailover.Phase)
-	}
-	if got.Status.PlannedFailover.Reason != ReasonDragonflySyncTimeout {
-		t.Errorf("reason = %q, want %q", got.Status.PlannedFailover.Reason, ReasonDragonflySyncTimeout)
-	}
-}
-
-func TestPlannedFailoverPromotingDragonfly_Success(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
-	// Seed both pods with the steady-state labels: source has
-	// role=master+traffic=enabled, target has role=replica+traffic=enabled.
-	// The handler's strip→takeover→restore sequence should rewrite them.
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
-	r, c := newReconciler(fg, sourcePod, targetPod)
+	r, c, _ := pfDFReconciler(t, fg, sourcePod, targetPod)
+	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}
+	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{
+		Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 100}}}
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
+	nn := fgNN(fg)
 
-	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 200}}
-	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
-	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
-		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": target,
-		"lion-dragonfly-iad.shared-lion.svc.cluster.local:6379": source,
-	})
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
+	pfDFPass(t, r, nn)
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Dragonfly.SourceOffsetState != v1alpha1.DragonflyOffsetCaptured || pf.Dragonfly.SourceOffset == nil || *pf.Dragonfly.SourceOffset != 100 {
+		t.Fatalf("offset capture = %+v", pf.Dragonfly)
 	}
-	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromoting {
-		t.Errorf("phase = %q, want Promoting", got.Status.PlannedFailover.Phase)
+	pfDFPass(t, r, nn)
+	pf = fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Takeover == nil ||
+		pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverIntended {
+		t.Fatalf("after sync = %+v %+v", pf.Phase, pf.Dragonfly)
 	}
-	if got.Status.PlannedFailover.Dragonfly.PromotionMethod != "REPLTAKEOVER" {
-		t.Errorf("promotionMethod = %q, want REPLTAKEOVER", got.Status.PlannedFailover.Dragonfly.PromotionMethod)
+	if !plannedFailoverDragonflyStripActive(fetchFG(t, r, nn)) {
+		t.Error("strip predicate false while the takeover is Intended")
 	}
-	if got.Status.PlannedFailover.Dragonfly.SessionsPreserved == nil || !*got.Status.PlannedFailover.Dragonfly.SessionsPreserved {
-		t.Errorf("expected sessionsPreserved=true: %+v", got.Status.PlannedFailover.Dragonfly)
+	pfDFPass(t, r, nn)
+	got := fetchFG(t, r, nn)
+	pf = got.Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded ||
+		pf.Dragonfly.Takeover.Method != v1alpha1.DragonflyTakeoverMethodReplTakeover || pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsPreserved ||
+		pf.Promotion == nil || pf.Promotion.TargetServerUUID != "uuid-pdx" {
+		t.Fatalf("after takeover = %+v %+v %+v", pf.Phase, pf.Dragonfly, pf.Promotion)
 	}
-
-	// Pod labels should reflect the post-promotion topology: target is
-	// the new master with traffic enabled; source is deleted so the
-	// StatefulSet creates a fresh pod without kubelet CrashLoopBackOff.
+	if target.takeovers != 1 {
+		t.Errorf("REPLTAKEOVER sent %d times, want 1", target.takeovers)
+	}
+	if plannedFailoverDragonflyStripActive(got) || effectiveDragonflyMasterSite(got) != "pdx" {
+		t.Errorf("strip=%v master=%q after a successful takeover", plannedFailoverDragonflyStripActive(got), effectiveDragonflyMasterSite(got))
+	}
 	var gotTarget corev1.Pod
-	if err := c.Get(context.Background(), types.NamespacedName{Name: targetPod.Name, Namespace: targetPod.Namespace}, &gotTarget); err != nil {
-		t.Fatalf("get target pod: %v", err)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(targetPod), &gotTarget); err != nil {
+		t.Fatal(err)
 	}
-	if gotTarget.Labels[labelDragonflyRole] != "master" {
-		t.Errorf("target role = %q, want master", gotTarget.Labels[labelDragonflyRole])
+	if gotTarget.Labels[labelDragonflyRole] != "master" || gotTarget.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+		t.Errorf("target labels = %v", gotTarget.Labels)
 	}
-	if gotTarget.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
-		t.Errorf("target traffic = %q, want enabled", gotTarget.Labels[labelDragonflyTraffic])
-	}
-	var gotSource corev1.Pod
-	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); client.IgnoreNotFound(err) != nil {
-		t.Fatalf("get source pod: %v", err)
-	} else if err == nil {
-		t.Errorf("source pod still exists after takeover; want deleted to reset CrashLoopBackOff")
-	}
-
-	// CLIENT KILL was issued against the old master.
 	if len(source.clientKillTypes) == 0 || source.clientKillTypes[0] != "NORMAL" {
-		t.Errorf("expected CLIENT KILL TYPE NORMAL on source, got %v", source.clientKillTypes)
+		t.Errorf("CLIENT KILL on the old master = %v", source.clientKillTypes)
 	}
 }
 
-// TestPlannedFailoverPromotingDragonfly_StripFails_ProceedsWithFailureHandler
-// regression-tests B14: the previous version of this test left the
-// source pod absent and asserted only on phase advance — so the strip
-// step succeeded vacuously (no pods to patch) and the failure handler
-// ran because the takeover dial failed. The strip-fail control path
-// (which must skip the takeover entirely and never call dragonflyDial)
-// was not exercised.
-//
-// Inject a fake-client interceptor that errors on Update of the source
-// pod when the strip step removes the traffic label, and assert:
-//   - The takeover dial is NEVER invoked (strip-fail short-circuits the
-//     promotion sequence).
-//   - The proceed-mode failure handler advances phase to Promoting and
-//     the failure reason is the strip error.
-func TestPlannedFailoverPromotingDragonfly_StripFails_ProceedsWithFailureHandler(t *testing.T) {
+// A re-run whose takeover intent is durable but whose result was lost
+// finds the target master and never sends a second REPLTAKEOVER.
+func TestPlannedFailoverDragonfly_RerunNeverRepeatsTakeover(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("proceed")
+	now := metav1.Now()
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
-	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
-	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
+	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
+	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
+	r, _, _ := pfDFReconciler(t, fg)
+	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}}
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: &fakeDragonflyConn{}})
+	pfDFPass(t, r, fgNN(fg))
+	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
+		t.Fatalf("block = %+v %+v", pf.Phase, pf.Dragonfly)
+	}
+	if target.takeovers != 0 {
+		t.Errorf("REPLTAKEOVER re-sent %d times on a target already master", target.takeovers)
+	}
+}
 
+// onSyncTimeout=proceed goes on to the takeover with sessions lost.
+func TestPlannedFailoverDragonflySync_TimeoutProceedAdvances(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
+	offset := int64(500)
+	fg.Status.PlannedFailover.Dragonfly.SourceOffset = &offset
+	r, _, _ := pfDFReconciler(t, fg)
+	lagging := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", SlaveReplOffset: 10}}
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: lagging, pfDFIad: &fakeDragonflyConn{}})
+	r.plannedClock.(*clock.FakeClock).Advance(time.Second)
+	pfDFPass(t, r, fgNN(fg))
+	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsLost ||
+		pf.Dragonfly.Reason != string(v1alpha1.DragonflyPlannedReasonSyncTimeout) {
+		t.Fatalf("block = %+v %+v", pf.Phase, pf.Dragonfly)
+	}
+}
+
+// An unreachable source offset proceeds with sessions lost.
+func TestPlannedFailoverDragonflySync_OffsetCaptureFailsProceedsWithSessionsLost(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("proceed")
+	r, _, _ := pfDFReconciler(t, fg)
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{})
+	pfDFPass(t, r, fgNN(fg))
+	if pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover; pf.Dragonfly.SourceOffsetState != v1alpha1.DragonflyOffsetUnavailable {
+		t.Fatalf("dragonfly = %+v", pf.Dragonfly)
+	}
+	pfDFPass(t, r, fgNN(fg))
+	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsLost {
+		t.Fatalf("block = %+v %+v", pf.Phase, pf.Dragonfly)
+	}
+}
+
+// onSyncTimeout=fail rolls back.
+func TestPlannedFailoverDragonflySync_TimeoutFailRollsBack(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("fail")
+	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetUnavailable
+	r, _, _ := pfDFReconciler(t, fg)
+	pfDFPass(t, r, fgNN(fg))
+	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || pf.Rollback.Reason != v1alpha1.PlannedFailoverReasonDragonflySyncTimeout {
+		t.Fatalf("block = %+v %+v", pf.Phase, pf.Rollback)
+	}
+}
+
+// A failed strip short-circuits the takeover (no dial), restores nothing it
+// did not change, and proceeds with the takeover Failed.
+func TestPlannedFailoverDragonfly_StripFailsProceeds(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("proceed")
+	now := metav1.Now()
+	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
+	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
+	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	scheme := testScheme()
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
-		WithObjects(fg, newTestSecret(), sourcePod, targetPod).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg, newTestSecret(), sourcePod, makeDragonflyPod(fg.Name, "pdx", "replica", true)).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				// Fail the strip step: source pod being updated with the
-				// dragonfly-traffic label absent (i.e. removed).
+			Update: func(ctx context.Context, under client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name {
 					if _, has := pod.Labels[labelDragonflyTraffic]; !has {
 						return errors.New("simulated strip-patch failure")
 					}
 				}
-				return underlying.Update(ctx, obj, opts...)
+				return under.Update(ctx, obj, opts...)
 			},
-		}).
-		Build()
-	r := &MysqlFailoverGroupReconciler{
-		Client:   c,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		}).Build()
+	r := &MysqlFailoverGroupReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(16)}
+	topo := newPFFakeTopology()
+	topo.setHeld("run-1", false)
+	r.PlannedTopology = topo
+	r.plannedClock = clock.NewFakeClock(time.Now())
+	dials := 0
+	r.dragonflyConnector = func(context.Context, string, string) (DragonflyConnection, error) {
+		dials++
+		return nil, errors.New("must not dial")
 	}
-	dialAttempts := 0
-	r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
-		dialAttempts++
-		return nil, errors.New("must not dial: strip should have failed first (addr=" + addr + ")")
-	}
-
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if dialAttempts != 0 {
-		t.Errorf("dragonflyDial called %d times after strip-fail; want 0 (strip-fail must short-circuit the promotion)", dialAttempts)
+	pfDFPass(t, r, fgNN(fg))
+	if dials != 0 {
+		t.Errorf("dialled %d times after a failed strip", dials)
 	}
 	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromoting {
-		t.Errorf("phase = %q, want Promoting (proceed)", got.Status.PlannedFailover.Phase)
+	pf := got.Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed ||
+		pf.Dragonfly.Reason != ReasonDragonflyPromotionFailed || !strings.Contains(pf.Dragonfly.Message, "strip source traffic label") {
+		t.Fatalf("block = %+v %+v", pf.Phase, pf.Dragonfly)
 	}
-	if got.Status.PlannedFailover.Dragonfly.PromotionMethod != "" {
-		t.Errorf("promotionMethod = %q, want empty (strip failed → effectiveDragonflyMasterSite must keep returning source)", got.Status.PlannedFailover.Dragonfly.PromotionMethod)
-	}
-	if got.Status.PlannedFailover.Dragonfly.Reason != ReasonDragonflyPromotionFailed {
-		t.Errorf("reason = %q, want %q", got.Status.PlannedFailover.Dragonfly.Reason, ReasonDragonflyPromotionFailed)
-	}
-	if got.Status.PlannedFailover.Dragonfly.Message == "" || !contains(got.Status.PlannedFailover.Dragonfly.Message, "strip source traffic label") {
-		t.Errorf("expected strip-fail wording in message; got %q", got.Status.PlannedFailover.Dragonfly.Message)
+	if effectiveDragonflyMasterSite(got) != "iad" {
+		t.Errorf("master = %q after a failed takeover, want the source", effectiveDragonflyMasterSite(got))
 	}
 }
 
-// TestPlannedFailoverPromotingDragonfly_DemoteFails_DoesNotRestoreSourceTraffic
-// regression-tests the bug where the success path restored the source's
-// traffic label after a failed role-demote patch. The result was a pod
-// still labelled dragonfly-role=master with traffic=enabled — selectable
-// by the active Service alongside the newly-promoted target. Split-brain
-// at the routing layer.
-//
-// We inject a fake-client interceptor that errors on Update of the
-// source pod when the demote role label is being set, and assert the
-// source's traffic label remains stripped (no restore).
-func TestPlannedFailoverPromotingDragonfly_DemoteFails_DoesNotRestoreSourceTraffic(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+// A failed REPLTAKEOVER restores the source's traffic label; with
+// onSyncTimeout=fail the run rolls back with the takeover recorded Failed.
+func TestPlannedFailoverDragonfly_TakeoverFailsFailRollsBack(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("fail")
+	now := metav1.Now()
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
+	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
-	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
-
-	scheme := testScheme()
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
-		WithObjects(fg, newTestSecret(), sourcePod, targetPod).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				// Fail the demote patch: source pod being updated with
-				// dragonfly-role=replica. Let everything else through —
-				// strip (delete traffic label) and target master-stamp
-				// must still succeed.
-				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name {
-					if pod.Labels[labelDragonflyRole] == "replica" {
-						return errors.New("simulated demote-patch failure")
-					}
-				}
-				return underlying.Update(ctx, obj, opts...)
-			},
-		}).
-		Build()
-	r := &MysqlFailoverGroupReconciler{
-		Client:   c,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+	r, c, _ := pfDFReconciler(t, fg, sourcePod, makeDragonflyPod(fg.Name, "pdx", "replica", true))
+	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave"},
+		replTakeoverErr: errors.New("takeover refused")}}
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: &fakeDragonflyConn{}})
+	pfDFPass(t, r, fgNN(fg))
+	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || pf.Rollback.Reason != v1alpha1.PlannedFailoverReasonDragonflyPromotionFailed ||
+		pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed {
+		t.Fatalf("block = %+v %+v %+v", pf.Phase, pf.Rollback, pf.Dragonfly)
 	}
-
-	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 200}}
-	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
-	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
-		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": target,
-		"lion-dragonfly-iad.shared-lion.svc.cluster.local:6379": source,
-	})
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Demote failed → source must NOT have its traffic label restored.
-	// Otherwise it sits with role=master+traffic=enabled and joins the
-	// active Service alongside the new master.
 	var gotSource corev1.Pod
-	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
-		t.Fatalf("get source pod: %v", err)
-	}
-	if _, has := gotSource.Labels[labelDragonflyTraffic]; has {
-		t.Errorf("source traffic label = %q, want absent (demote failed → must not restore traffic)", gotSource.Labels[labelDragonflyTraffic])
-	}
-}
-
-func TestPlannedFailoverPromotingDragonfly_TakeoverFails_RestoresSourceTraffic(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
-	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
-	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
-	r, c := newReconciler(fg, sourcePod, targetPod)
-
-	target := &fakeDragonflyConn{
-		info:            dragonfly.ReplicationInfo{Role: "slave"},
-		replTakeoverErr: errors.New("REPLTAKEOVER refused"),
-	}
-	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
-		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": target,
-	})
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Source's traffic label should be restored after takeover failure
-	// so the active Service still routes to it under the proceed
-	// policy. Without this restore the Service would have no endpoint.
-	var gotSource corev1.Pod
-	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
-		t.Fatalf("get source pod: %v", err)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sourcePod), &gotSource); err != nil {
+		t.Fatal(err)
 	}
 	if gotSource.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
-		t.Errorf("source traffic = %q, want enabled (restored after takeover failure)", gotSource.Labels[labelDragonflyTraffic])
+		t.Errorf("source traffic label not restored after a failed takeover: %v", gotSource.Labels)
 	}
 }
 
-func TestPlannedFailoverPromotingDragonfly_FailureProceeds(t *testing.T) {
+// The source-loss window still applies in the Dragonfly phases.
+func TestPlannedFailoverDragonfly_SourceLossRollsBack(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("proceed")
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
-	r, _ := newReconciler(fg)
-	target := &fakeDragonflyConn{
-		info:            dragonfly.ReplicationInfo{Role: "slave"},
-		replTakeoverErr: errors.New("REPLTAKEOVER refused"),
+	fg.Status.PlannedFailover.Settings.Dragonfly.MaxSyncWait = metav1.Duration{Duration: time.Hour}
+	r, _, topo := pfDFReconciler(t, fg)
+	topo.probe = func(PlannedRunRef) (LagProbe, error) { return LagProbe{TargetReachable: true}, nil }
+	lagging := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", SlaveReplOffset: 10}}
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: lagging,
+		pfDFIad: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 500}}})
+	clk := r.plannedClock.(*clock.FakeClock)
+	for i := 0; i < 12 && fetchFG(t, r, fgNN(fg)).Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseRollingBack; i++ {
+		pfDFPass(t, r, fgNN(fg))
+		clk.Advance(time.Second)
 	}
-	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
-		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": target,
-	})
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromoting {
-		t.Errorf("phase = %q, want Promoting (best-effort proceed)", got.Status.PlannedFailover.Phase)
-	}
-	if got.Status.PlannedFailover.Dragonfly.SessionsPreserved == nil || *got.Status.PlannedFailover.Dragonfly.SessionsPreserved {
-		t.Errorf("expected sessionsPreserved=false on REPLTAKEOVER fail: %+v", got.Status.PlannedFailover.Dragonfly)
-	}
-	if got.Status.PlannedFailover.Dragonfly.Reason != ReasonDragonflyPromotionFailed {
-		t.Errorf("reason = %q, want %q", got.Status.PlannedFailover.Dragonfly.Reason, ReasonDragonflyPromotionFailed)
+	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || pf.Rollback.Reason != v1alpha1.PlannedFailoverReasonSourceLost {
+		t.Fatalf("block = %+v %+v", pf.Phase, pf.Rollback)
 	}
 }
 
-// takeoverHookConn embeds fakeDragonflyConn and fires onTakeover at
-// the moment ReplTakeover would commit on the server side. Used by
-// regression tests that need to flip a "real Dragonfly master"
-// pointer in lockstep with the protocol-level takeover.
-type takeoverHookConn struct {
-	*fakeDragonflyConn
-	onTakeover func()
-}
-
-func (c *takeoverHookConn) ReplTakeover(ctx context.Context, t time.Duration) error {
-	if c.onTakeover != nil {
-		c.onTakeover()
-	}
-	return c.fakeDragonflyConn.ReplTakeover(ctx, t)
-}
-
-// TestPlannedFailoverPromotingDragonfly_NoReadOnlyMidFlight is the
-// regression guard for the safety invariant called out in
-// PLANS-Bloodraven-Dragonfly.md "Required Before Next Slice": during
-// the strip → REPLTAKEOVER → re-label sequence, the active Service
-// selector (role=master AND traffic=enabled) must never match a
-// Dragonfly pod that is not the real Dragonfly master at that
-// instant.
-//
-// "READONLY mid-flight" is the failure mode in which an application
-// write reaches a Dragonfly pod that is currently a replica — either
-// because REPLTAKEOVER hasn't happened yet (so the pod the selector
-// points to is still a replica) or because the post-takeover
-// demotion of the old master raced ahead of the active-Service
-// label flip (so two pods match while one is now a replica).
-//
-// The test intercepts every Pod Update against the fake client and
-// re-evaluates the selector after each label patch. The "real
-// Dragonfly master" pointer flips inside ReplTakeover, mirroring
-// server-side semantics. Any selector match against a pod whose
-// site is not the current real master is recorded as an invariant
-// violation.
-//
-// This is a unit-level proxy for the deferred k3d e2e test that runs
-// continuous writes against the active Service through a real
-// failover; the unit-level coverage exercises the label/state
-// transitions but not the live kube-proxy/endpoint controller. The
-// remaining live-cluster scenario lives in
-// PLANS-Dragonfly-Chaos-Scenarios.md (D3).
-func TestPlannedFailoverPromotingDragonfly_NoReadOnlyMidFlight(t *testing.T) {
+// The strip predicate and the Dragonfly master follow the takeover record,
+// and a marked run strips nothing.
+func TestPlannedFailoverDragonflyPredicates(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("proceed")
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
-	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
-	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
-
-	// realMaster tracks which site is the real Dragonfly master at any
-	// given instant. It flips inside the target's ReplTakeover hook.
-	// violations is appended to whenever the selector matches a pod
-	// that isn't the real master.
-	var (
-		invMu      sync.Mutex
-		realMaster = "iad"
-		violations []string
-		checks     int
-	)
-
-	checkActiveServiceInvariant := func(c client.Reader, label string) {
-		var pods corev1.PodList
-		if err := c.List(context.Background(), &pods,
-			client.InNamespace(sourcePod.Namespace),
-			client.MatchingLabels{
-				labelAppName:          dragonflyAppName,
-				labelInstance:         fg.Name,
-				labelDragonflyRole:    "master",
-				labelDragonflyTraffic: dragonflyTrafficEnabled,
-			}); err != nil {
-			return
-		}
-		invMu.Lock()
-		defer invMu.Unlock()
-		checks++
-		for _, p := range pods.Items {
-			site := p.Labels[labelSite]
-			if site != realMaster {
-				violations = append(violations, fmt.Sprintf(
-					"after %s: pod %q (site=%s) matches active-Service selector but real Dragonfly master is %q (READONLY mid-flight)",
-					label, p.Name, site, realMaster))
-			}
+	pf := fg.Status.PlannedFailover
+	now := metav1.Now()
+	pf.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
+	pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
+	if !plannedFailoverDragonflyStripActive(fg) || plannedFailoverSourceSite(fg) != "iad" || effectiveDragonflyMasterSite(fg) != "iad" {
+		t.Errorf("intended: strip=%v source=%q master=%q", plannedFailoverDragonflyStripActive(fg), plannedFailoverSourceSite(fg), effectiveDragonflyMasterSite(fg))
+	}
+	for _, phase := range []v1alpha1.PlannedFailoverPhase{v1alpha1.PlannedFailoverPhasePromoting,
+		v1alpha1.PlannedFailoverPhasePublishing, v1alpha1.PlannedFailoverPhaseRollingBack} {
+		pf.Phase = phase
+		pf.Dragonfly.Takeover.State = v1alpha1.DragonflyTakeoverSucceeded
+		if plannedFailoverDragonflyStripActive(fg) || effectiveDragonflyMasterSite(fg) != "pdx" {
+			t.Errorf("%s/succeeded: strip=%v master=%q", phase, plannedFailoverDragonflyStripActive(fg), effectiveDragonflyMasterSite(fg))
 		}
 	}
-
-	scheme := testScheme()
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
-		WithObjects(fg, newTestSecret(), sourcePod, targetPod).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				if err := underlying.Update(ctx, obj, opts...); err != nil {
-					return err
-				}
-				if pod, ok := obj.(*corev1.Pod); ok {
-					checkActiveServiceInvariant(underlying, "update "+pod.Name)
-				}
-				return nil
-			},
-		}).
-		Build()
-	r := &MysqlFailoverGroupReconciler{
-		Client:   c,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(20),
-	}
-
-	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 200}}
-	targetWithHook := &takeoverHookConn{
-		fakeDragonflyConn: target,
-		onTakeover: func() {
-			invMu.Lock()
-			realMaster = "pdx"
-			invMu.Unlock()
-		},
-	}
-	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
-	r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
-		switch addr {
-		case "lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379":
-			return targetWithHook, nil
-		case "lion-dragonfly-iad.shared-lion.svc.cluster.local:6379":
-			return source, nil
-		}
-		return nil, errors.New("no programmed conn for " + addr)
-	}
-
-	// Initial state must already hold the invariant: the source pod
-	// (iad) matches the selector and is the real master.
-	checkActiveServiceInvariant(c, "initial")
-
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("plannedFailoverPromotingDragonfly: %v", err)
-	}
-
-	// Final state: only target should match the selector, and it is
-	// the real master. Intermediate states are covered by the Update
-	// interceptor.
-	checkActiveServiceInvariant(c, "final")
-
-	invMu.Lock()
-	defer invMu.Unlock()
-	for _, v := range violations {
-		t.Errorf("invariant violation: %s", v)
-	}
-	// Sanity: at least the initial, the strip-update, the target role
-	// flip, the source role flip, the source traffic restore, and the
-	// final check should each have been observed. Five mutating Pod
-	// Updates plus initial + final = 7. Use a relaxed lower bound to
-	// stay tolerant to idempotent-skip optimisations in the label
-	// helpers, but assert the interceptor actually fired.
-	if checks < 4 {
-		t.Errorf("invariant checker only fired %d times; expected several Pod-Update interceptions plus initial+final", checks)
+	pf.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
+	pf.Dragonfly.Takeover.State = v1alpha1.DragonflyTakeoverIntended
+	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: "run-1/SourceLeftFenced/StatusStalled"}
+	if plannedFailoverDragonflyStripActive(fg) || plannedFailoverSourceSite(fg) != "" {
+		t.Error("a marked run still strips the source")
 	}
 }
 
-func TestPlannedFailoverPromotingDragonfly_FailureFailRollsBack(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("fail")
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
-	r, _ := newReconciler(fg)
-	target := &fakeDragonflyConn{
-		info:            dragonfly.ReplicationInfo{Role: "slave"},
-		replTakeoverErr: errors.New("REPLTAKEOVER refused"),
+// pfDragonflyTakeoverPass runs the engine's PromotingDragonfly step for the
+// group's stored run, the way a reconcile pass of that phase does: the
+// takeover intent is seeded when the fixture lacks it, and an empty facade
+// fake holds the run's claim unless the test injected one.
+func pfDragonflyTakeoverPass(t *testing.T, r *MysqlFailoverGroupReconciler, ctx context.Context, nn types.NamespacedName) (time.Duration, error) {
+	t.Helper()
+	if r.PlannedTopology == nil && r.plannedEngine == nil {
+		topo := newPFFakeTopology()
+		r.PlannedTopology = topo
 	}
-	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
-		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": target,
-	})
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
-		t.Fatalf("err: %v", err)
+	var live v1alpha1.MysqlFailoverGroup
+	if err := r.Client.Get(ctx, nn, &live); err != nil {
+		t.Fatal(err)
 	}
-	got := fetchFG(t, r, fgNN(fg))
-	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseFailed {
-		t.Errorf("phase = %q, want Failed (fail policy)", got.Status.PlannedFailover.Phase)
+	pf := live.Status.PlannedFailover
+	if pf.RunID == "" {
+		pf.RunID = "run-1"
 	}
-	if got.Status.PlannedFailover.Reason != ReasonDragonflyPromotionFailed {
-		t.Errorf("reason = %q, want %q", got.Status.PlannedFailover.Reason, ReasonDragonflyPromotionFailed)
+	if pf.Source == "" {
+		pf.Source = pf.SourcePrimary
 	}
+	if pf.Settings == nil {
+		settings := plannedFailoverSettingsFor(&live, PlannedFailoverRequest{Site: pf.Target})
+		pf.Settings = &settings
+	}
+	if pf.Dragonfly == nil {
+		pf.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
+	}
+	if pf.Dragonfly.Takeover == nil {
+		pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: metav1.Now()}
+	}
+	if err := r.Client.Status().Update(ctx, &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Client.Get(ctx, nn, &live); err != nil {
+		t.Fatal(err)
+	}
+	e := r.plannedFailoverEngine()
+	if topo, ok := e.topo.(*pfFakeTopology); ok {
+		topo.setHeld(live.Status.PlannedFailover.RunID, false)
+	}
+	pf = live.Status.PlannedFailover
+	return e.dragonflyTakeoverStep(ctx, &live, pf, plannedRunRef(nn, pf))
 }

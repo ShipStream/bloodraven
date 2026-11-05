@@ -85,6 +85,10 @@ type DeploymentLeaseManager struct {
 	observed        sync.Map
 	confirmed       sync.Map
 	wake            chan struct{}
+	// plannedClaimHeld reports whether a group's planned-failover claim slot
+	// is held (a run, a provisional grant, or an automation hold). Nil means
+	// no runner: only status is consulted.
+	plannedClaimHeld atomic.Pointer[func(types.NamespacedName) bool]
 }
 
 func NewDeploymentLeaseManager(c client.Client, reader client.Reader, recorder record.EventRecorder) *DeploymentLeaseManager {
@@ -96,6 +100,38 @@ func NewDeploymentLeaseManager(c client.Client, reader client.Reader, recorder r
 
 // SetClock is a test seam. Configure before serving requests.
 func (m *DeploymentLeaseManager) SetClock(now func() time.Time) { m.now = now }
+
+// SetPlannedClaimHeld injects the runner's planned-failover claim check, so
+// admission and stability also exclude a provisional grant and a hold that
+// status does not show yet.
+func (m *DeploymentLeaseManager) SetPlannedClaimHeld(held func(types.NamespacedName) bool) {
+	if held == nil {
+		m.plannedClaimHeld.Store(nil)
+		return
+	}
+	m.plannedClaimHeld.Store(&held)
+}
+
+// claimHeld reports the injected planned-failover claim check for fg.
+func (m *DeploymentLeaseManager) claimHeld(fg *v1alpha1.MysqlFailoverGroup) bool {
+	held := m.plannedClaimHeld.Load()
+	return held != nil && (*held)(client.ObjectKeyFromObject(fg))
+}
+
+// UnstableReason is DeploymentUnstableReason plus the planned-failover
+// claim slot: a held claim is "PlannedFailover" even before status shows a
+// run.
+func (m *DeploymentLeaseManager) UnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
+	reason := DeploymentUnstableReason(fg)
+	switch reason {
+	case "DeploymentRevocationPending", "Initializing", "NoPrimary", "PlannedFailover":
+		return reason
+	}
+	if m.claimHeld(fg) {
+		return "PlannedFailover"
+	}
+	return reason
+}
 
 func deploymentLeaseName(group, kind, operation string) string {
 	name := "bloodraven-deploy-" + group + "-" + kind
@@ -277,7 +313,7 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 		}
 		return "NoPrimary"
 	}
-	if plannedFailoverInFlight(fg.Status.PlannedFailover) || (fg.Status.PlannedFailover != nil && fg.Status.PlannedFailover.Phase == v1alpha1.PlannedFailoverPhaseDeferred) {
+	if plannedFailoverActive(fg) {
 		return "PlannedFailover"
 	}
 	if fg.Status.UpdatePhase != "" {
@@ -454,7 +490,7 @@ func (m *DeploymentLeaseManager) Grant(ctx context.Context, fg *v1alpha1.MysqlFa
 		metrics.DeployLeaseGrantsTotal.WithLabelValues(fg.Name, kind, "unstable").Inc()
 		return DeploymentLeaseResult{}, err
 	}
-	if reason := DeploymentUnstableReason(fg); reason != "" {
+	if reason := m.UnstableReason(fg); reason != "" {
 		metrics.DeployLeaseGrantsTotal.WithLabelValues(fg.Name, kind, "unstable").Inc()
 		return DeploymentLeaseResult{}, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: reason, RetryAfterSeconds: 1}
 	}
@@ -636,7 +672,7 @@ func (m *DeploymentLeaseManager) validateWrite(ctx context.Context, fg *v1alpha1
 		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: "topology_changed", TopologyGeneration: fresh.Status.TopologyGeneration}
 	}
 	if grant {
-		if reason := DeploymentUnstableReason(fresh); reason != "" {
+		if reason := m.UnstableReason(fresh); reason != "" {
 			return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: reason, RetryAfterSeconds: 1}
 		}
 	}
@@ -662,7 +698,7 @@ func (m *DeploymentLeaseManager) Snapshot(ctx context.Context, fg *v1alpha1.Mysq
 		if err := m.topologyGate(fresh); err != nil {
 			return nil, nil, err
 		}
-		if DeploymentUnstableReason(fresh) == "" {
+		if m.UnstableReason(fresh) == "" {
 			if err := m.gate(fresh); err != nil {
 				return nil, nil, err
 			}
@@ -729,7 +765,9 @@ func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1alpha1.
 	if err != nil || hold != nil {
 		return hold, err
 	}
-	if (operation != "PlannedFailover" && plannedFailoverInFlight(fg.Status.PlannedFailover)) ||
+	// Another operation is refused while a planned-failover run owns the
+	// sites, holds a (possibly provisional) claim, or a hold stands.
+	if (operation != "PlannedFailover" && (plannedFailoverOwnsSites(fg) || m.claimHeld(fg))) ||
 		(operation != "RestoreInPlace" && inPlaceRestoreInFlight(fg)) ||
 		(operation != "OrderedUpdate" && fg.Status.UpdatePhase != "") {
 		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: "ConcurrentOperation", RetryAfterSeconds: 1}

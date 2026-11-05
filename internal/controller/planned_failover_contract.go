@@ -4,8 +4,8 @@
 // engine, its status store and its topology facade are built against: the run
 // identity and records, the terminal marker and the automation hold, the
 // status predicates, and the interfaces between the engine (store, topology,
-// registry, sink). The engine and the claim slot below are placeholders until
-// their implementations land.
+// registry, sink). The claim slot below is a placeholder until its
+// implementation lands.
 package controller
 
 import (
@@ -22,7 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	"github.com/shipstream/bloodraven/internal/clock"
 )
 
 // ---------- annotations ----------
@@ -639,25 +638,10 @@ type SimHooks struct {
 	Yield func(point string)
 }
 
-// ---------- engine (placeholder; the signatures are final) ----------
-
-// PlannedFailoverEngine drives planned-failover runs through the store and
-// the topology facade, one bounded step per call. This placeholder does
-// nothing; nothing constructs it yet.
-type PlannedFailoverEngine struct{}
-
-var errPlannedFailoverEngineUnimplemented = errors.New("planned failover: engine not implemented")
-
-// NewPlannedFailoverEngine returns an engine over store, topo and sink.
-func NewPlannedFailoverEngine(store PlannedFailoverStore, topo PlannedFailoverTopology, sink PlannedFailoverSink,
-	clk clock.Clock, hooks SimHooks) *PlannedFailoverEngine {
-	return &PlannedFailoverEngine{}
-}
-
-// Step runs one pass for nn and returns when to run the next.
-func (e *PlannedFailoverEngine) Step(ctx context.Context, nn types.NamespacedName) (requeueAfter time.Duration, err error) {
-	return 0, errPlannedFailoverEngineUnimplemented
-}
+// ---------- engine ----------
+//
+// PlannedFailoverEngine, NewPlannedFailoverEngine and Step live in
+// planned_failover_engine.go; their signatures are part of this contract.
 
 // ---------- manager wiring (no-op until the claim lands) ----------
 

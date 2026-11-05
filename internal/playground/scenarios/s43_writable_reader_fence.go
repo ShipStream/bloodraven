@@ -301,7 +301,7 @@ func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {
 					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%q reason=%q message=%q", pf.Phase, pf.Target, pf.Reason, pf.Message)
+					msg := fmt.Sprintf("phase=%q target=%q reason=%q message=%q", pf.Phase, pf.Target, plannedReason(pf), pf.Message)
 					if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed {
 						if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
 							return false, msg, fmt.Errorf("planned failover to reader %q succeeded; role gate is broken", state.topo.reader)

@@ -533,7 +533,8 @@ func TestDeployAPIUnstableAndFreshSnapshot(t *testing.T) {
 	f.group.Status.TopologyGeneration = 8
 	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "pdx", State: "writable"}, {Name: "iad", State: "read-only", SecondsBehindSource: &lag, RecoveryState: "Recloning", SourceConvergenceState: v1alpha1.SourceConvergencePending}}
 	f.group.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse}, {Type: "Degraded", Status: metav1.ConditionTrue, Reason: "ReplicaDown"}, {Type: "RecoveryPending", Status: metav1.ConditionTrue}}
-	f.group.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDeferred, Reason: "DeploymentHold"}
+	f.group.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseDeferred,
+		Admission: &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferDeploymentHold}}
 	f.group.Status.UpdatePhase = "UpdatingReplicas"
 	f.group.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceSucceeded}
 	f.group.Status.Dragonfly = &v1alpha1.DragonflyStatus{Upgrade: &v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseSucceeded}}
