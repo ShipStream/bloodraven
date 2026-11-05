@@ -36,12 +36,20 @@ Go jobs restore a shared module cache and separate `race`, `plain`, `codegen`, a
 
 ### `deploy-site.yml` — bloodraven.dev Deploy
 
-**Triggers:** Push to `main` touching `site/**`, and manual dispatch.
+**Triggers:** Called by `release.yml` after a release is published, a
+`release: published` event (prereleases skipped), and manual dispatch with an
+optional `ref` input.
 
 **Permissions:** `contents: read`
 
 Uploads `site/` to the Railway service `bloodraven-site`, which builds it with
 Nixpacks (see `site/railway.json`) and serves <https://bloodraven.dev>.
+
+Until v1.7.0 ships, the site is built from the latest published release tag,
+not from `main`, so it never documents fields that no installable release has
+(issue #237). Pushes to `main` do not deploy. To deploy a docs fix for the
+released version, commit it to a branch cut from the release tag and run
+`gh workflow run deploy-site.yml -f ref=<branch>`.
 
 **Required secret:** `RAILWAY_TOKEN` — a Railway *project* token, which scopes
 the CLI to a single project and environment with no interactive login. The
@@ -52,8 +60,8 @@ offer to create a new project.
 `bloodraven-site`.
 
 > If the Railway project also has the GitHub repo connected for automatic
-> deploys, disconnect it in the Railway dashboard. Otherwise every push to
-> `main` deploys twice: once from Railway's own integration and once here.
+> deploys, disconnect it in the Railway dashboard. Otherwise Railway deploys
+> every push to `main`, which would publish unreleased docs.
 
 ---
 
