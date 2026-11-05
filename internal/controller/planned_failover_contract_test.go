@@ -51,10 +51,10 @@ func contractGroup(pf *v1alpha1.PlannedFailoverStatus, annotations map[string]st
 func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 	type want struct{ pending, owns, active bool }
 	table := map[v1alpha1.PlannedFailoverPhase]want{
-		v1alpha1.PlannedFailoverPhaseNone:                    {},
-		v1alpha1.PlannedFailoverPhasePending:                 {},
-		v1alpha1.PlannedFailoverPhaseValidating:              {},
-		v1alpha1.PlannedFailoverPhaseResuming:                {},
+		plannedLegacyPhaseNone:                               {},
+		plannedLegacyPhasePending:                            {},
+		plannedLegacyPhaseValidating:                         {},
+		plannedLegacyPhaseResuming:                           {},
 		v1alpha1.PlannedFailoverPhaseAdmitting:               {pending: true, active: true},
 		v1alpha1.PlannedFailoverPhaseDeferred:                {pending: true, active: true},
 		v1alpha1.PlannedFailoverPhaseFencing:                 {owns: true, active: true},
@@ -74,9 +74,10 @@ func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 			t.Errorf("phase %q is in the API enum but not classified here", v)
 		}
 	}
+	legacyPhases := []v1alpha1.PlannedFailoverPhase{plannedLegacyPhaseNone, plannedLegacyPhasePending, plannedLegacyPhaseValidating, plannedLegacyPhaseResuming}
 	for phase := range table {
-		if !slices.Contains(enum, string(phase)) {
-			t.Errorf("phase %q is classified here but not in the API enum", phase)
+		if inEnum := slices.Contains(enum, string(phase)); inEnum == slices.Contains(legacyPhases, phase) {
+			t.Errorf("phase %q: in the API enum = %v, but it is legacy = %v", phase, inEnum, !inEnum)
 		}
 	}
 

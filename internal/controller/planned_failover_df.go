@@ -251,7 +251,7 @@ func (e *PlannedFailoverEngine) dragonflySyncTimeout(ctx context.Context, fg *v1
 		d := plannedDragonflyBlock(next)
 		d.SyncWaitSeconds = &secs
 		d.Sessions = v1alpha1.DragonflySessionsLost
-		d.Reason = string(v1alpha1.DragonflyPlannedReasonSyncTimeout)
+		d.Reason = v1alpha1.DragonflyPlannedReasonSyncTimeout
 		d.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
 		d.Message = fmt.Sprintf("sync wait timed out (%s): %s; proceeding best-effort", truncateDur(elapsed), why)
 	})
@@ -318,7 +318,7 @@ func (e *PlannedFailoverEngine) dragonflyTakeoverStep(ctx context.Context, fg *v
 		t.CompletedAt = &now
 		d.Takeover = t
 		d.Sessions = v1alpha1.DragonflySessionsLost
-		d.Reason = string(v1alpha1.DragonflyPlannedReasonPromotionFailed)
+		d.Reason = v1alpha1.DragonflyPlannedReasonPromotionFailed
 		d.Message = "REPLTAKEOVER failed: " + why
 	}
 	if plannedSettings(pf).Dragonfly.OnSyncTimeout == "fail" {

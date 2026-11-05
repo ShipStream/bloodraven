@@ -5,17 +5,24 @@ package envtest
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
@@ -205,28 +212,156 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 	}
 }
 
-// §13: a block an older operator wrote mid-run is refused and nothing is
-// hydrated from it.
-func TestEnvtest_PlannedFailover_LegacyRefused(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-legacy", nil)
-	fg := pfEnvGet(t, nn)
-	start := metav1.Now()
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "dc2",
-		SourcePrimary: "dc1", StartTime: &start, SourceGtidAtFence: "uuid-dc1:1-5"}
-	if err := k8sClient.Status().Update(ctx, fg); err != nil {
+// §13, against the real upgrade path: blocks written by an older operator
+// under the pre-#235 CRD, then the CRD is upgraded to the final schema.
+//   - The old fields are pruned on read, and an unchanged legacy block stays
+//     writable (validation ratcheting), so the runner's status writes keep
+//     working while it is there.
+//   - A mid-run legacy block is refused (Failed{SourceLeftFenced,
+//     LegacyRunRefused}, the Event), and nothing is hydrated from it.
+//   - A legacy terminal block is replaced by the next request's run.
+func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
+	upgradeScheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1alpha1.AddToScheme, apiextensionsv1.AddToScheme} {
+		if err := add(upgradeScheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldEnv := &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join("testdata", "crd-pre-235")},
+		Scheme:            upgradeScheme,
+	}
+	oldCfg, err := oldEnv.Start()
+	if err != nil {
+		t.Fatalf("start a second envtest with the pre-#235 CRD: %v", err)
+	}
+	t.Cleanup(func() { _ = oldEnv.Stop() })
+	c, err := client.New(oldCfg, client.Options{Scheme: upgradeScheme})
+	if err != nil {
 		t.Fatal(err)
 	}
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "pf-legacy-upgrade"}}
+	if err := c.Create(ctx, ns); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	seed := func(name string, block map[string]any) types.NamespacedName {
+		t.Helper()
+		fg := newTestFG(ns.Name)
+		fg.Name = name
+		if err := c.Create(ctx, fg); err != nil {
+			t.Fatal(err)
+		}
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+		if err := c.Get(ctx, client.ObjectKeyFromObject(fg), u); err != nil {
+			t.Fatal(err)
+		}
+		status := map[string]any{
+			"activeSite": "dc1",
+			"sites": []any{
+				map[string]any{"name": "dc1", "state": "writable"},
+				map[string]any{"name": "dc2", "state": "read-only", "replicating": true},
+			},
+			"plannedFailover": block,
+		}
+		if err := unstructured.SetNestedField(u.Object, status, "status"); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Status().Update(ctx, u); err != nil {
+			t.Fatalf("seed %s under the old CRD: %v", name, err)
+		}
+		return client.ObjectKeyFromObject(fg)
+	}
+	midRun := seed("midrun", map[string]any{
+		"phase": "Draining", "target": "dc2", "sourcePrimary": "dc1", "startTime": start,
+		"sourceGtidAtFence": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5", "drainStartTime": start,
+		"maxLagWait": "5m0s", "drainTimeout": "30s",
+	})
+	finished := seed("finished", map[string]any{
+		"phase": "Succeeded", "target": "dc2", "sourcePrimary": "dc1", "startTime": start, "completionTime": start,
+		"durationSeconds": int64(12), "transactionsLost": int64(0), "message": "promoted \"dc2\", 0 transactions lost",
+	})
+	validating := seed("validating", map[string]any{
+		"phase": "Validating", "target": "dc2", "sourcePrimary": "dc1", "startTime": start, "reason": "CooldownActive",
+	})
+
+	// Upgrade the CRD in place to the final schema.
+	crdOpts := &envtest.CRDInstallOptions{Paths: []string{filepath.Join("..", "..", "config", "crd", "bases")}}
+	if err := envtest.ReadCRDFiles(crdOpts); err != nil {
+		t.Fatal(err)
+	}
+	for _, crd := range crdOpts.CRDs {
+		if crd.Name != "mysqlfailovergroups.shipstream.io" {
+			continue
+		}
+		var cur apiextensionsv1.CustomResourceDefinition
+		if err := c.Get(ctx, client.ObjectKeyFromObject(crd), &cur); err != nil {
+			t.Fatal(err)
+		}
+		cur.Spec = crd.Spec
+		if err := c.Update(ctx, &cur); err != nil {
+			t.Fatalf("upgrade the CRD: %v", err)
+		}
+	}
+	// The served schema follows the CRD asynchronously: wait until an old
+	// field is pruned on read.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+		if err := c.Get(ctx, finished, u); err != nil {
+			t.Fatal(err)
+		}
+		if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "plannedFailover", "sourcePrimary"); !found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the upgraded schema never pruned status.plannedFailover.sourcePrimary")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	get := func(nn types.NamespacedName) *v1alpha1.MysqlFailoverGroup {
+		t.Helper()
+		var fg v1alpha1.MysqlFailoverGroup
+		if err := c.Get(ctx, nn, &fg); err != nil {
+			t.Fatal(err)
+		}
+		return &fg
+	}
+	// A status write that leaves the legacy block unchanged (the runner's
+	// snapshot writes) is still accepted.
+	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
+		fg := get(nn)
+		fg.Status.UpdatePhase = ""
+		fg.Status.TopologyGeneration++
+		if err := c.Status().Update(ctx, fg); err != nil {
+			t.Fatalf("%s: a status write beside the unchanged legacy block was refused: %v", nn.Name, err)
+		}
+	}
+
 	topo := &pfEnvTopology{}
-	r := pfEnvReconciler(topo)
-	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
-		t.Fatal(err)
+	r := &controller.MysqlFailoverGroupReconciler{Client: c, APIReader: c, Scheme: upgradeScheme,
+		Recorder: record.NewFakeRecorder(256), PlannedTopology: topo}
+	for _, tc := range []struct {
+		nn      types.NamespacedName
+		outcome v1alpha1.PlannedFailoverOutcome
+	}{
+		{midRun, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{validating, v1alpha1.PlannedFailoverOutcomeNotStarted},
+	} {
+		if _, err := r.StepPlannedFailoverForTest(ctx, tc.nn); err != nil {
+			t.Fatal(err)
+		}
+		pf := get(tc.nn).Status.PlannedFailover
+		if pf.Result == nil || pf.Result.Outcome != tc.outcome || pf.Result.Reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused ||
+			pf.RunID == "" || pf.Revision != 1 || pf.Target != "dc2" {
+			t.Fatalf("%s: block = %+v", tc.nn.Name, pf)
+		}
 	}
-	pf := pfEnvGet(t, nn).Status.PlannedFailover
-	if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced ||
-		pf.Result.Reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused || pf.RunID == "" {
-		t.Fatalf("block = %+v", pf)
-	}
-	if len(topo.calls) != 0 || topo.PlannedClaimHeld(nn) {
+	if len(topo.calls) != 0 || topo.PlannedClaimHeld(midRun) {
 		t.Errorf("a legacy block reached the topology: %v", topo.calls)
 	}
 	found := false
@@ -237,6 +372,19 @@ func TestEnvtest_PlannedFailover_LegacyRefused(t *testing.T) {
 	}
 	if !found {
 		t.Error("no PlannedFailoverLegacyRefused event")
+	}
+
+	// A legacy terminal block is history: a new request replaces it.
+	fg := get(finished)
+	fg.Annotations = map[string]string{controller.PlannedFailoverAnnotation: "dc2"}
+	if err := c.Update(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.StepPlannedFailoverForTest(ctx, finished); err != nil {
+		t.Fatal(err)
+	}
+	if pf := get(finished).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" {
+		t.Fatalf("new request over a legacy terminal block = %+v", pf)
 	}
 }
 
@@ -327,8 +475,8 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 	now := metav1.Now()
 	f := "uuid-dc1:1-5"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		Target: "dc2", Source: "dc1", StartTime: &now,
-		Settings: &v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Hour}, DrainTimeout: metav1.Duration{Duration: time.Second}},
+		Target: "dc2", Source: "dc1", StartTime: now,
+		Settings: v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Hour}, DrainTimeout: metav1.Duration{Duration: time.Second}},
 		Fence: &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntendedAt: now, SourceServerUUID: "uuid-dc1",
 			AppliedAt: &now, GtidSet: &f},
 		Drain: &v1alpha1.PlannedFailoverDrainRecord{StartTime: now, CompletedAt: &now}, LagWait: &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: now}}

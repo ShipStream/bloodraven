@@ -82,7 +82,7 @@ func TestReconcilePlannedFailover_NoopTerminalStatusWithoutAnnotation(t *testing
 	fg := plannedFailoverFG("")
 	now := metav1.Now()
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
-		Target: "pdx", StartTime: &now, Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: now}}
+		Target: "pdx", StartTime: now, Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: now}}
 	r, _ := pfReconciler(t, fg)
 	if !plannedFailoverPassDue(fg) == false {
 		t.Fatal("a terminal block with no annotation needs no pass")
@@ -106,7 +106,7 @@ func TestReconcilePlannedFailover_AcceptStampsAdmitting(t *testing.T) {
 	got := fetchFG(t, r, fgNN(fg))
 	pf := got.Status.PlannedFailover
 	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Target != "pdx" ||
-		pf.Settings == nil || pf.Settings.MaxLagWait.Duration != 30*time.Second ||
+		pf.Settings.MaxLagWait.Duration != 30*time.Second ||
 		pf.Settings.DrainTimeout.Duration != defaultPlannedFailoverDrainTimeout || pf.Admission == nil || pf.Admission.Deadline == nil {
 		t.Fatalf("admitting record = %+v", pf)
 	}
@@ -290,7 +290,7 @@ func TestPlannedSettings(t *testing.T) {
 		s.Dragonfly.MaxSyncWait.Duration != 100*time.Millisecond {
 		t.Errorf("snapshot: %+v %+v", s, s.Dragonfly)
 	}
-	if got := plannedSettings(&v1alpha1.PlannedFailoverStatus{Settings: &s}); got.MaxLagWait.Duration != 7*time.Second {
+	if got := plannedSettings(&v1alpha1.PlannedFailoverStatus{Settings: s}); got.MaxLagWait.Duration != 7*time.Second {
 		t.Errorf("read back: %+v", got)
 	}
 	if s := plannedFailoverSettingsFor(plannedFailoverFG(""), PlannedFailoverRequest{Site: "pdx"}); s.Dragonfly != nil {

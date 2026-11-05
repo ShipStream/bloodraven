@@ -43,8 +43,7 @@ func plannedFailoverFGWithDragonfly(activePolicy string) *v1alpha1.MysqlFailover
 	pf := pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, now.Time)
 	pf.Phase = v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync
 	pf.LagWait.CaughtUpAt = &now
-	settings := plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: "pdx"})
-	pf.Settings = &settings
+	pf.Settings = plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: "pdx"})
 	pf.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{SyncWaitStartTime: &now}
 	fg.Status.PlannedFailover = pf
 	return fg
@@ -201,7 +200,7 @@ func TestPlannedFailoverDragonflySync_TimeoutProceedAdvances(t *testing.T) {
 	pfDFPass(t, r, fgNN(fg))
 	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
 	if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsLost ||
-		pf.Dragonfly.Reason != string(v1alpha1.DragonflyPlannedReasonSyncTimeout) {
+		pf.Dragonfly.Reason != v1alpha1.DragonflyPlannedReasonSyncTimeout {
 		t.Fatalf("block = %+v %+v", pf.Phase, pf.Dragonfly)
 	}
 }
@@ -372,12 +371,14 @@ func pfDragonflyTakeoverPass(t *testing.T, r *MysqlFailoverGroupReconciler, ctx 
 	if pf.RunID == "" {
 		pf.RunID = "run-1"
 	}
-	if pf.Source == "" {
-		pf.Source = pf.SourcePrimary
+	if pf.Revision == 0 {
+		pf.Revision = 1
 	}
-	if pf.Settings == nil {
-		settings := plannedFailoverSettingsFor(&live, PlannedFailoverRequest{Site: pf.Target})
-		pf.Settings = &settings
+	if pf.StartTime.IsZero() {
+		pf.StartTime = metav1.Now()
+	}
+	if pf.Settings.MaxLagWait.Duration == 0 {
+		pf.Settings = plannedFailoverSettingsFor(&live, PlannedFailoverRequest{Site: pf.Target})
 	}
 	if pf.Dragonfly == nil {
 		pf.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}

@@ -15,12 +15,12 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// TestCRD_PlannedFailoverRoundTrip_Additive pins the durable-claim fields of
-// status.plannedFailover: every new field and enum value persists unpruned
-// beside the legacy fields, a legacy-only block is still accepted, and
-// invalid phase, outcome, reason and wait-reason values are rejected by the
-// API server.
-func TestCRD_PlannedFailoverRoundTrip_Additive(t *testing.T) {
+// TestCRD_PlannedFailoverRoundTrip pins the final shape of
+// status.plannedFailover: every field and enum value persists unpruned, the
+// run identity and parameters are required, and invalid phase, outcome,
+// reason and wait-reason values (including the removed phases) are rejected
+// by the API server.
+func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 	ns := createNamespace(t, "pf-roundtrip")
 	ts := func(sec int) metav1.Time {
 		return metav1.NewTime(time.Date(2026, 11, 4, 12, 0, sec, 0, time.UTC))
@@ -36,14 +36,14 @@ func TestCRD_PlannedFailoverRoundTrip_Additive(t *testing.T) {
 		Revision: 7,
 		Phase:    v1alpha1.PlannedFailoverPhasePublishing,
 		Target:   "dc2",
-		Settings: &v1alpha1.PlannedFailoverSettings{
+		Settings: v1alpha1.PlannedFailoverSettings{
 			MaxLagWait:   metav1.Duration{Duration: 5 * time.Minute},
 			DrainTimeout: metav1.Duration{Duration: 30 * time.Second},
 			Dragonfly: &v1alpha1.PlannedFailoverDragonflySettings{
 				MaxSyncWait: metav1.Duration{Duration: 30 * time.Second}, OnSyncTimeout: "proceed",
 			},
 		},
-		StartTime:     ptrTime(0),
+		StartTime:     ts(0),
 		Source:        "dc1",
 		ClaimedAt:     ptrTime(1),
 		ClaimBaseline: &v1alpha1.PlannedFailoverRecordRef{LastFailover: ptrTime(2), LastFailoverTarget: "dc1"},
@@ -78,9 +78,7 @@ func TestCRD_PlannedFailoverRoundTrip_Additive(t *testing.T) {
 			Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: ts(18),
 			Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningDNSUpdateFailed, v1alpha1.PlannedFailoverWarningUnreachablePeers},
 		},
-		// Legacy fields stay beside the new ones until the old shape is removed.
-		SourcePrimary: "dc1",
-		Message:       "published",
+		Message: "published",
 	}
 
 	create := func(name string) *v1alpha1.MysqlFailoverGroup {
@@ -132,15 +130,23 @@ func TestCRD_PlannedFailoverRoundTrip_Additive(t *testing.T) {
 		}
 	}
 
-	// A legacy-only block (what today's operator writes) is still accepted.
-	legacy := &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhaseValidating, Target: "dc2", StartTime: ptrTime(0), Reason: "CooldownActive",
-	}
-	if err := writeStatus(fg, legacy); err != nil {
-		t.Fatalf("legacy block: %v", err)
-	}
-	if got := readBack(fg); !equality.Semantic.DeepEqual(got, legacy) {
-		t.Fatalf("legacy block did not round-trip:\n got %+v\nwant %+v", got, legacy)
+	// A new block without its run identity or parameters is rejected:
+	// runId, revision, phase, target, settings and startTime are required.
+	for name, mutate := range map[string]func(pf *v1alpha1.PlannedFailoverStatus){
+		"no runId":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.RunID = "" },
+		"no revision":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Revision = 0 },
+		"no phase":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "" },
+		"no target":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.Target = "" },
+		"no settings":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Settings = v1alpha1.PlannedFailoverSettings{} },
+		"no startTime": func(pf *v1alpha1.PlannedFailoverStatus) { pf.StartTime = metav1.Time{} },
+		"old phase":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "Validating" },
+	} {
+		target := create("required-" + strings.ToLower(strings.ReplaceAll(name, " ", "-")))
+		pf := full.DeepCopy()
+		mutate(pf)
+		if err := writeStatus(target, pf); !apierrors.IsInvalid(err) {
+			t.Errorf("%s: status update error = %v; want Invalid", name, err)
+		}
 	}
 
 	// Invalid values are rejected server-side.

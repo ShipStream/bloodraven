@@ -276,7 +276,7 @@ func opsRun(phase v1alpha1.PlannedFailoverPhase) *v1alpha1.PlannedFailoverStatus
 	gtid := opsF
 	t0 := metav1.NewTime(time.Date(2026, 11, 4, 11, 59, 0, 0, time.UTC))
 	pf := &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-1", Revision: 3, Phase: phase, Target: "dc2", Source: "dc1", StartTime: &t0, ClaimedAt: &t0,
+		RunID: "run-1", Revision: 3, Phase: phase, Target: "dc2", Source: "dc1", StartTime: t0, ClaimedAt: &t0,
 		ClaimBaseline: &v1alpha1.PlannedFailoverRecordRef{},
 		Fence:         &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntendedAt: t0, SourceServerUUID: opsUUIDA, GtidSet: &gtid},
 	}

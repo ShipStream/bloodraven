@@ -377,7 +377,7 @@ func plannedSettings(pf *v1alpha1.PlannedFailoverStatus) v1alpha1.PlannedFailove
 		MaxLagWait:   metav1.Duration{Duration: defaultPlannedFailoverMaxLagWait},
 		DrainTimeout: metav1.Duration{Duration: defaultPlannedFailoverDrainTimeout},
 	}
-	if pf == nil || pf.Settings == nil {
+	if pf == nil {
 		return s
 	}
 	if pf.Settings.MaxLagWait.Duration > 0 {

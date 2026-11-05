@@ -339,6 +339,15 @@ var plannedEnginePhases = []v1alpha1.PlannedFailoverPhase{
 	v1alpha1.PlannedFailoverPhaseRollingBack,
 }
 
+// Phases only an older operator wrote; they are outside the API enum, but a
+// block stored before the upgrade can still carry them (§13).
+const (
+	plannedLegacyPhaseNone       v1alpha1.PlannedFailoverPhase = ""
+	plannedLegacyPhasePending    v1alpha1.PlannedFailoverPhase = "Pending"
+	plannedLegacyPhaseValidating v1alpha1.PlannedFailoverPhase = "Validating"
+	plannedLegacyPhaseResuming   v1alpha1.PlannedFailoverPhase = "Resuming"
+)
+
 // plannedLegacyBlock reports a non-terminal block an older operator wrote:
 // no runId, or a phase this engine never writes (§13).
 func plannedLegacyBlock(pf *v1alpha1.PlannedFailoverStatus) bool {
@@ -569,8 +578,8 @@ func (e *PlannedFailoverEngine) newRunBlock(fg *v1alpha1.MysqlFailoverGroup, req
 		Revision:  1,
 		Phase:     phase,
 		Target:    req.Site,
-		Settings:  &settings,
-		StartTime: &now,
+		Settings:  settings,
+		StartTime: now,
 		Message:   msg,
 	}
 }
@@ -795,7 +804,7 @@ func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.M
 		out, _ := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
 			next.Phase = v1alpha1.PlannedFailoverPhaseAdmitting
 			next.Target = req.Site
-			next.Settings = &settings
+			next.Settings = settings
 			deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
 			next.Admission = &v1alpha1.PlannedFailoverAdmission{Deadline: &deadline}
 			next.Message = fmt.Sprintf("proceeding with deferred planned failover to %q", req.Site)
@@ -2094,7 +2103,7 @@ func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.M
 	outcome := v1alpha1.PlannedFailoverOutcomeNotStarted
 	msg := fmt.Sprintf("planned failover in phase %q was written by an older operator and is refused; re-annotate to run it again", pf.Phase)
 	switch pf.Phase {
-	case v1alpha1.PlannedFailoverPhaseNone, v1alpha1.PlannedFailoverPhasePending, v1alpha1.PlannedFailoverPhaseValidating,
+	case plannedLegacyPhaseNone, plannedLegacyPhasePending, plannedLegacyPhaseValidating,
 		v1alpha1.PlannedFailoverPhaseDeferred, v1alpha1.PlannedFailoverPhaseAdmitting:
 	default:
 		outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
@@ -2103,21 +2112,20 @@ func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.M
 	}
 	now := metav1.NewTime(e.clk.Now())
 	start := now
-	if pf.StartTime != nil {
-		start = *pf.StartTime
+	if !pf.StartTime.IsZero() {
+		start = pf.StartTime
 	}
 	target := pf.Target
 	if target == "" {
 		target = "unknown"
 	}
-	source := pf.Source
-	if source == "" {
-		source = pf.SourcePrimary
-	}
+	// The older operator's sourcePrimary is pruned on read: the source is
+	// not known, which is why the message asks a human to check.
 	next := &v1alpha1.PlannedFailoverStatus{
 		RunID: string(uuid.NewUUID()), Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseFailed,
-		Target: target, Source: source, StartTime: &start, Message: msg,
-		Result: &v1alpha1.PlannedFailoverResult{Outcome: outcome, Reason: v1alpha1.PlannedFailoverReasonLegacyRunRefused, CompletionTime: now},
+		Target: target, Source: pf.Source, StartTime: start, Message: msg,
+		Settings: plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: target}),
+		Result:   &v1alpha1.PlannedFailoverResult{Outcome: outcome, Reason: v1alpha1.PlannedFailoverReasonLegacyRunRefused, CompletionTime: now},
 	}
 	phase := pf.Phase
 	out, _, _ := e.commit(ctx, fg, false, func(base *v1alpha1.MysqlFailoverGroup) (*v1alpha1.PlannedFailoverStatus,

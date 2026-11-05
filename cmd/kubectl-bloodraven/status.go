@@ -256,12 +256,12 @@ func printPlannedFailover(out io.Writer, pf *v1alpha1.PlannedFailoverStatus) {
 	if pf.Message != "" {
 		fmt.Fprintf(out, "  Message: %s\n", pf.Message)
 	}
-	if pf.StartTime != nil {
+	if !pf.StartTime.IsZero() {
 		fmt.Fprintf(out, "  Started: %s ago\n", age(pf.StartTime.Time))
 	}
 	if r := pf.Result; r != nil {
 		fmt.Fprintf(out, "  Completed: %s ago\n", age(r.CompletionTime.Time))
-		if pf.StartTime != nil {
+		if !pf.StartTime.IsZero() {
 			if d := r.CompletionTime.Sub(pf.StartTime.Time); d >= 0 {
 				fmt.Fprintf(out, "  Duration: %ds\n", int64(d.Seconds()))
 			}

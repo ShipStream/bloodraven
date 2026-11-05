@@ -40,74 +40,13 @@ type PlannedFailoverSpec struct {
 	OnCooldown string `json:"onCooldown,omitempty"`
 }
 
-// PlannedFailoverPhase enumerates the discrete states a planned failover
-// progresses through. The reconciler advances the state machine by one
-// step per reconcile so that operator restarts land on a well-defined
-// observable state.
-//
-// The enum carries both the legacy phases ("", Pending, Validating,
-// Resuming) and the durable-claim phases (Admitting, Fencing, Publishing,
-// RollingBack) while the claim lands; the legacy values are removed once
-// nothing writes them.
-// +kubebuilder:validation:Enum="";Pending;Admitting;Deferred;Validating;Fencing;Draining;WaitingForLag;WaitingForDragonflySync;PromotingDragonfly;Promoting;Publishing;Resuming;RollingBack;Succeeded;Failed
+// PlannedFailoverPhase enumerates the discrete states a planned-failover
+// run progresses through. Each transition is one durable, conditioned
+// status write, so operator restarts always land on a well-defined record.
+// +kubebuilder:validation:Enum=Admitting;Deferred;Fencing;Draining;WaitingForLag;WaitingForDragonflySync;PromotingDragonfly;Promoting;Publishing;RollingBack;Succeeded;Failed
 type PlannedFailoverPhase string
 
 const (
-	// PlannedFailoverPhaseNone is the zero value.
-	PlannedFailoverPhaseNone PlannedFailoverPhase = ""
-
-	// PlannedFailoverPhasePending means the annotation has been observed
-	// and the reconciler is about to validate preconditions.
-	PlannedFailoverPhasePending PlannedFailoverPhase = "Pending"
-
-	// PlannedFailoverPhaseDeferred means validation rejected the request
-	// because the anti-flap cooldown is still active AND
-	// spec.plannedFailover.onCooldown="defer". The annotation remains
-	// in place; the reconciler re-tries validation at cooldown expiry.
-	PlannedFailoverPhaseDeferred PlannedFailoverPhase = "Deferred"
-
-	// PlannedFailoverPhaseValidating means the reconciler is checking
-	// preconditions (unknown site, role, cooldown, in-flight restore,
-	// etc.).
-	PlannedFailoverPhaseValidating PlannedFailoverPhase = "Validating"
-
-	// PlannedFailoverPhaseDraining means super_read_only=ON has been set
-	// on the source and the primary role label has been stripped.
-	PlannedFailoverPhaseDraining PlannedFailoverPhase = "Draining"
-
-	// PlannedFailoverPhaseWaitingForLag means the reconciler is polling
-	// the target's GTID_EXECUTED until it covers the source's fenced
-	// GTID_EXECUTED, bounded by spec.plannedFailover.maxLagWait.
-	PlannedFailoverPhaseWaitingForLag PlannedFailoverPhase = "WaitingForLag"
-
-	// PlannedFailoverPhaseWaitingForDragonflySync means the reconciler
-	// is polling the target Dragonfly replica until its replication
-	// offset reaches the source's offset captured at drain time, bounded
-	// by spec.dragonfly.plannedFailover.maxSyncWait. Skipped when
-	// spec.dragonfly is unset or disabled.
-	PlannedFailoverPhaseWaitingForDragonflySync PlannedFailoverPhase = "WaitingForDragonflySync"
-
-	// PlannedFailoverPhasePromotingDragonfly means the reconciler is
-	// issuing REPLTAKEOVER against the target Dragonfly to promote it
-	// before MySQL promotion runs. Skipped when spec.dragonfly is unset
-	// or disabled.
-	PlannedFailoverPhasePromotingDragonfly PlannedFailoverPhase = "PromotingDragonfly"
-
-	// PlannedFailoverPhasePromoting means FailoverController.Execute is
-	// running against the target.
-	PlannedFailoverPhasePromoting PlannedFailoverPhase = "Promoting"
-
-	// PlannedFailoverPhaseResuming means the reconciler is updating
-	// status.activeSite and lifting the planned-failover guard.
-	PlannedFailoverPhaseResuming PlannedFailoverPhase = "Resuming"
-
-	// PlannedFailoverPhaseSucceeded is the terminal success state.
-	PlannedFailoverPhaseSucceeded PlannedFailoverPhase = "Succeeded"
-
-	// PlannedFailoverPhaseFailed is the terminal failure state. Leaves
-	// status populated so kubectl describe explains the outcome.
-	PlannedFailoverPhaseFailed PlannedFailoverPhase = "Failed"
-
 	// PlannedFailoverPhaseAdmitting means the request was accepted and
 	// stamped with a runId, and the run is waiting for the topology
 	// manager to grant its claim. The run owns nothing yet; it ends
@@ -115,10 +54,41 @@ const (
 	// admission.deadline.
 	PlannedFailoverPhaseAdmitting PlannedFailoverPhase = "Admitting"
 
+	// PlannedFailoverPhaseDeferred means admission is deferred: the
+	// anti-flap cooldown is active with spec.plannedFailover.onCooldown
+	// "defer", or a deployment failover-hold lease stands. The run owns
+	// nothing; the annotation remains in place and admission is retried
+	// at admission.retryAfter.
+	PlannedFailoverPhaseDeferred PlannedFailoverPhase = "Deferred"
+
 	// PlannedFailoverPhaseFencing means the claim is granted and the
 	// fence intent is durable: the run is setting super_read_only=ON on
 	// the source and proving that the fence is its own.
 	PlannedFailoverPhaseFencing PlannedFailoverPhase = "Fencing"
+
+	// PlannedFailoverPhaseDraining means the source is fenced and the
+	// run is killing application connections on it, bounded by
+	// settings.drainTimeout.
+	PlannedFailoverPhaseDraining PlannedFailoverPhase = "Draining"
+
+	// PlannedFailoverPhaseWaitingForLag means the run is polling the
+	// target until it has applied the fenced set, bounded by
+	// settings.maxLagWait.
+	PlannedFailoverPhaseWaitingForLag PlannedFailoverPhase = "WaitingForLag"
+
+	// PlannedFailoverPhaseWaitingForDragonflySync means the run is
+	// polling the target Dragonfly replica until its replication offset
+	// reaches the source's, bounded by settings.dragonfly.maxSyncWait.
+	// Skipped when Dragonfly was not enabled at acceptance.
+	PlannedFailoverPhaseWaitingForDragonflySync PlannedFailoverPhase = "WaitingForDragonflySync"
+
+	// PlannedFailoverPhasePromotingDragonfly means the run is promoting
+	// the target Dragonfly (REPLTAKEOVER) before the MySQL promotion.
+	PlannedFailoverPhasePromotingDragonfly PlannedFailoverPhase = "PromotingDragonfly"
+
+	// PlannedFailoverPhasePromoting means the promotion intent is
+	// durable and the run is promoting the target on a pinned session.
+	PlannedFailoverPhasePromoting PlannedFailoverPhase = "Promoting"
 
 	// PlannedFailoverPhasePublishing means the promotion is confirmed,
 	// recorded in the topology manager and published to DNS, and the
@@ -129,6 +99,13 @@ const (
 	// was written to the target and is unfencing the source under the
 	// rollback preconditions.
 	PlannedFailoverPhaseRollingBack PlannedFailoverPhase = "RollingBack"
+
+	// PlannedFailoverPhaseSucceeded is the terminal success state.
+	PlannedFailoverPhaseSucceeded PlannedFailoverPhase = "Succeeded"
+
+	// PlannedFailoverPhaseFailed is the terminal failure state;
+	// result.outcome and result.reason say what happened.
+	PlannedFailoverPhaseFailed PlannedFailoverPhase = "Failed"
 )
 
 // PlannedFailoverOutcome is the terminal outcome of a planned-failover run,
@@ -278,33 +255,48 @@ const (
 	PlannedFailoverDNSSkipped PlannedFailoverDNSState = "Skipped"
 )
 
-// PlannedFailoverStatus tracks an in-flight or completed planned
-// failover. Only the most recent attempt is retained; re-annotating
-// replaces the block.
+// PlannedFailoverStatus is the record of the most recent planned-failover
+// run. Every field belongs to the run named by runId. Target and Settings
+// are the run's parameters, copied from the consumed annotation and the
+// spec at acceptance (the annotation is removed, so they are recorded here
+// rather than re-read). The operator writes this block conditioned on the
+// object's resourceVersion and refuses a non-terminal block without a
+// runId (a block written by an older operator).
 //
-// The durable-claim fields (runId through result) record one run: every
-// field belongs to the run named by runId. They are written conditioned on
-// the object's resourceVersion. Target and Settings are the run's
-// parameters, copied from the consumed annotation and the spec at
-// acceptance.
+// The required fields use omitempty/omitzero so that an unchanged block
+// written by an older operator re-serializes byte for byte and stays
+// writable under CRD validation ratcheting until the operator refuses it.
 type PlannedFailoverStatus struct {
 	// RunID identifies the run this block belongs to. It is minted when a
 	// request is first stamped (Admitting or Deferred) and is the token
 	// of the run's claim.
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	// +optional
 	RunID string `json:"runId,omitempty"`
 
 	// Revision increments on every write the run makes. Settlement of an
 	// ambiguous write identifies a committed write by (runId, revision).
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
-	// +optional
 	Revision int64 `json:"revision,omitempty"`
+
+	// Phase of the run.
+	// +kubebuilder:validation:Required
+	Phase PlannedFailoverPhase `json:"phase,omitempty"`
+
+	// Target is the site the admin asked to promote.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Target string `json:"target,omitempty"`
 
 	// Settings are the run's effective timing settings, snapshotted at
 	// acceptance from the annotation overrides and the spec.
-	// +optional
-	Settings *PlannedFailoverSettings `json:"settings,omitempty"`
+	// +kubebuilder:validation:Required
+	Settings PlannedFailoverSettings `json:"settings,omitzero"`
+
+	// StartTime is when the request was first accepted.
+	// +kubebuilder:validation:Required
+	StartTime metav1.Time `json:"startTime,omitzero"`
 
 	// Source is the site the topology manager named the unique writable
 	// primary when it granted the claim. Empty until Fencing.
@@ -339,6 +331,11 @@ type PlannedFailoverStatus struct {
 	// +optional
 	LagWait *PlannedFailoverLagWaitRecord `json:"lagWait,omitempty"`
 
+	// Dragonfly tracks the Dragonfly side of the run. Populated only when
+	// Dragonfly was enabled at acceptance.
+	// +optional
+	Dragonfly *PlannedFailoverDragonflyStatus `json:"dragonfly,omitempty"`
+
 	// Promotion is the write-ahead record of the target's promotion.
 	// +optional
 	Promotion *PlannedFailoverPromotionRecord `json:"promotion,omitempty"`
@@ -355,84 +352,10 @@ type PlannedFailoverStatus struct {
 	// +optional
 	Result *PlannedFailoverResult `json:"result,omitempty"`
 
-	// Phase of the planned failover.
-	Phase PlannedFailoverPhase `json:"phase,omitempty"`
-
-	// Target is the site the admin asked to promote.
-	Target string `json:"target,omitempty"`
-
-	// SourcePrimary is the site being fenced (status.activeSite at the
-	// moment the annotation was accepted).
-	SourcePrimary string `json:"sourcePrimary,omitempty"`
-
-	// SourceGtidAtFence is the source's GTID_EXECUTED recorded
-	// immediately after super_read_only=ON took effect.
-	SourceGtidAtFence string `json:"sourceGtidAtFence,omitempty"`
-
-	// TargetGtidAtPromotion is the target's GTID_EXECUTED captured just
-	// before the operator ran SET GLOBAL read_only=0 on it.
-	TargetGtidAtPromotion string `json:"targetGtidAtPromotion,omitempty"`
-
-	// StartTime is when the annotation was first accepted.
-	StartTime *metav1.Time `json:"startTime,omitempty"`
-
-	// CompletionTime is when the state machine reached a terminal phase.
-	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
-
-	// DurationSeconds is CompletionTime - StartTime, rounded to seconds.
+	// Message is a human-readable status line suitable for kubectl
+	// describe.
 	// +optional
-	DurationSeconds *int64 `json:"durationSeconds,omitempty"`
-
-	// TransactionsLost is the count of GTIDs present on the fenced
-	// source but not on the promoted target. By construction this is 0
-	// on a successful planned switchover; the field is retained for
-	// symmetry with the emergency-failover path's data-loss accounting.
-	// +optional
-	TransactionsLost *int64 `json:"transactionsLost,omitempty"`
-
-	// Reason is a machine-readable tag on Failed outcomes. Examples:
-	// "CooldownActive", "LagTimeout", "InvalidGTID", "SourceCrashed",
-	// "ExecuteFailed", "InvalidAnnotation", "ConcurrentOperation",
-	// "UnknownSite".
-	Reason string `json:"reason,omitempty"`
-
-	// Message is a human-readable status line suitable for
-	// kubectl describe.
 	Message string `json:"message,omitempty"`
-
-	// MaxLagWait is the effective maxLagWait used for this run
-	// (after applying the spec default and the per-annotation override).
-	// +optional
-	MaxLagWait *metav1.Duration `json:"maxLagWait,omitempty"`
-
-	// DrainStartTime is when the reconciler entered the Draining phase
-	// (immediately after super_read_only=ON took effect on the source).
-	// The DrainTimeout budget is measured from this timestamp.
-	// +optional
-	DrainStartTime *metav1.Time `json:"drainStartTime,omitempty"`
-
-	// DrainTimeout is the effective drainTimeout used for this run.
-	// +optional
-	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
-
-	// LagWaitStartTime is when the reconciler entered the WaitingForLag
-	// phase. The MaxLagWait budget and the lag-wait histogram are both
-	// measured from this timestamp so Pending/Validating/Draining time
-	// does not count against the lag budget.
-	// +optional
-	LagWaitStartTime *metav1.Time `json:"lagWaitStartTime,omitempty"`
-
-	// RetryAfter is populated on the Deferred phase with the earliest
-	// time the state machine will retry validation. Derived from
-	// status.lastFailover + spec.failoverCooldown. Clears on transition
-	// out of Deferred.
-	// +optional
-	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
-
-	// Dragonfly tracks Dragonfly-specific outcome of this planned
-	// failover attempt. Populated only when spec.dragonfly is enabled.
-	// +optional
-	Dragonfly *PlannedFailoverDragonflyStatus `json:"dragonfly,omitempty"`
 }
 
 // PlannedFailoverRecordRef is a value copy of the failover record
@@ -619,96 +542,41 @@ type DragonflyTakeoverRecord struct {
 	TargetOffset *int64 `json:"targetOffset,omitempty"`
 }
 
-// PlannedFailoverDragonflyStatus captures the Dragonfly-specific outcome of
-// a planned-failover attempt. Subset of the full design (PLANS doc §42)
-// needed to debug the first slice; additional fields can be added later
-// without breaking compatibility.
+// PlannedFailoverDragonflyStatus records the Dragonfly side of a planned
+// failover run.
 type PlannedFailoverDragonflyStatus struct {
-	// Enabled mirrors spec.dragonfly.enabled at the moment the
-	// state machine entered the Dragonfly phases.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// SyncWaitStartTime is when the reconciler entered the
-	// WaitingForDragonflySync phase. The maxSyncWait budget is measured
-	// against this stamp so it is independent from the (often-expired)
-	// MySQL lag-wait budget.
+	// SyncWaitStartTime is when the run entered WaitingForDragonflySync.
+	// The maxSyncWait budget is measured from it, independently of the
+	// MySQL lag wait.
 	// +optional
 	SyncWaitStartTime *metav1.Time `json:"syncWaitStartTime,omitempty"`
 
-	// SourceOffsetAtDrain is the source Dragonfly's master replication
-	// offset captured immediately before WaitingForDragonflySync begins
-	// polling. Used as the catch-up target for the replica. nil means
-	// not yet captured (still within the capture step). Once a value is
-	// stamped, OffsetCaptureFailed distinguishes a real captured offset
-	// from an "unknown" fallback.
-	// +optional
-	SourceOffsetAtDrain *int64 `json:"sourceOffsetAtDrain,omitempty"`
-
-	// OffsetCaptureFailed marks that the source Dragonfly was
-	// unreachable or failed to respond to INFO replication when the
-	// drain offset would normally be captured. The state machine
-	// proceeds best-effort with sessions flagged unpreserved; the
-	// per-target sync-readiness check is skipped because there is no
-	// trustworthy comparator. SourceOffsetAtDrain may be set to a
-	// sentinel zero alongside this flag — readers MUST consult this
-	// field, not the offset value.
-	// +optional
-	OffsetCaptureFailed bool `json:"offsetCaptureFailed,omitempty"`
-
-	// TargetOffsetAtPromotion is the target Dragonfly's slave/master
-	// replication offset captured at the moment REPLTAKEOVER returned.
-	// +optional
-	TargetOffsetAtPromotion *int64 `json:"targetOffsetAtPromotion,omitempty"`
-
-	// SyncWaitSeconds is the time spent in WaitingForDragonflySync,
-	// from phase entry until either CandidateSyncReady passed or
-	// MaxSyncWait expired.
-	// +optional
-	SyncWaitSeconds *int64 `json:"syncWaitSeconds,omitempty"`
-
-	// SessionsPreserved is a tri-state: true if Dragonfly promotion
-	// completed cleanly with replica caught up; false if sessions were
-	// lost (timeout-with-proceed, REPLTAKEOVER failure, empty-master
-	// fallback); nil when the field is unknown (e.g., Dragonfly disabled
-	// for this attempt).
-	// +optional
-	SessionsPreserved *bool `json:"sessionsPreserved,omitempty"`
-
-	// SourceOffsetState says whether SourceOffset was captured. It
-	// replaces offsetCaptureFailed for durable-claim runs.
+	// SourceOffsetState says whether SourceOffset was captured.
 	// +optional
 	SourceOffsetState DragonflyOffsetState `json:"sourceOffsetState,omitempty"`
 
 	// SourceOffset is the source Dragonfly's master replication offset,
 	// the catch-up target of the sync wait. Set iff sourceOffsetState is
-	// Captured. It replaces sourceOffsetAtDrain for durable-claim runs.
+	// Captured.
 	// +optional
 	SourceOffset *int64 `json:"sourceOffset,omitempty"`
 
+	// SyncWaitSeconds is the time spent in WaitingForDragonflySync.
+	// +optional
+	SyncWaitSeconds *int64 `json:"syncWaitSeconds,omitempty"`
+
 	// Takeover is the write-ahead record of the target Dragonfly's
-	// promotion. It replaces targetOffsetAtPromotion and promotionMethod
-	// for durable-claim runs.
+	// promotion.
 	// +optional
 	Takeover *DragonflyTakeoverRecord `json:"takeover,omitempty"`
 
-	// Sessions says whether Dragonfly sessions survived the run. It
-	// replaces sessionsPreserved for durable-claim runs.
+	// Sessions says whether Dragonfly sessions survived the run.
 	// +optional
 	Sessions DragonflySessions `json:"sessions,omitempty"`
 
-	// PromotionMethod records how the target was promoted. First slice
-	// always uses "REPLTAKEOVER"; reserved values include
-	// "REPLICAOF NO ONE" (fallback path) and "skipped" (no promotion
-	// attempted, e.g., spec.dragonfly disabled at fail time).
+	// Reason explains a non-success Dragonfly outcome.
 	// +optional
-	PromotionMethod string `json:"promotionMethod,omitempty"`
-
-	// Reason is a machine-readable tag explaining a non-success outcome.
-	// Examples: "DragonflySyncTimeout", "DragonflyPromotionFailed",
-	// "DragonflyDisabled".
-	// +optional
-	Reason string `json:"reason,omitempty"`
+	Reason DragonflyPlannedReason `json:"reason,omitempty"`
 
 	// Message is a human-readable line for kubectl describe.
 	// +optional

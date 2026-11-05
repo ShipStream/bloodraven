@@ -146,7 +146,7 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 	}
 
 	if mfg.Status.PlannedFailover != nil &&
-		mfg.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseNone &&
+		mfg.Status.PlannedFailover.Phase != "" &&
 		!plannedTerminal(mfg.Status.PlannedFailover.Phase) {
 		return fmt.Errorf("baseline unhealthy: planned failover in non-terminal phase %q", mfg.Status.PlannedFailover.Phase)
 	}

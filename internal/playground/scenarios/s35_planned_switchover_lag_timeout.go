@@ -140,7 +140,7 @@ func s35ObserveLagTimeoutRollback() runner.Step {
 					// Ignore stale blocks from prior runs (metav1.Time truncates
 					// to seconds, so allow 2s of slack like scenario 02).
 					staleCutoff := env.StartTime.Add(-2 * time.Second)
-					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseWaitingForLag {

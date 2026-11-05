@@ -41,7 +41,7 @@ func TestDeploymentHoldDefersRequest(t *testing.T) {
 	if pf.Admission.RetryAfter == nil || !pf.Admission.RetryAfter.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) {
 		t.Fatalf("retryAfter = %v, want %s", pf.Admission.RetryAfter, hold.ExpiresAt)
 	}
-	if pf.StartTime == nil || !pf.StartTime.Time.Equal(now.Truncate(time.Second)) {
+	if !pf.StartTime.Time.Equal(now.Truncate(time.Second)) {
 		t.Fatalf("startTime = %v, want %s", pf.StartTime, *now)
 	}
 	req, err := parsePlannedFailoverAnnotation(fresh.Annotations[PlannedFailoverAnnotation])

@@ -551,7 +551,7 @@ func (s promoteMemoStage) statement() string {
 
 // plannedRunStartTime is when the run was accepted (zero if unknown).
 func plannedRunStartTime(pf *v1alpha1.PlannedFailoverStatus) time.Time {
-	if pf.StartTime != nil {
+	if !pf.StartTime.IsZero() {
 		return pf.StartTime.Time
 	}
 	if pf.ClaimedAt != nil {

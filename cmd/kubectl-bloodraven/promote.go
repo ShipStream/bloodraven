@@ -160,7 +160,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	lastPhase := v1alpha1.PlannedFailoverPhaseNone
+	lastPhase := v1alpha1.PlannedFailoverPhase("")
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	startedAt := time.Now()
@@ -192,7 +192,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 		}
 		consecutiveErrors = 0
 		pf := fg.Status.PlannedFailover
-		phase := v1alpha1.PlannedFailoverPhaseNone
+		phase := v1alpha1.PlannedFailoverPhase("")
 		if pf != nil {
 			phase = pf.Phase
 		}

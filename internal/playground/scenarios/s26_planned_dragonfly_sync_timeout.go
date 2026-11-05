@@ -167,7 +167,7 @@ func observeS26PlannedFailoverSucceeded() runner.Step {
 						return false, "no plannedFailover status yet", nil
 					}
 					staleCutoff := env.StartTime.Add(-2 * time.Second)
-					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
 							pf.StartTime, env.StartTime), nil
 					}

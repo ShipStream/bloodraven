@@ -117,7 +117,7 @@ func (s reconcilerPlannedSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.
 		return
 	}
 	metrics.PlannedFailoversTotal.WithLabelValues(pf.Target, mapOutcomeToMetricResult(pf.Result)).Inc()
-	if pf.StartTime != nil && pf.Result != nil {
+	if !pf.StartTime.IsZero() && pf.Result != nil {
 		if d := pf.Result.CompletionTime.Sub(pf.StartTime.Time); d > 0 {
 			metrics.PlannedFailoverDurationSeconds.WithLabelValues(pf.Target).Observe(d.Seconds())
 		}

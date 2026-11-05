@@ -425,7 +425,7 @@ func TestPlannedFailoverEngine_HappyPath(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG("pdx"))
 	h.step()
 	pf := h.pf()
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Revision != 1 || pf.Settings == nil {
+	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Revision != 1 || pf.Settings.MaxLagWait.Duration == 0 {
 		t.Fatalf("admitting record = %+v", pf)
 	}
 	if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; ok {
@@ -520,16 +520,16 @@ func TestPlannedFailoverEngine_LegacyRefused(t *testing.T) {
 		phase   v1alpha1.PlannedFailoverPhase
 		outcome v1alpha1.PlannedFailoverOutcome
 	}{
-		{v1alpha1.PlannedFailoverPhasePending, v1alpha1.PlannedFailoverOutcomeNotStarted},
-		{v1alpha1.PlannedFailoverPhaseValidating, v1alpha1.PlannedFailoverOutcomeNotStarted},
+		{plannedLegacyPhasePending, v1alpha1.PlannedFailoverOutcomeNotStarted},
+		{plannedLegacyPhaseValidating, v1alpha1.PlannedFailoverOutcomeNotStarted},
 		{v1alpha1.PlannedFailoverPhaseDeferred, v1alpha1.PlannedFailoverOutcomeNotStarted},
 		{v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{v1alpha1.PlannedFailoverPhaseResuming, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{plannedLegacyPhaseResuming, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
 	} {
 		t.Run(string(tc.phase), func(t *testing.T) {
 			h := newPFEngineHarness(t, plannedFailoverFG(""))
 			start := metav1.NewTime(h.clk.Now())
-			h.setBlock(&v1alpha1.PlannedFailoverStatus{Phase: tc.phase, Target: "pdx", SourcePrimary: "iad", StartTime: &start})
+			h.setBlock(&v1alpha1.PlannedFailoverStatus{Phase: tc.phase, Target: "pdx", StartTime: start})
 			h.step()
 			pf := h.pf()
 			if pf.Result == nil || pf.Result.Outcome != tc.outcome || pf.Result.Reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused || pf.RunID == "" {

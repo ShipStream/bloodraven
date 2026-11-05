@@ -475,7 +475,7 @@ func TestDeploymentLeaseStatusRetryPreservesNewerOperations(t *testing.T) {
 				}
 				fresh.Status.TopologyGeneration = 9
 				fresh.Status.ActiveSite = "pdx"
-				fresh.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseResuming}
+				fresh.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhasePublishing, Target: "pdx"}
 				fresh.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing}
 				if err := c.Status().Update(ctx, fresh); err != nil {
 					return err
@@ -494,7 +494,7 @@ func TestDeploymentLeaseStatusRetryPreservesNewerOperations(t *testing.T) {
 	if err := m.reader.Get(context.Background(), client.ObjectKeyFromObject(fg), fresh); err != nil {
 		t.Fatal(err)
 	}
-	if persisted == nil || fresh.Status.TopologyGeneration != 9 || fresh.Status.ActiveSite != "pdx" || fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseResuming || fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing {
+	if persisted == nil || fresh.Status.TopologyGeneration != 9 || fresh.Status.ActiveSite != "pdx" || fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePublishing || fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing {
 		t.Fatalf("retry clobbered newer state: %+v", fresh.Status)
 	}
 }

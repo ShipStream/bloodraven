@@ -595,8 +595,8 @@ func pfRunAt(phase v1alpha1.PlannedFailoverPhase, now time.Time) *v1alpha1.Plann
 	deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
 	f := "uuid-iad:1-10"
 	pf := &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-1", Revision: 1, Phase: phase, Target: "pdx", StartTime: &t,
-		Settings: &v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute},
+		RunID: "run-1", Revision: 1, Phase: phase, Target: "pdx", StartTime: t,
+		Settings: v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute},
 			DrainTimeout: metav1.Duration{Duration: 5 * time.Second}},
 		Admission: &v1alpha1.PlannedFailoverAdmission{Deadline: &deadline},
 	}

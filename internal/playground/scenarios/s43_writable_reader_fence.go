@@ -298,7 +298,7 @@ func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {
 					// Ignore terminal blocks left over from earlier scenarios
 					// (metav1.Time truncates to seconds; 2s of slack).
 					staleCutoff := env.StartTime.Add(-2 * time.Second)
-					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
 					msg := fmt.Sprintf("phase=%q target=%q reason=%q message=%q", pf.Phase, pf.Target, plannedReason(pf), pf.Message)

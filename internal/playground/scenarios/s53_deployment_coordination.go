@@ -334,7 +334,7 @@ func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, 
 	defer cancel()
 	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "Deferred/DeploymentHold", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		pf := mfg.Status.PlannedFailover
-		if pf == nil || pf.StartTime == nil || pf.StartTime.Time.Before(env.StartTime.Add(-2*time.Second)) {
+		if pf == nil || pf.StartTime.IsZero() || pf.StartTime.Time.Before(env.StartTime.Add(-2*time.Second)) {
 			return false, "waiting for current planned request", nil
 		}
 		if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {

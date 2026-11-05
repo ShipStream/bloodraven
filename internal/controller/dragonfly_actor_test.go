@@ -596,8 +596,9 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 
 	fg = get()
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, SourcePrimary: "dc2", Target: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{PromotionMethod: "REPLTAKEOVER"},
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, RunID: "run-1", Source: "dc2", Target: "dc1",
+		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{Takeover: &v1alpha1.DragonflyTakeoverRecord{
+			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	now := metav1.Now()
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", LastPromotionTime: &now, LastPromotionTarget: "dc1"}
@@ -1044,7 +1045,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	live := getFGByKey(t, c, key)
 	live.Status.ActiveSite = "dc2"
 	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromotingDragonfly, SourcePrimary: "dc2", Target: "dc1",
+		Phase: v1alpha1.PlannedFailoverPhasePromotingDragonfly, RunID: "run-1", Source: "dc2", Target: "dc1",
 		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{},
 	}
 	if err := c.Status().Update(context.Background(), live); err != nil {

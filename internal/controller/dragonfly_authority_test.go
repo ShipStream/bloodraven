@@ -45,8 +45,9 @@ func TestDragonflyManager_QueuedRequestObsoleteAfterCompletedPlannedFailover(t *
 	latest := getFGByKey(t, c, mgr.fgKey)
 	latest.Status.ActiveSite = "dc1"
 	latest.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhaseSucceeded, SourcePrimary: "dc2", Target: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{PromotionMethod: "REPLTAKEOVER"},
+		Phase: v1alpha1.PlannedFailoverPhaseSucceeded, RunID: "run-1", Source: "dc2", Target: "dc1",
+		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{Takeover: &v1alpha1.DragonflyTakeoverRecord{
+			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	now := metav1.Now()
 	latest.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: &now}
@@ -136,19 +137,19 @@ func TestSupersededPromotionRequest(t *testing.T) {
 		}, true},
 		{"planned failover claimed after", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Target: "dc1",
-				StartTime: at(-time.Minute), ClaimedAt: at(time.Second)}
+				StartTime: *at(-time.Minute), ClaimedAt: at(time.Second)}
 		}, true},
 		{"planned request accepted earlier, claimed after", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseFencing, Target: "dc1",
-				StartTime: at(-time.Hour), ClaimedAt: at(0)}
+				StartTime: *at(-time.Hour), ClaimedAt: at(0)}
 		}, true},
 		{"planned request still waiting", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, Target: "dc1",
-				StartTime: at(time.Second)}
+				StartTime: *at(time.Second)}
 		}, false},
 		{"planned failover from yesterday", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Target: "dc1",
-				StartTime: at(-24 * time.Hour), ClaimedAt: at(-24 * time.Hour)}
+				StartTime: *at(-24 * time.Hour), ClaimedAt: at(-24 * time.Hour)}
 		}, false},
 		{"newer Dragonfly promotion to dc1", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: at(time.Second)}
@@ -208,8 +209,9 @@ func TestPromoteDragonflyForRollout_ReadsAuthorityUncached(t *testing.T) {
 	stale := getFGByKey(t, liveClient, mgr.fgKey)
 	latest := stale.DeepCopy()
 	latest.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, SourcePrimary: "dc2", Target: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{PromotionMethod: "REPLTAKEOVER"},
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, RunID: "run-1", Source: "dc2", Target: "dc1",
+		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{Takeover: &v1alpha1.DragonflyTakeoverRecord{
+			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	if err := liveClient.Status().Update(context.Background(), latest); err != nil {
 		t.Fatal(err)

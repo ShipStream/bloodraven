@@ -190,7 +190,7 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 					if pf == nil {
 						return false, "no plannedFailover status yet", nil
 					}
-					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
 					msg := fmt.Sprintf("phase=%q target=%q reason=%q active=%q",
