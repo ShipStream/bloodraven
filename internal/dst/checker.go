@@ -14,9 +14,17 @@ import (
 // probes Poll issues (per-site goroutines) because every access holds the
 // cluster lock and mutations only ever arrive from the operator's main poll
 // goroutine.
+//
+// A pinned simChecker (pinned=true) is the connection behind a simSession:
+// it captured the site's server incarnation at pin time and fails every call
+// once the incarnation has moved, the way a pinned MySQL connection fails
+// after its server restarted or its pod was replaced.
 type simChecker struct {
 	c *Cluster
 	s *siteData
+
+	pinned bool
+	pinInc int
 }
 
 // NewChecker returns the mysql.Checker for the named site.
@@ -31,14 +39,23 @@ func (c *Cluster) NewChecker(site string) mysql.Checker {
 var errNotApplied = errors.New("read tcp: i/o timeout (sim: statement not applied)")
 var errAmbiguous = errors.New("read tcp: i/o timeout (sim: statement applied, response lost)")
 
+// errSessionLost is what a pinned session's call sees once its server is
+// gone. go-sql-driver/mysql reports a broken connection as "invalid
+// connection"; the session never redials.
+var errSessionLost = errors.New("invalid connection (sim: the pinned session's server is gone)")
+
 // reachableLocked returns nil when the operator can talk to this site.
 //
 // A process killed mid-Execute fails here first: the remainder of the dying
 // Poll must not be able to read or write anything, or the model would credit
-// a dead operator with work it never did.
+// a dead operator with work it never did. A pinned connection whose server
+// incarnation has moved fails next, whatever the address reaches now.
 func (m *simChecker) reachableLocked() error {
 	if m.c.operatorDead {
 		return errOperatorDead
+	}
+	if m.pinned && m.s.incarnation != m.pinInc {
+		return errSessionLost
 	}
 	if m.s.crashed {
 		return fmt.Errorf("dial tcp %s:3306: connect: connection refused", m.s.host)
@@ -49,15 +66,42 @@ func (m *simChecker) reachableLocked() error {
 	return nil
 }
 
+// stillConnectedLocked reports whether a statement issued at incarnation
+// inc still has its connection: the server it reached has not been
+// replaced, crashed or cut off since. Must be called with c.mu held.
+func (m *simChecker) stillConnectedLocked(inc int) bool {
+	return m.reachableLocked() == nil && m.s.incarnation == inc
+}
+
 // mutate runs a state-changing statement under the fault rules: reachability,
 // then the armed mid-Execute crash, then fail-without-apply, then apply
 // (which may itself return a semantic MySQL error), then ambiguous
 // apply-but-error.
-func (m *simChecker) mutate(kind EventKind, detail string, fn func() error) error {
+//
+// A statement the trial marks slow (Cluster.slow) yields twice with c.mu
+// released: between issue and apply, and between apply and acknowledgement,
+// so another actor can act while this one is blocked inside the statement.
+// If the server's incarnation moves (or it crashes, or the operator link is
+// cut) during the first yield the statement never applies; during the second
+// it applied and the reply is lost.
+func (m *simChecker) mutate(ctx context.Context, kind EventKind, detail string, fn func() error) error {
+	actor := actorFrom(ctx)
 	m.c.mu.Lock()
-	defer m.c.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			m.c.mu.Unlock()
+		}
+	}()
+	relock := func(point string) {
+		m.c.mu.Unlock()
+		locked = false
+		m.c.yield(point)
+		m.c.mu.Lock()
+		locked = true
+	}
 	if err := m.reachableLocked(); err != nil {
-		m.c.event(m.s.name, kind, detail, "unreachable")
+		m.c.eventBy(m.s.name, kind, detail, "unreachable", actor)
 		return err
 	}
 	// The crash countdown is consumed by every mutation the operator gets
@@ -66,38 +110,91 @@ func (m *simChecker) mutate(kind EventKind, detail string, fn func() error) erro
 	// rather than only at points that happen to be healthy.
 	if m.c.crashNowLocked() {
 		if m.c.crashPreApply {
-			m.c.event(m.s.name, kind, detail, "operatorDied")
+			m.c.eventBy(m.s.name, kind, detail, "operatorDied", actor)
 			m.c.killOperatorLocked(m.s.name, kind, false)
 			return errOperatorDead
 		}
 		// The statement reaches the server and applies; the reply never
 		// gets back to a process that no longer exists. Semantic rejections
 		// still reject — a dying operator does not get to violate MySQL.
+		before := m.observeLocked()
 		if err := fn(); err != nil {
-			m.c.event(m.s.name, kind, detail, "rejected:"+err.Error())
+			m.c.eventBy(m.s.name, kind, detail, "rejected:"+err.Error(), actor)
 			m.c.killOperatorLocked(m.s.name, kind, false)
 			return err
 		}
-		m.c.event(m.s.name, kind, detail, "appliedThenOperatorDied")
+		e := m.c.eventBy(m.s.name, kind, detail, "appliedThenOperatorDied", actor)
+		m.notifyLocked(e, before)
 		m.c.killOperatorLocked(m.s.name, kind, true)
 		return errOperatorDead
 	}
 	if m.c.failMuts[m.s.name] > 0 {
 		m.c.failMuts[m.s.name]--
-		m.c.event(m.s.name, kind, detail, "failed")
+		m.c.eventBy(m.s.name, kind, detail, "failed", actor)
 		return errNotApplied
 	}
+	slow := m.c.yield != nil && m.c.slow != nil && m.c.slow(m.s.name, kind, actor)
+	inc := m.s.incarnation
+	if slow {
+		relock(fmt.Sprintf("stmt.issued:%s:%s", m.s.name, kind))
+		if !m.stillConnectedLocked(inc) {
+			m.c.eventBy(m.s.name, kind, detail, "lostBeforeApply", actor)
+			return errSessionLost
+		}
+	}
+	before := m.observeLocked()
 	if err := fn(); err != nil {
-		m.c.event(m.s.name, kind, detail, "rejected:"+err.Error())
+		m.c.eventBy(m.s.name, kind, detail, "rejected:"+err.Error(), actor)
 		return err
+	}
+	if slow {
+		// The statement applied: the event (a clean apply, which every
+		// invariant counts as landed) and the observers see it at the
+		// instant it landed. What the acknowledgement brings back is a
+		// second, non-effective event, so nothing counts the statement
+		// twice.
+		e := m.c.eventBy(m.s.name, kind, detail, "", actor)
+		m.notifyLocked(e, before)
+		relock(fmt.Sprintf("stmt.applied:%s:%s", m.s.name, kind))
+		if !m.stillConnectedLocked(inc) {
+			m.c.eventBy(m.s.name, kind, detail, "ack:responseLost", actor)
+			return errAmbiguous
+		}
+		if m.c.ambiguousMuts[m.s.name] > 0 {
+			m.c.ambiguousMuts[m.s.name]--
+			m.c.eventBy(m.s.name, kind, detail, "ack:ambiguous", actor)
+			return errAmbiguous
+		}
+		return nil
 	}
 	if m.c.ambiguousMuts[m.s.name] > 0 {
 		m.c.ambiguousMuts[m.s.name]--
-		m.c.event(m.s.name, kind, detail, "ambiguous")
+		e := m.c.eventBy(m.s.name, kind, detail, "ambiguous", actor)
+		m.notifyLocked(e, before)
 		return errAmbiguous
 	}
-	m.c.event(m.s.name, kind, detail, "")
+	e := m.c.eventBy(m.s.name, kind, detail, "", actor)
+	m.notifyLocked(e, before)
 	return nil
+}
+
+// observeLocked snapshots the site for the mutation observer; the zero
+// value when no observer is installed, so trials without actors pay
+// nothing. Must be called with c.mu held.
+func (m *simChecker) observeLocked() SiteTruth {
+	if m.c.onMutation == nil {
+		return SiteTruth{}
+	}
+	return m.c.truthLocked(m.s)
+}
+
+// notifyLocked hands an applied mutation to the observer. Must be called
+// with c.mu held.
+func (m *simChecker) notifyLocked(e Event, before SiteTruth) {
+	if m.c.onMutation == nil {
+		return
+	}
+	m.c.onMutation(e, before, m.c.truthLocked(m.s))
 }
 
 func (m *simChecker) CheckReadOnly(_ context.Context) (bool, error) {
@@ -120,9 +217,9 @@ func (m *simChecker) CheckSuperReadOnly(_ context.Context) (bool, error) {
 	return m.s.superReadOnly, nil
 }
 
-func (m *simChecker) Promote(_ context.Context) error {
+func (m *simChecker) Promote(ctx context.Context) error {
 	// STOP REPLICA; RESET REPLICA ALL; SET GLOBAL read_only = 0.
-	return m.mutate(EvPromote, "", func() error {
+	return m.mutate(ctx, EvPromote, "", func() error {
 		m.s.ioWant = false
 		m.s.sqlWant = false
 		m.s.ioErr = ""
@@ -138,8 +235,8 @@ func (m *simChecker) Promote(_ context.Context) error {
 
 func (m *simChecker) Close() error { return nil }
 
-func (m *simChecker) SetSuperReadOnly(_ context.Context, on bool) error {
-	return m.mutate(EvSetSuperRO, fmt.Sprintf("on=%v", on), func() error {
+func (m *simChecker) SetSuperReadOnly(ctx context.Context, on bool) error {
+	return m.mutate(ctx, EvSetSuperRO, fmt.Sprintf("on=%v", on), func() error {
 		if on {
 			m.s.superReadOnly = true
 			m.s.readOnly = true // super_read_only=ON implies read_only=ON
@@ -150,7 +247,8 @@ func (m *simChecker) SetSuperReadOnly(_ context.Context, on bool) error {
 	})
 }
 
-func (m *simChecker) KillAppConnections(_ context.Context) (int, error) {
+func (m *simChecker) KillAppConnections(ctx context.Context) (int, error) {
+	actor := actorFrom(ctx)
 	m.c.mu.Lock()
 	defer m.c.mu.Unlock()
 	if err := m.reachableLocked(); err != nil {
@@ -167,24 +265,29 @@ func (m *simChecker) KillAppConnections(_ context.Context) (int, error) {
 		if applied {
 			outcome = "appliedThenOperatorDied"
 		}
-		m.c.event(m.s.name, EvKillConns, "", outcome)
+		m.c.eventBy(m.s.name, EvKillConns, "", outcome, actor)
 		m.c.killOperatorLocked(m.s.name, EvKillConns, applied)
 		return 0, errOperatorDead
 	}
-	m.c.event(m.s.name, EvKillConns, "", "")
+	// The kill is attributed per actor (a planned run's KILL on its target
+	// is a RepeatedPromotion), and observed like a mutation so the planned
+	// invariants see it, though it changes no model state.
+	before := m.observeLocked()
+	e := m.c.eventBy(m.s.name, EvKillConns, "", "", actor)
+	m.notifyLocked(e, before)
 	return 0, nil
 }
 
-func (m *simChecker) StopReplica(_ context.Context) error {
-	return m.mutate(EvStopReplica, "", func() error {
+func (m *simChecker) StopReplica(ctx context.Context) error {
+	return m.mutate(ctx, EvStopReplica, "", func() error {
 		m.s.ioWant = false
 		m.s.sqlWant = false
 		return nil
 	})
 }
 
-func (m *simChecker) ResetReplicaAll(_ context.Context) error {
-	return m.mutate(EvResetReplica, "", func() error {
+func (m *simChecker) ResetReplicaAll(ctx context.Context) error {
+	return m.mutate(ctx, EvResetReplica, "", func() error {
 		if m.s.ioWant || m.s.sqlWant {
 			return errors.New("Error 3081: replica must be stopped before RESET REPLICA ALL")
 		}
@@ -197,8 +300,8 @@ func (m *simChecker) ResetReplicaAll(_ context.Context) error {
 	})
 }
 
-func (m *simChecker) SetReadOnly(_ context.Context, on bool) error {
-	return m.mutate(EvSetRO, fmt.Sprintf("on=%v", on), func() error {
+func (m *simChecker) SetReadOnly(ctx context.Context, on bool) error {
+	return m.mutate(ctx, EvSetRO, fmt.Sprintf("on=%v", on), func() error {
 		if on {
 			m.s.readOnly = true
 		} else {
@@ -245,8 +348,8 @@ func (m *simChecker) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus,
 	return rs, nil
 }
 
-func (m *simChecker) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {
-	return m.mutate(EvChangeSource, "host="+opts.Host, func() error {
+func (m *simChecker) ChangeReplicationSource(ctx context.Context, opts mysql.ReplicationSourceOpts) error {
+	return m.mutate(ctx, EvChangeSource, "host="+opts.Host, func() error {
 		if m.s.ioWant || m.s.sqlWant {
 			return errors.New("Error 3081: replica must be stopped before CHANGE REPLICATION SOURCE")
 		}
@@ -274,8 +377,8 @@ func (m *simChecker) ChangeReplicationSource(_ context.Context, opts mysql.Repli
 	})
 }
 
-func (m *simChecker) StartReplica(_ context.Context) error {
-	return m.mutate(EvStartReplica, "", func() error {
+func (m *simChecker) StartReplica(ctx context.Context) error {
+	return m.mutate(ctx, EvStartReplica, "", func() error {
 		if !m.s.replConfigured {
 			return errors.New("Error 1200: the server is not configured as a replica")
 		}
@@ -350,9 +453,16 @@ type userSchemaChecker interface {
 	HasUserSchemas(context.Context) (bool, error)
 }
 
+// gtidSnapshotReader mirrors the operator's unexported interface of the same
+// name, for the same reason.
+type gtidSnapshotReader interface {
+	ReadGTIDSnapshot(context.Context) (mysql.GTIDSnapshot, error)
+}
+
 var (
-	_ mysql.Checker     = (*simChecker)(nil)
-	_ userSchemaChecker = (*simChecker)(nil)
+	_ mysql.Checker      = (*simChecker)(nil)
+	_ userSchemaChecker  = (*simChecker)(nil)
+	_ gtidSnapshotReader = (*simChecker)(nil)
 )
 
 // HasUserSchemas satisfies the operator's userSchemaChecker type assertion.
@@ -379,9 +489,31 @@ func (m *simChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) 
 	return nil, nil
 }
 
-// PinSession returns a Session over this fake's own methods.
-func (m *simChecker) PinSession(context.Context) (mysql.Session, error) {
-	return mysql.CheckerSession(m), nil
+// PinSession pins a connection to the site's current server incarnation
+// (see simSession). Pinning dials, so it fails like a connect when the site
+// is unreachable.
+func (m *simChecker) PinSession(ctx context.Context) (mysql.Session, error) {
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	if err := m.reachableLocked(); err != nil {
+		return nil, fmt.Errorf("pin connection: %w", err)
+	}
+	if a := actorFrom(ctx); a == ActorPF || a == ActorUpdate {
+		m.c.eventBy(m.s.name, EvPinSession, fmt.Sprintf("incarnation=%d", m.s.incarnation), "", a)
+	}
+	return &simSession{m: &simChecker{c: m.c, s: m.s, pinned: true, pinInc: m.s.incarnation}}, nil
+}
+
+// ReadGTIDSnapshot reads @@server_uuid and gtid_executed in one statement,
+// as the real checker does. The replica GTID audit and the planned
+// failover's grant probe type-assert for it.
+func (m *simChecker) ReadGTIDSnapshot(_ context.Context) (mysql.GTIDSnapshot, error) {
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	if err := m.reachableLocked(); err != nil {
+		return mysql.GTIDSnapshot{}, err
+	}
+	return mysql.GTIDSnapshot{ServerUUID: m.s.serverUUID, GtidExecuted: m.s.executed.String()}, nil
 }
 
 func (m *simChecker) EnsurePartialRevokes(_ context.Context) error { return nil }

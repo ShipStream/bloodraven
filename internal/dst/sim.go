@@ -119,6 +119,11 @@ const (
 	EvSidecarFence EventKind = "sidecarSelfFence"
 	EvSidecarKill  EventKind = "sidecarKillConns"
 
+	// Pinned-session lifecycle. EvPinSession is recorded only for a
+	// planned-failover or update actor (the actors whose statements must
+	// all reach one server); pooled calls are never evented as pins.
+	EvPinSession EventKind = "pinSession"
+
 	// Harness-injected fault events.
 	EvCrash           EventKind = "fault.crash"
 	EvRecoverSite     EventKind = "fault.recover"
@@ -147,6 +152,8 @@ const (
 	EvStateHeal       EventKind = "fault.failoverStateHeal"
 	EvDNSOutage       EventKind = "fault.dnsOutage"
 	EvDNSHeal         EventKind = "fault.dnsHeal"
+	EvReplacePod      EventKind = "fault.replacePod"
+	EvRestartSite     EventKind = "fault.restartSite"
 )
 
 // Event is one model-level occurrence during a trial.
@@ -159,6 +166,13 @@ type Event struct {
 	// Outcome is "" (applied cleanly), "failed" (rejected without applying),
 	// or "ambiguous" (applied but an error was returned to the operator).
 	Outcome string
+	// Actor is the operator-side actor whose ctx issued the statement (see
+	// WithActor). "" is an untagged ctx, which is the topology manager's
+	// Poll in every trial that predates the actors.
+	Actor Actor
+	// Incarnation is the site's server incarnation the statement reached
+	// (bumped by a crash or a pod replacement).
+	Incarnation int
 }
 
 func (e Event) String() string {
@@ -168,6 +182,11 @@ func (e Event) String() string {
 	}
 	if e.Outcome != "" {
 		s += " [" + e.Outcome + "]"
+	}
+	// The topology manager is the default actor; naming it on every line
+	// would only add noise to repro logs that predate the actors.
+	if e.Actor != "" && e.Actor != ActorTM {
+		s += " by=" + string(e.Actor)
 	}
 	return s
 }
@@ -194,6 +213,20 @@ type siteData struct {
 	host string
 	lbIP string
 	uuid string
+
+	// serverUUID is the identity @@server_uuid reports and the GTID stream
+	// the site's own writes land in. It starts as uuid and changes only when
+	// a pod replacement brings up a regressed (restored) data directory,
+	// which MySQL boots with a fresh auto.cnf.
+	serverUUID string
+	// incarnation counts server processes: a crash or a pod replacement
+	// starts a new one. A pinned session captures it at pin time and fails
+	// every later call once it moves (the connection broke), however the
+	// address resolves now.
+	incarnation int
+	// history is a bounded log of executed-set snapshots, one per tick,
+	// that a regressing pod replacement rolls back to.
+	history []gtidVec
 
 	crashed       bool
 	readOnly      bool
@@ -263,6 +296,20 @@ type Cluster struct {
 
 	// Model-detected violations (checked at mutation time).
 	violations []Violation
+
+	// Planned-failover actor hooks (nil in trials without actors).
+	//
+	// yield is called by a slow statement between issue and apply and again
+	// between apply and acknowledgement, with c.mu released (see
+	// simChecker.mutate). slow decides which statements are slow.
+	yield func(point string)
+	slow  func(site string, kind EventKind, actor Actor) bool
+	// onMutation observes every applied (or applied-ambiguous) mutation
+	// after it lands, with c.mu held. The planned monitor uses it.
+	onMutation func(e Event, before, after SiteTruth)
+	// onEvent observes every event as it is recorded, with c.mu held, so
+	// attempts that did not land are visible too.
+	onEvent func(e Event)
 }
 
 // SiteSpec configures one simulated site.
@@ -302,6 +349,8 @@ func NewCluster(specs []SiteSpec, baselineTxns int64) *Cluster {
 			uuid:     sp.UUID,
 			executed: base.clone(),
 			hasData:  baselineTxns > 0,
+
+			serverUUID: sp.UUID,
 		}
 		if i == 0 {
 			s.readOnly = false
@@ -380,13 +429,26 @@ func (c *Cluster) Violations() []Violation {
 }
 
 // event must be called with c.mu held.
-func (c *Cluster) event(site string, kind EventKind, detail, outcome string) {
-	e := Event{Poll: c.poll, Seq: c.seq, Site: site, Kind: kind, Detail: detail, Outcome: outcome}
+func (c *Cluster) event(site string, kind EventKind, detail, outcome string) Event {
+	return c.eventBy(site, kind, detail, outcome, "")
+}
+
+// eventBy records an event attributed to actor. Must be called with c.mu
+// held.
+func (c *Cluster) eventBy(site string, kind EventKind, detail, outcome string, actor Actor) Event {
+	e := Event{Poll: c.poll, Seq: c.seq, Site: site, Kind: kind, Detail: detail, Outcome: outcome, Actor: actor}
+	if s := c.byName[site]; s != nil {
+		e.Incarnation = s.incarnation
+	}
 	c.seq++
 	c.pollEvents = append(c.pollEvents, e)
 	if c.capture {
 		c.events = append(c.events, e)
 	}
+	if c.onEvent != nil {
+		c.onEvent(e)
+	}
+	return e
 }
 
 // violate must be called with c.mu held.
@@ -412,6 +474,8 @@ type SiteTruth struct {
 	LastError     string
 	Executed      gtidVec
 	Retrieved     gtidVec
+	ServerUUID    string
+	Incarnation   int
 }
 
 // Writable reports whether the site would accept an application write.
@@ -444,7 +508,42 @@ func (c *Cluster) Truth() []SiteTruth {
 			LastError:     firstNonEmpty(s.sqlErr, s.ioErr),
 			Executed:      s.executed.clone(),
 			Retrieved:     s.retrieved.clone(),
+			ServerUUID:    s.serverUUID,
+			Incarnation:   s.incarnation,
 		})
+	}
+	return out
+}
+
+// truthLocked is one site's SiteTruth. Must be called with c.mu held.
+func (c *Cluster) truthLocked(s *siteData) SiteTruth {
+	io, sql := c.effectiveThreadsLocked(s)
+	return SiteTruth{
+		Name:          s.name,
+		Crashed:       s.crashed,
+		ReadOnly:      s.readOnly,
+		SuperReadOnly: s.superReadOnly,
+		OpLinkDown:    c.opLinkDown[s.name],
+		ReplConfig:    s.replConfigured,
+		SourceHost:    s.sourceHost,
+		IORunning:     io,
+		SQLRunning:    sql,
+		LastError:     firstNonEmpty(s.sqlErr, s.ioErr),
+		Executed:      s.executed.clone(),
+		Retrieved:     s.retrieved.clone(),
+		ServerUUID:    s.serverUUID,
+		Incarnation:   s.incarnation,
+	}
+}
+
+// writableSitesLocked lists the truth-writable sites in site order. Must
+// be called with c.mu held.
+func (c *Cluster) writableSitesLocked() []string {
+	var out []string
+	for _, s := range c.sites {
+		if !s.crashed && !s.readOnly && !s.superReadOnly {
+			out = append(out, s.name)
+		}
 	}
 	return out
 }
@@ -498,6 +597,9 @@ func (c *Cluster) Crash(site string) {
 		return
 	}
 	s.crashed = true
+	// The process is gone: every connection to it is broken, so a session
+	// pinned before the crash can never reach the server that boots next.
+	s.incarnation++
 	c.event(site, EvCrash, "", "")
 }
 
@@ -870,15 +972,17 @@ func (c *Cluster) Tick() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Application writes.
+	// Application writes. They land in the server's current GTID stream,
+	// which is the site's original uuid unless a regressing pod replacement
+	// booted a fresh data directory.
 	for _, s := range c.sites {
 		if s.crashed || s.readOnly || s.superReadOnly {
 			continue
 		}
-		s.executed[s.uuid]++
+		s.executed[s.serverUUID]++
 		s.hasData = true
-		if c.acked[s.uuid] < s.executed[s.uuid] {
-			c.acked[s.uuid] = s.executed[s.uuid]
+		if c.acked[s.serverUUID] < s.executed[s.serverUUID] {
+			c.acked[s.serverUUID] = s.executed[s.serverUUID]
 		}
 	}
 
@@ -921,4 +1025,6 @@ func (c *Cluster) Tick() {
 			}
 		}
 	}
+
+	c.recordHistoryLocked()
 }

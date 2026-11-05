@@ -161,22 +161,22 @@ func (f *simFencer) SetSuperReadOnly(_ context.Context) error {
 	defer f.c.mu.Unlock()
 	s := f.c.byName[f.site]
 	if s.crashed {
-		f.c.event(f.site, EvSidecarFence, "", "unreachable")
+		f.c.eventBy(f.site, EvSidecarFence, "", "unreachable", ActorSidecar)
 		return errSidecarSiteDown
 	}
 	if f.c.failMuts[f.site] > 0 {
 		f.c.failMuts[f.site]--
-		f.c.event(f.site, EvSidecarFence, "", "failed")
+		f.c.eventBy(f.site, EvSidecarFence, "", "failed", ActorSidecar)
 		return errNotApplied
 	}
 	s.superReadOnly = true
 	s.readOnly = true // super_read_only=ON implies read_only=ON
 	if f.c.ambiguousMuts[f.site] > 0 {
 		f.c.ambiguousMuts[f.site]--
-		f.c.event(f.site, EvSidecarFence, "", "ambiguous")
+		f.c.eventBy(f.site, EvSidecarFence, "", "ambiguous", ActorSidecar)
 		return errAmbiguous
 	}
-	f.c.event(f.site, EvSidecarFence, "", "")
+	f.c.eventBy(f.site, EvSidecarFence, "", "", ActorSidecar)
 	return nil
 }
 
@@ -186,7 +186,7 @@ func (f *simFencer) KillConnections(_ context.Context) (int, error) {
 	if f.c.byName[f.site].crashed {
 		return 0, errSidecarSiteDown
 	}
-	f.c.event(f.site, EvSidecarKill, "", "")
+	f.c.eventBy(f.site, EvSidecarKill, "", "", ActorSidecar)
 	return 0, nil
 }
 
