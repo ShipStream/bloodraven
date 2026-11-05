@@ -1554,6 +1554,30 @@ func TestDetectEmptySite_SharedHistorySchemalessNotEmpty(t *testing.T) {
 	}
 }
 
+// TestDetectEmptySite_TaggedSharedHistorySchemalessNotEmpty: GTID tags do not
+// change which server wrote a transaction, so a schemaless site whose only
+// overlap with the primary is tagged history under the cluster's server UUID
+// is a returning member, not a fresh datadir to clone over.
+func TestDetectEmptySite_TaggedSharedHistorySchemalessNotEmpty(t *testing.T) {
+	for _, tc := range []struct{ name, primary, old string }{
+		{"tagged vs untagged", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-12", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3"},
+		{"different tags", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:ops:1-12", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			site0 := &mockMySQL{readOnly: false, gtidExecuted: tc.primary}
+			site1 := &mockMySQL{readOnly: true, gtidExecuted: tc.old, hasUserSchemas: testBoolPtr(false)}
+			tm, _, _ := newTestTopologyManager(site0, site1)
+			tm.sites[0].state = state.StateWritable
+			tm.sites[1].state = state.StateReadOnly
+
+			donor, empty := tm.detectEmptySite(context.Background())
+			if donor != "" || empty != "" {
+				t.Errorf("tagged shared-history schemaless site must not be empty, got donor=%q empty=%q", donor, empty)
+			}
+		})
+	}
+}
+
 // TestDetectEmptySite_SkipsSitesUnderRecovery ensures auto-clone cannot
 // race a RecoveryBlocked / RecoveryInProgress report on the same poll.
 func TestDetectEmptySite_SkipsSitesUnderRecovery(t *testing.T) {
@@ -3038,10 +3062,12 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 
 	tests := []struct {
 		name             string
+		primaryGTID      string // defaults to clusterGTID
 		oldGTID          string
 		wantRecovery     bool
 		wantState        string
 		wantStartReplica bool
+		wantDivergent    string
 	}{
 		{
 			// Contained by the new primary's set: safe to rejoin as a replica.
@@ -3067,11 +3093,35 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			oldGTID:      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-3",
 			wantRecovery: false,
 		},
+		{
+			// Tagged history from the cluster's server is shared history,
+			// not fresh-datadir noise. Subtraction stays tag-exact, so the
+			// tagged transactions are reported and the site is blocked.
+			name:             "tagged history under a cluster uuid: blocked, never cloned over",
+			oldGTID:          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
+			wantRecovery:     true,
+			wantState:        recoveryStateBlocked,
+			wantStartReplica: false,
+			wantDivergent:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
+		},
+		{
+			name:             "different tag than the primary's: blocked, never cloned over",
+			primaryGTID:      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:ops:1-12",
+			oldGTID:          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
+			wantRecovery:     true,
+			wantState:        recoveryStateBlocked,
+			wantStartReplica: false,
+			wantDivergent:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			site0 := &mockMySQL{readOnly: false, gtidExecuted: clusterGTID}
+			primaryGTID := tt.primaryGTID
+			if primaryGTID == "" {
+				primaryGTID = clusterGTID
+			}
+			site0 := &mockMySQL{readOnly: false, gtidExecuted: primaryGTID}
 			site1 := &mockMySQL{readOnly: true, gtidExecuted: tt.oldGTID, hasUserSchemas: testBoolPtr(false)}
 			clk := clock.NewFakeClock(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
 			tm, _, _ := newTestTopologyManagerWithBootstrapClock(site0, site1, clk)
@@ -3102,6 +3152,15 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			if started != tt.wantStartReplica {
 				t.Errorf("StartReplica called = %v, want %v (calls=%d)",
 					started, tt.wantStartReplica, site1.startReplicaCallCount())
+			}
+			if tt.wantDivergent != "" {
+				gotDivergent := ""
+				if rec != nil {
+					gotDivergent = rec.divergentGtid
+				}
+				if gotDivergent != tt.wantDivergent {
+					t.Errorf("divergent GTID = %q, want %q (rec=%+v)", gotDivergent, tt.wantDivergent, rec)
+				}
 			}
 		})
 	}

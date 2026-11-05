@@ -7,9 +7,7 @@ import (
 )
 
 func TestServiceAccountChart(t *testing.T) {
-	if _, err := exec.LookPath("helm"); err != nil {
-		t.Skip("helm is required for chart render tests")
-	}
+	requireHelm(t)
 	for _, tt := range []struct {
 		name, values, wantError, wantSubject string
 	}{

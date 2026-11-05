@@ -308,7 +308,7 @@ func TestTryEmergencyPromote_CancelAfterTakeoverSentKeepsBudgets(t *testing.T) {
 	}
 }
 
-// --- unconfirmed outcomes (round-4 review, Opus R2) --------------------------
+// --- unconfirmed outcomes ----------------------------------------------------
 
 // dialStep is one scripted dial result.
 type dialStep struct {

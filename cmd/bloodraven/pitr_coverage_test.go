@@ -29,9 +29,9 @@ func TestPITRCoverageRequired(t *testing.T) {
 		{name: "partial tail", data: true, stop: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), partial: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store, _ := round2Archive(t)
+			store, _ := archiveBinlogFixtures(t)
 			if tc.data {
-				store, _ = round2Archive(t, pitrFixture(t, "incarnation-a.bin"))
+				store, _ = archiveBinlogFixtures(t, pitrFixture(t, "incarnation-a.bin"))
 			}
 			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, tc.stop, t.TempDir(), retentionTestSID+":1-10", tc.partial, false, "timestamp", slog.New(slog.NewTextHandler(io.Discard, nil)))
 			if tc.want != "" {
@@ -48,7 +48,7 @@ func TestPITRCoverageRequired(t *testing.T) {
 }
 
 func TestPITROmittedArchiveSite(t *testing.T) {
-	store, _ := round2Archive(t, pitrFixture(t, "incarnation-a.bin"))
+	store, _ := archiveBinlogFixtures(t, pitrFixture(t, "incarnation-a.bin"))
 	_, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"renamed"}, time.Now(), t.TempDir(), "", true, false, "timestamp", slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "PITRArchiveSiteOmitted") || !strings.Contains(err.Error(), "manifest-iad.json") {
 		t.Fatalf("omitted source accepted: %v", err)
@@ -108,7 +108,7 @@ func TestPITRCoverageArchiveCases(t *testing.T) {
 			case "zero manifests":
 				want = "PITRTargetNotCovered"
 			case "zero files":
-				round2Manifest(t, store, sidecar.Manifest{Site: "iad"})
+				saveArchiveManifest(t, store, sidecar.Manifest{Site: "iad"})
 				want = "PITRTargetNotCovered"
 			case "partial empty":
 				partial = true
@@ -130,7 +130,7 @@ func TestPITRCoverageArchiveCases(t *testing.T) {
 				switch name {
 				case "forged timestamp":
 					stop = stop.Add(time.Hour)
-					round2Manifest(t, store, sidecar.Manifest{Site: "iad", Files: []sidecar.ManifestEntry{{Name: "mysql-bin.000001", ID: e.Digest, PreviousGTIDs: e.Metadata.PreviousGTIDs, LastEventTime: stop.Add(time.Hour)}}})
+					saveArchiveManifest(t, store, sidecar.Manifest{Site: "iad", Files: []sidecar.ManifestEntry{{Name: "mysql-bin.000001", ID: e.Digest, PreviousGTIDs: e.Metadata.PreviousGTIDs, LastEventTime: stop.Add(time.Hour)}}})
 					want = "PITRTargetNotCovered"
 				case "beyond tail":
 					stop = stop.Add(time.Hour)
@@ -177,7 +177,7 @@ func TestPITRCoverageArchiveCases(t *testing.T) {
 						m.Divergent = []sidecar.ArchiveDivergence{{Name: row.Name, ID: row.ID, MissingGTIDs: "lost:1"}}
 						want = "divergent"
 					}
-					round2Manifest(t, store, m)
+					saveArchiveManifest(t, store, m)
 					if name == "partial quarantine" {
 						if err := sidecar.QuarantineArchive(context.Background(), store, "binlogs", "iad", row.Name, row.ID, "test", retentionTestSID+":1-20", false); err != nil {
 							t.Fatal(err)

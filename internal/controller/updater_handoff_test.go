@@ -363,7 +363,7 @@ func TestExecuteTargets_HandoffRefusesCandidateReplacedAfterStop(t *testing.T) {
 	}
 }
 
-// Adapted from the round-2 review reproduction: a replacement that
+// A replacement that
 // appears after the final GTID proof, just before the writability
 // statements, must never be the server made writable. The pinned
 // connection to the proven server breaks, so the handoff refuses.
@@ -398,7 +398,7 @@ func TestExecuteTargets_HandoffRefusesReplacementAfterFinalProof(t *testing.T) {
 	}
 }
 
-// The round-2 review's wrapper form of the same race: a Checker whose
+// The wrapper form of the same race: a Checker whose
 // writability calls would go to a replacement. Promotion uses the pinned
 // session of the proven server, so only that server can become writable.
 type lateReplacementChecker struct {

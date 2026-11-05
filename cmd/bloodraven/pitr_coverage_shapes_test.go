@@ -19,12 +19,12 @@ import (
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
-func round1Time(hour, minute, second int) time.Time {
+func coverageTime(hour, minute, second int) time.Time {
 	return time.Date(2026, 4, 15, hour, minute, second, 0, time.UTC)
 }
 
 // Preserve native framing and CRCs while varying history, clocks, and idle files.
-func round1Stream(t *testing.T, previous uint64, at time.Time, idle, foreign bool) []byte {
+func coverageStream(t *testing.T, previous uint64, at time.Time, idle, foreign bool) []byte {
 	t.Helper()
 	raw := pitrFixture(t, "incarnation-a.bin")
 	result := []byte("\xfebin")
@@ -67,7 +67,7 @@ func round1Stream(t *testing.T, previous uint64, at time.Time, idle, foreign boo
 	return result
 }
 
-func round1PatchTimestamp(t *testing.T, raw []byte, kind byte, ts uint32) []byte {
+func patchEventTimestamp(t *testing.T, raw []byte, kind byte, ts uint32) []byte {
 	t.Helper()
 	raw = bytes.Clone(raw)
 	for off := 4; off < len(raw); {
@@ -81,7 +81,7 @@ func round1PatchTimestamp(t *testing.T, raw []byte, kind byte, ts uint32) []byte
 	return raw
 }
 
-func round1Archive(t *testing.T, streams map[string][][]byte) sidecar.ArchiveStore {
+func coverageArchive(t *testing.T, streams map[string][][]byte) sidecar.ArchiveStore {
 	t.Helper()
 	store, err := sidecar.NewArchiveStore(context.Background(), &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest}})
 	if err != nil {
@@ -115,12 +115,12 @@ func round1Archive(t *testing.T, streams map[string][][]byte) sidecar.ArchiveSto
 	return store
 }
 
-func TestRound1IdleCoverage(t *testing.T) {
+func TestPITRIdleCoverage(t *testing.T) {
 	for _, shape := range []string{"idle sealed file", "backed-up transaction then idle rotation", "backed-up transaction then idle file", "replica-era transaction then idle rotation"} {
 		t.Run(shape, func(t *testing.T) {
-			idle := round1Stream(t, 11, round1Time(9, 0, 0), true, false)
-			idle = round1PatchTimestamp(t, idle, 3, uint32(round1Time(9, 31, 0).Unix()))
-			old := round1PatchTimestamp(t, pitrFixture(t, "incarnation-a.bin"), 3, uint32(round1Time(9, 31, 0).Unix()))
+			idle := coverageStream(t, 11, coverageTime(9, 0, 0), true, false)
+			idle = patchEventTimestamp(t, idle, 3, uint32(coverageTime(9, 31, 0).Unix()))
+			old := patchEventTimestamp(t, pitrFixture(t, "incarnation-a.bin"), 3, uint32(coverageTime(9, 31, 0).Unix()))
 			files := [][]byte{idle}
 			switch shape {
 			case "backed-up transaction then idle rotation":
@@ -130,20 +130,20 @@ func TestRound1IdleCoverage(t *testing.T) {
 			case "replica-era transaction then idle rotation":
 				// The sealed file's transaction came from another server, so
 				// the local rotation cannot show that replication reached it.
-				events := round4Events(old)
+				events := splitBinlogEvents(old)
 				for _, event := range events {
 					if event[4] == 33 || event[4] == 2 {
 						binary.LittleEndian.PutUint32(event[5:9], 2)
 					}
 				}
-				files = [][]byte{round4Reframe(events)}
+				files = [][]byte{reframeBinlogEvents(events)}
 			}
 			// A transaction-free chain cannot show which server wrote it,
 			// so its server-local stop event proves nothing on its own.
 			covered := shape == "backed-up transaction then idle rotation" || shape == "backed-up transaction then idle file"
-			store := round1Archive(t, map[string][][]byte{"iad": files})
+			store := coverageArchive(t, map[string][][]byte{"iad": files})
 			for _, partial := range []bool{false, true} {
-				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-11", partial, false, "timestamp", slog.Default())
+				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, coverageTime(9, 30, 0), t.TempDir(), retentionTestSID+":1-11", partial, false, "timestamp", slog.Default())
 				if covered && (err != nil || !result.TargetCovered || result.Partial || len(result.Sites[0].Staged) != 0) {
 					t.Fatalf("idle window lost verified coverage: %+v %v", result, err)
 				}
@@ -161,36 +161,36 @@ func TestRound1IdleCoverage(t *testing.T) {
 // Under the single-site rule, two sites holding transactions to replay always
 // refuse, whatever their event order. A site that replays nothing before the
 // target is left out, so it neither refuses nor ends replay early.
-func TestRound1TwoReplayingSitesAlwaysRefuse(t *testing.T) {
+func TestPITRTwoReplayingSitesAlwaysRefuse(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	for _, name := range []string{"ordered failover", "reverse failover", "failback", "overlap", "equal boundary", "missing timestamp", "foreign barrier", "nontransaction barrier"} {
 		t.Run(name, func(t *testing.T) {
-			early := round1Stream(t, 10, round1Time(9, 0, 0), false, false)
-			late := round1Stream(t, 11, round1Time(11, 0, 0), false, false)
+			early := coverageStream(t, 10, coverageTime(9, 0, 0), false, false)
+			late := coverageStream(t, 11, coverageTime(11, 0, 0), false, false)
 			streams := map[string][][]byte{"east": {early}, "iad": {late}}
 			switch name {
 			case "reverse failover":
 				streams = map[string][][]byte{"east": {late}, "iad": {early}}
 			case "failback":
-				streams = map[string][][]byte{"east": {early, round1Stream(t, 12, round1Time(11, 0, 0), false, false)}, "iad": {round1Stream(t, 11, round1Time(10, 0, 0), false, false)}}
+				streams = map[string][][]byte{"east": {early, coverageStream(t, 12, coverageTime(11, 0, 0), false, false)}, "iad": {coverageStream(t, 11, coverageTime(10, 0, 0), false, false)}}
 			case "overlap":
-				streams["iad"] = [][]byte{round1Stream(t, 11, round1Time(9, 0, 1), false, false)}
+				streams["iad"] = [][]byte{coverageStream(t, 11, coverageTime(9, 0, 1), false, false)}
 			case "equal boundary":
-				streams["iad"] = [][]byte{round1Stream(t, 11, round1Time(9, 0, 2), false, false)}
+				streams["iad"] = [][]byte{coverageStream(t, 11, coverageTime(9, 0, 2), false, false)}
 			case "missing timestamp":
-				streams["iad"] = [][]byte{round1Stream(t, 10, round1Time(11, 0, 0), false, false)}
-				streams["east"] = [][]byte{round1PatchTimestamp(t, early, 15, 0)}
+				streams["iad"] = [][]byte{coverageStream(t, 10, coverageTime(11, 0, 0), false, false)}
+				streams["east"] = [][]byte{patchEventTimestamp(t, early, 15, 0)}
 			case "foreign barrier":
 				streams["iad"] = [][]byte{early}
-				streams["east"] = [][]byte{round1Stream(t, 10, round1Time(12, 0, 0), false, true)}
+				streams["east"] = [][]byte{coverageStream(t, 10, coverageTime(12, 0, 0), false, true)}
 			case "nontransaction barrier":
-				streams["iad"] = [][]byte{round1Stream(t, 10, round1Time(11, 0, 0), false, false)}
-				streams["east"] = [][]byte{round1Stream(t, 10, round1Time(12, 0, 0), true, true)}
+				streams["iad"] = [][]byte{coverageStream(t, 10, coverageTime(11, 0, 0), false, false)}
+				streams["east"] = [][]byte{coverageStream(t, 10, coverageTime(12, 0, 0), true, true)}
 			}
-			store := round1Archive(t, streams)
+			store := coverageArchive(t, streams)
 			for _, partial := range []bool{false, true} {
 				for _, unverified := range []bool{false, true} {
-					result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "east"}, round1Time(11, 0, 2), t.TempDir(), retentionTestSID+":1-10", partial, unverified, "timestamp", logger)
+					result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "east"}, coverageTime(11, 0, 2), t.TempDir(), retentionTestSID+":1-10", partial, unverified, "timestamp", logger)
 					replaying := 0
 					for _, site := range result.Sites {
 						if site.HasReplayTransactions {
@@ -234,16 +234,16 @@ func TestRound1TwoReplayingSitesAlwaysRefuse(t *testing.T) {
 	}
 }
 
-func TestRound1UnanchoredCoverage(t *testing.T) {
+func TestPITRUnanchoredCoverage(t *testing.T) {
 	for _, name := range []string{"foreign lineage", "unknown baseline"} {
 		t.Run(name, func(t *testing.T) {
-			store := round1Archive(t, map[string][][]byte{"iad": {round1Stream(t, 10, round1Time(11, 0, 0), false, name == "foreign lineage")}})
+			store := coverageArchive(t, map[string][][]byte{"iad": {coverageStream(t, 10, coverageTime(11, 0, 0), false, name == "foreign lineage")}})
 			baseline := retentionTestSID + ":1-10"
 			if name == "unknown baseline" {
 				baseline = ""
 			}
 			out := t.TempDir()
-			_, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(10, 0, 0), out, baseline, false, false, "timestamp", slog.Default())
+			_, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, coverageTime(10, 0, 0), out, baseline, false, false, "timestamp", slog.Default())
 			want := "PITRTargetNotCovered"
 			if name == "unknown baseline" {
 				want = "PITRBackupBoundUnknown"
@@ -251,7 +251,7 @@ func TestRound1UnanchoredCoverage(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("unanchored barrier certified: %v", err)
 			}
-			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(10, 0, 0), out, baseline, true, false, "timestamp", slog.Default())
+			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, coverageTime(10, 0, 0), out, baseline, true, false, "timestamp", slog.Default())
 			if err != nil || result.TargetCovered || !result.Partial {
 				t.Fatalf("unanchored partial: %+v %v", result, err)
 			}
@@ -271,7 +271,7 @@ func TestRound1UnanchoredCoverage(t *testing.T) {
 	}
 }
 
-func TestRound1CompressedPayloadTimesAreDiagnostic(t *testing.T) {
+func TestPITRCompressedPayloadTimesAreDiagnostic(t *testing.T) {
 	compressed := pitrFixture(t, "compressed-transaction.bin")
 	// Decoded inner headers keep event-time diagnostics complete; a
 	// compressed transaction alone no longer decides multi-site policy.
@@ -279,20 +279,20 @@ func TestRound1CompressedPayloadTimesAreDiagnostic(t *testing.T) {
 	if err != nil || !evidence.TimestampsComplete {
 		t.Fatalf("decoded payload marked timestamps incomplete: %+v %v", evidence, err)
 	}
-	store := round1Archive(t, map[string][][]byte{"east": {compressed}, "iad": {round1Stream(t, 10, round1Time(9, 0, 0), false, false)}})
-	_, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"east", "iad"}, round1Time(11, 0, 1), t.TempDir(), retentionTestSID+":1-10", true, false, "timestamp", slog.Default())
+	store := coverageArchive(t, map[string][][]byte{"east": {compressed}, "iad": {coverageStream(t, 10, coverageTime(9, 0, 0), false, false)}})
+	_, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"east", "iad"}, coverageTime(11, 0, 1), t.TempDir(), retentionTestSID+":1-10", true, false, "timestamp", slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "PITRCrossSiteOrder") {
 		t.Fatalf("two replaying sites certified: %v", err)
 	}
 	// A single staged site retains the existing native payload replay rules.
-	store = round1Archive(t, map[string][][]byte{"iad": {compressed}})
-	result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(9, 0, 1), t.TempDir(), retentionTestSID+":1-10", false, false, "timestamp", slog.Default())
+	store = coverageArchive(t, map[string][][]byte{"iad": {compressed}})
+	result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, coverageTime(9, 0, 1), t.TempDir(), retentionTestSID+":1-10", false, false, "timestamp", slog.Default())
 	if err != nil || !result.TargetCovered {
 		t.Fatalf("single-site payload replay changed: %+v %v", result, err)
 	}
 }
 
-func TestRound1NativeIdleRotationCoverage(t *testing.T) {
+func TestPITRNativeIdleRotationCoverage(t *testing.T) {
 	data := pitrFixture(t, "native/flush-empty.bin")
 	evidence, err := sidecar.InspectBinlog(bytes.NewReader(data), time.Time{})
 	if err != nil {
@@ -303,23 +303,23 @@ func TestRound1NativeIdleRotationCoverage(t *testing.T) {
 	}
 	// A transaction-free file cannot show which server wrote the history, so
 	// its server-local rotation alone does not prove the stop.
-	store := round1Archive(t, map[string][][]byte{"iad": {data}})
+	store := coverageArchive(t, map[string][][]byte{"iad": {data}})
 	result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, evidence.NewestEventTime, t.TempDir(), evidence.Metadata.PreviousGTIDs, false, false, "timestamp", slog.Default())
 	if err == nil || result.TargetCovered || !strings.Contains(result.Sites[0].AnchorReason, "stop reached only on a server-local event") {
 		t.Fatalf("transaction-free rotation certified: %+v %v", result, err)
 	}
 	// With the writer's file archived, its commits share the rotation's
 	// second: they are after a target at that second, yet in the bound.
-	store = round1Archive(t, map[string][][]byte{"iad": {pitrFixture(t, "native/initial.bin"), data}})
+	store = coverageArchive(t, map[string][][]byte{"iad": {pitrFixture(t, "native/initial.bin"), data}})
 	_, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, evidence.NewestEventTime, t.TempDir(), evidence.Metadata.PreviousGTIDs, false, false, "timestamp", slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "the backup already contains transactions committed at or after the target") {
 		t.Fatalf("post-target bound certified: %v", err)
 	}
 }
 
-func TestRound1FirstEventAtTarget(t *testing.T) {
-	at := round1Time(11, 0, 0)
-	store := round1Archive(t, map[string][][]byte{"iad": {round1Stream(t, 10, at, false, false)}})
+func TestPITRFirstEventAtTarget(t *testing.T) {
+	at := coverageTime(11, 0, 0)
+	store := coverageArchive(t, map[string][][]byte{"iad": {coverageStream(t, 10, at, false, false)}})
 	result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, at, t.TempDir(), retentionTestSID+":1-10", false, false, "timestamp", slog.Default())
 	if err != nil || !result.TargetCovered || len(result.Sites[0].Staged) != 1 || !result.Sites[0].NewestReplayEventTime.IsZero() {
 		t.Fatalf("first-event barrier coverage: %+v %v", result, err)

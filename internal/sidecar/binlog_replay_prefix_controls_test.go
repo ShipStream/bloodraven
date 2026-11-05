@@ -8,16 +8,16 @@ import (
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
-func round4PrefixEvent(kind replication.EventType) *replication.BinlogEvent {
+func prefixControlEvent(kind replication.EventType) *replication.BinlogEvent {
 	return &replication.BinlogEvent{Header: &replication.EventHeader{EventType: kind}, RawData: make([]byte, 19)}
 }
-func round4PrefixQuery(sql string) *replication.BinlogEvent {
-	event := round4PrefixEvent(replication.QUERY_EVENT)
+func prefixQueryEvent(sql string) *replication.BinlogEvent {
+	event := prefixControlEvent(replication.QUERY_EVENT)
 	event.Event = &replication.QueryEvent{Query: []byte(sql)}
 	return event
 }
-func round4PrefixPayload(events ...*replication.BinlogEvent) *replication.BinlogEvent {
-	event := round4PrefixEvent(replication.TRANSACTION_PAYLOAD_EVENT)
+func prefixPayloadEvent(events ...*replication.BinlogEvent) *replication.BinlogEvent {
+	event := prefixControlEvent(replication.TRANSACTION_PAYLOAD_EVENT)
 	event.Event = &replication.TransactionPayloadEvent{Events: events, Payload: []byte{1}, Size: 1, UncompressedSize: uint64(19 * len(events))}
 	for _, field := range []struct {
 		key   byte
@@ -31,52 +31,52 @@ func round4PrefixPayload(events ...*replication.BinlogEvent) *replication.Binlog
 	return event
 }
 func TestCompletedPrefixBodyForms(t *testing.T) {
-	begin := round4PrefixQuery("BEGIN")
-	xid := round4PrefixEvent(replication.XID_EVENT)
-	commit := round4PrefixQuery("COMMIT")
-	unknown := round4PrefixEvent(replication.EventType(99))
+	begin := prefixQueryEvent("BEGIN")
+	xid := prefixControlEvent(replication.XID_EVENT)
+	commit := prefixQueryEvent("COMMIT")
+	unknown := prefixControlEvent(replication.EventType(99))
 	for _, tc := range []struct {
 		name     string
 		events   []*replication.BinlogEvent
 		complete bool
 	}{
-		{"native shape", []*replication.BinlogEvent{begin, round4PrefixEvent(replication.TABLE_MAP_EVENT), round4PrefixEvent(replication.WRITE_ROWS_EVENTv2), xid}, true},
-		{"savepoint before XID", []*replication.BinlogEvent{begin, round4PrefixQuery("SAVEPOINT `s1`"), xid}, true},
-		{"savepoint rollback", []*replication.BinlogEvent{begin, round4PrefixQuery("SAVEPOINT `s1`"), round4PrefixQuery("ROLLBACK TO SAVEPOINT `s1`"), xid}, true},
-		{"payload savepoint rollback", []*replication.BinlogEvent{round4PrefixPayload(begin, round4PrefixQuery("ROLLBACK TO SAVEPOINT `s1`"), xid)}, true},
-		{"line commented XA", []*replication.BinlogEvent{round4PrefixQuery("-- transaction\nXA START 'x'"), xid}, false},
-		{"version commented control", []*replication.BinlogEvent{round4PrefixQuery("/*!80000 XA START 'x' */"), xid}, false},
-		{"neutral Query before COMMIT", []*replication.BinlogEvent{begin, round4PrefixQuery("RELEASE SAVEPOINT `s1`"), commit}, true},
-		{"analyze", []*replication.BinlogEvent{round4PrefixQuery("ANALYZE TABLE replay.markers")}, true},
-		{"optimize", []*replication.BinlogEvent{round4PrefixQuery("OPTIMIZE TABLE replay.markers")}, true},
-		{"flush", []*replication.BinlogEvent{round4PrefixQuery("FLUSH PRIVILEGES")}, true},
-		{"password", []*replication.BinlogEvent{round4PrefixQuery("SET PASSWORD = 'new'")}, true},
-		{"commented DDL", []*replication.BinlogEvent{round4PrefixQuery("/* application */ CREATE TABLE replay.other (id INT)")}, true},
-		{"decoded payload XID", []*replication.BinlogEvent{round4PrefixPayload(begin, round4PrefixQuery("SAVEPOINT `s1`"), xid)}, true},
-		{"decoded payload COMMIT", []*replication.BinlogEvent{round4PrefixPayload(begin, commit)}, true},
-		{"interrupted", []*replication.BinlogEvent{begin, round4PrefixQuery("INSERT INTO replay.markers VALUES (1)")}, false},
-		{"rollback", []*replication.BinlogEvent{begin, round4PrefixQuery("ROLLBACK"), xid}, false},
-		{"XA", []*replication.BinlogEvent{round4PrefixQuery("XA START 'x'"), xid}, false},
-		{"commented XA", []*replication.BinlogEvent{round4PrefixQuery("/* application */ XA START 'x'"), xid}, false},
+		{"native shape", []*replication.BinlogEvent{begin, prefixControlEvent(replication.TABLE_MAP_EVENT), prefixControlEvent(replication.WRITE_ROWS_EVENTv2), xid}, true},
+		{"savepoint before XID", []*replication.BinlogEvent{begin, prefixQueryEvent("SAVEPOINT `s1`"), xid}, true},
+		{"savepoint rollback", []*replication.BinlogEvent{begin, prefixQueryEvent("SAVEPOINT `s1`"), prefixQueryEvent("ROLLBACK TO SAVEPOINT `s1`"), xid}, true},
+		{"payload savepoint rollback", []*replication.BinlogEvent{prefixPayloadEvent(begin, prefixQueryEvent("ROLLBACK TO SAVEPOINT `s1`"), xid)}, true},
+		{"line commented XA", []*replication.BinlogEvent{prefixQueryEvent("-- transaction\nXA START 'x'"), xid}, false},
+		{"version commented control", []*replication.BinlogEvent{prefixQueryEvent("/*!80000 XA START 'x' */"), xid}, false},
+		{"neutral Query before COMMIT", []*replication.BinlogEvent{begin, prefixQueryEvent("RELEASE SAVEPOINT `s1`"), commit}, true},
+		{"analyze", []*replication.BinlogEvent{prefixQueryEvent("ANALYZE TABLE replay.markers")}, true},
+		{"optimize", []*replication.BinlogEvent{prefixQueryEvent("OPTIMIZE TABLE replay.markers")}, true},
+		{"flush", []*replication.BinlogEvent{prefixQueryEvent("FLUSH PRIVILEGES")}, true},
+		{"password", []*replication.BinlogEvent{prefixQueryEvent("SET PASSWORD = 'new'")}, true},
+		{"commented DDL", []*replication.BinlogEvent{prefixQueryEvent("/* application */ CREATE TABLE replay.other (id INT)")}, true},
+		{"decoded payload XID", []*replication.BinlogEvent{prefixPayloadEvent(begin, prefixQueryEvent("SAVEPOINT `s1`"), xid)}, true},
+		{"decoded payload COMMIT", []*replication.BinlogEvent{prefixPayloadEvent(begin, commit)}, true},
+		{"interrupted", []*replication.BinlogEvent{begin, prefixQueryEvent("INSERT INTO replay.markers VALUES (1)")}, false},
+		{"rollback", []*replication.BinlogEvent{begin, prefixQueryEvent("ROLLBACK"), xid}, false},
+		{"XA", []*replication.BinlogEvent{prefixQueryEvent("XA START 'x'"), xid}, false},
+		{"commented XA", []*replication.BinlogEvent{prefixQueryEvent("/* application */ XA START 'x'"), xid}, false},
 		{"unknown", []*replication.BinlogEvent{begin, unknown, xid}, false},
-		{"payload interrupted", []*replication.BinlogEvent{round4PrefixPayload(begin, round4PrefixQuery("SAVEPOINT `s1`"))}, false},
-		{"payload unknown", []*replication.BinlogEvent{round4PrefixPayload(begin, unknown, xid)}, false},
-		{"payload rolled back", []*replication.BinlogEvent{round4PrefixPayload(begin, round4PrefixQuery("ROLLBACK"), xid)}, false},
-		{"start transaction", []*replication.BinlogEvent{round4PrefixQuery("START TRANSACTION"), round4PrefixQuery("INSERT INTO replay.markers VALUES (1)"), xid}, true},
-		{"standalone start", []*replication.BinlogEvent{round4PrefixQuery("START REPLICA")}, true},
-		{"rollback work to savepoint", []*replication.BinlogEvent{begin, round4PrefixQuery("ROLLBACK WORK TO SAVEPOINT `s1`"), xid}, true},
-		{"savepoint rollback outside transaction", []*replication.BinlogEvent{round4PrefixQuery("ROLLBACK TO SAVEPOINT `s1`"), xid}, false},
-		{"hash comment", []*replication.BinlogEvent{round4PrefixQuery("# note\nCREATE TABLE replay.other (id INT)")}, true},
-		{"unterminated comment", []*replication.BinlogEvent{round4PrefixQuery("/* note CREATE TABLE replay.other (id INT)"), xid}, false},
-		{"unterminated line comment", []*replication.BinlogEvent{round4PrefixQuery("-- only a comment"), xid}, false},
-		{"empty query", []*replication.BinlogEvent{round4PrefixQuery("  ;"), xid}, false},
-		{"query event without body", []*replication.BinlogEvent{round4PrefixEvent(replication.QUERY_EVENT), xid}, false},
-		{"payload XA", []*replication.BinlogEvent{round4PrefixPayload(round4PrefixQuery("XA START 'x'"), xid)}, false},
-		{"payload ending without commit", []*replication.BinlogEvent{round4PrefixPayload(begin, round4PrefixEvent(replication.WRITE_ROWS_EVENTv2))}, false},
+		{"payload interrupted", []*replication.BinlogEvent{prefixPayloadEvent(begin, prefixQueryEvent("SAVEPOINT `s1`"))}, false},
+		{"payload unknown", []*replication.BinlogEvent{prefixPayloadEvent(begin, unknown, xid)}, false},
+		{"payload rolled back", []*replication.BinlogEvent{prefixPayloadEvent(begin, prefixQueryEvent("ROLLBACK"), xid)}, false},
+		{"start transaction", []*replication.BinlogEvent{prefixQueryEvent("START TRANSACTION"), prefixQueryEvent("INSERT INTO replay.markers VALUES (1)"), xid}, true},
+		{"standalone start", []*replication.BinlogEvent{prefixQueryEvent("START REPLICA")}, true},
+		{"rollback work to savepoint", []*replication.BinlogEvent{begin, prefixQueryEvent("ROLLBACK WORK TO SAVEPOINT `s1`"), xid}, true},
+		{"savepoint rollback outside transaction", []*replication.BinlogEvent{prefixQueryEvent("ROLLBACK TO SAVEPOINT `s1`"), xid}, false},
+		{"hash comment", []*replication.BinlogEvent{prefixQueryEvent("# note\nCREATE TABLE replay.other (id INT)")}, true},
+		{"unterminated comment", []*replication.BinlogEvent{prefixQueryEvent("/* note CREATE TABLE replay.other (id INT)"), xid}, false},
+		{"unterminated line comment", []*replication.BinlogEvent{prefixQueryEvent("-- only a comment"), xid}, false},
+		{"empty query", []*replication.BinlogEvent{prefixQueryEvent("  ;"), xid}, false},
+		{"query event without body", []*replication.BinlogEvent{prefixControlEvent(replication.QUERY_EVENT), xid}, false},
+		{"payload XA", []*replication.BinlogEvent{prefixPayloadEvent(prefixQueryEvent("XA START 'x'"), xid)}, false},
+		{"payload ending without commit", []*replication.BinlogEvent{prefixPayloadEvent(begin, prefixControlEvent(replication.WRITE_ROWS_EVENTv2))}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := replayPrefixCollector{committed: make(internalmysql.GTIDSet)}
-			gtid := round4PrefixEvent(replication.GTID_EVENT)
+			gtid := prefixControlEvent(replication.GTID_EVENT)
 			gtid.Event = &replication.GTIDEvent{SID: make([]byte, 16), GNO: 11}
 			c.observe(gtid)
 			for _, event := range tc.events {
