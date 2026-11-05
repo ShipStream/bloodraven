@@ -12,21 +12,49 @@ name: Deploy Site
 #
 # Railway builds the uploaded directory with Nixpacks per `site/railway.json`;
 # `site/.railwayignore` keeps build artifacts out of the upload.
+#
+# Which commit is deployed: until v1.7.0 ships, bloodraven.dev follows the
+# latest published release, NOT `main`. `main` is about to carry incompatible
+# v1alpha1 -> v1beta1 CRD changes (issue #237, proposals/20-api-v1beta1.md
+# section 6, F-41/F-42), and the site must never document fields that no
+# installable release has. So there is no push-to-main trigger: every run
+# resolves the latest non-prerelease GitHub Release and builds `site/` from
+# that tag.
+#
+#   * release.yml calls this workflow after it publishes a release. (A
+#     release published with GITHUB_TOKEN does not fire `release` events, so
+#     the `release: published` trigger only covers releases published by
+#     hand, for example a draft published from the UI.)
+#   * To ship a docs fix for the released version, commit it to a branch cut
+#     from the release tag (e.g. `release-1.6` from `v1.6.0`) and run this
+#     workflow by hand with `ref` set to that branch:
+#       gh workflow run deploy-site.yml -f ref=release-1.6
+#     Then land the same fix on `main`. The next release redeploys from its
+#     own tag and supersedes the hotfix.
+#   * A bare manual run (no `ref`) redeploys the latest release.
+#
+# After v1.7.0 ships, revisit whether to go back to deploying `main`.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'site/**'
-      - '.github/workflows/deploy-site.yml'
+  release:
+    types: [published]
+  workflow_call:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: >-
+          Branch, tag or SHA to build instead of the latest release (docs
+          hotfix from a release branch). Leave empty for the latest release.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
-# Serialize deploys so two pushes cannot race the same service. Superseded
+# Serialize deploys so two runs cannot race the same service. Superseded
 # runs are dropped while pending rather than cancelled mid-upload, so the
-# last commit to `site/` is always the one that ends up live.
+# last requested deploy is always the one that ends up live.
 concurrency:
   group: deploy-site
   cancel-in-progress: false
@@ -34,6 +62,8 @@ concurrency:
 jobs:
   deploy:
     name: Deploy to Railway
+    # Prereleases never become the site.
+    if: github.event_name != 'release' || !github.event.release.prerelease
     runs-on: ubuntu-latest
     environment:
       name: bloodraven.dev
@@ -43,7 +73,32 @@ jobs:
     env:
       RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE || 'bloodraven-site' }}
     steps:
+      - name: Resolve the ref to deploy
+        id: ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_INPUT: ${{ inputs.ref }}
+        run: |
+          if [ -n "$REF_INPUT" ]; then
+            echo "Deploying the requested ref: $REF_INPUT"
+            echo "ref=$REF_INPUT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # `gh release view` with no tag returns the release marked Latest,
+          # which excludes drafts and prereleases.
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          # release.yml publishes every v*.*.* tag as a full release, so an
+          # -rc tag could still be marked Latest. Refuse to publish it.
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Latest release tag '$tag' is not a plain vX.Y.Z release. Run this workflow by hand with an explicit ref."
+            exit 1
+          fi
+          echo "Deploying the latest release: $tag"
+          echo "ref=$tag" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -74,11 +129,13 @@ jobs:
 
       - name: Summarize
         if: success()
+        env:
+          DEPLOY_REF: ${{ steps.ref.outputs.ref }}
         run: |
           {
             echo "### Site deployed"
             echo
-            echo "Service \`$RAILWAY_SERVICE\` updated from \`${GITHUB_SHA:0:7}\`."
+            echo "Service \`$RAILWAY_SERVICE\` updated from \`$DEPLOY_REF\` (\`$(git rev-parse --short HEAD)\`)."
             echo
             echo "<https://bloodraven.dev>"
           } >> "$GITHUB_STEP_SUMMARY"
