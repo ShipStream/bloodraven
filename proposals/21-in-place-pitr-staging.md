@@ -4,7 +4,7 @@
 **Status:** Draft
 **Branch:** `docs/in-place-pitr-proposal`
 
-All names introduced here (fields, phases, reasons, Events, annotations, metrics, log messages, scripts, GTID tags) are **proposed**. Citations are `path:line` on `main` at `418cd4b` unless marked `origin/fix/issue-212:` (PR #233, open, head `4e72753`). MySQL behaviour cited from the MySQL 9.7 Reference Manual is marked **unverified in repo** where nothing in this repository exercises it yet.
+All names introduced here (fields, phases, reasons, Events, annotations, metrics, log messages, scripts, GTID tags) are **proposed**. Citations are `path:line` on `main` at `418cd4b` unless marked `origin/fix/issue-212:` (PR #233 at head `4e72753`, since merged unchanged as `d846f9f`). MySQL behaviour cited from the MySQL 9.7 Reference Manual is marked **unverified in repo** where nothing in this repository exercises it yet.
 
 ## Supported procedure
 
@@ -20,10 +20,10 @@ What users get: a rewind of a whole instance to a proven point in time, in the s
 
 ## Goals
 
-1. Full-instance in-place PITR (`restoreInPlace.pointInTime` with empty `loadOptions.includeSchemas` and `excludeSchemas`, from a `mysqlBackupRef` source) through a staging `mysqld` in an operator-built Job.
-2. Every PITR refusal that can be decided from the backup, the archive and the staged result (coverage, cross-site order, GTID proof, versions, volume, subset of live history, loader budget) lands before the fence. The checks repeated after the fence, against the bound target, are bounded (seconds to minutes, plus the archive wait) and release the fence when they refuse.
+1. Full-instance in-place PITR (`restoreInPlace.pointInTime` with empty `loadOptions.includeSchemas` and `excludeSchemas`, from a `mysqlBackupRef` whose dump recorded instance scope and consistency) through a staging `mysqld` in an operator-built Job.
+2. Every PITR refusal that can be decided from the backup, the archive and the staged result (source scope, coverage, cross-site order, GTID proof, versions, keyring, volume, subset of live history, loader budget) lands before the fence. The checks repeated after the fence, against the bound target, are bounded (seconds to minutes, plus the archive wait) and release the fence when they refuse, unless a damage record exists.
 3. The outage is today's full-instance outage plus bounded additions: the Fencing rechecks, the barrier archive wait (at most 10 minutes), the #233 peer stop (at most 2 minutes) and the loader's artifact re-hash. Staging, replay and the intermediate dump run while the group serves traffic and emergency failover stays available.
-4. A loader Job that may have touched the primary leaves it fenced, the peers held with pre-restore data, and a verified artifact that a new confirm can reuse without re-staging. Only a loader that exits through its explicit pre-destruction refusal path counts as harmless.
+4. One damage invariant (Lifecycle, "The damage invariant"): from the loader's write-ahead until one of four named proofs, the primary stays fenced and every damage guard stays on, in every phase of every run. A verified artifact lets a new confirm repair without re-staging.
 5. Archive lineage stays correct: no GTID reuse; an in-band barrier before destructive execution and an in-band completion marker after it, both enforced by the planner; an automatic post-restore full backup.
 6. Additive to `shipstream.io/v1beta1`: no renamed or removed fields.
 
@@ -45,10 +45,10 @@ The feature (PR6 below) does not merge until all of these are on `main`:
 |---|---|---|
 | P1 | **#206** chronological cross-site replay with an exact GTID continuity proof, and a writer-stamped source-archive identity the operator can read for a profile without running a plan | Without it a window spanning a failback (A to B to A) can skip the other site's transactions. The staged GTID proof needs #206's plan to emit the exact replay set across sites, and artifact reuse needs the archive identity before it decides. |
 | P2 | **#203** encryption identity bound to the prefix, with an operator-owned immutable Secret revision | The staging Job must mount the accepted revision, not the user Secret, so a Secret edit during a multi-hour run cannot change what the Job decrypts. The revision is part of the reuse fingerprint. |
-| P3 | **#233** (open): peer `STOP REPLICA IO_THREAD` at Fencing, `fencedGtidExecuted`, Held vs Discarded settlement | Without it the peers replicate the DROPs and a post-DROP failure damages every site. Settlement is the evidence the damaged-primary fence keys on. |
+| P3 | **#233** (merged as `d846f9f`): peer `STOP REPLICA IO_THREAD` at Fencing, `fencedGtidExecuted`, Held vs Discarded settlement | Without it the peers replicate the DROPs and a post-DROP failure damages every site. Settlement is the evidence the damaged-primary fence keys on. |
 | P4 | **v1.6.0 target-coverage rule** for the staged run: the staging verdict must be `targetCovered=true` (`cmd/bloodraven/pitr_download.go:388-414`) | An in-place restore to an unproven point is a silent partial restore. `allowPartial` and `allowUnverifiedCrossSite` (`api/v1alpha1/backup_types.go:219-234`) are refused for in-place runs at reconcile time. |
-| P5 | **Damaged-primary fence** (Q10) with the write-ahead damage boundary below, shipped as its own PR (PR1) | Today a failed restore unfences the primary ("Even on failure we unfence", `internal/controller/restore_inplace.go:925-927`). #233 settlement cannot close the gap alone: an unlogged load into a primary with no user schemas leaves `gtid_executed` unchanged, which #233 itself flags (`origin/fix/issue-212:internal/controller/restore_reclones.go:771-774`). That gap exists for non-PITR full-instance restores too. |
-| P6 | **Restore barrier, completion marker and automatic post-restore backup** (Q3), shipped as its own PR (PR2) | Today's non-PITR full-instance restores already break lineage silently: a PITR from a pre-restore backup across the restore replays post-restore binlogs onto pre-restore data. |
+| P5 | **Damaged-primary fence** (Q10) under the damage invariant below, shipped as its own PR (PR1) | Today a failed restore unfences the primary ("Even on failure we unfence", `internal/controller/restore_inplace.go:925-927`). #233 settlement cannot close the gap alone: an unlogged load into a primary with no user schemas leaves `gtid_executed` unchanged, which #233 itself flags (`origin/fix/issue-212:internal/controller/restore_reclones.go:771-774`). That gap exists for non-PITR full-instance restores too. |
+| P6 | **Restore markers, source-scope recording and automatic post-restore backup** (Q3), shipped as its own PR (PR2) | Today's non-PITR full-instance restores already break lineage silently: a PITR from a pre-restore backup across the restore replays post-restore binlogs onto pre-restore data. They also accept a schema-filtered dump, whose omitted schemas the DROP destroys while the run reports success. |
 
 ## API
 
@@ -153,7 +153,8 @@ type RestoreStagingVolumeSpec struct {
 Choices:
 
 - **`staging` is required exactly when `pointInTime` is set.** The pairing is structural (two fields that only make sense together), so it is CEL. A missing `volume.size` cannot be defaulted safely (Q6), so the block must exist; and a `staging` block on a non-PITR restore would be silently ignored, which is worse than an admission error. CRD validation ratcheting (on by default since Kubernetes 1.30) keeps an unchanged stored `restoreInPlace` updatable; with zero production users the residual case of an old object with `pointInTime` and no `staging` is accepted (D3).
-- **Everything else is reconcile-time** (`RestoreInPlaceRejected`, confirm not consumed), checked in the acceptance pass: `allowPartial: true`; `allowUnverifiedCrossSite: true`; `pointInTime` with a non-empty `includeSchemas`; a non-empty `excludeSchemas` on **any** full-instance restore (the DROP removes every user schema, so an excluded schema is destroyed and never reloaded, while the restore reports success); explicit `loadOptions.skipBinlog: false` on any full-instance restore; for PITR runs, `loadIndexes: false` (the artifact's DDL comes from the staged server, so missing secondary indexes would be carried into the live primary); a `source` other than `mysqlBackupRef` (only a referenced backup has the trusted GTID bound PITR requires, `internal/controller/restore.go:161-170`, `:1585-1594`); `validatePITRBackupBefore` against the backup's `completionTime` (`internal/controller/restore.go:1557-1573`); `excludeGtids` that does not parse or that intersects the backup's `status.gtidExecuted` (an exclusion cannot remove a transaction the dump already contains); `excludeGtids` naming any `bloodraven_restore*` GTID. A size below a floor is a Warning only (see Lifecycle).
+- **Everything else is reconcile-time** (`RestoreInPlaceRejected`, confirm not consumed), checked in the acceptance pass. For **every full-instance** restore (PITR or not; the DROP removes every user schema, so anything the source lacks is destroyed while the run reports success): a non-empty `loadOptions.excludeSchemas`; explicit `loadOptions.skipBinlog: false`; a `source` other than `mysqlBackupRef`; a referenced backup that is not `Succeeded`, is terminating, has no `status.location`, has `status.dumpScope` other than `Instance`, has `status.consistent` other than `true`, or has a `status.gtidExecuted` that is empty or does not parse (`validatePITRBackupBound`, `internal/controller/restore.go:1585-1594`, run with the PITR spec or with an empty one; a backup taken before PR2 has no scope and is refused, D3). For **per-schema** restores: any `status.restoreDamage` (the record names the exits). For **PITR** runs, additionally: `allowPartial: true`; `allowUnverifiedCrossSite: true`; a non-empty `includeSchemas`; `loadIndexes: false` (the artifact's DDL comes from the staged server, so missing secondary indexes would be carried into the live primary); `validatePITRBackupBefore` against the backup's `completionTime` (`internal/controller/restore.go:1557-1573`); `excludeGtids` that does not parse, intersects the backup's `status.gtidExecuted` (an exclusion cannot remove a transaction the dump already contains) or names any `bloodraven_restore*` GTID; the backup's `status.gtidExecuted` not a subset of the active site's `gtid_executed` (an early `StagedGtidsNotInLive`). A size below a floor is a Warning only (see Lifecycle).
+- **Source scope is recorded, never inferred.** `MysqlBackup` gains `status.dumpScope` (`Instance` when the options the backup script passed to `util.dump_instance` had no `includeSchemas`/`excludeSchemas`, else `Filtered`) and `status.consistent` (the effective `consistent` option, mysqlsh default `true`). The script reports both on its `BLOODRAVEN_DUMP_COMPLETE` sentinel from the options it actually used, so a later profile edit cannot change what an old backup claims. `MysqlBackup` also gains optional `spec.dumpScope` (enum `Instance`): the Job drops the profile's schema filters and forces `consistent: true`. The automatic post-restore backup always sets it, and barrier closure requires `status.dumpScope=Instance` and `consistent=true`.
 - **Which load options reach which Job.** The only user field honoured is `loadOptions.threads` (and `resetProgress`, a no-op today). Staging load: `{threads, loadIndexes:true, updateGtidSet:"replace", skipBinlog:true, loadUsers:true, excludeUsers:[root and system accounts]}` (accounts are needed for the replay, see Staging step d). Live loader: `{threads, loadIndexes:true, skipBinlog:true, loadUsers:false}` and no `updateGtidSet`. Accounts, grants and the rest of the `mysql` schema are therefore **not rewound**: the restored primary keeps its current accounts.
 - **Access mode is fixed `ReadWriteOnce` and not exposed** (Q6). One pod writes the volume, then one pod reads it, strictly in sequence, which the controller enforces. No use case needs RWX, and RWX classes (NFS) are a poor fit for a mysqld datadir. A future `accessModes` field would be additive.
 - **`size` is a plain required `resource.Quantity`**, with no CEL floor. The CEL quantity library is version-dependent; the useful floor depends on the source size, which only the reconciler knows.
@@ -175,18 +176,29 @@ New `RestoreInPlacePhase` values (enum at `api/v1alpha1/backup_types.go:837-838`
 Existing phases keep their meaning; PITR runs reach `Preflight` only from `Staged`. Non-PITR runs still start at `Preflight`.
 
 ```go
+// RestoreInPlaceKind is derived at acceptance from scope and pointInTime
+// and pinned. An unknown stored value is handled like an unknown phase.
+// +kubebuilder:validation:Enum=Full;Schema;PITR
+type RestoreInPlaceKind string
+
 // status.restoreInPlace gains the run's pinned request and staging state.
 type RestoreInPlaceStatus struct {
 	// ... existing fields ...
-	// Kind is pinned at acceptance: "full", "schema" or "pitr".
-	Kind string `json:"kind,omitempty"`
-	// RequestSHA256 is the accepted request identity (see "Request
-	// identity"). Written in the acceptance write; never changed.
+	Kind RestoreInPlaceKind `json:"kind,omitempty"`
+	// RequestSHA256 is the request identity (see "Request identity"),
+	// used for supersession and artifact reuse. Never changed.
 	RequestSHA256 string `json:"requestSHA256,omitempty"`
-	// Request is the canonical JSON the digest is computed over.
-	Request string `json:"request,omitempty"`
+	// Snapshot names the immutable ConfigMap holding the complete accepted
+	// request; every later step reads it, never the current spec.
+	Snapshot *RestoreSnapshotRef `json:"snapshot,omitempty"`
 	// +optional
 	Staging *RestoreStagingRunStatus `json:"staging,omitempty"`
+}
+
+type RestoreSnapshotRef struct {
+	Name   string `json:"name"`   // mysql-<fg>-restore-<run8>
+	UID    string `json:"uid"`
+	SHA256 string `json:"sha256"` // of the snapshot's canonical JSON
 }
 
 // RestoreStagingRunStatus is per run. Artifacts are not stored here: they
@@ -198,25 +210,29 @@ type RestoreStagingRunStatus struct {
 	ProbeJobName    string             `json:"probeJobName,omitempty"`
 	JobName         string             `json:"jobName,omitempty"`         // staging, re-auth or result-read Job of the current attempt
 	JobCreating     bool               `json:"jobCreating,omitempty"`     // write-ahead
-	Attempt         int32              `json:"attempt,omitempty"`         // incremented in the write-ahead; pods carry it as a label
+	Attempt         int32              `json:"attempt,omitempty"`         // incremented in every Job write-ahead; pods carry it as a label
+	LostJobs        int32              `json:"lostJobs,omitempty"`        // lost staging-side Jobs; StagingFailed at 3
 	ProvisioningSince *metav1.Time     `json:"provisioningSince,omitempty"` // durable start of claim/scheduling waits
 	Image           string             `json:"image,omitempty"`
 	ImageDigest     string             `json:"imageDigest,omitempty"`
 	ImageSource     RestoreStagingImageSource `json:"imageSource,omitempty"`
-	MysqlshVersion  string             `json:"mysqlshVersion,omitempty"`
 	TargetServerVersion string         `json:"targetServerVersion,omitempty"` // live target at the last check
 	VersionGate     *RestoreVersionGate `json:"versionGate,omitempty"`    // see StagingVersionMismatch
 	Reason          string             `json:"reason,omitempty"`
-	Message         string             `json:"message,omitempty"`
+	Message         string             `json:"message,omitempty"`         // at most 1 KiB
 }
 
-// RestoreVersionGate records the (candidate image, live version) pair a
-// version refusal was made for. A terminal run refused for a version
-// mismatch is not restarted by its unconsumed confirm while the pair is
-// unchanged.
+// RestoreVersionGate is the key a version refusal was made for. A
+// terminal run refused for a version mismatch is not restarted by its
+// unconsumed confirm while every field still matches; any change, or a
+// newer confirm, is evaluated afresh.
 type RestoreVersionGate struct {
-	ImageRef      string `json:"imageRef"`
-	TargetVersion string `json:"targetVersion"`
+	Confirm           string `json:"confirm"`
+	RequestSHA256     string `json:"requestSHA256"`
+	ImageRef          string `json:"imageRef"`          // candidate as resolved (override, live imageID, backup image)
+	ImageDigest       string `json:"imageDigest"`       // probe pod imageID; empty if the probe never ran
+	DumpServerVersion string `json:"dumpServerVersion"`
+	TargetVersion     string `json:"targetVersion"`
 }
 
 type MysqlFailoverGroupStatus struct {
@@ -238,6 +254,12 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	RestoreBarriers []RestoreBarrierStatus `json:"restoreBarriers,omitempty"`
 
+	// RestoreMarkerSeq is the highest marker number ever allocated for
+	// this group. Never decreases; written in the same update that
+	// records a new marker, so an allocated number is never reused.
+	// +optional
+	RestoreMarkerSeq int64 `json:"restoreMarkerSeq,omitempty"`
+
 	// RestoreDamage is the damaged-primary record. Top-level: it is not
 	// part of restoreOfflineFence, which existing code replaces and clears.
 	// +optional
@@ -253,8 +275,9 @@ type RestoreStagingImageSource string
 // +kubebuilder:validation:Enum=Provisioning;Building;Verified;Invalid;Deleting
 type RestoreStagingArtifactState string
 
-// RestoreStagingArtifact is one claim and the artifact on it. Immutable
-// provenance (originRunID, pvcUID, path, certification) is written once.
+// RestoreStagingArtifact is one claim and the artifact on it. Everything
+// below State is written once, at certification, and is exactly the
+// certification input (see "Artifact certification").
 type RestoreStagingArtifact struct {
 	OriginRunID    string `json:"originRunID"`            // run that built it; never reused
 	PVCName        string `json:"pvcName"`                // written before Create (write-ahead)
@@ -263,25 +286,29 @@ type RestoreStagingArtifact struct {
 	LocalNode      string `json:"localNode,omitempty"`    // bound PV pinned to one node
 	CleanupPolicy  RestoreStagingCleanupPolicy `json:"cleanupPolicy,omitempty"` // policy of the origin run
 	State          RestoreStagingArtifactState `json:"state"`
+	GtidSets       *RestoreSnapshotRef `json:"gtidSets,omitempty"` // immutable ConfigMap holding B and S
+	CertificationSHA256 string `json:"certificationSHA256,omitempty"`
 	RequestSHA256  string `json:"requestSHA256,omitempty"`  // origin run's request identity
-	CertificationSHA256 string `json:"certificationSHA256,omitempty"` // see "Artifact certification"
 	SourceDumpSHA256 string `json:"sourceDumpSHA256,omitempty"` // source @.json
 	ArchiveIdentity string `json:"archiveIdentity,omitempty"` // #206
-	EncryptionRevision string `json:"encryptionRevision,omitempty"` // #203 revision, or "plaintext"
+	DumpEncryptionRevision    string `json:"dumpEncryptionRevision,omitempty"`    // #203 revision of the backup prefix, or "plaintext"
+	ArchiveEncryptionRevision string `json:"archiveEncryptionRevision,omitempty"` // #203 revision of the archive prefix, or "plaintext"
 	ImageDigest    string `json:"imageDigest,omitempty"`
 	ServerVersion  string `json:"serverVersion,omitempty"`  // staging SELECT VERSION()
 	DumpServerVersion string `json:"dumpServerVersion,omitempty"` // source @.json serverVersion
+	MysqlshVersion string `json:"mysqlshVersion,omitempty"`
 	FormatVersion  int32  `json:"formatVersion,omitempty"`  // operator's staging/proof/manifest format
 	ManifestSHA256 string `json:"manifestSHA256,omitempty"`
+	BaselineGtidSHA256 string `json:"baselineGtidSHA256,omitempty"`
+	StagedGtidSHA256   string `json:"stagedGtidSHA256,omitempty"`
+	EncryptedTables bool  `json:"encryptedTables,omitempty"` // artifact DDL has ENCRYPTION='Y'
+	SourceBytes    int64  `json:"sourceBytes,omitempty"`    // downloaded source dump, measured by staging
 	ArtifactBytes  int64  `json:"artifactBytes,omitempty"`
-	BaselineGtids  string `json:"baselineGtids,omitempty"`      // B, from the source @.json
-	StagedGtidExecuted string `json:"stagedGtidExecuted,omitempty"` // S, in full
-	StagedGtidSHA256 string `json:"stagedGtidSHA256,omitempty"`
 	StagingLoadSeconds int64 `json:"stagingLoadSeconds,omitempty"`
 	HashBytesPerSecond int64 `json:"hashBytesPerSecond,omitempty"` // measured while writing the manifest
 	VerifiedAt     *metav1.Time `json:"verifiedAt,omitempty"`
 	Reason         string `json:"reason,omitempty"`
-	Message        string `json:"message,omitempty"`
+	Message        string `json:"message,omitempty"`          // at most 1 KiB
 }
 
 // +kubebuilder:validation:Enum=Writing;Written;Archived
@@ -293,38 +320,43 @@ type RestoreMarker struct {
 	At    *metav1.Time       `json:"at,omitempty"`
 }
 
+type RestoreObjectRef struct {
+	Name string `json:"name"`
+	UID  string `json:"uid"`
+}
+
 type RestoreBarrierStatus struct {
 	RunID      string         `json:"runID"`
+	N          int64          `json:"n"`                    // allocated from restoreMarkerSeq
 	Site       string         `json:"site,omitempty"`
 	Barrier    RestoreMarker  `json:"barrier"`             // <uuid>:bloodraven_restore:<n>
 	Completion *RestoreMarker `json:"completion,omitempty"` // <uuid>:bloodraven_restored:<n>
 	Void       *RestoreMarker `json:"void,omitempty"`       // <uuid>:bloodraven_restore_void:<n>
-	BaselineBackup *corev1.ObjectReference `json:"baselineBackup,omitempty"` // name + uid
+	BaselineBackup *RestoreObjectRef `json:"baselineBackup,omitempty"`
 	Message    string         `json:"message,omitempty"`
 }
 
 // RestoreDamageStatus: the primary may hold a partial or dropped dataset.
+// No list of Jobs: execution-stopped proof is label-based.
 type RestoreDamageStatus struct {
-	OriginRunID string      `json:"originRunID"` // first run whose loader may have touched the primary
-	RunID       string      `json:"runID"`       // run that owns the record now (origin, or an exit-1 run)
+	OriginRunID string      `json:"originRunID"` // run whose loader write-ahead created the record
+	RunID       string      `json:"runID"`       // run that owns the record now (origin, or a takeover run)
 	Site        string      `json:"site"`
-	// Jobs are every loader Job (name + UID) that may have touched the
-	// primary since originRunID. Exits require all of them stopped.
-	// +kubebuilder:validation:MaxItems=8
-	Jobs        []corev1.ObjectReference `json:"jobs"`
 	Since       metav1.Time `json:"since"`
-	Confirmed   bool        `json:"confirmed,omitempty"` // the Job ended without a pre-destruction refusal proof
+	// Accept is the accept marker <uuid>:bloodraven_restore_accepted:<m>,
+	// recorded before it is committed (exit 2).
+	Accept      *RestoreMarker `json:"accept,omitempty"`
 	Reason      string      `json:"reason,omitempty"`
 }
 ```
 
-`stagedGtidExecuted` is stored in full, as `sourceGtidExecuted` and `targetGtidExecuted` already are (`api/v1alpha1/backup_types.go:1016-1105`). The staging Job may report at most 1 MiB for it (`StagingFailed` above that). A `status.pitr` summary is unchanged.
+**Status size budget.** No full GTID set is added to any status beyond the two that exist today (`sourceGtidExecuted`, `targetGtidExecuted`, `api/v1alpha1/backup_types.go:1016-1105`). The full accepted request, `excludeGtids` included, lives in the run's snapshot ConfigMap; the baseline `B` and staged `S` sets live in the artifact's `manifest.json` on the claim (authenticated by `manifestSHA256`) and in one immutable operator-owned ConfigMap per artifact (`<pvcName>-gtids`, owner reference to the group, deleted with the artifact), which the operator reads uncached and checks against the two digests before each use. Each set may be at most 256 KiB (the staging Job fails `StagingFailed`/`GtidSetTooLarge` above that). Messages are truncated to 1 KiB. What this proposal adds to `MysqlFailoverGroup` status is at most about 40 KiB: 8 artifact entries of about 2 KiB, 32 barrier entries of about 0.5 KiB, the damage record and the run status. A unit test serializes the maximal object and asserts it.
 
 ### Conditions
 
 | Type | Status/Reason | When |
 |---|---|---|
-| `RestoreInPlaceDamagedPrimaryFenced` (new) | `True` / `RestoreFailedAfterJob` | `status.restoreDamage` exists and its owning run is terminal. Message names the origin run, the loader Jobs, the exits and the Verified artifacts. `False` / `Released`, `Repaired` after an exit. |
+| `RestoreInPlaceDamagedPrimaryFenced` (new) | `True` / `RestoreFailedAfterJob` | `status.restoreDamage` exists, whatever the phase of any run. Message names the origin and owning runs, the exits and the Verified artifacts. `False` / `Accepted`, `Repaired`, `NotDamaged` after a clearing proof. |
 | `PITRArchiveReady` (existing, `internal/controller/pitr_archive_condition.go:29`) | `False` / `PITRRestoreBarrier` (new reason) | An entry in `status.restoreBarriers` is open. Message names the barrier and completion GTIDs and the post-restore backup. Precedence: below `ArchiverError`, above `Archiving`. |
 | `Ready` | `False` while `status.restoreDamage` exists | Same mechanism #233 uses for `Held`. |
 
@@ -334,35 +366,37 @@ Stable reason strings, used in status messages and Events. "Consumed" follows on
 
 | Reason | Where | Confirm consumed |
 |---|---|---|
-| `RestoreInPlaceRejected` (existing) | acceptance-pass refusals listed above, including a full `restoreStagingArtifacts` list | no |
-| `StagingVersionMismatch` | probe, Staged check, Preflight, Fencing, and the operator's check immediately before the loader write-ahead | no; not restarted while `versionGate` matches the current (candidate image, live version) |
+| `RestoreInPlaceRejected` (existing) | acceptance-pass refusals listed above | no |
+| `StagingVersionMismatch` | probe, Staged check, Preflight, Fencing, and the operator's check immediately before the loader write-ahead | no; not restarted while `versionGate` matches |
+| `StagingArtifactSlotsFull` | Build decision (Staging step 3) with 8 artifact entries; the message names `kubectl bloodraven restore-staging cleanup` | yes |
 | `StagingTargetNotCovered` | staging verdict `targetCovered=false` | yes |
 | `StagingGtidProofFailed` | staged set differs from the exact plan, or `excludeGtids` intersects the dump baseline `B` | yes |
 | `StagedGtidsNotInLive` | `S − L` non-empty; the message splits `D ∩ B` from `D − B` (see Preflight) | yes |
-| `StagingKeyringUnavailable` | encrypted tables in the dump, keyring component unavailable | yes |
+| `StagingKeyringUnavailable` | encrypted tables in the dump and the staging keyring unavailable; or `encryptedTables` and the live keyring component not active (Preflight, Fencing, loader) | yes |
 | `StagingVolumeNotWritable` | in-Job ownership/writability check | yes |
 | `StagingVolumeUnavailable` | provisioning timeout, claim lost or replaced (UID), node gone or unschedulable before the loader write-ahead | yes |
-| `StagingArtifactMismatch` | manifest or file digest mismatch (re-auth Job, result-read Job) | yes |
+| `StagingArtifactMismatch` | manifest, file or GTID-set digest mismatch (re-auth Job, result-read Job, `<pvcName>-gtids` ConfigMap, loader refusal); the artifact becomes `Invalid` | yes |
+| `RestoreInPlaceSnapshotLost` | the run's snapshot ConfigMap is missing or fails its digest before the loader write-ahead | yes |
 | `StagingLoaderDeadlineTooShort` | `loaderActiveDeadlineSeconds` set and below the loader budget (Preflight) | yes; the Verified artifact stays reusable |
-| `StagingFailed` | staging Job failed for any other reason, or its result could not be read after 3 result-read attempts | yes |
+| `StagingFailed` | staging Job failed for any other reason (detail such as `GtidSetTooLarge`), or 3 staging-side Jobs were lost | yes |
 | `RestoreInPlaceStagingOnly` | PR5 flag on: the run stops after `Staged` | yes |
 | `RestoreInPlaceSuperseded` | the spec's request identity differs from the accepted one before the loader write-ahead (with or without a confirm bump) | no; the next pass starts a run from the current spec |
 | `RestoreBarrierNotArchived` | barrier binlog not archived within 10 min at Fencing | yes (no Job) |
-| `RestoreInPlacePreDestructionRefused` | the loader exited through its pre-destruction refusal path (manifest, file digests, version, offline fence, local_infile, start deadline, pre-destruction budget); detail in the sentinel | yes (a Job ran) |
+| `RestoreInPlacePreDestructionRefused` | the loader exited through its pre-destruction refusal path (manifest, file digests, version, keyring, offline fence, local_infile, pre-destruction deadline); detail in the sentinel | yes (a Job ran) |
 | `PITRRestoreBarrier` | planner refusal and `PITRArchiveReady` reason | n/a |
 
-New Events: `RestoreInPlaceStagingStarted`, `RestoreInPlaceStagingJobCreated`, `RestoreInPlaceStagingVolumeNodeLocal` (Warning), `RestoreInPlaceStagingVolumeSmall` (Warning), `RestoreInPlaceStagingResourcesUnset` (Warning), `RestoreInPlaceStaged`, `RestoreInPlaceStagingReused`, `RestoreInPlaceStagingFailed` (Warning), `StagingVersionMismatch` (Warning), `RestoreInPlaceSpecEditDeferred`, `RestoreInPlaceWritesDiscarded` (Normal, at Fencing: requested stop time and actual fence time), `RestoreBarrierWritten`, `RestoreBarrierArchived`, `RestoreCompletionWritten`, `RestoreBarrierVoided`, `RestoreBarrierClosed`, `PostRestoreBackupCreated`, `PostRestoreBackupFailed` (Warning), `RestoreInPlaceDamagedPrimaryFenced` (Warning), `RestoreInPlaceDamagedPrimaryReleased`, `RestoreInPlaceDamageTakenOver`, `ScheduledBackupSkippedDamagedPrimary` (Warning), `RestoreStagingRetained`, `RestoreStagingDeleted`, `RestoreStagingVolumeGone` (Warning), `RestoreStagingCleanupRejected` (Warning), `RestoreInPlaceUnknownPhase` (Warning).
+New Events: `RestoreInPlaceStagingStarted`, `RestoreInPlaceStagingJobCreated`, `RestoreInPlaceStagingVolumeNodeLocal` (Warning), `RestoreInPlaceStagingVolumeSmall` (Warning), `RestoreInPlaceStagingResourcesUnset` (Warning), `RestoreInPlaceStaged`, `RestoreInPlaceStagingReused`, `RestoreInPlaceStagingFailed` (Warning), `StagingVersionMismatch` (Warning), `RestoreInPlaceSpecEditDeferred`, `RestoreInPlaceWritesDiscarded` (Normal, at Fencing: requested stop time and actual fence time), `RestoreBarrierWritten`, `RestoreBarrierArchived`, `RestoreCompletionWritten`, `RestoreBarrierVoided`, `RestoreBarrierClosed`, `RestoreAcceptMarkerWritten`, `PostRestoreBackupCreated`, `PostRestoreBackupFailed` (Warning), `RestoreInPlaceDamagedPrimaryFenced` (Warning), `RestoreInPlaceDamagedPrimaryReleased`, `RestoreInPlaceDamageTakenOver`, `ScheduledBackupSkippedDamagedPrimary` (Warning), `RestoreStagingRetained`, `RestoreStagingDeleted`, `RestoreStagingVolumeGone` (Warning), `RestoreStagingCleanupRejected` (Warning), `RestoreInPlaceUnknownPhase` (Warning).
 
 ### Annotations (one-shot, on the `MysqlFailoverGroup`, consumed and cleared like `RecloneAnnotation`)
 
 | Annotation | Value | Effect |
 |---|---|---|
 | `bloodraven.shipstream.io/restore-staging-cleanup` | artifact `originRunID` | Deletes that artifact's claim (UID-conditional delete, state `Deleting`). Refused (Event, annotation cleared) if no such artifact exists or a non-terminal run references it. Allowed while `status.restoreDamage` exists, with a Warning that it removes a repair source. RunIDs are UUIDs and never reused, so a stale value cannot hit a later artifact. |
-| `bloodraven.shipstream.io/restore-accept-damaged` | `status.restoreDamage.originRunID` | Releases the damaged-primary fence (exit 2). Refused unless the value matches, no run is in `Preflight` through `Resuming`, and an uncached read shows every Job in `restoreDamage.jobs` gone or explicitly terminal and every pod labelled with it `Succeeded`/`Failed` (the #232 `verificationExecutionStopped` rule, `internal/controller/backup_verification_hold.go:62`). A `Held` queue stays `Held` for #233's exits. If settlement had discarded the queue (the peers resumed, which an unlogged load allows), the same write arms a `Held` queue of every peer: their pre-restore data no longer matches the primary the administrator accepted. |
+| `bloodraven.shipstream.io/restore-accept-damaged` | `status.restoreDamage.originRunID` | Exit 2 (see "The damage invariant"). Refused (Event, annotation cleared) unless the value matches, no run is in `Preflight` through `Resuming`, and the execution-stopped proof holds. Then: record `restoreDamage.accept` (fresh number from `restoreMarkerSeq`), commit the accept marker on the primary, clear the record, release the fence, and create the automatic post-restore backup. An unreachable primary leaves the record and fence in place and retries; nothing times out into a release. A `Held` queue stays `Held` for #233's exits. If settlement had discarded the queue (the peers resumed, which an unlogged load allows), the same write arms a `Held` queue of every peer: their pre-restore data no longer matches the primary the administrator accepted. |
 
 `kubectl bloodraven restore-staging list|cleanup <group> --run <id>` (new plugin subcommand, `cmd/kubectl-bloodraven/`) reads the artifact list and sets the cleanup annotation. `kubectl bloodraven restore accept-damaged <group> --run <id>` sets the other.
 
-A hold annotation is added to the source `MysqlBackup` from the Staging step 1 write until the run is terminal, no pod of the run can still read the source, and no `status.restoreDamage` names the run (the source is the re-staging input of a repair): `hold.restore.shipstream.io/<runID>` = group name, mirroring the verification hold prefix (`internal/controller/backup_verification_hold.go:29`).
+A hold annotation `hold.restore.shipstream.io/<runID>` = group name (mirroring the verification hold prefix, `internal/controller/backup_verification_hold.go:29`) is added to the source `MysqlBackup` in the Staging step 1 write (non-PITR full-instance runs: in Preflight). It is released when the run is terminal and no pod of the run can still read the source, except that **no restore hold whose value is this group is released while `status.restoreDamage` exists**: every earlier run's source is a possible repair input, and the hold itself, not run status, is what names it.
 
 ### Metrics
 
@@ -378,7 +412,7 @@ A hold annotation is added to the source `MysqlBackup` from the Staging step 1 w
 
 ### RBAC
 
-PVC create/delete already exists (`internal/controller/reconciler.go:190`, `config/rbac/role.yaml:7-20`). New: `+kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get` on the group reconciler, to read the bound PV's `nodeAffinity`. `charts/bloodraven/templates/clusterrole.yaml` must mirror it (AGENTS.md pre-PR gate 5). The reconciler also `Owns(&corev1.PersistentVolumeClaim{})` for the staging claims; claims carry an owner reference to the group.
+PVC and ConfigMap create/delete already exist (`internal/controller/reconciler.go:190`, `config/rbac/role.yaml:7-20`). New: `+kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get` on the group reconciler, to read the bound PV's `nodeAffinity` through the uncached API reader (the `apiReader()` pattern, `internal/controller/backup_verification_hold.go:397-410`; the default cached client would start a PV informer that needs `list`/`watch`). `charts/bloodraven/templates/clusterrole.yaml` must mirror it (AGENTS.md pre-PR gate 5). The reconciler also `Owns(&corev1.PersistentVolumeClaim{})` for the staging claims; claims carry an owner reference to the group.
 
 ### Example
 
@@ -442,77 +476,89 @@ spec:
                                                        │       │   + damage record), loader
                                        Job succeeded   │       │ Job failed / lost
                                                        v       v
-                                                  Resuming   Failed ──> damage evaluation + settlement (#233)
-                                     completion marker │                 │ refusal proven -> void barrier, release
-                                                       v                 │ otherwise -> damaged-primary fence
+                                                  Resuming   Failed ──> settlement (#233) decides the peers;
+                                     completion marker │                 the damage invariant decides the primary
+                                                       v
                                                   Succeeded ──> post-restore backup closes barrier
 ```
 
+### The damage invariant
+
+This paragraph overrides every table and step below. **A damage record (`status.restoreDamage`) is created in the same status update that sets the loader's `jobCreating`, for every full-instance restore. While it exists, every damage guard is on in every phase of every run, terminal or not: the primary's Service label fence, `offline_mode=ON` and `event_scheduler=OFF`, the topology freeze, the MysqlDatabase pause, refused leases and planned failovers, skipped scheduled backups, every restore hold whose value is this group, every `Verified` artifact, and no fence release on any timeout. It is cleared only by:**
+
+- **(a) Repaired:** a full-instance run that owns the record (it created it, or took it over in its acceptance write) reaches `Succeeded`: its loader succeeded and its completion marker is committed;
+- **(b) Refused:** the loader of the run that created the record exits through its own pre-destruction refusal: an uncached read shows the loader Job explicitly terminal and every pod of it terminal with exit code 70 and a termination message naming this run and Job;
+- **(c) Never started:** for a record the run created itself, the same read shows the loader Job explicitly terminal and every pod of it terminal with the main container never started (no `state.running`, no `state.terminated`, no `lastState`; with `restartPolicy: Never` and no init container that connects to MySQL, pinned by a unit test, such a pod cannot have touched the primary), for example a failed `decrypt-download` init container; or the API server refused the Job's Create outright (Invalid/Forbidden/BadRequest), so no pod exists;
+- **(d) Accepted:** the `restore-accept-damaged` annotation with the execution-stopped proof, after the accept marker is committed.
+
+Nothing else clears it: not #233 settlement, not a GTID comparison, not a timeout, not an unreachable primary, not a later run's refusal, failure, cancellation or supersession (an inherited record is never cleared by (b) or (c)). While it exists, per-schema restores are refused at acceptance and every full-instance run takes the record over in its acceptance write. **Execution-stopped proof** is label-based: every in-place loader pod carries `shipstream.io/restore-loader=<group>`, and an uncached list shows no pod with that label that is not `Succeeded`/`Failed` (a pod with a deletion timestamp that is not terminal still counts) and no Job with that label lacking an explicit terminal condition (the `jobFinished` rule, `internal/controller/backup_verification_hold.go:62-90`). A pod whose node is lost counts only after the machine is confirmed shut down or externally fenced from MySQL: deleting the Node or force-deleting the pod removes the API object, not the process, and Kubernetes' non-graceful node shutdown procedure (`node.kubernetes.io/out-of-service` after confirmed shutdown) is the supported way to get there. A loader whose pod never runs (unschedulable, `ImagePullBackOff`) keeps the record until it fails or is deleted; deleting it leaves the record (no evidence), and exit 1 reuses the artifact in minutes.
+
 ### Request identity and artifact certification
 
-**Request identity** is what the user asked for. At acceptance the operator writes `status.restoreInPlace.request`, the canonical JSON below, and `requestSHA256` (SHA-256, lowercase hex, of its UTF-8 bytes). Canonical means: keys sorted, no insignificant whitespace, no absent-vs-empty ambiguity (every key present, empty string or empty array when unset), defaults resolved at acceptance.
+**Accepted execution snapshot.** In the acceptance pass, before the status write, the operator creates an immutable ConfigMap `mysql-<fg>-restore-<run8>` (`immutable: true`, owner reference to the group, label `shipstream.io/restore-run=<runID>`) holding the complete accepted request as canonical JSON: `restoreInPlace` with every default resolved (source with the `MysqlBackup` UID, decryption, `loadOptions` including `threads`, `pointInTime` including `excludeGtids`, and the whole `staging` block: image override, volume, resources, cleanup policy, both deadlines, sanity check), plus the backup's `dumpScope`, `consistent`, `gtidExecuted` digest and `serverVersion` at acceptance. The status write records `snapshot{name, uid, sha256}`. An orphaned ConfigMap from a crash before that write is deleted by its run label. Every later step, including after an operator restart, reads the snapshot uncached and checks its digest; nothing reads the current spec for execution. The snapshot is deleted when the run is terminal and its loader (if any) is stopped. Canonical means: keys sorted, no insignificant whitespace, every key present (empty string or empty array when unset).
+
+**Request identity** is the subset that decides supersession and artifact reuse; `requestSHA256` is the SHA-256 (lowercase hex) of its canonical JSON:
 
 ```json
-{"v":1,"kind":"pitr",
+{"v":1,"kind":"PITR",
  "source":{"mysqlBackupRef":{"name":"orders-nightly-20261119","uid":"<MysqlBackup UID>"}},
  "decryption":{"secret":"<name or empty>","key":"<key or empty>"},
  "pointInTime":{"stopDatetime":"2026-11-20T01:42:00Z","sites":["iad","pdx"],
                 "archiveProfileName":"nightly-s3","excludeGtids":"<canonical set or empty>"},
- "loadOptions":{"loadIndexes":true,"skipBinlog":true},
  "staging":{"image":"<override or empty>","sanityCheck":{"query":"...","expect":{...}}}}
 ```
 
-`stopDatetime` is normalized to UTC whole seconds rounded up, as `restore.py` does (`internal/controller/restore_script.py:363-384`); `sites` is sorted and defaults to the group's sites; `archiveProfileName` defaults to `spec.backup.pitr.profileName`; `excludeGtids` is re-serialized by the operator's parser (`internal/mysql/gtid.go:38`, sorted source identifiers, merged intervals). `kind` is `full`, `schema` or `pitr`, so removing `pointInTime`+`staging` changes the identity. Non-identity fields (`threads`, `staging.resources`, `volume`, `cleanupPolicy`, deadlines) are pinned at acceptance as well; an edit applies to the next run (Event `RestoreInPlaceSpecEditDeferred`).
+`stopDatetime` is normalized to UTC whole seconds rounded up, as `restore.py` does (`internal/controller/restore_script.py:363-384`); `sites` is sorted and defaults to the group's sites; `archiveProfileName` defaults to `spec.backup.pitr.profileName`. `excludeGtids` is canonicalized by a new `GTIDSet.Canonical()`: tags and UUIDs sorted, each source's intervals sorted, merged where adjacent or overlapping, and deduplicated. Today's `ParseGTIDSet` appends intervals in input order (`internal/mysql/gtid.go:85-90`) and `String()` sorts only the source identifiers (`:321-347`), so `u:1:2` and `u:1-2` would differ; equivalence fixtures pin the new function. Non-identity fields (`threads`, resources, volume, cleanup policy, deadlines) come from the snapshot; an edit to them applies to the next run (Event `RestoreInPlaceSpecEditDeferred`).
 
-On every pass before the loader write-ahead, and explicitly at Preflight exit, Fencing entry and immediately before the write-ahead, the operator recomputes the identity from the current spec (re-reading the `MysqlBackup` UID):
+On every pass before the loader write-ahead, and explicitly at Preflight exit, Fencing entry and immediately before the write-ahead, the operator recomputes the identity from the current spec (re-reading the `MysqlBackup` UID; a `MysqlBackup` that is gone counts as a changed identity). When the confirm regressed and the identity also changed, the cancel row wins.
 
 | Change | Before the loader write-ahead (`Staging` through `Restoring` without a Job) | After it |
 |---|---|---|
 | Confirm advanced, identity equal | Rebind the confirm to the run, as today (`internal/controller/restore_inplace.go:700-717`) | Deferred, as today (`RestoreInPlaceConfirmDeferred`) |
 | Confirm not advanced, changed | `RestoreInPlaceCancelled`, as today (`:399-415`) | Deferred |
-| Identity changed (any of source, backup UID, `stopDatetime`, sites, profile, `excludeGtids`, `sanityCheck`, image override, kind), confirm advanced or not | Run ends `RestoreInPlaceSuperseded`, confirm not consumed; fence released if up (unless a damage record exists); the next pass accepts a run from the current spec, which may reuse an artifact whose request matches | Deferred: the Job runs the accepted identity; `RestoreInPlaceRequestChangeDeferred` Event |
+| Identity changed (any of source, backup UID, `stopDatetime`, sites, profile, `excludeGtids`, `sanityCheck`, image override, kind), confirm advanced or not | Run ends `RestoreInPlaceSuperseded`, confirm not consumed; fence released if up (unless a damage record exists); the next pass accepts a run from the current spec, which may reuse an artifact whose request matches | Deferred: the Job runs the accepted snapshot; `RestoreInPlaceSpecEditDeferred` Event |
 | `spec.restoreInPlace` removed | `RestoreInPlaceCancelled` (existing) | Existing `RestoreInPlaceSpecRemoved` |
 
-The loader is built from the pinned request and the artifact record, never from the current spec.
+The loader is built from the snapshot and the artifact record, never from the current spec.
 
-**Artifact certification** is what an artifact proves. `certificationSHA256` is the SHA-256 of the canonical JSON `{v, requestSHA256, sourceDumpSHA256, archiveIdentity, encryptionRevision, imageDigest, serverVersion, mysqlshVersion, formatVersion, baselineGtidSHA256, stagedGtidSHA256, manifestSHA256}`, all taken from the staging result. These are the Q4 fingerprint inputs; `formatVersion` is the operator constant for the staging script, proof and manifest format (the planner/verifier version). An artifact is handed to a loader only if it is `Verified`, its `requestSHA256` equals the run's, its stored certification recomputes from its fields, its `imageDigest` is the run's selected staging image and its `serverVersion` equals the bound target's `VERSION()`.
+**Artifact certification** is what an artifact proves. `certificationSHA256` is the SHA-256 of the canonical JSON of the artifact entry's fields from `requestSHA256` through `encryptedTables` in the struct above (`v` first), all taken from the digest-checked staging result and recorded with it, so a later run recomputes it from the entry alone. These are the Q4 fingerprint inputs; `formatVersion` is the operator constant for the staging script, proof and manifest format (the planner/verifier version). An artifact is handed to a loader only if it is `Verified`, its `requestSHA256` equals the run's, its stored certification recomputes from its fields, its `imageDigest` is the run's selected staging image, its `serverVersion` equals the bound target's `VERSION()`, and its `<pvcName>-gtids` ConfigMap matches both GTID digests.
 
 ### Guards by phase
 
-`inPlaceRestoreInFlight` (`internal/controller/restore_inplace.go:56`) gates more than the freeze. Each consumer gets an explicit rule:
+`inPlaceRestoreInFlight` (`internal/controller/restore_inplace.go:56`) gates more than the freeze. Each consumer gets an explicit rule. The last column is the damage invariant and **overrides the phase columns**: each guard is `restoreDamagePresent || <phase rule>`.
 
-| Guard | `Staging`/`Staged` | `Preflight` | `Fencing`/`Restoring`/`Resuming` | terminal with `status.restoreDamage` |
+| Guard | `Staging`/`Staged` | `Preflight` | `Fencing`/`Restoring`/`Resuming` | `status.restoreDamage` present (any phase, any run) |
 |---|---|---|---|---|
 | Topology freeze (`inPlaceRestoreFreezesTopology`, `:70-74`) | no | no (today) | yes | yes |
-| Primary label fence + `offline_mode` (`restoreOfflineFenceWanted`, `internal/controller/restore_offline_fence.go:288-300`) | no | no | yes | yes |
+| Primary label fence, `offline_mode`, `event_scheduler=OFF` (`restoreOfflineFenceWanted`, `internal/controller/restore_offline_fence.go:288-300`) | no | no | yes | yes |
 | `BeginPlanned` conflict for planned failover and ordered updates (`internal/controller/deployment_leases.go:727-731`) | **no** (new predicate excludes these phases) | yes | yes | yes |
 | MysqlDatabase pause (`groupFenced`, `internal/controller/mysqldatabase_reconciler.go:2426-2433`) | **no** | yes | yes | **yes** (today it resumes on a damaged primary) |
 | New deployment leases (`deployment_leases.go:295-296`) | refused (decision 4) | refused | refused | refused, reason `RestoreDamagedPrimary` |
 | Scheduled backups | run | run | unchanged | skipped with `ScheduledBackupSkippedDamagedPrimary`: the backup account has no `CONNECTION_ADMIN` (`internal/controller/credentials.go:260`), so `offline_mode` refuses it and the primary fallback would fail. An explicit `MysqlBackup` with `sourceSiteOverride` naming a held site still runs |
 
-PR1 adds `inPlaceRestoreMutating` (in flight and not `Staging`/`Staged`) and `restoreDamagePresent`, and switches the four consumers above to them; a unit test pins the table.
+PR1 adds `inPlaceRestoreMutating` (in flight and not `Staging`/`Staged`) and `restoreDamagePresent`, and switches the consumers above to them; a unit test pins every cell, including a takeover run in `Staging` and in `Preflight` with a record present.
 
 ### 1. Acceptance (entry)
 
-`validateInPlaceRestoreSpec` keeps its checks and replaces the blanket `pointInTime` refusal with the acceptance-pass refusals listed under API, plus: the backup's `status.gtidExecuted` (a lower bound of the dump baseline `B`) must be a subset of the active site's `gtid_executed` (an early `StagedGtidsNotInLive`, worded as an acceptance refusal), and `restoreStagingArtifacts` must have a free slot. A valid PITR run writes `phase=Staging`, `runID`, `runConfirm`, `startTime`, `kind`, `scope=full`, `request`, `requestSHA256` and `staging{}` in one status write, then emits `RestoreInPlaceStagingStarted`. Nothing else happens on that pass. If `status.restoreDamage` exists, the same write sets `restoreDamage.runID` to the new run (exit 1, Event `RestoreInPlaceDamageTakenOver`); the fence and freeze never lapse because the record keeps them wanted.
+`validateInPlaceRestoreSpec` keeps its checks and replaces the blanket `pointInTime` refusal with the acceptance-pass refusals listed under API; `validatePITRBackupBefore` and `validatePITRBackupBound` both run here, against the referenced backup. A valid PITR run creates its snapshot, then writes `phase=Staging`, `runID`, `runConfirm`, `startTime`, `kind`, `scope=full`, `requestSHA256`, `snapshot` and `staging{}` in one status write, and emits `RestoreInPlaceStagingStarted`. Nothing else happens on that pass. If `status.restoreDamage` exists, the same write (for any full-instance run) sets `restoreDamage.runID` to the new run (exit 1, Event `RestoreInPlaceDamageTakenOver`); the guards never lapse because they key on the record, not on the run.
 
 ### 2. Staging
 
 No deployment hold, no topology freeze, no reclone queue, no fence, no `offline_mode` (guards table). A deploy that migrates the schema during staging would be undone by the restore while the new code keeps running, so new leases stay refused for the whole run; existing leases are only waited for in Preflight. Steps, one durable write before each external action:
 
 1. **Source hold.** Stamp `hold.restore.shipstream.io/<runID>` on the `MysqlBackup` with an optimistic lock, then re-read it uncached before any Job is created and refuse if it is gone, terminating or its UID differs from the request, as `stampVerificationHold` and `launchHoldConfirmed` do (`internal/controller/backup_verification_hold.go:308`, `:347`). Retention (`deleteUnreadBackup`, `:418`), artifact cleanup (`internal/controller/backup_reconciler.go:637`) and the PITR binlog cutoff (`cmd/bloodraven/pitr_retention.go:53`) honour restore holds as they honour verification holds. Release rule: see the hold paragraph under API.
-2. **Image selection and probe.** Candidate = `staging.image` (`Override`), else the live target's mysqld container `imageID` when it is a pullable `<repo>@sha256:<digest>` reference, else that container's `image` string (images imported into k3d/kind report a bare ID) (`LiveTarget`), else `spec.backup.image` (`BackupImage`). A probe Job (`mysql-<fg>-staging-probe-<run8>-<attempt>`, 120 s deadline, no volumes, no token) runs `mysqlsh --version; mysqld --version` and reports through the termination message; the digest recorded is the probe pod's own `imageID`. A `LiveTarget` candidate without mysqlsh, or with a mysqlsh older than the one that wrote the source dump (`@.json`), falls back once to `BackupImage`. The probe's parsed `mysqld` `X.Y.Z` must equal the live target's `SELECT VERSION()` numeric prefix and must not be older than the dump's `serverVersion`; otherwise `Failed`/`StagingVersionMismatch` with `versionGate` set (the authoritative comparison is the staged server's own `VERSION()` string at step b). **Unverified:** whether the default `mysql:9.7` image ships mysqlsh (`api/v1alpha1/backup_types.go:9-21` names the community-server image as the mysqlsh carrier), so the design probes and never assumes.
-3. **Reuse decision** (here, not at acceptance, because it needs the probe's digest). `mode=Reuse` when a `Verified` artifact has the run's `requestSHA256`, the current #203 `encryptionRevision`, the current #206 `archiveIdentity` for the profile, the probe's `imageDigest`, the operator's `formatVersion`, and a claim whose UID matches `pvcUID`. Else `mode=Build`.
+2. **Image selection and probe.** Candidate = `staging.image` (`Override`), else the live target's mysqld container `imageID` when it is a pullable `<repo>@sha256:<digest>` reference, else that container's `image` string (images imported into k3d/kind report a bare ID) (`LiveTarget`), else `spec.backup.image` (`BackupImage`). A probe Job (`mysql-<fg>-staging-probe-<run8>-<attempt>`, no volumes, no token, `activeDeadlineSeconds: 120` counted from container start by an in-script timer, and a 10-minute durable bound on pull and scheduling) runs `mysqlsh --version; mysqld --version; mysqlbinlog --version; mysql --version` and reports through the termination message; the digest recorded is the probe pod's own `imageID`. A deadline, `ErrImagePull`/`ImagePullBackOff` past the bound, or an eviction is a lost Job, not an answer. Only a completed probe that reports a missing binary, or a mysqlsh older than the one that wrote the source dump (`@.json`), makes a `LiveTarget` candidate fall back once to `BackupImage`. The probe's parsed `mysqld` `X.Y.Z` must equal the live target's `SELECT VERSION()` numeric prefix and must not be older than the dump's `serverVersion`; otherwise `Failed`/`StagingVersionMismatch` with `versionGate` set (the authoritative comparison is the staged server's own `VERSION()` string at step b). **Unverified:** whether the default `mysql:9.7` image ships mysqlsh (`api/v1alpha1/backup_types.go:9-21` names the community-server image as the mysqlsh carrier), so the design probes and never assumes.
+3. **Reuse decision** (here, not at acceptance, because it needs the probe's digest). `mode=Reuse` when a `Verified` artifact has the run's `requestSHA256`, the current #203 revisions of both the backup prefix (`dumpEncryptionRevision`) and the archive prefix (`archiveEncryptionRevision`), the current #206 `archiveIdentity` for the profile, the probe's `imageDigest`, the operator's `formatVersion`, a claim whose UID matches `pvcUID`, and, if `localNode` is set, a node that exists, is Ready and is not cordoned. Else `mode=Build`, which needs a free artifact slot (`StagingArtifactSlotsFull` otherwise; a Reuse run needs none).
 4. **Claim (Build).** Append `restoreStagingArtifacts[{originRunID: runID, pvcName: mysql-<fg>-staging-<run8>, state: Provisioning, cleanupPolicy}]` (write-ahead), then create the claim (RWO, `volume.size`, `storageClassName`, owner reference to the group, label `shipstream.io/restore-run=<runID>`), record `pvcUID`, and set `provisioningSince`. A size below `3 x MysqlBackup.status.sizeBytes` emits `RestoreInPlaceStagingVolumeSmall` (a warning: compression ratios vary). The consumer is created **before** waiting for binding: with `volumeBindingMode: WaitForFirstConsumer` (the playground class, `playground/manifests/storageclass.yaml:16`) the claim binds only once a pod is scheduled. Once bound, the operator reads the PV: `nodeAffinity` on `kubernetes.io/hostname` sets `localNode` and emits `RestoreInPlaceStagingVolumeNodeLocal` (zonal affinity is not node-local). The claim bind, pod scheduling and volume attach together must finish within 30 minutes of `provisioningSince` (durable, so restarts do not reset it), else `StagingVolumeUnavailable`.
-5. **Staging Job (Build), re-auth Job (Reuse).** Before every creation, including re-creations, an uncached read must show no earlier Job of this run present and every pod labelled `shipstream.io/restore-run=<runID>` terminal (`Succeeded`/`Failed`; a pod with a deletion timestamp that is not terminal still counts as running). The same proof precedes probe, re-auth and result-read Jobs. Then write `jobCreating=true`, `jobName` and `attempt+1` (write-ahead, as `internal/controller/restore_inplace.go:742-752` does for the destructive Job), then create the Job, whose pods carry `shipstream.io/restore-attempt=<attempt>`. Only after that proof may a pod clear `<runID>/`. Pod: hardened security context (uid/gid 27, read-only root, drop ALL; `internal/controller/backup_job.go:505-560`), `automountServiceAccountToken: false`, no `hostNetwork`, read-only failover tolerations, `backoffLimit: 0`, `activeDeadlineSeconds` from `staging`. Init containers (operator image): `decrypt-download` and `pitr-download` with the #203 revision Secret mounted 0400, writing to the claim instead of size-limited emptyDirs. The claim is mounted at `/var/lib/mysql` (the stock AppArmor profile only allows a datadir under `/var/lib/mysql/**`, `internal/controller/backup_verification_job.go:18-33`); `/run/mysqld` and `/tmp` are emptyDirs. A pod failure carrying the `DisruptionTarget` pod condition (eviction, preemption, drain) counts as a lost attempt, not a failure.
+5. **Staging Job (Build), re-auth Job (Reuse).** Before every creation, including re-creations, an uncached read must show no earlier Job of this run present and every pod labelled `shipstream.io/restore-run=<runID>` terminal (`Succeeded`/`Failed`; a pod with a deletion timestamp that is not terminal still counts as running). The same proof precedes probe, re-auth and result-read Jobs. Then write `jobCreating=true`, `jobName` and `attempt+1` (write-ahead, as `internal/controller/restore_inplace.go:742-752` does for the destructive Job), then create the Job, whose pods carry `shipstream.io/restore-attempt=<attempt>`. Pod: hardened security context (uid/gid 27, read-only root, drop ALL; `internal/controller/backup_job.go:505-560`), `automountServiceAccountToken: false`, no `hostNetwork`, read-only failover tolerations, `backoffLimit: 0`, `activeDeadlineSeconds` from the snapshot. Init containers, in order (operator image): `staging-prepare` checks that `/var/lib/mysql` is writable by uid 27, refuses if `<runID>/owner` names another run, clears `<runID>/` (Build attempts only; the pod-gone proof above ran first) and writes `owner` (runID, attempt); then `decrypt-download` and `pitr-download` with the #203 revision Secret mounted 0400, writing to `<runID>/inputs/` on the claim instead of size-limited emptyDirs. The main script only verifies `owner` and never clears. Re-auth and result-read Jobs never clear anything; they mount the claim read-only, get the 30-minute scheduling bound and `activeDeadlineSeconds = 600 + 2 x artifactBytes / hashBytesPerSecond`. The claim is mounted at `/var/lib/mysql` (the stock AppArmor profile only allows a datadir under `/var/lib/mysql/**`, `internal/controller/backup_verification_job.go:18-33`); `/run/mysqld` and `/tmp` are emptyDirs. A pod failure carrying the `DisruptionTarget` pod condition (eviction, preemption, drain) counts as a lost attempt, not a failure.
 
 Staging Job internals (new `staging.sh`, sharing the mysqld boot with `verify_script.sh` and delegating load and replay to `restore.py`). Layout on the claim: `<runID>/owner` (runID and attempt), `<runID>/inputs/`, `<runID>/data/`, `<runID>/gtid-proof.json`, and the artifact directory `<runID>/artifact/` holding `manifest.json` and `dump/`.
 
 | Step | What | Fails with |
 |---|---|---|
-| a | Ownership: `/var/lib/mysql` writable by uid 27; create or clear `<runID>/`, write `owner`; refuse if `<runID>/owner` names another runID; free-space check against the source size. Read the source `@.json`: refuse `X ∩ B ≠ ∅` | `StagingVolumeNotWritable`, `StagingGtidProofFailed` |
-| b | Boot mysqld on `<runID>/data` after `--initialize-insecure`: `--bind-address=127.0.0.1 --mysqlx=OFF --skip-log-bin --gtid-mode=ON --enforce-gtid-consistency=ON --skip-replica-start --event-scheduler=OFF --skip-name-resolve --partial-revokes=ON --local-infile=1` (the verification set, `internal/controller/verify_script.sh:191-204`, plus the event scheduler); `VERSION()` must equal `BLOODRAVEN_STAGING_EXPECT_VERSION` exactly before anything is loaded | `StagingVersionMismatch` |
-| c | Keyring: load `component_keyring_file` as verification does (`:95-153`). Unlike verification it fails closed: if the component cannot load and any dump DDL file contains `ENCRYPTION='Y'`, stop | `StagingKeyringUnavailable` |
+| a | `<runID>/owner` names this run and attempt (written by `staging-prepare`; `StagingVolumeNotWritable` there); measure `sourceBytes`, the downloaded dump's total size; free-space check against it. Read the source `@.json`: refuse `X ∩ B ≠ ∅` | `StagingVolumeNotWritable`, `StagingGtidProofFailed` |
+| b | Boot mysqld on `<runID>/data` after `--initialize-insecure`, with the target site's effective `mysqlConf` (group merged with site and unsafe keys dropped, as `generateMyCnf` does, `internal/controller/reconciler.go:891`, `:1004`) in an option file minus a pinned denylist (networking and admin ports, replication, binlog and GTID options, plugin and component loading, `init_file`, path options), and on the command line, which overrides option files: `--bind-address=127.0.0.1 --mysqlx=OFF --skip-log-bin --gtid-mode=ON --enforce-gtid-consistency=ON --skip-replica-start --event-scheduler=OFF --skip-name-resolve --partial-revokes=ON --local-infile=1` (the verification set, `internal/controller/verify_script.sh:191-204`, plus the event scheduler); `VERSION()` must equal `BLOODRAVEN_STAGING_EXPECT_VERSION` exactly before anything is loaded | `StagingVersionMismatch` |
+| c | Keyring: load `component_keyring_file` as verification does (`:95-153`). Unlike verification it fails closed: if the component cannot load and any dump DDL file contains `ENCRYPTION='Y'`, stop. Record `encryptedTables` | `StagingKeyringUnavailable` |
 | d | `util.load_dump` with the staging options (API). Accounts are loaded because `--initialize-insecure` creates only root and the replay pipe (`mysqlbinlog | mysql`, no `--force`, `internal/controller/restore_script.py:503-568`) stops on the first `ALTER USER`/`GRANT`/`SET PASSWORD` against a missing account; the operator's own MysqlDatabase statements are binlogged and land in every window. Then `ACCOUNT LOCK` every loaded account. Record the load duration. **Unverified in repo:** mysqlsh `loadUsers`/`excludeUsers` behaviour on 9.7; the native test covers it | `StagingFailed` |
 | e | `_verify_loaded_dump` (post-stop GTIDs already in the dump, lineage; `internal/controller/restore_script.py:581-618`) | `StagingTargetNotCovered` |
 | f | Replay through the #206 chronological plan, not one mysqlbinlog run per site | `StagingFailed` |
@@ -521,7 +567,7 @@ Staging Job internals (new `staging.sh`, sharing the mysqld boot with `verify_sc
 | i | `SET GLOBAL super_read_only=ON`; optional sanity query inside `START TRANSACTION READ ONLY` | `StagingFailed` (`SanityCheckFailed` detail) |
 | j | Delete `inputs/`; `util.dump_instance('<runID>/artifact/dump', {consistent:true, users:false, events:true, routines:true, triggers:true, compression:'zstd', threads})` | `StagingFailed` |
 | k | Re-read `@@gtid_executed`; it must equal the proven set and the artifact's `@.json` `gtidExecuted` | `StagingGtidProofFailed` |
-| l | Write `artifact/manifest.json`: `{version:1, originRunID, requestSHA256, sourceDumpSHA256, archiveIdentity, encryptionRevision, files:[{path,size,sha256}], baselineGtids, stagedGtidExecuted, serverVersion, mysqlshVersion, imageDigest, formatVersion, createdAt}`; fsync. The hashing throughput is measured here (`hashBytesPerSecond`) | `StagingFailed` |
+| l | Write `artifact/manifest.json`: `{version:1, originRunID, requestSHA256, sourceDumpSHA256, archiveIdentity, dumpEncryptionRevision, archiveEncryptionRevision, files:[{path,size,sha256}], baselineGtids, stagedGtidExecuted, serverVersion, dumpServerVersion, mysqlshVersion, imageDigest, formatVersion, encryptedTables, sourceBytes, createdAt}`; fsync. The hashing throughput is measured here (`hashBytesPerSecond` = bytes / max(1, whole seconds)). Either GTID set above 256 KiB fails here | `StagingFailed` |
 | m | Stop mysqld, remove `<runID>/data`; print the result (below) | |
 
 **Staged-GTID proof.** Let `B` be the dump's `@.json` `gtidExecuted` (installed by `replace`), `X` the user's `excludeGtids` (`X ∩ B = ∅`, step a), and from the #206 plan `P` the exact set of transactions committed at or before the stop that the replay must apply, and `Q` every staged GTID after the stop. In-place runs require #206's exact plan (P1), so with `S = @@gtid_executed` after replay the proof is:
@@ -531,13 +577,13 @@ Staging Job internals (new `staging.sh`, sharing the mysqld boot with `verify_sc
 
 #206 must emit `P` and `Q` in `coverage.json`; today's per-site `inWindowGTIDs`/`postStopGTIDs` (`cmd/bloodraven/pitr_download.go:225-274`) cover only the single-replaying-site case. The diffs are written to `<runID>/gtid-proof.json` and printed to the log for diagnosis.
 
-**Result channel.** The termination message (4096 bytes) is authoritative and bounded: `BLOODRAVEN_STAGING_COMPLETE v=1 runID= attempt= manifestSha256= stagedGtidSha256= baselineGtidSha256= sourceDumpSha256= archiveIdentity= serverVersion= mysqlshVersion= bytes= loadSeconds= hashBps=`. The two GTID sets, at most 1 MiB each, travel in the last log lines (`BLOODRAVEN_STAGING_GTIDS v=1 baseline=<B> staged=<S>`). The existing log reader is best-effort: it tails 50 lines with a 16 MiB line limit (`internal/controller/restore.go:413-429`) and never decides a Job's outcome (`:307-308`). The operator therefore accepts the logged sets only when their digests match the termination message. If the log is missing, truncated or mismatched, the operator runs a result-read Job (the re-auth builder in `ReadResult` mode: read-only mount, checks `manifest.json` against `manifestSha256`, prints the sets from it), at most 3 times, then `StagingFailed`. A missing termination message (pod gone) counts as a lost attempt. Status, written only by the operator from these checked values, is the trust anchor.
+**Result channel.** The termination message (4096 bytes) is authoritative and bounded: `BLOODRAVEN_STAGING_COMPLETE v=1 runID= attempt= manifestSha256= stagedGtidSha256= baselineGtidSha256= sourceDumpSha256= archiveIdentity= serverVersion= mysqlshVersion= encryptedTables= sourceBytes= bytes= loadSeconds= hashBps=`. The two GTID sets, at most 256 KiB each, travel in the last log lines (`BLOODRAVEN_STAGING_GTIDS v=1 baseline=<B> staged=<S>`). The existing log reader is best-effort: it tails 50 lines with a 16 MiB line limit (`internal/controller/restore.go:413-429`) and never decides a Job's outcome (`:307-308`). The operator therefore accepts the logged sets only when their digests match the termination message. If the log is missing, truncated or mismatched, the operator runs a result-read Job (the re-auth builder in `ReadResult` mode: read-only mount, checks `manifest.json` against `manifestSha256`, prints the sets from it); each such Job counts toward `lostJobs`. A missing termination message (pod gone) is a lost Job. Status and the `<pvcName>-gtids` ConfigMap, written only by the operator from these checked values, are the trust anchor.
 
 ### 3. Staged
 
-On Job success the operator checks the result as above, the versions and `stagingLoadSeconds`, writes the artifact's certification fields and `state=Verified`, sets `phase=Staged` and emits `RestoreInPlaceStaged`. Next pass: `phase=Preflight`.
+On Job success the operator checks the result as above, the versions and `stagingLoadSeconds`, creates the `<pvcName>-gtids` ConfigMap, writes the artifact's certification fields and `state=Verified`, sets `phase=Staged` and emits `RestoreInPlaceStaged`. Next pass: `phase=Preflight`.
 
-In `Reuse` mode, Staging runs a re-authentication Job instead: it mounts the artifact's claim read-only at `subPath: <artifact.path>`, checks `manifest.json` against `manifestSHA256`, re-hashes every file under `dump/` (no missing or extra files), checks the artifact `@.json` set against `stagedGtidExecuted`, and prints the same completion sentinel. A digest mismatch (its own sentinel) makes the artifact `Invalid` and ends the run `StagingArtifactMismatch`. Any other failure (I/O error, eviction, a lost pod) leaves the artifact `Verified` and counts as a lost attempt.
+In `Reuse` mode, Staging runs a re-authentication Job instead: it mounts the artifact's claim read-only at `subPath: <artifact.path>`, checks `manifest.json` against `manifestSHA256`, re-hashes every file under `dump/` (no missing or extra files), checks the artifact `@.json` set against `stagedGtidSHA256`, and prints the same completion sentinel. A digest mismatch (its own sentinel) makes the artifact `Invalid` and ends the run `StagingArtifactMismatch`. Any other failure (I/O error, eviction, a lost pod, the deadline) leaves the artifact `Verified` and is a lost Job.
 
 **Artifact lifecycle.** Every staging claim has one entry in `restoreStagingArtifacts` from its write-ahead until it is observed gone, so a run's terminal write never has to hand a claim to another list.
 
@@ -545,20 +591,20 @@ In `Reuse` mode, Staging runs a re-authentication Job instead: it mounts the art
 |---|---|---|
 | `Provisioning` | claim write-ahead | `Building` at the staging Job write-ahead; `Invalid` on timeout, cancel, supersede or failure |
 | `Building` | staging Job may write | `Verified` (Staged checks pass); `Invalid` (failure, cancel, supersede, attempts exhausted) |
-| `Verified` | certified | `Deleting`: (1) a run that loaded it reached `Succeeded`; (2) policy `Delete` when its origin run is terminal and nothing protects it; (3) replacement: another `Verified` artifact passed the Fencing rechecks against the bound target; (4) cleanup annotation. `Invalid` on a re-auth digest mismatch |
+| `Verified` | certified | `Deleting`: (1) a run that loaded it reached `Succeeded`; (2) policy `Delete` when its origin run is terminal and nothing protects it; (3) replacement: another `Verified` artifact passed the Fencing rechecks against the bound target; (4) cleanup annotation. `Invalid` on a digest mismatch found by a re-auth Job, the gtids ConfigMap check or a loader refusal whose sentinel reason is a manifest or digest mismatch |
 | `Invalid` | never reusable | `Deleting` once no pod of its origin run can mount it |
 | `Deleting` | UID-conditional delete issued (`Preconditions{UID}`) | entry removed when the claim is observed gone |
 
-Protection overrides (1)-(3): an artifact referenced by a non-terminal run is never deleted, and while `status.restoreDamage` exists nothing `Verified` or `Invalid` is deleted automatically (a replacement that then fails a hand-off check must not have cost the previous repair source); deferred deletions run when the record clears. A claim deleted directly is tolerated: the entry is removed with `RestoreStagingVolumeGone`, and a run that references it fails `StagingVolumeUnavailable` before the loader write-ahead. `Verified` entries whose origin run is terminal are what the retained gauge counts. `MaxItems=8` cannot be exceeded because acceptance refuses a run without a free slot (repeated failures leave `Invalid` entries only until their pods are gone).
+Protection overrides (1)-(3): an artifact referenced by a non-terminal run is never deleted, and while `status.restoreDamage` exists no `Verified` artifact is deleted automatically (a replacement that then fails a hand-off check must not have cost the previous repair source); deferred deletions run when the record clears. `Invalid` artifacts protect nothing and are deleted as usual. A claim deleted directly is tolerated: the entry is removed with `RestoreStagingVolumeGone`, and a run that references it fails `StagingVolumeUnavailable` before the loader write-ahead. `Verified` entries whose origin run is terminal are what the retained gauge counts. `MaxItems=8` cannot be exceeded because a Build needs a free slot (step 3).
 
 ### 4. Preflight
 
 Today's Preflight unchanged (`internal/controller/restore_inplace.go:437-585`, plus #233's peer checks: `BeginPlanned` hold, writable active site, privileges, previous fence released or kept by a damage record this run took over, queue armed, fence recorded), plus:
 
-- for a run that took over a damage record: an uncached read shows every Job in `restoreDamage.jobs` gone or explicitly terminal and every pod labelled with it terminal (the exit-2 rule); a fixed-name loader Job of an earlier run is deleted only after that;
-- privileges (all full-instance runs): `RestoreFencePrivileges` (`internal/mysql/restore_fence.go:41-49`) gains `RELOAD` (`FLUSH BINARY LOGS`) and `TRANSACTION_GTID_TAG`; the explicitly assigned tagged `gtid_next` needs `TRANSACTION_GTID_TAG` plus one of `SYSTEM_VARIABLES_ADMIN`, `SESSION_VARIABLES_ADMIN` or `REPLICATION_APPLIER` (MySQL 9.7 Reference Manual, `gtid_next` system variable; tagged GTIDs since 8.3; **unverified in repo**), which the existing `SYSTEM_VARIABLES_ADMIN` requirement covers;
-- for PITR runs: live `VERSION()` of the active site equals the artifact's `serverVersion` (`StagingVersionMismatch`); `S ⊆ L` with `L` the live `gtid_executed` (`StagedGtidsNotInLive`, below); claim bound, UID unchanged, not terminating, and if `localNode` is set that node exists, is Ready and is not cordoned (`StagingVolumeUnavailable`); every staging, probe, re-auth and result-read pod of the run terminal;
-- loader budget: `estimate = artifactBytes / hashBytesPerSecond + stagingLoadSeconds x max(1, artifactBytes / sourceSizeBytes)` (the load term scales the measured staging load by artifact growth; both sizes are zstd-compressed dumps). With `loaderActiveDeadlineSeconds` set, refuse `StagingLoaderDeadlineTooShort` below `1.5 x estimate`; unset, emit a Normal Event with the estimate. This is a heuristic, not a proof: the live load runs over the network into a busy server. It is evaluated again at Preflight exit, immediately before Fencing.
+- with a damage record present: the execution-stopped proof (the damage invariant); a fixed-name loader Job of an earlier run is deleted only after that;
+- privileges (all full-instance runs): `RestoreFencePrivileges` (`internal/mysql/restore_fence.go:41-49`) gains `RELOAD` (`FLUSH BINARY LOGS`) and `TRANSACTION_GTID_TAG`; the explicitly assigned tagged `gtid_next` needs `TRANSACTION_GTID_TAG` plus one of `SYSTEM_VARIABLES_ADMIN`, `SESSION_VARIABLES_ADMIN` or `REPLICATION_APPLIER` (MySQL 9.7 Reference Manual, `gtid_next` system variable; tagged GTIDs since 8.3; **unverified in repo**), which the existing `SYSTEM_VARIABLES_ADMIN` requirement covers. `SUPER` implies neither `RELOAD` nor `TRANSACTION_GTID_TAG`, so today's "SUPER covers all but PROCESS" rule (`:95`) becomes a per-privilege list; a unit test and the real-MySQL test use a SUPER-only account;
+- for PITR runs: live `VERSION()` of the active site equals the artifact's `serverVersion` (`StagingVersionMismatch`); `S ⊆ L` with `L` the live `gtid_executed` (`StagedGtidsNotInLive`, below); if `encryptedTables`, the live keyring component is active (`performance_schema.keyring_component_status`; `StagingKeyringUnavailable`); claim bound, UID unchanged, not terminating, and if `localNode` is set that node exists, is Ready and is not cordoned (`StagingVolumeUnavailable`); every staging, probe, re-auth and result-read pod of the run terminal;
+- loader budget, in whole seconds with saturating arithmetic (capped at 30 days): `hash = ceil(artifactBytes / max(1, hashBytesPerSecond))`; `load = ceil(max(1, stagingLoadSeconds) x max(1, artifactBytes / max(1, sourceBytes)))`, where `sourceBytes` is what staging measured, never `MysqlBackup.status.sizeBytes` (0 means unknown for S3 backups, `internal/controller/backup_script.py:223-231`); `preDestruction = 600 + 2 x hash`. With `loaderActiveDeadlineSeconds = D` set, refuse `StagingLoaderDeadlineTooShort` when `D < preDestruction + 1.5 x load`; unset, emit a Normal Event with the estimate. This is a heuristic, not a proof: the live load runs over the network into a busy server. It is evaluated again at Preflight exit, immediately before Fencing.
 
 **Staged set not a subset of live `gtid_executed`: refuse.** `D = S − L` non-empty means the staged data contains transactions the live history does not record, for example an archived branch a lossy failover abandoned, or a dump from another group. The alternative, `SET GLOBAL gtid_purged='+D'` after the load, rewrites the live primary's GTID history behind the archiver's back: the next archived file's `Previous_gtids` would jump by `D` with no archived events, which the predecessor-ordering planner cannot anchor, and it would quietly resurrect a branch the group abandoned. The message splits `D`: for `D − B` (replayed transactions) adding them to `pointInTime.excludeGtids` and re-running helps (the identity changes, so it re-stages); for `D ∩ B` (transactions inside the dump) nothing in this run can remove them, and only a different backup or a restore into a new group helps. Consequence, documented: in-place PITR from another group's backup or archive is always refused.
 
@@ -567,9 +613,9 @@ Today's Preflight unchanged (`internal/controller/restore_inplace.go:437-585`, p
 Target site bound at entry (`TopologyGeneration++`, existing). Order:
 
 1. strip the primary role label, wait until fenced (existing);
-2. `offline_mode=ON`, evict pre-fence sessions (existing, `internal/controller/restore_offline_fence.go:365-450`);
-3. rechecks against the bound target: request identity, `VERSION()`, `S ⊆ gtid_executed` (a staging-time failover may have bound a different server), claim UID and node, staging pods terminal, artifact hand-off rule. A refusal releases the fence immediately (no Job, no barrier) unless a damage record exists;
-4. **barrier** (every full-instance run): choose `n` = 1 + the highest number used by any `bloodraven_restore`, `bloodraven_restored` or `bloodraven_restore_void` GTID across all source UUIDs in the target's `gtid_executed`, and write `restoreBarriers[runID]{barrier: {gtid: <target server_uuid>:bloodraven_restore:<n>, state: Writing}}` **before** committing anything. Then `FLUSH BINARY LOGS`; `SET GTID_NEXT='<uuid>:bloodraven_restore:<n>'; BEGIN; COMMIT; SET GTID_NEXT='AUTOMATIC'`; `FLUSH BINARY LOGS`; `state: Written`, Event `RestoreBarrierWritten`. An empty transaction is logged only under an explicitly assigned GTID; with `AUTOMATIC` (tagged or not) it gets none (MySQL 9.7 Reference Manual, GTID lifecycle; **unverified in repo**). Retry is idempotent: on restart in `Writing`, the recorded GTID already in `gtid_executed` means it was committed; otherwise both statements run again. In `Written` the second flush is re-run unconditionally (an extra rotation is harmless). The flushes put the barrier alone in its own sealed binlog file. Ownership is only ever the recorded GTID; a tag never identifies a run;
+2. `offline_mode=ON` and `event_scheduler=OFF`, recording the prior values in the fence record (`priorEventScheduler` beside the existing `priorOfflineMode`; a scheduler `DISABLED` at startup is recorded and left alone), evict pre-fence sessions (existing, `internal/controller/restore_offline_fence.go:365-450`); the fence release restores both, as it restores `offline_mode` today (`:452-475`). Events loaded with the data would otherwise fire into a half-loaded schema and log writes;
+3. rechecks against the bound target: request identity, `VERSION()`, `S ⊆ gtid_executed` (a staging-time failover may have bound a different server), live keyring if `encryptedTables`, claim UID and node, staging pods terminal, artifact hand-off rule. A refusal releases the fence immediately (no Job, no barrier) unless a damage record exists;
+4. **barrier** (every full-instance run): allocate `n = 1 + max(status.restoreMarkerSeq, every marker number of any `bloodraven_restore*` tag across all source UUIDs in the target's `gtid_executed`)` and, in one status write, set `restoreMarkerSeq = n` and `restoreBarriers[runID]{n, barrier: {gtid: <target server_uuid>:bloodraven_restore:<n>, state: Writing}}`, **before** committing anything. Because the sequence never decreases and an allocated number is recorded before use, no number is ever handed out twice, even when a barrier is never committed. Then `FLUSH BINARY LOGS`; `SET GTID_NEXT='<uuid>:bloodraven_restore:<n>'; BEGIN; COMMIT; SET GTID_NEXT='AUTOMATIC'`; `FLUSH BINARY LOGS`; `state: Written`, Event `RestoreBarrierWritten`. An empty transaction is logged only under an explicitly assigned GTID; with `AUTOMATIC` (tagged or not) it gets none (MySQL 9.7 Reference Manual, GTID lifecycle; **unverified in repo**). Retry is idempotent: on restart in `Writing` while the run is non-terminal, the recorded GTID already in `gtid_executed` means it was committed; otherwise both statements run again. In `Written` the second flush is re-run unconditionally (an extra rotation is harmless). The flushes put the barrier alone in its own sealed binlog file;
 5. #233 peer IO stop with catch-up; `fencedGtidExecuted` now includes the barrier;
 6. if PITR archiving is enabled, wait up to 10 minutes for the primary's sidecar to report the barrier archived (new `GET /archiver/covers?gtids=<set>`: whether a sealed archived file covers the set), then `state: Archived`. Timeout ends the run `RestoreBarrierNotArchived` before any Job;
 7. Event `RestoreInPlaceWritesDiscarded` (requested stop, fence time), `phase=Restoring`.
@@ -578,17 +624,17 @@ Target site bound at entry (`TopologyGeneration++`, existing). Order:
 
 Today's destructive path (`internal/controller/restore_inplace.go:689-873`) with these changes:
 
-- **Immediately before the write-ahead**, the operator re-reads the target `VERSION()` and the request identity (refusals as in Fencing; a version refusal here does not consume the confirm, Q7's "immediately before the DROP" check).
-- **Damage write-ahead (every full-instance run, PR1).** The status update that sets `jobCreating=true` also creates `status.restoreDamage{originRunID: runID, runID, site, jobs: [loader Job name], since}`, or, for a run that took one over, appends this Job to `jobs`. The Job UID is added once the Job exists. From this write on the primary counts as possibly damaged. If the API server refuses the Create (Invalid/Forbidden/BadRequest, which today withdraws the write-ahead, `:753-762`), the record is withdrawn with it when this run created it.
-- **Source:** the artifact's claim (`pvcUID` checked uncached before Create), `subPath: <artifact.path>`, read-only at `/staging` (`/staging/manifest.json`, `/staging/dump`); image: the artifact's `imageDigest`; no `pitr-download` or `decrypt-download` init containers; loader options as in API; no `updateGtidSet` (the live-target rule, `internal/controller/restore.go:937-949`, `TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline`). `activeDeadlineSeconds` = `loaderActiveDeadlineSeconds` (none when unset) for PITR runs; non-PITR runs keep `spec.backup.activeDeadlineSeconds`.
-- **Env:** `BLOODRAVEN_RUN_ID`, `BLOODRAVEN_STAGING_MANIFEST_SHA256`, `BLOODRAVEN_STAGING_GTID_SHA256`, `BLOODRAVEN_EXPECT_TARGET_VERSION`, `BLOODRAVEN_PRE_DESTRUCTION_DEADLINE` (absolute time: Job creation + 10 min + 2 x the estimated hash time).
-- **Pre-destruction refusal path (PR1, all full-instance loaders).** `restore.py` sets a module flag immediately before its first mutating statement (`_maybe_reset_replication`, then `_maybe_preflight_drops`, `internal/controller/restore_script.py:880-883`). Before that point every refusal goes through one function, `_refuse_before_destruction(reason)`, which asserts the flag is unset, writes `BLOODRAVEN_PRE_DESTRUCTION_REFUSED v=1 runID=<id> job=<name> reason=<r>` to the termination message and exits with a dedicated code (proposed 70; today every failure exits 2, `:399-402`, `:700-742`, `:887-894`). The refusals routed through it: `_verify_staging_artifact` (manifest digest, every file size and SHA-256, no extra files, artifact `@.json` set digest), target `VERSION()`, `_prepare_local_infile`, `_require_offline_mode`, and the pre-destruction deadline (checked after every hashed file and immediately before the flag is set). After the flag is set the function falls through to exit 2. **Unverified in repo:** that `mysqlsh --py -f` propagates `sys.exit(70)` as the container exit code; PR1 pins it with a native test.
+- **Immediately before the write-ahead**, the operator re-reads the target `VERSION()`, the live keyring if `encryptedTables`, and the request identity (refusals as in Fencing; a version refusal here does not consume the confirm, Q7's "immediately before the DROP" check).
+- **Damage write-ahead (every full-instance run, PR1).** The status update that sets `jobCreating=true` also creates `status.restoreDamage{originRunID: runID, runID, site, since}`, unless a record already exists (this run then owns it from its acceptance write). From this write on the damage invariant holds. If the API server refuses the Create (Invalid/Forbidden/BadRequest, which today withdraws the write-ahead, `:753-762`), a record this run created in that write is withdrawn with it.
+- **Source:** the artifact's claim (`pvcUID` checked uncached before Create), `subPath: <artifact.path>`, read-only at `/staging` (`/staging/manifest.json`, `/staging/dump`); image: the artifact's `imageDigest`; no `pitr-download` or `decrypt-download` init containers; loader options as in API; no `updateGtidSet` (the live-target rule, `internal/controller/restore.go:937-949`, `TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline`). Pods carry `shipstream.io/restore-loader=<group>` (every full-instance loader, PR1). `activeDeadlineSeconds` = `loaderActiveDeadlineSeconds` (none when unset) for PITR runs; non-PITR runs keep `spec.backup.activeDeadlineSeconds`.
+- **Env:** `BLOODRAVEN_RUN_ID`, `BLOODRAVEN_STAGING_MANIFEST_SHA256`, `BLOODRAVEN_STAGING_GTID_SHA256`, `BLOODRAVEN_EXPECT_TARGET_VERSION`, `BLOODRAVEN_EXPECT_KEYRING` (when `encryptedTables`), `BLOODRAVEN_PRE_DESTRUCTION_DEADLINE`: absolute time `T0 + min(preDestruction, D − 1.5 x load)` (Preflight budget; the second term only when `D` is set), where `T0` is the operator's clock at the write-ahead. `T0` is not later than the Job's creation, and Kubernetes counts `activeDeadlineSeconds` from `status.startTime`, which is not earlier, so the bound is conservative.
+- **Pre-destruction refusal path (PR1, all full-instance loaders).** `restore.py` sets a module flag immediately before its first mutating statement (`_maybe_reset_replication`, then `_maybe_preflight_drops`, `internal/controller/restore_script.py:880-883`). Before that point every refusal goes through one function, `_refuse_before_destruction(reason)`, which asserts the flag is unset, writes `BLOODRAVEN_PRE_DESTRUCTION_REFUSED v=1 runID=<id> job=<name> reason=<r>` to the termination message and exits with a dedicated code (proposed 70; today every failure exits 2, `:399-402`, `:700-742`, `:887-894`). The refusals routed through it: `_verify_staging_artifact` (manifest digest, every file size and SHA-256, no extra files, artifact `@.json` set digest; reason `ArtifactMismatch`, which makes the artifact `Invalid`), target `VERSION()`, live keyring active when expected, `_prepare_local_infile`, `_require_offline_mode`, and the pre-destruction deadline (checked after every hashed file and immediately before the flag is set). After the flag is set the function falls through to exit 2. **Unverified in repo:** that `mysqlsh --py -f` propagates `sys.exit(70)` as the container exit code; PR1 pins it with a native test.
 
 The full re-hash runs while fenced; for a large artifact it adds minutes to the outage. That is the price of turning a truncated or altered claim into a refusal before the DROP instead of a load failure after it.
 
 ### 7. Resuming and Succeeded
 
-After the loader Job succeeds: write `restoreBarriers[runID].completion{gtid: <uuid>:bloodraven_restored:<n>, state: Writing}` (same uuid and `n` as the barrier), commit it with the same explicit-GTID statements (idempotent the same way), `Written`, Event `RestoreCompletionWritten`; an unreachable primary is retried with the fence up, since the load already succeeded. Only then release the queue to `Draining` and write `Succeeded`, which clears `status.restoreDamage` (whether this run created it or took it over) in the same write. The completion marker therefore precedes the fence release and every reclone, so recloned peers carry it and held peers do not. The hold on the source backup is released, and the artifact the run loaded goes to `Deleting` (success always deletes).
+After the loader Job succeeds: write `restoreBarriers[runID].completion{gtid: <uuid>:bloodraven_restored:<n>, state: Writing}` (same uuid and `n` as the barrier), commit it with the same explicit-GTID statements (idempotent the same way), `Written`, Event `RestoreCompletionWritten`; an unreachable primary is retried with the fence up, since the load already succeeded. Only then release the queue to `Draining` and write `Succeeded`, which clears `status.restoreDamage` in the same write (clearing proof (a); the run owns the record, and only full-instance runs can). The completion marker therefore precedes the fence release and every reclone, so recloned peers carry it and held peers do not. The hold on the source backup is released, and the artifact the run loaded goes to `Deleting` (success always deletes).
 
 ### 8. After a failed or lost loader Job: damage evaluation
 
