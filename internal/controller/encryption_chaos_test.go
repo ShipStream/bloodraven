@@ -341,7 +341,7 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 
 	stalled := liveKeyring(keyringDigest([]byte("live-but-unescrowed")), false)
 	stalled.LastError = "post escrow: x509: certificate signed by unknown authority"
-	r, _ := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+	r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
 		"dc1": stalled,
 	}), fg, unsealedDeployment(fg, "dc1"))
 
@@ -359,9 +359,18 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 		t.Fatal("an unescrowed site must never render sealed, however long the outage lasts")
 	}
 
-	// Wind the clock past the escrow deadline.
+	// Wind the clock past the escrow deadline, in the stored status too:
+	// a pass whose input differs from what is persisted is discarded.
 	old := metav1.NewTime(time.Now().Add(-10 * time.Minute))
-	siteStatus(fg, "dc1").UnsealedSince = &old
+	var stored v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &stored); err != nil {
+		t.Fatal(err)
+	}
+	siteStatus(&stored, "dc1").UnsealedSince = &old
+	if err := c.Status().Update(ctx, &stored); err != nil {
+		t.Fatal(err)
+	}
+	fg = stored.DeepCopy()
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 		t.Fatalf("reconcile after the deadline: %v", err)
 	}

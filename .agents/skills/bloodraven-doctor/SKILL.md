@@ -75,7 +75,7 @@ Check the core conditions and status fields:
 - `.status.conditions`:
   - `Ready == True`?
   - `Bootstrapping == False`?
-  - `RecoveryInProgress == False`?
+  - `RecoveryInProgress == False`? (It is expected to stay set while a planned failover or ordered update is in flight: recovery stands down until the handoff ends. A Dragonfly snapshot upgrade defers it only intermittently, so a site stuck through a whole upgrade is a real stall.)
   - `RecoveryBlocked == False`?
 - Pod status: `kubectl get pods -n <namespace> -l app.kubernetes.io/instance=<group-name>`
 - Recent events: `kubectl get events -n <namespace> --sort-by=.lastTimestamp`
@@ -120,6 +120,7 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
   ./.agents/skills/bloodraven-doctor/scripts/sidecar-probe.sh -n <namespace> <group-name> keyring
   ```
 - **CRITICAL SAFETY RULE**: If `KeyringEscrowMissing` or `KeyringEscrowCorrupt` is detected on a sealed pod, **DO NOT delete, restart, or reschedule the pod**. Recover the escrow Secret first.
+- **Escrow Secret**: named by `status.encryptionAtRest.sites[].keyringSecret` (`mysql-<group>-<site>-keyring-v<N>`). `/keyring/status` returns metadata and digests only; the recoverable copy is the keyring file in the running pod. Recreate a missing Secret with `./.agents/skills/bloodraven-doctor/scripts/keyring-escrow-recover.sh -n <namespace> <group-name> <site>`; it never deletes or overwrites an existing Secret unless re-run with `--replace-corrupt <secret-name>` after a human confirms. Follow [playbook 3](./references/troubleshooting_playbooks.md#3-keyring--encryption-at-rest-troubleshooting).
 
 ### 4. Dragonfly Cache & Session Degradation
 - **Symptom**: `status.dragonfly.phase=Degraded`, `DragonflyPromotionFailed`, or active cache service has no endpoints.
@@ -167,7 +168,7 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
   kubectl bloodraven backup <group-name> -n <namespace>
   kubectl bloodraven verify-backup <group-name> -n <namespace>
   ```
-- **After a full-instance in-place restore**: `status.restoreReclones.pending` lists the peers not yet recloned from the restored primary. They are excluded from automatic promotion and removed from the `-replica` and read-only Services until their clone succeeds. See [playbook 20](./references/troubleshooting_playbooks.md#20-peers-not-yet-recloned-after-a-full-instance-in-place-restore).
+- **After a full-instance in-place restore**: `status.restoreReclones.pending` lists the peers not yet recloned from the restored primary. They are excluded from automatic promotion and removed from the `-replica` and read-only Services until their clone succeeds, and their replication receiver (IO thread) is stopped by design until then: `Degraded`/deployment API reason `RestoreReclonePending`, `sourceConvergenceReason: RestorePeerHold`, and `bloodraven_restore_reclone_pending{phase}=1` are expected, not a replication fault. Never `START REPLICA` on a queued site: after a failed restore (`phase: Held`) that replicates the restore's `DROP` statements into the only intact copies. See [playbook 20](./references/troubleshooting_playbooks.md#20-peers-not-yet-recloned-after-a-full-instance-in-place-restore).
 
 ### 6. DNS & Application Traffic
 - **Symptom**: App writes hitting wrong site, DNS records not updating after failover, or a hostname rename that never reached DNS.

@@ -57,6 +57,27 @@ type UpdateController struct {
 	mu       sync.Mutex
 	phase    UpdatePhase
 	updating bool
+
+	// replicaStartGate, when set, runs a replication start on a site
+	// unless an in-place restore holds that site's replication (see
+	// TopologyManager.withReplicaStartGate). Set once by the topology
+	// manager before the updater runs.
+	replicaStartGate func(site string, start func() error) error
+}
+
+// SetReplicaStartGate installs the restore hold gate for replication
+// starts. Call before the updater runs.
+func (u *UpdateController) SetReplicaStartGate(gate func(site string, start func() error) error) {
+	u.replicaStartGate = gate
+}
+
+// startReplica restarts site's replication through the gate.
+func (u *UpdateController) startReplica(ctx context.Context, target UpdateTarget) error {
+	start := func() error { return target.Checker.StartReplica(ctx) }
+	if u.replicaStartGate == nil {
+		return start()
+	}
+	return u.replicaStartGate(target.Name, start)
 }
 
 // UpdateTarget describes one site in an N-site ordered rollout.
@@ -94,6 +115,12 @@ type UpdateTarget struct {
 	// the pod-readiness gate off for this site; production always sets
 	// it together with ApplyUpdate.
 	PodReady func(context.Context) (PodReadiness, error)
+	// HandoffBlocked, when set, reports the site's handoff eligibility
+	// (keyring rotation, pending reclone, divergence) at the moment the
+	// handoff target is chosen. The flags above are a snapshot taken when
+	// the update was planned, which can be minutes older after follower
+	// rollouts. Production always sets it; nil skips the live check.
+	HandoffBlocked func() error
 }
 
 // podReadinessProbeTimeout bounds one pod-readiness probe.
@@ -332,7 +359,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		processedFollowers[name] = struct{}{}
 	}
 	var handoff *UpdateTarget
-	var rotatingStandby, pendingStandby, divergentStandby []string
+	var rotatingStandby, pendingStandby, divergentStandby, liveBlocked []string
 	for i := range followers {
 		if !followers[i].Promotable {
 			continue
@@ -348,6 +375,12 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		if followers[i].DivergenceBlocked {
 			divergentStandby = append(divergentStandby, divergentStandbyMessage(followers[i]))
 			continue
+		}
+		if followers[i].HandoffBlocked != nil {
+			if err := followers[i].HandoffBlocked(); err != nil {
+				liveBlocked = append(liveBlocked, err.Error())
+				continue
+			}
 		}
 		if followers[i].Drifted {
 			if _, updated := processedFollowers[followers[i].Name]; !updated {
@@ -368,6 +401,9 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		}
 		if len(divergentStandby) > 0 {
 			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s", strings.Join(divergentStandby, "; "))
+		}
+		if len(liveBlocked) > 0 {
+			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s", strings.Join(liveBlocked, "; "))
 		}
 		return processed, fmt.Errorf("no healthy promotable standby available for active-site update")
 	}
@@ -559,7 +595,7 @@ func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateT
 	var podErr error
 	deadline := time.Now().Add(timeout)
 	for {
-		replicating := directReplicaReady(ctx, target.Checker, expected)
+		replicating := directReplicaReady(ctx, target.Checker, expected, func() error { return u.startReplica(ctx, target) })
 		podReady := true
 		if target.PodReady != nil {
 			pod, podErr = u.probePod(ctx, target)
@@ -606,7 +642,7 @@ func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateT
 // threads run against expected. It re-fences a follower whose pod
 // replacement left it writable and restarts a stopped channel that already
 // points at expected.
-func directReplicaReady(ctx context.Context, checker mysql.Checker, expected string) bool {
+func directReplicaReady(ctx context.Context, checker mysql.Checker, expected string, startReplica func() error) bool {
 	readOnly, roleErr := checker.CheckReadOnly(ctx)
 	if roleErr == nil && !readOnly {
 		// MySQL does not persist SET GLOBAL read_only across a pod
@@ -623,7 +659,7 @@ func directReplicaReady(ctx context.Context, checker mysql.Checker, expected str
 		return false
 	}
 	if canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) && (!rs.IORunning || !rs.SQLRunning) {
-		_ = checker.StartReplica(ctx)
+		_ = startReplica()
 	}
 	return rs.IORunning && rs.SQLRunning && canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected)
 }

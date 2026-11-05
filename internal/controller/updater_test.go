@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -130,6 +131,69 @@ func TestUpdateController_ExecuteTargetsSkipsRotationBlockedHandoff(t *testing.T
 	}
 	if rotating.ReadOnlyVal == false {
 		t.Fatal("rotating standby must not be handed off")
+	}
+}
+
+// The snapshot flags are taken when the update is planned; a rotation stamped
+// while followers rolled is visible only to the live re-check at selection.
+func TestUpdateController_ExecuteTargetsLiveBlockSkipsHandoffTarget(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	rotating := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	sealed := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	var promoted string
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Host: "primary-internal", Checker: active, Drifted: true,
+	}, []UpdateTarget{
+		{Name: "rotating", Host: "rotating-internal", Checker: rotating, Promotable: true, ExpectedSource: "primary-internal",
+			HandoffBlocked: func() error { return errors.New("rotating mid-keyring-rotation (UnsealReason=Rotation)") }},
+		{Name: "sealed", Host: "sealed-internal", Checker: sealed, Promotable: true, ExpectedSource: "primary-internal",
+			HandoffBlocked: func() error { return nil }},
+	}, func(_ context.Context, name string) error {
+		if name == "primary" {
+			active.ReplicaStatusVal = &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "sealed-internal"}
+		}
+		return nil
+	}, func(target, _ string) { promoted = target })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted != "sealed" {
+		t.Fatalf("promoted = %q, want sealed", promoted)
+	}
+	if !rotating.ReadOnlyVal {
+		t.Fatal("a standby blocked live must not be handed off")
+	}
+}
+
+func TestUpdateController_ExecuteTargetsLiveBlockOnOnlyStandbyFencesNothing(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	standby := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	promoted := false
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Checker: active, Drifted: true,
+	}, []UpdateTarget{
+		{Name: "standby", Host: "standby-internal", Checker: standby, Promotable: true, ExpectedSource: "primary-internal",
+			HandoffBlocked: func() error { return errors.New("standby mid-keyring-rotation (UnsealReason=Rotation)") }},
+	}, func(context.Context, string) error { return nil }, func(string, string) { promoted = true })
+	if err == nil || !strings.Contains(err.Error(), "UnsealReason=Rotation") {
+		t.Fatalf("err = %v, want the live rotation reason", err)
+	}
+	if promoted || !standby.ReadOnlyVal {
+		t.Fatal("a standby blocked live must not be promoted")
+	}
+	if slices.Contains(active.Calls, "SetSuperReadOnly(ON)") {
+		t.Fatal("the active site was fenced for a handoff that had no eligible target")
 	}
 }
 

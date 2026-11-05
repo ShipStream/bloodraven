@@ -62,9 +62,7 @@ type gtidAuditSchedule struct {
 // cluster is being reshaped, so a comparison against the active site would
 // not describe a settled primary and follower. Must hold tm.mu.
 func (tm *TopologyManager) gtidAuditSuppressedLocked() bool {
-	return tm.promotedSite != "" || tm.autoBootstrapSuppressed || tm.topologyFrozen ||
-		tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) ||
-		tm.deploymentUpdateRunning || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation
+	return tm.autoBootstrapSuppressed || tm.followerMutationSuppressedLocked()
 }
 
 // auditFollowerDivergence checks every due read-only follower for

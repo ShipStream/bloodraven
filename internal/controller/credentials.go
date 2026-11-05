@@ -167,10 +167,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 
 // tenantClaimedUsernames returns the MySQL usernames owned by live
 // MysqlDatabases on fg, mapped to the claiming CR's name. status.ownerUser
-// is echoed before the tenant path's first statement runs, so any account
-// the tenant path has touched — or will retry — is claimed. CRs being
-// deleted keep their claim: only the finalizer decides whether the account
-// survives, and failing closed here costs one defer, not a password reset.
+// is echoed before the tenant path's first statement runs, and an owner
+// rotation target is written ahead as status.pendingOwnerUser the same way,
+// so any account the tenant path has touched — or will retry — is claimed.
+// CRs being deleted keep their claim: only the finalizer decides whether the
+// account survives, and failing closed here costs one defer, not a password
+// reset.
 func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (map[string]string, error) {
 	var list v1alpha1.MysqlDatabaseList
 	if err := r.List(ctx, &list, ctrlclient.InNamespace(fg.Namespace)); err != nil {
@@ -184,6 +186,9 @@ func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Contex
 		}
 		if mdb.Status.OwnerUser != "" {
 			claimed[mdb.Status.OwnerUser] = mdb.Name
+		}
+		if mdb.Status.PendingOwnerUser != "" {
+			claimed[mdb.Status.PendingOwnerUser] = mdb.Name
 		}
 		// spec.users[] principals are tenant claims too: their write-ahead
 		// ledger (status.appliedUsers) is stamped before their first

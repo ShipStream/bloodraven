@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -12,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 )
 
@@ -222,5 +226,257 @@ func TestConnectionMaterialHash_UnreadableSecretIsAnError(t *testing.T) {
 	fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
 	if h, err := connectionMaterialHash(ctx, c, fg); err == nil {
 		t.Fatalf("missing TLS secret: hash %q, want an error", h)
+	}
+}
+
+// A manager started while a planned failover is in flight (an operator
+// restart mid-switchover) must carry the planned-failover guard before its
+// first poll: the RecoveryInProgress markers startManager restores would
+// otherwise let that poll drain or recover the sites the switchover uses.
+func TestStartManager_HydratesPlannedFailoverGuardBeforeRun(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	nn := FailoverGroupNamespacedName(fg)
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "dc2"}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc2", RecoveryState: recoveryStateInProgress}}
+
+	cfg := CRConfigToTopologyConfig(fg)
+	if err := r.startManager(context.Background(), fg, cfg, nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	mt := registeredManager(r, nn)
+	if mt == nil {
+		t.Fatal("no manager registered")
+	}
+	if !mt.tm.isPlannedFailoverActive() {
+		t.Fatal("planned-failover guard not set when Run started")
+	}
+	if !mt.tm.followerMutationSuppressed() {
+		t.Fatal("restored RecoveryInProgress sites are open to recovery during the planned failover")
+	}
+}
+
+func managerRotationBlocked(mt *managedTopology, site string) bool {
+	mt.tm.mu.RLock()
+	defer mt.tm.mu.RUnlock()
+	return mt.tm.keyringRotationBlockedLocked(site)
+}
+
+// No manager can be asked about an ordered update, so a rotation is refused
+// (and retried) until one runs. A rotation admitted against a manager that
+// is then replaced must block promotion on the replacement before its Run
+// can claim an ordered update.
+func TestRotationReservationSurvivesManagerReplacement(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	nn := FailoverGroupNamespacedName(fg)
+	ctx := context.Background()
+	cfg := CRConfigToTopologyConfig(fg)
+
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedNoManager {
+		t.Fatalf("reservation with no manager = %v, %q; want refused until a manager runs", ok, why)
+	}
+	if err := r.startManager(ctx, fg, cfg, nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	first := registeredManager(r, nn)
+	settleAuthority(first.tm)
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); !ok {
+		t.Fatalf("reservation refused with a running manager: %s", why)
+	}
+	if !managerRotationBlocked(first, "dc2") {
+		t.Fatal("the running manager does not block dc2")
+	}
+
+	// Replace the manager before the stamp is persisted.
+	r.StopManager(nn)
+	if err := r.startManager(ctx, fg, cfg, first); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	second := registeredManager(r, nn)
+	if second == first || !managerRotationBlocked(second, "dc2") {
+		t.Fatal("the replacement manager lost the rotation reservation")
+	}
+
+	// An authoritative view without the stamp ends the reservation for the
+	// running manager and for any later one.
+	r.PublishKeyringRotationBlocked(nn, nil)
+	if managerRotationBlocked(second, "dc2") {
+		t.Fatal("authoritative view did not end the reservation")
+	}
+	r.StopManager(nn)
+	if err := r.startManager(ctx, fg, cfg, second); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if managerRotationBlocked(registeredManager(r, nn), "dc2") {
+		t.Fatal("an ended reservation was carried onto a new manager")
+	}
+}
+
+// A reservation the running manager refuses is not recorded, so no later
+// manager inherits it.
+func TestRefusedRotationReservationIsNotCarried(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	nn := FailoverGroupNamespacedName(fg)
+	cfg := CRConfigToTopologyConfig(fg)
+	if err := r.startManager(context.Background(), fg, cfg, nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	mt := registeredManager(r, nn)
+	mt.tm.mu.Lock()
+	mt.tm.deploymentUpdatePending = true
+	mt.tm.mu.Unlock()
+	if ok, _ := r.ReserveKeyringRotation(nn, "dc2"); ok {
+		t.Fatal("reservation admitted while an ordered update is pending")
+	}
+	r.reservationMu.Lock()
+	pending := r.pendingKeyringRotationReservations(nn)
+	r.reservationMu.Unlock()
+	if len(pending) != 0 {
+		t.Fatalf("refused reservation recorded: %v", pending)
+	}
+}
+
+// The interleaving the retiring list exists for: a manager is replaced
+// while its ordered-update goroutine is still alive and about to hand the
+// active site off. Until that goroutine exits, a rotation must not be
+// admitted, whatever replaced the manager; the old worker's handoff and a
+// rotation of its target cannot both proceed. (Retired before its claim,
+// the old worker now also never claims the sites.)
+func TestRotationRefusedWhileRetiringManagerUpdateInFlight(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	r := &TopologyManagerRunner{logger: logger, managers: make(map[types.NamespacedName]*managedTopology)}
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+
+	primary := &mockMySQL{readOnly: false}
+	standby := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+	old, _, _ := newTestTopologyManagerWithBootstrap(primary, standby)
+	old.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	pollN(old, 4)
+
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	old.PodReady = func(context.Context, string) (PodReadiness, error) {
+		once.Do(func() {
+			close(entered)
+			<-unblock
+		})
+		return PodReadiness{Ready: true}, nil
+	}
+	// The old active's own update is where this test stops the worker.
+	old.ApplyUpdate = func(context.Context, string) error { return errors.New("stop after the handoff") }
+	r.SetManagerForTest(nn, old)
+	old.SetSpecDriftSites([]string{"dc1"})
+	if !old.checkUpdate(context.Background()) {
+		t.Fatal("setup: ordered update did not start")
+	}
+	<-entered
+
+	// sync replaces the manager: retire and unregister, as the runner does.
+	r.mu.Lock()
+	r.retireManagerLocked(nn, r.managers[nn])
+	r.mu.Unlock()
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedManagerRestarting {
+		t.Fatalf("rotation with the old update in flight and no replacement = %v, %q; want refused", ok, why)
+	}
+	replacement, _, _ := newTestTopologyManagerWithBootstrap(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	settleAuthority(replacement)
+	r.SetManagerForTest(nn, replacement)
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedManagerRestarting {
+		t.Fatalf("rotation with the old update in flight = %v, %q; want refused until it exits", ok, why)
+	}
+	if old.checkUpdate(context.Background()) {
+		t.Fatal("a retired manager started another ordered update")
+	}
+
+	close(unblock)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		r.mu.RLock()
+		retiring := len(r.retiring[nn])
+		r.mu.RUnlock()
+		if retiring == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the retired manager was never released after its update exited")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// It was still before its claim when retired, so it touched nothing.
+	if !standbyReadOnly(standby) {
+		t.Fatal("a retired manager's unclaimed update claimed the sites and handed off")
+	}
+	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); !ok {
+		t.Fatalf("rotation still refused after the old update exited: %s", why)
+	}
+}
+
+func standbyReadOnly(m *mockMySQL) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.readOnly
+}
+
+// A replaced manager's ordered update can outlive its Run. The manager that
+// replaces it must not drain, recover or repoint the sites that update is
+// still working on until it exits (issue #175 item 1 across a restart).
+func TestReplacementManagerDefersToPredecessorUpdate(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	r := &TopologyManagerRunner{logger: logger, managers: make(map[types.NamespacedName]*managedTopology)}
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+
+	primary := &mockMySQL{readOnly: false}
+	follower := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+	old, _, _ := newTestTopologyManagerWithBootstrap(primary, follower)
+	old.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	pollN(old, 4)
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	// The old update blocks rolling the follower, then gives up.
+	old.ApplyUpdate = func(context.Context, string) error {
+		close(entered)
+		<-unblock
+		return errors.New("rollout abandoned")
+	}
+	r.registerManager(nn, &managedTopology{tm: old})
+	old.SetSpecDriftSites([]string{"dc2"})
+	if !old.checkUpdate(context.Background()) {
+		t.Fatal("setup: ordered update did not start")
+	}
+	<-entered
+
+	r.mu.Lock()
+	r.retireManagerLocked(nn, r.managers[nn])
+	r.mu.Unlock()
+	replacement, _, _ := newTestTopologyManagerWithBootstrap(primary, follower)
+	replacement.SetRecoveryInProgress("dc2")
+	r.registerManager(nn, &managedTopology{tm: replacement})
+
+	pollN(replacement, 4)
+	follower.mu.Lock()
+	kills, fences, changes := follower.killConnectionCalls, follower.superReadOnlyCalls, follower.changeSourceCalls
+	follower.mu.Unlock()
+	if kills != 0 || fences != 0 || changes != 0 {
+		t.Fatalf("replacement mutated a site the old update still owns: kill=%d fence=%d changeSource=%d", kills, fences, changes)
+	}
+
+	close(unblock)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		replacement.mu.RLock()
+		waiting := replacement.predecessorUpdateInFlight
+		replacement.mu.RUnlock()
+		if !waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the replacement still defers after the old update exited")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	pollN(replacement, 2)
+	follower.mu.Lock()
+	kills = follower.killConnectionCalls
+	follower.mu.Unlock()
+	if kills == 0 {
+		t.Fatal("recovery did not resume once the old update exited")
 	}
 }
