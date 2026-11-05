@@ -16,7 +16,8 @@ package runner
 //     through unplanned failover, reader stall isolation, writable-reader
 //     fencing, and the source-convergence invariant), and the regressions
 //     from the 2026-10-15 chaos round (cooldown retry, hung primary, hung
-//     reader, killed clone).
+//     reader, killed clone), and the durable planned-failover claim
+//     surviving an operator restart (#235).
 //   - full:   every registered scenario (existing run-all behaviour).
 type Profile string
 
@@ -70,6 +71,8 @@ var releaseScenarios = map[string]bool{
 	"44-reader-source-convergence-invariant":  true, // wrong-source reader heals as a poll-loop invariant
 	"53-deployment-hold-expiry":               true, // planned hold deferral and TTL recovery
 	"55-deployment-emergency-revocation":      true, // emergency bypass and live lease revocation
+	// durable planned-failover claim (#235)
+	"63-planned-failover-operator-restart-mid-lag": true, // claim rehydrates across an operator restart mid WaitingForLag
 	// chaos round 2026-10-15 regressions
 	"09-anti-flap-cooldown":                 true, // blocked failover retried at cooldown expiry
 	"57-hung-primary-detected-and-fenced":   true, // SIGSTOPped primary: detection, fence on resume, sidecar alive

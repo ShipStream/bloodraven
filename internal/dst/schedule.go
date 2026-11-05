@@ -44,6 +44,43 @@ const (
 	// statement reaches the server; Down is how many polls pass before the
 	// replacement process starts.
 	OpCrashOperatorMid OpKind = "crashOperatorMid"
+
+	// Actor-stream ops (§15.1). They are generated only into Trial.Actors,
+	// from a PRNG stream of their own, so they never appear in (or shift)
+	// the fault schedule above.
+	//
+	// OpPlannedFailover sets the planned-failover request annotation (Site
+	// is the requested target, possibly the active site or an unknown one).
+	OpPlannedFailover OpKind = "plannedFailover"
+	// OpOrderedUpdate starts the update actor on the current manager.
+	OpOrderedUpdate OpKind = "orderedUpdate"
+	// OpReplaceManager retires the current manager (which keeps polling for
+	// N more polls) and registers a new one in the same process.
+	OpReplaceManager OpKind = "replaceManager"
+	// OpManagerAbsent leaves the group with no registered manager for N
+	// polls.
+	OpManagerAbsent OpKind = "managerAbsent"
+	// OpPFWriteLost: the next N engine status writes time out uncommitted.
+	OpPFWriteLost OpKind = "pfWriteLost"
+	// OpPFWriteAmbiguous: the next N engine status writes commit and time
+	// out.
+	OpPFWriteAmbiguous OpKind = "pfWriteAmbiguous"
+	// OpPFWriteLate: the next N writes time out and commit K polls later
+	// iff their resourceVersion is still current.
+	OpPFWriteLate OpKind = "pfWriteLate"
+	// OpPFReadOutage: uncached reads fail for N polls.
+	OpPFReadOutage OpKind = "pfReadOutage"
+	// OpPFStatusDenied: status writes are forbidden for N polls while
+	// metadata writes work.
+	OpPFStatusDenied OpKind = "pfStatusDenied"
+	// OpOOBLateWrite replays an older out-of-band failover record late.
+	OpOOBLateWrite OpKind = "oobLateWrite"
+	// OpRestartPromotedTarget restarts a run's target K yields after the
+	// run's read_only clear on it (data kept, boots read_only=ON).
+	OpRestartPromotedTarget OpKind = "restartPromotedTarget"
+	// OpReplacePod replaces Site's pod; K > 0 regresses its data directory
+	// K ticks (#218).
+	OpReplacePod OpKind = "replacePod"
 )
 
 // Op is one scheduled fault operation, applied at the start of poll At.
@@ -65,6 +102,10 @@ type Op struct {
 	// Down (OpCrashOperatorMid) is how many polls the operator stays dead
 	// before its replacement starts.
 	Down int
+	// K is the second count of an actor-stream op: the late-commit delay
+	// (OpPFWriteLate), the yield countdown (OpRestartPromotedTarget), or
+	// the regress depth (OpReplacePod).
+	K int
 }
 
 func (o Op) String() string {
@@ -86,6 +127,9 @@ func (o Op) String() string {
 	}
 	if o.Kind == OpCrashOperatorMid {
 		s += fmt.Sprintf(" preApply=%v down=%d", o.PreApply, o.Down)
+	}
+	if o.K != 0 {
+		s += fmt.Sprintf(" k=%d", o.K)
 	}
 	return s
 }
@@ -123,6 +167,11 @@ type Trial struct {
 	Ops []Op
 	// Skip masks Ops for shrinking; nil means all ops are active.
 	Skip []bool
+
+	// Actors is the planned-failover actor schedule (§15.1). The zero value
+	// (GenerateTrial's) disables it, and the trial runs exactly as before
+	// the actors existed.
+	Actors Actors
 }
 
 // ActiveOps returns the ops not masked out by Skip.
@@ -155,6 +204,9 @@ func (t Trial) String() string {
 			masked = " [masked]"
 		}
 		fmt.Fprintf(&b, "  %s%s\n", op, masked)
+	}
+	if t.Actors.Enabled {
+		b.WriteString(t.Actors.String())
 	}
 	return b.String()
 }

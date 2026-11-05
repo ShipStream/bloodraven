@@ -521,3 +521,24 @@ type recorderFunc func(context.Context, controller.FailoverRecord) error
 func (f recorderFunc) RecordFailoverState(ctx context.Context, r controller.FailoverRecord) error {
 	return f(ctx, r)
 }
+
+// ---------------------------------------------------------------------------
+// Planned-failover durable claim (#235)
+// ---------------------------------------------------------------------------
+//
+// Findings of the actors-on DST sweep (internal/dst TestDST_PlannedQuick,
+// GeneratePlannedTrial) that this PR fixes are pinned below, one test per
+// finding, named TestDSTPF_<what the operator must do>, with the shrunk
+// trial's shape in the doc comment (seed numbers shift whenever the actor
+// generator changes, so they are recorded for history only). Build them on
+// the planned-failover harness in planned_failover_claim_test.go: the real
+// TopologyManagers, the production facade over a test ManagerRegistry, the
+// real engine and the in-memory store with scripted faults, and mockMySQL's
+// pinned sessions, replacePod and blockOn for the interleaving the DST
+// reached through a yield.
+//
+// The DST model issues found while building the actors (a regressing pod
+// replacement destroying the last copy of an acknowledged write; a replaced
+// manager polling unretired beside its successor) were harness defects, not
+// operator findings, and are pinned in internal/dst (TestReplacePod_* and
+// TestRegistry_*).

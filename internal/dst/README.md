@@ -15,7 +15,12 @@ make test            # includes the quick sweep (TestDST_Quick, 400 seeds, share
 make dst             # full saturation campaign; report → playground/chaos-results/dst-report.txt
 DST_SEED=61 make dst-repro              # replay one trial with events + operator logs
 DST_SEED=61 DST_SKIP=1,3 make dst-repro # replay with schedule ops 1 and 3 masked out
+DST_SEED=61 go test ./internal/dst -run PlannedRepro -v  # replay one seed with the planned-failover actors on
 ```
+
+`make test` also runs `TestDST_PlannedQuick`: 300 seeds with the
+planned-failover actors enabled (see below; `DST_PLANNED_TRIALS` overrides
+the count).
 
 Campaign knobs (env): `DST_BATCH` (default 1000), `DST_DRY_BATCHES` (default
 3), `DST_MAX_TRIALS` (500000), `DST_WALL_SECONDS` (1800), `DST_REPORT`.
@@ -75,6 +80,75 @@ dimension rather than one per statement.
    settle window outlasts the cooldown, the 30s recovery stabilization
    delay, and debounce thresholds, so end-state invariants judge a genuinely
    quiesced cluster.
+
+## Planned-failover actors (#235)
+
+`GeneratePlannedTrial(seed)` is `GenerateTrial(seed)` plus `Trial.Actors`,
+drawn from a PRNG stream of its own (`rand.NewPCG(seed, 0x9f1a2b3c)`), so the
+fault schedule of every seed is byte-identical with or without the actors
+(`TestGenerateTrial_ScheduleUnchangedByActors` pins a hash of seeds
+1..2000). The zero `Actors` (what `GenerateTrial` returns) disables the whole
+machinery, and those trials run exactly as before. With the actors on:
+
+- **The object and the store.** `simPlannedStore` is the simulated API
+  server for the group: one `MysqlFailoverGroup` (annotations and status)
+  with an integer `resourceVersion`, implementing
+  `controller.PlannedFailoverStore` (conditioned writes, settlement through
+  the status-fence annotation, the terminal marker, the durable deadline
+  annotations, the hold). The topology manager's snapshot writes merge into
+  it through the production `MergeTopologySnapshotStatus`, and the
+  out-of-band failover record lands on its annotations, so every writer
+  contends on one `resourceVersion`. A no-op write does not move it.
+- **The registry.** `simRegistry` (`controller.ManagerRegistry`) is one
+  operator process: the current manager, retiring managers and one
+  `PlannedClaimSlot`. Managers are wired with `controller.WireRegisteredManager`
+  from an uncached read of the object. A restart builds a new registry (the
+  slot is dropped); a manager replacement keeps it.
+- **Pinned sessions.** `simChecker.PinSession` returns a `simSession` pinned
+  to the site's server incarnation; a crash, restart or pod replacement
+  moves the incarnation and every later call on the session fails. Pooled
+  calls reach whichever server runs now.
+- **Actor attribution.** Every statement carries its actor (`WithActor`:
+  `tm`, `pf`, `upd`, `sidecar`; untagged is `tm`), recorded on the event.
+- **Slow statements and the scheduler.** A statement the trial marks slow
+  yields between issue and apply and between apply and acknowledgement, with
+  `Cluster.mu` released. At each yield the scheduler steps a PRNG-chosen
+  subset of the other actors (the current and retiring managers' `Poll`,
+  the engine, the update actor, one sidecar, rogue writability), at most
+  three deep, never re-entering an actor on the stack, and panics if a
+  tracked mutex is held. Only the planned and update actors' statements can
+  be slow: the topology manager probes from per-site goroutines, so there
+  are no TM-internal yields (F2).
+- **Ops.** `plannedFailover`, `orderedUpdate`, `replaceManager`,
+  `managerAbsent`, `pfWriteLost`, `pfWriteAmbiguous`, `pfWriteLate`,
+  `pfReadOutage`, `pfStatusDenied` (with restarts inside the outage),
+  `oobLateWrite`, `restartPromotedTarget` and `replacePod` (optionally onto
+  a regressed data directory under a fresh `server_uuid`; never the writable
+  site or the last copy of a transaction).
+- **Invariants.** `plannedMonitor` checks the §15.1 planned invariants
+  (`PlannedFenceWithoutAuthority`, `PlannedPromoteBesideWritable`,
+  `SucceededBesideWritable`, `UnfenceBesideWritable`, `UnfenceUnattributed`,
+  `ForeignMutationUnderClaim`, `ClaimRevoked`, `ZombieClaim`,
+  `OutcomeDishonest`, `RepeatedPromotion`, `WatermarkRegressed`,
+  `AutomationHeldByPendingRequest`, `HoldNotHonoured`, `MarkedRunResumed`,
+  `UnconfirmedBlocksEmergency`, `HoldWithoutDataAtRisk`,
+  `FencedSourceNeverHealed`, `PlannedRunStuck`) on the events, the landed
+  mutations, the store's commits and the yields. All of them count rogue
+  writability. `RogueRaceResidual` is a statistic, not a violation.
+
+**Seams still to wire** (the planned-failover engine and the claim land
+separately): `plannedHarness.engineStep` (the production
+`PlannedFailoverEngine` over the production facade on `simRegistry`, with
+`SimHooks.Yield` set to the scheduler), `updateStart`/`updateStep` (the
+update actor over the `…ForSim` hooks), `simRegistry.retire` and
+`changingSites` (until both are set a replaced manager stops polling at
+once, because an unretired predecessor polling beside its successor is a
+state production never reaches), the `claimView` of the slot (the
+`ClaimRevoked`, `ZombieClaim` and `AutomationHeldByPendingRequest` checks
+need it; without it `ForeignMutationUnderClaim` judges the durable block),
+and the tracked-mutex probes for `tm.mu`, `failoverStateWriteMu`,
+`restoreProtectionMu` and `restoreFenceMu`. Until then the actor ops that
+need a seam are counted in `PlannedResult.Unsupported` and skipped.
 
 ## Invariants
 
@@ -137,10 +211,18 @@ exactly what their lease rule exists for.
 
 Not modeled (excluded from trials, guarded by loud errors): CLONE /
 bootstrap (the bootstrap controller is real and production-shaped, but the
-model never produces an empty site so no clone goroutine can start), ordered
-updates, planned failovers, Dragonfly, and wall-clock
-`context.WithTimeout` expiry (timeouts are modeled as injected call errors
-instead).
+model never produces an empty site so no clone goroutine can start),
+Dragonfly, and wall-clock `context.WithTimeout` expiry (timeouts are
+modeled as injected call errors instead). Planned failovers and ordered
+updates are modeled only in trials with the actors on, and only once their
+seams are wired (above). The update actor is a step model of
+`ExecuteTargets`' handoff over the real claim API: it exercises the claim
+protocol and predecessor tracking, not `ExecuteHandoff`'s internals, which
+the component tests cover with the production updater. There are no yields
+inside the topology manager, so interleavings inside one `Poll` are
+component-test territory (rows 1–3 and 9 of the #235 interleaving table).
+The sidecars' view of the operator (`/active-site`) follows the trial's
+current manager even while `managerAbsent` has unregistered it.
 
 The simulator only contains failure modes we teach it. When the playground or
 production surfaces a new MySQL behavior, encode it here too — and keep the
@@ -152,7 +234,10 @@ playground E2E suite as the fidelity check for this model.
   promotions that came up without the durable anti-flap record. That
   requires **both** durable paths (CR status and the out-of-band annotation
   store) to have been rejecting writes at once; nothing could then have
-  carried the cooldown across the restart. See
+  carried the cooldown across the restart. With the actors on,
+  `pfStatusDenied` deliberately puts restarts inside a status outage, so a
+  trial whose fault stream also denies the out-of-band store lands here;
+  `TestDST_PlannedQuick` allows exactly this fingerprint and nothing else. See
   `site/content/docs/3.get-started/1.known-limitations.md` → Operator availability.
 
 `CooldownViolated` splits three ways so the inherent class cannot absorb a
