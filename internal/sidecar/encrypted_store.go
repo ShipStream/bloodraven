@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -157,6 +158,26 @@ func (e *encryptedStore) GetFile(ctx context.Context, key, dst string) error {
 	}
 	defer reader.Close()
 	return writeArchiveFile(reader, dst)
+}
+
+// PutIfAbsent encrypts the object and creates it atomically on the inner
+// store. The ciphertext is buffered: atomic creates are small objects.
+func (e *encryptedStore) PutIfAbsent(ctx context.Context, key string, source io.Reader, _ int64) error {
+	plain, err := readAtomicBody(source)
+	if err != nil {
+		return err
+	}
+	var sealed bytes.Buffer
+	if _, err := backupcrypto.Encrypt(&sealed, bytes.NewReader(plain), e.passphrase); err != nil {
+		return err
+	}
+	return PutIfAbsent(ctx, e.inner, key, bytes.NewReader(sealed.Bytes()), int64(sealed.Len()))
+}
+
+// plaintextArchive exposes the backend and key for the archive descriptor,
+// which is plaintext by design (§3.2).
+func (e *encryptedStore) plaintextArchive() (ArchiveStore, []byte) {
+	return e.inner, e.passphrase
 }
 
 // Delete passes through; delete needs no plaintext.

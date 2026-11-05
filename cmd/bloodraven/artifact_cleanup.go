@@ -147,7 +147,16 @@ func runCleanupRequest(ctx context.Context, req artifactCleanupRequest, newStore
 		if err != nil {
 			return 0, rejected("init S3 store: %v", err)
 		}
-		return cleanupS3(ctx, store, prefix)
+		n, cerr := cleanupS3(ctx, store, prefix)
+		if cerr != nil {
+			return n, cerr
+		}
+		// The backup stamp is a sibling object of the dump prefix (D-8).
+		stamp := backupmeta.StampKey(prefix)
+		if err := store.Delete(ctx, stamp); err != nil {
+			return n, transient("delete backup stamp %s: %v", stamp, err)
+		}
+		return n, nil
 	case "PVC":
 		rel, cerr := cleanupPVCPath(req.Location, req.MountPath, req.Name)
 		if cerr != nil {
@@ -298,15 +307,31 @@ func deleteKeys(ctx context.Context, store cleanupStore, keys []string) (int, er
 	return deleted, firstErr
 }
 
-// cleanupPVC removes rel through an os.Root anchored at the mount, so every
-// path component is resolved inside the mount at the moment of use: a
-// directory swapped for a symlink after validation cannot redirect the delete.
+// cleanupPVC removes rel, then its backup stamp (a sibling file, D-8),
+// through an os.Root anchored at the mount, so every path component is
+// resolved inside the mount at the moment of use: a directory swapped for a
+// symlink after validation cannot redirect the delete.
 func cleanupPVC(mount, rel string) (int, *cleanupError) {
 	root, err := os.OpenRoot(mount)
 	if err != nil {
 		return 0, transient("open mount %s: %v", mount, err)
 	}
 	defer func() { _ = root.Close() }()
+	files, cerr := cleanupPVCTree(root, rel)
+	if cerr != nil {
+		return files, cerr
+	}
+	stamp := backupmeta.StampKey(filepath.ToSlash(rel))
+	if err := root.Remove(stamp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if pathEscapes(err) {
+			return files, rejected("refusing to delete %s: %v", stamp, err)
+		}
+		return files, transient("remove backup stamp %s: %v", stamp, err)
+	}
+	return files, nil
+}
+
+func cleanupPVCTree(root *os.Root, rel string) (int, *cleanupError) {
 	files := 0
 	walkErr := fs.WalkDir(root.FS(), filepath.ToSlash(rel), func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {

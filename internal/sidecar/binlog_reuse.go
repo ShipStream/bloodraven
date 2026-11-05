@@ -3,8 +3,10 @@ package sidecar
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"hash"
+	"os"
 	"strings"
 	"time"
 
@@ -121,7 +123,21 @@ func (a *BinlogArchiver) detectArchiveReuse(ctx context.Context, m *Manifest, en
 	if candidate.IsEmpty() {
 		return nil
 	}
+	// Quarantined rows are compared too (D-36, O1): a quarantine moves only
+	// metadata, so a reissue of a quarantined row's GTIDs is still reuse.
+	type prior struct {
+		entry       ManifestEntry
+		quarantined bool
+	}
+	priors := make([]prior, 0, len(m.Files)+len(m.Quarantined))
 	for _, old := range m.Files {
+		priors = append(priors, prior{entry: old})
+	}
+	for _, q := range m.Quarantined {
+		priors = append(priors, prior{entry: q.Entry, quarantined: true})
+	}
+	for _, p := range priors {
+		old := p.entry
 		if !coverageBoundToEntry(old) {
 			continue
 		}
@@ -141,6 +157,12 @@ func (a *BinlogArchiver) detectArchiveReuse(ctx context.Context, m *Manifest, en
 		}
 		proof, err := CheckArchiveIssuance(ctx, a.store, a.cfg.ManifestPrefix, a.site, old, entry, overlap)
 		if err != nil {
+			// A quarantined row is often quarantined because its object is
+			// gone. Without its bytes there is no reuse proof to record;
+			// the planner refuses rows it cannot verify on its own (§4.9).
+			if p.quarantined && (errors.Is(err, os.ErrNotExist) || isS3NotFound(err)) {
+				continue
+			}
 			return err
 		}
 		if proof != nil {

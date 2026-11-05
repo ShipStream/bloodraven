@@ -89,7 +89,7 @@ func TestLegacyIdentityRecoveryAndPriority(t *testing.T) {
 			if mode == "missing" {
 				row.ContentID = id
 			}
-			if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
+			if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "transient" {
@@ -107,7 +107,7 @@ func TestLegacyIdentityRecoveryAndPriority(t *testing.T) {
 				}
 			}
 			create := func() *BinlogArchiver {
-				return NewBinlogArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
+				return newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
 			}
 			a := create()
 			a.scanAndArchive(ctx)
@@ -171,7 +171,7 @@ func TestStrippedIdentityRetainsObjectAddress(t *testing.T) {
 	if err := pvc.Put(ctx, row.RemotePath, bytes.NewReader(payload), int64(len(payload))); err != nil {
 		t.Fatal(err)
 	}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, pvc, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, pvc, slog.Default())
 	// Retention uses this same inspection path to backfill legacy metadata.
 	err = a.inspectArchivedBinlog(ctx, row, func(evidence BinlogEvidence) error {
 		if evidence.Digest != id {
@@ -194,7 +194,7 @@ func TestEncryptedIdentityIsKeyed(t *testing.T) {
 	var previous, first string
 	for _, pass := range []string{"high entropy key A", "high entropy key B", "high entropy key A"} {
 		store := WrapWithEncryption(plain, []byte(pass))
-		a := NewBinlogArchiver(&PITRConfig{}, "iad", &stubRoleChecker{}, store, slog.Default())
+		a := newTestArchiver(&PITRConfig{}, "iad", &stubRoleChecker{}, store, slog.Default())
 		id, err := a.localBinlogID(file)
 		if err != nil {
 			t.Fatal(err)
@@ -219,7 +219,7 @@ func TestStrippedIdentityConfinement(t *testing.T) {
 	store := newMemStore()
 	id := strings.Repeat("a", 64)
 	for _, key := range []string{"other/iad/mysql-bin.000001." + id, "binlogs/other/mysql-bin.000001." + id, "binlogs/iad/../iad/mysql-bin.000001." + id, "binlogs/iad/elsewhere." + id} {
-		data, _ := json.Marshal(Manifest{Files: []ManifestEntry{{Name: "mysql-bin.000001", RemotePath: key}}})
+		data, _ := json.Marshal(Manifest{Version: ManifestVersion, ArchiveID: testArchiveID, Files: []ManifestEntry{{Name: "mysql-bin.000001", RemotePath: key}}})
 		if err := store.Put(ctx, ManifestKey("binlogs", "iad"), bytes.NewReader(data), int64(len(data))); err != nil {
 			t.Fatal(err)
 		}

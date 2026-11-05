@@ -34,7 +34,7 @@ func TestAuditPreservesLegacyOnlyDivergence(t *testing.T) {
 		}
 	}
 	state := &historyStateStub{uuid: "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee", executed: coverageTestSID + ":1-21"}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	if err := a.auditArchive(ctx, m); err != nil || len(m.Divergent) != 0 {
 		t.Fatalf("restored execution retained obsolete legacy divergence: %v %+v", err, m.Divergent)
 	}

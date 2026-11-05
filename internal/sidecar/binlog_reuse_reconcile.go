@@ -309,7 +309,7 @@ jobsLoop:
 		a.beginArchiveReuseWork(ctx, w)
 	}
 	if changed {
-		if err := saveManifest(ctx, a.store, a.cfg.ManifestPrefix, m); err != nil {
+		if err := a.saveManifest(ctx, m); err != nil {
 			return err
 		}
 	}

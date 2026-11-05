@@ -110,7 +110,7 @@ func newRetentionRetryFixture(t *testing.T, legacy bool) (*retentionFaultStore, 
 		entries = append(entries, entry)
 		keys = append(keys, key)
 	}
-	if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: entries}); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: entries}); err != nil {
 		t.Fatal(err)
 	}
 	store.manifestPuts = 0
@@ -123,7 +123,7 @@ func newRetentionRetryFixture(t *testing.T, legacy bool) (*retentionFaultStore, 
 	t.Cleanup(srv.Close)
 	cfg := &PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), BinlogIndex: "mysql-bin.index"}
 	factory := func() *BinlogArchiver {
-		a := NewBinlogArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
+		a := newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
 		a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
 		return a
 	}
@@ -205,7 +205,7 @@ func TestRetentionRetriesAfterDeleteAcknowledgementFails(t *testing.T) {
 
 func TestRetentionResumesPersistedDeleteBeforeContactingOperator(t *testing.T) {
 	store, factory, status, entries, keys := newRetentionRetryFixture(t, false)
-	body := map[string]any{"version": 1, "site": "iad", "files": entries[1:], "pruned": []map[string]any{{"name": entries[0].Name, "id": entries[0].ID, "key": "unrelated/victim", "deleted": false, "previousGtids": entries[0].PreviousGTIDs, "firstEventTime": entries[0].FirstEventTime}}}
+	body := map[string]any{"version": ManifestVersion, "archiveId": testArchiveID, "site": "iad", "files": entries[1:], "pruned": []map[string]any{{"name": entries[0].Name, "id": entries[0].ID, "key": "unrelated/victim", "deleted": false, "previousGtids": entries[0].PreviousGTIDs, "firstEventTime": entries[0].FirstEventTime}}}
 	data, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +255,7 @@ func TestRetentionDoesNotDeleteBeforeRetirementSave(t *testing.T) {
 
 func TestRetentionDoesNotRetryDeleteOfLiveReference(t *testing.T) {
 	store, factory, status, entries, keys := newRetentionRetryFixture(t, false)
-	body := map[string]any{"version": 1, "site": "iad", "files": entries, "pruned": []map[string]any{{"name": entries[0].Name, "id": entries[0].ID, "key": keys[0], "deleted": false}}}
+	body := map[string]any{"version": ManifestVersion, "archiveId": testArchiveID, "site": "iad", "files": entries, "pruned": []map[string]any{{"name": entries[0].Name, "id": entries[0].ID, "key": keys[0], "deleted": false}}}
 	data, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)

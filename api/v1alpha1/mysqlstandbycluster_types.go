@@ -245,6 +245,12 @@ type StandbyDiscovered struct {
 	// actually needs it. Adding unpopulated bool/string fields to the CRD
 	// before that code exists creates dead-on-arrival schema.
 
+	// Archive is the identity read from the source archive's descriptor
+	// (<prefix>/binlogs/archive.json). Unset while the descriptor is
+	// missing or refused; the SourceConfigKnown condition says why.
+	// +optional
+	Archive *PITRArchiveIdentity `json:"archive,omitempty"`
+
 	// OldestArchivedBinlogTime is the earliest first-event timestamp
 	// across all manifest-<site>.json files in <prefix>/binlogs/.
 	// +optional

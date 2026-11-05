@@ -322,8 +322,9 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 
 	// ---- Reconcile 2: populate dump + manifest ----------------------------
 	atJSON := `{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":1024}`
-	manifestJSON := `{"version":1,"site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":128,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
+	manifestJSON := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":128,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
 	store.Objects["orders/dump-20260520/@.json"] = []byte(atJSON)
+	store.Objects["orders/binlogs/archive.json"] = standbyTestDescriptor()
 	store.Objects["orders/binlogs/manifest-dc1.json"] = []byte(manifestJSON)
 
 	// Ensure a measurable time difference for transition detection.
@@ -366,9 +367,13 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 	if brc3 == nil || brc3.Status != metav1.ConditionTrue {
 		t.Fatalf("step3: BucketReadable want True, got %v", brc3)
 	}
-	// All manifests corrupt → ManifestCount=0 → NoBinlogManifests.
-	if skc3 == nil || skc3.Status != metav1.ConditionFalse || skc3.Reason != "NoBinlogManifests" {
-		t.Fatalf("step3: SourceConfigKnown want False/NoBinlogManifests, got %v", skc3)
+	// A corrupt manifest refuses the archive: a window computed without it
+	// would overstate what is archived.
+	if skc3 == nil || skc3.Status != metav1.ConditionFalse || skc3.Reason != "ArchiveUnreadable" {
+		t.Fatalf("step3: SourceConfigKnown want False/ArchiveUnreadable, got %v", skc3)
+	}
+	if cr3.Status.Discovered == nil || cr3.Status.Discovered.Archive != nil || cr3.Status.Discovered.ManifestCount != 0 {
+		t.Fatalf("step3: a refused archive must not publish its identity or window: %+v", cr3.Status.Discovered)
 	}
 	// SourceConfigKnown flipped True→False — verify it's not the same as before.
 	// We check Reason as the authoritative signal; LTT may equal ltt2SKC on a fast
@@ -533,7 +538,8 @@ func TestStandbyCluster_DumpSelectionByEndTime(t *testing.T) {
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/z-dump-OLDER/@.json":       []byte(`{"end":"2026-05-18T04:00:00Z","gtidExecuted":"old:1-50","totalBytes":100}`),
 		"orders/a-dump-NEWER/@.json":       []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"new:1-200","totalBytes":200}`),
-		"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`),
+		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	r, _ := newTestReconcilerRaw(t, []client.Object{cr}, store)
 
@@ -562,4 +568,101 @@ func TestStandbyCluster_DumpSelectionByEndTime(t *testing.T) {
 func newStandbySchemeWithCoreV1(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	return newStandbyScheme(t)
+}
+
+// TestStandbyCluster_ArchiveIdentity covers the standby's reader-side archive
+// open (§3.3, §3.5): a verified descriptor publishes discovered.archive; a
+// missing, legacy, refused or mixed archive publishes the dump with no
+// archive window and SourceConfigKnown=False naming the refusal.
+func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
+	const atKey, atJSON = "orders/d1/@.json", `{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100"}`
+	v2 := func(id string) []byte {
+		return []byte(`{"version":2,"archiveId":"` + id + `","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":7}]}`)
+	}
+	tests := []struct {
+		name        string
+		prefix      string
+		decrypt     bool
+		objects     map[string][]byte
+		wantReason  string
+		wantArchive bool
+	}{
+		{name: "verified", objects: map[string][]byte{"orders/binlogs/archive.json": standbyTestDescriptor(), "orders/binlogs/manifest-dc1.json": v2(standbyTestArchiveID)}, wantReason: "DumpFound", wantArchive: true},
+		// §3.1: "/orders/" and "orders" are one destination.
+		{name: "prefix normalizes", prefix: "/orders/", objects: map[string][]byte{"orders/binlogs/archive.json": standbyTestDescriptor(), "orders/binlogs/manifest-dc1.json": v2(standbyTestArchiveID)}, wantReason: "DumpFound", wantArchive: true},
+		{name: "no archive is dump-only", objects: map[string][]byte{}, wantReason: "NoBinlogManifests"},
+		{name: "descriptor missing (replication lag)", objects: map[string][]byte{"orders/binlogs/manifest-dc1.json": v2(standbyTestArchiveID)}, wantReason: "ArchiveDescriptorMissing"},
+		{name: "legacy v1 manifests", objects: map[string][]byte{"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`)}, wantReason: "ArchiveLegacy"},
+		{name: "manifest of another archive", objects: map[string][]byte{"orders/binlogs/archive.json": standbyTestDescriptor(), "orders/binlogs/manifest-dc1.json": v2("ar1-bbbbbbbbbbbbbbbbbbbbbbbbbb")}, wantReason: "ArchiveIdentityMismatch"},
+		{name: "decryption set on a plaintext archive", decrypt: true, objects: map[string][]byte{"orders/binlogs/archive.json": standbyTestDescriptor(), "orders/binlogs/manifest-dc1.json": v2(standbyTestArchiveID)}, wantReason: "ArchiveEncryptionMismatch"},
+		{name: "unreadable descriptor", objects: map[string][]byte{"orders/binlogs/archive.json": []byte(`{"kind":"Something"}`), "orders/binlogs/manifest-dc1.json": v2(standbyTestArchiveID)}, wantReason: "ArchiveVersionUnsupported"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := minimalStandbyCR("test-sc", "default")
+			objs := []client.Object{cr}
+			if tt.prefix != "" {
+				cr.Spec.Source.Storage.S3.Prefix = tt.prefix
+			}
+			if tt.decrypt {
+				cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pp"}}
+				objs = append(objs, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pp", Namespace: "default"}, Data: map[string][]byte{"passphrase": []byte("k")}})
+			}
+			store := &fakeStore{Objects: tt.objects}
+			store.Objects[atKey] = []byte(atJSON)
+			r, recorder := newTestReconciler(t, objs, store)
+			got, _ := reconcileStandby(t, r, "test-sc", "default")
+			skc := standbyFindCondition(got, v1alpha1.StandbyConditionSourceConfigKnown)
+			if skc == nil || skc.Reason != tt.wantReason {
+				t.Fatalf("SourceConfigKnown = %v, want reason %s", skc, tt.wantReason)
+			}
+			d := got.Status.Discovered
+			if d == nil || d.DumpName != "d1" {
+				t.Fatalf("the dump must be published regardless of the archive: %+v", d)
+			}
+			if !tt.wantArchive {
+				if d.Archive != nil || d.ManifestCount != 0 || d.ArchivedBinlogCount != 0 {
+					t.Fatalf("no verified archive, but discovered carries one: %+v", d)
+				}
+				if strings.HasPrefix(tt.wantReason, "Archive") && !standbyContainsEvent(standbyDrainEvents(recorder), "PITRArchiveRefused") {
+					t.Fatal("a refused archive emits a PITRArchiveRefused Warning")
+				}
+				return
+			}
+			want := &v1alpha1.PITRArchiveIdentity{
+				ArchiveID:      standbyTestArchiveID,
+				Destination:    "s3://my-bucket/orders/binlogs?endpoint=aws",
+				Source:         v1alpha1.PITRArchiveSource{Namespace: "prod", Name: "orders", UID: "source-uid"},
+				EncryptionMode: v1alpha1.PITRArchiveEncryptionNone,
+			}
+			if d.Archive == nil || *d.Archive != *want {
+				t.Fatalf("discovered.archive = %+v, want %+v", d.Archive, want)
+			}
+			if d.ManifestCount != 1 || d.ArchivedBinlogCount != 1 {
+				t.Fatalf("window not published: %+v", d)
+			}
+		})
+	}
+}
+
+// D-7/F16: the standby's passphrase follows the one trim rule, so a key with
+// a leading vertical tab (which strings.TrimSpace would strip) still matches
+// the keyCheck the writers computed.
+func TestStandbyCluster_PassphraseUsesTrimPassphrase(t *testing.T) {
+	r, _ := newTestReconciler(t, []client.Object{&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "pp", Namespace: "default"},
+		Data:       map[string][]byte{"passphrase": []byte("\vkey  \n")},
+	}}, &fakeStore{Objects: map[string][]byte{}})
+	file, dir, err := r.resolvePassphraseToFile(context.Background(), "default", v1alpha1.PassphraseSecretRef{Name: "pp"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	got, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "\vkey  " {
+		t.Fatalf("passphrase = %q, want %q", got, "\vkey  ")
+	}
 }

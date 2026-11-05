@@ -21,7 +21,7 @@ type reviewReplaceBeforeUploadStore struct {
 }
 
 func (s *reviewReplaceBeforeUploadStore) Put(ctx context.Context, key string, r io.Reader, size int64) error {
-	if !strings.Contains(key, "/manifest-") && !s.replaced {
+	if !strings.Contains(key, "/manifest-") && !strings.HasSuffix(key, "/archive.json") && !s.replaced {
 		s.replaced = true
 		if s.target != "" {
 			next := s.target + ".replacement"
@@ -68,7 +68,7 @@ func TestUploadedBytesStayBoundToIdentityAndCoverage(t *testing.T) {
 				if replaceSource {
 					store.target = file
 				}
-				a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: local}, "iad", &stubRoleChecker{}, store, slog.Default())
+				a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: local}, "iad", &stubRoleChecker{}, store, slog.Default())
 				id, err := a.localBinlogID(file)
 				if err != nil {
 					t.Fatal(err)

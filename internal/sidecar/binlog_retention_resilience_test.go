@@ -44,7 +44,7 @@ func TestCorruptLegacyRowDoesNotHaltAllRetention(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{corrupt, covered}}); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{corrupt, covered}}); err != nil {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
@@ -88,7 +88,7 @@ func TestCorruptLegacyRowDoesNotHaltAllRetention(t *testing.T) {
 		t.Fatal("manifest outage cleared an unresolved history error")
 	}
 	a.store = store
-	if err := QuarantineArchive(ctx, store, "binlogs", "iad", corrupt.Name, "", "unrecoverable legacy stream; canonical backup verified", coverageTestSID+":1-11", false); err != nil {
+	if err := testQuarantine(ctx, store, "binlogs", "iad", corrupt.Name, "", "unrecoverable legacy stream; canonical backup verified", coverageTestSID+":1-11", false); err != nil {
 		t.Fatal(err)
 	}
 	a.lastRetentionRun = time.Time{}
@@ -137,6 +137,11 @@ type countingRole struct {
 	store *flakyManifestStore
 }
 
+func (r *countingRole) ProbeRole(ctx context.Context) (RoleObservation, error) {
+	ro, err := r.IsReadOnly(ctx)
+	return RoleObservation{ReadOnly: ro}, err
+}
+
 func (r *countingRole) IsReadOnly(context.Context) (bool, error) {
 	if r.store.scans.Add(1) == 6 {
 		close(r.store.excess)
@@ -168,11 +173,11 @@ func TestFinishedReuseJobDoesNotSpinOnManifestOutage(t *testing.T) {
 		}
 		m.Files = append(m.Files, row)
 	}
-	if err := saveManifest(ctx, base, "binlogs", m); err != nil {
+	if err := seedManifest(ctx, base, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), BinlogIndex: "mysql-bin.index", PollInterval: time.Hour}
-	a := NewBinlogArchiver(cfg, "iad", &countingRole{store: store}, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a := newTestArchiver(cfg, "iad", &countingRole{store: store}, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	done := make(chan struct{})
 	go func() { defer close(done); a.Run(ctx) }()
 	select {

@@ -1995,6 +1995,11 @@ func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *
 	// Join all per-site errors so nothing is silently dropped. Empty
 	// when every site is clean.
 	out.Message = strings.Join(errorMsgs, "; ")
+	var prevArchive *v1alpha1.PITRArchiveObservation
+	if fg.Status.PITR != nil {
+		prevArchive = fg.Status.PITR.Archive
+	}
+	out.Archive = pitrArchiveObservation(fg, sites, snaps, lastGood, prevArchive, time.Now())
 	fg.Status.PITR = out
 }
 
@@ -2011,6 +2016,7 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		r.recorder.Eventf(fg, corev1.EventTypeNormal, "FailoverExecuted",
 			"Failover completed: %s promoted as new primary", snap.LastFailoverTarget)
 	}
+	r.emitPITRArchiveReissueRisk(fg, existingStatus)
 
 	// Per-site recovery transitions: compare the previously persisted state
 	// against the new snapshot for each site independently, since multiple
@@ -2080,6 +2086,50 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 			}
 		}
 	}
+}
+
+// eventReasonPITRArchiveReissueRisk warns that a promoted site may reissue
+// GTIDs the archive already holds (D-46).
+const eventReasonPITRArchiveReissueRisk = "PITRArchiveReissueRisk"
+
+// emitPITRArchiveReissueRisk fires when the active site changed (a
+// failover, a planned failover or a re-promotion) to a site whose last
+// archiver status reports divergent or quarantined rows in its own
+// manifest. Rotating server_uuid on reclone is FU-4: until then a site
+// recloned after a lossy failover reissues the lost GTIDs once promoted, and
+// the archive can only be restarted (D-46).
+func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFailoverGroup, existingStatus *v1alpha1.MysqlFailoverGroupStatus) {
+	promoted := fg.Status.ActiveSite
+	if !pitrEnabled(fg) || promoted == "" || existingStatus.ActiveSite == "" || promoted == existingStatus.ActiveSite {
+		return
+	}
+	rows, ok := r.pitrArchiveSuspectRows(FailoverGroupNamespacedName(fg), promoted)
+	if !ok || rows == 0 {
+		return
+	}
+	r.recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveReissueRisk,
+		"site %s was promoted while its archive manifest holds %d divergent/quarantined rows. If %s was recloned after a lossy failover, it reissues the lost GTIDs, and every restore from this archive refuses PITRArchiveHistoryReset. Start a new archive prefix and take a full backup.",
+		promoted, rows, promoted)
+}
+
+// pitrArchiveSuspectRows is divergentRows+quarantinedRows from site's latest
+// (or last good) archiver status, or false when the poller has none.
+func (r *TopologyManagerRunner) pitrArchiveSuspectRows(nn types.NamespacedName, site string) (int64, bool) {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok || mt.archiver == nil {
+		return 0, false
+	}
+	snaps, lastGood, _ := mt.archiver.view()
+	s := snaps[site]
+	if s == nil {
+		s = lastGood[site]
+	}
+	if s == nil {
+		return 0, false
+	}
+	return s.DivergentRows + s.QuarantinedRows, true
 }
 
 // ReasonOrderedUpdateStalled is the Updating condition reason, and the

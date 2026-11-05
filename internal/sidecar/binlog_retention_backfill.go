@@ -111,7 +111,7 @@ func (a *BinlogArchiver) backfillRetentionCoverage(ctx context.Context, m *Manif
 		}
 	}
 	if result.progress {
-		return result, saveManifest(ctx, a.store, a.cfg.ManifestPrefix, m)
+		return result, a.saveManifest(ctx, m)
 	}
 	return result, nil
 }

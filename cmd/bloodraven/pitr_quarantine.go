@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
@@ -22,7 +24,7 @@ func pitrQuarantine(ctx context.Context, args []string, out, errOut io.Writer) e
 	undo := flags.Bool("undo", false, "Restore a quarantined row after repairing its object")
 	confirm := flags.Bool("confirm", false, "Apply the metadata change; stop the site's writer first")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(errOut, "Preserve a problematic object and quarantine only its manifest row.\nUsage: bloodraven pitr-quarantine --site SITE --name NAME --id ID|legacy --reason TEXT --resume-gtids SET --confirm\nOr: bloodraven pitr-quarantine --site SITE --acknowledge-history --reason TEXT --resume-gtids SET --confirm\nUses the same BLOODRAVEN_PITR_* storage configuration and mounted Secrets as pitr-download.\nStop the site's sidecar writer first; take a manifest copy and a canonical full backup. Use --undo to restore a repaired row.")
+		_, _ = fmt.Fprintln(errOut, "Preserve a problematic object and quarantine only its manifest row.\nUsage: bloodraven pitr-quarantine --site SITE --name NAME --id ID|legacy --reason TEXT --resume-gtids SET --confirm\nOr: bloodraven pitr-quarantine --site SITE --acknowledge-history --reason TEXT --resume-gtids SET --confirm\nUses the same BLOODRAVEN_PITR_* storage configuration and mounted Secrets as pitr-download, plus the writer identity the sidecar gets (BLOODRAVEN_FAILOVER_GROUP_UID, BLOODRAVEN_PITR_DESTINATION, BLOODRAVEN_PITR_ENCRYPTION_MODE); it refuses an archive whose descriptor this group does not own.\nStop the site's sidecar writer first; take a manifest copy and a canonical full backup. Use --undo to restore a repaired row.")
 		flags.PrintDefaults()
 	}
 	for _, arg := range args {
@@ -56,10 +58,14 @@ func pitrQuarantine(ctx context.Context, args []string, out, errOut io.Writer) e
 	if err != nil {
 		return err
 	}
+	session, err := openQuarantineSession(ctx, store, cfg, prefix)
+	if err != nil {
+		return err
+	}
 	if *ack {
-		err = sidecar.AcknowledgeArchiveHistory(ctx, store, prefix, *site, *reason, *resume)
+		err = sidecar.AcknowledgeArchiveHistory(ctx, session, *site, *reason, *resume)
 	} else {
-		err = sidecar.QuarantineArchive(ctx, store, prefix, *site, *name, *id, *reason, *resume, *undo)
+		err = sidecar.QuarantineArchive(ctx, session, *site, *name, *id, *reason, *resume, *undo)
 	}
 	if err != nil {
 		return err
@@ -70,4 +76,23 @@ func pitrQuarantine(ctx context.Context, args []string, out, errOut io.Writer) e
 		_, err = fmt.Fprintf(out, "Updated %s/%s; archive objects preserved\n", *site, *name)
 	}
 	return err
+}
+
+// openQuarantineSession opens a verified writer session: pitr-quarantine
+// writes manifests, so it checks the descriptor exactly as the site's
+// sidecar does and never creates one (§3.3, §3.5).
+func openQuarantineSession(ctx context.Context, store sidecar.ArchiveStore, cfg *sidecar.PITRConfig, prefix string) (*sidecar.ArchiveSession, error) {
+	cfg.ManifestPrefix = prefix
+	identity, err := sidecar.ArchiveIdentityFromEnv(cfg)
+	if err != nil {
+		return nil, err
+	}
+	session, err := sidecar.OpenArchiveForWrite(ctx, store, prefix, identity, "", nil)
+	if errors.Is(err, sidecar.ErrDescriptorAbsent) {
+		return nil, fmt.Errorf("%s: no archive at %s; nothing to quarantine", pitrarchive.TokenArchiveNotFound, identity.Destination)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
 }

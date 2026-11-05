@@ -723,7 +723,7 @@ Preserve the archive and its original passphrase. Restore access to the original
 1. Record sidecar, operator, and backup/restore image versions. Confirm all archive readers and writers understand the additive manifest `id` field before using new archives with older images.
 2. Inspect `/archiver/status`, upload logs, and the relevant site manifest through the configured archive reader. New rows use `(name, id)` where `id` is a SHA-256 of sealed plaintext bytes for plaintext stores, or a passphrase-keyed HMAC-SHA256 digest for encrypted stores, and new keys end in `<name>.<id>`. Two rows may share a name. Legacy rows without IDs retain plain keys and persist a verified `contentId` after archive inspection. A surviving rollback-stripped row recovers its ID only from an exact confined `remotePath` key.
 3. Check that sealed files created after rebuild have corresponding objects and rows. New/changed rotations preempt historical work, including known names. A newest-first cursor yields after 64 MiB/two seconds, including mid-file. Verified legacy IDs survive restart; local fingerprints do not persist. Inspection/encryption/upload need no full-file scratch space. Inspect `archive binlog` errors, backlog and actual storage throughput if it cannot catch up.
-4. Take a full backup after the rebuild becomes primary, then verify an isolated restore to a marker written after that backup. A window that spans the rebuild and the failback holds transactions on two sites and fails `PITRCrossSiteOrder` by design (#206), so do not use it as the proof. A successful upload count or zero backlog cannot prove history that an older writer already omitted.
+4. Take a full backup after the rebuild becomes primary and verify an isolated dump-only restore with application markers. This build cannot replay a version-2 archive (`PITRReplayUnsupported`), so a PITR restore to a later marker is not available as proof yet. If the rebuilt site was recloned after a lossy failover and then promoted, follow playbook 39 first. A successful upload count or zero backlog cannot prove history that an older writer already omitted.
 
 ### Safe remediation
 Preserve old manifests, objects, and encryption material. Do not delete a site manifest, purge local binlogs, or overwrite retained objects to make names appear new. Use compatible ID-aware readers and writers. If an older archiver already missed files, preserve any surviving local binlogs and investigate the recovery gap before declaring PITR coverage restored. Older writers discard IDs, coverage, purged bases, quarantine/reset guards and pending deletes on rewrite; their pruning can drop every same-name row. Re-upgrade repairs surviving stripped IDs but cannot recover lost rows or pending records. Stop the older writer and restore preserved manifests with compatible recovery images, then verify coverage. All rows use GTID predecessor order, including unique-name numbering resets. Empty frontiers/rotations are valid; XA, LOAD DATA and checksum-off logs use observed ordering GTIDs independently of strict retention coverage. Clone `baseGtids` bridges donor GTIDs missing from the first log header. Divergent boundaries fail before SQL. For missing objects with unknown digests or abandoned tails, follow [Repair PITR history safely](../../../../site/content/docs/7.backup-and-restore/7.pitr-history-repair.md): pause writers, preserve objects/manifests, verify a canonical full backup, quarantine the exact row with a reason/resume bound, then verify replay. Quarantine never deletes data and can be undone. Divergence is evaluated only with established server history: empty execution, running clone and read-only/no-channel bootstrap cannot flag the archive. Eligible audits clear recovered foreign-source flags. Known loss from the current server UUID remains unresolved on numeric return; verify recovery or explicitly acknowledge a canonical backup, or quarantine the abandoned row. Surviving flags block affected transactions, including last rows and discovered aliases. Legacy overlap verification runs even without retention; unresolved issuance blocks unsafe compatibility and retirement. A true reuse guard compares conflicting issuance of the same GTIDs; names, retries and publication order are not evidence. Verified reuse still requires a new generation even after quarantine. For an obsolete upload-order guard, `pitr-quarantine --acknowledge-history` verifies every active stream is covered by a canonical full-backup bound, compares overlapping issuance and records prior evidence; it removes no rows and adds no global backup cutoff. Quarantine bounds restrict only windows needing excluded rows; earlier windows with a proven stop before them remain available. Prefer a new unused selected profile `storage.s3.prefix`/`storage.pvc.subPath` and full backup after RESET. Follow the repair guide for the exact procedure.
@@ -810,8 +810,10 @@ Binlog archiving has stopped on at least one site. Archiving state is deliberate
 - `ArchiverError`: the store is up but uploads or manifest reads fail on 2 consecutive archiver scans (`consecutiveFailedScans` ≥ 2 in `/archiver/status`), or the same error stays for 10 minutes without a scan completing. A single failed scan never sets it.
 - `ArchiverDisabled`: the sidecar reports PITR disabled on 2 consecutive polls while the spec enables it, and no ordered update is pending for the site, or the PITR spec cannot render an archiver (empty or unknown `profileName`), or the rollout has been pending for 30 minutes. While a valid rollout is pending, for up to 30 minutes, the condition is `Unknown`/`AwaitingRollout` instead, with no Event; the same applies for the first sync after a topology manager starts, before its drift set is computed.
 - `SidecarUnreachable`: the operator's poll of `/archiver/status` failed 3 times over at least 60 s, or over at least 5 minutes for a sidecar that has not answered since the operator process started. With a sidecar image older than this behaviour, this is how an archive init crash loop shows up.
+- Archive identity refusals (`ArchiveForeign`, `ArchiveCopy`, `ArchiveLegacy`, `ArchiveDescriptorMissing`, `ArchiveEncryptionMismatch`, `ArchiveKeyMismatch`, `ArchiveVersionUnsupported`, `ArchiveStoreUnsupported`): the sidecar refused the archive's `archive.json` descriptor or the store's atomic create. Immediate, and they do not clear by retrying. See playbook 37.
+- `ArchiveUnsafeHistory`: a site persisted its permanent history-integrity marker, or `spec.mysqlConf` would make it (previewed before any sidecar reports, with a Warning `PITRArchiveUnsafeHistory`). See playbook 38.
 
-When sites disagree, the reason is the first that applies in that order; the message lists every affected site.
+When sites disagree, the reason is the first that applies in the order `ArchiveStoreInitFailed`, the archive refusals in the order above, `ArchiverError`, `ArchiverDisabled`, `SidecarUnreachable`; the message lists every affected site. `status.pitr.archive` summarizes the identity: `state` is `AwaitingDescriptor`, `Verified` or `Refused` with `reason`.
 
 Expected, self-clearing Warning `PITRArchiveNotReady` → Normal `PITRArchiveReady` pairs (no action unless the Normal never follows):
 - a pod taking more than 60 s to come back in a rollout or node move (`SidecarUnreachable`);
@@ -832,28 +834,45 @@ The PVC store checks its volume when it is built: the mount path must be a mount
 3. Read the sidecar log for `failed to init archive store` (ERROR when the cause changes, WARN while it repeats, with `attempt` and `retryIn`) or `archive binlog` errors.
 4. If `PITRArchiveReady` does not change while `status.pitr.message` does, look for the operator log `PITR archive condition read failed; leaving the condition as persisted`: the operator cannot read the group uncached and keeps the persisted condition until it can.
 5. For `SidecarUnreachable`, check `kubectl get pod <pod> -n <ns>` restart counts and `kubectl logs <pod> -c sidecar --previous`, and the sidecar image tag.
+6. For an `Archive*` reason, read `status.pitr.archive` and each site's `/archiver/status` `archive` block (`scripts/triage.sh` prints both), then go to playbook 37 or 38.
 
 ### Safe remediation
 - `ArchiveStoreInitFailed`: fix what the error names (Secret projection mode or content, endpoint URL, PVC mount path). The next retry picks it up; look for `archive store initialized after retries`. No pod restart is needed for Secret or endpoint fixes. For `is not a mount point`, compare the pod's `volumes`/`volumeMounts` with the Deployment's pod template: the operator always renders the `pitr-archive` volume, so a missing one was removed by a mutating webhook, policy engine or manual edit. Fix that; restoring the volume changes the pod spec and restarts the pod, which also restarts MySQL, so on the primary site run a planned failover away from it first (`kubectl bloodraven promote <group> <other-site>`). For `is not writable`, the error ends with the cause: `permission denied` means ownership or fsGroup (compare the volume's owner with the sidecar UID, 999 unless overridden); `read-only file system` means the claim's access mode or a filesystem the kernel remounted read-only after an I/O error (check the node's `dmesg`); `no space left on device` means the volume has no free inodes (expand or prune it). The probe creates an empty file, so a volume that is only out of data blocks does not fail init; it shows as `ArchiverError` while retention keeps freeing space. For passphrase `permission denied`, see playbook 25. Do not change an existing archive's passphrase to make the error go away; see playbook 26.
 - `ArchiverError`: follow the error text (storage reachability, credentials, playbook 26 for authentication or BRV1 errors).
 - `AwaitingRollout`: let the ordered update finish; check `status.updatePhase`. If it stays, the update is blocked (operator log `ordered update: deferring active-site update`, for example no healthy promotable standby, or `ordered update: deferring follower update; no drifted follower is a healthy direct replica` when only followers are drifted and none replicates directly from the active site yet, such as an old primary recovery has not rejoined). After 30 minutes the condition turns `False`/`ArchiverDisabled` with `ordered update still pending after 30m`; unblock the update (restore the standby) rather than restarting pods by hand.
 - `ArchiverDisabled`: if it persists after the rollout, check that `spec.backup.pitr.profileName` names an existing profile (look for a `BackupPITRInvalid` Event). With an empty or unknown profile the operator renders no PITR configuration into the sidecar, so it reports archiving disabled indefinitely.
+- `ArchiveStoreInitFailed` with `archive store init: … s3:ListBucket`: grant `s3:ListBucket` on the bucket (and `s3:PutObject`/`s3:DeleteObject` on the prefix); the sidecar lists the prefix before creating the descriptor. An inconclusive conditional-write probe (persistent `409 ConditionalRequestConflict`) also shows here and is retried on the next cycle.
+- Archive identity reasons and `ArchiveUnsafeHistory`: playbooks 37 and 38.
 - `SidecarUnreachable` on an older sidecar image: upgrade the sidecar image; the operator rolls it through the ordered update. The ordered update stops on a rolled pod that is not Ready (playbook 34), but a current sidecar stays Ready through archive failures, so watch `PITRArchiveReady` site by site instead of assuming a finished rollout means archiving works.
 - Recovery to `True` needs 2 consecutive clean poll rounds (about a minute) and emits a Normal `PITRArchiveReady` Event. Binlogs sealed during the outage are uploaded once the archiver runs, as long as MySQL still has them; check `backlogFiles` and the coverage fields afterwards.
 
 ---
 
-## 32. PITR restore or verification failed with `PITRTargetNotCovered` or `PITRArchiveSiteOmitted`
+## 32. PITR restore or verification refused (`PITRReplayUnsupported`, archive identity, `PITRTargetNotCovered`)
 
 ### Symptoms
-- Restore/verification status message names `PITRTargetNotCovered`, `PITRArchiveSiteOmitted`, `PITRArchiveListFailed`, `PITRCrossSiteOrder`, `PITRBackupBoundUnknown`, or `PITRNoArchivedReplay`. The download init container may have failed before MySQL Shell started.
+- Restore/verification status message names `PITRReplayUnsupported`, an archive identity token (`PITRArchiveNotFound`, `PITRArchiveLegacy`, `PITRArchiveDescriptorMissing`, `PITRArchiveVersionUnsupported`, `PITRArchiveIdentityMismatch`, `PITRArchiveObjectInvalid`, `PITRArchiveEncryptionMismatch`, `PITRArchiveKeyMismatch`, `PITRArchiveHistoryReset`), `PITRArchiveListFailed`, `PITRArchiveDestinationShared`, `PITRTargetNotCovered`, `PITRBackupBoundUnknown`, or `PITRNoArchivedReplay`. The download init container may have failed before MySQL Shell started.
 - A restore with `allowPartial: true` completes with reason `PointInTimePartial` and a Warning Event. This is an earlier recovery point, not the requested target.
+- `PITRArchiveSiteOmitted`, `PITRCrossSiteOrder`, `PointInTimeCrossSiteUnverified` and `PITRSharedArchivePrefix` no longer occur: `pointInTime.sites` and `allowUnverifiedCrossSite` were removed in v2.0.0, and replay considers every manifest in the archive.
 
 ### Diagnostic steps
 1. Read `kubectl get mfg <group> -n <namespace> -o jsonpath='{.status.restore}'` or `kubectl get mysqlbackupverification <verification> -n <namespace> -o yaml`. Capture Events and the Job pod's container termination messages (`kubectl get pod <job-pod> -n <namespace> -o jsonpath='{.status.initContainerStatuses[*].state.terminated.message}{"\n"}{.status.containerStatuses[*].state.terminated.message}'`): each container records its own refusal there, stable reason first, and a successful main container records `BLOODRAVEN_PITR_VERDICT v=1 …`. `triage.sh` includes restore status; the support bundle captures group YAML and verification status. Capture `kubectl logs -n <namespace> <job-pod> -c pitr-download` separately when needed.
-2. For `PITRArchiveSiteOmitted`, compare every omitted manifest key with the replay set. The default is the target group's `spec.sites`; `pointInTime.sites` names source archive sites, including removed or renamed sites. Add the source site to pointInTime.sites for replay validation, or move a foreign archive to its own prefix. There is no exclusion bypass; `allowPartial` does not bypass omission. Files already in a referenced backup are skipped by its trusted GTID lower cut. If the foreign manifest was written by a group restored from this archive (a `PITRSharedArchivePrefix` Warning on that group), that group should read the source through `pointInTime.archiveProfileName` and archive into its own prefix.
-3. For `PITRArchiveListFailed`, repair list permission on the configured prefix (S3 `ListObjectsV2`). Read permission alone is insufficient. Preserve manifests and binlogs.
-4. For `PITRTargetNotCovered`, read the `anchorReason` and distinguish the cause before choosing a remedy. Never use manifest timestamps alone as proof.
+2. **`PITRReplayUnsupported` ("this build cannot replay a version-2 archive")** is expected in this build: `pitr-download` opened the archive, every identity check passed, and the build has no replay planner. It is not an archive fault. Restore without `pointInTime` (to the dump's GTID), or use `mode: none` verifications, until a release with the chronological planner. Do not try to work around it by pointing at an old prefix: version 1 archives refuse `PITRArchiveLegacy`.
+3. **Archive identity tokens** come before replay, so they name the real problem:
+   - `PITRArchiveNotFound`: no descriptor and no manifests. Wrong `archiveProfileName`, or the archive is empty.
+   - `PITRArchiveLegacy`: the prefix predates v2.0.0 (version 1 manifests, no `archive.json`). This build cannot read it; restore with a pre-v2.0.0 image if the target needs it.
+   - `PITRArchiveDescriptorMissing`: version 2 manifests but no `archive.json`. For a replicated copy, wait for replication or copy `archive.json` from the source; otherwise restore it from a backup of the bucket. Never write one by hand.
+   - `PITRArchiveIdentityMismatch`: a manifest names another archive than the descriptor; the prefix mixes two archives. Point at one archive's prefix.
+   - `PITRArchiveEncryptionMismatch` / `PITRArchiveKeyMismatch`: the reading profile's encryption mode or passphrase does not match the descriptor's `keyCheck`. Use the profile and passphrase the archive was written with.
+   - `PITRArchiveVersionUnsupported`: written by a newer release. Upgrade.
+   - `PITRArchiveHistoryReset`: a site's manifest records a reset epoch; the whole archive is refused. Start a new prefix and take a full backup; older targets need the pre-reset generation.
+   - `PITRArchiveObjectInvalid`: a manifest cannot be parsed or names an unsafe site. Preserve it and inspect.
+4. **`PITRArchiveDestinationShared`** (`RestoreBuildFailed`, no Job): `initFromBackup.pointInTime.archiveProfileName` resolves to the restored group's own active PITR destination (compared normalized, so an alias profile counts). Keep `spec.backup.pitr` on a profile with its own prefix. `archiveProfileName` is required under `initFromBackup`; the API server rejects a `pointInTime` without it.
+5. For `PITRArchiveListFailed`, repair list permission on the configured prefix (S3 `ListObjectsV2`). Read permission alone is insufficient. Preserve manifests and binlogs.
+
+The remaining steps describe the per-site planner's refusals. This build stops at step 2 before reaching them; they apply to older releases and are kept until the chronological planner's playbook replaces them.
+
+6. For `PITRTargetNotCovered`, read the `anchorReason` and distinguish the cause before choosing a remedy. Never use manifest timestamps alone as proof.
 
    - **Target before the backup completed:** refused at render time. Use the previous backup, whose dump cannot hold changes after the target.
    - **No stop barrier:** the message names the requested time and the newest verified event per site (`none` means no evidence). The active binlog is archived only after rotation (`FLUSH BINARY LOGS` on the source), or `allowPartial` restores to the newest archived point. Wait for rotation and archival before retrying.
@@ -861,18 +880,17 @@ The PVC store checks its volume when it is built: the mount path must be a mount
    - **"… before the target, comes after the stop event …; replay would not apply it":** a lagging replica, an interrupted transaction or a clock step put an older commit after the stop. Choose a target outside that file or use a backup taken after it. No override bypasses it.
    - **"the backup already contains transactions committed at or after the target":** the dump overshoots the target. Use an earlier backup.
    - **"replayed history does not continue the backup bound":** the archive belongs to another branch than the backup. Use a backup taken on this archive's lineage.
-   - **Missing bytes:** "archive does not contain transactions between the backup bound and ..." means recover the missing archive bytes or choose a trusted full backup covering the gap and preceding the target. Neither override bypasses it.
-   - **Existing but unverifiable evidence:** "archived file lacks verifiable transaction evidence (XA/checksum-off/unsupported encoding)" does not mean an object is absent. Preserve the files and reader versions. Use a trusted full backup whose GTID bound already covers these transactions and whose consistent point fits the requested target. Do not fabricate the GTID bound, delete manifest rows, or use either override to bypass it.
-   - **Compressed inner cut/decoding failure:** the message names the compressed transaction and says it has events at or after the target (mysqlbinlog would replay it partially), or cannot be decoded before the target. Preserve the bytes and source clock/SQL timestamp evidence. Choose a target after all events of the affected transaction, or use a trusted full backup with a suitable consistent point. Do not rewrite archived event timestamps; neither override bypasses this refusal.
+   - **Missing bytes:** "archive does not contain transactions between the backup bound and ..." means recover the missing archive bytes or choose a trusted full backup covering the gap and preceding the target. `allowPartial` does not bypass it.
+   - **Existing but unverifiable evidence:** "archived file lacks verifiable transaction evidence (XA/checksum-off/unsupported encoding)" does not mean an object is absent. Preserve the files and reader versions. Use a trusted full backup whose GTID bound already covers these transactions and whose consistent point fits the requested target. Do not fabricate the GTID bound, delete manifest rows, or use `allowPartial` to bypass it.
+   - **Compressed inner cut/decoding failure:** the message names the compressed transaction and says it has events at or after the target (mysqlbinlog would replay it partially), or cannot be decoded before the target. Preserve the bytes and source clock/SQL timestamp evidence. Choose a target after all events of the affected transaction, or use a trusted full backup with a suitable consistent point. Do not rewrite archived event timestamps; `allowPartial` does not bypass this refusal.
 
    Whole parsed, identity-verified predecessor files count their announced GTIDs in full, including XA/checksum-off/SAVEPOINT/admin/compressed transactions, regardless of retention completeness; only the stop-file prefix needs completed transaction bodies. Clone metadata alone cannot replace missing replay bytes. Unknown/empty bounds fail Job rendering with `PITRBackupBoundUnknown`: use a mysqlBackupRef whose backup has status.gtidExecuted, or explicitly authorize allowPartial on a restore; that restore checks the lower edge against the loaded dump and always ends `PointInTimePartial`. Verification requires trustworthy backup metadata. An idle anchored file can prove coverage even if the lower cut skips every file, leaving newest replay time empty.
-5. For `PITRNoArchivedReplay`, `mode: latest` found no archived transaction beyond the loaded dump. Rotate on the source, wait for archival, and start a new verification. Timestamp verification uses strict upper coverage; verification has no partial override.
-6. For `PITRCrossSiteOrder`, two or more sites hold transactions to replay in the window, usually because of a failover, planned switchover or ordered update. For a target after the handoff, use a full backup taken after it and before the target. For a target before it, restore-only `pointInTime.allowUnverifiedCrossSite: true` is the only option. It replays sites in name order in one mysqlbinlog run, which ends at the first stop event, so later-sorted sites' pre-target transactions can be skipped; it does not check that the surviving site contains the other site's archived transactions. Its Warning and `PointInTimeCrossSiteUnverified` reason name the staged sites. Verification has no opt-in and cannot cover these windows until #206. Lower-edge, payload and stop-proof checks remain enforced. Never omit a needed site.
-7. For `PointInTimePartial`, compare requested `pitrStopDatetime` with `pitrNewestEventTime` (empty means no replay). Confirm the earlier recovery point meets the recovery objective before routing traffic.
-8. For `PITRCoverageInvalid`, read the message. "pod is gone" means the Job's pod was deleted before the operator read its verdict; that is final. A verdict or coverage mismatch means the Job was rendered by a different operator version or the staged files changed; use matching versions and preserve evidence.
+7. For `PITRNoArchivedReplay`, `mode: latest` found no archived transaction beyond the loaded dump. Rotate on the source, wait for archival, and start a new verification. Timestamp verification uses strict upper coverage; verification has no partial override.
+8. For `PointInTimePartial`, compare requested `pitrStopDatetime` with `pitrNewestEventTime` (empty means no replay). Confirm the earlier recovery point meets the recovery objective before routing traffic.
+9. For `PITRCoverageInvalid`, read the message. "pod is gone" means the Job's pod was deleted before the operator read its verdict; that is final. A verdict or coverage mismatch means the Job was rendered by a different operator version or the staged files changed; use matching versions and preserve evidence.
 
 ### Safe remediation
-Correct the cause and retry through the normal restore/verification workflow. A failed bootstrap restore has no automatic retry. The post-load checks (unknown bound, overshooting dump, replay already in the dump) run after `util.loadDump()`, so the target may already hold the dump: empty it (or recreate its PVC) before deleting the failed restore Job to retry. Opt into restore `allowPartial` only when the earlier point is acceptable. It relaxes upper coverage alone, never the single-site rule, identity, gap, divergence, quarantine, omission, lower-edge, lineage, payload or stop-proof refusals. Do not delete manifest rows to force success.
+Correct the cause and retry through the normal restore/verification workflow. A failed bootstrap restore has no automatic retry. The post-load checks (unknown bound, overshooting dump, replay already in the dump) run after `util.loadDump()`, so the target may already hold the dump: empty it (or recreate its PVC) before deleting the failed restore Job to retry. Opt into restore `allowPartial` only when the earlier point is acceptable. It relaxes upper coverage alone, never identity, gap, divergence, quarantine, lower-edge, lineage, payload or stop-proof refusals. Do not delete manifest rows to force success.
 
 **Upgrading:** let in-flight PITR restores and verifications finish before upgrading, or delete their Jobs and retry afterwards. A Job rendered by an older operator writes no verdict and fails `PITRCoverageInvalid`. Idle `mode: latest` schedules now fail with `PITRNoArchivedReplay` instead of certifying PITR without replay.
 
@@ -1040,4 +1058,109 @@ Do not:
 Do not:
 - Remove a `hold.verification.shipstream.io/*` annotation by hand while a pod of that verification runs: retention or cleanup could then delete the artifact under it.
 - Remove the verification finalizer to hurry deletion. The hold then stays on the backup; it stops counting once the pods are gone, but retention only notices on its next pass.
+
+---
+
+## 37. PITR archive identity refused (`ArchiveLegacy`, `ArchiveForeign`, `ArchiveCopy`, `ArchiveDescriptorMissing`, encryption, store)
+
+### Symptoms
+- `PITRArchiveReady=False` with an `Archive*` reason and a Warning `PITRArchiveNotReady`; `status.pitr.archive.state: Refused` with the same `reason`.
+- `/archiver/status` on the refusing site: `archive.state: Refused`, `lastError` starting with the token (`PITRArchiveLegacy: archive … at s3://…: …; <procedure>`). The site uploads nothing; other sites may still be `Verified` or `AwaitingDescriptor`.
+- Sidecar WARN `archive descriptor changed` when a descriptor that verified earlier no longer does.
+
+### Cause
+Every archive has a write-once plaintext descriptor `<prefix>/binlogs/archive.json` naming the source group (`namespace`, `name`, `uid`), an archive ID derived from that UID and the normalized destination, and the encryption mode with a passphrase `keyCheck`. A writer accepts it only when it names its own group's UID, an ID derived for its own destination, and its profile's encryption and key:
+
+| Reason | Meaning |
+|---|---|
+| `ArchiveLegacy` | The prefix predates v2.0.0: version 1 manifests or other objects, no descriptor. Expected on the first upgrade to v2.0.0. |
+| `ArchiveForeign` | The descriptor names another group's UID: another group archives here, or this group was deleted and re-created under the same name (new UID). |
+| `ArchiveCopy` | This group's UID but an archive ID for another destination: the profile points at a copy (a replicated bucket, a moved prefix, a changed endpoint spelling). Copies are read-only. |
+| `ArchiveDescriptorMissing` | Version 2 manifests but no descriptor: it was deleted, or a replicated copy has not received it yet. |
+| `ArchiveEncryptionMismatch` | The profile's encryption mode or algorithm differs from the descriptor's (encryption was enabled or disabled on an existing archive). |
+| `ArchiveKeyMismatch` | The mounted passphrase does not verify the `keyCheck` (the passphrase or Secret key changed). |
+| `ArchiveVersionUnsupported` | Descriptor or manifest from a newer release (a downgrade). |
+| `ArchiveStoreUnsupported` | The store does not enforce atomic create: the probe's second `If-None-Match: *` create succeeded or the header was rejected, or a PVC filesystem lacks `link(2)`. |
+
+### Diagnostic steps
+1. Read the observation and the per-site reports:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.status.pitr.archive}{"\n"}'
+   scripts/sidecar-probe.sh -n <ns> <group> archiver
+   ```
+2. Read the descriptor (plaintext on every archive; it holds no secret):
+   ```bash
+   aws s3 cp s3://<bucket>/<prefix>/binlogs/archive.json - | jq .
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.metadata.uid}{"\n"}'
+   ```
+   Compare `source.uid` with the group's UID and `archiveID` with `status.pitr.archive.archiveID` and the sidecar's `BLOODRAVEN_PITR_ARCHIVE_ID`.
+3. For `ArchiveStoreUnsupported`, check the store's conditional-write support (AWS S3, MinIO and RustFS 1.0+ support it; active-active multi-zone buckets do not certify it).
+4. For `ArchiveKeyMismatch` / `ArchiveEncryptionMismatch`, compare the active profile's `encryption` block and Secret reference with what the archive was written with (playbook 26). Do not print the passphrase.
+
+### Safe remediation
+- Most reasons need **a new prefix and a full backup**: change the active profile's `storage.s3.prefix` (or `pvc.subPath`), or select another profile in `spec.backup.pitr.profileName`, wait for the rollout, then take and verify a full backup. The first upload creates a new descriptor.
+- `ArchiveLegacy` after upgrading to v2.0.0: that is the procedure; keep the old prefix, backups, passphrase and a pre-v2.0.0 image for older targets.
+- `ArchiveDescriptorMissing`: restore `archive.json` from a bucket backup or, for a copy, from the source; never write a descriptor by hand (the ID and `keyCheck` are derived and a wrong one makes the archive foreign).
+- `ArchiveKeyMismatch` / `ArchiveEncryptionMismatch`: revert the profile's encryption settings to what the archive was written with, or start a new prefix. There is no in-place re-encryption.
+- `ArchiveStoreUnsupported`: move the archive to a store that enforces conditional writes.
+- `ArchiveVersionUnsupported`: run the release that wrote the archive.
+
+Do not delete `archive.json`, rewrite manifests, or point two groups at one prefix. A restored group must archive into its own prefix (`PITRArchiveDestinationShared` refuses the restore otherwise).
+
+---
+
+## 38. PITR unsafe history marker (`ArchiveUnsafeHistory`)
+
+### Symptoms
+- `PITRArchiveReady=False` / `ArchiveUnsafeHistory` and a Warning `PITRArchiveUnsafeHistory` (edge-triggered, besides `PITRArchiveNotReady`).
+- A site's `/archiver/status` has a non-null `historyIntegrity{violation, detail, at}` and `lastError: PITRArchiveUnsafeHistory: <site> <violation> <detail>; this site's binlogs cannot certify history; start a new archive prefix and take a full backup`. Sidecar WARN `archive history unsafe`.
+- Or no sidecar has reported yet, and the condition message names a `spec.mysqlConf` key (the operator's preview).
+
+### Cause
+PITR certifies history from binlog order and row images. At store init and every audit cycle each site checks: no replication filters (`performance_schema.replication_applier_filters` / `_global_filters`), no binlog filters (`Binlog_Do_DB`, `Binlog_Ignore_DB`), `binlog_format=ROW`, `binlog_row_image=FULL`, `replica_preserve_commit_order=ON`. On the first violation (`ReplicationFilter`, `BinlogFilter`, `BinlogFormat`, `BinlogRowImage`, `CommitOrder`) it persists the marker in its own manifest and stops uploading. The marker is permanent for that prefix; removing the setting never clears it. `replica-preserve-commit-order` is operator-owned (`ON`), so `CommitOrder` means something changed it at runtime (`SET GLOBAL`). When the check itself fails, `lastError` reads `history integrity: …` and no marker is set; fix the probe (privileges, connectivity).
+
+### Diagnostic steps
+1. Find the marked sites and the offending key:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o jsonpath='{range .status.conditions[?(@.type=="PITRArchiveReady")]}{.reason}: {.message}{"\n"}{end}'
+   kubectl get mfg <group> -n <ns> -o json | jq '{group: .spec.mysqlConf, sites: [.spec.sites[] | {name, mysqlConf}]}'
+   scripts/sidecar-probe.sh -n <ns> <group> archiver
+   ```
+2. On the site, confirm the live values:
+   ```sql
+   SELECT @@global.binlog_format, @@global.binlog_row_image, @@global.replica_preserve_commit_order;
+   SELECT * FROM performance_schema.replication_applier_filters;
+   SELECT * FROM performance_schema.replication_applier_global_filters;
+   SHOW BINARY LOG STATUS;
+   ```
+
+### Safe remediation
+1. Remove the setting from `spec.mysqlConf` (group and site); the preview clears once nothing offending remains, but a persisted marker does not.
+2. Point `spec.backup.pitr` at a new prefix and wait for the rollout.
+3. Take and verify a full backup in the new archive.
+4. Keep the marked prefix and its manifest as evidence. Do not edit the manifest to remove `historyIntegrity`.
+
+---
+
+## 39. Reissue risk after a reclone (`PITRArchiveReissueRisk`)
+
+### Symptoms
+- Warning `PITRArchiveReissueRisk` on the group: "site `<s>` was promoted while its archive manifest holds N divergent/quarantined rows. If `<s>` was recloned after a lossy failover, it reissues the lost GTIDs, and every restore from this archive refuses PITRArchiveHistoryReset. Start a new archive prefix and take a full backup."
+- Later, restores from the archive fail `PITRArchiveHistoryReset`.
+
+### Cause
+A recloned server keeps its `server_uuid`. After a lossy failover the old primary's unreplicated transactions are flagged `divergent` (or were quarantined) in its manifest. Once that site is recloned and promoted again, it issues the same GTID numbers with different transactions. The archive then holds two transactions under one GTID, and every reader refuses the whole archive. The Warning fires when the active site changes (failover, planned failover, re-promotion) to a site whose last archiver status reports `divergentRows + quarantinedRows > 0`; it is a heuristic and fires before any reissued GTID is archived.
+
+### Diagnostic steps
+1. Read the promoted site's counts and whether it was recloned since the failover:
+   ```bash
+   scripts/sidecar-probe.sh -n <ns> <group> archiver   # divergentRows, quarantinedRows, promotionRecordedAt
+   kubectl logs -n <operator-ns> deploy/bloodraven | jq -c 'select(.msg=="starting bootstrap" and .source=="reclone")'
+   ```
+2. Compare the reclone time with the lossy failover (`status.lastFailover`, `DataLossDetected` Events).
+
+### Safe remediation
+1. If the site was recloned after the lossy failover: point `spec.backup.pitr` at a new prefix, wait for the rollout, then take and verify a full backup. Keep the old prefix and its backups for targets before the reissue.
+2. If it was not recloned (the rows come from something else), the Warning is a false positive for reissue; continue with playbook 27 for the divergent rows.
+3. Quarantine and acknowledgement cannot clear a verified reuse. Rotating `server_uuid` on reclone is a planned follow-up.
 

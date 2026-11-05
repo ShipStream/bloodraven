@@ -337,26 +337,6 @@ func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context
 	return restoreCompletionMetadata{}, false
 }
 
-// pitrForeignReplaySites lists replay sites outside spec.sites that are read
-// from the group's own archive profile.
-func pitrForeignReplaySites(fg *v1alpha1.MysqlFailoverGroup) []string {
-	pit := fg.Spec.InitFromBackup.PointInTime
-	if pit == nil || pit.ArchiveProfileName != "" {
-		return nil
-	}
-	own := make(map[string]bool, len(fg.Spec.Sites))
-	for _, site := range fg.Spec.Sites {
-		own[site.Name] = true
-	}
-	var foreign []string
-	for _, site := range pit.Sites {
-		if !own[site] {
-			foreign = append(foreign, site)
-		}
-	}
-	return foreign
-}
-
 // applyPITRVerdict replaces log-derived PITR fields with the verdict's.
 func applyPITRVerdict(meta *restoreCompletionMetadata, verdict pitrVerdict) {
 	meta.PitrCoverageVersion = 1
@@ -612,10 +592,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		r.setRestoreStatus(ctx, fg, running)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreStarted",
 			"created restore Job %s targeting site %s", built.Name, targetSite)
-		if foreign := pitrForeignReplaySites(fg); len(foreign) > 0 {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PITRSharedArchivePrefix",
-				"pointInTime.sites %v are not in spec.sites but are read from this group's own archive prefix; if they belong to another group, this group's archiver will add its manifests to that prefix and both groups' default replay sets will fail PITRArchiveSiteOmitted; set pointInTime.archiveProfileName to read the source archive from its own profile", foreign)
-		}
 		return 15 * time.Second, nil
 	}
 
@@ -1193,6 +1169,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	// (restore.py, runs mysqlbinlog | mysql on the downloaded files).
 	// See buildRestorePITRFragments for the shape.
 	if err := validatePITRBackupBound(in.PointInTime, sourceMeta.SourceGtidExecuted, false); err != nil {
+		return nil, err
+	}
+	if err := validateRestoreArchiveProfile(fg, in.PointInTime); err != nil {
 		return nil, err
 	}
 	pitrFrags, err := buildRestorePITRFragmentsFor(fg, in.PointInTime)

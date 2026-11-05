@@ -31,7 +31,7 @@ func TestLegacyReuseEventuallyGetsGuard(t *testing.T) {
 	if err := appendManifestEntry(ctx, store, "binlogs", "iad", legacy); err != nil {
 		t.Fatal(err)
 	}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-11"}, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-11"}, store, slog.Default())
 	id, err := a.localBinlogID("testdata/same-header.bin")
 	if err != nil {
 		t.Fatal(err)

@@ -16,7 +16,7 @@ import (
 func TestVerifiedGTIDReissuanceAndQuarantineUndo(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
 	var ids []string
 	for i, file := range []string{"incarnation-a.bin", "same-header.bin"} {
 		source := filepath.Join("testdata", file)
@@ -36,10 +36,10 @@ func TestVerifiedGTIDReissuanceAndQuarantineUndo(t *testing.T) {
 	if m.Epoch == nil || len(m.Epoch.Reuse) != 1 || m.Epoch.ResetReason == "" {
 		t.Fatalf("different transactions reissued as GTID 11 without a guard: %+v", m.Epoch)
 	}
-	if err := AcknowledgeArchiveHistory(ctx, store, "binlogs", "iad", "canonical backup", coverageTestSID+":1-11"); err == nil {
+	if err := testAcknowledge(ctx, store, "binlogs", "iad", "canonical backup", coverageTestSID+":1-11"); err == nil {
 		t.Fatal("numeric coverage alone superseded verified conflicting issuance")
 	}
-	if err := QuarantineArchive(ctx, store, "binlogs", "iad", "mysql-bin.000001", ids[0], "canonical backup selects replacement history", coverageTestSID+":1-11", false); err != nil {
+	if err := testQuarantine(ctx, store, "binlogs", "iad", "mysql-bin.000001", ids[0], "canonical backup selects replacement history", coverageTestSID+":1-11", false); err != nil {
 		t.Fatal(err)
 	}
 	m, err = loadManifest(ctx, store, "binlogs", "iad")
@@ -49,10 +49,10 @@ func TestVerifiedGTIDReissuanceAndQuarantineUndo(t *testing.T) {
 	if m.Epoch.ResetReason == "" || len(m.Quarantined[0].Reuse) != 1 {
 		t.Fatal("quarantine erased verified generation-conflict protection")
 	}
-	if err := AcknowledgeArchiveHistory(ctx, store, "binlogs", "iad", "canonical backup", coverageTestSID+":1-11"); err == nil {
+	if err := testAcknowledge(ctx, store, "binlogs", "iad", "canonical backup", coverageTestSID+":1-11"); err == nil {
 		t.Fatal("quarantine reopened a proven reused generation from numeric backup bounds alone")
 	}
-	if err := QuarantineArchive(ctx, store, "binlogs", "iad", "mysql-bin.000001", ids[0], "", "", true); err != nil {
+	if err := testQuarantine(ctx, store, "binlogs", "iad", "mysql-bin.000001", ids[0], "", "", true); err != nil {
 		t.Fatal(err)
 	}
 	m, err = loadManifest(ctx, store, "binlogs", "iad")
@@ -114,7 +114,7 @@ func TestNativeCommitIdentityDistinguishesRelogging(t *testing.T) {
 			}
 			state := &historyStateStub{uuid: uuid, executed: meta.GTIDs.String()}
 			store := newMemStore()
-			a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 			for i, data := range [][]byte{raw, changed} {
 				source := filepath.Join(t.TempDir(), "source")
 				if err := os.WriteFile(source, data, 0600); err != nil {
@@ -142,7 +142,7 @@ func TestNativeCommitIdentityDistinguishesRelogging(t *testing.T) {
 func TestObsoleteGuardHasBoundedRecovery(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-11"}, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-11"}, store, slog.Default())
 	id, err := a.localBinlogID("testdata/incarnation-a.bin")
 	if err != nil {
 		t.Fatal(err)
@@ -158,13 +158,13 @@ func TestObsoleteGuardHasBoundedRecovery(t *testing.T) {
 		m.Epoch = &ArchiveEpoch{}
 	}
 	m.Epoch.ResetReason = "obsolete upload-order guard"
-	if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := AcknowledgeArchiveHistory(ctx, store, "binlogs", "iad", "verified canonical backup", coverageTestSID+":1-10"); err == nil {
+	if err := testAcknowledge(ctx, store, "binlogs", "iad", "verified canonical backup", coverageTestSID+":1-10"); err == nil {
 		t.Fatal("acknowledgement omitted a needed transaction")
 	}
-	if err := AcknowledgeArchiveHistory(ctx, store, "binlogs", "iad", "verified canonical backup", coverageTestSID+":1-11"); err != nil {
+	if err := testAcknowledge(ctx, store, "binlogs", "iad", "verified canonical backup", coverageTestSID+":1-11"); err != nil {
 		t.Fatal(err)
 	}
 	m, err = loadManifest(ctx, store, "binlogs", "iad")

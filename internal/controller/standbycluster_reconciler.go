@@ -26,6 +26,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
@@ -189,7 +191,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	// ---------------------------------------------------------------
 	// Step 2: Resolve storage backend
 	// ---------------------------------------------------------------
-	storeCfg, storePrefix, credsDir, configErr := r.buildStoreCfg(ctx, &sc)
+	storeCfg, storePrefix, archive, credsDir, configErr := r.buildStoreCfg(ctx, &sc)
 	if credsDir != "" {
 		// Safety-net defer: keeps the tempdir clean even on unexpected
 		// panics. The on-success path removes it immediately after newStore
@@ -243,7 +245,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	// scanBucket manages its own two-phase budgets derived from the parent ctx
 	// and the discovery interval: a fixed List timeout, then a work-aware read
 	// timeout computed after List from the discovered work size (WISHLIST #44).
-	discovered, scanErr := r.scanBucket(ctx, logger, &sc, store, storePrefix, interval)
+	discovered, scanErr := r.scanBucket(ctx, logger, &sc, store, storePrefix, archive, interval)
 	if scanErr != nil {
 		// A context error from scanBucket means List itself was cut short by a
 		// deadline/cancel (it never completed) — distinct from a genuine List
@@ -357,7 +359,15 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	sourceReason := "DumpFound"
 	sourceMsg := ""
 	sourceKnown := metav1.ConditionTrue
-	if discovered.DumpName == "" {
+	if refusal := discovered.ArchiveRefusal; refusal != nil {
+		// The dump is still published; the archive's PITR window is not.
+		sourceKnown = metav1.ConditionFalse
+		sourceReason = refusal.reason
+		sourceMsg = refusal.message
+		if prev := standbyFindStatusCondition(&sc, v1alpha1.StandbyConditionSourceConfigKnown); prev == nil || prev.Reason != refusal.reason {
+			r.Recorder.Eventf(&sc, corev1.EventTypeWarning, "PITRArchiveRefused", "%s", refusal.message)
+		}
+	} else if discovered.DumpName == "" {
 		sourceKnown = metav1.ConditionFalse
 		sourceReason = "NoDumpFound"
 		sourceMsg = fmt.Sprintf("no dump found under prefix %q (no @.json objects)", storePrefix)
@@ -370,7 +380,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		// dump with no point-in-time window.
 		sourceMsg = fmt.Sprintf("dump %q found but no PITR binlog manifests under %q/%s/ yet; "+
 			"recovery is limited to the dump (no point-in-time window)",
-			discovered.DumpName, storePrefix, pitrBinlogSubprefix)
+			discovered.DumpName, storePrefix, pitrarchive.BinlogSubprefix)
 	}
 
 	return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
@@ -417,16 +427,32 @@ func (r *MysqlStandbyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error
 // For PVC it returns a ConfigError: the operator pod does not mount the source
 // cluster's backup PVC, which is a cross-cluster constraint. Use S3-compatible
 // storage for production DR.
-func (r *MysqlStandbyClusterReconciler) buildStoreCfg(ctx context.Context, sc *v1alpha1.MysqlStandbyCluster) (*sidecar.PITRConfig, string, string, error) {
+func (r *MysqlStandbyClusterReconciler) buildStoreCfg(ctx context.Context, sc *v1alpha1.MysqlStandbyCluster) (*sidecar.PITRConfig, string, standbyArchiveExpectation, string, error) {
 	storage := sc.Spec.Source.Storage
 	switch storage.Type {
 	case v1alpha1.BackupStorageS3:
 		if storage.S3 == nil {
-			return nil, "", "", fmt.Errorf("source.storage.type=S3 but source.storage.s3 is not set")
+			return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("source.storage.type=S3 but source.storage.s3 is not set")
 		}
-		s3Cfg, prefix, credsDir, err := r.buildS3PitrCfg(ctx, sc.Namespace, storage.S3)
+		// The archive destination is normalized exactly as the source
+		// group's sidecars normalize it (§3.1), so the standby reads the
+		// same <prefix>/binlogs the descriptor was created at; the dumps
+		// live beside it.
+		dest, err := pitrarchive.NewS3Destination(storage.S3.Bucket, storage.S3.Prefix, storage.S3.EndpointURL)
 		if err != nil {
-			return nil, "", credsDir, err
+			return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("source.storage.s3: %w", err)
+		}
+		prefix := path.Dir(dest.KeyPrefix)
+		if prefix == "." {
+			prefix = ""
+		}
+		archive := standbyArchiveExpectation{
+			dest:       dest,
+			encryption: pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone},
+		}
+		s3Cfg, credsDir, err := r.buildS3PitrCfg(ctx, sc.Namespace, storage.S3)
+		if err != nil {
+			return nil, "", archive, credsDir, err
 		}
 		cfg := &sidecar.PITRConfig{
 			StorageType: "S3",
@@ -435,21 +461,61 @@ func (r *MysqlStandbyClusterReconciler) buildStoreCfg(ctx context.Context, sc *v
 		if sc.Spec.Source.Decryption != nil && sc.Spec.Source.Decryption.PassphraseSecret.Name != "" {
 			passphraseFile, dir, err := r.resolvePassphraseToFile(ctx, sc.Namespace, sc.Spec.Source.Decryption.PassphraseSecret, credsDir)
 			if err != nil {
-				return nil, "", dir, err
+				return nil, "", archive, dir, err
 			}
 			credsDir = dir
 			cfg.PassphraseFile = passphraseFile
+			// The archive's descriptor must record the passphrase mode
+			// with the only algorithm there is; its keyCheck is verified
+			// by the encrypting store's passphrase.
+			archive.encryption = pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: pitrarchive.AlgorithmAES256GCM}
 		}
-		return cfg, prefix, credsDir, nil
+		return cfg, prefix, archive, credsDir, nil
 
 	case v1alpha1.BackupStoragePVC:
-		return nil, "", "", fmt.Errorf("PVC storage is not supported by the standby reconciler: " +
+		return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("PVC storage is not supported by the standby reconciler: " +
 			"the operator pod does not mount the source cluster backup PVC; " +
 			"use S3-compatible object storage for cross-cluster DR")
 
 	default:
-		return nil, "", "", fmt.Errorf("unknown storage type %q", storage.Type)
+		return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("unknown storage type %q", storage.Type)
 	}
+}
+
+// standbyArchiveExpectation is what the standby expects of the source
+// archive's descriptor: its normalized destination and the encryption the
+// standby's decryption settings imply. The source group's UID is unknown to
+// the standby, so it reads as a reader that expects no particular source.
+type standbyArchiveExpectation struct {
+	dest       pitrarchive.Destination
+	encryption pitrarchive.EncryptionIdentity
+}
+
+// standbyArchiveRefusal is why the standby refuses the source archive. reason
+// is the token without its "PITR" prefix (e.g. ArchiveLegacy), used as the
+// SourceConfigKnown reason.
+type standbyArchiveRefusal struct {
+	reason  string
+	message string
+}
+
+func newStandbyArchiveRefusal(err error) *standbyArchiveRefusal {
+	reason := "ArchiveUnreadable"
+	if tok, ok := pitrarchive.TokenOf(err); ok {
+		reason = strings.TrimPrefix(string(tok), "PITR")
+	} else if tok, ok := pitrarchive.ParseToken(err.Error()); ok {
+		reason = strings.TrimPrefix(string(tok), "PITR")
+	}
+	return &standbyArchiveRefusal{reason: reason, message: err.Error()}
+}
+
+func standbyFindStatusCondition(sc *v1alpha1.MysqlStandbyCluster, condType string) *metav1.Condition {
+	for i := range sc.Status.Conditions {
+		if sc.Status.Conditions[i].Type == condType {
+			return &sc.Status.Conditions[i]
+		}
+	}
+	return nil
 }
 
 // buildS3PitrCfg resolves S3 credentials from the referenced Kubernetes
@@ -457,7 +523,7 @@ func (r *MysqlStandbyClusterReconciler) buildStoreCfg(ctx context.Context, sc *v
 // The scan prefix is s3.Prefix (the top-level prefix under which dumps and the
 // binlogs/ subdir both live). tempCredsDir is non-empty when credentials were
 // written to disk; the caller must remove it after the store is constructed.
-func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, namespace string, s3 *v1alpha1.S3Storage) (*sidecar.PITRS3Config, string, string, error) {
+func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, namespace string, s3 *v1alpha1.S3Storage) (*sidecar.PITRS3Config, string, error) {
 	cfg := &sidecar.PITRS3Config{
 		Bucket:      s3.Bucket,
 		Region:      s3.Region,
@@ -469,12 +535,12 @@ func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, name
 		var err error
 		credsDir, err = r.resolveS3CredsToDir(ctx, namespace, s3.CredentialsSecret)
 		if err != nil {
-			return nil, "", credsDir, fmt.Errorf("resolve S3 credentials from secret %q: %w", s3.CredentialsSecret, err)
+			return nil, credsDir, fmt.Errorf("resolve S3 credentials from secret %q: %w", s3.CredentialsSecret, err)
 		}
 		cfg.AWSCredsDir = credsDir
 	}
 
-	return cfg, standbyNormalizePrefix(s3.Prefix), credsDir, nil
+	return cfg, credsDir, nil
 }
 
 func (r *MysqlStandbyClusterReconciler) resolvePassphraseToFile(ctx context.Context, namespace string, ref v1alpha1.PassphraseSecretRef, dir string) (string, string, error) {
@@ -487,7 +553,10 @@ func (r *MysqlStandbyClusterReconciler) resolvePassphraseToFile(ctx context.Cont
 	}
 
 	key := ref.PassphraseSecretKeyOrDefault()
-	passphrase := strings.TrimSpace(string(secret.Data[key]))
+	// The one trim rule (D-7): the archive's keyCheck was computed over
+	// these bytes, so strings.TrimSpace (which also strips \v \f U+0085
+	// U+00A0) would turn a valid key into a KeyMismatch.
+	passphrase := string(backupcrypto.TrimPassphrase(secret.Data[key]))
 	if passphrase == "" {
 		return "", dir, fmt.Errorf("Secret %q key %q is missing or empty", ref.Name, key)
 	}
@@ -588,6 +657,12 @@ type standbyScanResult struct {
 	ManifestCount            int32
 	ArchivedBinlogCount      int32
 	ArchivedBinlogBytes      int64
+	// Archive is the verified source archive identity; nil when there is no
+	// archive or it was refused.
+	Archive *v1alpha1.PITRArchiveIdentity
+	// ArchiveRefusal is set when the source archive was refused. The dump
+	// fields are still published; the archive fields stay zero.
+	ArchiveRefusal *standbyArchiveRefusal
 	// MetadataErr is set when the chosen dump's @.json could not be parsed.
 	// The caller stamps SourceConfigKnown=False / MetadataUnreadable in that case.
 	MetadataErr error
@@ -635,6 +710,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	sc *v1alpha1.MysqlStandbyCluster,
 	store sidecar.ArchiveStore,
 	prefix string,
+	archive standbyArchiveExpectation,
 	interval time.Duration,
 ) (*standbyScanResult, error) {
 	listPrefix := standbyListPrefix(prefix)
@@ -684,7 +760,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 
 	// Count manifest keys now so the read-phase budget covers them too (the
 	// manifest loop reads one object per manifest key — V5).
-	binlogPrefix := path.Join(prefix, pitrBinlogSubprefix)
+	binlogPrefix := archive.dest.KeyPrefix
 	manifestPrefix := sidecar.ManifestKeyPrefix(binlogPrefix)
 	manifestKeyCount := 0
 	for _, key := range keys {
@@ -816,10 +892,37 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	r.pruneSeenDumpDirs(listPrefix, dumpDirs)
 
 	// -------------------------------------------------------------------
+	// Open the source archive (§3.3, reader role): the descriptor must parse
+	// and agree with the standby's encryption settings, and its keyCheck
+	// must verify. A prefix with no archive at all is a dump-only source.
+	// Every refusal publishes the dump without a PITR window.
+	// -------------------------------------------------------------------
+	desc, openErr := sidecar.OpenArchiveForRead(readCtx, store, binlogPrefix, pitrarchive.Expectation{
+		Role:        pitrarchive.RoleReader,
+		Destination: archive.dest,
+		Encryption:  archive.encryption,
+	})
+	if openErr != nil {
+		if isContextErr(openErr) || readCtx.Err() != nil {
+			result.Incomplete = true
+			result.IncompletePhase = "manifest"
+			return result, nil
+		}
+		if tok, _ := pitrarchive.TokenOf(openErr); tok == pitrarchive.TokenArchiveNotFound {
+			return result, nil
+		}
+		result.ArchiveRefusal = newStandbyArchiveRefusal(openErr)
+		return result, nil
+	}
+
+	// -------------------------------------------------------------------
 	// Read per-site binlog manifests under <prefix>/binlogs/.
 	// Layout: <prefix>/binlogs/manifest-<site>.json
 	// sidecar.ManifestKeyPrefix("<prefix>/binlogs") → "<prefix>/binlogs/manifest-"
+	// Every manifest must be version 2 and name the descriptor's archive;
+	// one that does not refuses the whole archive.
 	// -------------------------------------------------------------------
+	window := &standbyScanResult{}
 	for _, key := range keys {
 		if !strings.HasPrefix(key, manifestPrefix) || !strings.HasSuffix(key, ".json") {
 			continue
@@ -844,35 +947,60 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 				result.IncompletePhase = "manifest"
 				return result, nil
 			}
-			// R-4: do NOT increment ManifestCount for a failed LoadManifest.
-			// Emit a Warning event so corruption is visible in the event stream.
+			// R-4: emit a Warning event so corruption is visible in the event
+			// stream. An unreadable manifest also refuses the archive: a
+			// window computed without it would overstate what is archived.
 			r.Recorder.Eventf(sc, corev1.EventTypeWarning, "ManifestParseFailed",
 				"failed to parse binlog manifest %q: %v", key, err)
-			continue
+			result.ArchiveRefusal = newStandbyArchiveRefusal(fmt.Errorf("manifest %s: %w", key, err))
+			return result, nil
 		}
-		// R-4: only count after successful LoadManifest.
-		result.ManifestCount++
+		if m.ArchiveID != desc.ArchiveID {
+			result.ArchiveRefusal = newStandbyArchiveRefusal(&pitrarchive.VerifyError{
+				Token: pitrarchive.TokenArchiveIdentityMismatch, ArchiveID: desc.ArchiveID, Destination: archive.dest.String(),
+				Detail:    fmt.Sprintf("manifest %s names archive %q", key, m.ArchiveID),
+				Procedure: "the prefix mixes two archives; point the standby at one archive's prefix",
+			})
+			return result, nil
+		}
+		window.ManifestCount++
 
 		for _, f := range m.Files {
-			result.ArchivedBinlogCount++
-			result.ArchivedBinlogBytes += f.Size
+			window.ArchivedBinlogCount++
+			window.ArchivedBinlogBytes += f.Size
 			if !f.FirstEventTime.IsZero() {
 				t := metav1.NewTime(f.FirstEventTime)
-				if result.OldestArchivedBinlogTime == nil ||
-					f.FirstEventTime.Before(result.OldestArchivedBinlogTime.Time) {
-					result.OldestArchivedBinlogTime = &t
+				if window.OldestArchivedBinlogTime == nil ||
+					f.FirstEventTime.Before(window.OldestArchivedBinlogTime.Time) {
+					window.OldestArchivedBinlogTime = &t
 				}
 			}
 			if !f.LastEventTime.IsZero() {
 				t := metav1.NewTime(f.LastEventTime)
-				if result.NewestArchivedBinlogTime == nil ||
-					f.LastEventTime.After(result.NewestArchivedBinlogTime.Time) {
-					result.NewestArchivedBinlogTime = &t
+				if window.NewestArchivedBinlogTime == nil ||
+					f.LastEventTime.After(window.NewestArchivedBinlogTime.Time) {
+					window.NewestArchivedBinlogTime = &t
 				}
 			}
 		}
 	}
 
+	result.ManifestCount = window.ManifestCount
+	result.ArchivedBinlogCount = window.ArchivedBinlogCount
+	result.ArchivedBinlogBytes = window.ArchivedBinlogBytes
+	result.OldestArchivedBinlogTime = window.OldestArchivedBinlogTime
+	result.NewestArchivedBinlogTime = window.NewestArchivedBinlogTime
+	result.Archive = &v1alpha1.PITRArchiveIdentity{
+		ArchiveID:   desc.ArchiveID,
+		Destination: archive.dest.String(),
+		Source: v1alpha1.PITRArchiveSource{
+			Namespace: desc.Source.Namespace,
+			Name:      desc.Source.Name,
+			UID:       desc.Source.UID,
+		},
+		EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(desc.Encryption.Mode),
+		Algorithm:      v1alpha1.EncryptionAlgorithm(desc.Encryption.Algorithm),
+	}
 	return result, nil
 }
 
@@ -921,12 +1049,10 @@ func standbyReadTimeout(interval time.Duration, workItems int) time.Duration {
 	return budget
 }
 
-func standbyNormalizePrefix(prefix string) string {
-	return strings.Trim(prefix, "/")
-}
-
+// standbyListPrefix and standbyRelUnderPrefix take the dump prefix already
+// normalized by pitrarchive.NewS3Destination (no leading or trailing "/",
+// no empty or "." segments), the same spelling the source wrote under.
 func standbyListPrefix(prefix string) string {
-	prefix = standbyNormalizePrefix(prefix)
 	if prefix == "" {
 		return ""
 	}
@@ -934,7 +1060,6 @@ func standbyListPrefix(prefix string) string {
 }
 
 func standbyRelUnderPrefix(key, prefix string) (string, bool) {
-	prefix = standbyNormalizePrefix(prefix)
 	if prefix == "" {
 		return strings.TrimPrefix(key, "/"), true
 	}
@@ -1142,6 +1267,7 @@ func (r *MysqlStandbyClusterReconciler) stampConditionsAndRequeue(
 			ManifestCount:            discovered.ManifestCount,
 			ArchivedBinlogCount:      discovered.ArchivedBinlogCount,
 			ArchivedBinlogBytes:      discovered.ArchivedBinlogBytes,
+			Archive:                  discovered.Archive,
 			// LastScanAt intentionally left nil for comparison purposes.
 		}
 

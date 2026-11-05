@@ -76,6 +76,13 @@ func main() {
 			// encrypt_upload.go.
 			runEncryptUpload(os.Args[2:])
 			return
+		case "backup-stamp":
+			// Invoked as the backup Job's backup-stamp init container
+			// (writes the dump's identity stamp before the dump) and,
+			// with --end, after the dump (adds serverClock.end). See
+			// backup_stamp.go.
+			runBackupStamp(os.Args[2:])
+			return
 		case "artifact-cleanup":
 			// Invoked as the main container of the MysqlBackup
 			// finalizer's cleanup Job: deletes the backup artifact

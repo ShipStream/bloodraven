@@ -439,14 +439,14 @@ history:
 		completed++
 	}
 	if len(updates) > 0 {
-		latest, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
+		latest, err := a.loadManifest(ctx)
 		if err == nil {
 			for i := range latest.Files {
 				if id, ok := updates[latest.Files[i].identity()]; ok {
 					latest.Files[i].ContentID = id
 				}
 			}
-			err = saveManifest(ctx, a.store, a.cfg.ManifestPrefix, latest)
+			err = a.saveManifest(ctx, latest)
 		}
 		if err != nil {
 			fail("manifest", err)

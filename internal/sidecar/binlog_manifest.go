@@ -247,10 +247,22 @@ func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) 
 }
 
 // saveManifest serializes m and writes it to storage under the site's
-// manifest key. The Files slice is sorted lexicographically by Name and ID so
-// the output is deterministic and diff-friendly in object storage
-// browsers.
+// manifest key, with no identity checks. Writers save through
+// ArchiveSession.SaveManifest, which adds Reverify, the archive ID and the
+// read-back compare; this raw form is for tests and fixtures.
 func saveManifest(ctx context.Context, store ArchiveStore, prefix string, m *Manifest) error {
+	buf, err := encodeManifest(prefix, m)
+	if err != nil {
+		return err
+	}
+	return store.Put(ctx, manifestKey(prefix, m.Site), bytes.NewReader(buf), int64(len(buf)))
+}
+
+// encodeManifest stamps the current version and serializes m. The Files
+// slice is sorted lexicographically by Name and ID so the output is
+// deterministic and diff-friendly in object storage browsers. It refuses a
+// manifest its own loader would refuse.
+func encodeManifest(prefix string, m *Manifest) ([]byte, error) {
 	sort.Slice(m.Files, func(i, j int) bool {
 		if m.Files[i].Name != m.Files[j].Name {
 			return m.Files[i].Name < m.Files[j].Name
@@ -269,35 +281,13 @@ func saveManifest(ctx context.Context, store ArchiveStore, prefix string, m *Man
 	})
 	m.Version = ManifestVersion
 	if err := checkManifestVersion(manifestKey(prefix, m.Site), m); err != nil {
-		return fmt.Errorf("refusing to save: %w", err)
+		return nil, fmt.Errorf("refusing to save: %w", err)
 	}
 	buf, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
+		return nil, fmt.Errorf("marshal manifest: %w", err)
 	}
-	return store.Put(ctx, manifestKey(prefix, m.Site), bytes.NewReader(buf), int64(len(buf)))
-}
-
-// appendManifestEntry is a convenience wrapper that loads, upserts by
-// (Name, ID), and saves. Idempotent: re-appending the same file just
-// overwrites its row (archivedAt is bumped to match).
-func appendManifestEntry(ctx context.Context, store ArchiveStore, prefix, site string, entry ManifestEntry) error {
-	m, err := loadManifest(ctx, store, prefix, site)
-	if err != nil {
-		return err
-	}
-	found := false
-	for i := range m.Files {
-		if m.Files[i].identity() == entry.identity() {
-			m.Files[i] = entry
-			found = true
-			break
-		}
-	}
-	if !found {
-		m.Files = append(m.Files, entry)
-	}
-	return saveManifest(ctx, store, prefix, m)
+	return buf, nil
 }
 
 // pruneManifest removes entries whose (Name, ID) identity is in drop. Returns the
@@ -308,8 +298,9 @@ func appendManifestEntry(ctx context.Context, store ArchiveStore, prefix, site s
 // a plain file name, or whose ID is invalid, are dropped but not deleted. The
 // manifest is only rewritten if at least one entry was removed. Drop values
 // must contain the verified content ID (keyed for encrypted stores) for each selected identity.
-func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string, drop map[binlogIdentity]string) ([]string, error) {
-	m, err := loadManifest(ctx, store, prefix, site)
+func pruneManifest(ctx context.Context, session *ArchiveSession, site string, drop map[binlogIdentity]string) ([]string, error) {
+	prefix := session.Prefix()
+	m, err := session.LoadManifest(ctx, site)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +346,7 @@ func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string,
 		return nil, nil
 	}
 	m.Files = kept
-	if err := saveManifest(ctx, store, prefix, m); err != nil {
+	if err := session.SaveManifest(ctx, m); err != nil {
 		return nil, err
 	}
 	return removed, nil

@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // +kubebuilder:object:root=true
@@ -175,6 +176,19 @@ type MysqlBackupStatus struct {
 	// second algorithm can dispatch on this rather than re-reading the
 	// header from storage.
 	EncryptionAlgorithm string `json:"encryptionAlgorithm,omitempty"`
+
+	// FailoverGroupUID is the metadata.uid of the source failover group,
+	// pinned in the backup Job's template when the Job is created and
+	// recovered from the Job. The backup's stamp records the same UID.
+	// +optional
+	FailoverGroupUID types.UID `json:"failoverGroupUID,omitempty"`
+
+	// PITRArchiveID is the archive ID of the source group's active PITR
+	// archive when the Job was created, pinned in the Job's template and
+	// recovered from it. Empty when PITR was disabled.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^(ar1-[a-z2-7]{26})?$`
+	PITRArchiveID string `json:"pitrArchiveID,omitempty"`
 
 	// Message is a human-readable status message.
 	Message string `json:"message,omitempty"`

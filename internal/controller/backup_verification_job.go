@@ -633,12 +633,12 @@ func verificationPITRSpec(in *v1alpha1.PointInTimeVerificationSpec) (*v1alpha1.P
 		// The pipeline uses a far-future ceiling. The download init container
 		// also receives mode=latest and requires replay beyond the backup,
 		// rather than treating this sentinel as a target to cover.
-		return &v1alpha1.PointInTimeSpec{StopDatetime: "9999-12-31T23:59:59Z", Sites: append([]string(nil), in.Sites...)}, nil
+		return &v1alpha1.PointInTimeSpec{StopDatetime: "9999-12-31T23:59:59Z"}, nil
 	case "timestamp":
 		if in.Timestamp == "" {
 			return nil, fmt.Errorf("pointInTime.timestamp is required when mode=timestamp")
 		}
-		return &v1alpha1.PointInTimeSpec{StopDatetime: in.Timestamp, Sites: append([]string(nil), in.Sites...)}, nil
+		return &v1alpha1.PointInTimeSpec{StopDatetime: in.Timestamp}, nil
 	default:
 		return nil, fmt.Errorf("pointInTime.mode %q is not one of none|latest|timestamp", in.Mode)
 	}

@@ -1124,17 +1124,6 @@ spec:
                                           - latest
                                           - timestamp
                                           type: string
-                                        sites:
-                                          description: |-
-                                            Sites are the archive site names to replay. Defaults to this group's sites.
-                                            Set when the source archive's sites differ, or to include a removed site.
-                                          items:
-                                            maxLength: 253
-                                            minLength: 1
-                                            pattern: ^[a-z0-9-]+$
-                                            type: string
-                                          type: array
-                                          x-kubernetes-list-type: set
                                         timestamp:
                                           description: |-
                                             Timestamp is an RFC3339 instant; replay stops just before the
@@ -5847,52 +5836,32 @@ spec:
                               allowPartial:
                                 default: false
                                 description: |-
-                                  AllowPartial permits restoring to the newest archived point when the target
-                                  is not covered, and admits a backup with an unknown GTID bound, which the
-                                  restore then checks against the loaded dump. It never bypasses archive
-                                  safety, site omission, lower-edge or lineage checks.
-                                type: boolean
-                              allowUnverifiedCrossSite:
-                                default: false
-                                description: |-
-                                  AllowUnverifiedCrossSite replays archives from more than one site in site
-                                  name order, one mysqlbinlog run, without proving cross-site completeness.
-                                  mysqlbinlog stops at the first event at or after the target in any site,
-                                  so later sites' earlier transactions can be skipped. This never bypasses
-                                  archive, payload, lower-edge or stop-proof checks.
+                                  AllowPartial permits restoring to the newest archived point when the
+                                  target is not covered. It never bypasses archive identity, lineage
+                                  or continuity checks.
                                 type: boolean
                               archiveProfileName:
                                 description: |-
                                   ArchiveProfileName names the spec.backup.profiles entry whose binlog
-                                  archive the restore reads. Defaults to spec.backup.pitr.profileName.
-                                  Set it when restoring another group's archive, for example into renamed
-                                  sites, so this group keeps archiving into its own prefix instead of
-                                  adding foreign manifests to the source's prefix.
+                                  archive the restore reads. Required under initFromBackup: the restore
+                                  reads the source group's archive through it, and it may not resolve
+                                  to this group's own active PITR destination, so the new group never
+                                  writes into the archive it restores from. Replay considers every
+                                  site manifest under that archive.
+                                maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                               excludeGtids:
                                 description: |-
-                                  ExcludeGtids is an optional GTID set passed verbatim to
-                                  mysqlbinlog --exclude-gtids. Useful for surgically skipping a
-                                  known-bad transaction (e.g. an accidental DROP TABLE) while
-                                  replaying everything else.
+                                  ExcludeGtids is an optional GTID set that is never replayed. Useful
+                                  for surgically skipping a known-bad transaction (e.g. an accidental
+                                  DROP TABLE) while replaying everything else.
                                 type: string
-                              sites:
-                                description: |-
-                                  Sites are the archive site names to replay. Defaults to this group's sites.
-                                  Set when the source archive's sites differ, or to include a removed site.
-                                items:
-                                  maxLength: 253
-                                  minLength: 1
-                                  pattern: ^[a-z0-9-]+$
-                                  type: string
-                                type: array
-                                x-kubernetes-list-type: set
                               stopDatetime:
                                 description: |-
                                   StopDatetime is the MySQL-style datetime at which to stop
-                                  replaying binlog events (forwarded to mysqlbinlog
-                                  --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
+                                  replaying binlog events. Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
                                   the MySQL native form ("2026-04-15 09:30:00"). Required.
                                 minLength: 1
                                 type: string
@@ -5991,6 +5960,10 @@ spec:
                         required:
                         - source
                         type: object
+                        x-kubernetes-validations:
+                        - message: 'pointInTime.archiveProfileName is required: name
+                            the backup profile whose PITR archive the restore reads'
+                          rule: '!has(self.pointInTime) || has(self.pointInTime.archiveProfileName)'
                       license:
                         description: |-
                           License is an optional Ed25519-signed JWT recording this group's
@@ -6460,52 +6433,32 @@ spec:
                               allowPartial:
                                 default: false
                                 description: |-
-                                  AllowPartial permits restoring to the newest archived point when the target
-                                  is not covered, and admits a backup with an unknown GTID bound, which the
-                                  restore then checks against the loaded dump. It never bypasses archive
-                                  safety, site omission, lower-edge or lineage checks.
-                                type: boolean
-                              allowUnverifiedCrossSite:
-                                default: false
-                                description: |-
-                                  AllowUnverifiedCrossSite replays archives from more than one site in site
-                                  name order, one mysqlbinlog run, without proving cross-site completeness.
-                                  mysqlbinlog stops at the first event at or after the target in any site,
-                                  so later sites' earlier transactions can be skipped. This never bypasses
-                                  archive, payload, lower-edge or stop-proof checks.
+                                  AllowPartial permits restoring to the newest archived point when the
+                                  target is not covered. It never bypasses archive identity, lineage
+                                  or continuity checks.
                                 type: boolean
                               archiveProfileName:
                                 description: |-
                                   ArchiveProfileName names the spec.backup.profiles entry whose binlog
-                                  archive the restore reads. Defaults to spec.backup.pitr.profileName.
-                                  Set it when restoring another group's archive, for example into renamed
-                                  sites, so this group keeps archiving into its own prefix instead of
-                                  adding foreign manifests to the source's prefix.
+                                  archive the restore reads. Required under initFromBackup: the restore
+                                  reads the source group's archive through it, and it may not resolve
+                                  to this group's own active PITR destination, so the new group never
+                                  writes into the archive it restores from. Replay considers every
+                                  site manifest under that archive.
+                                maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                               excludeGtids:
                                 description: |-
-                                  ExcludeGtids is an optional GTID set passed verbatim to
-                                  mysqlbinlog --exclude-gtids. Useful for surgically skipping a
-                                  known-bad transaction (e.g. an accidental DROP TABLE) while
-                                  replaying everything else.
+                                  ExcludeGtids is an optional GTID set that is never replayed. Useful
+                                  for surgically skipping a known-bad transaction (e.g. an accidental
+                                  DROP TABLE) while replaying everything else.
                                 type: string
-                              sites:
-                                description: |-
-                                  Sites are the archive site names to replay. Defaults to this group's sites.
-                                  Set when the source archive's sites differ, or to include a removed site.
-                                items:
-                                  maxLength: 253
-                                  minLength: 1
-                                  pattern: ^[a-z0-9-]+$
-                                  type: string
-                                type: array
-                                x-kubernetes-list-type: set
                               stopDatetime:
                                 description: |-
                                   StopDatetime is the MySQL-style datetime at which to stop
-                                  replaying binlog events (forwarded to mysqlbinlog
-                                  --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
+                                  replaying binlog events. Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
                                   the MySQL native form ("2026-04-15 09:30:00"). Required.
                                 minLength: 1
                                 type: string
@@ -7238,6 +7191,60 @@ spec:
                   Discovered is the most recent successful bucket scan result.
                   Populated by the Phase 1 discovery loop.
                 properties:
+                  archive:
+                    description: |-
+                      Archive is the identity read from the source archive's descriptor
+                      (<prefix>/binlogs/archive.json). Unset while the descriptor is
+                      missing or refused; the SourceConfigKnown condition says why.
+                    properties:
+                      algorithm:
+                        description: Algorithm is the encryption algorithm; empty
+                          for None.
+                        enum:
+                        - AES-256-GCM
+                        type: string
+                      archiveID:
+                        description: |-
+                          ArchiveID is the descriptor's archive ID, derived from the source
+                          group's UID and the normalized destination.
+                        pattern: ^ar1-[a-z2-7]{26}$
+                        type: string
+                      destination:
+                        description: |-
+                          Destination is the normalized archive destination the descriptor
+                          was read from (s3://… or pvc://…).
+                        maxLength: 4096
+                        type: string
+                      encryptionMode:
+                        description: EncryptionMode is the archive's encryption mode.
+                        enum:
+                        - None
+                        - Passphrase
+                        type: string
+                      source:
+                        description: Source is the group that created the archive.
+                        properties:
+                          name:
+                            description: Name is the source group's name.
+                            maxLength: 253
+                            type: string
+                          namespace:
+                            description: Namespace is the source group's namespace.
+                            maxLength: 63
+                            type: string
+                          uid:
+                            description: UID is the source group's metadata.uid.
+                            type: string
+                        required:
+                        - name
+                        - namespace
+                        - uid
+                        type: object
+                    required:
+                    - archiveID
+                    - encryptionMode
+                    - source
+                    type: object
                   archivedBinlogBytes:
                     description: |-
                       ArchivedBinlogBytes is the total size of archived binlog files

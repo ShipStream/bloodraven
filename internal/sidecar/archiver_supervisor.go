@@ -7,6 +7,8 @@ import (
 	"path"
 	"sync"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // ArchiveStoreFactory builds the PITR archive store. NewArchiveStore in
@@ -159,7 +161,11 @@ func (s *ArchiverSupervisor) Snapshot(ctx context.Context) Status {
 	ready := a != nil
 	if ready {
 		st := a.Snapshot(ctx)
-		st.StoreReady = &ready
+		// The archiver reports StoreReady=false itself while its archive
+		// session cannot reach or establish the archive.
+		if st.StoreReady == nil {
+			st.StoreReady = &ready
+		}
 		// Keep the counter monotonic across the transition.
 		st.UploadFailures += failures
 		return st
@@ -176,6 +182,14 @@ func (s *ArchiverSupervisor) Snapshot(ctx context.Context) Status {
 		ManifestPrefix: s.cfg.ManifestPrefix,
 		Site:           s.site,
 		UploadFailures: failures,
+	}
+	if !s.cfg.Archive.Destination.IsZero() {
+		st.Archive = &pitrarchive.ArchiveStatus{
+			Destination:    s.cfg.Archive.Destination.String(),
+			EncryptionMode: s.cfg.Archive.Encryption.Mode,
+			State:          pitrarchive.StateAwaitingDescriptor,
+			KeyRevision:    s.cfg.Archive.KeyRevision,
+		}
 	}
 	if initErr != "" {
 		st.LastError = "archive store init: " + initErr

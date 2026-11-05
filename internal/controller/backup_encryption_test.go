@@ -54,10 +54,14 @@ func TestBuildBackupJob_EncryptedS3_ShapeChanges(t *testing.T) {
 		t.Fatalf("BuildBackupJob: %v", err)
 	}
 
-	if got := len(job.Spec.Template.Spec.InitContainers); got != 1 {
-		t.Fatalf("want 1 init container, got %d", got)
+	// backup-stamp writes the dump's identity stamp first (D-8).
+	if got := len(job.Spec.Template.Spec.InitContainers); got != 2 {
+		t.Fatalf("want 2 init containers, got %d", got)
 	}
-	init := job.Spec.Template.Spec.InitContainers[0]
+	if got := job.Spec.Template.Spec.InitContainers[0].Name; got != backupStampInitContainerName {
+		t.Errorf("first init container: got %q want %q", got, backupStampInitContainerName)
+	}
+	init := job.Spec.Template.Spec.InitContainers[1]
 	if init.Name != backupDumpInitContainerName {
 		t.Errorf("init container name: got %q want %q", init.Name, backupDumpInitContainerName)
 	}

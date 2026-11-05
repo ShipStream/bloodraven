@@ -102,6 +102,18 @@ fi
 PITR_ARCHIVE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="PITRArchiveReady")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
 if [[ -n "$PITR_ARCHIVE" ]]; then
     echo "PITRArchiveReady:    $PITR_ARCHIVE (archiving state only; never affects pod readiness)"
+    if [[ "$PITR_ARCHIVE" == *ArchiveUnsafeHistory* ]]; then
+        echo "  A site set its permanent history-integrity marker (or spec.mysqlConf would): see playbook 38."
+    elif [[ "$PITR_ARCHIVE" == *" Archive"[A-Z]* && "$PITR_ARCHIVE" != *ArchiveStoreInitFailed* ]]; then
+        echo "  A site refused the archive's identity and uploads nothing: see playbook 37."
+    fi
+fi
+# The archive identity the sidecars observed at the active PITR destination.
+# The descriptor holds no secret; destination is the normalized s3:// or pvc:// form.
+PITR_ARCHIVE_ID=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.pitr.archive.state}{" "}{.status.pitr.archive.reason}{" archiveID="}{.status.pitr.archive.archiveID}{" encryption="}{.status.pitr.archive.encryptionMode}{" destination="}{.status.pitr.archive.destination}{" observed="}{.status.pitr.archive.observedTime}' 2>/dev/null || true)
+if [[ -n "$PITR_ARCHIVE_ID" && "$PITR_ARCHIVE_ID" != " archiveID= encryption= destination= observed=" ]]; then
+    echo "PITR archive:        $PITR_ARCHIVE_ID"
+    echo "  Per-site archive, promotionRecordedAt, historyIntegrity, divergentRows and quarantinedRows: sidecar-probe.sh -n $NAMESPACE $MFG_NAME archiver"
 fi
 RESTORE_FENCE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreOfflineFence.site}{" priorOfflineMode="}{.status.restoreOfflineFence.priorOfflineMode}{" sessionsEvicted="}{.status.restoreOfflineFence.sessionsEvicted}' 2>/dev/null || true)
 if [[ -n "$RESTORE_FENCE" && "$RESTORE_FENCE" != " priorOfflineMode= sessionsEvicted=" ]]; then
@@ -154,6 +166,9 @@ kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -
 MANAGER_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.name=$MFG_NAME" --sort-by=.lastTimestamp \
     -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
     | grep -E 'TopologyManagerStart(ed|Failed)' || true)
+PITR_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.name=$MFG_NAME" --sort-by=.lastTimestamp \
+    -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
+    | grep -E 'PITRArchive(ReissueRisk|UnsafeHistory)' || true)
 if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "Topology manager start history for $MFG_NAME. History only, not current state, in either direction:"
     echo "  - Warnings are throttled to one per 5 minutes, so a group that recovered and then broke again can still show TopologyManagerStarted last."
@@ -161,6 +176,10 @@ if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "  Confirm the current state before declaring the manager absent: the operator logs ERROR 'failed to start topology manager' for $NAMESPACE/$MFG_NAME every 30s while it is down"
     echo "  (kubectl logs -n <operator-ns> deploy/bloodraven --since=2m | grep 'failed to start topology manager' | grep '$NAMESPACE/$MFG_NAME'), and status.sites[].lastSeen stops advancing. See playbook 24."
     echo "$MANAGER_EVENTS"
+fi
+if [[ -n "$PITR_EVENTS" ]]; then
+    echo "PITR archive warnings for $MFG_NAME (PITRArchiveReissueRisk: playbook 39; PITRArchiveUnsafeHistory: playbook 38):"
+    echo "$PITR_EVENTS"
 fi
 
 echo ""
@@ -171,7 +190,7 @@ echo ""
 echo "--- 8. Backup Completion Metadata ---"
 kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o 'jsonpath={range .status.backupSchedules[*]}Schedule: {.name}{"\t"}RetryConflict: {.retryConflict}{"\n"}{end}' 2>/dev/null || echo "Backup schedule status unavailable."
 # Project public fields only; never dump credential or passphrase env/volumes.
-kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.location,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' 2>/dev/null || echo "Backup status unavailable."
+kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.location,FG_UID:.status.failoverGroupUID,PITR_ARCHIVE_ID:.status.pitrArchiveID,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' 2>/dev/null || echo "Backup status unavailable."
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup" -o 'custom-columns=NAME:.metadata.name,OWNER_UID:.metadata.ownerReferences[*].uid,SUCCEEDED:.status.succeeded,CONTAINERS:.spec.template.spec.containers[*].name,STORAGE:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_STORAGE_TYPE")].value,OUTPUT:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_OUTPUT_URL")].value,BUCKET:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_S3_BUCKET")].value' 2>/dev/null || echo "Backup Job inputs unavailable."
 echo "Artifact cleanup (Terminating backups show DELETING; CLEANUP is the ArtifactCleanup reason):"
 kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,LOCATION:.status.location,RECORDED:.status.artifactStorage.location,BUCKET:.status.artifactStorage.bucket,CLAIM:.status.artifactStorage.claimName,CLEANUP:.status.conditions[?(@.type=="ArtifactCleanup")].reason,MESSAGE:.status.conditions[?(@.type=="ArtifactCleanup")].message' 2>/dev/null || echo "Artifact cleanup status unavailable."

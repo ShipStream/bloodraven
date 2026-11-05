@@ -35,7 +35,7 @@ func TestRetiredLocalBinlogIsNotReuploaded(t *testing.T) {
 						t.Fatal(err)
 					}
 					m.Files = m.Files[1:]
-					if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+					if err := seedManifest(ctx, store, "binlogs", m); err != nil {
 						t.Fatal(err)
 					}
 					if err := store.ArchiveStore.Delete(ctx, keys[0]); err != nil {
@@ -181,10 +181,10 @@ func TestRetirementCompactionRequiresAcknowledgementAndLocalAbsence(t *testing.T
 			for i, name := range []string{"mysql-bin.000001", "mysql-bin.000002", "mysql-bin.000003", "mysql-bin.000004", "mysql-bin.000005"} {
 				records = append(records, PrunedEntry{Name: name, ID: strings.Repeat("a", 64), Deleted: i != 1})
 			}
-			if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Pruned: records}); err != nil {
+			if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Pruned: records}); err != nil {
 				t.Fatal(err)
 			}
-			a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: local, BinlogIndex: "mysql-bin.index"}, "iad", &stubRoleChecker{readOnly: true}, store, slog.Default())
+			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: local, BinlogIndex: "mysql-bin.index"}, "iad", &stubRoleChecker{readOnly: true}, store, slog.Default())
 			a.scanAndArchive(ctx)
 			m, err := loadManifest(ctx, store, "binlogs", "iad")
 			if err != nil {
@@ -215,7 +215,7 @@ func TestFailedRetirementCompactionPreservesDurableSuppression(t *testing.T) {
 	a.retentionCfg = nil
 	a.mysql = &stubRoleChecker{readOnly: true}
 	record := PrunedEntry{Name: entries[0].Name, ID: entries[0].ID, Key: keys[0], Deleted: true}
-	if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Pruned: []PrunedEntry{record}}); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Pruned: []PrunedEntry{record}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex), []byte("mysql-bin.000009\n"), 0o600); err != nil {
@@ -258,7 +258,7 @@ func TestMalformedRetirementIdentityDoesNotSuppressNewData(t *testing.T) {
 		{Name: entries[0].Name, Deleted: true, PreviousGTIDs: entries[0].PreviousGTIDs, FirstEventTime: entries[0].FirstEventTime},
 		{Name: entries[0].Name, ID: "../../outside", Deleted: true},
 	}
-	if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Pruned: records}); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Pruned: records}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile("testdata/incarnation-a.bin")

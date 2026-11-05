@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 )
 
@@ -161,6 +162,19 @@ type ArchiverStatusResponse struct {
 	ManifestBytes          int64     `json:"manifestBytes"`
 	OldestArchivedTime     time.Time `json:"oldestArchivedTime"`
 	NewestArchivedTime     time.Time `json:"newestArchivedTime"`
+	// Archive identity (§3.7): the destination, the verified archive ID,
+	// the encryption mode, the observed state and refusal reason, and the
+	// key revision. nil from a sidecar without PITR.
+	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
+	// DivergentRows and QuarantinedRows count those rows in the site's own
+	// manifest.
+	DivergentRows   int64 `json:"divergentRows"`
+	QuarantinedRows int64 `json:"quarantinedRows"`
+	// PromotionRecordedAt is the confirmed promotion record of the current
+	// writable episode; zero while none is confirmed (or read-only).
+	PromotionRecordedAt time.Time `json:"promotionRecordedAt"`
+	// HistoryIntegrity is the site's persisted history-integrity marker.
+	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
 }
 
 // ArchiverStatus calls GET /archiver/status and decodes the JSON response.

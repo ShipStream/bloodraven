@@ -53,6 +53,9 @@ func outcomeRestore(t *testing.T, pit v1alpha1.PointInTimeSpec) (*MysqlFailoverG
 	if pit.StopDatetime == "" {
 		pit.StopDatetime = outcomeStop
 	}
+	if pit.ArchiveProfileName == "" {
+		pit.ArchiveProfileName = addSourceArchiveProfile(fg)
+	}
 	fg.Spec.InitFromBackup.PointInTime = &pit
 	r, c := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), dsnSecret())
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
@@ -121,7 +124,6 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 		{name: "covered", verdict: testVerdict(verdictFields{covered: true, files: 2, newest: "2029-12-31T23:59:50Z", lastFile: "mysql-bin.000002", sites: "iad"})},
 		{name: "covered idle", verdict: testVerdict(verdictFields{covered: true})},
 		{name: "partial", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{partial: true, files: 1, newest: "2029-12-31T23:59:50Z", sites: "iad"}), reason: "PointInTimePartial", warning: "Warning PointInTimePartial"},
-		{name: "unverified", pit: v1alpha1.PointInTimeSpec{AllowUnverifiedCrossSite: true}, verdict: testVerdict(verdictFields{covered: true, cross: true, files: 2, sites: "iad,pdx"}), reason: "PointInTimeCrossSiteUnverified", warning: "staged sites in replay order [iad, pdx]"},
 		{name: "fractional stop", pit: v1alpha1.PointInTimeSpec{StopDatetime: "2029-12-31T23:59:59.5Z"}, verdict: testVerdict(verdictFields{covered: true})},
 		{name: "missing verdict", verdict: "", reason: "PITRCoverageInvalid", failed: true},
 		{name: "old version", verdict: testVerdict(verdictFields{version: "0", covered: true}), reason: "PITRCoverageInvalid", failed: true},
@@ -266,7 +268,7 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 	seed := succeededSeedBackup()
 	seed.Status.GtidExecuted = ""
 	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
-	fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop}
+	fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, ArchiveProfileName: addSourceArchiveProfile(fg)}
 	r, _ := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), dsnSecret())
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -317,14 +319,19 @@ func TestPITRTargetMustFollowBackupCompletion(t *testing.T) {
 func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 	fg := verifyFG()
 	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, Sites: []string{"source-old", "removed"}, AllowPartial: true, AllowUnverifiedCrossSite: true, ExcludeGtids: "other:9"}
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, AllowPartial: true, ExcludeGtids: "other:9"}
 	frags, err := buildRestorePITRFragmentsFor(fg, pit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertEnvEquals(t, frags.InitContainer.Env, "BLOODRAVEN_PITR_SITES", "source-old,removed")
 	assertEnvEquals(t, frags.InitContainer.Env, "BLOODRAVEN_PITR_ALLOW_PARTIAL", "true")
-	assertEnvEquals(t, frags.InitContainer.Env, "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", "true")
+	// D-9: replay considers every manifest under the prefix, so no site
+	// list or cross-site switch is rendered.
+	for _, removed := range []string{"BLOODRAVEN_PITR_SITES", "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE"} {
+		if _, ok := envValue(append(append([]corev1.EnvVar{}, frags.InitContainer.Env...), frags.MainEnv...), removed); ok {
+			t.Fatalf("%s is still rendered", removed)
+		}
+	}
 	// The planner must exempt exactly what mysqlbinlog --exclude-gtids skips.
 	assertEnvEquals(t, frags.InitContainer.Env, "BLOODRAVEN_PITR_EXCLUDE_GTIDS", "other:9")
 	assertEnvEquals(t, frags.MainEnv, "BLOODRAVEN_PITR_EXCLUDE_GTIDS", "other:9")
@@ -332,7 +339,7 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 		t.Fatal("init refusals need a termination message")
 	}
 	for _, mode := range []string{"timestamp", "latest"} {
-		v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"}, Spec: v1alpha1.MysqlBackupVerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: mode, Timestamp: outcomeStop, Sites: pit.Sites}}}
+		v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"}, Spec: v1alpha1.MysqlBackupVerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: mode, Timestamp: outcomeStop}}}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
 		if err != nil {
@@ -341,7 +348,6 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 		spec := job.Spec.Template.Spec
 		assertEnvEquals(t, spec.InitContainers[0].Env, "BLOODRAVEN_PITR_MODE", mode)
 		assertEnvEquals(t, spec.InitContainers[0].Env, "BLOODRAVEN_PITR_ALLOW_PARTIAL", "false")
-		assertEnvEquals(t, spec.InitContainers[0].Env, "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", "false")
 		assertEnvEquals(t, spec.Containers[0].Env, "BLOODRAVEN_SOURCE_GTID_EXECUTED", backup.Status.GtidExecuted)
 		if spec.Containers[0].TerminationMessagePolicy != corev1.TerminationMessageFallbackToLogsOnError {
 			t.Fatal("verify.sh failures need a termination message")
@@ -481,7 +487,7 @@ func TestPITRArchiveProfileSeparatesPrefixes(t *testing.T) {
 	source.Storage.S3.Prefix = "source-group"
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
 	fg.Spec.Backup.PITR = nil
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, Sites: []string{"old-east"}, ArchiveProfileName: "source-archive"}
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, ArchiveProfileName: "source-archive"}
 	frags, err := buildRestorePITRFragmentsFor(fg, pit)
 	if err != nil {
 		t.Fatal(err)
@@ -490,11 +496,5 @@ func TestPITRArchiveProfileSeparatesPrefixes(t *testing.T) {
 	pit.ArchiveProfileName = "missing"
 	if _, err := buildRestorePITRFragmentsFor(fg, pit); err == nil {
 		t.Fatal("unknown archive profile accepted")
-	}
-
-	// Reading foreign sites from the group's own prefix warns.
-	_, _, fg2, _ := outcomeRestore(t, v1alpha1.PointInTimeSpec{Sites: []string{"old-east"}})
-	if foreign := pitrForeignReplaySites(fg2); len(foreign) != 1 || foreign[0] != "old-east" {
-		t.Fatalf("foreign sites: %v", foreign)
 	}
 }

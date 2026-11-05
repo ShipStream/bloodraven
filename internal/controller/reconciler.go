@@ -1007,6 +1007,11 @@ func ownedMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
 		// Grant names treat `_` and `%` literally, and the app role's
 		// mysql schema revoke can replicate; see appSystemSchemaRevoke.
 		"partial-revokes": "ON",
+		// PITR replay certifies a history from its binlog order, so a
+		// multi-threaded applier must commit in source order (D-33).
+		// Overriding it is refused rather than left to the sidecar's
+		// history-integrity marker, which is permanent for the prefix.
+		"replica-preserve-commit-order": "ON",
 	}
 
 	// Encryption coverage is likewise operator-owned: the security claim

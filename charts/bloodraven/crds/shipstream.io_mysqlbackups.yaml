@@ -244,6 +244,12 @@ spec:
                   second algorithm can dispatch on this rather than re-reading the
                   header from storage.
                 type: string
+              failoverGroupUID:
+                description: |-
+                  FailoverGroupUID is the metadata.uid of the source failover group,
+                  pinned in the backup Job's template when the Job is created and
+                  recovered from the Job. The backup's stamp records the same UID.
+                type: string
               gtidExecuted:
                 description: |-
                   GtidExecuted is the value of @@global.gtid_executed captured at
@@ -284,6 +290,13 @@ spec:
                 - Running
                 - Succeeded
                 - Failed
+                type: string
+              pitrArchiveID:
+                description: |-
+                  PITRArchiveID is the archive ID of the source group's active PITR
+                  archive when the Job was created, pinned in the Job's template and
+                  recovered from it. Empty when PITR was disabled.
+                pattern: ^(ar1-[a-z2-7]{26})?$
                 type: string
               size:
                 description: |-

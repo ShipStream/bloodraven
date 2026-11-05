@@ -6,6 +6,10 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 const (
@@ -116,6 +120,130 @@ type PITRConfig struct {
 	// an unencrypted prefix to encryption — it disables the tamper
 	// detection guarantee that AES-GCM otherwise provides.
 	AllowPlaintextFallback bool
+
+	// Archive is the archive identity this writer expects (§3.7): its
+	// group, normalized destination and encryption identity. Writers
+	// refuse to touch a prefix whose descriptor disagrees.
+	Archive ArchiveIdentity
+
+	// RoleProbeInterval is how often the archiver probes the server's role
+	// to write promotion records (D-43). The sidecar sets it to
+	// PEER_CHECK_INTERVAL; zero means defaultPeerCheckInterval.
+	RoleProbeInterval time.Duration
+}
+
+// ArchiveIdentity is what a writer expects the archive descriptor to hold.
+type ArchiveIdentity struct {
+	// Source is the owning MysqlFailoverGroup. Verification needs only the
+	// UID; creating a descriptor also needs the namespace and name.
+	Source pitrarchive.Source
+	// Destination is the normalized destination (BLOODRAVEN_PITR_DESTINATION).
+	Destination pitrarchive.Destination
+	// Encryption is the profile's encryption identity.
+	Encryption pitrarchive.EncryptionIdentity
+	// ArchiveID is the ID the operator rendered (BLOODRAVEN_PITR_ARCHIVE_ID).
+	// When set it must be a supported derivation for Source.UID and
+	// Destination; the descriptor is checked against every derivation.
+	ArchiveID string
+	// KeyRevision is the archive key snapshot the operator mounted (#203);
+	// echoed in status only.
+	KeyRevision string
+}
+
+// validate checks the identity a writer needs. It does not require the
+// source namespace and name, which only descriptor creation uses.
+func (id ArchiveIdentity) validate() error {
+	if id.Source.UID == "" {
+		return fmt.Errorf("archive identity: no failover group UID (BLOODRAVEN_FAILOVER_GROUP_UID)")
+	}
+	if id.Destination.IsZero() {
+		return fmt.Errorf("archive identity: no destination (BLOODRAVEN_PITR_DESTINATION)")
+	}
+	if err := id.Encryption.Validate(); err != nil {
+		return fmt.Errorf("archive identity: %w", err)
+	}
+	if id.ArchiveID != "" && !pitrarchive.IsDerivedArchiveID(id.ArchiveID, id.Source.UID, id.Destination) {
+		return fmt.Errorf("archive identity: BLOODRAVEN_PITR_ARCHIVE_ID %q is not derived from uid %s and destination %s",
+			id.ArchiveID, id.Source.UID, id.Destination)
+	}
+	return nil
+}
+
+// ArchiveIdentityFromEnv reads the archive identity env vars rendered for
+// writers (BLOODRAVEN_FAILOVER_GROUP_UID, BLOODRAVEN_PITR_ARCHIVE_ID,
+// BLOODRAVEN_PITR_DESTINATION, BLOODRAVEN_PITR_ENCRYPTION_MODE,
+// BLOODRAVEN_PITR_KEY_REVISION, plus POD_NAMESPACE and FAILOVER_GROUP for
+// the source) and checks them against cfg's storage settings, so a writer
+// can only write where its identity says it does.
+func ArchiveIdentityFromEnv(cfg *PITRConfig) (ArchiveIdentity, error) {
+	id := ArchiveIdentity{
+		Source: pitrarchive.Source{
+			Namespace: os.Getenv("POD_NAMESPACE"),
+			Name:      os.Getenv("FAILOVER_GROUP"),
+			UID:       types.UID(os.Getenv("BLOODRAVEN_FAILOVER_GROUP_UID")),
+		},
+		ArchiveID:   os.Getenv("BLOODRAVEN_PITR_ARCHIVE_ID"),
+		KeyRevision: os.Getenv("BLOODRAVEN_PITR_KEY_REVISION"),
+	}
+	raw := os.Getenv("BLOODRAVEN_PITR_DESTINATION")
+	if raw == "" {
+		return id, fmt.Errorf("BLOODRAVEN_PITR_DESTINATION is required")
+	}
+	dest, err := pitrarchive.ParseDestination(raw)
+	if err != nil {
+		return id, fmt.Errorf("parse BLOODRAVEN_PITR_DESTINATION: %w", err)
+	}
+	id.Destination = dest
+	switch mode := pitrarchive.EncryptionMode(os.Getenv("BLOODRAVEN_PITR_ENCRYPTION_MODE")); mode {
+	case pitrarchive.EncryptionNone:
+		id.Encryption = pitrarchive.EncryptionIdentity{Mode: mode}
+	case pitrarchive.EncryptionPassphrase:
+		id.Encryption = pitrarchive.EncryptionIdentity{Mode: mode, Algorithm: pitrarchive.AlgorithmAES256GCM}
+	default:
+		return id, fmt.Errorf("BLOODRAVEN_PITR_ENCRYPTION_MODE=%q; must be %s or %s", mode, pitrarchive.EncryptionNone, pitrarchive.EncryptionPassphrase)
+	}
+	if err := id.validate(); err != nil {
+		return id, err
+	}
+	if err := id.checkStorage(cfg); err != nil {
+		return id, err
+	}
+	return id, nil
+}
+
+// checkStorage refuses an identity that disagrees with the store settings
+// it will be used with.
+func (id ArchiveIdentity) checkStorage(cfg *PITRConfig) error {
+	d := id.Destination
+	if d.KeyPrefix != cfg.ManifestPrefix {
+		return fmt.Errorf("archive identity: destination %s has key prefix %q, BLOODRAVEN_PITR_MANIFEST_PREFIX is %q", d, d.KeyPrefix, cfg.ManifestPrefix)
+	}
+	switch cfg.StorageType {
+	case "S3":
+		if d.Kind != pitrarchive.DestinationS3 || cfg.S3 == nil || d.Bucket != cfg.S3.Bucket {
+			return fmt.Errorf("archive identity: destination %s does not name the configured S3 bucket", d)
+		}
+		endpoint, err := pitrarchive.NormalizeEndpoint(cfg.S3.EndpointURL)
+		if err != nil {
+			return fmt.Errorf("archive identity: %w", err)
+		}
+		if endpoint != d.Endpoint {
+			return fmt.Errorf("archive identity: destination %s has endpoint %q, the store uses %q", d, d.Endpoint, endpoint)
+		}
+	case "PVC":
+		if d.Kind != pitrarchive.DestinationPVC {
+			return fmt.Errorf("archive identity: destination %s is not a PVC destination", d)
+		}
+		if ns := id.Source.Namespace; ns != "" && d.Namespace != ns {
+			return fmt.Errorf("archive identity: destination %s is in namespace %q, not %q", d, d.Namespace, ns)
+		}
+	default:
+		return fmt.Errorf("archive identity: unknown storage type %q", cfg.StorageType)
+	}
+	if (id.Encryption.Mode == pitrarchive.EncryptionPassphrase) != (cfg.PassphraseFile != "") {
+		return fmt.Errorf("archive identity: encryption mode %s but passphrase file %q", id.Encryption.Mode, cfg.PassphraseFile)
+	}
+	return nil
 }
 
 // PITRS3Config is the S3-specific archiver config.
@@ -266,6 +394,9 @@ func ConfigFromEnv() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if pitr != nil {
+		pitr.RoleProbeInterval = peerCheckInterval
+	}
 
 	keyring, err := keyringConfigFromEnv()
 	if err != nil {
@@ -380,6 +511,12 @@ func pitrConfigFromEnv() (*PITRConfig, error) {
 	if v := os.Getenv("BLOODRAVEN_PITR_ALLOW_PLAINTEXT_FALLBACK"); v == "1" || v == "true" {
 		cfg.AllowPlaintextFallback = true
 	}
+
+	identity, err := ArchiveIdentityFromEnv(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Archive = identity
 
 	return cfg, nil
 }

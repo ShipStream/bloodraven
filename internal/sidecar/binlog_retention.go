@@ -43,7 +43,7 @@ func (a *BinlogArchiver) retryPrunedDeletes(ctx context.Context, m *Manifest) (i
 			continue
 		}
 		// Key is diagnostic metadata; only the validated name and original ID select the object.
-		if err := a.store.Delete(ctx, key); err != nil {
+		if err := a.deleteRetired(ctx, key); err != nil {
 			a.logger.Warn("retention: delete object", "key", key, "error", err)
 			continue
 		}
@@ -52,11 +52,19 @@ func (a *BinlogArchiver) retryPrunedDeletes(ctx context.Context, m *Manifest) (i
 		deleted++
 	}
 	if deleted > 0 {
-		if err := saveManifest(ctx, a.store, a.cfg.ManifestPrefix, m); err != nil {
+		if err := a.saveManifest(ctx, m); err != nil {
 			return deleted, err
 		}
 	}
 	return deleted, nil
+}
+
+// deleteRetired deletes a retired object after Reverify (§3.5).
+func (a *BinlogArchiver) deleteRetired(ctx context.Context, key string) error {
+	if err := a.openSession(ctx); err != nil {
+		return err
+	}
+	return a.session.DeleteObject(ctx, key)
 }
 
 // retiredBinlogIdentities includes both pending and acknowledged retirements.
@@ -92,7 +100,12 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	if manifest, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site); err == nil {
+	// Audit and retention write this site's manifest, which needs a
+	// verified descriptor; a replica waiting for the writer skips them.
+	if a.openSession(ctx) != nil {
+		return
+	}
+	if manifest, err := a.loadManifest(ctx); err == nil {
 		if err := a.auditArchive(ctx, manifest); err != nil {
 			a.historyAuditError = err.Error()
 			a.setError(err.Error())
@@ -111,7 +124,7 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 		a.setError(a.historyAuditError)
 	}
 	a.maybeRunRetention(ctx)
-	m, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
+	m, err := a.loadManifest(ctx)
 	if err != nil {
 		return
 	}
@@ -155,7 +168,7 @@ func (a *BinlogArchiver) compactRetirementRecords(ctx context.Context, m *Manife
 		return
 	}
 	m.Pruned = kept
-	if err := saveManifest(ctx, a.store, a.cfg.ManifestPrefix, m); err != nil {
+	if err := a.saveManifest(ctx, m); err != nil {
 		a.logger.Warn("retention: compact retirement records", "error", err)
 	}
 }

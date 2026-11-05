@@ -20,6 +20,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
@@ -215,8 +216,9 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 	store := &envtestFakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(
 			`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":512000}`),
+		"orders/binlogs/archive.json": envtestArchiveDescriptor(t),
 		"orders/binlogs/manifest-site1.json": []byte(
-			`{"version":1,"site":"site1","files":[{"name":"b1","remotePath":"orders/binlogs/site1/b1","size":1024,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`),
+			`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"site1","files":[{"name":"b1","remotePath":"orders/binlogs/site1/b1","size":1024,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`),
 	}}
 
 	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
@@ -275,6 +277,29 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 	if d.LastScanAt == nil {
 		t.Error("LastScanAt is nil")
 	}
+	// discovered.archive round-trips through the CRD schema.
+	if d.Archive == nil || d.Archive.ArchiveID != "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa" ||
+		d.Archive.Source.UID != "orders-uid" || d.Archive.EncryptionMode != v1alpha1.PITRArchiveEncryptionNone {
+		t.Errorf("discovered.archive: %+v", d.Archive)
+	}
+}
+
+// envtestArchiveDescriptor is a plaintext archive.json whose ID the fixture
+// manifests name.
+func envtestArchiveDescriptor(t *testing.T) []byte {
+	t.Helper()
+	d := &pitrarchive.Descriptor{
+		Kind: pitrarchive.DescriptorKind, Version: pitrarchive.DescriptorVersion,
+		ArchiveID:  "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Source:     pitrarchive.Source{Namespace: "prod", Name: "orders", UID: "orders-uid"},
+		Encryption: pitrarchive.DescriptorEncryption{Mode: pitrarchive.EncryptionNone},
+		CreatedAt:  time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC), CreatedBy: "site1",
+	}
+	b, err := d.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestMysqlStandbyCluster_EnvtestCreate_BucketUnreadable creates a CR against

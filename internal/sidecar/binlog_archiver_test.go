@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // stubRoleChecker implements roleChecker so the archiver can be driven
@@ -25,12 +27,54 @@ type stubRoleChecker struct {
 	readOnly       bool
 	isReadOnlyErr  error
 	connectableVal bool
+	// Role-probe identity (zero values get stub defaults) and the
+	// history-integrity answer.
+	serverUUID   string
+	serverID     uint32
+	gtidExecuted string
+	violation    pitrarchive.HistoryViolation
+	detail       string
+	integrityErr error
 }
 
 func (s *stubRoleChecker) IsReadOnly(_ context.Context) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.readOnly, s.isReadOnlyErr
+}
+
+func (s *stubRoleChecker) ProbeRole(_ context.Context) (RoleObservation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	obs := RoleObservation{ReadOnly: s.readOnly, ServerUUID: s.serverUUID, ServerID: s.serverID, GTIDExecuted: s.gtidExecuted}
+	if obs.ServerUUID == "" {
+		obs.ServerUUID = "00000000-0000-0000-0000-00000000005b"
+	}
+	if obs.ServerID == 0 {
+		obs.ServerID = 101
+	}
+	return obs, s.isReadOnlyErr
+}
+
+func (s *stubRoleChecker) HistoryIntegrityViolation(_ context.Context) (pitrarchive.HistoryViolation, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.violation, s.detail, s.integrityErr
+}
+
+// PutIfAbsent gives memStore atomic create, so archives can be established.
+func (m *memStore) PutIfAbsent(_ context.Context, key string, r io.Reader, _ int64) error {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.objects[key]; ok {
+		return ErrObjectExists
+	}
+	m.objects[key] = b
+	return nil
 }
 
 func (s *stubRoleChecker) isConnectable(_ context.Context) bool {
@@ -165,7 +209,10 @@ func writeBinlogFile(t *testing.T, path string, size int) {
 // so updateManifestAggregates can be tested deterministically.
 func seedArchiverWithManifest(t *testing.T, a *BinlogArchiver, files []ManifestEntry) {
 	t.Helper()
-	m := &Manifest{Version: ManifestVersion, Site: a.site, Files: files}
+	if err := seedTestDescriptor(context.Background(), a.store, a.cfg.ManifestPrefix); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manifest{Version: ManifestVersion, ArchiveID: testArchiveID, Site: a.site, Files: files}
 	buf, err := json.Marshal(m)
 	if err != nil {
 		t.Fatalf("marshal manifest: %v", err)
@@ -223,7 +270,7 @@ func TestScanRecordsFailuresOnRoleError(t *testing.T) {
 		ManifestPrefix: "binlogs",
 		PollInterval:   time.Hour,
 	}
-	a := NewBinlogArchiver(cfg, "dc1", checker, store, slog.Default())
+	a := newTestArchiver(cfg, "dc1", checker, store, slog.Default())
 
 	a.scanAndArchive(context.Background())
 
@@ -249,7 +296,7 @@ func TestScanClearsBacklogOnStandby(t *testing.T) {
 		ManifestPrefix: "binlogs",
 		PollInterval:   time.Hour,
 	}
-	a := NewBinlogArchiver(cfg, "dc1", checker, store, slog.Default())
+	a := newTestArchiver(cfg, "dc1", checker, store, slog.Default())
 	// Force non-zero backlog before scan.
 	a.setBacklog(5)
 
@@ -292,7 +339,7 @@ func TestScanBacklogReflectsPendingFiles(t *testing.T) {
 		ManifestPrefix: "binlogs",
 		PollInterval:   time.Hour,
 	}
-	a := NewBinlogArchiver(cfg, "dc1", checker, store, slog.Default())
+	a := newTestArchiver(cfg, "dc1", checker, store, slog.Default())
 
 	a.scanAndArchive(context.Background())
 
@@ -338,7 +385,7 @@ func TestSnapshotExposesSeededManifestAggregates(t *testing.T) {
 		ManifestPrefix: "binlogs",
 		PollInterval:   time.Hour,
 	}
-	a := NewBinlogArchiver(cfg, "dc1", checker, store, slog.Default())
+	a := newTestArchiver(cfg, "dc1", checker, store, slog.Default())
 
 	t0 := time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC)
 	id, err := fileContentID(filepath.Join(dir, "mysql-bin.000001"))
@@ -393,7 +440,7 @@ func TestRetentionCutoffIsBounded(t *testing.T) {
 			ctx := context.Background()
 			store := newMemStore()
 			cfg := &PITRConfig{ManifestPrefix: "binlogs"}
-			a := NewBinlogArchiver(cfg, "dc1", &stubRoleChecker{}, store, slog.Default())
+			a := newTestArchiver(cfg, "dc1", &stubRoleChecker{}, store, slog.Default())
 			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
 			payload, err := os.ReadFile("testdata/incarnation-a.bin")
 			if err != nil {

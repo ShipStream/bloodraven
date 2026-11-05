@@ -190,6 +190,12 @@ type PITRStatus struct {
 	// manifest read error, or an unreachable sidecar, in which case the
 	// coverage fields are last-known). Empty on the happy path.
 	Message string `json:"message,omitempty"`
+
+	// Archive is the archive identity the sidecars observed at the active
+	// PITR destination: the descriptor's archive ID and encryption mode,
+	// and whether every reporting sidecar verified it.
+	// +optional
+	Archive *PITRArchiveObservation `json:"archive,omitempty"`
 }
 
 // PointInTimeSpec configures a restore that replays archived binlogs on
@@ -198,52 +204,34 @@ type PITRStatus struct {
 // failover group's spec.backup.pitr block to have been enabled at the
 // time of the full dump, otherwise no binlog archive exists to replay.
 type PointInTimeSpec struct {
-	// Sites are the archive site names to replay. Defaults to this group's sites.
-	// Set when the source archive's sites differ, or to include a removed site.
-	// +optional
-	// +listType=set
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=253
-	// +kubebuilder:validation:items:Pattern=`^[a-z0-9-]+$`
-	Sites []string `json:"sites,omitempty"`
-
 	// ArchiveProfileName names the spec.backup.profiles entry whose binlog
-	// archive the restore reads. Defaults to spec.backup.pitr.profileName.
-	// Set it when restoring another group's archive, for example into renamed
-	// sites, so this group keeps archiving into its own prefix instead of
-	// adding foreign manifests to the source's prefix.
+	// archive the restore reads. Required under initFromBackup: the restore
+	// reads the source group's archive through it, and it may not resolve
+	// to this group's own active PITR destination, so the new group never
+	// writes into the archive it restores from. Replay considers every
+	// site manifest under that archive.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	ArchiveProfileName string `json:"archiveProfileName,omitempty"`
 
-	// AllowPartial permits restoring to the newest archived point when the target
-	// is not covered, and admits a backup with an unknown GTID bound, which the
-	// restore then checks against the loaded dump. It never bypasses archive
-	// safety, site omission, lower-edge or lineage checks.
+	// AllowPartial permits restoring to the newest archived point when the
+	// target is not covered. It never bypasses archive identity, lineage
+	// or continuity checks.
 	// +optional
 	// +kubebuilder:default=false
 	AllowPartial bool `json:"allowPartial,omitempty"`
 
-	// AllowUnverifiedCrossSite replays archives from more than one site in site
-	// name order, one mysqlbinlog run, without proving cross-site completeness.
-	// mysqlbinlog stops at the first event at or after the target in any site,
-	// so later sites' earlier transactions can be skipped. This never bypasses
-	// archive, payload, lower-edge or stop-proof checks.
-	// +optional
-	// +kubebuilder:default=false
-	AllowUnverifiedCrossSite bool `json:"allowUnverifiedCrossSite,omitempty"`
-
 	// StopDatetime is the MySQL-style datetime at which to stop
-	// replaying binlog events (forwarded to mysqlbinlog
-	// --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
+	// replaying binlog events. Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
 	// the MySQL native form ("2026-04-15 09:30:00"). Required.
 	// +kubebuilder:validation:MinLength=1
 	StopDatetime string `json:"stopDatetime"`
 
-	// ExcludeGtids is an optional GTID set passed verbatim to
-	// mysqlbinlog --exclude-gtids. Useful for surgically skipping a
-	// known-bad transaction (e.g. an accidental DROP TABLE) while
-	// replaying everything else.
+	// ExcludeGtids is an optional GTID set that is never replayed. Useful
+	// for surgically skipping a known-bad transaction (e.g. an accidental
+	// DROP TABLE) while replaying everything else.
 	// +optional
 	ExcludeGtids string `json:"excludeGtids,omitempty"`
 }
@@ -598,6 +586,7 @@ type BackupSchedule struct {
 // brand-new failover group from an existing backup. Once the restore has
 // completed successfully (fg.status.restore.phase == Succeeded), subsequent
 // reconciles skip the restore even if this field is still set.
+// +kubebuilder:validation:XValidation:rule="!has(self.pointInTime) || has(self.pointInTime.archiveProfileName)",message="pointInTime.archiveProfileName is required: name the backup profile whose PITR archive the restore reads"
 type InitFromBackupSpec struct {
 	// Source is a tagged reference to the artifact to restore.
 	// +kubebuilder:validation:XValidation:rule="(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of mysqlBackupRef, s3, or pvc must be set"

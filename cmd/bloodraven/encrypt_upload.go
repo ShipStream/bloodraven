@@ -165,6 +165,19 @@ func runEncryptUpload(args []string) {
 		os.Exit(2)
 	}
 
+	// The upload is the encrypted Job's final step: only now has the dump
+	// finished, so serverClock.end, which the dump captured on the source
+	// right after mysqlsh succeeded, goes into the stamp (D-8, D-52).
+	if os.Getenv(backupStampTemplateEnv) != "" {
+		stamp, err := finishBackupStampFromEnv(ctx, meta.ServerClockEnd)
+		if err != nil {
+			logger.Error("finish backup stamp", "error", err)
+			_ = os.WriteFile("/dev/termination-log", []byte(compactTerminationMessage("backup stamp: "+err.Error())), 0644)
+			os.Exit(2)
+		}
+		logger.Info("backup stamp finished", "serverClockStart", stamp.ServerClock.Start.String(), "serverClockEnd", stamp.ServerClock.End.String())
+	}
+
 	printlnf("%s", backupmeta.FormatDumpComplete(backupmeta.DumpComplete{
 		Location: locationDisplay, SizeBytes: totalPlaintext, Size: humanBytes(totalPlaintext),
 		GtidExecuted: meta.GTIDExecuted, BinlogFile: meta.BinlogFile, BinlogPos: meta.BinlogPos,
@@ -716,6 +729,9 @@ type dumpMeta struct {
 	GTIDExecuted string `json:"gtidExecuted,omitempty"`
 	BinlogFile   string `json:"binlogFile,omitempty"`
 	BinlogPos    int64  `json:"binlogPos,omitempty"`
+	// ServerClockEnd is the dumped server's UTC clock read right after
+	// mysqlsh's dump succeeded (backupmeta.MicroTimeLayout).
+	ServerClockEnd string `json:"serverClockEnd,omitempty"`
 }
 
 // loadEncryptionManifest best-effort fetches the

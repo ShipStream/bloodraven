@@ -52,7 +52,7 @@ func TestNoScratchAcrossEncryptionAndInspection(t *testing.T) {
 			if encrypted {
 				store = WrapWithEncryption(store, []byte("high entropy fixture passphrase"))
 			}
-			a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: local}, "iad", &stubRoleChecker{}, store, slog.Default())
+			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: local}, "iad", &stubRoleChecker{}, store, slog.Default())
 			source := "testdata/incarnation-a.bin"
 			data, err := os.ReadFile(source)
 			if err != nil {
@@ -138,7 +138,7 @@ func TestArchiveCapturesNativeClonePurgedBase(t *testing.T) {
 		t.Fatal("native clone no longer exercises the missing-header baseline")
 	}
 	store := newMemStore()
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &nativeCloneBaseStub{base: base}, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &nativeCloneBaseStub{base: base}, store, slog.Default())
 	file := "testdata/native/recloned.bin"
 	id, err := a.localBinlogID(file)
 	if err != nil {

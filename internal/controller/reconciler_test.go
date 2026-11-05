@@ -750,6 +750,46 @@ func TestGenerateMyCnf_StripsLogBinDisableAliases(t *testing.T) {
 	}
 }
 
+// D-33: replica-preserve-commit-order is owned, so neither spelling, at
+// group or site level, nor a skip-/disable- prefix can turn it off.
+func TestGenerateMyCnf_OwnsReplicaPreserveCommitOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		site bool
+		key  string
+		val  string
+	}{
+		{name: "hyphen spelling", key: "replica-preserve-commit-order", val: "OFF"},
+		{name: "underscore spelling", key: "replica_preserve_commit_order", val: "OFF"},
+		{name: "site override", site: true, key: "replica_preserve_commit_order", val: "0"},
+		{name: "skip prefix", key: "skip-replica-preserve-commit-order", val: ""},
+		{name: "disable prefix underscore", key: "disable_replica_preserve_commit_order", val: ""},
+		{name: "unset", key: "", val: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fg := newTestFG()
+			if tt.key != "" {
+				conf := map[string]string{tt.key: tt.val}
+				if tt.site {
+					fg.Spec.Sites[0].MysqlConf = conf
+				} else {
+					fg.Spec.MysqlConf = conf
+				}
+			}
+			cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+			if !strings.Contains(cnf, "\nreplica-preserve-commit-order=ON\n") {
+				t.Fatalf("my.cnf must own replica-preserve-commit-order=ON; got:\n%s", cnf)
+			}
+			for _, line := range strings.Split(cnf, "\n") {
+				if strings.Contains(line, "preserve-commit-order") && line != "replica-preserve-commit-order=ON" {
+					t.Fatalf("override %q survived as %q", tt.key, line)
+				}
+			}
+		})
+	}
+}
+
 func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) {
 	tests := []struct {
 		name string

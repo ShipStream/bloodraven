@@ -265,6 +265,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		backup.Status.MysqlImage = mysqlImageFor(&fg)
 		backup.Status.ActiveSiteAtStart = fg.Status.ActiveSite
 		backup.Status.Encrypted, backup.Status.EncryptionAlgorithm = backupJobEncryption(built)
+		backup.Status.FailoverGroupUID, backup.Status.PITRArchiveID = backupJobIdentity(built)
 		backup.Status.Attempt = effectiveBackupAttempt(&backup)
 		backup.Status.Message = fmt.Sprintf("running (source=%s, reason=%s)", sourceSite, reason)
 		backup.Status.ObservedGeneration = backup.Generation
@@ -293,6 +294,11 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Job exists — observe its status.
 	phase, message := jobPhase(&job, "backup")
 	if phase == "" {
+		// The status patch after the Job's create can be lost (F21);
+		// the identity the Job pinned is recovered from it.
+		if err := r.recoverBackupIdentity(ctx, &backup, &job); err != nil {
+			return ctrl.Result{}, err
+		}
 		// Still running. Emit a soft warning if the group's active
 		// site drifted while the backup was in flight.
 		r.maybeWarnInFlightFailover(&backup, &fg)
@@ -334,6 +340,9 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	if next.MysqlImage == "" {
 		next.MysqlImage = mysqlImageFor(&fg)
+	}
+	if uid, archiveID := backupJobIdentity(&job); metav1.IsControlledBy(&job, &backup) && next.FailoverGroupUID == "" && uid != "" {
+		next.FailoverGroupUID, next.PITRArchiveID = uid, archiveID
 	}
 	next.ObservedGeneration = backup.Generation
 
@@ -408,6 +417,25 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	return metadataResult, nil
+}
+
+// recoverBackupIdentity copies the source group UID and PITR archive ID a
+// running Job pinned into a status that lost them. Only the backup's own
+// Job is trusted, and recorded values are never replaced.
+func (r *MysqlBackupReconciler) recoverBackupIdentity(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) error {
+	uid, archiveID := backupJobIdentity(job)
+	if uid == "" || backup.Status.FailoverGroupUID != "" || !metav1.IsControlledBy(job, backup) {
+		return nil
+	}
+	patch := client.MergeFrom(backup.DeepCopy())
+	backup.Status.FailoverGroupUID, backup.Status.PITRArchiveID = uid, archiveID
+	if backup.Status.JobName == "" {
+		backup.Status.JobName = job.Name
+	}
+	if err := r.Status().Patch(ctx, backup, patch); err != nil {
+		return fmt.Errorf("patch backup identity recovered from job: %w", err)
+	}
+	return nil
 }
 
 // backupJobEncryption reads the launch-time encryption choice. The label also

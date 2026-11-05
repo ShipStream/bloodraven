@@ -2,11 +2,14 @@ package controller
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
@@ -152,6 +155,15 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_S3_REGION", "us-east-1")
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_S3_ENDPOINT_URL", "https://s3.example.com")
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_PROFILE_NAME", "primary")
+	// §3.7: the archive identity the sidecar writes and verifies.
+	dest, err := pitrarchive.NewS3Destination("lion", "dumps", "https://s3.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_FAILOVER_GROUP_UID", "uid-lion")
+	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_DESTINATION", dest.String())
+	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_ARCHIVE_ID", pitrarchive.CreateArchiveID("uid-lion", dest))
+	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_ENCRYPTION_MODE", "None")
 
 	// Data PVC + AWS creds mounted into sidecar.
 	var sawData, sawAWS bool
@@ -250,8 +262,14 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 			},
 		},
 	}}
+	// The restore reads the source group's archive through its own
+	// profile; the restored group archives into "primary" (D-10).
+	source := *fg.Spec.Backup.Profiles[0].DeepCopy()
+	source.Name = "source"
+	source.Storage.S3.Prefix = "source-dumps"
+	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"},
+		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source"},
 	}
 
 	frags, err := buildRestorePITRFragments(fg)
@@ -270,7 +288,16 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	}
 	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00Z")
 	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STORAGE_TYPE", "S3")
-	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_SITES", "us-east-1a,us-east-1b")
+	dest, err := pitrarchive.NewS3Destination("lion", "source-dumps", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_DESTINATION", dest.String())
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_MANIFEST_PREFIX", "source-dumps/binlogs")
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_ENCRYPTION_MODE", "None")
+	if _, ok := envValue(ic.Env, "BLOODRAVEN_PITR_SITES"); ok {
+		t.Error("BLOODRAVEN_PITR_SITES is rendered; replay considers every manifest (D-9)")
+	}
 	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_OUTPUT_DIR", restorePITRLocalDir)
 	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_S3_BUCKET", "lion")
 	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_AWS_CREDS_DIR", pitrAWSCredsMountDir)
@@ -298,10 +325,52 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	}
 }
 
+// D-10: initFromBackup names its archive profile, and that profile may not
+// resolve to the group's own active PITR destination, however it is
+// spelled.
+func TestValidateRestoreArchiveProfile(t *testing.T) {
+	s3 := func(name, bucket, prefix, endpoint string) v1alpha1.BackupProfile {
+		return v1alpha1.BackupProfile{Name: name, Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3,
+			S3: &v1alpha1.S3Storage{Bucket: bucket, Prefix: prefix, EndpointURL: endpoint}}}
+	}
+	tests := []struct {
+		name     string
+		pitr     *v1alpha1.PITRSpec
+		profiles []v1alpha1.BackupProfile
+		archive  string
+		want     string
+	}{
+		{name: "missing archiveProfileName", pitr: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "")}, want: "archiveProfileName is required"},
+		{name: "unknown profile", profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "")}, archive: "ghost", want: "not found"},
+		{name: "same profile as the active archive", pitr: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "")}, archive: "own", want: "PITRArchiveDestinationShared"},
+		{name: "alias of the active destination", pitr: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "own"},
+			profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "https://S3.example.com:443/"), s3("alias", "b", "/own/", "https://s3.example.com")}, archive: "alias", want: "PITRArchiveDestinationShared"},
+		{name: "a different prefix", pitr: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", ""), s3("source", "b", "source", "")}, archive: "source"},
+		{name: "own profile while PITR is disabled", pitr: &v1alpha1.PITRSpec{Enabled: false, ProfileName: "own"}, profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "")}, archive: "own"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fg := withBackup(tt.pitr)
+			fg.Spec.Backup.Profiles = tt.profiles
+			err := validateRestoreArchiveProfile(fg, &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: tt.archive})
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("unexpected refusal: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 // ---- helpers ----
 
 func withBackup(p *v1alpha1.PITRSpec) *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "shared-lion", UID: "uid-lion"},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Backup: &v1alpha1.BackupSpec{PITR: p},
 		},

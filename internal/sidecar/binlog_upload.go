@@ -15,7 +15,7 @@ func (a *BinlogArchiver) archiveOne(ctx context.Context, path, name, id string) 
 	return a.archivePinned(ctx, path, name, id, false)
 }
 func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id string, replaceLegacy bool) error {
-	manifest, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
+	manifest, err := a.loadManifest(ctx)
 	if err != nil {
 		return err
 	}
@@ -88,7 +88,7 @@ func stableBinlogFile(before, after os.FileInfo) bool {
 	return after != nil && os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime() == after.ModTime()
 }
 func (a *BinlogArchiver) publishBinlog(ctx context.Context, entry ManifestEntry, replaceLegacy bool) error {
-	m, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
+	m, err := a.loadManifest(ctx)
 	if err != nil {
 		return err
 	}
@@ -114,5 +114,5 @@ func (a *BinlogArchiver) publishBinlog(ctx context.Context, entry ManifestEntry,
 			return err
 		}
 	}
-	return saveManifest(ctx, a.store, a.cfg.ManifestPrefix, m)
+	return a.saveManifest(ctx, m)
 }

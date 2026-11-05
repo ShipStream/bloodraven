@@ -70,7 +70,7 @@ func TestManifestRoundTripPVC(t *testing.T) {
 
 	// Prune drops e1, returns its remote path for delete, and leaves
 	// the on-disk manifest with just e2.
-	removed, err := pruneManifest(ctx, store, prefix, site,
+	removed, err := testPrune(ctx, store, prefix, site,
 		map[binlogIdentity]string{{Name: "mysql-bin.000001"}: strings.Repeat("a", 64)})
 	if err != nil {
 		t.Fatalf("prune: %v", err)
@@ -111,7 +111,7 @@ func TestPruneManifestIgnoresRemotePath(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	removed, err := pruneManifest(ctx, store, prefix, site, map[binlogIdentity]string{
+	removed, err := testPrune(ctx, store, prefix, site, map[binlogIdentity]string{
 		{Name: "mysql-bin.000001"}:            strings.Repeat("a", 64),
 		{Name: "../../backups/full-2026.tar"}: strings.Repeat("a", 64),
 	})
@@ -142,7 +142,7 @@ func TestLoadManifestForcesSite(t *testing.T) {
 	if err := os.MkdirAll(tmp+"/binlogs", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	forged := `{"version":1,"site":"x/../../victim","files":[]}`
+	forged := `{"version":2,"archiveId":"` + testArchiveID + `","site":"x/../../victim","files":[]}`
 	if err := os.WriteFile(tmp+"/binlogs/manifest-iad.json", []byte(forged), 0o644); err != nil {
 		t.Fatal(err)
 	}

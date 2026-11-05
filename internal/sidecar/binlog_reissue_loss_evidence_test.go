@@ -30,7 +30,7 @@ func TestActiveReissueMustNotEraseLostTailEvidence(t *testing.T) {
 	logs := t.TempDir()
 	cfg := &PITRConfig{ManifestPrefix: "binlogs", BinlogDir: logs, BinlogIndex: "mysql-bin.index"}
 	state := &bootstrapAuditState{historyStateStub: historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-11"}, ready: true}
-	a := NewBinlogArchiver(cfg, "iad", state, store, slog.Default())
+	a := newTestArchiver(cfg, "iad", state, store, slog.Default())
 	id, err := a.localBinlogID("testdata/incarnation-a.bin")
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +108,7 @@ func TestKnownLossClearingRequiresDifferentIssuer(t *testing.T) {
 			row := ManifestEntry{Name: "mysql-bin.000001", ID: strings.Repeat("a", 64)}
 			m := &Manifest{Site: "iad", Files: []ManifestEntry{row}, Divergent: []ArchiveDivergence{{Name: row.Name, ID: row.ID, MissingGTIDs: tc.missing}}}
 			state := &bootstrapAuditState{historyStateStub: historyStateStub{uuid: tc.uuid, executed: coverageTestSID + ":1-11," + coverageTestSID + ":blue:1-11," + foreign + ":1-3"}, ready: true}
-			a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 			err := a.auditArchive(ctx, m)
 			if tc.want == "" {
 				if err != nil || len(m.Divergent) != 0 {

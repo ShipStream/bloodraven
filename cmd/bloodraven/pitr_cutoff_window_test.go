@@ -18,6 +18,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -123,8 +124,27 @@ func TestPITRRunningBackupKeepsReplayWindowThroughCompletion(t *testing.T) {
 	if err := store.Put(ctx, key, bytes.NewReader(payload), int64(len(payload))); err != nil {
 		t.Fatal(err)
 	}
+	// The archive carries its identity (#206): a descriptor and a version-2
+	// manifest of that archive.
+	dest, err := pitrarchive.NewPVCDestination("ns", "backups", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := sidecar.ArchiveIdentity{Source: pitrarchive.Source{Namespace: "ns", Name: "fg", UID: "fg-uid"}, Destination: dest,
+		Encryption: pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}}
+	desc, err := pitrarchive.NewDescriptor(identity.Source, dest, identity.Encryption, nil, "iad", start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descBytes, err := desc.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, pitrarchive.DescriptorKey("binlogs"), bytes.NewReader(descBytes), int64(len(descBytes))); err != nil {
+		t.Fatal(err)
+	}
 	row := sidecar.ManifestEntry{Name: name, ID: id, LastEventTime: start.Add(-72 * time.Hour), GTIDCoverage: &sidecar.BinlogGTIDCoverage{Complete: true, GTIDs: retentionTestSID + ":11"}}
-	data, _ := json.Marshal(sidecar.Manifest{Version: 1, Site: "iad", Files: []sidecar.ManifestEntry{row}})
+	data, _ := json.Marshal(sidecar.Manifest{Version: sidecar.ManifestVersion, ArchiveID: desc.ArchiveID, Site: "iad", Files: []sidecar.ManifestEntry{row}})
 	if err := store.Put(ctx, sidecar.ManifestKey("binlogs", "iad"), bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +160,7 @@ func TestPITRRunningBackupKeepsReplayWindowThroughCompletion(t *testing.T) {
 		}
 		defer mysql.Close()
 		observed := &retentionMaintenanceStore{ArchiveStore: store, cancel: cancel}
-		a := sidecar.NewBinlogArchiver(&sidecar.PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), PollInterval: time.Hour}, "iad", retentionReplica{mysql}, observed, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		a := sidecar.NewBinlogArchiver(&sidecar.PITRConfig{StorageType: "PVC", ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), PollInterval: time.Hour, Archive: identity}, "iad", retentionReplica{mysql}, observed, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
 		done := make(chan struct{})
 		go func() { defer close(done); a.Run(runCtx) }()

@@ -28,6 +28,23 @@ func fgInitFromMysqlBackup() *v1alpha1.MysqlFailoverGroup {
 	return fg
 }
 
+// addSourceArchiveProfile adds a "source-archive" profile, a copy of the
+// group's first profile under its own prefix, for a PITR restore to read
+// from: initFromBackup must name its archive profile, and it may not be the
+// group's own active PITR destination (D-10).
+func addSourceArchiveProfile(fg *v1alpha1.MysqlFailoverGroup) string {
+	source := *fg.Spec.Backup.Profiles[0].DeepCopy()
+	source.Name = "source-archive"
+	switch {
+	case source.Storage.S3 != nil:
+		source.Storage.S3.Prefix = "source-group"
+	case source.Storage.PVC != nil:
+		source.Storage.PVC.SubPath = "source-group"
+	}
+	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
+	return source.Name
+}
+
 // succeededSeedBackup is a previously-completed MysqlBackup the restore
 // can use as its source.
 func succeededSeedBackup() *v1alpha1.MysqlBackup {
@@ -480,7 +497,7 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 	f, tr := false, true
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source-archive"}
 
 	for _, tc := range []struct {
 		name        string
@@ -501,6 +518,7 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInitFromMysqlBackup()
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			addSourceArchiveProfile(fg)
 			fg.Spec.InitFromBackup.PointInTime = tc.pit
 			fg.Spec.InitFromBackup.LoadOptions = tc.loadOptions
 			r, _ := newReconciler(fg, succeededSeedBackup())
@@ -537,11 +555,12 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source-archive"}
 
 	newFG := func() *v1alpha1.MysqlFailoverGroup {
 		fg := fgInPlaceRestore("")
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		addSourceArchiveProfile(fg)
 		return fg
 	}
 

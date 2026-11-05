@@ -20,6 +20,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // conditionPITRArchiveReady reports whether every site's PITR archiver is
@@ -79,13 +80,164 @@ const (
 
 // pitrArchiveFalseReasons is the reason precedence when sites disagree:
 // what a live sidecar reports explicitly outranks what the operator
-// infers, and the most specific report comes first. The message still
-// lists every affected site.
-var pitrArchiveFalseReasons = []string{
-	reasonPITRArchiveStoreInitFailed,
-	reasonPITRArchiverError,
-	reasonPITRArchiverDisabled,
-	reasonPITRSidecarUnreachable,
+// infers, and the most specific report comes first. The archive refusals
+// (D-27) rank after ArchiveStoreInitFailed. The message still lists every
+// affected site.
+var pitrArchiveFalseReasons = func() []string {
+	out := []string{reasonPITRArchiveStoreInitFailed}
+	for _, r := range pitrarchive.ArchiveReadyReasons {
+		out = append(out, string(r))
+	}
+	return append(out, reasonPITRArchiverError, reasonPITRArchiverDisabled, reasonPITRSidecarUnreachable)
+}()
+
+// eventReasonPITRArchiveUnsafeHistory is the edge-triggered Warning for the
+// transition into PITRArchiveReady=False/ArchiveUnsafeHistory.
+const eventReasonPITRArchiveUnsafeHistory = "PITRArchiveUnsafeHistory"
+
+// pitrArchiveRefusal returns the D-27 refusal reason a sidecar reports for
+// its archive, or "". The persisted history-integrity marker wins; then the
+// archive block's refusal; then a refusal token leading lastError (a sidecar
+// whose store could not open the archive).
+func pitrArchiveRefusal(s *internalmysql.ArchiverStatus) pitrarchive.RefusalReason {
+	if s == nil {
+		return ""
+	}
+	if s.HistoryIntegrity != nil {
+		return pitrarchive.ReasonArchiveUnsafeHistory
+	}
+	if a := s.Archive; a != nil && a.State == pitrarchive.StateRefused {
+		for _, r := range pitrarchive.ArchiveReadyReasons {
+			if a.Reason == r {
+				return r
+			}
+		}
+	}
+	if tok, ok := pitrarchive.ParseToken(s.LastError); ok {
+		if r, ok := tok.Reason(); ok {
+			return r
+		}
+	}
+	return ""
+}
+
+// pitrArchiveObservation derives status.pitr.archive from the sidecars'
+// archive reports. Only reports for the group's active destination count:
+// a pod still on an older render reports another destination, or none. A
+// refusal on any counted site wins; Verified needs every site to report
+// Verified with one archive ID. ObservedTime moves only when the
+// observation changes, so an unchanged archive does not churn status.
+func pitrArchiveObservation(fg *v1alpha1.MysqlFailoverGroup, sites []string, snaps, lastGood map[string]*internalmysql.ArchiverStatus, prev *v1alpha1.PITRArchiveObservation, now time.Time) *v1alpha1.PITRArchiveObservation {
+	ident, ok := activePITRArchiveIdentity(fg)
+	if !ok {
+		return nil
+	}
+	dest := ident.Destination.String()
+	out := &v1alpha1.PITRArchiveObservation{
+		Destination:    dest,
+		EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(ident.Encryption.Mode),
+		State:          v1alpha1.PITRArchiveAwaitingDescriptor,
+	}
+	var (
+		refusal   pitrarchive.RefusalReason
+		refused   bool
+		verified  int
+		ids, keys = map[string]bool{}, map[string]bool{}
+	)
+	for _, site := range sites {
+		s := snaps[site]
+		if s == nil {
+			s = lastGood[site]
+		}
+		if s == nil || s.Archive == nil || s.Archive.Destination != dest {
+			continue
+		}
+		a := s.Archive
+		if r := pitrArchiveRefusal(s); r != "" || a.State == pitrarchive.StateRefused {
+			refused = true
+			if r != "" && (refusal == "" || slices.Index(pitrarchive.ArchiveReadyReasons, r) < slices.Index(pitrarchive.ArchiveReadyReasons, refusal)) {
+				refusal = r
+			}
+		}
+		if a.State == pitrarchive.StateVerified && a.ArchiveID != "" {
+			verified++
+			ids[a.ArchiveID] = true
+			if a.EncryptionMode != "" {
+				out.EncryptionMode = v1alpha1.PITRArchiveEncryptionMode(a.EncryptionMode)
+			}
+		}
+		keys[a.KeyRevision] = true
+	}
+	if len(ids) == 1 {
+		for id := range ids {
+			out.ArchiveID = id
+		}
+	}
+	if len(keys) == 1 {
+		for k := range keys {
+			out.KeyRevision = k
+		}
+	}
+	switch {
+	case refused:
+		out.State = v1alpha1.PITRArchiveRefused
+		out.Reason = v1alpha1.PITRArchiveRefusalReason(refusal)
+	case len(ids) > 1:
+		// Two verified archives at one destination cannot both be this
+		// group's; nothing is certified.
+		out.State, out.ArchiveID = v1alpha1.PITRArchiveRefused, ""
+	case verified == len(sites) && verified > 0:
+		out.State = v1alpha1.PITRArchiveVerified
+	}
+	if prev != nil && prev.ObservedTime != nil {
+		same := *prev
+		same.ObservedTime = nil
+		if same == *out {
+			out.ObservedTime = prev.ObservedTime
+			return out
+		}
+	}
+	t := metav1.NewMicroTime(now.UTC().Truncate(time.Microsecond))
+	out.ObservedTime = &t
+	return out
+}
+
+// pitrMySQLConfHistoryViolation previews ArchiveUnsafeHistory from
+// spec.mysqlConf (§3.7): a replication or binlog filter, binlog_format other
+// than ROW, or binlog_row_image other than FULL makes every site's sidecar
+// set the permanent history marker once it runs with that configuration.
+// It returns the first offending key, group level before site level, or "".
+func pitrMySQLConfHistoryViolation(fg *v1alpha1.MysqlFailoverGroup) string {
+	if !pitrEnabled(fg) {
+		return ""
+	}
+	confs := []map[string]string{fg.Spec.MysqlConf}
+	for _, site := range fg.Spec.Sites {
+		confs = append(confs, site.MysqlConf)
+	}
+	for _, raw := range confs {
+		norm := normalizedMySQLSettings(raw)
+		keys := make([]string, 0, len(norm))
+		for k := range norm {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			name := strings.TrimPrefix(k, "loose-")
+			v := strings.ToUpper(strings.TrimSpace(norm[k]))
+			switch {
+			case strings.HasPrefix(name, "replicate-do-") || strings.HasPrefix(name, "replicate-ignore-") ||
+				strings.HasPrefix(name, "replicate-wild-") || name == "replicate-rewrite-db" ||
+				name == "binlog-do-db" || name == "binlog-ignore-db":
+				return fmt.Sprintf("spec.mysqlConf sets %s (a replication or binlog filter)", k)
+			case name == "binlog-format" && v != "ROW":
+				return fmt.Sprintf("spec.mysqlConf sets %s=%s (PITR needs ROW)", k, norm[k])
+			case name == "binlog-row-image" && v != "FULL":
+				return fmt.Sprintf("spec.mysqlConf sets %s=%s (PITR needs FULL)", k, norm[k])
+			}
+		}
+	}
+	return ""
 }
 
 // archiverPollResult is one site's outcome in one poll round. status is
@@ -370,6 +522,21 @@ func (h *pitrSiteHistory) classify(now time.Time, r archiverPollResult, errorStu
 			return
 		}
 		h.health, h.reason = pitrSiteBad, reasonPITRArchiverDisabled
+	case pitrArchiveRefusal(s) != "":
+		// An archive refusal is persisted by the sidecar (a refused
+		// descriptor, the history marker) and holds until the archive is
+		// replaced, so it is reported at once, ahead of the store state
+		// it usually comes with.
+		h.resetError()
+		h.disabledPolls = 0
+		h.health, h.reason = pitrSiteBad, string(pitrArchiveRefusal(s))
+		h.detail = s.LastError
+		if h.detail == "" && s.HistoryIntegrity != nil {
+			h.detail = fmt.Sprintf("history integrity marker %s: %s", s.HistoryIntegrity.Violation, s.HistoryIntegrity.Detail)
+		}
+		if h.detail == "" {
+			h.detail = "archive refused: " + h.reason
+		}
 	case s.StoreReady != nil && !*s.StoreReady:
 		h.resetError()
 		h.disabledPolls = 0
@@ -550,6 +717,17 @@ func (r *TopologyManagerRunner) applyPITRArchiveStatus(nn types.NamespacedName, 
 	if !anchored {
 		return
 	}
+	// A configuration that sets the permanent history marker is reported
+	// before any sidecar runs with it. A refusal a sidecar already reports
+	// stays, since it is what has actually happened.
+	if detail := pitrMySQLConfHistoryViolation(fg); detail != "" && (v.Status != metav1.ConditionFalse || v.Reason != string(pitrarchive.ReasonArchiveUnsafeHistory)) {
+		v = pitrArchiveVerdict{
+			Status: metav1.ConditionFalse,
+			Reason: string(pitrarchive.ReasonArchiveUnsafeHistory),
+			Message: detail + "; with PITR enabled every site's archiver would set the permanent history marker for this prefix " +
+				"(PITRArchiveUnsafeHistory); remove the setting, or start a new archive prefix and take a full backup once it is applied",
+		}
+	}
 	setCondition(&fg.Status.Conditions, metav1.Condition{
 		Type:               conditionPITRArchiveReady,
 		Status:             v.Status,
@@ -613,6 +791,12 @@ func pitrArchiveWriteNeeded(before, after *v1alpha1.MysqlFailoverGroupStatus, si
 	}
 	if after.PITR != nil {
 		if after.PITR.Enabled != before.PITR.Enabled || after.PITR.ProfileName != before.PITR.ProfileName {
+			return true, false
+		}
+		// The archive identity is written when it changes, not with the
+		// next coverage write.
+		if a, b := after.PITR.Archive, before.PITR.Archive; (a == nil) != (b == nil) ||
+			(a != nil && (a.Destination != b.Destination || a.ArchiveID != b.ArchiveID || a.State != b.State || a.Reason != b.Reason || a.KeyRevision != b.KeyRevision)) {
 			return true, false
 		}
 		bPITRMsg, aPITRMsg = before.PITR.Message, after.PITR.Message
@@ -776,6 +960,11 @@ func (r *TopologyManagerRunner) emitPITRArchiveEvents(fg *v1alpha1.MysqlFailover
 	cur := apimeta.FindStatusCondition(fg.Status.Conditions, conditionPITRArchiveReady)
 	if cur == nil {
 		return
+	}
+	if cur.Status == metav1.ConditionFalse && cur.Reason == string(pitrarchive.ReasonArchiveUnsafeHistory) &&
+		(prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != cur.Reason) {
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveUnsafeHistory,
+			"PITR archive history is unsafe: %s", cur.Message)
 	}
 	switch {
 	case cur.Status == metav1.ConditionFalse && (prev == nil || prev.Status != metav1.ConditionFalse):

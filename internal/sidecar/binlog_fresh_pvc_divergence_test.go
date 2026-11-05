@@ -28,7 +28,7 @@ func TestFreshPVCBeforeCloneLeavesNoPermanentDivergence(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-21"}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	source := "testdata/incarnation-b.bin"
 	id, err := a.localBinlogID(source)
 	if err != nil {

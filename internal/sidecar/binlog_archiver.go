@@ -69,6 +69,16 @@ type BinlogArchiver struct {
 	mysql        roleChecker
 	store        ArchiveStore
 	logger       *slog.Logger
+	now          func() time.Time
+
+	// Archive identity (§3.5-§3.7), owned by the scan goroutine. session
+	// is nil only when the configured identity is unusable (identityErr).
+	session         *ArchiveSession
+	identityErr     error
+	episode         promotionEpisode
+	persistedMarker *HistoryIntegrity
+	pendingMarker   *HistoryIntegrity
+	unsafeLogged    bool
 
 	// mu guards lastError, lastScanAt, filesArchiv, lastRetentionRun,
 	// uploadFailures, lastUploadAt, backlogFiles, and the manifest
@@ -101,6 +111,13 @@ type BinlogArchiver struct {
 	manifestBytes      int64
 	oldestArchivedTime time.Time
 	newestArchivedTime time.Time
+	// divergentRows/quarantinedRows count this site's manifest rows;
+	// promotionRecordedAt is the confirmed record of the current writable
+	// episode; historyIntegrity is the site's marker (persisted or pending).
+	divergentRows       int64
+	quarantinedRows     int64
+	promotionRecordedAt time.Time
+	historyIntegrity    *HistoryIntegrity
 }
 
 // retentionClientConfig is what the archiver needs to query the
@@ -120,23 +137,119 @@ type retentionClientConfig struct {
 // roleChecker is the narrow subset of mysqlQuerier that the archiver
 // needs. Using a minimal interface lets tests substitute a stub without
 // pulling in the SQL driver.
+//
+// The optional extensions the archiver asserts are roleProber (promotion
+// records), historyIntegrityProber (D-34), binlogStateReader (the
+// divergence audit), binlogBootstrapReader and binlogBaseReader. All
+// methods are exported so tests outside the package can supply a server.
 type roleChecker interface {
 	IsReadOnly(ctx context.Context) (bool, error)
-	isConnectable(ctx context.Context) bool
 }
 
 // NewBinlogArchiver builds an archiver instance. It does NOT start any
 // goroutines — call Run for that. site identifies the MySQL site this
 // archiver belongs to and is written into every manifest entry; the
 // restore Job groups manifests by site.
+//
+// cfg.Archive is the archive identity the archiver writes under. The
+// session it opens verifies the prefix's descriptor (creating it on an
+// empty prefix when this site is writable); an unusable identity leaves the
+// archiver refusing every write, with the reason in LastError.
 func NewBinlogArchiver(cfg *PITRConfig, site string, mysql roleChecker, store ArchiveStore, logger *slog.Logger) *BinlogArchiver {
-	return &BinlogArchiver{
+	a := &BinlogArchiver{
 		cfg:    cfg,
 		site:   site,
 		mysql:  mysql,
 		store:  store,
 		logger: logger.With("component", "binlog-archiver", "site", site),
+		now:    time.Now,
 	}
+	a.session, a.identityErr = newArchiveSession(store, cfg.ManifestPrefix, cfg.Archive, site, a.logger)
+	if a.identityErr != nil {
+		a.identityErr = fmt.Errorf("archive identity: %w", a.identityErr)
+	}
+	return a
+}
+
+// ensureSession opens the archive session when it is not verified: a
+// writable site establishes an empty prefix (EnsureCreated), a read-only
+// site only opens it and waits for the writer. It returns nil when the
+// session is verified or (read-only) still awaiting the descriptor, and
+// otherwise the refusal or store error, which blocks this cycle's writes.
+func (a *BinlogArchiver) ensureSession(ctx context.Context, writable bool) error {
+	if a.session == nil {
+		return a.identityErr
+	}
+	if a.session.Verified() {
+		return nil
+	}
+	var err error
+	if writable {
+		err = a.session.EnsureCreated(ctx)
+	} else {
+		err = a.session.Open(ctx)
+	}
+	if errors.Is(err, ErrDescriptorAbsent) {
+		return nil
+	}
+	if err != nil && a.session.transientFailure() {
+		return fmt.Errorf("archive store init: %w", err)
+	}
+	return err
+}
+
+// openSession opens an unverified session without establishing the
+// archive; a verified session is left alone (saves Reverify it).
+func (a *BinlogArchiver) openSession(ctx context.Context) error {
+	if a.session == nil {
+		return a.identityErr
+	}
+	if a.session.Verified() {
+		return nil
+	}
+	return a.session.Open(ctx)
+}
+
+// loadManifest reads this site's manifest through the archive session and
+// refreshes the counters and marker that /archiver/status reports.
+func (a *BinlogArchiver) loadManifest(ctx context.Context) (*Manifest, error) {
+	if err := a.openSession(ctx); err != nil {
+		return nil, err
+	}
+	m, err := a.session.LoadManifest(ctx, a.site)
+	if err != nil {
+		return nil, err
+	}
+	a.observeManifest(m)
+	return m, nil
+}
+
+// saveManifest is the archiver's only manifest write path.
+func (a *BinlogArchiver) saveManifest(ctx context.Context, m *Manifest) error {
+	if err := a.openSession(ctx); err != nil {
+		return err
+	}
+	m.Site = a.site
+	if err := a.session.SaveManifest(ctx, m); err != nil {
+		return err
+	}
+	a.observeManifest(m)
+	return nil
+}
+
+func (a *BinlogArchiver) observeManifest(m *Manifest) {
+	if m.HistoryIntegrity != nil && a.persistedMarker == nil {
+		marker := *m.HistoryIntegrity
+		a.persistedMarker = &marker
+		a.pendingMarker = nil
+	}
+	a.mu.Lock()
+	a.divergentRows = int64(len(m.Divergent))
+	a.quarantinedRows = int64(len(m.Quarantined))
+	if a.persistedMarker != nil {
+		a.historyIntegrity = a.persistedMarker
+	}
+	a.mu.Unlock()
 }
 
 // SetRetentionClient wires the retention-sweep dependencies onto the
@@ -202,6 +315,8 @@ func (a *BinlogArchiver) Run(ctx context.Context) {
 
 	ticker := time.NewTicker(a.cfg.PollInterval)
 	defer ticker.Stop()
+	roleTicker := time.NewTicker(roleProbeInterval(a.cfg))
+	defer roleTicker.Stop()
 
 	indexPath := filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex)
 
@@ -234,6 +349,8 @@ func (a *BinlogArchiver) Run(ctx context.Context) {
 		case <-a.reuseReady():
 			a.reuseWork.notified = true
 			a.scanAndArchive(ctx)
+		case <-roleTicker.C:
+			a.roleTick(ctx)
 		case <-ticker.C:
 			a.scanAndArchive(ctx)
 		}
@@ -247,6 +364,8 @@ func (a *BinlogArchiver) Run(ctx context.Context) {
 func (a *BinlogArchiver) runPollOnly(ctx context.Context) {
 	ticker := time.NewTicker(a.cfg.PollInterval)
 	defer ticker.Stop()
+	roleTicker := time.NewTicker(roleProbeInterval(a.cfg))
+	defer roleTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -254,6 +373,8 @@ func (a *BinlogArchiver) runPollOnly(ctx context.Context) {
 		case <-a.reuseReady():
 			a.reuseWork.notified = true
 			a.scanAndArchive(ctx)
+		case <-roleTicker.C:
+			a.roleTick(ctx)
 		case <-ticker.C:
 			a.scanAndArchive(ctx)
 		}
@@ -273,21 +394,42 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	defer a.maintainArchive(ctx)
 
 	// Only the primary uploads; every site maintains its own archive.
-	// On failover the former replica starts uploading on its next scan.
-	// A brief re-check race after failover is fine — at worst the new
-	// primary's first archive cycle fires a couple of seconds later.
-	ro, err := a.mysql.IsReadOnly(ctx)
+	// On failover the former replica starts uploading on its next scan,
+	// once its promotion record is confirmed (D-43).
+	obs, complete, err := a.probeRole(ctx)
 	if err != nil {
+		a.resetEpisode()
 		a.incUploadFailures()
 		a.setError(fmt.Sprintf("role check: %v", err))
 		a.logger.Debug("role check failed; skipping scan", "error", err)
 		return
 	}
-	if ro {
+	writable := !obs.ReadOnly
+	if err := a.ensureSession(ctx, writable); err != nil {
+		a.incUploadFailures()
+		a.setError(err.Error())
+		a.setBacklog(0)
+		a.logger.Debug("archive session not ready; skipping scan", "error", err)
+		return
+	}
+	recordErr := a.observeRole(ctx, obs, complete)
+	if err := a.checkHistoryIntegrity(ctx); err != nil {
+		a.incUploadFailures()
+		a.setError(err.Error())
+		a.setBacklog(0)
+		return
+	}
+	if !writable {
 		// No uploads on a standby. Clear stale errors so a former
 		// primary that failed over cleanly stops reporting noise.
 		a.setError("")
 		a.setBacklog(0)
+		return
+	}
+	if recordErr != nil {
+		a.incUploadFailures()
+		a.setError(recordErr.Error())
+		a.logger.Warn("uploads wait for the promotion record", "error", recordErr)
 		return
 	}
 
@@ -310,7 +452,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	// file is what MySQL is currently writing to).
 	sealed := entries[:len(entries)-1]
 
-	manifest, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
+	manifest, err := a.loadManifest(ctx)
 	if err != nil {
 		a.incUploadFailures()
 		a.setError(fmt.Sprintf("load manifest: %v", err))
@@ -365,7 +507,7 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 			a.logger.Info("retention sweep complete", "cutoff", cutoffText, "deleted", deleted, "manifest_pruned", pruned)
 		}
 	}()
-	manifest, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
+	manifest, err := a.loadManifest(ctx)
 	if err != nil {
 		a.logger.Warn("retention: load manifest", "error", err)
 		return
@@ -447,13 +589,13 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 	if len(drop) == 0 {
 		return
 	}
-	removed, err := pruneManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site, drop)
+	removed, err := pruneManifest(ctx, a.session, a.site, drop)
 	if err != nil {
 		a.logger.Warn("retention: prune manifest", "error", err)
 		return
 	}
 	pruned = len(removed)
-	manifest, err = loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
+	manifest, err = a.loadManifest(ctx)
 	if err != nil {
 		a.logger.Warn("retention: load manifest", "error", err)
 		return
@@ -661,9 +803,31 @@ func (a *BinlogArchiver) Snapshot(ctx context.Context) Status {
 	if ro, err := a.mysql.IsReadOnly(ctx); err == nil {
 		primary = !ro
 	}
+	var archive *pitrarchive.ArchiveStatus
+	var storeReady *bool
+	if a.session != nil {
+		st := a.session.Status()
+		archive = &st
+		if st.State != pitrarchive.StateVerified && a.session.transientFailure() {
+			storeReady = new(bool)
+		}
+	} else {
+		storeReady = new(bool)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	var marker *HistoryIntegrity
+	if a.historyIntegrity != nil {
+		copied := *a.historyIntegrity
+		marker = &copied
+	}
 	return Status{
+		StoreReady:             storeReady,
+		Archive:                archive,
+		DivergentRows:          a.divergentRows,
+		QuarantinedRows:        a.quarantinedRows,
+		PromotionRecordedAt:    a.promotionRecordedAt,
+		HistoryIntegrity:       marker,
 		Enabled:                true,
 		Primary:                primary,
 		LastScanAt:             a.lastScanAt,
