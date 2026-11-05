@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/types"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
@@ -418,21 +421,26 @@ func TestRegistry_SlotSharedByGenerationsAndDroppedByRestart(t *testing.T) {
 	}
 }
 
-// TestPlannedTrial_ExercisesTheActorOps: over a fixed range the actor ops
-// reach the store and the model (requests stamped on the object, pod
-// replacements, manager replacements), so a generator or harness change
-// that quietly drops them fails here.
+// TestPlannedTrial_ExercisesTheActorOps: over a fixed range the actors
+// reach every part of the machinery: runs of every outcome class through the
+// production engine, ordered updates, manager replacements with an in-flight
+// window, pod replacements (some regressed), late out-of-band replays and
+// restarted promoted targets. A generator or harness change that quietly
+// drops one fails here.
 func TestPlannedTrial_ExercisesTheActorOps(t *testing.T) {
-	requests, replacedPods, regressed, replacedManagers := 0, 0, 0, 0
-	for seed := uint64(1); seed <= 60; seed++ {
+	counts := map[string]int{}
+	outcomes := map[string]int{}
+	replacedPods, regressed := 0, 0
+	for seed := uint64(1); seed <= 150; seed++ {
 		r := RunTrial(GeneratePlannedTrial(seed), true, nil)
-		for _, op := range r.Planned.StoreLog {
-			if op.Op == "request" {
-				requests++
-			}
+		for k, v := range r.Planned.Counts {
+			counts[k] += v
 		}
-		if r.Planned.Object != nil && r.Planned.Object.GetAnnotations()[controller.PlannedFailoverAnnotation] != "" {
-			requests++
+		for _, o := range r.Planned.Outcomes {
+			outcomes[o]++
+		}
+		if n := r.Planned.Unsupported[OpReplaceManager]; n > 0 {
+			t.Fatalf("seed %d: %d manager replacements without the in-flight window", seed, n)
 		}
 		for _, e := range r.Events {
 			if e.Kind == EvReplacePod {
@@ -442,12 +450,24 @@ func TestPlannedTrial_ExercisesTheActorOps(t *testing.T) {
 				}
 			}
 		}
-		replacedManagers += r.Planned.Unsupported[OpReplaceManager]
 	}
-	if requests == 0 || replacedPods == 0 || regressed == 0 || replacedManagers == 0 {
-		t.Fatalf("actor ops not exercised: requests=%d replacedPods=%d regressed=%d replacedManagers=%d",
-			requests, replacedPods, regressed, replacedManagers)
+	for _, k := range []string{"enginePasses", "updatesStarted", "managersReplaced", "oobReplayed", "promotedTargetRestarted"} {
+		if counts[k] == 0 {
+			t.Errorf("counter %s never moved (counts %v)", k, counts)
+		}
 	}
+	if replacedPods == 0 || regressed == 0 {
+		t.Errorf("pod replacements %d, regressed %d", replacedPods, regressed)
+	}
+	for _, o := range []v1alpha1.PlannedFailoverOutcome{
+		v1alpha1.PlannedFailoverOutcomeSucceeded, v1alpha1.PlannedFailoverOutcomeNotStarted,
+		v1alpha1.PlannedFailoverOutcomeRolledBack,
+	} {
+		if outcomes[string(o)] == 0 {
+			t.Errorf("no run ended %s (outcomes %v)", o, outcomes)
+		}
+	}
+	t.Logf("outcomes %v counts %v", outcomes, counts)
 }
 
 // TestPlannedTrial_SnapshotWritesContendOnTheObject: the topology manager's
@@ -467,5 +487,126 @@ func TestPlannedTrial_SnapshotWritesContendOnTheObject(t *testing.T) {
 	}
 	if len(r.Violations) != 0 {
 		t.Fatalf("fault-free actors-on trial: %v", r.Violations)
+	}
+}
+
+// plannedSweepSeeds is the range the planned fidelity tests share.
+const plannedSweepSeeds = 200
+
+var plannedSweepOnce = sync.OnceValues(func() (map[string]int, map[string]int) {
+	y, s, c := plannedSweepOf(plannedSweepSeeds)
+	for k, v := range c {
+		s["count:"+k] = v
+	}
+	return y, s
+})
+
+// plannedSweep aggregates the planned reports of seeds 1..plannedSweepSeeds
+// once per package run.
+func plannedSweep(uint64) (yields, steps, counts map[string]int) {
+	y, s := plannedSweepOnce()
+	counts = map[string]int{}
+	steps = map[string]int{}
+	for k, v := range s {
+		if strings.HasPrefix(k, "count:") {
+			counts[strings.TrimPrefix(k, "count:")] = v
+		} else {
+			steps[k] = v
+		}
+	}
+	return y, steps, counts
+}
+
+// plannedSweepOf aggregates the planned reports of seeds 1..n.
+func plannedSweepOf(n uint64) (yields, steps, counts map[string]int) {
+	yields, steps, counts = map[string]int{}, map[string]int{}, map[string]int{}
+	for seed := uint64(1); seed <= n; seed++ {
+		r := RunTrial(GeneratePlannedTrial(seed), false, nil)
+		for k, v := range r.Planned.Yields {
+			yields[k] += v
+		}
+		for k, v := range r.Planned.Steps {
+			steps[k] += v
+		}
+		for k, v := range r.Planned.Counts {
+			counts[k] += v
+		}
+	}
+	return yields, steps, counts
+}
+
+// TestScheduler_ReachesEveryYieldClass: over a fixed range the production
+// engine and facade reach every yield point the scheduler knows, and
+// another actor steps at each. engine.settle (a settlement that ends
+// Unknown) needs an ambiguous write and a read outage together, so it gets
+// a targeted trial.
+func TestScheduler_ReachesEveryYieldClass(t *testing.T) {
+	yields, steps, _ := plannedSweep(plannedSweepSeeds)
+	for _, class := range []string{YieldEngineLoad, YieldEngineWrite, YieldPeerProbe, YieldBeforePublish, YieldAfterPublish,
+		YieldBeforeStmt, YieldAfterStmt, YieldGateProbe, YieldConfirmProbe, YieldStmtIssued, YieldStmtApplied} {
+		if yields[class] == 0 {
+			t.Errorf("yield class %s never reached (yields %v)", class, yields)
+		} else if steps[class] == 0 {
+			t.Errorf("no actor ever stepped at %s", class)
+		}
+	}
+	reached := false
+	for seed := uint64(1); seed <= 50 && !reached; seed++ {
+		tr := GeneratePlannedTrial(seed)
+		for _, op := range tr.Actors.Ops {
+			if op.Kind == OpPlannedFailover && op.Site != tr.SiteNames[0] && op.Site != unknownPlannedTarget {
+				tr.Actors.Ops = append(tr.Actors.Ops,
+					Op{At: op.At + 1, Kind: OpPFWriteLost, N: 1}, Op{At: op.At + 1, Kind: opPFSettleOutage, N: settleAttempts})
+				sort.SliceStable(tr.Actors.Ops, func(i, j int) bool { return tr.Actors.Ops[i].At < tr.Actors.Ops[j].At })
+				break
+			}
+		}
+		reached = RunTrial(tr, false, nil).Planned.Yields[YieldEngineSettle] > 0
+	}
+	if !reached {
+		t.Error("an unsettled write never yielded engine.settle")
+	}
+}
+
+// TestSlowStatementInterleavesWithOtherActors: a slow statement yields
+// inside the statement and other actors (a grant, a Poll, an update step)
+// run while it is blocked.
+func TestSlowStatementInterleavesWithOtherActors(t *testing.T) {
+	_, steps, _ := plannedSweep(plannedSweepSeeds)
+	if steps[YieldStmtIssued] == 0 || steps[YieldStmtApplied] == 0 {
+		t.Fatalf("no actor stepped inside a slow statement (steps %v)", steps)
+	}
+}
+
+// TestRetiringPollAfterReplacement: after a manager replacement the
+// retired manager keeps polling inside its window (a Poll in flight).
+func TestRetiringPollAfterReplacement(t *testing.T) {
+	_, _, counts := plannedSweep(plannedSweepSeeds)
+	if counts["managersReplaced"] == 0 || counts["retiringPolls"] == 0 {
+		t.Fatalf("replacements %d, retiring polls %d", counts["managersReplaced"], counts["retiringPolls"])
+	}
+}
+
+// TestRestartPromotedTargetReachesWasWritable: a target restarted after the
+// run's read_only=OFF boots read_only=ON and the run still finishes
+// (§7.1 WasWritable), never rolling back.
+func TestRestartPromotedTargetReachesWasWritable(t *testing.T) {
+	found := false
+	for seed := uint64(1); seed <= 400 && !found; seed++ {
+		r := RunTrial(GeneratePlannedTrial(seed), false, nil)
+		if r.Planned.Counts["promotedTargetRestarted"] == 0 {
+			continue
+		}
+		for _, o := range r.Planned.Outcomes {
+			if o == string(v1alpha1.PlannedFailoverOutcomeRolledBack) {
+				t.Fatalf("seed %d: a run rolled back after its target restarted post-write (outcomes %v)", seed, r.Planned.Outcomes)
+			}
+			if o == string(v1alpha1.PlannedFailoverOutcomeSucceeded) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no run finished after its promoted target restarted")
 	}
 }

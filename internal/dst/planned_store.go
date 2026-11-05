@@ -68,6 +68,9 @@ type simPlannedStore struct {
 	late         []lateCommit
 	statusDenied int // polls left
 	readOutage   int // polls left
+	// settleOutage fails this many settlement reads (not the pass's Load):
+	// a read outage that starts between a write and its settlement.
+	settleOutage int
 
 	// onCommit observes every committed change (kind names the writer)
 	// with the object before and after; invariants hang off it.
@@ -431,6 +434,10 @@ func (s *simPlannedStore) settle(_ context.Context, base *v1alpha1.MysqlFailover
 	var lastErr error
 	for attempt := 1; attempt <= settleAttempts; attempt++ {
 		cur, err := s.loadLocked()
+		if err == nil && s.settleOutage > 0 {
+			s.settleOutage--
+			cur, err = nil, errStoreReadDown
+		}
 		if err != nil {
 			lastErr = err
 			continue
@@ -701,4 +708,63 @@ func holdStands(obj *v1alpha1.MysqlFailoverGroup) bool {
 	parts := strings.Split(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation], "/")
 	return len(parts) == 3 && parts[0] != "" &&
 		v1alpha1.PlannedFailoverOutcome(parts[1]) == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
+}
+
+// PlannedStore is the simulated planned-failover store, exported for the
+// component tests (test/component) so both use one implementation of the
+// write protocol and its fault script.
+type PlannedStore = simPlannedStore
+
+// NewPlannedStore returns a store over a copy of obj, its fence and
+// deadline timestamps taken from clk.
+func NewPlannedStore(obj *v1alpha1.MysqlFailoverGroup, clk clock.Clock) *PlannedStore {
+	return newSimPlannedStore(obj, clk)
+}
+
+// SetDead installs the operator-death check (nil: never dead).
+func (s *simPlannedStore) SetDead(dead func() bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dead = dead
+}
+
+// SetAnnotations patches annotations as an unconditioned writer would ("" deletes).
+func (s *simPlannedStore) SetAnnotations(kv map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.obj == nil {
+		return
+	}
+	s.patchAnnotationsLocked("annotations", kv)
+}
+
+// MutateStatus applies fn to the stored status as an unconditioned status
+// writer would (another controller, a human). A no-op change does not move
+// the resourceVersion.
+func (s *simPlannedStore) MutateStatus(fn func(*v1alpha1.MysqlFailoverGroupStatus)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.obj == nil {
+		return
+	}
+	next := *s.obj.Status.DeepCopy()
+	fn(&next)
+	s.commitStatusLocked("mutate", next)
+}
+
+// LogStrings renders the operation log.
+func (s *simPlannedStore) LogStrings() []string {
+	var out []string
+	for _, op := range s.Log() {
+		out = append(out, op.String())
+	}
+	return out
+}
+
+// SettleOutage fails the next n settlement reads (not the pass's Load): a
+// read outage that starts between a write and its settlement.
+func (s *simPlannedStore) SettleOutage(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settleOutage += n
 }

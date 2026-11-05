@@ -210,6 +210,9 @@ func GenerateActors(t Trial) Actors {
 func GeneratePlannedTrial(seed uint64) Trial {
 	t := GenerateTrial(seed)
 	t.Actors = GenerateActors(t)
+	// A request made just before HealAt may wait out its admission
+	// deadline: the settle window must let every run end.
+	t.Polls = t.HealAt + max(t.Polls-t.HealAt, plannedSettlePolls)
 	return t
 }
 

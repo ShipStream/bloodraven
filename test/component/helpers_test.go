@@ -96,6 +96,34 @@ type mockMySQL struct {
 	// calls counts every statement call by method name, including failed
 	// and lost ones.
 	calls map[string]int
+	// stopClearsThreads makes STOP REPLICA stop the reported threads, as
+	// MySQL does. Off by default: older fixtures assert on the status after
+	// a stop.
+	stopClearsThreads bool
+	// stmtLog records every applied mutation as "<Method>[:on|:off]", in
+	// order (exactly-once assertions).
+	stmtLog []string
+}
+
+// mutatingStmt are the statements stmtLog records by name; the read-only
+// setters record themselves with their value ("SetReadOnly:off").
+var mutatingStmt = map[string]bool{
+	"Promote": true, "StopReplica": true, "ResetReplicaAll": true,
+	"ChangeReplicationSource": true, "StartReplica": true, "KillAppConnections": true,
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+// statements returns the applied mutations so far (see stmtLog).
+func (m *mockMySQL) statements() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.stmtLog...)
 }
 
 // errMockSessionLost is what a pinned session's call sees once its server
@@ -194,6 +222,9 @@ func (m *mockMySQL) stmt(name string, pin *int, apply func() error) error {
 		return errMockSessionLost
 	}
 	err := apply()
+	if err == nil && mutatingStmt[name] {
+		m.stmtLog = append(m.stmtLog, name)
+	}
 	m.mu.Unlock()
 	if b != nil && b.afterApply {
 		b.hold()
@@ -255,6 +286,7 @@ func (m *mockMySQL) setSuperReadOnly(pin *int, on bool) error {
 		} else {
 			m.setSuperROFalseN++
 		}
+		m.stmtLog = append(m.stmtLog, "SetSuperReadOnly:"+onOff(on))
 		return nil
 	})
 }
@@ -280,6 +312,10 @@ func (m *mockMySQL) stopReplica(pin *int) error {
 			return errors.New("transient: i/o timeout")
 		}
 		m.stoppedReplica = true
+		if m.stopClearsThreads && m.replicaStatus != nil {
+			m.replicaStatus.IORunning = false
+			m.replicaStatus.SQLRunning = false
+		}
 		return nil
 	})
 }
@@ -306,6 +342,7 @@ func (m *mockMySQL) setReadOnlyStmt(pin *int, on bool) error {
 			m.superReadOnly = false
 			m.setReadOnlyFalseN++
 		}
+		m.stmtLog = append(m.stmtLog, "SetReadOnly:"+onOff(on))
 		return nil
 	})
 }
@@ -541,6 +578,23 @@ func (m *mockMySQL) replacePod(p podReplacement) {
 		m.replicaStatus.IORunning = true
 		m.replicaStatus.SQLRunning = true
 	}
+}
+
+// dropConnections breaks every connection to the server without changing
+// its state (a network blip, a proxy restart): pinned sessions fail from
+// their next call, pooled calls redial.
+func (m *mockMySQL) dropConnections() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.incarnation++
+}
+
+// setRO sets read_only and super_read_only directly, as an actor outside
+// the operator would (a human, the sidecar).
+func (m *mockMySQL) setRO(ro, sro bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.readOnly, m.superReadOnly = ro, sro
 }
 
 // setServerUUID sets @@server_uuid of the current server.

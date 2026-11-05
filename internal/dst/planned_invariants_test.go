@@ -118,8 +118,15 @@ func TestPlannedInvariant_FenceAuthority(t *testing.T) {
 		f := newMonFixture(t)
 		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
 		f.c.RogueWritable("beta")
+		f.mon.onYield(YieldPeerProbe)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		f.want("PlannedFenceWithoutAuthority")
+	})
+	t.Run("drOnlyFenceByTheManagerIsAllowed", func(t *testing.T) {
+		f := newMonFixture(t, state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleDROnly)
+		f.write(v1alpha1.PlannedFailoverPhaseDraining, nil, nil)
+		_ = f.pf("gamma").SetSuperReadOnly(context.Background(), true)
+		f.want()
 	})
 	t.Run("alreadyFenced", func(t *testing.T) {
 		f := newMonFixture(t)
@@ -162,8 +169,21 @@ func TestPlannedInvariant_UnfenceAttribution(t *testing.T) {
 		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		f.c.RogueWritable("beta")
+		f.mon.onYield(YieldPeerProbe) // the rollback's probe saw beta writable
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, false)
 		f.want("UnfenceBesideWritable")
+	})
+	t.Run("rogueAfterTheProbeIsTheResidual", func(t *testing.T) {
+		f := newMonFixture(t)
+		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
+		f.mon.onYield(YieldPeerProbe)
+		f.c.RogueWritable("beta") // lands between the probe and the unfence
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, false)
+		f.want()
+		if f.mon.stats.RogueRaceResidual != 1 {
+			t.Fatalf("RogueRaceResidual %d, want 1", f.mon.stats.RogueRaceResidual)
+		}
 	})
 }
 

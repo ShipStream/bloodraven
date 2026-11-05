@@ -1103,6 +1103,22 @@ func emergencyDragonflyCallback(dfMgr *DragonflyManager) func(context.Context, s
 // reproduces.
 func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) {
 	tm.deploymentLeases = r.deploymentLeases
+	// Wire the store before anything can promote. The annotations it writes
+	// are the second durable copy of the record below, on an API path that
+	// fails independently of the status subresource.
+	reader := r.apiReader
+	if reader == nil {
+		reader = r.client
+	}
+	tm.SetFailoverStateRecorder(NewAnnotationFailoverStateRecorder(r.client, reader, nn))
+	tm.restoreFailoverRecordFrom(fg, nn, r.logger)
+}
+
+// restoreFailoverRecordFrom is the manager-side part of restoreFailoverState:
+// the observed authority, the watermark and the newer failover record of
+// fg's two durable copies. The simulator calls it through
+// RestoreFailoverStateForSim.
+func (tm *TopologyManager) restoreFailoverRecordFrom(fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, logger *slog.Logger) {
 	tm.topologyGeneration = fg.Status.TopologyGeneration
 	tm.deploymentActiveSite = fg.Status.ActiveSite
 	// Observed, not named: this process did not make that site primary.
@@ -1120,32 +1136,24 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 	if tm.deploymentLeases != nil {
 		tm.deploymentTopologyPending()
 	}
-	// Wire the store before anything can promote. The annotations it writes
-	// are the second durable copy of the record below, on an API path that
-	// fails independently of the status subresource.
-	reader := r.apiReader
-	if reader == nil {
-		reader = r.client
-	}
-	tm.SetFailoverStateRecorder(NewAnnotationFailoverStateRecorder(r.client, reader, nn))
 
 	statusRecord := FailoverRecordFromStatus(fg)
-	failoverRecord, fromAnnotations, err := EffectiveFailoverRecord(fg, time.Now())
+	failoverRecord, fromAnnotations, err := EffectiveFailoverRecord(fg, tm.clock.Now())
 	if err != nil {
 		var readErr *FailoverRecordReadError
 		if errors.As(err, &readErr) {
 			if readErr.Annotations != nil {
 				// Corrupt or unsafe annotation: fall back to the other valid
 				// copy rather than silently resetting or poisoning the cooldown.
-				r.logger.Error("out-of-band anti-flap annotation unreadable; falling back to CR status",
+				logger.Error("out-of-band anti-flap annotation unreadable; falling back to CR status",
 					"fg", nn.String(), "error", readErr.Annotations)
 			}
 			if readErr.Status != nil {
-				r.logger.Error("CR status anti-flap state unreadable; ignoring unsafe copy",
+				logger.Error("CR status anti-flap state unreadable; ignoring unsafe copy",
 					"fg", nn.String(), "error", readErr.Status)
 			}
 		} else {
-			r.logger.Error("durable anti-flap state unreadable; ignoring unsafe copy",
+			logger.Error("durable anti-flap state unreadable; ignoring unsafe copy",
 				"fg", nn.String(), "error", err)
 		}
 	}
@@ -1158,21 +1166,21 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 	if failoverRecord.LastFailoverTarget != "" {
 		tm.SetLastFailoverTarget(failoverRecord.LastFailoverTarget)
 		if fromAnnotations {
-			r.logger.Warn("restored lastFailoverTarget from out-of-band annotations",
+			logger.Warn("restored lastFailoverTarget from out-of-band annotations",
 				"fg", nn.String(), "target", failoverRecord.LastFailoverTarget,
 				"statusTarget", statusRecord.LastFailoverTarget)
 		} else {
-			r.logger.Info("restored lastFailoverTarget from CR status", "fg", nn.String(), "target", failoverRecord.LastFailoverTarget)
+			logger.Info("restored lastFailoverTarget from CR status", "fg", nn.String(), "target", failoverRecord.LastFailoverTarget)
 		}
 	}
 	if !failoverRecord.LastFailover.IsZero() {
 		tm.SetLastFailover(failoverRecord.LastFailover)
 		if fromAnnotations {
-			r.logger.Warn("restored lastFailover from out-of-band annotations",
+			logger.Warn("restored lastFailover from out-of-band annotations",
 				"fg", nn.String(), "lastFailover", failoverRecord.LastFailover,
 				"statusLastFailover", statusRecord.LastFailover)
 		} else {
-			r.logger.Info("restored lastFailover from CR status", "fg", nn.String(), "lastFailover", failoverRecord.LastFailover)
+			logger.Info("restored lastFailover from CR status", "fg", nn.String(), "lastFailover", failoverRecord.LastFailover)
 		}
 	}
 	// The watermark goes with the newer record. An out-of-band record

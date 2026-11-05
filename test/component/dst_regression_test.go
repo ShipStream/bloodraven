@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -542,3 +543,35 @@ func (f recorderFunc) RecordFailoverState(ctx context.Context, r controller.Fail
 // manager polling unretired beside its successor) were harness defects, not
 // operator findings, and are pinned in internal/dst (TestReplacePod_* and
 // TestRegistry_*).
+
+// TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld pins DST-2: with this
+// process's slot holding the run and no manager registered, EnsureClaim
+// returned Granted, so every pass cleared and re-marked the
+// manager-absent-since annotation and the §6.3 deadline never fired (actors-on
+// DST seed 31 at the time: mark/clear alternating every pass). The run must
+// keep one durable start and end SourceLeftFenced{ManagerUnavailable} after
+// five minutes.
+func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
+	h := newPFHarness(t, pfOpts{})
+	h.tgt.setGtidExecuted(pfUUIDA + ":1-50") // lags: the run holds the claim in WaitingForLag
+	h.request("dc2")
+	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.setCurrent(nil)
+	h.pass()
+	start := h.store.Object().GetAnnotations()[controller.PlannedFailoverManagerAbsentSinceAnnotation]
+	if start == "" {
+		t.Fatal("no manager-absent-since annotation")
+	}
+	for range 12 {
+		h.clk.Advance(30 * time.Second)
+		h.pass()
+		if pf := h.pf(); pf.Result != nil {
+			break
+		}
+		if got := h.store.Object().GetAnnotations()[controller.PlannedFailoverManagerAbsentSinceAnnotation]; got != start {
+			t.Fatalf("the absent-since start moved: %q → %q", start, got)
+		}
+	}
+	pf := h.pf()
+	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonManagerUnavailable)
+}

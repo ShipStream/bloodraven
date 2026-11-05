@@ -81,6 +81,11 @@ const (
 	// OpReplacePod replaces Site's pod; K > 0 regresses its data directory
 	// K ticks (#218).
 	OpReplacePod OpKind = "replacePod"
+
+	// opPFSettleOutage fails the next N settlement reads only. Never
+	// generated: hand-built trials use it to reach a settlement that ends
+	// Unknown (an ambiguous write while the API server stops answering).
+	opPFSettleOutage OpKind = "pfSettleOutage"
 )
 
 // Op is one scheduled fault operation, applied at the start of poll At.

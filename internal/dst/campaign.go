@@ -90,6 +90,13 @@ func fingerprint(violations []Violation) string {
 				key = "CooldownViolated(restart+stateLost)"
 			}
 		}
+		if strings.Contains(v.Detail, replacedBeforeRecordMarker) &&
+			(v.Invariant == "AntiFlapStateLost" || v.Invariant == "CooldownViolated" || v.Invariant == "WedgedNoPrimary") {
+			key = v.Invariant + "(replacement)"
+		}
+		if v.Invariant == "DualWritableUnresolved" && strings.Contains(v.Detail, confirmedClaimMarker) {
+			key = "DualWritableUnresolved(confirmedClaim)"
+		}
 		set[key] = struct{}{}
 	}
 	keys := make([]string, 0, len(set))

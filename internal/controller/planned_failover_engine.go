@@ -122,6 +122,10 @@ type PlannedFailoverEngine struct {
 	// admission wraps admission passes; nil means no deployment leases.
 	admission plannedAdmissionGuard
 
+	// runIDSource mints run IDs; nil is uuid.NewUUID. The simulator sets
+	// a deterministic one (SetRunIDSourceForSim).
+	runIDSource func() string
+
 	mu     sync.Mutex
 	runs   map[string]*plannedRunMemo
 	groups map[types.NamespacedName]*plannedGroupMemo
@@ -206,6 +210,14 @@ func NewPlannedFailoverEngine(store PlannedFailoverStore, topo PlannedFailoverTo
 
 // SetSimHooksForSim installs the DST yield hooks.
 func (e *PlannedFailoverEngine) SetSimHooksForSim(h SimHooks) { e.hooks = h }
+
+// newRunID mints a run's ID (§2.1).
+func (e *PlannedFailoverEngine) newRunID() string {
+	if e.runIDSource != nil {
+		return e.runIDSource()
+	}
+	return string(uuid.NewUUID())
+}
 
 func (e *PlannedFailoverEngine) yield(point string) {
 	if e.hooks.Yield != nil {
@@ -574,7 +586,7 @@ func (e *PlannedFailoverEngine) newRunBlock(fg *v1alpha1.MysqlFailoverGroup, req
 	now := metav1.NewTime(e.clk.Now())
 	settings := plannedFailoverSettingsFor(fg, req)
 	return &v1alpha1.PlannedFailoverStatus{
-		RunID:     string(uuid.NewUUID()),
+		RunID:     e.newRunID(),
 		Revision:  1,
 		Phase:     phase,
 		Target:    req.Site,
@@ -2122,7 +2134,7 @@ func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.M
 	// The older operator's sourcePrimary is pruned on read: the source is
 	// not known, which is why the message asks a human to check.
 	next := &v1alpha1.PlannedFailoverStatus{
-		RunID: string(uuid.NewUUID()), Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseFailed,
+		RunID: e.newRunID(), Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseFailed,
 		Target: target, Source: pf.Source, StartTime: start, Message: msg,
 		Settings: plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: target}),
 		Result:   &v1alpha1.PlannedFailoverResult{Outcome: outcome, Reason: v1alpha1.PlannedFailoverReasonLegacyRunRefused, CompletionTime: now},

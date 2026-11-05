@@ -48,6 +48,9 @@ type pfFakeTopology struct {
 	rollback   func(ref PlannedRunRef) (RollbackResult, error)
 	needsProof bool              // the next mutating call returns errReproveRequired
 	authority  *PlannedAuthority // ManagerAuthority's answer; nil: no manager
+	// onCtx, when set, sees the ctx of every ProbeLag and Promote call (the
+	// pass bound the engine applied).
+	onCtx func(op string, ctx context.Context)
 
 	calls    []string
 	releases []string // "<runId>:<why>"
@@ -238,7 +241,10 @@ func (f *pfFakeTopology) KillAppConnections(_ context.Context, ref PlannedRunRef
 	return 0, nil
 }
 
-func (f *pfFakeTopology) ProbeLag(_ context.Context, ref PlannedRunRef, _ string) (LagProbe, error) {
+func (f *pfFakeTopology) ProbeLag(ctx context.Context, ref PlannedRunRef, _ string) (LagProbe, error) {
+	if f.onCtx != nil {
+		f.onCtx("probe", ctx)
+	}
 	if err := f.guard(ref); err != nil {
 		return LagProbe{}, err
 	}
@@ -260,7 +266,10 @@ func (f *pfFakeTopology) ReadTargetServerUUID(_ context.Context, ref PlannedRunR
 	return "uuid-pdx", nil
 }
 
-func (f *pfFakeTopology) Promote(_ context.Context, ref PlannedRunRef, _ *v1alpha1.PlannedFailoverStatus) (PromoteOutcome, error) {
+func (f *pfFakeTopology) Promote(ctx context.Context, ref PlannedRunRef, _ *v1alpha1.PlannedFailoverStatus) (PromoteOutcome, error) {
+	if f.onCtx != nil {
+		f.onCtx("promote", ctx)
+	}
 	if err := f.guard(ref); err != nil {
 		return PromoteOutcome{}, err
 	}

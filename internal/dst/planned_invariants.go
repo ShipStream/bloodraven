@@ -55,20 +55,28 @@ type runObs struct {
 	// fenceGen is the process generation in which a pf fence landed on
 	// the source (the fence memo lives in that process); -1 if none.
 	fenceGen int
+	// fenceInc is the source's incarnation when the run's fence landed; a
+	// later incarnation means the fence is no longer the run's. healed is
+	// set once the source was writable again after the run ended.
+	fenceInc int
+	healed   bool
 	// intentUUID is the durable Fencing intent's sourceServerUUID; fenceSet
 	// is fence.gtidSet (F).
 	intentUUID string
 	fenceSet   string
 
 	targetWritable bool // the run made its target writable
+	targetInc      int  // the target's incarnation when the run made it writable
 	resets         int  // RESET REPLICA ALL on the target
 	roClearTried   bool // a read_only=OFF was sent to the target
+	writeTried     bool // a super_read_only=OFF or read_only=OFF was sent to the target
 	promotionStmt  bool // any promotion statement was sent to the target
 	pfMutations    int  // every pf mutation attempt for the run
 
 	marked   bool
 	terminal bool
 	outcome  v1alpha1.PlannedFailoverOutcome
+	reason   v1alpha1.PlannedFailoverReason
 
 	// watermark tracking (WatermarkRegressed).
 	published      bool
@@ -81,11 +89,21 @@ type runObs struct {
 	// the open window (for RogueRaceResidual).
 	gateWritable []string
 	gateOpen     bool
-	confirmSet   []string
-	confirmSeen  bool
+	// confirmWritable and publishWritable are the truth-writable sites at
+	// the confirm probe and at the Publishing record.
+	confirmWritable []string
+	publishWritable []string
+	confirmSeen     bool
 
 	unconfirmedSince int // poll of a PromotedUnconfirmed with an unreachable target; -1 none
-	zombieFor        int // engine passes the slot has held this terminal run
+	startSeq         int // the cluster sequence when the monitor first saw the run
+	// promotingGen is the process generation that committed the run's
+	// Promoting record (-1: none). A terminal record from a later process
+	// was decided without the promotion memo (§7.1: a cross-process re-run
+	// cannot prove nothing was sent).
+	promotingGen int
+	targetUUID   string // promotion.targetServerUUID
+	zombieFor    int    // engine passes the slot has held this terminal run
 }
 
 // plannedStats are statistics, not violations.
@@ -100,6 +118,12 @@ type plannedStats struct {
 	ReplacedWhileHeld int
 	// Deferrals counts "planned failover in progress" cross-site deferrals.
 	Deferrals int
+	// ReplacedTargetHold counts holds set by a cross-process re-run that
+	// found the target replaced (§7.1 row 1).
+	ReplacedTargetHold int
+	// SucceededTargetRestarted counts Succeeded runs whose target restarted
+	// (booting read-only) between the run's read_only=OFF and the record.
+	SucceededTargetRestarted int
 }
 
 // plannedMonitor checks the planned-failover invariants of §15.1. The
@@ -123,15 +147,26 @@ type plannedMonitor struct {
 	violations []Violation
 	flagged    map[string]bool
 	stats      plannedStats
+
+	// rogueSeq is the event sequence of the last rogue read_only=0 per
+	// site, and probeSeq the cluster sequence at the last facade peer probe
+	// (fence, rollback). A foreign writable site whose rogue writability
+	// landed after the probe is the §18 R2 residual, not an operator fault.
+	rogueSeq map[string]int
+	probeSeq int
+	// onRecorded is called when a run's Publishing record commits, with its
+	// target and confirmedAt: the durable point of a planned promotion.
+	onRecorded func(target string, confirmedAt time.Time)
 }
 
 func newPlannedMonitor(c *Cluster, sites []string, roles []state.SiteRole) *plannedMonitor {
 	m := &plannedMonitor{
-		c:       c,
-		roles:   map[string]state.SiteRole{},
-		sites:   append([]string(nil), sites...),
-		runs:    map[string]*runObs{},
-		flagged: map[string]bool{},
+		c:        c,
+		roles:    map[string]state.SiteRole{},
+		sites:    append([]string(nil), sites...),
+		runs:     map[string]*runObs{},
+		flagged:  map[string]bool{},
+		rogueSeq: map[string]int{},
 	}
 	for i, s := range sites {
 		m.roles[s] = roles[i]
@@ -191,13 +226,13 @@ func (m *plannedMonitor) claimHeld() bool {
 }
 
 // crossSite reports whether e is a cross-site action the claim and the hold
-// exclude: anything but fencing a non-promotable reader.
+// exclude: anything but fencing a non-promotable (dr-only or reader) site.
 func (m *plannedMonitor) crossSite(e Event) bool {
 	switch e.Kind {
 	case EvPromote, EvResetReplica, EvStopReplica, EvStartReplica, EvChangeSource, EvSetRO, EvDrain, EvKillConns:
 		return true
 	case EvSetSuperRO:
-		return e.Detail != "on=true" || m.roles[e.Site] != state.SiteRoleReadOnly
+		return e.Detail != "on=true" || m.roles[e.Site] == state.SiteRolePrimaryCandidate
 	}
 	return false
 }
@@ -205,6 +240,9 @@ func (m *plannedMonitor) crossSite(e Event) bool {
 // autoMutation reports whether e changes a promotable site's writability
 // (HoldNotHonoured).
 func (m *plannedMonitor) autoMutation(e Event) bool {
+	if m.roles[e.Site] != state.SiteRolePrimaryCandidate && e.Kind == EvSetSuperRO && e.Detail == "on=true" {
+		return false // fencing a non-promotable site is not an automatic promotion action
+	}
 	if m.roles[e.Site] == state.SiteRoleReadOnly {
 		return false
 	}
@@ -223,9 +261,16 @@ func isUnfence(e Event) bool {
 
 // onEvent sees every recorded event (c.mu held).
 func (m *plannedMonitor) onEvent(e Event) {
+	if e.Kind == EvRecoverSite && strings.Contains(e.Detail, "bootWritable=true") {
+		// A pod booted writable (not yet rolled to read_only=ON) is an
+		// external writer, like a human's read_only=0.
+		m.rogueSeq[e.Site] = e.Seq
+		return
+	}
 	if e.Kind == EvRogueWritable {
-		for _, r := range m.runs {
-			if r.gateOpen {
+		m.rogueSeq[e.Site] = e.Seq
+		for _, id := range m.order {
+			if m.runs[id].gateOpen {
 				m.stats.RogueRaceResidual++
 			}
 		}
@@ -245,8 +290,12 @@ func (m *plannedMonitor) onEvent(e Event) {
 	switch {
 	case e.Kind == EvSetRO && e.Detail == "on=false":
 		r.roClearTried = true
+		r.writeTried = true
 		r.promotionStmt = true
-	case e.Kind == EvStopReplica, e.Kind == EvResetReplica, isUnfence(e):
+	case isUnfence(e):
+		r.writeTried = true
+		r.promotionStmt = true
+	case e.Kind == EvStopReplica, e.Kind == EvResetReplica:
 		r.promotionStmt = true
 	}
 }
@@ -261,6 +310,28 @@ func (m *plannedMonitor) writableExceptLocked(site string) []string {
 		}
 	}
 	return out
+}
+
+// externallyWritable reports whether a rogue or a writable boot made site
+// writable at or after event sequence since.
+func (m *plannedMonitor) externallyWritable(site string, since int) bool {
+	seq, ok := m.rogueSeq[site]
+	return ok && seq >= since
+}
+
+// raceResidual splits foreign writable sites into those made writable by a
+// rogue after the facade's last peer probe (the R2 residual, counted) and
+// the rest.
+func (m *plannedMonitor) raceResidual(sites []string) []string {
+	var rest []string
+	for _, w := range sites {
+		if m.externallyWritable(w, m.probeSeq) {
+			m.stats.RogueRaceResidual++
+			continue
+		}
+		rest = append(rest, w)
+	}
+	return rest
 }
 
 // onMutation sees every landed mutation (c.mu held).
@@ -293,19 +364,18 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 
 	// PlannedFenceWithoutAuthority: just before the fence, S must have been
 	// the unique writable site.
-	if e.Kind == EvSetSuperRO && e.Detail == "on=true" {
-		others := m.writableExceptLocked(e.Site)
+	if e.Kind == EvSetSuperRO && e.Detail == "on=true" && e.Site == r.source {
+		others := m.raceResidual(m.writableExceptLocked(e.Site))
 		if !before.Writable() || len(others) > 0 {
 			m.violate("PlannedFenceWithoutAuthority", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
 				"run %s fenced %s (writable before: %v; other writable sites: %v)", r.id, e.Site, before.Writable(), others))
 		}
-		if e.Site == r.source {
-			r.fenceGen = m.procGen
-		}
+		r.fenceGen = m.procGen
+		r.fenceInc = after.Incarnation
 	}
 
 	if isUnfence(e) && e.Site == r.source {
-		if others := m.writableExceptLocked(e.Site); len(others) > 0 {
+		if others := m.raceResidual(m.writableExceptLocked(e.Site)); len(others) > 0 {
 			m.violate("UnfenceBesideWritable", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
 				"run %s unfenced source %s while %v writable", r.id, e.Site, others))
 		}
@@ -344,6 +414,7 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 	case EvSetRO:
 		if e.Detail == "on=false" && after.Writable() {
 			r.targetWritable = true
+			r.targetInc = after.Incarnation
 		}
 	}
 }
@@ -351,6 +422,10 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 // onYield observes yield points: the gate and confirm probes record truth.
 func (m *plannedMonitor) onYield(point string) {
 	class := yieldClass(point)
+	if class == YieldPeerProbe {
+		m.probeSeq = m.c.Seq()
+		return
+	}
 	if class != YieldGateProbe && class != YieldConfirmProbe {
 		return
 	}
@@ -372,7 +447,7 @@ func (m *plannedMonitor) onYield(point string) {
 		r.gateOpen = true
 		return
 	}
-	r.confirmSet = others
+	r.confirmWritable = m.c.writableSites()
 	r.confirmSeen = true
 }
 
@@ -386,7 +461,7 @@ func (m *plannedMonitor) onCommit(_ string, before, after *v1alpha1.MysqlFailove
 	}
 	r := m.runs[pf.RunID]
 	if r == nil {
-		r = &runObs{id: pf.RunID, fenceGen: -1, unconfirmedSince: -1}
+		r = &runObs{id: pf.RunID, fenceGen: -1, unconfirmedSince: -1, startSeq: m.c.Seq(), promotingGen: -1}
 		m.runs[pf.RunID] = r
 		m.order = append(m.order, pf.RunID)
 	}
@@ -403,16 +478,27 @@ func (m *plannedMonitor) onCommit(_ string, before, after *v1alpha1.MysqlFailove
 	if markerRunID(after.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) == r.id {
 		r.marked = true
 	}
+	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && r.promotingGen < 0 {
+		r.promotingGen = m.procGen
+	}
+	if pf.Promotion != nil {
+		r.targetUUID = pf.Promotion.TargetServerUUID
+	}
 	if (pf.Phase == v1alpha1.PlannedFailoverPhasePublishing || pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded) &&
 		!r.published && r.fenceSet != "" {
 		r.published = true
+		r.publishWritable = m.c.writableSites()
 		if pf.Promotion != nil && pf.Promotion.ConfirmedAt != nil {
 			r.confirmedAt = pf.Promotion.ConfirmedAt.UTC().Truncate(time.Second)
+		}
+		if m.onRecorded != nil {
+			m.onRecorded(r.target, r.confirmedAt)
 		}
 	}
 	if pf.Result != nil && !r.terminal {
 		r.terminal = true
 		r.outcome = pf.Result.Outcome
+		r.reason = pf.Result.Reason
 		m.checkTerminal(r)
 	}
 	if !holdConditionTrue(before) && holdConditionTrue(after) {
@@ -495,39 +581,58 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 			dishonest("the source " + r.source + " is not writable")
 		}
 		if r.fenceSet != "" {
-			if extra, err := ownExtras(tgt, r.fenceSet); err == nil && !extra.IsEmpty() {
+			// Own extras an external writer put on the target during the
+			// run are not the run's writes.
+			if extra, err := ownExtras(tgt, r.fenceSet); err == nil && !extra.IsEmpty() && !m.externallyWritable(r.target, r.startSeq) {
 				dishonest(fmt.Sprintf("the target holds own-UUID extras %s", extra))
 			}
 		}
 	case v1alpha1.PlannedFailoverOutcomeSourceLeftFenced:
-		if r.source != "" && src.Writable() {
+		// SourceLost and ManagerUnavailable end the run without reaching the
+		// source (§6.2): whether it is fenced is what the run cannot know,
+		// and the sidecar lease rule or the emergency path decides it.
+		unreachable := r.reason == v1alpha1.PlannedFailoverReasonSourceLost ||
+			r.reason == v1alpha1.PlannedFailoverReasonManagerUnavailable
+		if r.source != "" && src.Writable() && !unreachable && !m.externallyWritable(r.source, r.startSeq) {
 			dishonest("the source " + r.source + " is writable")
 		}
 	case v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed:
-		if !r.roClearTried {
-			dishonest("it never sent read_only=OFF")
+		if !r.writeTried && !r.crossProcess(m.procGen) {
+			dishonest("it never sent super_read_only=OFF or read_only=OFF")
 		}
 		if !tgt.Reachable() {
 			r.unconfirmedSince = m.poll
 		}
 	case v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
-		if !r.promotionStmt {
+		if !r.promotionStmt && !r.crossProcess(m.procGen) {
 			dishonest("it sent no promotion statement")
 		}
 	case v1alpha1.PlannedFailoverOutcomeSucceeded:
-		if len(writable) != 1 || writable[0] != r.target {
-			dishonest(fmt.Sprintf("the writable sites are %v", writable))
+		// The claim was released at the Publishing record; what happens to
+		// the sites after it (a target restart, a pod booting writable) is
+		// the topology manager's to handle. The run is judged at its
+		// confirm probe, or at the Publishing record when the facade
+		// confirmed without a probe yield (§7.3).
+		at := r.confirmWritable
+		if !r.confirmSeen {
+			at = r.publishWritable
+		}
+		if at == nil {
+			at = writable
+		}
+		if len(at) != 1 || at[0] != r.target {
+			dishonest(fmt.Sprintf("the writable sites were %v when it confirmed", at))
+		}
+		if len(writable) == 0 && r.targetWritable && tgt.Incarnation != r.targetInc {
+			m.stats.SucceededTargetRestarted++
 		}
 		if r.fenceSet != "" && !containsSet(tgt, r.fenceSet) {
 			dishonest("the target lacks fenced transactions " + r.fenceSet)
 		}
-		others := r.confirmSet
-		if !r.confirmSeen {
-			others = nil
-			for _, w := range writable {
-				if w != r.target {
-					others = append(others, w)
-				}
+		var others []string
+		for _, w := range at {
+			if w != r.target {
+				others = append(others, w)
 			}
 		}
 		if len(others) > 0 {
@@ -536,11 +641,28 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 	}
 }
 
+// crossProcess reports whether a process other than the one that wrote the
+// Promoting record is deciding the run now.
+func (r *runObs) crossProcess(gen int) bool { return r.promotingGen >= 0 && r.promotingGen != gen }
+
 // checkHoldAtRisk is HoldWithoutDataAtRisk: a hold needs two writable
 // sites, or a site holding transactions outside F.
+//
+// One spec-mandated exception (§7.1 row 1): a
+// cross-process re-run that finds the target's server_uuid changed cannot
+// rule out writes to the replaced pod, whose data is gone from view, and
+// holds by design.
 func (m *plannedMonitor) checkHoldAtRisk(r *runObs) {
 	if r.fenceSet == "" {
 		return // F unknown: the rule cannot be judged
+	}
+	if r.crossProcess(m.procGen) && r.targetUUID != "" {
+		for _, t := range m.c.Truth() {
+			if t.Name == r.target && !strings.EqualFold(t.ServerUUID, r.targetUUID) {
+				m.stats.ReplacedTargetHold++
+				return
+			}
+		}
 	}
 	f, err := mysql.ParseGTIDSet(r.fenceSet)
 	if err != nil {
@@ -676,6 +798,13 @@ func (m *plannedMonitor) endPoll(p int, managerReady bool) {
 	truth := m.c.Truth()
 	for _, id := range m.order {
 		r := m.runs[id]
+		if r.terminal && r.outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed {
+			for _, t := range truth {
+				if t.Name == r.source && t.Writable() {
+					r.healed = true
+				}
+			}
+		}
 		if r.unconfirmedSince < 0 || p-r.unconfirmedSince <= unconfirmedGrace {
 			continue
 		}
@@ -724,9 +853,24 @@ func (m *plannedMonitor) checkEnd(endPoll int) []Violation {
 	sort.Strings(ids)
 	for _, id := range ids {
 		r := m.runs[id]
-		if r.outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
-			attributable := r.fenceGen >= 0 || (r.intentUUID != "" && byName[r.source].ServerUUID == r.intentUUID)
-			if attributable && allReachable && (lastTarget == "" || lastTarget == r.source) && !anyWritable {
+		if r.outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed {
+			// Judged only while the source still carries the run's own
+			// fence: a restart since (a new incarnation) replaced it, and a
+			// fence that was healed once and came back is not the run's.
+			src := byName[r.source]
+			// The monitor sees every process's pf fences, so "the run's own
+			// fence" is one that landed, in the source's current
+			// incarnation, and is still set (not mysqld's read_only boot).
+			attributable := r.fenceGen >= 0 && src.Incarnation == r.fenceInc && src.SuperReadOnly
+			// The re-assert's own preconditions (as WedgedNoPrimary): every
+			// peer GTID-contained in the source; a divergence needs a human.
+			contained := true
+			for _, t := range truth {
+				if t.Name != r.source && !src.Executed.contains(t.Executed) {
+					contained = false
+				}
+			}
+			if attributable && contained && allReachable && (lastTarget == "" || lastTarget == r.source) && !anyWritable {
 				m.violate("FencedSourceNeverHealed", id, fmt.Sprintf(
 					"run %s left its own fence on %s and after settle no site is writable", id, r.source))
 			}

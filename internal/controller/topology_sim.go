@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // Hooks for the deterministic simulation's step model of an ordered update
@@ -222,3 +226,28 @@ func (u *UpdateController) SetTickIntervalForTest(d time.Duration) { u.tickInter
 // UpdaterForTest returns tm's ordered-update controller (nil when none), for
 // harnesses that shrink its tick.
 func (tm *TopologyManager) UpdaterForTest() *UpdateController { return tm.updater }
+
+// SetRunIDSourceForSim makes e mint run IDs with fn instead of random UUIDs,
+// so a simulated trial replays byte for byte. Call before the first Step.
+func (e *PlannedFailoverEngine) SetRunIDSourceForSim(fn func() string) { e.runIDSource = fn }
+
+// RestoreFailoverStateForSim is startManager's restore for a simulated
+// process: rec becomes the out-of-band recorder, then the observed
+// authority, the watermark and the newer failover record are restored from
+// fg exactly as restoreFailoverState does. Call before the first Poll.
+func (tm *TopologyManager) RestoreFailoverStateForSim(fg *v1alpha1.MysqlFailoverGroup, rec FailoverStateRecorder) {
+	tm.SetFailoverStateRecorder(rec)
+	tm.restoreFailoverRecordFrom(fg, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, tm.logger)
+}
+
+// RestorePlannedFailoverStateForSim is startManager's planned-failover
+// restore from an uncached view (§3.7, §6.5): a confirmed run's record and
+// the naming of a source the run left fenced. Call after
+// RestoreFailoverStateForSim.
+func (tm *TopologyManager) RestorePlannedFailoverStateForSim(view *v1alpha1.MysqlFailoverGroup) {
+	if view == nil {
+		return
+	}
+	var r *TopologyManagerRunner // the restore reads nothing from the runner
+	r.restorePlannedFailoverState(tm, view, types.NamespacedName{Namespace: view.Namespace, Name: view.Name})
+}

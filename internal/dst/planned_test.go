@@ -3,6 +3,7 @@ package dst
 import (
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 	"strconv"
@@ -137,15 +138,52 @@ func TestDeterminism_Planned(t *testing.T) {
 	}
 }
 
-// plannedInherentFingerprint is the one finding class a trial with actors may
-// produce (README, Known finding classes): OpPFStatusDenied combines a
-// status outage with operator restarts, and when the fault stream denies the
-// out-of-band store over the same restarts, nothing could carry the cooldown.
-const plannedInherentFingerprint = "CooldownViolated(restart+stateLost)"
+// plannedAllowedClasses are the only finding classes a trial with actors
+// may produce (README, Known finding classes):
+//   - CooldownViolated(restart+stateLost): inherent. OpPFStatusDenied
+//     combines a status outage with operator restarts, and when the fault
+//     stream denies the out-of-band store over the same restarts, nothing
+//     could carry the cooldown.
+//   - AntiFlapStateLost(replacement), CooldownViolated(replacement),
+//     WedgedNoPrimary(replacement): the open finding DST-1 (README, Known
+//     finding classes): an ordered update's record
+//     made on, or not yet carried to status by, a manager that is then
+//     replaced is lost while the out-of-band store is down.
+var plannedAllowedClasses = map[string]bool{
+	"CooldownViolated(restart+stateLost)": true,
+	"AntiFlapStateLost(replacement)":      true,
+	"CooldownViolated(replacement)":       true,
+	"WedgedNoPrimary(replacement)":        true,
+	// DST-4: a confirmed run's claim, held through a stalled Publishing
+	// write, blocks the manager's fence of a site an external writer made
+	// writable after the confirm.
+	"DualWritableUnresolved(confirmedClaim)": true,
+}
+
+// allowedFingerprint reports whether every class of fp is allowed. Classes
+// are joined with '+', which also appears inside a class's parentheses.
+func allowedFingerprint(fp string) bool {
+	depth, start := 0, 0
+	for i := 0; i <= len(fp); i++ {
+		switch {
+		case i < len(fp) && fp[i] == '(':
+			depth++
+		case i < len(fp) && fp[i] == ')':
+			depth--
+		case i == len(fp) || (fp[i] == '+' && depth == 0):
+			if !plannedAllowedClasses[fp[start:i]] {
+				return false
+			}
+			start = i + 1
+		}
+	}
+	return true
+}
 
 // TestDST_PlannedQuick is the actors-on sweep (§15.1 "Runs"): 300 seeds with
-// every actor enabled. Any violation outside the documented inherent class
-// fails the build. Seeds shift whenever the actor generator changes; fixed
+// every actor enabled, driving the production engine, facade, claim and
+// out-of-band recorder. Any violation outside plannedAllowedClasses fails
+// the build. Seeds shift whenever the actor generator changes; fixed
 // findings are pinned in test/component/dst_regression_test.go.
 func TestDST_PlannedQuick(t *testing.T) {
 	trials := 300
@@ -154,21 +192,34 @@ func TestDST_PlannedQuick(t *testing.T) {
 			trials = n
 		}
 	}
-	inherent := 0
-	for seed := uint64(1); seed <= uint64(trials); seed++ {
+	start := uint64(1)
+	if s := os.Getenv("DST_PLANNED_START"); s != "" {
+		if n, err := strconv.ParseUint(s, 10, 64); err == nil && n > 0 {
+			start = n
+		}
+	}
+	first := map[string]uint64{}
+	counts := map[string]int{}
+	for seed := start; seed < start+uint64(trials); seed++ {
 		r := RunTrial(GeneratePlannedTrial(seed), false, nil)
 		if len(r.Violations) == 0 {
 			continue
 		}
-		if fingerprint(r.Violations) == plannedInherentFingerprint {
-			inherent++
+		fp := fingerprint(r.Violations)
+		if _, ok := first[fp]; !ok {
+			first[fp] = seed
+		}
+		counts[fp]++
+		if allowedFingerprint(fp) {
 			continue
 		}
 		for _, v := range r.Violations {
 			t.Errorf("seed %d: %s", seed, v)
 		}
 	}
-	t.Logf("%d/%d trials in the inherent class %s", inherent, trials, plannedInherentFingerprint)
+	for fp, seed := range first {
+		t.Logf("class %s: %d/%d trials, first seed %d", fp, counts[fp], trials, seed)
+	}
 }
 
 // TestDST_PlannedRepro replays one actors-on seed with full capture.
@@ -184,7 +235,11 @@ func TestDST_PlannedRepro(t *testing.T) {
 	}
 	trial := GeneratePlannedTrial(seed)
 	t.Logf("trial:\n%s", trial)
-	r := RunTrial(trial, true, nil)
+	var handler slog.Handler
+	if os.Getenv("DST_LOG") != "" {
+		handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	}
+	r := RunTrial(trial, true, handler)
 	for _, e := range r.Events {
 		t.Log(e)
 	}

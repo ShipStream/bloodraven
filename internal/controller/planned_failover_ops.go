@@ -177,6 +177,11 @@ func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunR
 				"automatic failover is held after planned failover run %s", held.runID), nil
 		case held.runID != ref.RunID:
 			return claimDecisionWait(v1alpha1.PlannedFailoverWaitClaimHeld, "planned failover run %s holds the claim", held.runID), nil
+		case snap.Current == nil:
+			// The slot outlives the manager: without one the run can send
+			// nothing, and the manager-absence deadline (§6.3) must keep
+			// running rather than restart on every Granted pass.
+			return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerAbsent, "the claim is held; no topology manager is registered"), nil
 		default:
 			return claimDecisionGranted(&held), nil
 		}

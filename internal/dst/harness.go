@@ -85,6 +85,15 @@ type trialRunner struct {
 	// legitimate (the replacement never knew the record), so the latch
 	// above only arms while the promoting process is still the one running.
 	promotionRestarts int
+	// replacedBeforeRecord latches when a manager replacement (trials with
+	// actors) lands after the last promotion and before any status write
+	// carried it: the replacement restores from a status that never saw
+	// the record (README, Known finding classes: DST-1).
+	replacedBeforeRecord bool
+	// retiredRecordPolls are the polls at which an ordered update recorded
+	// its handoff on a retired manager, which its replacement never learns
+	// (README, Known finding classes: DST-1).
+	retiredRecordPolls map[int]bool
 
 	// sidecars are the per-site fencing actors (sidecar.go). Each wraps a
 	// real sidecar.FencingMonitor.
@@ -95,10 +104,13 @@ type trialRunner struct {
 	sidecarTick int
 
 	promotionPolls []int
-	restartPolls   []int
-	violations     []Violation
-	kindsSeen      map[string]struct{}
-	reasonsSeen    map[string]struct{}
+	// promotionActors is the actor of each promotion in promotionPolls
+	// (trials with actors only).
+	promotionActors []Actor
+	restartPolls    []int
+	violations      []Violation
+	kindsSeen       map[string]struct{}
+	reasonsSeen     map[string]struct{}
 
 	// currentTarget is the failover target the running operator process
 	// knows in memory; it reverts to the persisted value on restart.
@@ -142,7 +154,7 @@ type trialRunner struct {
 // run here: the trial wires a nil UpdateController.
 type simFailoverStore struct{ r *trialRunner }
 
-func (s *simFailoverStore) RecordFailoverState(_ context.Context, rec controller.FailoverRecord) error {
+func (s *simFailoverStore) RecordFailoverState(ctx context.Context, rec controller.FailoverRecord) error {
 	if s.r.cluster.OperatorDead() {
 		return errOperatorDead
 	}
@@ -150,6 +162,25 @@ func (s *simFailoverStore) RecordFailoverState(_ context.Context, rec controller
 		s.r.cluster.NoteFailoverStateWrite(rec.LastFailoverTarget, true)
 		s.r.stateDeniedSincePromotion = true
 		return errors.New("mysqlfailovergroups patch forbidden (sim: outage)")
+	}
+	if s.r.pl != nil {
+		// The production recorder over the simulated object: an uncached
+		// read, then a merge patch conditioned on its resourceVersion, a
+		// no-op when the stored record is not superseded.
+		if err := s.r.pl.recordOOB(ctx, rec); err != nil {
+			// The path is unavailable (a read outage fails the recorder's
+			// uncached read; a conflict storm, an outage): the record may be
+			// behind the last promotion, exactly as for a denied write.
+			s.r.cluster.NoteFailoverStateWrite(rec.LastFailoverTarget, true)
+			s.r.stateDeniedSincePromotion = true
+			return err
+		}
+		if stored, ok := s.r.pl.storedOOB(); ok {
+			s.r.persistedFailover = &stored
+		}
+		s.r.stateDeniedSincePromotion = false
+		s.r.cluster.NoteFailoverStateWrite(rec.LastFailoverTarget, false)
+		return nil
 	}
 	annotations, err := controller.FailoverRecordAnnotations(rec)
 	if err != nil {
@@ -162,9 +193,6 @@ func (s *simFailoverStore) RecordFailoverState(_ context.Context, rec controller
 	s.r.persistedFailover = &cp
 	s.r.stateDeniedSincePromotion = false
 	s.r.cluster.NoteFailoverStateWrite(rec.LastFailoverTarget, false)
-	if s.r.pl != nil {
-		s.r.pl.recordOOB(annotations)
-	}
 	return nil
 }
 
@@ -293,6 +321,15 @@ func (r *trialRunner) newManager() *controller.TopologyManager {
 	)
 	tm.SetSleepForTest(func(time.Duration) {})
 
+	if r.pl != nil {
+		// Trials with actors run the production restore (runner.go
+		// restoreFailoverState and restorePlannedFailoverState) from an
+		// uncached read of the simulated object.
+		r.rehydrated = r.pl.restoreManager(tm, &simFailoverStore{r: r})
+		r.restoreSites(tm)
+		r.wireStatus(tm)
+		return tm
+	}
 	tm.SetFailoverStateRecorder(&simFailoverStore{r: r})
 
 	// Rehydration (runner.go): the anti-flap record comes from whichever
@@ -319,6 +356,14 @@ func (r *trialRunner) newManager() *controller.TopologyManager {
 	}
 	r.rehydrated = rehydrated
 
+	r.restoreSites(tm)
+	r.wireStatus(tm)
+	return tm
+}
+
+// restoreSites restores per-site source convergence and recovery state from
+// the simulated CR status (every site can carry its own recovery marker).
+func (r *trialRunner) restoreSites(tm *controller.TopologyManager) {
 	if p := r.persisted; p != nil {
 		for _, site := range p.Sites {
 			if site.SourceConvergenceState != "" || site.SourceHost != "" {
@@ -332,8 +377,17 @@ func (r *trialRunner) newManager() *controller.TopologyManager {
 			}
 		}
 	}
+}
 
+// wireStatus sets the manager's StatusCallback: the simulated CR status
+// subresource.
+func (r *trialRunner) wireStatus(tm *controller.TopologyManager) {
 	tm.StatusCallback = func(snap controller.TopologySnapshot) {
+		if r.pl != nil && tm != r.tm {
+			// As the runner's callback: a replaced manager's status
+			// writes are dropped (runner.go startManager).
+			return
+		}
 		if r.cluster.OperatorDead() {
 			// A process that no longer exists does not land status writes,
 			// however far the dying Poll gets through its own bookkeeping.
@@ -365,10 +419,11 @@ func (r *trialRunner) newManager() *controller.TopologyManager {
 			len(r.restartPolls) == r.promotionRestarts {
 			r.statusDroppedPromotion = true
 		}
+		if !cp.LastFailover.Before(r.lastPromotionAt) && !r.statusDroppedPromotion {
+			r.replacedBeforeRecord = false
+		}
 		tm.MarkStatusWriteResult(nil)
 	}
-
-	return tm
 }
 
 func (r *trialRunner) run() {
@@ -470,6 +525,12 @@ func (r *trialRunner) restartOperator(poll int) {
 	r.checkRehydratedAntiFlap(poll)
 }
 
+// replacedBeforeRecordMarker tags an AntiFlapStateLost whose record was
+// lost to a manager replacement: made on a retired manager, or made before
+// the replacement and not yet carried by any status write
+// (fingerprint AntiFlapStateLost(replacement), README, Known finding classes: DST-1).
+const replacedBeforeRecordMarker = "(the record was made on, or not yet written to status by, a replaced manager)"
+
 // checkRehydratedAntiFlap compares what the new process rehydrated against
 // the promotion the harness actually observed.
 //
@@ -498,6 +559,9 @@ func (r *trialRunner) checkRehydratedAntiFlap(poll int) {
 	why := "the out-of-band store was accepting writes"
 	if r.stateDeniedSincePromotion {
 		why = "the promoting process landed a CR status write that dropped the record"
+		if r.replacedBeforeRecord {
+			why += " " + replacedBeforeRecordMarker
+		}
 	}
 	r.violations = append(r.violations, Violation{
 		Invariant: "AntiFlapStateLost",

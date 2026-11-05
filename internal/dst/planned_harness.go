@@ -17,15 +17,11 @@ import (
 
 // plannedHarness is the planned-failover actor machinery of one trial
 // (§15.1): the simulated object and store, the process's manager registry,
-// the yield scheduler and the invariant monitor. It exists only when
+// the production PlannedFailoverEngine over the production facade
+// (NewPlannedFailoverTopology on the registry), the update actors, the
+// production out-of-band recorder over the simulated object, the yield
+// scheduler and the invariant monitor. It exists only when
 // Trial.Actors.Enabled.
-//
-// The planned failover engine and the ordered-update step actor plug in
-// through engineStep and updateStart/updateStep. Until they are wired the
-// actor ops that need them are counted as unsupported and otherwise
-// skipped, and the trial still exercises the store, the registry, manager
-// replacement and absence, pod replacement, the request annotation and the
-// existing invariants under all of it.
 type plannedHarness struct {
 	r     *trialRunner
 	nn    types.NamespacedName
@@ -35,38 +31,77 @@ type plannedHarness struct {
 	mon   *plannedMonitor
 	sink  *simSink
 
+	// eng and facade belong to the current process; a restart builds new
+	// ones (the engine and facade memos die with the process).
+	eng    *controller.PlannedFailoverEngine
+	facade controller.PlannedFailoverTopology
+	runSeq int
+	// nextEngine is when the engine's requeue is due (zero: none);
+	// lastEngineRV is the object's resourceVersion at the last pass, so a
+	// change to the object (a watch event) triggers a pass.
+	nextEngine   time.Time
+	lastEngineRV int64
+
+	// updates are the live update actors of this process.
+	updates []*updateActor
+
+	// recorder is the production out-of-band recorder over the simulated
+	// object; oobRecs are the records it accepted, for OpOOBLateWrite.
+	recorder controller.FailoverStateRecorder
+	oobRecs  []controller.FailoverRecord
+
 	ops  []Op
 	next int
 
-	// engineStep runs one engine pass and returns the requeue delay; nil
-	// until the engine is wired. nextEngine is when the next pass is due on
-	// the fake clock.
-	engineStep func(ctx context.Context) (time.Duration, error)
-	nextEngine time.Time
-
-	// updateStart starts the update actor on tm (false: refused where
-	// startUpdate would refuse); updateStep runs one statement and reports
-	// whether the actor is still active. nil until the …ForSim hooks land.
-	updateStart func(tm *controller.TopologyManager) bool
-	updateStep  func(ctx context.Context) bool
-
-	// unsupported counts actor ops skipped because their seam is not wired.
+	// unsupported counts actor ops that could not run (no manager to
+	// start an update on, no earlier record to replay).
 	unsupported map[OpKind]int
-
-	// oob is every accepted out-of-band record write with the
-	// resourceVersion its request was conditioned on (OpOOBLateWrite).
-	oob []oobWrite
+	counts      map[string]int
 
 	restart *restartArm
 
 	sidecarNext       int
 	builtSinceRestart bool
+
+	// pendingReset is the pf or upd actor whose RESET REPLICA ALL landed on
+	// a site, until its read_only=OFF lands there (a promotion).
+	pendingReset map[string]Actor
+
+	// tmPolled and retiringPolled record that this tick's Poll of the
+	// current and of the retiring managers ran: a manager polls once per
+	// poll interval, so a yield may pull its Poll forward (into an engine
+	// pass that runs first) but never adds a second one to the tick, which
+	// would advance its debounce with no time passing.
+	tmPolled, retiringPolled bool
+	// firstTick forces the poll-first order on the first tick of a process:
+	// its first Poll precedes its first engine pass (§15.1).
+	firstTick bool
 }
 
-// oobWrite is one accepted out-of-band failover-record write.
-type oobWrite struct {
-	annotations map[string]string
-	baseRV      int64
+// actorPromotion is a planned run's or an ordered update's promotion.
+type actorPromotion struct {
+	site  string
+	actor Actor
+}
+
+// promotions detects pf and upd promotions across polls: a RESET REPLICA
+// ALL and then a read_only=OFF by the same actor on the same site.
+func (pl *plannedHarness) promotions(events []Event) []actorPromotion {
+	var out []actorPromotion
+	for _, e := range events {
+		a := effectiveActor(e.Actor)
+		if (a != ActorPF && a != ActorUpdate) || !effectiveOutcome(e.Outcome) {
+			continue
+		}
+		switch {
+		case e.Kind == EvResetReplica:
+			pl.pendingReset[e.Site] = a
+		case e.Kind == EvSetRO && e.Detail == "on=false" && pl.pendingReset[e.Site] == a:
+			delete(pl.pendingReset, e.Site)
+			out = append(out, actorPromotion{site: e.Site, actor: a})
+		}
+	}
+	return out
 }
 
 // restartArm is an armed OpRestartPromotedTarget: once the run clears
@@ -77,13 +112,28 @@ type restartArm struct {
 	fired  bool
 }
 
+// plannedSettlePolls is the minimum settle window of a trial with actors: a
+// request made just before HealAt may wait out its admission deadline (2m)
+// before it ends.
+const plannedSettlePolls = 150
+
+// Planned-failover settings of the simulated group: the lag wait and drain
+// are short so a run fits a trial.
+var (
+	simMaxLagWait   = metav1.Duration{Duration: 20 * time.Second}
+	simDrainTimeout = metav1.Duration{Duration: 3 * time.Second}
+)
+
 func newPlannedHarness(r *trialRunner) *plannedHarness {
 	t := r.trial
 	nn := types.NamespacedName{Namespace: r.cfg.Namespace, Name: r.cfg.Name}
-	if nn.Name == "" {
-		nn = types.NamespacedName{Namespace: "sim", Name: "sim"}
-	}
 	obj := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: nn.Namespace, Name: nn.Name}}
+	for i, name := range t.SiteNames {
+		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: name, Role: v1alpha1.SiteRole(t.Roles[i])})
+	}
+	cooldown := metav1.Duration{Duration: time.Duration(t.CooldownSec) * time.Second}
+	obj.Spec.FailoverCooldown = &cooldown
+	obj.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{MaxLagWait: &simMaxLagWait, DrainTimeout: &simDrainTimeout}
 	if p := r.persisted; p != nil && !p.LastFailover.IsZero() {
 		lf := metav1.NewTime(p.LastFailover.UTC().Truncate(time.Second))
 		obj.Status.LastFailover = &lf
@@ -96,20 +146,27 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	}
 
 	pl := &plannedHarness{
-		r:           r,
-		nn:          nn,
-		store:       newSimPlannedStore(obj, r.clk),
-		reg:         newSimRegistry(nn),
-		sched:       newYieldScheduler(t.Actors.SchedSeed),
-		mon:         newPlannedMonitor(r.cluster, t.SiteNames, t.Roles),
-		sink:        &simSink{},
-		ops:         append([]Op(nil), t.Actors.ActiveOps()...),
-		unsupported: map[OpKind]int{},
+		r:            r,
+		nn:           nn,
+		store:        newSimPlannedStore(obj, r.clk),
+		sched:        newYieldScheduler(t.Actors.SchedSeed),
+		mon:          newPlannedMonitor(r.cluster, t.SiteNames, t.Roles),
+		sink:         &simSink{},
+		ops:          append([]Op(nil), t.Actors.ActiveOps()...),
+		unsupported:  map[OpKind]int{},
+		counts:       map[string]int{},
+		lastEngineRV: -1,
+		pendingReset: map[string]Actor{},
 	}
+	pl.newProcess()
 	pl.mon.cur = pl.store.Object()
+	pl.mon.claim = slotView{pl}
+	pl.mon.onRecorded = func(target string, confirmedAt time.Time) { r.armPromotion(target, confirmedAt) }
 	pl.store.dead = r.cluster.OperatorDead
 	pl.store.clusterStatusDenied = r.cluster.StatusDenied
 	pl.store.onCommit = pl.mon.onCommit
+	pl.recorder = controller.NewAnnotationFailoverStateRecorder(
+		&storeClient{store: pl.store, denied: r.cluster.StateDenied}, nil, nn)
 
 	r.cluster.setPlannedHooks(plannedHooks{
 		yield:      pl.sched.Yield,
@@ -133,6 +190,24 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 		pl.reg.mu.Unlock()
 		return true
 	})
+	for _, probe := range []struct {
+		name string
+		try  func(*controller.TopologyManager) bool
+	}{
+		{"tm.mu", (*controller.TopologyManager).TryLockManagerForSim},
+		{"failoverStateWriteMu", (*controller.TopologyManager).TryLockFailoverStateWriteForSim},
+		{"restoreProtectionMu", (*controller.TopologyManager).TryLockRestoreProtectionForSim},
+		{"restoreFenceMu", (*controller.TopologyManager).TryLockRestoreFenceForSim},
+	} {
+		pl.sched.trackLock(probe.name, func() bool {
+			for _, tm := range pl.managers() {
+				if !probe.try(tm) {
+					return false
+				}
+			}
+			return true
+		})
+	}
 	pl.sched.observe(pl.mon.onYield)
 	pl.sched.observe(pl.onYield)
 	pl.registerSchedActors()
@@ -143,40 +218,72 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	return pl
 }
 
+// newProcess builds the per-process state: the registry (slot), the facade
+// and the engine. Called at setup and at every operator restart.
+func (pl *plannedHarness) newProcess() {
+	if pl.reg != nil {
+		pl.reg.shutdown()
+	}
+	pl.reg = newSimRegistry(pl.nn)
+	pl.reg.retire = (*controller.TopologyManager).RetireForSim
+	pl.reg.changingSites = (*controller.TopologyManager).ChangingSitesForSim
+	hooks := controller.SimHooks{Yield: pl.sched.Yield}
+	pl.facade = controller.NewPlannedFailoverTopology(pl.reg)
+	controller.SetSimHooksForSim(pl.facade, hooks)
+	pl.eng = controller.NewPlannedFailoverEngine(pl.store, pl.facade, pl.sink, pl.r.clk, hooks)
+	pl.eng.SetRunIDSourceForSim(func() string {
+		pl.runSeq++
+		return fmt.Sprintf("run-%04d", pl.runSeq)
+	})
+	pl.updates = nil
+	pl.nextEngine = time.Time{}
+	pl.lastEngineRV = -1
+	pl.builtSinceRestart = false
+	pl.firstTick = true
+}
+
+// managers returns every manager of the process: the current one and the
+// retiring ones.
+func (pl *plannedHarness) managers() []*controller.TopologyManager {
+	snap := pl.reg.Snapshot(pl.nn)
+	out := append([]*controller.TopologyManager(nil), snap.Retiring...)
+	if pl.r.tm != nil {
+		out = append(out, pl.r.tm)
+	}
+	return out
+}
+
 // registerSchedActors registers the actors a yield may step, in step order.
 func (pl *plannedHarness) registerSchedActors() {
 	r := pl.r
 	pl.sched.addActor(&schedActor{
 		name:  "tm",
 		pct:   30,
-		ready: func() bool { return !r.cluster.OperatorDead() && pl.reg.Current() != nil },
-		step: func(ctx context.Context) {
-			if tm := pl.reg.Current(); tm != nil {
-				tm.Poll(WithActor(ctx, ActorTM))
-			}
-		},
+		ready: func() bool { return !r.cluster.OperatorDead() && !pl.tmPolled && pl.reg.Current() != nil },
+		step:  func(ctx context.Context) { pl.pollCurrent(ctx) },
 	})
 	pl.sched.addActor(&schedActor{
 		name:  "retiring",
 		pct:   30,
-		ready: func() bool { return !r.cluster.OperatorDead() && pl.reg.retiringCount() > 0 },
-		step: func(ctx context.Context) {
-			if snap := pl.reg.Snapshot(pl.nn); len(snap.Retiring) > 0 {
-				snap.Retiring[0].Poll(WithActor(ctx, ActorTM))
-			}
-		},
+		ready: func() bool { return !r.cluster.OperatorDead() && !pl.retiringPolled },
+		step:  func(ctx context.Context) { pl.pollRetiring(ctx) },
 	})
 	pl.sched.addActor(&schedActor{
 		name:  string(ActorPF),
 		pct:   40,
-		ready: func() bool { return !r.cluster.OperatorDead() && pl.engineStep != nil },
+		ready: func() bool { return !r.cluster.OperatorDead() },
 		step:  func(ctx context.Context) { pl.stepEngine(ctx) },
 	})
 	pl.sched.addActor(&schedActor{
 		name:  string(ActorUpdate),
 		pct:   40,
-		ready: func() bool { return !r.cluster.OperatorDead() && pl.updateStep != nil },
-		step:  func(ctx context.Context) { pl.updateStep(WithActor(ctx, ActorUpdate)) },
+		ready: func() bool { return !r.cluster.OperatorDead() && len(pl.liveUpdates()) > 0 },
+		step: func(ctx context.Context) {
+			if live := pl.liveUpdates(); len(live) > 0 {
+				live[0].stepOnce(WithActor(ctx, ActorUpdate))
+				pl.afterUpdates()
+			}
+		},
 	})
 	pl.sched.addActor(&schedActor{
 		name: string(ActorSidecar),
@@ -187,6 +294,12 @@ func (pl *plannedHarness) registerSchedActors() {
 		pl.sched.addActor(&schedActor{
 			name: string(ActorRogue),
 			pct:  5,
+			// Only inside the fault window: warmup and the settle window
+			// after HealAt are fault-free by construction.
+			ready: func() bool {
+				p := r.cluster.Poll()
+				return p >= r.trial.WarmupPolls && p < r.trial.HealAt
+			},
 			step: func(context.Context) {
 				names := r.trial.SiteNames
 				r.cluster.RogueWritable(names[pl.sched.rng.IntN(len(names))])
@@ -195,11 +308,36 @@ func (pl *plannedHarness) registerSchedActors() {
 	}
 }
 
+// slotView is the monitor's claimView over the live process's slot.
+type slotView struct{ pl *plannedHarness }
+
+func (v slotView) Held() (string, bool, bool) { return v.pl.reg.Slot(v.pl.nn).HeldForSim() }
+
+func (v slotView) Releases() []claimRelease {
+	var out []claimRelease
+	for _, n := range v.pl.reg.Slot(v.pl.nn).ReleasesForSim() {
+		out = append(out, claimRelease{RunID: n.RunID, Why: n.Why})
+	}
+	return out
+}
+
 // registerManager makes tm the current manager, wired from the uncached
 // object exactly as the runner's startManager wires it.
 func (pl *plannedHarness) registerManager(tm *controller.TopologyManager) {
 	pl.reg.register(tm, pl.wiring())
 	pl.builtSinceRestart = true
+}
+
+// restoreManager is startManager's restore for a new manager: the failover
+// record, watermark and observed authority from the object (production
+// restoreFailoverRecordFrom), then the planned-failover restore. It
+// returns the record the manager started from.
+func (pl *plannedHarness) restoreManager(tm *controller.TopologyManager, rec controller.FailoverStateRecorder) controller.FailoverRecord {
+	obj := pl.store.Object()
+	tm.RestoreFailoverStateForSim(obj, rec)
+	tm.RestorePlannedFailoverStateForSim(obj)
+	eff, _, _ := controller.EffectiveFailoverRecord(obj, pl.r.clk.Now())
+	return eff
 }
 
 // wiring builds the ManagerWiring from the object (an uncached read).
@@ -244,17 +382,12 @@ func plannedHoldOf(obj *v1alpha1.MysqlFailoverGroup) *controller.PlannedHold {
 }
 
 // restartProcess is an operator restart: a new process with a new registry
-// (the slot and the engine memo are gone) and leadership re-acquired.
+// (the slot is gone), a new engine and facade (their memos are gone), no
+// update actors, and leadership re-acquired. Its first engine pass runs
+// after the new manager's first Poll (the per-poll order guarantees it).
 func (pl *plannedHarness) restartProcess() {
-	pl.reg.shutdown()
-	retire, changing := pl.reg.retire, pl.reg.changingSites
-	pl.reg = newSimRegistry(pl.nn)
-	pl.reg.retire, pl.reg.changingSites = retire, changing
-	pl.builtSinceRestart = false
 	pl.mon.noteRestart()
-	// The engine is rebuilt by the new process; its first pass runs after
-	// the new manager's first Poll (the per-poll order guarantees it).
-	pl.nextEngine = time.Time{}
+	pl.newProcess()
 }
 
 // beginPoll advances the store (timed faults, late commits).
@@ -275,18 +408,38 @@ func (pl *plannedHarness) applyOp(op Op, poll int) {
 		pl.store.SetRequest(op.Site)
 	case OpOrderedUpdate:
 		tm := pl.reg.Current()
-		if pl.updateStart == nil || tm == nil {
+		if tm == nil || r.cluster.OperatorDead() {
 			pl.unsupported[op.Kind]++
 			return
 		}
-		pl.updateStart(tm)
-	case OpReplaceManager:
-		pl.mon.noteReplace()
-		tm := r.newManager()
-		if !pl.reg.replace(tm, pl.wiring(), op.N, nil) {
-			pl.unsupported[op.Kind]++ // replaced, but without the in-flight window
+		if a := startUpdateActor(r, tm); a != nil {
+			pl.updates = append(pl.updates, a)
+			pl.counts["updatesStarted"]++
+		} else {
+			pl.counts["updatesRefused"]++
 		}
+	case OpReplaceManager:
+		if r.cluster.OperatorDead() {
+			pl.unsupported[op.Kind]++
+			return
+		}
+		pl.mon.noteReplace()
+		if !r.lastPromotionAt.IsZero() {
+			// Cleared by the next status write that carries the promotion.
+			r.replacedBeforeRecord = true
+		}
+		old := r.tm
+		tm := r.newManager()
+		var inFlight func() bool
+		if old != nil {
+			inFlight = old.OrderedUpdateClaimedForSim
+		}
+		if !pl.reg.replace(tm, pl.wiring(), op.N, inFlight) {
+			pl.unsupported[op.Kind]++
+		}
+		pl.builtSinceRestart = true
 		r.tm = tm
+		pl.counts["managersReplaced"]++
 	case OpManagerAbsent:
 		pl.reg.setAbsent(op.N)
 	case OpPFWriteLost:
@@ -304,6 +457,9 @@ func (pl *plannedHarness) applyOp(op Op, poll int) {
 	case OpPFStatusDenied:
 		pl.mon.noteFault()
 		pl.store.DenyStatus(op.N)
+	case opPFSettleOutage:
+		pl.mon.noteFault()
+		pl.store.SettleOutage(op.N)
 	case OpOOBLateWrite:
 		pl.replayOOB()
 	case OpRestartPromotedTarget:
@@ -317,31 +473,39 @@ func (pl *plannedHarness) applyOp(op Op, poll int) {
 	}
 }
 
-// recordOOB lands an accepted out-of-band record write on the object.
-func (pl *plannedHarness) recordOOB(annotations map[string]string) {
-	base := pl.store.ResourceVersion()
-	if err := pl.store.PatchAnnotations("failoverRecord", annotations); err != nil {
-		return
+// recordOOB runs the production out-of-band recorder for rec.
+func (pl *plannedHarness) recordOOB(ctx context.Context, rec controller.FailoverRecord) error {
+	if err := pl.recorder.RecordFailoverState(ctx, rec); err != nil {
+		return err
 	}
-	pl.oob = append(pl.oob, oobWrite{annotations: annotations, baseRV: base})
+	pl.oobRecs = append(pl.oobRecs, rec)
+	return nil
 }
 
-// replayOOB delivers a late duplicate of the previous out-of-band record
-// write. The record is written conditioned on the resourceVersion its
-// request read (§5.3), so the API server refuses the duplicate unless
-// nothing has moved the object since; the sim applies the same check.
+// storedOOB is the out-of-band record on the object.
+func (pl *plannedHarness) storedOOB() (controller.FailoverRecord, bool) {
+	obj := pl.store.Object()
+	if obj == nil {
+		return controller.FailoverRecord{}, false
+	}
+	rec, err := controller.FailoverRecordFromAnnotations(obj.GetAnnotations())
+	if err != nil || rec.IsZero() {
+		return controller.FailoverRecord{}, false
+	}
+	return rec, true
+}
+
+// replayOOB delivers a late duplicate of an older out-of-band record
+// write through the production recorder, which must refuse to overwrite
+// the newer record (§5.3).
 func (pl *plannedHarness) replayOOB() {
-	if len(pl.oob) < 2 {
+	if len(pl.oobRecs) < 2 {
+		pl.unsupported[OpOOBLateWrite]++
 		return
 	}
-	old := pl.oob[len(pl.oob)-2]
-	if pl.store.ResourceVersion() != old.baseRV {
-		pl.store.mu.Lock()
-		pl.store.logLocked("oobLateWrite", "refused (conditioned)")
-		pl.store.mu.Unlock()
-		return
-	}
-	_ = pl.store.PatchAnnotations("oobLateWrite", old.annotations)
+	old := pl.oobRecs[len(pl.oobRecs)-2]
+	_ = pl.recorder.RecordFailoverState(WithActor(context.Background(), ActorTM), old)
+	pl.counts["oobReplayed"]++
 }
 
 // onMutation feeds the monitor and arms the restart-promoted-target fault
@@ -370,31 +534,134 @@ func (pl *plannedHarness) onYield(string) {
 		return
 	}
 	a.fired = true
+	pl.counts["promotedTargetRestarted"]++
 	pl.r.cluster.RestartSite(a.target)
 }
 
+// liveUpdates is the update actors still running, retiring managers'
+// first.
+func (pl *plannedHarness) liveUpdates() []*updateActor {
+	var retiring, current []*updateActor
+	for _, a := range pl.updates {
+		if !a.active() {
+			continue
+		}
+		if a.tm == pl.r.tm {
+			current = append(current, a)
+		} else {
+			retiring = append(retiring, a)
+		}
+	}
+	return append(retiring, current...)
+}
+
+// afterUpdates drops finished actors; when a replaced manager's update has
+// ended and no other replaced manager holds one, the current manager's
+// predecessor guard is cleared, as retireManagerLocked's goroutine does.
+func (pl *plannedHarness) afterUpdates() {
+	ended := false
+	kept := pl.updates[:0]
+	for _, a := range pl.updates {
+		if a.active() {
+			kept = append(kept, a)
+			continue
+		}
+		if a.tm != pl.r.tm {
+			ended = true
+		}
+	}
+	pl.updates = kept
+	if !ended {
+		return
+	}
+	for _, a := range pl.updates {
+		if a.tm != pl.r.tm && a.claimed() {
+			return
+		}
+	}
+	// The trial's manager, even inside a managerAbsent window: the sim's
+	// absent manager comes back as the same object, while production would
+	// register a fresh one that never had the guard.
+	if cur := pl.r.tm; cur != nil {
+		cur.SetPredecessorUpdateInFlightForSim(false)
+	}
+}
+
 // pollActors is the per-poll actor order: the current manager's Poll, the
-// retiring managers', the update actor's step, then the engine pass when
-// its requeue is due.
+// retiring managers', the update actors' steps (retiring first), then the
+// engine pass when its requeue is due or the object changed.
+//
+// The reconcile and the update goroutine run concurrently with Poll in
+// production, so on a scheduler draw the update steps and the engine pass
+// run first and the tick's Polls run at one of their yields (or after
+// them); never on a process's first tick.
 func (pl *plannedHarness) pollActors(ctx context.Context) {
+	pl.tmPolled, pl.retiringPolled = false, false
+	early := !pl.firstTick && pl.sched.rng.IntN(2) == 0
+	pl.firstTick = false
+	if !early {
+		pl.pollCurrent(ctx)
+		pl.pollRetiring(ctx)
+	}
+	for _, a := range pl.liveUpdates() {
+		if pl.r.cluster.OperatorDead() {
+			break
+		}
+		pl.sched.run(string(ActorUpdate), func() { a.stepOnce(WithActor(ctx, ActorUpdate)) })
+	}
+	pl.afterUpdates()
+	if pl.engineDue() {
+		pl.sched.run(string(ActorPF), func() { pl.stepEngine(ctx) })
+	}
+	pl.pollCurrent(ctx)
+	pl.pollRetiring(ctx)
+}
+
+// pollCurrent runs this tick's Poll of the current manager, once.
+func (pl *plannedHarness) pollCurrent(ctx context.Context) {
+	if pl.tmPolled || pl.r.cluster.OperatorDead() {
+		return
+	}
+	pl.tmPolled = true
 	if tm := pl.reg.Current(); tm != nil {
 		pl.sched.run("tm", func() { tm.Poll(WithActor(ctx, ActorTM)) })
 	}
+}
+
+// pollRetiring runs this tick's Polls of the retiring managers, once.
+func (pl *plannedHarness) pollRetiring(ctx context.Context) {
+	if pl.retiringPolled || pl.r.cluster.OperatorDead() {
+		return
+	}
+	pl.retiringPolled = true
 	for _, old := range pl.reg.retiringToPoll() {
+		pl.counts["retiringPolls"]++
 		pl.sched.run("retiring", func() { old.Poll(WithActor(ctx, ActorTM)) })
 	}
-	if pl.updateStep != nil && !pl.r.cluster.OperatorDead() {
-		pl.sched.run(string(ActorUpdate), func() { pl.updateStep(WithActor(ctx, ActorUpdate)) })
+}
+
+// engineDue reports whether a reconcile of the group would run now: its
+// requeue is due, or the object changed since the last pass.
+func (pl *plannedHarness) engineDue() bool {
+	if pl.r.cluster.OperatorDead() {
+		return false
 	}
-	if pl.engineStep != nil && !pl.r.cluster.OperatorDead() && !pl.r.clk.Now().Before(pl.nextEngine) {
-		pl.sched.run(string(ActorPF), func() { pl.stepEngine(ctx) })
+	if pl.store.ResourceVersion() != pl.lastEngineRV {
+		return true
 	}
+	return !pl.nextEngine.IsZero() && !pl.r.clk.Now().Before(pl.nextEngine)
 }
 
 // stepEngine runs one engine pass and schedules the next.
 func (pl *plannedHarness) stepEngine(ctx context.Context) {
-	requeue, _ := pl.engineStep(WithActor(ctx, ActorPF))
-	pl.nextEngine = pl.r.clk.Now().Add(requeue)
+	pl.lastEngineRV = pl.store.ResourceVersion()
+	requeue, _ := pl.eng.Step(WithActor(ctx, ActorPF), pl.nn)
+	if requeue > 0 {
+		pl.nextEngine = pl.r.clk.Now().Add(requeue)
+	} else {
+		pl.nextEngine = time.Time{}
+	}
+	pl.counts["enginePasses"]++
 	pl.mon.noteEnginePass()
 }
 
@@ -422,6 +689,7 @@ func (pl *plannedHarness) tickOneSidecar(ctx context.Context) {
 func (pl *plannedHarness) endPoll(p int) {
 	if a := pl.restart; a != nil && a.target != "" && !a.fired {
 		a.fired = true
+		pl.counts["promotedTargetRestarted"]++
 		pl.r.cluster.RestartSite(a.target)
 	}
 	pl.mon.endPoll(p, pl.reg.Current() != nil && pl.builtSinceRestart)
@@ -431,6 +699,9 @@ func (pl *plannedHarness) endPoll(p int) {
 // healAll clears the actor faults at HealAt.
 func (pl *plannedHarness) healAll() {
 	pl.store.ClearFaults()
+	if pl.restart != nil && !pl.restart.fired {
+		pl.restart = nil // an armed restart must not fire in the settle window
+	}
 	pl.reg.mu.Lock()
 	pl.reg.absentPolls = 0
 	pl.reg.mu.Unlock()
@@ -466,24 +737,50 @@ func (pl *plannedHarness) result() *PlannedResult {
 	for k, v := range pl.sched.yields {
 		yields[k] = v
 	}
+	counts := map[string]int{}
+	for k, v := range pl.counts {
+		counts[k] = v
+	}
+	steps := map[string]int{}
+	for k, v := range pl.sched.steps {
+		steps[k] = v
+	}
+	var outcomes []string
+	for _, id := range pl.mon.order {
+		if r := pl.mon.runs[id]; r.terminal {
+			outcomes = append(outcomes, string(r.outcome))
+		}
+	}
 	return &PlannedResult{
 		Object:      pl.store.Object(),
 		StoreLog:    pl.store.Log(),
 		Yields:      yields,
+		Steps:       steps,
 		Stats:       pl.mon.stats,
 		Unsupported: unsupported,
+		Counts:      counts,
+		Outcomes:    outcomes,
 		SinkEvents:  append([]string(nil), pl.sink.events...),
 	}
 }
 
 // PlannedResult is what a trial with actors reports beyond TrialResult.
 type PlannedResult struct {
-	Object      *v1alpha1.MysqlFailoverGroup
-	StoreLog    []storeOp
-	Yields      map[string]int
+	Object   *v1alpha1.MysqlFailoverGroup
+	StoreLog []storeOp
+	Yields   map[string]int
+	// Steps counts, per yield class, the yields at which another actor
+	// stepped.
+	Steps       map[string]int
 	Stats       plannedStats
 	Unsupported map[OpKind]int
-	SinkEvents  []string
+	// Counts are harness counters: enginePasses, updatesStarted,
+	// updatesRefused, managersReplaced, retiringPolls, oobReplayed,
+	// promotedTargetRestarted.
+	Counts map[string]int
+	// Outcomes are the terminal outcomes of the trial's runs, in run order.
+	Outcomes   []string
+	SinkEvents []string
 }
 
 // ---------------------------------------------------------------------------
@@ -545,4 +842,16 @@ func (h *deferralTap) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *deferralTap) WithGroup(name string) slog.Handler {
 	return &deferralTap{next: h.next.WithGroup(name), fn: h.fn}
+}
+
+// confirmedClaimHeld reports whether the live slot holds a run that has
+// already made its target writable (its Publishing record not yet
+// committed).
+func (pl *plannedHarness) confirmedClaimHeld() bool {
+	id, hold, ok := pl.reg.Slot(pl.nn).HeldForSim()
+	if !ok || hold {
+		return false
+	}
+	r := pl.mon.runs[id]
+	return r != nil && r.targetWritable
 }

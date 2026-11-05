@@ -221,3 +221,29 @@ func (c *Cluster) tryLockCluster() bool {
 	c.mu.Unlock()
 	return true
 }
+
+// Seq is the sequence number the next event will get.
+func (c *Cluster) Seq() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.seq
+}
+
+// writableSites is the truth-writable sites in site order (empty, not nil,
+// when none is).
+func (c *Cluster) writableSites() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.writableSitesLocked()
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+// Poll is the current poll index.
+func (c *Cluster) Poll() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.poll
+}
