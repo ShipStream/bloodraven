@@ -71,11 +71,16 @@ kubectl bloodraven status <group-name> -n <namespace>
 Check the core conditions and status fields:
 - `.status.activeSite`: Is there an active primary site?
 - `.status.topologyGeneration`: Has authoritative topology changed since the deployment's grant or the start of this investigation? This is durable across restarts, not the CR generation.
-- `.status.plannedFailover`: `Deferred/DeploymentHold` normally means a live deployment hold, not a failed promotion. Inspect `retryAfter` and the message's operation ID and instance. If it remains deferred past expiry, check operator logs for Lease persistence errors.
+- `.status.plannedFailover`: read `phase`, `runId`, `result.outcome`, `result.reason`, `result.warnings` and `admission` (`kubectl bloodraven status` prints them). The phases are `Admitting`, `Deferred`, `Fencing`, `Draining`, `WaitingForLag`, `WaitingForDragonflySync`, `PromotingDragonfly`, `Promoting`, `Publishing`, `RollingBack`, `Succeeded`, `Failed`.
+  - `Deferred` with `admission.deferReason: DeploymentHold` normally means a live deployment hold, not a failed promotion. Inspect `admission.retryAfter` and the message's operation ID and instance. If it remains deferred past expiry, check operator logs for Lease persistence errors.
+  - `Admitting` owns nothing and fences nothing; `admission.waitReason` says what it waits for. `PeerUnreadable` means a `primary-candidate` or `dr-only` site does not answer: a planned failover is strict and will end `NotStarted/AdmissionTimeout` after 2 minutes. That is by design, not a bug.
+  - `Failed`: route by `result.outcome` with the [alert matrix](./references/alert_runbook_matrix.md) (`NotStarted`/`RolledBack`: nothing to recover; `SourceLeftFenced`: [playbook 37](./references/troubleshooting_playbooks.md#37-planned-failover-left-the-source-fenced); `PromotedUnconfirmed`: matrix row; `ManualRecoveryRequired`: [playbook 38](./references/troubleshooting_playbooks.md#38-automation-held-after-a-planned-failover-automaticfailoverheld)).
+  - A `bloodraven.shipstream.io/planned-failover-terminal` annotation naming the run ends it whatever `phase` says (status writes had stalled).
 - `.status.conditions`:
   - `Ready == True`?
   - `Bootstrapping == False`?
-  - `RecoveryInProgress == False`? (It is expected to stay set while a planned failover or ordered update is in flight: recovery stands down until the handoff ends. A Dragonfly snapshot upgrade defers it only intermittently, so a site stuck through a whole upgrade is a real stall.)
+  - `AutomaticFailoverHeld` absent or `False`? A `True` condition means a planned failover ended `ManualRecoveryRequired` and **automatic failover, split-brain resolution, the re-assert, ordered updates, rotations, recovery and DNS reconcile are held for the group** until a human resolves the split brain and annotates `bloodraven.shipstream.io/ack-planned-failover-hold=<runId>`. Page on it; see [playbook 38](./references/troubleshooting_playbooks.md#38-automation-held-after-a-planned-failover-automaticfailoverheld). Never acknowledge it before the sites are resolved.
+  - `RecoveryInProgress == False`? (It is expected to stay set while a planned failover holds its claim (`Fencing` through `Promoting`, or `RollingBack`), while an automation hold stands, or while an ordered update is in flight: recovery stands down until it ends. A planned failover that is only `Admitting` or `Deferred` defers nothing, and a Dragonfly snapshot upgrade does not defer recovery at all, so a site stuck through either is a real stall.)
   - `RecoveryBlocked == False`?
 - Pod status: `kubectl get pods -n <namespace> -l app.kubernetes.io/instance=<group-name>`
 - Recent events: `kubectl get events -n <namespace> --sort-by=.lastTimestamp`

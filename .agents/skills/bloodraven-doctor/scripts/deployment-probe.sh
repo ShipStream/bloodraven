@@ -16,14 +16,24 @@ echo "--- Deployment topology and planned operations ---"
 kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o json | jq '{
     group: .metadata.name, namespace: .metadata.namespace,
     activeSite: .status.activeSite, topologyGeneration: .status.topologyGeneration,
-    plannedFailover: .status.plannedFailover, updatePhase: .status.updatePhase,
+    plannedFailover: (.status.plannedFailover // null | if . == null then null else {
+        runId, phase, source, target,
+        outcome: .result.outcome, reason: .result.reason, warnings: .result.warnings,
+        waitReason: .admission.waitReason, deferReason: .admission.deferReason,
+        retryAfter: .admission.retryAfter, admissionDeadline: .admission.deadline,
+        fenceState: .fence.state, promotionState: .promotion.state, rollbackReason: .rollback.reason,
+        message} end),
+    plannedFailoverTerminalMarker: (.metadata.annotations // {})["bloodraven.shipstream.io/planned-failover-terminal"],
+    automaticFailoverHeld: ([.status.conditions[]? | select(.type == "AutomaticFailoverHeld") | {status, reason, message}] | first),
+    updatePhase: .status.updatePhase,
     restoreInPlace: .status.restoreInPlace, dragonflyUpgrade: .status.dragonfly.upgrade,
     restoreReclones: (.status.restoreReclones // null | if . == null then null else {phase, pending} end),
     degraded: ([.status.conditions[]? | select(.type == "Degraded") | {status, reason}] | first),
-    revokeRequested: (.metadata.annotations | has("bloodraven.shipstream.io/revoke-deployment-leases"))
+    revokeRequested: ((.metadata.annotations // {}) | has("bloodraven.shipstream.io/revoke-deployment-leases"))
 }'
 
 echo "Degraded reason RestoreReclonePending (restoreReclones.pending non-empty) keeps the deployment API unstable until the post-restore reclones finish or a Held queue is resolved (playbook 20)."
+echo "A non-terminal plannedFailover phase, a planned-failover claim, or automaticFailoverHeld status=True keeps it unstable (unstableReason PlannedFailover); a hold needs a human acknowledgement (playbook 38)."
 
 echo "--- Declared deployment callers ---"
 kubectl get mysqldatabases.shipstream.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" '

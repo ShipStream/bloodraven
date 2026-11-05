@@ -48,7 +48,7 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
 - `SHOW REPLICA STATUS` shows replication stopped with GTID error (e.g. error 1236).
 - A replica that is still replicating normally can be divergent too (`divergenceDetectedBy=ReplicaAudit`): use playbook 33.
 
-Before treating a site stuck in `RecoveryInProgress` (or an old primary that has not rejoined) as a stall, check whether a handoff owns the sites. Old-primary recovery, its connection drain and replication-source convergence stand down while a planned failover or ordered update is in flight (`.status.plannedFailover.phase`, `.status.updatePhase`) and resume, with a fresh drain budget, once it ends. A Dragonfly snapshot upgrade defers them only intermittently, so it does not explain a stall that lasts the whole upgrade. A planned failover that ends with `reason: RecoveryInFlight` hit its promotion deadline while such a step was still running on the sites; nothing was promoted, and the source was unfenced unless another site was already writable (message ends `left fenced`; see that matrix row). After an operator config or credential change restarts a group's topology manager mid-update, the new manager takes no failover, re-assert, recovery or update until the old manager's ordered update exits. A planned failover that reaches `Promoting` in that window fails closed: `reason: ExecuteFailed` with `a replaced topology manager's ordered update is still finishing on the sites` in the message, nothing sent to the target and the source left fenced (see the matrix row). Meanwhile `status.updatePhase` is empty. The operator log brackets this window with `topology manager deferring to its predecessor's ordered update; no failover, recovery or update until it exits` and `predecessor's ordered update exited; topology manager resuming` (`heldFor`).
+Before treating a site stuck in `RecoveryInProgress` (or an old primary that has not rejoined) as a stall, check whether a handoff owns the sites. Old-primary recovery, its connection drain and replication-source convergence stand down while a planned failover holds its claim (`.status.plannedFailover.phase` from `Fencing` through `Promoting`, or `RollingBack`), while an automation hold stands (`AutomaticFailoverHeld=True`, [playbook 38](#38-automation-held-after-a-planned-failover-automaticfailoverheld)), or while an ordered update is in flight (`.status.updatePhase`), and resume, with a fresh drain budget, once it ends. A planned failover that is only `Admitting` or `Deferred` owns nothing, and a Dragonfly snapshot upgrade does not defer recovery at all, so neither explains a stall. A planned failover waits in `Admitting` (`admission.waitReason: RecoveryInFlight`) for a recovery or convergence step that is already running; nothing is fenced while it waits, and if the step outlasts the 2-minute admission deadline the run ends `NotStarted` with `AdmissionTimeout`. After an operator config or credential change restarts a group's topology manager mid-update, the new manager takes no failover, re-assert, recovery or update until the old manager's ordered update exits, and a new planned failover waits in `Admitting` with `PredecessorBusy`. Meanwhile `status.updatePhase` is empty. The operator log brackets this window with `topology manager deferring to its predecessor's ordered update; no failover, recovery or update until it exits` and `predecessor's ordered update exited; topology manager resuming` (`heldFor`).
 
 ### Diagnostic Steps
 1. Inspect GTID executed sets:
@@ -154,9 +154,13 @@ Before executing a planned failover with `kubectl bloodraven promote <group> -n 
 - [ ] Replication lag on target site is 0 seconds (`SecondsBehindSource == 0`).
 - [ ] Target site has received all GTIDs from active primary.
 - [ ] Target node has sufficient CPU/memory capacity and no scheduling taints.
+- [ ] Every other `primary-candidate` and `dr-only` site is reachable and read-only. A planned failover is strict: an unreadable one makes it wait (`admission.waitReason: PeerUnreadable`) and end `NotStarted/AdmissionTimeout` after 2 minutes. Readers do not block it.
+- [ ] No `AutomaticFailoverHeld=True` condition: a standing hold refuses new requests (`ManualRecoveryPending`).
+- [ ] The target is not awaiting a post-restore reclone (`status.restoreReclones.pending`): it is refused with `TargetUnhealthy`, and a planned failover is not an override.
+- [ ] No planned failover is in flight before an operator upgrade across the claim release: an older operator's in-flight block is refused, not resumed.
 - [ ] Dragonfly replica is caught up and `status.dragonfly.replTakeoverSupported == true`.
 - [ ] DNS provider / `external-dns` is healthy.
-- [ ] No unexpired deployment `failover-hold` is active; otherwise expect `Deferred/DeploymentHold` and inspect the named operation, instance, and `retryAfter`.
+- [ ] No unexpired deployment `failover-hold` is active; otherwise expect `Deferred/DeploymentHold` and inspect the named operation, instance, and `admission.retryAfter`.
 
 ## 6. Deployment lease lost or planned operation deferred
 
@@ -887,7 +891,7 @@ A replica can apply every new transaction from the primary while holding transac
 - `status.sites[<site>]`: `recoveryState=RecoveryBlocked`, `divergenceDetectedBy=ReplicaAudit`, `divergentGtid`, `divergentTransactionCount`, `divergenceComparedTo=<primary>`; `replicating` often `true`.
 - Warning Event `DivergentReplicaDetected`; WARN `divergence detected` with `detectedBy=ReplicaAudit`; `bloodraven_divergent_transactions{site} > 0`.
 - Ordered update: `ordered update failed` with `<site> is divergent (N transactions the primary lacks); reclone or reconcile before the active site can be updated`, WARN `ordered update: active-site update stalled; standby is divergent`, or WARN `maintenance handoff refused; candidate has transactions the source lacks`. The active site keeps serving, unfenced, with its old spec. During the v1.6.0 upgrade itself this stall is expected on installs damaged by #202.
-- Planned failover: `status.plannedFailover.reason=DivergentTarget`.
+- Planned failover: `status.plannedFailover.result.reason=DivergentTarget` (refused before fencing, or rolled back from the lag wait with `rollback.reason=DivergentTarget`).
 - After an emergency: `DivergentPromotion=True` condition and Warning Event `DivergentSitePromoted` (a divergent site is now primary).
 
 ### Diagnostic steps
@@ -1041,3 +1045,65 @@ Do not:
 - Remove a `hold.verification.shipstream.io/*` annotation by hand while a pod of that verification runs: retention or cleanup could then delete the artifact under it.
 - Remove the verification finalizer to hurry deletion. The hold then stays on the backup; it stops counting once the pods are gone, but retention only notices on its next pass.
 
+## 37. Planned failover left the source fenced
+
+A planned failover ended `Failed` with `result.outcome: SourceLeftFenced`. Nothing was written to the target; the source is read-only.
+
+### Symptoms
+- `status.plannedFailover.result.outcome: SourceLeftFenced`; Warning Event `PlannedFailoverFailed`.
+- `NoPrimary` when no other site is writable.
+
+### Diagnostic steps
+1. Read the run:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o json | jq '{run: .status.plannedFailover | {runId, phase, source, target, result, message, fence: (.fence // {} | {state, sourceServerUUID})}, lastFailoverTarget: .status.lastFailoverTarget, activeSite: .status.activeSite, marker: .metadata.annotations["bloodraven.shipstream.io/planned-failover-terminal"]}'
+   ```
+2. On every site: `SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only, @@GLOBAL.server_uuid, @@GLOBAL.gtid_executed;`.
+3. Operator log for the run: `planned failover: named fenced source for re-assert` (the source was handed to the re-assert), and later WARN `re-asserting fenced promoted primary`.
+
+### Safe remediation
+Decide by `result.reason` and `result.warnings`:
+1. **Another site is writable** (`ForeignWritable`, or a rollback that found a writable peer): that site is the primary. Never unfence the source; old-primary recovery repoints it as a replica. If you are not sure which site holds the newest data, escalate.
+2. **`SourceLost`**: the source was unreachable; emergency failover takes over once the run releases its claim. Restore connectivity; nothing to unfence.
+3. **An attributable fence** (no `FenceNotAttributable` warning; for example `StatusStalled`, `ManagerUnavailable`, or a rollback that could not confirm the unfence within 30s), every site reachable, and `status.lastFailoverTarget` empty or the source: the topology manager re-asserts the source on its own, rate-limited by `failoverCooldown`. Wait for the re-assert. With a peer unreachable, the normal unreachable-plus-read-only promotion path decides.
+4. **Manual cases**: `FenceNotAttributable`, `LegacyRunRefused`, `AuthorityChanged` before `fence.state` was `Applied`, or `status.lastFailoverTarget` naming a site other than the source. The fence is not the run's to clear, and nothing in the operator will lift it. With explicit approval, after confirming no site is writable, unfence the site with the most complete GTID set (`SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF;`), or re-annotate a planned failover to a healthy target.
+5. Verify `status.activeSite`, DNS and an application write.
+
+Do not:
+- Unfence the source while any other site answers `read_only=0`.
+- Clear only `super_read_only`: the site stays `read_only=ON`.
+
+## 38. Automation held after a planned failover (`AutomaticFailoverHeld`)
+
+A planned failover may have written to its target and could not explain what it found (a foreign writable site, transactions outside the fenced set, a writable target with a replication channel, a replaced server after a possible write). It ended `ManualRecoveryRequired` and holds automation for the group instead of letting split-brain resolution pick a winner, which could fence the only holder of acknowledged writes.
+
+### Symptoms
+- Condition `AutomaticFailoverHeld=True`, reason `PlannedFailoverManualRecovery`; `kubectl bloodraven status` summary ends `+held`.
+- Warning Events `PlannedFailoverManualRecoveryRequired`, then `PlannedFailoverHoldPending` every 10 minutes.
+- Operator log `planned failover: automation held pending acknowledgement` and, every poll, `cross-site action deferred: planned failover in progress`.
+- New planned-failover requests end `NotStarted/ManualRecoveryPending`.
+
+### Diagnostic steps
+1. Read the hold:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o json | jq '{hold: [.status.conditions[]? | select(.type == "AutomaticFailoverHeld")], run: .status.plannedFailover | {runId, source, target, result, message}, marker: .metadata.annotations["bloodraven.shipstream.io/planned-failover-terminal"], ack: .metadata.annotations["bloodraven.shipstream.io/ack-planned-failover-hold"]}'
+   ```
+   The message reads `planned failover run <runId> ended ManualRecoveryRequired (<reason>); writable or ambiguous sites: <sites>`. A marker `<runId>/ManualRecoveryRequired/<reason>` carries the same hold when status writes had stalled.
+2. On every site: `read_only`, `super_read_only`, `server_uuid`, `gtid_executed`, `SHOW REPLICA STATUS`. Run `gtid-audit.sh`.
+3. Compare the source and the target both ways: `SELECT GTID_SUBTRACT('<target set>', '<source set>'), GTID_SUBTRACT('<source set>', '<target set>');`.
+
+### Safe remediation
+Get explicit approval for every step; this is a data decision.
+1. Choose the primary from the data: the site holding the transactions that must be kept. Preserve the other site's extra transactions (`mysqlbinlog --include-gtids=<extra set>`) before anything reclones it.
+2. Fence every other site: `SET GLOBAL super_read_only=ON;`.
+3. Make sure exactly one `primary-candidate` is writable and DNS points at it; the operator does not move DNS while the hold stands.
+4. Acknowledge with the held run's id:
+   ```bash
+   kubectl annotate mfg <group> -n <ns> bloodraven.shipstream.io/ack-planned-failover-hold=<runId>
+   ```
+5. Verify: the condition is removed, the operator deletes the annotation, Event `PlannedFailoverHoldCleared`, log `planned failover: hold acknowledged` then `planned failover: claim released` with `why=ack`. Old-primary recovery then repoints the fenced site, or reports divergence ([playbook 33](#33-a-healthy-replica-reports-divergent-transactions-or-an-ordered-updateplanned-failover-refuses-a-divergent-target)).
+
+Do not:
+- Acknowledge before the sites are resolved: the next poll acts on whatever state they are in.
+- Delete the `planned-failover-terminal` annotation or the condition by hand to clear a hold that names a run; the acknowledgement clears them in a restart-safe order. The exception is a `True` condition whose message names no run: no acknowledgement can match it, so remove it by hand after resolving the sites.
+- Expect `PlannedFailoverHoldAckIgnored` to clear anything: it means the value names the wrong run.
