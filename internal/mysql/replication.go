@@ -94,7 +94,11 @@ func (m *checker) SetReadOnly(ctx context.Context, on bool) error {
 }
 
 func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error) {
-	rows, err := m.db.QueryContext(ctx, "SHOW REPLICA STATUS")
+	return showReplicaStatus(ctx, m.db)
+}
+
+func showReplicaStatus(ctx context.Context, r sqlRunner) (*ReplicaStatus, error) {
+	rows, err := r.QueryContext(ctx, "SHOW REPLICA STATUS")
 	if err != nil {
 		return nil, fmt.Errorf("show replica status: %w", err)
 	}
@@ -238,10 +242,7 @@ func (m *checker) HasUserSchemas(ctx context.Context) (bool, error) {
 const ReplicationSourceCAFile = "/etc/mysql/tls/ca.crt"
 
 func (m *checker) ChangeReplicationSource(ctx context.Context, opts ReplicationSourceOpts) error {
-	if _, err := m.db.ExecContext(ctx, changeReplicationSourceSQL(opts)); err != nil {
-		return fmt.Errorf("change replication source: %w", err)
-	}
-	return nil
+	return changeReplicationSource(ctx, m.db, opts)
 }
 
 func changeReplicationSourceSQL(opts ReplicationSourceOpts) string {
@@ -267,11 +268,7 @@ func changeReplicationSourceSQL(opts ReplicationSourceOpts) string {
 }
 
 func (m *checker) StartReplica(ctx context.Context) error {
-	_, err := m.db.ExecContext(ctx, "START REPLICA")
-	if err != nil {
-		return fmt.Errorf("start replica: %w", err)
-	}
-	return nil
+	return startReplica(ctx, m.db)
 }
 
 func (m *checker) startReplicaSQLThread(ctx context.Context) error {

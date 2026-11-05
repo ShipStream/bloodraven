@@ -172,6 +172,44 @@ func (r *TopologyManagerRunner) SetPlannedFailoverActive(nn types.NamespacedName
 	return true
 }
 
+// PlannedClaimHeld reports whether the group's planned-failover claim slot
+// is held, in either mode. Stub: false.
+func (r *TopologyManagerRunner) PlannedClaimHeld(nn types.NamespacedName) bool {
+	return false
+}
+
+// SetDragonflyUpgradePaused sets the Dragonfly manager's upgrade pause
+// source; false when no manager runs. Stub: no-op, false.
+func (r *TopologyManagerRunner) SetDragonflyUpgradePaused(nn types.NamespacedName, paused bool) bool {
+	return false
+}
+
+// ActiveSite is the registered manager's effective active site; ok=false
+// when no manager is registered. Stub: "", false.
+func (r *TopologyManagerRunner) ActiveSite(nn types.NamespacedName) (site string, ok bool) {
+	return "", false
+}
+
+// EnqueueDragonflyFollowUp hands an emergency follow-up to the Dragonfly
+// manager; false when none accepted it. Stub: false.
+func (r *TopologyManagerRunner) EnqueueDragonflyFollowUp(nn types.NamespacedName, activeSite, previousSite string) bool {
+	return false
+}
+
+// ClaimPlannedFailover asks the group's topology manager for the
+// planned-failover claim. Stub: Wait{ManagerAbsent}, nil.
+func (r *TopologyManagerRunner) ClaimPlannedFailover(ctx context.Context, nn types.NamespacedName,
+	req PlannedClaimRequest) (PlannedClaimDecision, error) {
+	return PlannedClaimDecision{Kind: ClaimWait, WaitReason: v1alpha1.PlannedFailoverWaitManagerAbsent}, nil
+}
+
+// ReleasePlannedFailoverClaim releases the claim only when it is held by
+// runID, and records why. Stub: false.
+func (r *TopologyManagerRunner) ReleasePlannedFailoverClaim(nn types.NamespacedName, runID string,
+	why ClaimReleaseReason) bool {
+	return false
+}
+
 // SetDNSRecordSpec pushes spec.dns.hostname and spec.dns.ttl onto the
 // running topology manager's DNS updater. Returns true when a manager
 // is running for nn. A false return is safe — the next startManager
@@ -1420,49 +1458,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	// Save existing status before modification for comparison.
 	existingStatus := freshFG.Status.DeepCopy()
-	if snap.TopologyGeneration < freshFG.Status.TopologyGeneration {
+	if !MergeTopologySnapshotStatus(&freshFG.Status, snap) {
 		r.hydrateDeploymentGeneration(&freshFG)
 		return nil
-	}
-
-	freshFG.Status.ActiveSite = snap.ActiveSite
-	if snap.TopologyGeneration > freshFG.Status.TopologyGeneration && snap.DeploymentActiveSite != "" {
-		freshFG.Status.ActiveSite = snap.DeploymentActiveSite
-	}
-	freshFG.Status.TopologyGeneration = snap.TopologyGeneration
-	// Ensure the Sites slice is allocated to match the number of sites.
-	if len(freshFG.Status.Sites) != len(snap.Sites) {
-		freshFG.Status.Sites = make([]v1alpha1.SiteStatus, len(snap.Sites))
-	}
-	for i, s := range snap.Sites {
-		freshFG.Status.Sites[i] = siteStatusFromSnapshot(s)
-	}
-
-	if !snap.LastFailover.IsZero() {
-		t := metav1.NewTime(snap.LastFailover)
-		freshFG.Status.LastFailover = &t
-	}
-	freshFG.Status.LastFailoverTarget = snap.LastFailoverTarget
-	freshFG.Status.PromotionGtidExecuted = snap.PromotionGtidExecuted
-
-	// Write per-site recovery fields. Every site carries its own recovery
-	// state and divergence report — multiple sites can be in recovery at
-	// once (e.g. two former primaries after consecutive failovers).
-	for i, s := range snap.Sites {
-		freshFG.Status.Sites[i].RecoveryState = s.RecoveryState
-		freshFG.Status.Sites[i].DivergentGtid = s.DivergentGtid
-		if s.RecoveryState != "" && s.DivergentTxnCount > 0 {
-			c := s.DivergentTxnCount
-			freshFG.Status.Sites[i].DivergentTransactionCount = &c
-		} else {
-			freshFG.Status.Sites[i].DivergentTransactionCount = nil
-		}
-		freshFG.Status.Sites[i].DivergenceDetectedBy = ""
-		freshFG.Status.Sites[i].DivergenceComparedTo = ""
-		if s.RecoveryState == recoveryStateBlocked {
-			freshFG.Status.Sites[i].DivergenceDetectedBy = s.DivergenceDetectedBy
-			freshFG.Status.Sites[i].DivergenceComparedTo = s.DivergenceComparedTo
-		}
 	}
 
 	// Evaluate replication health.
@@ -1646,8 +1644,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Bootstrapping condition reflects fresh-deploy bootstrap progress.
 	setBootstrappingCondition(&freshFG.Status.Conditions, freshFG.Generation, now, snap.BootstrapPhase, snap.BootstrapError, snap.BootstrapSource)
 
-	// Update phase tracking.
-	freshFG.Status.UpdatePhase = snap.UpdatePhase
+	// Update phase tracking (status.updatePhase itself is merged above).
 	if snap.UpdatePhase != "" {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "Updating",
@@ -1854,6 +1851,61 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		r.deploymentLeases.confirmTopology(&freshFG, snap.DeploymentEpoch)
 	}
 	return nil
+}
+
+// MergeTopologySnapshotStatus merges the topology manager's snapshot into
+// st: the active site, topologyGeneration, the per-site observations and
+// recovery fields, the failover record {lastFailover, lastFailoverTarget,
+// promotionGtidExecuted} and updatePhase. It returns false, leaving st
+// untouched, when the snapshot is older than the stored topologyGeneration.
+// Conditions and the subtrees other writers own are not touched.
+func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) bool {
+	if snap.TopologyGeneration < st.TopologyGeneration {
+		return false
+	}
+
+	st.ActiveSite = snap.ActiveSite
+	if snap.TopologyGeneration > st.TopologyGeneration && snap.DeploymentActiveSite != "" {
+		st.ActiveSite = snap.DeploymentActiveSite
+	}
+	st.TopologyGeneration = snap.TopologyGeneration
+	// Ensure the Sites slice is allocated to match the number of sites.
+	if len(st.Sites) != len(snap.Sites) {
+		st.Sites = make([]v1alpha1.SiteStatus, len(snap.Sites))
+	}
+	for i, s := range snap.Sites {
+		st.Sites[i] = siteStatusFromSnapshot(s)
+	}
+
+	if !snap.LastFailover.IsZero() {
+		t := metav1.NewTime(snap.LastFailover)
+		st.LastFailover = &t
+	}
+	st.LastFailoverTarget = snap.LastFailoverTarget
+	st.PromotionGtidExecuted = snap.PromotionGtidExecuted
+
+	// Write per-site recovery fields. Every site carries its own recovery
+	// state and divergence report — multiple sites can be in recovery at
+	// once (e.g. two former primaries after consecutive failovers).
+	for i, s := range snap.Sites {
+		st.Sites[i].RecoveryState = s.RecoveryState
+		st.Sites[i].DivergentGtid = s.DivergentGtid
+		if s.RecoveryState != "" && s.DivergentTxnCount > 0 {
+			c := s.DivergentTxnCount
+			st.Sites[i].DivergentTransactionCount = &c
+		} else {
+			st.Sites[i].DivergentTransactionCount = nil
+		}
+		st.Sites[i].DivergenceDetectedBy = ""
+		st.Sites[i].DivergenceComparedTo = ""
+		if s.RecoveryState == recoveryStateBlocked {
+			st.Sites[i].DivergenceDetectedBy = s.DivergenceDetectedBy
+			st.Sites[i].DivergenceComparedTo = s.DivergenceComparedTo
+		}
+	}
+
+	st.UpdatePhase = snap.UpdatePhase
+	return true
 }
 
 func validSnapshotActiveSite(snap TopologySnapshot) string {
@@ -2470,13 +2522,15 @@ func conditionBool(v bool) metav1.ConditionStatus {
 	return metav1.ConditionFalse
 }
 
-// setCondition sets or updates a condition in the slice, preserving LastTransitionTime
-// if the status has not changed.
 // reconcilerOwnedConditions are the condition types the group reconciler
 // writes. updateCRStatus re-reads them instead of replaying its snapshot's
 // copy, which would undo a concurrent reconciler write.
-var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady}
+// AutomaticFailoverHeld is the planned-failover automation hold: a runner
+// status write must never drop it.
+var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady, v1alpha1.ConditionAutomaticFailoverHeld}
 
+// setCondition sets or updates a condition in the slice, preserving LastTransitionTime
+// if the status has not changed.
 func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 	for i, existing := range *conditions {
 		if existing.Type == c.Type {

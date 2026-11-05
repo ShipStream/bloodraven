@@ -653,6 +653,19 @@ type MysqlFailoverGroupStatus struct {
 	EncryptionAtRest *EncryptionAtRestStatus `json:"encryptionAtRest,omitempty"`
 }
 
+// ConditionAutomaticFailoverHeld is True while a planned failover that may
+// have written to its target ended ManualRecoveryRequired: automatic
+// cross-site actions (emergency failover, re-assert, split-brain
+// resolution, ordered updates, rotations, follower mutations, bootstrap and
+// DNS reconciliation) stay held for the group until an administrator
+// resolves the split brain and acknowledges the hold with the
+// bloodraven.shipstream.io/ack-planned-failover-hold=<runId> annotation.
+const ConditionAutomaticFailoverHeld = "AutomaticFailoverHeld"
+
+// ReasonPlannedFailoverManualRecovery is the reason of a True
+// AutomaticFailoverHeld condition.
+const ReasonPlannedFailoverManualRecovery = "PlannedFailoverManualRecovery"
+
 // SiteStatus describes the observed state of a single site.
 type SiteStatus struct {
 	// Name is the site identifier, mirrored from spec for convenience.

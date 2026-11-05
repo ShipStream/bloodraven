@@ -7286,11 +7286,93 @@ spec:
                   annotation replaces the block; the field is how kubectl describe
                   tells the story of a switchover after the fact.
                 properties:
+                  admission:
+                    description: |-
+                      Admission records why a run that owns nothing yet is waiting or
+                      deferred, and its admission deadline.
+                    properties:
+                      deadline:
+                        description: |-
+                          Deadline is when an Admitting run that still has no claim ends
+                          Failed{NotStarted, AdmissionTimeout}.
+                        format: date-time
+                        type: string
+                      deferReason:
+                        description: DeferReason is why the run is Deferred.
+                        enum:
+                        - CooldownActive
+                        - DeploymentHold
+                        type: string
+                      retryAfter:
+                        description: RetryAfter is the earliest time a Deferred run
+                          re-tries admission.
+                        format: date-time
+                        type: string
+                      waitReason:
+                        description: WaitReason is the latest reason the claim was
+                          not granted.
+                        enum:
+                        - ManagerAbsent
+                        - ManagerNotReady
+                        - ManagerRetiring
+                        - PredecessorBusy
+                        - AuthorityUnsettled
+                        - PeerUnreadable
+                        - TargetNotReady
+                        - PromotionInFlight
+                        - UpdateInFlight
+                        - RecoveryInFlight
+                        - BootstrapInFlight
+                        - RestoreInFlight
+                        - KeyringRotation
+                        - DragonflyUpgradeInFlight
+                        - ClaimHeld
+                        - StatusUnsettled
+                        type: string
+                    type: object
+                  claimBaseline:
+                    description: |-
+                      ClaimBaseline is the durable failover record {lastFailover,
+                      lastFailoverTarget} at the grant (the newer of status and the
+                      out-of-band record), at second precision. A re-proof compares it by
+                      value.
+                    properties:
+                      lastFailover:
+                        format: date-time
+                        type: string
+                      lastFailoverTarget:
+                        type: string
+                    type: object
+                  claimedAt:
+                    description: ClaimedAt is when the claim was granted.
+                    format: date-time
+                    type: string
                   completionTime:
                     description: CompletionTime is when the state machine reached
                       a terminal phase.
                     format: date-time
                     type: string
+                  dns:
+                    description: DNS records publishing the promoted target.
+                    properties:
+                      attemptedAt:
+                        format: date-time
+                        type: string
+                      lastError:
+                        type: string
+                      state:
+                        description: |-
+                          PlannedFailoverDNSState is the result of publishing the promoted target
+                          to DNS.
+                        enum:
+                        - Applied
+                        - Failed
+                        - Skipped
+                        type: string
+                    required:
+                    - attemptedAt
+                    - state
+                    type: object
                   dragonfly:
                     description: |-
                       Dragonfly tracks Dragonfly-specific outcome of this planned
@@ -7329,6 +7411,14 @@ spec:
                           Examples: "DragonflySyncTimeout", "DragonflyPromotionFailed",
                           "DragonflyDisabled".
                         type: string
+                      sessions:
+                        description: |-
+                          Sessions says whether Dragonfly sessions survived the run. It
+                          replaces sessionsPreserved for durable-claim runs.
+                        enum:
+                        - Preserved
+                        - Lost
+                        type: string
                       sessionsPreserved:
                         description: |-
                           SessionsPreserved is a tri-state: true if Dragonfly promotion
@@ -7337,6 +7427,13 @@ spec:
                           fallback); nil when the field is unknown (e.g., Dragonfly disabled
                           for this attempt).
                         type: boolean
+                      sourceOffset:
+                        description: |-
+                          SourceOffset is the source Dragonfly's master replication offset,
+                          the catch-up target of the sync wait. Set iff sourceOffsetState is
+                          Captured. It replaces sourceOffsetAtDrain for durable-claim runs.
+                        format: int64
+                        type: integer
                       sourceOffsetAtDrain:
                         description: |-
                           SourceOffsetAtDrain is the source Dragonfly's master replication
@@ -7347,6 +7444,14 @@ spec:
                           from an "unknown" fallback.
                         format: int64
                         type: integer
+                      sourceOffsetState:
+                        description: |-
+                          SourceOffsetState says whether SourceOffset was captured. It
+                          replaces offsetCaptureFailed for durable-claim runs.
+                        enum:
+                        - Captured
+                        - Unavailable
+                        type: string
                       syncWaitSeconds:
                         description: |-
                           SyncWaitSeconds is the time spent in WaitingForDragonflySync,
@@ -7362,12 +7467,61 @@ spec:
                           MySQL lag-wait budget.
                         format: date-time
                         type: string
+                      takeover:
+                        description: |-
+                          Takeover is the write-ahead record of the target Dragonfly's
+                          promotion. It replaces targetOffsetAtPromotion and promotionMethod
+                          for durable-claim runs.
+                        properties:
+                          completedAt:
+                            format: date-time
+                            type: string
+                          intendedAt:
+                            format: date-time
+                            type: string
+                          method:
+                            description: DragonflyTakeoverMethod is how the target
+                              Dragonfly was promoted.
+                            enum:
+                            - REPLTAKEOVER
+                            - Skipped
+                            type: string
+                          state:
+                            description: DragonflyTakeoverState is the state of the
+                              target Dragonfly's takeover.
+                            enum:
+                            - Intended
+                            - Succeeded
+                            - Failed
+                            type: string
+                          targetOffset:
+                            format: int64
+                            type: integer
+                        required:
+                        - intendedAt
+                        - state
+                        type: object
                       targetOffsetAtPromotion:
                         description: |-
                           TargetOffsetAtPromotion is the target Dragonfly's slave/master
                           replication offset captured at the moment REPLTAKEOVER returned.
                         format: int64
                         type: integer
+                    type: object
+                  drain:
+                    description: Drain records the source connection drain.
+                    properties:
+                      completedAt:
+                        format: date-time
+                        type: string
+                      remainingConnections:
+                        format: int32
+                        type: integer
+                      startTime:
+                        format: date-time
+                        type: string
+                    required:
+                    - startTime
                     type: object
                   drainStartTime:
                     description: |-
@@ -7385,6 +7539,55 @@ spec:
                       to seconds.
                     format: int64
                     type: integer
+                  fence:
+                    description: Fence is the write-ahead record of the run's fence
+                      on the source.
+                    properties:
+                      appliedAt:
+                        description: AppliedAt is set iff state is Applied.
+                        format: date-time
+                        type: string
+                      gtidSet:
+                        description: |-
+                          GtidSet is the fenced source set ("" is a valid empty set). It is also
+                          the promotion watermark.
+                        type: string
+                      intendedAt:
+                        format: date-time
+                        type: string
+                      sourceServerUUID:
+                        description: |-
+                          SourceServerUUID is the source's @@server_uuid recorded by the grant's
+                          evidence probe and written with the intent. The fence is sent only to a
+                          server with this uuid, and a cross-process re-run attributes
+                          super_read_only=ON to this run only when the uuid still matches.
+                        minLength: 1
+                        type: string
+                      state:
+                        description: PlannedFailoverFenceState is the state of the
+                          run's fence on the source.
+                        enum:
+                        - Intended
+                        - Applied
+                        type: string
+                    required:
+                    - intendedAt
+                    - sourceServerUUID
+                    - state
+                    type: object
+                  lagWait:
+                    description: LagWait records the wait for the target to apply
+                      the fenced set.
+                    properties:
+                      caughtUpAt:
+                        format: date-time
+                        type: string
+                      startTime:
+                        format: date-time
+                        type: string
+                    required:
+                    - startTime
+                    type: object
                   lagWaitStartTime:
                     description: |-
                       LagWaitStartTime is when the reconciler entered the WaitingForLag
@@ -7408,17 +7611,49 @@ spec:
                     enum:
                     - ""
                     - Pending
+                    - Admitting
                     - Deferred
                     - Validating
+                    - Fencing
                     - Draining
                     - WaitingForLag
                     - WaitingForDragonflySync
                     - PromotingDragonfly
                     - Promoting
+                    - Publishing
                     - Resuming
+                    - RollingBack
                     - Succeeded
                     - Failed
                     type: string
+                  promotion:
+                    description: Promotion is the write-ahead record of the target's
+                      promotion.
+                    properties:
+                      confirmedAt:
+                        format: date-time
+                        type: string
+                      intendedAt:
+                        format: date-time
+                        type: string
+                      state:
+                        description: PlannedFailoverPromotionState is the state of
+                          the target's promotion.
+                        enum:
+                        - Intended
+                        - Confirmed
+                        type: string
+                      targetServerUUID:
+                        description: |-
+                          TargetServerUUID is the target's @@server_uuid read on a pinned
+                          session before the first promotion statement.
+                        minLength: 1
+                        type: string
+                    required:
+                    - intendedAt
+                    - state
+                    - targetServerUUID
+                    type: object
                   reason:
                     description: |-
                       Reason is a machine-readable tag on Failed outcomes. Examples:
@@ -7426,6 +7661,81 @@ spec:
                       "ExecuteFailed", "InvalidAnnotation", "ConcurrentOperation",
                       "UnknownSite".
                     type: string
+                  result:
+                    description: Result is set when the run is terminal.
+                    properties:
+                      completionTime:
+                        format: date-time
+                        type: string
+                      outcome:
+                        description: |-
+                          PlannedFailoverOutcome is the terminal outcome of a planned-failover run,
+                          recorded in result.outcome.
+                        enum:
+                        - Succeeded
+                        - NotStarted
+                        - RolledBack
+                        - SourceLeftFenced
+                        - PromotedUnconfirmed
+                        - ManualRecoveryRequired
+                        type: string
+                      reason:
+                        description: |-
+                          PlannedFailoverReason is a machine-readable reason for a run's outcome
+                          (result.reason) or for a rollback (rollback.reason).
+                        enum:
+                        - InvalidAnnotation
+                        - UnknownSite
+                        - TargetNotPromotable
+                        - AlreadyActive
+                        - TargetUnhealthy
+                        - DivergentTarget
+                        - KeyringRotation
+                        - CooldownActive
+                        - ConcurrentOperation
+                        - InvalidFailoverState
+                        - Cancelled
+                        - AdmissionTimeout
+                        - AuthorityChanged
+                        - LegacyRunRefused
+                        - FenceFailed
+                        - SourceLost
+                        - SourceUnfenced
+                        - TargetLost
+                        - ForeignWritable
+                        - PeerUnreadable
+                        - LagTimeout
+                        - InvalidGTID
+                        - DragonflySyncTimeout
+                        - DragonflyPromotionFailed
+                        - TargetChanged
+                        - PromotionAborted
+                        - PromotionUnconfirmed
+                        - ManagerUnavailable
+                        - StatusStalled
+                        - ManualRecoveryPending
+                        - ExecuteFailed
+                        - InternalError
+                        type: string
+                      warnings:
+                        items:
+                          description: PlannedFailoverWarning qualifies a terminal
+                            outcome (result.warnings).
+                          enum:
+                          - DNSUpdateFailed
+                          - DragonflySessionsLost
+                          - TargetReplicationNotRestored
+                          - UnreachablePeers
+                          - FenceNotAttributable
+                          - StatusStalled
+                          - SourceReplaced
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                    required:
+                    - completionTime
+                    - outcome
+                    type: object
                   retryAfter:
                     description: |-
                       RetryAfter is populated on the Deferred phase with the earliest
@@ -7433,6 +7743,107 @@ spec:
                       status.lastFailover + spec.failoverCooldown. Clears on transition
                       out of Deferred.
                     format: date-time
+                    type: string
+                  revision:
+                    description: |-
+                      Revision increments on every write the run makes. Settlement of an
+                      ambiguous write identifies a committed write by (runId, revision).
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  rollback:
+                    description: Rollback is the write-ahead record of a rollback.
+                    properties:
+                      intendedAt:
+                        format: date-time
+                        type: string
+                      reason:
+                        description: |-
+                          PlannedFailoverReason is a machine-readable reason for a run's outcome
+                          (result.reason) or for a rollback (rollback.reason).
+                        enum:
+                        - InvalidAnnotation
+                        - UnknownSite
+                        - TargetNotPromotable
+                        - AlreadyActive
+                        - TargetUnhealthy
+                        - DivergentTarget
+                        - KeyringRotation
+                        - CooldownActive
+                        - ConcurrentOperation
+                        - InvalidFailoverState
+                        - Cancelled
+                        - AdmissionTimeout
+                        - AuthorityChanged
+                        - LegacyRunRefused
+                        - FenceFailed
+                        - SourceLost
+                        - SourceUnfenced
+                        - TargetLost
+                        - ForeignWritable
+                        - PeerUnreadable
+                        - LagTimeout
+                        - InvalidGTID
+                        - DragonflySyncTimeout
+                        - DragonflyPromotionFailed
+                        - TargetChanged
+                        - PromotionAborted
+                        - PromotionUnconfirmed
+                        - ManagerUnavailable
+                        - StatusStalled
+                        - ManualRecoveryPending
+                        - ExecuteFailed
+                        - InternalError
+                        type: string
+                    required:
+                    - intendedAt
+                    - reason
+                    type: object
+                  runId:
+                    description: |-
+                      RunID identifies the run this block belongs to. It is minted when a
+                      request is first stamped (Admitting or Deferred) and is the token
+                      of the run's claim.
+                    minLength: 1
+                    type: string
+                  settings:
+                    description: |-
+                      Settings are the run's effective timing settings, snapshotted at
+                      acceptance from the annotation overrides and the spec.
+                    properties:
+                      dragonfly:
+                        description: Dragonfly is set when spec.dragonfly was enabled
+                          at acceptance.
+                        properties:
+                          maxSyncWait:
+                            description: MaxSyncWait bounds WaitingForDragonflySync.
+                            type: string
+                          onSyncTimeout:
+                            description: |-
+                              OnSyncTimeout mirrors spec.dragonfly.plannedFailover.onSyncTimeout
+                              (lower case like spec.plannedFailover.onCooldown).
+                            enum:
+                            - proceed
+                            - fail
+                            type: string
+                        required:
+                        - maxSyncWait
+                        - onSyncTimeout
+                        type: object
+                      drainTimeout:
+                        description: DrainTimeout bounds Draining.
+                        type: string
+                      maxLagWait:
+                        description: MaxLagWait bounds WaitingForLag.
+                        type: string
+                    required:
+                    - drainTimeout
+                    - maxLagWait
+                    type: object
+                  source:
+                    description: |-
+                      Source is the site the topology manager named the unique writable
+                      primary when it granted the claim. Empty until Fencing.
                     type: string
                   sourceGtidAtFence:
                     description: |-
