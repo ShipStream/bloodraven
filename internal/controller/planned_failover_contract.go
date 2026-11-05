@@ -4,8 +4,8 @@
 // engine, its status store and its topology facade are built against: the run
 // identity and records, the terminal marker and the automation hold, the
 // status predicates, and the interfaces between the engine (store, topology,
-// registry, sink). The engine and the claim slot below are placeholders until
-// their implementations land.
+// registry, sink). The engine below is a placeholder until its
+// implementation lands; the claim slot is in planned_failover_claim.go.
 package controller
 
 import (
@@ -661,14 +661,6 @@ func (e *PlannedFailoverEngine) Step(ctx context.Context, nn types.NamespacedNam
 
 // ---------- manager wiring (no-op until the claim lands) ----------
 
-// PlannedClaimSlot is a group's planned-failover claim, shared by every
-// topology-manager generation of the group. Placeholder until the claim
-// lands; the field gives it a non-zero size, so distinct slots never share
-// an address.
-type PlannedClaimSlot struct {
-	_ byte
-}
-
 // ManagerWiring is everything a manager must see before Run.
 type ManagerWiring struct {
 	Slot                   *PlannedClaimSlot
@@ -682,5 +674,5 @@ type ManagerWiring struct {
 // WireRegisteredManager applies everything a manager must see before Run:
 // pending rotation reservations, the predecessor guards, the planned-failover
 // claim slot (hydrated uncached) and any promotion recorded on the claim.
-// No-op until the claim lands; nothing calls it yet.
-func WireRegisteredManager(tm *TopologyManager, w ManagerWiring) {}
+// The runner's registerManager and the simulator's registry both call it.
+func WireRegisteredManager(tm *TopologyManager, w ManagerWiring) { fillWireRegisteredManager(tm, w) }

@@ -354,7 +354,6 @@ func TestPlannedFailoverContractPlaceholders(t *testing.T) {
 	if _, err := e.Step(t.Context(), nn); err == nil {
 		t.Error("the placeholder engine reports success")
 	}
-	WireRegisteredManager(nil, ManagerWiring{})
 	a, b := &PlannedClaimSlot{}, &PlannedClaimSlot{}
 	if a == b {
 		t.Error("two slots share an address")

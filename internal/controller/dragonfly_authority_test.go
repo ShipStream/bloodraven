@@ -53,7 +53,7 @@ func TestDragonflyManager_QueuedRequestObsoleteAfterCompletedPlannedFailover(t *
 	if err := c.Status().Update(context.Background(), latest); err != nil {
 		t.Fatal(err)
 	}
-	mgr.SetPaused(false)
+	mgr.SetUpgradePaused(false)
 	var dials atomic.Int32
 	mgr.SetConnector(func(context.Context, string, string) (DragonflyConnection, error) {
 		dials.Add(1)
@@ -487,7 +487,7 @@ func TestDragonflySnapshotUpgrade_WaitsForAndYieldsToEmergencyPromotion(t *testi
 	if err != nil || requeue != dragonflyGateRetry {
 		t.Fatalf("upgrade while the emergency held the gate = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
 	}
-	if !mgr.paused.Load() {
+	if !mgr.paused() {
 		t.Error("fixture: snapshot upgrade did not pause the registered manager")
 	}
 	if n := upgradeDials.Load(); n != 0 {
@@ -511,21 +511,49 @@ func TestDragonflySnapshotUpgrade_WaitsForAndYieldsToEmergencyPromotion(t *testi
 	}
 }
 
-// A runner resync derives the Dragonfly manager's pause from persisted
-// status, so it cannot unpause a manager while a snapshot upgrade runs.
-func TestDragonflyMaintenanceActive(t *testing.T) {
+// TestDragonflyPauseSourcesIndependent: the Dragonfly manager pauses while
+// either source says so, and neither source can revoke the other. A
+// snapshot upgrade ending (or a runner resync deriving the upgrade pause
+// from status) does not unpause a manager whose group's planned-failover
+// claim is held, and releasing the claim does not unpause an upgrade.
+func TestDragonflyPauseSourcesIndependent(t *testing.T) {
+	mgr := NewDragonflyManager(nil, nil, slog.Default(), client.ObjectKey{Namespace: "ns", Name: "fg"}, time.Second)
+	if mgr.paused() {
+		t.Fatal("fresh manager is paused")
+	}
+	slot := &PlannedClaimSlot{}
+	mgr.SetPlannedOwner(slot.Held)
+	slot.hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2"})
+	if !mgr.paused() {
+		t.Fatal("a held claim did not pause the manager")
+	}
+	mgr.SetUpgradePaused(true)
+	mgr.SetUpgradePaused(false) // the upgrade ends
+	if !mgr.paused() {
+		t.Fatal("ending the upgrade unpaused a manager whose claim is held")
+	}
+	mgr.SetUpgradePaused(true)
+	slot.release("run-1", ReleaseTerminal)
+	if !mgr.paused() {
+		t.Fatal("releasing the claim unpaused an upgrade")
+	}
+	mgr.SetUpgradePaused(false)
+	if mgr.paused() {
+		t.Fatal("manager still paused with neither source set")
+	}
+	if !slot.toHold("run-2") || !mgr.paused() {
+		t.Fatal("a hold must pause the manager like a running claim")
+	}
+	// A waiting request owns nothing: a status block in Admitting does not
+	// make the group's Dragonfly owned.
 	fg := fgWithDragonflyEnabledAndActive()
-	if dragonflyMaintenanceActive(fg) {
-		t.Fatal("idle group reported maintenance")
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-3", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, Target: "dc2"}
+	if plannedFailoverOwnsDragonfly(fg, false) {
+		t.Error("a waiting planned-failover request owns the group's Dragonfly")
 	}
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Upgrade: &v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseUpdatingActive}}
-	if !dragonflyMaintenanceActive(fg) {
-		t.Error("in-flight snapshot upgrade not reported as maintenance")
-	}
-	fg.Status.Dragonfly.Upgrade.Phase = v1alpha1.DragonflyUpgradePhaseSucceeded
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining}
-	if !dragonflyMaintenanceActive(fg) {
-		t.Error("in-flight planned failover not reported as maintenance")
+	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseDraining
+	if !plannedFailoverOwnsDragonfly(fg, false) {
+		t.Error("a run that owns the sites does not own the group's Dragonfly")
 	}
 }
 
@@ -587,7 +615,7 @@ func TestTopologyManagerRunner_NewDragonflyManagerWiring(t *testing.T) {
 	if mgr.authority() != client.Reader(reader) {
 		t.Error("manager does not read the group through the runner's uncached reader")
 	}
-	if !mgr.paused.Load() {
+	if !mgr.paused() {
 		t.Error("manager started unpaused during a snapshot upgrade")
 	}
 }

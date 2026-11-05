@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/clock"
 )
 
 // recoveryAttemptTimeout bounds each admitted old-primary recovery section:
@@ -21,21 +23,48 @@ var errHandoffNotAdmitted = errors.New("planned promote: a recovery or source-co
 
 // mutationGate is the admission barrier between follower mutations
 // (recovery drain, old-primary recovery, source convergence) and topology
-// handoffs (planned promotion, ordered-update claim). Mutations enter and
-// exit; a handoff blocks new entries, waits, cancellably, until every
-// admitted mutation has exited, then publishes the flag that keeps later
-// mutations out. The zero value is ready to use.
+// handoffs (planned promotion, ordered-update claim, the planned-failover
+// claim). Mutations enter and exit; a blocking handoff (admit) blocks new
+// entries, waits, cancellably, until every admitted mutation has exited,
+// then publishes the flag that keeps later mutations out. A non-blocking
+// handoff (tryAdmit) registers a pending entry that expires on its own and
+// publishes only when no mutation is admitted. The zero value is ready to
+// use; clock defaults to the wall clock.
 type mutationGate struct {
 	mu      sync.Mutex
 	active  int           // admitted mutation sections
-	pending int           // handoffs waiting to publish
+	pending int           // blocking handoffs waiting to publish
 	idle    chan struct{} // closed when active drops to zero; nil while zero
+	// tryPending maps a non-blocking handoff's key (a planned-failover
+	// runId) to when its pending entry expires. An unexpired entry
+	// refuses new mutations exactly like a blocking handoff.
+	tryPending map[string]time.Time
+	clock      clock.Clock
+}
+
+func (g *mutationGate) now() time.Time {
+	if g.clock == nil {
+		return time.Now()
+	}
+	return g.clock.Now()
+}
+
+// tryPendingLocked reports whether an unexpired non-blocking handoff is
+// registered, dropping expired entries. Must hold g.mu.
+func (g *mutationGate) tryPendingLocked() bool {
+	now := g.now()
+	for key, expires := range g.tryPending {
+		if !now.Before(expires) {
+			delete(g.tryPending, key)
+		}
+	}
+	return len(g.tryPending) > 0
 }
 
 func (g *mutationGate) enter() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.pending > 0 {
+	if g.pending > 0 || g.tryPendingLocked() {
 		return false
 	}
 	if g.active == 0 {
@@ -85,11 +114,37 @@ func (g *mutationGate) admit(ctx context.Context, publish func()) error {
 	return nil
 }
 
+// tryAdmit is the planned-failover claim's non-blocking admission. It
+// registers (or renews) a pending entry for key that refuses new follower
+// mutations until it expires ttl from now on the gate's clock. If an
+// admitted mutation is still running it returns errGateBusy at once; the
+// caller retries later and renews the entry. Otherwise it runs publish
+// with g.mu released (publish takes tm.mu, which is never held together
+// with g.mu) and clears the entry. A caller that stops retrying stops
+// costing follower mutations anything once its entry lapses.
+func (g *mutationGate) tryAdmit(key string, ttl time.Duration, publish func()) error {
+	g.mu.Lock()
+	if g.tryPending == nil {
+		g.tryPending = make(map[string]time.Time)
+	}
+	g.tryPending[key] = g.now().Add(ttl)
+	busy := g.active > 0
+	g.mu.Unlock()
+	if busy {
+		return errGateBusy
+	}
+	// Registered and idle: enter() refuses from here on, so no mutation
+	// can be admitted between the check and publish.
+	publish()
+	g.mu.Lock()
+	delete(g.tryPending, key)
+	g.mu.Unlock()
+	return nil
+}
+
 // followerMutationSuppressedLocked reports whether another actor owns the
-// sites or authority is still moving: a planned failover (the Dragonfly
-// snapshot upgrade writes the same flag, but the runner's planned-failover
-// sync clears it, so an upgrade defers mutations only intermittently), an
-// ordered update, a promotion in flight or not yet observed writable, an
+// sites or authority is still moving: a planned-failover claim or hold
+// (the group's claim slot), an ordered update, a promotion in flight or not yet observed writable, an
 // in-place restore, or an auto-bootstrap. Old-primary recovery, the recovery
 // connection drain and replication-source convergence all stand down while
 // it holds: they kill sessions and rewrite replication on the very sites a
@@ -104,7 +159,7 @@ func (g *mutationGate) admit(ctx context.Context, publish func()) error {
 // so a poll still carrying pre-promotion observations cannot act on them.
 // Must hold tm.mu.
 func (tm *TopologyManager) followerMutationSuppressedLocked() bool {
-	return tm.retired || tm.promotedSite != "" || tm.topologyFrozen || tm.plannedFailoverActive ||
+	return tm.retired || tm.promotedSite != "" || tm.topologyFrozen || tm.plannedClaimHeldLocked() ||
 		!bootstrapIdlePhase(tm.bootstrapPhase) ||
 		tm.deploymentUpdateRunning || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation ||
 		tm.predecessorUpdateInFlight

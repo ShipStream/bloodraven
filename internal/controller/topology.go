@@ -580,13 +580,27 @@ type TopologyManager struct {
 	// See runner.sync() and MysqlFailoverGroupReconciler.reconcileInPlaceRestore.
 	topologyFrozen bool
 
-	// plannedFailoverActive is set by the runner while the reconciler
-	// is driving a planned-failover state machine. Blocks automatic
-	// cross-site action in applyCrossSiteAction so an emergency
-	// promotion cannot race the admin-triggered switchover. Cleared on
-	// Succeeded or Failed. Protected by mu. See
-	// planned_failover_reconciler.go.
+	// plannedFailoverActive is the legacy status-derived planned-failover
+	// guard, set only by the pre-claim planned-failover reconciler through
+	// Runner.SetPlannedFailoverActive; plannedClaimHeldLocked honours it
+	// until that reconciler is replaced. Protected by mu.
 	plannedFailoverActive bool
+
+	// plannedSlot is the group's planned-failover claim slot, shared with
+	// every other manager generation of the group and installed by
+	// WireRegisteredManager before Run (see planned_failover_claim.go).
+	// While it holds a claim (a run or a hold) this manager takes no
+	// automatic cross-site action, ordered update, rotation, follower
+	// mutation, bootstrap of a promotable site, or DNS reconcile. The
+	// pointer is protected by mu; the slot has its own leaf mutex.
+	plannedSlot *PlannedClaimSlot
+	// plannedGateRunID and plannedGateAttemptAt rate-limit a waiting
+	// run's follower-mutation gate attempts. lastPlannedRunRecorded is the
+	// run whose promotion RecordPlannedPromotion last recorded (idempotence
+	// per runId). Protected by mu.
+	plannedGateRunID       string
+	plannedGateAttemptAt   time.Time
+	lastPlannedRunRecorded string
 
 	// followerMutationGate is the admission barrier between follower
 	// mutations (recovery drain, old-primary recovery, source convergence)
@@ -874,6 +888,7 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checke
 		gtidAudit:           make(map[string]*gtidAuditSchedule),
 		gtidAuditSourceUUID: make(map[string]string),
 	}
+	tm.followerMutationGate.clock = clk
 	if updater != nil {
 		updater.SetReplicaStartGate(tm.withReplicaStartGate)
 	}
@@ -920,7 +935,11 @@ func (tm *TopologyManager) SetFailoverStateRecorder(rec FailoverStateRecorder) {
 // ordered-update handoff — goes through here, so the durable record can
 // never be written by one and skipped by another.
 func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, target, promotionGtid string) {
-	rec := FailoverRecord{LastFailover: now, LastFailoverTarget: target}
+	rec := FailoverRecord{LastFailover: now, LastFailoverTarget: target, PromotionGtidExecuted: promotionGtid}
+	if len(promotionGtid) > maxPromotionGtidAnnotationBytes {
+		tm.logger.Error("promotion watermark too large for the out-of-band failover record; only the status copy carries it",
+			"fg", tm.cfg.Name, "target", target, "bytes", len(promotionGtid))
+	}
 
 	tm.mu.Lock()
 	tm.authorityEpoch++
@@ -1814,10 +1833,11 @@ func (tm *TopologyManager) reconcileDNS(ctx context.Context) {
 	if tm.dns == nil {
 		return
 	}
-	// A planned failover owns the DNS record for the duration of its own
-	// promotion sequence; let it finish rather than racing it mid-flight.
-	// Any divergence it leaves behind is repaired by the next poll.
-	if tm.isPlannedFailoverActive() {
+	// A planned failover owns the DNS record while it holds its claim
+	// (and a hold freezes it): the run applies DNS itself before it
+	// releases. Any divergence it leaves behind is repaired by the next
+	// poll after release.
+	if tm.plannedClaimHeld() {
 		return
 	}
 
@@ -2269,12 +2289,12 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		return
 	}
 
-	// A planned failover is driving its own fence/promote sequence
-	// from the reconciler. The topology manager must not race it by
-	// fencing the source itself, auto-promoting a different candidate,
-	// or resolving the transient split-brain window as if it were a
-	// real one.
-	if tm.isPlannedFailoverActive() {
+	// A planned failover holds its claim (or a hold stands after one
+	// ended ManualRecoveryRequired). The topology manager must not race it
+	// by fencing the source itself, auto-promoting a different candidate,
+	// or resolving the transient split-brain window as if it were a real
+	// one. A request that is only waiting holds nothing and defers nothing.
+	if tm.plannedClaimHeld() {
 		tm.armCrossSiteRetry()
 		tm.logger.Info("cross-site action deferred: planned failover in progress")
 		return
@@ -2638,7 +2658,7 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 	if !action.SplitBrain && writableCandidates < 2 {
 		return false
 	}
-	if tm.isTopologyFrozen() || tm.isPlannedFailoverActive() || tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
+	if tm.isTopologyFrozen() || tm.plannedClaimHeld() || tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
 		return false
 	}
 
@@ -2958,21 +2978,13 @@ func (tm *TopologyManager) isTopologyFrozen() bool {
 	return tm.topologyFrozen
 }
 
-// SetPlannedFailoverActive toggles the guard that blocks automatic
-// cross-site action while a reconciler-driven planned failover is in
-// flight. The runner sets it from the CR's status.plannedFailover.phase.
+// SetPlannedFailoverActive sets the legacy status-derived planned-failover
+// guard (see plannedFailoverActive). Only the pre-claim planned-failover
+// reconciler calls it; the claim slot is the source of truth otherwise.
 func (tm *TopologyManager) SetPlannedFailoverActive(v bool) {
 	tm.mu.Lock()
 	tm.plannedFailoverActive = v
 	tm.mu.Unlock()
-}
-
-// isPlannedFailoverActive reports whether a planned failover is
-// currently running against this CR.
-func (tm *TopologyManager) isPlannedFailoverActive() bool {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	return tm.plannedFailoverActive
 }
 
 // FenceSite sets super_read_only=ON on the named site and returns the
@@ -3395,7 +3407,7 @@ func (tm *TopologyManager) crossSiteRetryReady() bool {
 	if !armed || tm.clock.Now().Before(notBefore) {
 		return false
 	}
-	return !tm.isTopologyFrozen() && !tm.isPlannedFailoverActive() &&
+	return !tm.isTopologyFrozen() && !tm.plannedClaimHeld() &&
 		!tm.bootstrapBlocksCrossSite() && !tm.isUpdating()
 }
 
@@ -3536,9 +3548,9 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
 		"driftSites", driftSites, "active", activeName)
 	tm.mu.Lock()
-	// A planned failover owns the sites while its guard is set; an update
-	// started now could only be refused at its claim.
-	if tm.deploymentUpdatePending || tm.retired || tm.predecessorUpdateInFlight || tm.plannedFailoverActive {
+	// A planned failover owns the sites while its claim (or hold) is
+	// held; an update started now could only be refused at its claim.
+	if tm.deploymentUpdatePending || tm.retired || tm.predecessorUpdateInFlight || tm.plannedClaimHeldLocked() {
 		tm.mu.Unlock()
 		return false
 	}
@@ -3864,7 +3876,7 @@ func (tm *TopologyManager) maybeStartFreshDeployBootstrap(ctx context.Context, l
 // fence could not be lifted) would otherwise never run again, and the
 // group would wait for a primary forever.
 func (tm *TopologyManager) retryFreshDeployBootstrap(ctx context.Context, action state.CrossSiteAction) {
-	if action.Reason != "NoPrimary" || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() ||
+	if action.Reason != "NoPrimary" || tm.isTopologyFrozen() || tm.plannedClaimHeld() ||
 		tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
 		return
 	}
@@ -4846,7 +4858,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	// what rescues a group stuck with no writable site, and a reader clone
 	// says nothing about where the primary belongs. See
 	// bootstrapBlocksCrossSite.
-	if tm.bootstrapBlocksCrossSite() || tm.isUpdating() || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() {
+	if tm.bootstrapBlocksCrossSite() || tm.isUpdating() || tm.isTopologyFrozen() || tm.plannedClaimHeld() {
 		return false
 	}
 

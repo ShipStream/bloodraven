@@ -1,0 +1,625 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"sync"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+)
+
+// The planned-failover claim.
+//
+// A planned failover owns the group's sites through one claim slot per
+// group, kept on the runner and shared by every topology-manager
+// generation of the group (WireRegisteredManager hands the same pointer to
+// each before its Run). The claim is granted only under tm.mu, against
+// every other claimant in topology_claims.go, and only after live peer
+// evidence; it is hydrated only from uncached reads, and only the owning
+// run releases it. Lock order: reservationMu → r.mu → tm.mu → slot.mu.
+// slot.mu is a leaf: nothing is called while it is held.
+
+const (
+	// plannedClaimGateTTL is how long a waiting claim's entry at the
+	// follower-mutation gate refuses new mutations without being renewed.
+	plannedClaimGateTTL = 15 * time.Second
+	// plannedClaimGateInterval spaces a run's gate attempts.
+	plannedClaimGateInterval = time.Second
+)
+
+// PlannedClaimSlot is a group's planned-failover claim. The runner keeps one
+// per group (like dragonflyGates) and hands the same pointer to every
+// topology manager generation before its Run. The zero value is an empty
+// slot.
+type PlannedClaimSlot struct {
+	mu       sync.Mutex // leaf: tm.mu → slot.mu, never the reverse
+	held     *plannedClaim
+	releases []claimReleaseNote // instrumentation (tests and DST): runId, why
+}
+
+// claimReleaseNote records one release (or conversion to a hold).
+type claimReleaseNote struct {
+	RunID string
+	Why   ClaimReleaseReason
+}
+
+type plannedClaimMode int
+
+const (
+	claimModeRun  plannedClaimMode = iota // the run owns the sites
+	claimModeHold                         // ManualRecoveryRequired: automation held until ack
+)
+
+func (m plannedClaimMode) String() string {
+	if m == claimModeHold {
+		return "Hold"
+	}
+	return "Run"
+}
+
+type plannedClaim struct {
+	mode                  plannedClaimMode
+	runID, source, target string
+	sourceUUID            string // the grant probe's source @@server_uuid
+	grantedAt             time.Time
+	baseline              FailoverRecordRef  // second precision, compared with sameFailoverRecord
+	needsReprove          bool               // hydrated: re-prove before the next side effect
+	provisional           bool               // Fencing write not yet Committed
+	promotion             *recordedPromotion // {confirmedAt} only; the watermark always comes from the run's fence.gtidSet
+}
+
+// recordedPromotion is what RecordPlannedPromotion leaves on the claim, so
+// a replacement manager of the same process applies it before Run.
+type recordedPromotion struct {
+	confirmedAt time.Time
+}
+
+// PlannedClaimView is a copy of a held claim, for tests and the
+// simulator.
+type PlannedClaimView struct {
+	Mode         string // "Run" or "Hold"
+	RunID        string
+	Source       string
+	Target       string
+	Provisional  bool
+	NeedsReprove bool
+	Promoted     bool // RecordPlannedPromotion ran for the run
+}
+
+// View returns the held claim, or ok=false when the slot is empty.
+func (s *PlannedClaimSlot) View() (v PlannedClaimView, ok bool) {
+	if s == nil {
+		return PlannedClaimView{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held == nil {
+		return PlannedClaimView{}, false
+	}
+	h := s.held
+	return PlannedClaimView{
+		Mode: h.mode.String(), RunID: h.runID, Source: h.source, Target: h.target,
+		Provisional: h.provisional, NeedsReprove: h.needsReprove, Promoted: h.promotion != nil,
+	}, true
+}
+
+// ReleaseNotes returns every release recorded on the slot, oldest first.
+func (s *PlannedClaimSlot) ReleaseNotes() []claimReleaseNote {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.releases)
+}
+
+// Held reports whether the slot holds a claim in either mode.
+func (s *PlannedClaimSlot) Held() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.held != nil
+}
+
+// snapshot returns a copy of the held claim.
+func (s *PlannedClaimSlot) snapshot() (plannedClaim, bool) {
+	if s == nil {
+		return plannedClaim{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held == nil {
+		return plannedClaim{}, false
+	}
+	c := *s.held
+	if c.promotion != nil {
+		p := *c.promotion
+		c.promotion = &p
+	}
+	return c, true
+}
+
+// hydrate sets c only if the slot is empty. Hydration never clears or
+// replaces a held claim.
+func (s *PlannedClaimSlot) hydrate(c plannedClaim) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held != nil {
+		return false
+	}
+	s.held = &c
+	return true
+}
+
+// update applies fn to the held claim if it is runID's Run-mode claim.
+func (s *PlannedClaimSlot) update(runID string, fn func(*plannedClaim)) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held == nil || s.held.mode != claimModeRun || s.held.runID != runID {
+		return false
+	}
+	fn(s.held)
+	return true
+}
+
+// release empties the slot if it holds runID, and records why. A Hold
+// claim is released only by an acknowledgement, and a Run claim never by
+// one; a zombie release applies to a Run claim only.
+func (s *PlannedClaimSlot) release(runID string, why ClaimReleaseReason) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held == nil || s.held.runID != runID {
+		return false
+	}
+	if (s.held.mode == claimModeHold) != (why == ReleaseAck) {
+		return false
+	}
+	s.held = nil
+	s.releases = append(s.releases, claimReleaseNote{RunID: runID, Why: why})
+	return true
+}
+
+// toHold switches runID's claim, in either mode, to a hold. It also
+// installs a hold for runID in an empty slot (a marker that landed after
+// the claim was gone): the hold must be in force either way.
+func (s *PlannedClaimSlot) toHold(runID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.held == nil:
+		s.held = &plannedClaim{mode: claimModeHold, runID: runID}
+	case s.held.runID != runID:
+		return false
+	default:
+		s.held.mode = claimModeHold
+		s.held.provisional, s.held.needsReprove = false, false
+	}
+	s.releases = append(s.releases, claimReleaseNote{RunID: runID, Why: ReleaseToHold})
+	return true
+}
+
+// plannedClaimHeldLocked reports whether the group's planned-failover
+// claim slot is held, in either mode. Must hold tm.mu (read or write).
+//
+// tm.plannedFailoverActive is the legacy status-derived guard, set only by
+// the pre-claim planned-failover reconciler through
+// Runner.SetPlannedFailoverActive. It is honoured here until that
+// reconciler is replaced, so the legacy path keeps its protection; the
+// claim slot is the source of truth for everything else.
+func (tm *TopologyManager) plannedClaimHeldLocked() bool {
+	return tm.plannedFailoverActive || tm.plannedSlot.Held()
+}
+
+// plannedClaimHeld is plannedClaimHeldLocked under tm.mu.
+func (tm *TopologyManager) plannedClaimHeld() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.plannedClaimHeldLocked()
+}
+
+// plannedClaimSlot returns the slot WireRegisteredManager installed, or
+// nil.
+func (tm *TopologyManager) plannedClaimSlot() *PlannedClaimSlot {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.plannedSlot
+}
+
+// claimDecisionWait and claimDecisionReject build decisions.
+func claimDecisionWait(reason v1alpha1.PlannedFailoverWaitReason, format string, args ...any) PlannedClaimDecision {
+	return PlannedClaimDecision{Kind: ClaimWait, WaitReason: reason, Message: fmt.Sprintf(format, args...)}
+}
+
+func claimDecisionReject(reason v1alpha1.PlannedFailoverReason, format string, args ...any) PlannedClaimDecision {
+	return PlannedClaimDecision{Kind: ClaimReject, RejectReason: reason, Message: fmt.Sprintf(format, args...)}
+}
+
+func claimDecisionGranted(c *plannedClaim) PlannedClaimDecision {
+	return PlannedClaimDecision{Kind: ClaimGranted, Source: c.source, SourceServerUUID: c.sourceUUID, Baseline: c.baseline}
+}
+
+// plannedClaimRefusalLocked decides every tm-local condition of the grant
+// (§3.2 step 1) for req. It returns decided=true with the decision when
+// the claim cannot be granted now, or when the same run already holds it
+// (an idempotent Granted). Otherwise it returns the poll-named source.
+// Must hold tm.mu.
+func (tm *TopologyManager) plannedClaimRefusalLocked(req PlannedClaimRequest) (d PlannedClaimDecision, polled string, decided bool) {
+	if held, ok := tm.plannedSlot.snapshot(); ok {
+		switch {
+		case held.mode == claimModeHold:
+			return claimDecisionReject(v1alpha1.PlannedFailoverReasonManualRecoveryPending,
+				"automatic failover is held after planned failover run %s; acknowledge the hold first", held.runID), "", true
+		case held.runID != req.RunID:
+			return claimDecisionWait(v1alpha1.PlannedFailoverWaitClaimHeld,
+				"planned failover run %s holds the claim", held.runID), "", true
+		case held.target != req.Target:
+			return claimDecisionReject(v1alpha1.PlannedFailoverReasonInternalError,
+				"run %s holds the claim for target %q, not %q", held.runID, held.target, req.Target), "", true
+		default:
+			return claimDecisionGranted(&held), held.source, true
+		}
+	}
+	target := tm.getSite(req.Target)
+	switch {
+	case target == nil:
+		return claimDecisionReject(v1alpha1.PlannedFailoverReasonUnknownSite, "site %q is not in the topology", req.Target), "", true
+	case !target.isPromotable():
+		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetNotPromotable,
+			"site %q has role %q; only primary-candidate sites may be promoted", req.Target, target.role), "", true
+	case !tm.ready:
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerNotReady, "the topology manager has not completed a poll"), "", true
+	case tm.retired:
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerRetiring, "the topology manager is being replaced"), "", true
+	case tm.predecessorUpdateInFlight:
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager's ordered update is still running"), "", true
+	case tm.deploymentChanging > 0 || tm.promotionUnobservedLocked():
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitPromotionInFlight, "a promotion is in flight or not yet observed"), "", true
+	case tm.deploymentUpdateRunning:
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitUpdateInFlight, "an ordered update holds the sites"), "", true
+	case tm.topologyFrozen:
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRestoreInFlight, "an in-place restore holds the sites"), "", true
+	case tm.bootstrapBlocksCrossSiteLocked():
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitBootstrapInFlight, "a bootstrap of a promotable site is running"), "", true
+	case slices.Contains(tm.keyringRotationBlocked, req.Target):
+		return claimDecisionReject(v1alpha1.PlannedFailoverReasonKeyringRotation,
+			"site %q is mid-keyring-rotation; wait for it to be Sealed and re-annotate", req.Target), "", true
+	case slices.Contains(tm.keyringRotationReserved, req.Target):
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitKeyringRotation, "a keyring rotation of %q is being admitted", req.Target), "", true
+	}
+	if rec := tm.recovery[req.Target]; rec != nil && rec.state == recoveryStateBlocked {
+		return claimDecisionReject(v1alpha1.PlannedFailoverReasonDivergentTarget,
+			"site %q has %d transactions the primary lacks (%s)", req.Target, rec.divergentCount, truncateGtidSet(rec.divergentGtid)), "", true
+	}
+	if tm.restoreReclonePendingLocked(req.Target) {
+		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetUnhealthy,
+			"site %q still awaits its post-restore reclone", req.Target), "", true
+	}
+	polled = tm.activeSiteLocked()
+	switch {
+	case polled == req.Target:
+		return claimDecisionReject(v1alpha1.PlannedFailoverReasonAlreadyActive, "site %q is already the active primary", req.Target), "", true
+	case polled == "":
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "the topology manager names no unique writable primary"), "", true
+	}
+	return PlannedClaimDecision{}, polled, false
+}
+
+// claimPlannedFailover is §3.2 steps 1 to 5 on this manager: the fast path,
+// live peer evidence with no lock held, the durable-baseline check, the
+// non-blocking follower-mutation gate, and the publish that re-decides
+// every tm-local condition under tm.mu. The caller has done step 0 (the
+// retiring managers) with no lock held. It never calls a callback that
+// takes r.mu while holding tm.mu, and holds no lock across a probe.
+func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req PlannedClaimRequest, hooks SimHooks) (PlannedClaimDecision, error) {
+	if tm.plannedClaimSlot() == nil {
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerNotReady, "the topology manager is not wired to a claim slot"), nil
+	}
+	if tm.predecessorMutating() {
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager is still changing the sites"), nil
+	}
+	tm.mu.RLock()
+	d, polled, decided := tm.plannedClaimRefusalLocked(req)
+	epoch := tm.authorityEpoch
+	inMemory := newFailoverRecordRef(tm.lastFailover, tm.lastFailoverTarget)
+	tm.mu.RUnlock()
+	if decided {
+		return d, nil
+	}
+
+	ev := tm.plannedGrantEvidence(ctx, polled, req.Target)
+	hooks.yield("claim.afterProbe")
+	if ev.wait != nil {
+		return *ev.wait, nil
+	}
+	if !sameFailoverRecord(inMemory, req.DurableBaseline) {
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled,
+			"the durable failover record (%s) has not caught up with the topology manager's (%s)",
+			describeFailoverRecordRef(req.DurableBaseline), describeFailoverRecordRef(inMemory)), nil
+	}
+
+	// A run whose last gate attempt found a follower mutation running
+	// tries again at most once per plannedClaimGateInterval.
+	tm.mu.RLock()
+	throttled := tm.plannedGateRunID == req.RunID && tm.clock.Since(tm.plannedGateAttemptAt) < plannedClaimGateInterval
+	tm.mu.RUnlock()
+	if throttled {
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRecoveryInFlight, "a follower mutation was still running at the last gate attempt"), nil
+	}
+
+	hooks.yield("claim.beforePublish")
+	var out PlannedClaimDecision
+	err := tm.followerMutationGate.tryAdmit(req.RunID, plannedClaimGateTTL, func() {
+		out = tm.publishPlannedClaim(req, epoch, polled, inMemory, ev.sourceUUID)
+	})
+	if err != nil {
+		tm.mu.Lock()
+		tm.plannedGateRunID, tm.plannedGateAttemptAt = req.RunID, tm.clock.Now()
+		tm.mu.Unlock()
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRecoveryInFlight, "a recovery or source-convergence step is still running on the sites"), nil
+	}
+	hooks.yield("claim.afterPublish")
+	if out.Kind == ClaimGranted {
+		tm.logger.Info("planned failover: claim granted", "fg", tm.cfg.Name, "runId", req.RunID, "source", out.Source, "target", req.Target)
+	}
+	return out, nil
+}
+
+// publishPlannedClaim is §3.2 step 4: under tm.mu then slot.mu it
+// re-decides every tm-local condition, the authority epoch and the poll's
+// active site, and on success installs the provisional claim. The
+// predecessor checks are not repeated: they would need r.mu under tm.mu,
+// and a retired manager starts nothing new, so "predecessor busy" only
+// goes from true to false.
+func (tm *TopologyManager) publishPlannedClaim(req PlannedClaimRequest, epoch uint64, polled string, inMemory FailoverRecordRef, sourceUUID string) PlannedClaimDecision {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	d, now, decided := tm.plannedClaimRefusalLocked(req)
+	switch {
+	case decided:
+		return d
+	case tm.authorityEpoch != epoch || now != polled:
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "authority moved while the claim was being decided")
+	case !sameFailoverRecord(newFailoverRecordRef(tm.lastFailover, tm.lastFailoverTarget), inMemory):
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "a failover was recorded while the claim was being decided")
+	}
+	c := plannedClaim{
+		mode: claimModeRun, runID: req.RunID, source: polled, target: req.Target,
+		sourceUUID: sourceUUID, grantedAt: tm.clock.Now(), baseline: inMemory, provisional: true,
+	}
+	if !tm.plannedSlot.hydrate(c) {
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitClaimHeld, "another run took the claim")
+	}
+	tm.authorityEpoch++
+	tm.crossSiteRetry = true
+	return claimDecisionGranted(&c)
+}
+
+func describeFailoverRecordRef(r FailoverRecordRef) string {
+	if r.LastFailover.IsZero() && r.LastFailoverTarget == "" {
+		return "no failover"
+	}
+	return fmt.Sprintf("%s at %s", r.LastFailoverTarget, r.LastFailover.UTC().Format(time.RFC3339))
+}
+
+// requireRunClaim is §3.3: immediately before a mutating facade call's
+// first statement, the leader context is alive, the slot holds ref in Run
+// mode with the same source and target, and (unless the call is the
+// re-proof) the claim needs no re-proof.
+func (tm *TopologyManager) requireRunClaim(leader context.Context, ref PlannedRunRef, reprove bool) error {
+	if leader != nil && leader.Err() != nil {
+		return errLeaderLost
+	}
+	tm.mu.RLock()
+	held, ok := tm.plannedSlot.snapshot()
+	tm.mu.RUnlock()
+	switch {
+	case !ok || held.mode != claimModeRun || held.runID != ref.RunID || held.source != ref.Source || held.target != ref.Target:
+		return errClaimLost
+	case held.needsReprove && !reprove:
+		return errReproveRequired
+	}
+	return nil
+}
+
+// hydratedRunClaim builds the Run claim an owns-sites block hydrates to,
+// or ok=false when pf cannot be hydrated (no runId, no source, or a
+// phase that owns nothing).
+func hydratedRunClaim(pf *v1alpha1.PlannedFailoverStatus, now time.Time) (plannedClaim, bool) {
+	if pf == nil || pf.RunID == "" || pf.Source == "" || pf.Target == "" {
+		return plannedClaim{}, false
+	}
+	if !plannedFailoverOwnsSites(&v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{PlannedFailover: pf}}) {
+		return plannedClaim{}, false
+	}
+	c := plannedClaim{
+		mode: claimModeRun, runID: pf.RunID, source: pf.Source, target: pf.Target,
+		grantedAt: now, baseline: failoverRecordRefFromAPI(pf.ClaimBaseline), needsReprove: true,
+	}
+	if pf.ClaimedAt != nil {
+		c.grantedAt = pf.ClaimedAt.Time
+	}
+	return c, true
+}
+
+// fillWireRegisteredManager is WireRegisteredManager's body.
+func fillWireRegisteredManager(tm *TopologyManager, w ManagerWiring) {
+	tm.restoreKeyringRotationReservations(w.PendingRotations)
+	if w.RetiringUpdateInFlight {
+		tm.setPredecessorUpdateInFlight(true)
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if w.RetiringBusy != nil {
+		tm.predecessorBusy = w.RetiringBusy
+	}
+	if w.Slot == nil {
+		return
+	}
+	tm.plannedSlot = w.Slot
+	switch {
+	case w.HoldFrom != nil:
+		if w.Slot.hydrate(plannedClaim{mode: claimModeHold, runID: w.HoldFrom.RunID, grantedAt: tm.clock.Now()}) {
+			tm.logger.Warn("planned failover: automation held pending acknowledgement",
+				"fg", tm.cfg.Name, "runId", w.HoldFrom.RunID, "sites", []string(nil))
+		}
+	case w.HydrateFrom != nil:
+		if c, ok := hydratedRunClaim(w.HydrateFrom, tm.clock.Now()); ok {
+			w.Slot.hydrate(c)
+		}
+	}
+	held, ok := w.Slot.snapshot()
+	if !ok || held.mode != claimModeRun || held.promotion == nil {
+		return
+	}
+	// The run recorded its promotion into an earlier generation of this
+	// process; bring it into this one. The watermark always comes from
+	// the run's uncached fence.gtidSet.
+	watermark := ""
+	if pf := w.HydrateFrom; pf != nil && pf.RunID == held.runID && pf.Fence != nil && pf.Fence.GtidSet != nil {
+		watermark = *pf.Fence.GtidSet
+	}
+	tm.applyPlannedPromotionLocked(held.promotion.confirmedAt, held.target, watermark)
+}
+
+// applyPlannedPromotionLocked brings a planned promotion recorded
+// elsewhere (the claim, or the run's durable Publishing or Succeeded
+// record) into this manager's failover record under the timestamp-monotonic
+// rule: it applies iff confirmedAt is not before the current lastFailover
+// (second precision) and, on equal times, only when the target matches (an
+// idempotent re-apply). Must hold tm.mu.
+func (tm *TopologyManager) applyPlannedPromotionLocked(confirmedAt time.Time, target, watermark string) bool {
+	if confirmedAt.IsZero() || target == "" {
+		return false
+	}
+	at := confirmedAt.UTC().Truncate(time.Second)
+	cur := tm.lastFailover.UTC().Truncate(time.Second)
+	switch {
+	case at.Before(cur):
+		return false
+	case at.Equal(cur) && !tm.lastFailover.IsZero() && tm.lastFailoverTarget != target:
+		return false
+	}
+	tm.lastFailover, tm.lastFailoverTarget = at, target
+	tm.lastActiveSite, tm.lastActiveSiteNamed = target, true
+	if watermark != "" {
+		tm.promotionGtidExecuted = watermark
+		tm.groupHasData = true
+	}
+	return true
+}
+
+func (h SimHooks) yield(point string) {
+	if h.Yield != nil {
+		h.Yield(point)
+	}
+}
+
+// plannedRunStartTime is when the run was accepted (zero if unknown).
+func plannedRunStartTime(pf *v1alpha1.PlannedFailoverStatus) time.Time {
+	if pf.StartTime != nil {
+		return pf.StartTime.Time
+	}
+	if pf.ClaimedAt != nil {
+		return pf.ClaimedAt.Time
+	}
+	return time.Time{}
+}
+
+// plannedFenceAttributableEnd reports whether the latest run ended
+// SourceLeftFenced (by its terminal record, or by a terminal marker naming
+// it) with a fence the topology manager may lift by a named re-assert
+// (§6.5): the run's source is known, its fence was attributable, and the
+// fence was not refused (a legacy run) or never sent because authority had
+// already moved.
+func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.PlannedFailoverStatus, ok bool) {
+	pf, marked := plannedFailoverRun(fg)
+	if pf == nil || pf.RunID == "" || pf.Source == "" || pf.Fence == nil {
+		return nil, false
+	}
+	var reason v1alpha1.PlannedFailoverReason
+	switch {
+	case pf.Result != nil && pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced:
+		if slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
+			return nil, false
+		}
+		reason = pf.Result.Reason
+	case marked:
+		m, _ := parseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+		if m.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+			return nil, false
+		}
+		reason = m.Reason
+	default:
+		return nil, false
+	}
+	switch {
+	case reason == v1alpha1.PlannedFailoverReasonLegacyRunRefused:
+		return nil, false
+	case reason == v1alpha1.PlannedFailoverReasonAuthorityChanged && pf.Fence.State != v1alpha1.PlannedFailoverFenceApplied:
+		return nil, false
+	}
+	return pf, true
+}
+
+// restorePlannedFailoverState brings the latest planned-failover run into
+// a new manager from view, the start's uncached read (nil: nothing):
+//   - a run that ended Succeeded (or is Publishing) applies its promotion
+//     iff its confirmedAt is not before the restored lastFailover and, on
+//     equal times, only when the target matches (an idempotent re-apply);
+//   - a run that ended SourceLeftFenced with its own, attributable fence
+//     names its source for re-assert (§6.5), unless a failover recorded
+//     after the run started has moved authority since.
+func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager, view *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) {
+	if view == nil {
+		return
+	}
+	pf, _ := plannedFailoverRun(view)
+	if pf == nil {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	confirmed := pf.Phase == v1alpha1.PlannedFailoverPhasePublishing ||
+		(pf.Result != nil && pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded)
+	if confirmed && pf.Promotion != nil && pf.Promotion.ConfirmedAt != nil && pf.Fence != nil && pf.Fence.GtidSet != nil {
+		tm.applyPlannedPromotionLocked(pf.Promotion.ConfirmedAt.Time, pf.Target, *pf.Fence.GtidSet)
+	}
+	src, ok := plannedFenceAttributableEnd(view)
+	if !ok {
+		return
+	}
+	started := plannedRunStartTime(src).UTC().Truncate(time.Second)
+	if tm.lastFailover.UTC().Truncate(time.Second).After(started) {
+		return
+	}
+	tm.lastActiveSite, tm.lastActiveSiteNamed = src.Source, true
+	tm.logger.Info("planned failover: named fenced source for re-assert", "fg", nn.String(), "runId", src.RunID, "site", src.Source)
+}
+
+// plannedFailoverView is the start's uncached read of the group, for the
+// planned-failover hydration. Without an uncached reader (tests) it is fg.
+// A read error fails the start unless the group's slot already holds a
+// claim or a predecessor of this process is being replaced: hydration
+// only ever fills an empty slot, and this process's runs hold theirs.
+func (r *TopologyManagerRunner) plannedFailoverView(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, prev *managedTopology) (*v1alpha1.MysqlFailoverGroup, error) {
+	if r.apiReader == nil {
+		return fg, nil
+	}
+	nn := FailoverGroupNamespacedName(fg)
+	var fresh v1alpha1.MysqlFailoverGroup
+	if err := r.apiReader.Get(ctx, nn, &fresh); err != nil {
+		if prev != nil || r.Slot(nn).Held() {
+			r.logger.Warn("could not read the group uncached; the new topology manager shares its predecessor's planned-failover claim",
+				"fg", nn.String(), "error", err)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read the group uncached to hydrate its planned-failover claim: %w", err)
+	}
+	return &fresh, nil
+}

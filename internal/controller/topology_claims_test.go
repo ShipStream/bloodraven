@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 // claimFixture is a two-site group, dc1 the settled primary and dc2 a
@@ -33,9 +36,28 @@ func newClaimFixture(t *testing.T) *claimFixture {
 	return f
 }
 
+// claimMySQL is a mockMySQL that also reports its server_uuid, as the
+// production checker does, for the planned-failover grant's source probe.
+type claimMySQL struct {
+	*mockMySQL
+	uuid string
+}
+
+func (m *claimMySQL) ReadGTIDSnapshot(ctx context.Context) (mysql.GTIDSnapshot, error) {
+	gtid, err := m.GetGtidExecuted(ctx)
+	return mysql.GTIDSnapshot{ServerUUID: m.uuid, GtidExecuted: gtid}, err
+}
+
 func (f *claimFixture) newManager() *TopologyManager {
-	tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
+	dc1 := &claimMySQL{mockMySQL: &mockMySQL{}, uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+	dc2 := &claimMySQL{mockMySQL: &mockMySQL{readOnly: true, superReadOnly: true,
+		replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}},
+		uuid: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}
+	tm := NewTopologyManager(testTopologyConfig(), []mysql.Checker{dc1, dc2}, NewFailoverController(testLogger()), nil, nil,
+		BootstrapConfig{}, newMockTainter(), platform.NewHub(testLogger()), &mockDNS{}, testLogger())
+	tm.failoverCooldown = 0
 	settleAuthority(tm)
+	tm.SetReadyForSim()
 	return tm
 }
 
@@ -113,6 +135,23 @@ var claimants = []struct {
 		}
 		return claimRefused
 	}},
+	{"PF", func(t *testing.T, f *claimFixture) claimOutcome {
+		d, err := f.r.ClaimPlannedFailover(context.Background(), f.nn, claimRequest(f.tm, "pf-column"))
+		switch {
+		case err != nil:
+			t.Fatalf("PF claim: %v", err)
+		case d.Kind == ClaimGranted:
+			return claimAllowed
+		case d.Kind == ClaimWait:
+			return claimWaits
+		}
+		return claimRefused
+	}},
+}
+
+// holdPlannedClaim installs another run's claim in the group's slot.
+func holdPlannedClaim(f *claimFixture, mode plannedClaimMode, provisional bool) {
+	f.r.Slot(f.nn).hydrate(plannedClaim{mode: mode, runID: "run-held", source: "dc1", target: "dc2", provisional: provisional})
 }
 
 // TestTopologyClaimMatrix: for every held claim (row) and every claimant
@@ -126,7 +165,7 @@ func TestTopologyClaimMatrix(t *testing.T) {
 		want string // one outcome per claimant, in column order
 		hold func(t *testing.T, f *claimFixture)
 	}{
-		{"Auto promotion", "RRRRR", func(t *testing.T, f *claimFixture) {
+		{"Auto promotion", "RRRRRW", func(t *testing.T, f *claimFixture) {
 			if began, _ := f.tm.beginAutoPromotionOf("dc2"); !began {
 				t.Fatal("setup: auto promotion not claimed")
 			}
@@ -134,12 +173,12 @@ func TestTopologyClaimMatrix(t *testing.T) {
 		// The promotion's own claim, without the planned-failover guard
 		// (that is the next row), so the row fails if the claim stops
 		// holding the sites.
-		{"PlannedPromote", "RRRRR", func(t *testing.T, f *claimFixture) {
+		{"PlannedPromote", "RRRRRW", func(t *testing.T, f *claimFixture) {
 			if err := f.tm.claimPlannedPromotion(ctx, "dc2"); err != nil {
 				t.Fatalf("setup: %v", err)
 			}
 		}},
-		{"promotion not yet observed", "RRRRA", func(t *testing.T, f *claimFixture) {
+		{"promotion not yet observed", "RRRRAW", func(t *testing.T, f *claimFixture) {
 			if began, _ := f.tm.beginAutoPromotionOf("dc2"); !began {
 				t.Fatal("setup: auto promotion not claimed")
 			}
@@ -148,10 +187,17 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			f.tm.mu.Unlock()
 			f.tm.finishDeploymentTopologyChange()
 		}},
-		{"planned failover", "RRRRR", func(t *testing.T, f *claimFixture) {
-			f.tm.SetPlannedFailoverActive(true) // derived from status, from Pending on
+		{"planned-failover claim", "RRRRRW", func(t *testing.T, f *claimFixture) {
+			holdPlannedClaim(f, claimModeRun, false)
 		}},
-		{"ordered update claimed", "RRRRR", func(t *testing.T, f *claimFixture) {
+		{"planned-failover claim (provisional grant)", "RRRRRW", func(t *testing.T, f *claimFixture) {
+			holdPlannedClaim(f, claimModeRun, true)
+		}},
+		{"planned-failover hold", "RRRRRR", func(t *testing.T, f *claimFixture) {
+			holdPlannedClaim(f, claimModeHold, false)
+		}},
+		{"planned request waiting", "AAAAAA", func(t *testing.T, f *claimFixture) {}},
+		{"ordered update claimed", "RRRRRW", func(t *testing.T, f *claimFixture) {
 			f.tm.mu.RLock()
 			epoch, active := f.tm.authorityEpoch, f.tm.activeSiteLocked()
 			f.tm.mu.RUnlock()
@@ -159,35 +205,35 @@ func TestTopologyClaimMatrix(t *testing.T) {
 				t.Fatalf("setup: claimed=%v err=%v", claimed, err)
 			}
 		}},
-		{"ordered update pending", "AARAA", func(t *testing.T, f *claimFixture) {
+		{"ordered update pending", "AARAAA", func(t *testing.T, f *claimFixture) {
 			f.tm.mu.Lock()
 			f.tm.deploymentUpdatePending = true // startUpdate
 			f.tm.mu.Unlock()
 		}},
-		{"rotation of the target", "RAAAA", func(t *testing.T, f *claimFixture) {
+		{"rotation of the target", "RAAAAW", func(t *testing.T, f *claimFixture) {
 			if ok, why := f.r.ReserveKeyringRotation(f.nn, "dc2"); !ok {
 				t.Fatalf("setup: %s", why)
 			}
 		}},
-		{"follower mutation", "AWAAA", func(t *testing.T, f *claimFixture) {
+		{"follower mutation", "AWAAAW", func(t *testing.T, f *claimFixture) {
 			release, ok := f.tm.beginFollowerMutation()
 			if !ok {
 				t.Fatal("setup: follower mutation not admitted")
 			}
 			t.Cleanup(release)
 		}},
-		{"bootstrap into a promotable site", "RRARR", func(t *testing.T, f *claimFixture) {
+		{"bootstrap into a promotable site", "RRARRW", func(t *testing.T, f *claimFixture) {
 			if _, why := f.tm.claimBootstrap("dc2", "reclone"); why != "" {
 				t.Fatalf("setup: %s", why)
 			}
 		}},
-		{"in-place restore", "RRARR", func(t *testing.T, f *claimFixture) {
+		{"in-place restore", "RRARRW", func(t *testing.T, f *claimFixture) {
 			f.tm.SetTopologyFrozen(true) // runner, from status.restoreInPlace
 		}},
-		{"predecessor's ordered update", "RRRRR", func(t *testing.T, f *claimFixture) {
+		{"predecessor's ordered update", "RRRRRW", func(t *testing.T, f *claimFixture) {
 			f.tm.setPredecessorUpdateInFlight(true) // registerManager
 		}},
-		{"predecessor still promoting", "RRRRR", func(t *testing.T, f *claimFixture) {
+		{"predecessor still promoting", "RRRRRW", func(t *testing.T, f *claimFixture) {
 			if began, _ := f.tm.beginAutoPromotionOf("dc2"); !began {
 				t.Fatal("setup: auto promotion not claimed")
 			}
@@ -195,7 +241,7 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			f.tm = f.newManager()
 			f.r.registerManager(f.nn, &managedTopology{tm: f.tm})
 		}},
-		{"predecessor still in a follower mutation", "RRARR", func(t *testing.T, f *claimFixture) {
+		{"predecessor still in a follower mutation", "RRARRW", func(t *testing.T, f *claimFixture) {
 			release, ok := f.tm.beginFollowerMutation()
 			if !ok {
 				t.Fatal("setup: follower mutation not admitted")
@@ -205,7 +251,7 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			f.tm = f.newManager()
 			f.r.registerManager(f.nn, &managedTopology{tm: f.tm})
 		}},
-		{"this manager retired", "RRRRR", func(t *testing.T, f *claimFixture) {
+		{"this manager retired", "RRRRRW", func(t *testing.T, f *claimFixture) {
 			f.retire(t)
 		}},
 	}
@@ -233,10 +279,11 @@ func TestAutoPromotion_ClaimBetweenEligibilityAndClaimStopsIt(t *testing.T) {
 		name string
 		hold func(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedName, tm *TopologyManager)
 	}{
-		{"planned failover", func(t *testing.T, _ *TopologyManagerRunner, _ types.NamespacedName, tm *TopologyManager) {
-			// The guard arrives from status, as the reconciler and the
-			// runner's sync derive it for an in-flight planned failover.
-			tm.SetPlannedFailoverActive(true)
+		{"planned-failover claim", func(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedName, _ *TopologyManager) {
+			r.Slot(nn).hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2", provisional: true})
+		}},
+		{"planned-failover hold", func(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedName, _ *TopologyManager) {
+			r.Slot(nn).toHold("run-1")
 		}},
 		{"in-place restore", func(t *testing.T, _ *TopologyManagerRunner, _ types.NamespacedName, tm *TopologyManager) {
 			tm.SetTopologyFrozen(true)

@@ -63,9 +63,29 @@ func legacyMergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, sn
 	return true
 }
 
-// MergeTopologySnapshotStatus is behaviour-preserving: for every pairing of
-// stored status and snapshot it produces exactly what updateCRStatus's
-// inline merge did, and leaves every other field alone.
+// monotonicFailoverTriple applies the one intended change to the legacy
+// merge (OPEN-2): the failover triple never moves to a strictly older
+// lastFailover (second precision), and an equal one changes only the
+// target.
+func monotonicFailoverTriple(merged, stored *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
+	snapAt := snap.LastFailover.UTC().Truncate(time.Second)
+	var storedAt time.Time
+	if stored.LastFailover != nil {
+		storedAt = stored.LastFailover.UTC().Truncate(time.Second)
+	}
+	switch {
+	case snapAt.Before(storedAt):
+		merged.LastFailover, merged.LastFailoverTarget, merged.PromotionGtidExecuted =
+			stored.LastFailover.DeepCopy(), stored.LastFailoverTarget, stored.PromotionGtidExecuted
+	case snapAt.Equal(storedAt):
+		merged.LastFailover, merged.PromotionGtidExecuted = stored.LastFailover.DeepCopy(), stored.PromotionGtidExecuted
+	}
+}
+
+// MergeTopologySnapshotStatus is the legacy inline merge plus the
+// monotonic failover triple: for every pairing of stored status and
+// snapshot it produces exactly what updateCRStatus's inline merge did with
+// that one change, and leaves every other field alone.
 func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 	t0 := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	earlier := metav1.NewTime(t0.Add(-time.Hour))
@@ -129,6 +149,9 @@ func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 			got, want := base.DeepCopy(), base.DeepCopy()
 			gotOK := MergeTopologySnapshotStatus(got, snap)
 			wantOK := legacyMergeTopologySnapshotStatus(want, snap)
+			if wantOK {
+				monotonicFailoverTriple(want, &base, snap)
+			}
 			if gotOK != wantOK {
 				t.Errorf("%s / %s: merged = %v, legacy = %v", sn, nn, gotOK, wantOK)
 			}

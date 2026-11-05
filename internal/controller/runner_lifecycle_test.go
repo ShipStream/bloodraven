@@ -229,29 +229,55 @@ func TestConnectionMaterialHash_UnreadableSecretIsAnError(t *testing.T) {
 	}
 }
 
-// A manager started while a planned failover is in flight (an operator
-// restart mid-switchover) must carry the planned-failover guard before its
-// first poll: the RecoveryInProgress markers startManager restores would
+// TestRegisterManager_HydratesUncachedBeforeRun: a manager started while a
+// planned failover owns the sites (an operator restart mid-switchover)
+// carries the run's claim before its first poll, hydrated from the
+// uncached read, not from the (possibly stale) cached object the sync
+// passed in. The RecoveryInProgress markers startManager restores would
 // otherwise let that poll drain or recover the sites the switchover uses.
-func TestStartManager_HydratesPlannedFailoverGuardBeforeRun(t *testing.T) {
-	r, _, fg, _ := lifecycleRunner(t)
+func TestRegisterManager_HydratesUncachedBeforeRun(t *testing.T) {
+	r, c, fg, _ := lifecycleRunner(t)
 	nn := FailoverGroupNamespacedName(fg)
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "dc2"}
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc2", RecoveryState: recoveryStateInProgress}}
+	live := fg.DeepCopy()
+	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		RunID: "run-restart", Revision: 4, Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "dc2", Source: "dc1",
+	}
+	live.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc2", RecoveryState: recoveryStateInProgress}}
+	if err := c.Status().Update(context.Background(), live); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	r.SetAPIReader(c)
+	cached := fg.DeepCopy() // the sync's cached copy predates the run
+	cached.Status.Sites = live.Status.Sites
 
-	cfg := CRConfigToTopologyConfig(fg)
-	if err := r.startManager(context.Background(), fg, cfg, nil); err != nil {
+	cfg := CRConfigToTopologyConfig(cached)
+	if err := r.startManager(context.Background(), cached, cfg, nil); err != nil {
 		t.Fatalf("startManager: %v", err)
 	}
 	mt := registeredManager(r, nn)
 	if mt == nil {
 		t.Fatal("no manager registered")
 	}
-	if !mt.tm.isPlannedFailoverActive() {
-		t.Fatal("planned-failover guard not set when Run started")
+	view, ok := r.Slot(nn).View()
+	if !ok || view.RunID != "run-restart" || view.Mode != "Run" || !view.NeedsReprove {
+		t.Fatalf("slot = %+v (held=%v), want run-restart hydrated in Run mode with needsReprove", view, ok)
+	}
+	if mt.tm.plannedClaimSlot() != r.Slot(nn) {
+		t.Fatal("the manager is not wired to the group's slot")
 	}
 	if !mt.tm.followerMutationSuppressed() {
 		t.Fatal("restored RecoveryInProgress sites are open to recovery during the planned failover")
+	}
+}
+
+// An uncached read failure fails the start of a group's first manager
+// (nothing could hydrate its claim), as initRestoreProtection's does.
+func TestStartManager_PlannedViewReadErrorFailsFirstStart(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	r.SetAPIReader(failingReader{})
+	cfg := CRConfigToTopologyConfig(fg)
+	if err := r.startManager(context.Background(), fg, cfg, nil); err == nil {
+		t.Fatal("startManager succeeded without an uncached read of the planned-failover claim")
 	}
 }
 

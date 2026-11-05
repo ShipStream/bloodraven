@@ -608,7 +608,7 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 	if err := mgr.client.Create(context.Background(), pod); err != nil {
 		t.Fatal(err)
 	}
-	mgr.SetPaused(true)
+	mgr.SetUpgradePaused(true)
 	release()
 	<-ran
 

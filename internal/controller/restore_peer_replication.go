@@ -428,7 +428,7 @@ func (tm *TopologyManager) reassertRestorePeerReplicationStop(ctx context.Contex
 func (tm *TopologyManager) restoreMutationInFlight(requireFrozen bool) string {
 	tm.mu.RLock()
 	frozen := tm.topologyFrozen
-	planned := tm.plannedFailoverActive
+	planned := tm.plannedClaimHeldLocked()
 	phase := tm.bootstrapPhase
 	recipient := tm.bootstrapRecipient
 	admitting := tm.bootstrapAdmitting

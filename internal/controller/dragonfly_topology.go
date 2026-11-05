@@ -25,8 +25,8 @@ import (
 
 // DragonflyManager observes per-site Dragonfly state and steers
 // replication topology. It runs as a goroutine alongside the MySQL
-// TopologyManager and is paused while a planned-failover state machine
-// is driving its own Dragonfly promotion.
+// TopologyManager and is paused while a planned failover owns the group
+// (its claim or hold) or a snapshot upgrade is in flight.
 type DragonflyManager struct {
 	client       client.Client
 	recorder     record.EventRecorder
@@ -39,9 +39,16 @@ type DragonflyManager struct {
 	// dragonfly.New.
 	connector DragonflyConnector
 
-	// paused is set to true while a planned-failover state machine is
-	// running so we don't fight its promotion sequence.
-	paused atomic.Bool
+	// The manager pauses (observes and publishes status, but sends no
+	// role or replication command) while either independent source says
+	// so. plannedOwner is the group's planned-failover claim slot, read
+	// live: true while a run holds the claim or a hold stands. It is set
+	// once at construction by the runner; nil means none. upgradePaused is
+	// set from the snapshot upgrade's own status. Neither writes the
+	// other, so an upgrade step can never revoke a planned failover's
+	// pause, nor the reverse.
+	plannedOwner  atomic.Pointer[func() bool]
+	upgradePaused atomic.Bool
 
 	// stale-master events are deduplicated per (site, role) so we don't
 	// spam the Event stream while the state persists.
@@ -141,11 +148,49 @@ func NewDragonflyManager(c client.Client, recorder record.EventRecorder, logger 
 	}
 }
 
-// SetPaused toggles the planned-failover guard. While paused, the manager
-// continues to observe and update status, but does NOT issue REPLICAOF
-// commands.
-func (m *DragonflyManager) SetPaused(paused bool) {
-	m.paused.Store(paused)
+// SetPlannedOwner sets the planned-failover pause source: owned reports
+// whether a planned failover holds the group's claim or a hold stands.
+// Call before Run.
+func (m *DragonflyManager) SetPlannedOwner(owned func() bool) {
+	if owned == nil {
+		m.plannedOwner.Store(nil)
+		return
+	}
+	m.plannedOwner.Store(&owned)
+}
+
+// SetUpgradePaused sets the snapshot-upgrade pause source. While either
+// source pauses the manager, it continues to observe and update status,
+// but does NOT issue REPLICAOF commands.
+func (m *DragonflyManager) SetUpgradePaused(paused bool) {
+	m.upgradePaused.Store(paused)
+}
+
+// plannedOwned reports the planned-failover pause source.
+func (m *DragonflyManager) plannedOwned() bool {
+	if f := m.plannedOwner.Load(); f != nil {
+		return (*f)()
+	}
+	return false
+}
+
+// paused reports whether either pause source holds.
+func (m *DragonflyManager) paused() bool {
+	return m.upgradePaused.Load() || m.plannedOwned()
+}
+
+// plannedFailoverOwnsDragonfly reports whether a planned failover owns the
+// group's Dragonfly: its run owns the sites (fg, read under the gate), or
+// the claim slot holds a run or a hold (claimHeld). A request that is only
+// waiting (Admitting, Deferred) owns nothing. A block written by the
+// pre-claim reconciler (no runId) keeps that reconciler's in-flight rule
+// until it is replaced.
+func plannedFailoverOwnsDragonfly(fg *v1alpha1.MysqlFailoverGroup, claimHeld bool) bool {
+	if claimHeld || plannedFailoverOwnsSites(fg) {
+		return true
+	}
+	pf := fg.Status.PlannedFailover
+	return pf != nil && pf.RunID == "" && plannedFailoverInFlight(pf)
 }
 
 // SetConnector overrides the default connector. Tests use this to inject
@@ -308,7 +353,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 	}
 	m.patchStatus(ctx, snap)
 
-	if m.paused.Load() || m.shouldYield() {
+	if m.paused() || m.shouldYield() {
 		return
 	}
 	// Commands run on a context the stop signal does not cancel: once a
@@ -706,13 +751,34 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 	}
 }
 
+// plannedTakeoverMasterSite is the run's target while its Dragonfly
+// takeover has succeeded and the run is past it (PromotingDragonfly,
+// Promoting, Publishing or RollingBack): the target already holds the
+// master, though status.activeSite has not moved yet (§8.4). "" otherwise.
+func plannedTakeoverMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
+	pf, marked := plannedFailoverRun(fg)
+	if pf == nil || marked || pf.RunID == "" || pf.Target == "" || pf.Dragonfly == nil || pf.Dragonfly.Takeover == nil ||
+		pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
+		return ""
+	}
+	switch pf.Phase {
+	case v1alpha1.PlannedFailoverPhasePromotingDragonfly, v1alpha1.PlannedFailoverPhasePromoting,
+		v1alpha1.PlannedFailoverPhasePublishing, v1alpha1.PlannedFailoverPhaseRollingBack:
+		return pf.Target
+	}
+	return ""
+}
+
 // activeDragonflySiteFromObservation chooses the site that should be treated
 // as Dragonfly master for status, label reconciliation, and replica wiring.
 // A persisted status.dragonfly.activeSite is honored only when that site is
 // still observed as a raw Dragonfly master; otherwise a single observed raw
 // master self-heals stale status after operator upgrades or restarts.
 func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) string {
-	if pf := fg.Status.PlannedFailover; pf != nil {
+	if site := plannedTakeoverMasterSite(fg); site != "" {
+		return site
+	}
+	if pf := fg.Status.PlannedFailover; pf != nil && pf.RunID == "" {
 		switch pf.Phase {
 		case v1alpha1.PlannedFailoverPhasePromotingDragonfly,
 			v1alpha1.PlannedFailoverPhasePromoting,
@@ -1055,8 +1121,10 @@ func (m *DragonflyManager) executeRequest(ctx context.Context, req *dragonflyPro
 	if !dragonflyEnabled(&fg) {
 		return false
 	}
-	if m.paused.Load() || plannedFailoverInFlight(fg.Status.PlannedFailover) || dragonflyUpgradeInFlight(dragonflyUpgradeStatus(&fg)) {
-		// A planned failover or snapshot upgrade owns Dragonfly.
+	if m.paused() || plannedFailoverOwnsDragonfly(&fg, false) || dragonflyUpgradeInFlight(dragonflyUpgradeStatus(&fg)) {
+		// A planned failover or snapshot upgrade owns Dragonfly. During an
+		// upgrade nothing is stored for later: the upgrade reconcile
+		// re-derives the follow-up from MySQL authority (§8.3).
 		m.logger.Info("dragonfly promotion: planned failover in flight; skipping", "site", req.target, "fg", m.fgKey.String())
 		return false
 	}
@@ -1111,7 +1179,11 @@ func (m *DragonflyManager) rolloutPromoteLocked(work context.Context, target, ol
 		m.logger.Error("dragonfly rollout: get fg", "error", err)
 		return false
 	}
-	if why := rolloutPromotionBlocked(&fg, target, oldSource); why != "" {
+	why := rolloutPromotionBlocked(&fg, target, oldSource)
+	if why == "" && m.plannedOwned() {
+		why = "planned failover holds the claim"
+	}
+	if why != "" {
 		m.logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target, "reason", why, "fg", m.fgKey.String())
 		return false
 	}
@@ -1133,7 +1205,7 @@ func rolloutPromotionBlocked(fg *v1alpha1.MysqlFailoverGroup, target, oldSource 
 	switch {
 	case !dragonflyEnabled(fg):
 		return "dragonfly disabled"
-	case plannedFailoverInFlight(fg.Status.PlannedFailover):
+	case plannedFailoverOwnsDragonfly(fg, false):
 		return "planned failover in flight"
 	case dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg)):
 		return "snapshot upgrade in flight"
@@ -1151,7 +1223,8 @@ func rolloutPromotionBlocked(fg *v1alpha1.MysqlFailoverGroup, target, oldSource 
 // obsolete against fg (read under the gate), or "" if it still stands. The
 // request reflects a MySQL decision; it is obsolete once a later decision,
 // recorded durably after it was made, points elsewhere:
-//   - a planned failover started at or after the request;
+//   - a planned failover claimed at or after the request (a run that is
+//     only waiting has decided nothing);
 //   - a MySQL failover to another site recorded at or after the request;
 //   - a successful Dragonfly promotion to another site stamped at or after
 //     the request's second (status times have one-second resolution),
@@ -1166,8 +1239,14 @@ func rolloutPromotionBlocked(fg *v1alpha1.MysqlFailoverGroup, target, oldSource 
 // and never come through here.
 func supersededPromotionRequest(fg *v1alpha1.MysqlFailoverGroup, req *dragonflyPromotionRequest) string {
 	issued := req.issued.Truncate(time.Second)
-	if pf := fg.Status.PlannedFailover; pf != nil && pf.StartTime != nil && !pf.StartTime.Time.Before(issued) {
-		return fmt.Sprintf("planned failover to %q started after the request", pf.Target)
+	if pf := fg.Status.PlannedFailover; pf != nil {
+		at := pf.ClaimedAt
+		if pf.RunID == "" {
+			at = pf.StartTime // a block written by the pre-claim reconciler
+		}
+		if at != nil && !at.Time.Before(issued) {
+			return fmt.Sprintf("planned failover to %q claimed the group after the request", pf.Target)
+		}
 	}
 	if t := fg.Status.LastFailoverTarget; t != "" && t != req.target && fg.Status.LastFailover != nil && !fg.Status.LastFailover.Time.Before(issued) {
 		return fmt.Sprintf("MySQL failed over to %q after the request", t)
