@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
@@ -105,14 +106,47 @@ func lastFailoverAge(fg *v1alpha1.MysqlFailoverGroup) string {
 }
 
 func plannedFailoverSummary(fg *v1alpha1.MysqlFailoverGroup) string {
-	if fg.Status.PlannedFailover == nil {
-		return "-"
+	held := ""
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil && c.Status == metav1.ConditionTrue {
+		held = "+held"
 	}
 	pf := fg.Status.PlannedFailover
-	if pf.Reason != "" && pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
-		return fmt.Sprintf("%s(%s)", pf.Phase, pf.Reason)
+	if pf == nil {
+		if held != "" {
+			return "-" + held
+		}
+		return "-"
 	}
-	return string(pf.Phase)
+	// A terminal marker that names the run ends it whatever the phase says
+	// (the operator could not write status).
+	if m := fg.Annotations[brcontroller.PlannedFailoverTerminalAnnotation]; pf.RunID != "" && strings.HasPrefix(m, pf.RunID+"/") {
+		parts := strings.SplitN(m, "/", 3)
+		if len(parts) == 3 {
+			return fmt.Sprintf("Ended(%s)%s", plannedOutcomeReason(v1alpha1.PlannedFailoverOutcome(parts[1]), v1alpha1.PlannedFailoverReason(parts[2])), held)
+		}
+	}
+	if r := pf.Result; r != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
+		return fmt.Sprintf("%s(%s)%s", pf.Phase, plannedOutcomeReason(r.Outcome, r.Reason), held)
+	}
+	if a := pf.Admission; a != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting && a.WaitReason != "" {
+		return fmt.Sprintf("%s(%s)%s", pf.Phase, a.WaitReason, held)
+	}
+	if a := pf.Admission; a != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred && a.DeferReason != "" {
+		return fmt.Sprintf("%s(%s)%s", pf.Phase, a.DeferReason, held)
+	}
+	return string(pf.Phase) + held
+}
+
+// plannedOutcomeReason renders a terminal result: the reason alone for a
+// run that never started (as before), "<outcome>:<reason>" otherwise.
+func plannedOutcomeReason(outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) string {
+	switch {
+	case outcome == v1alpha1.PlannedFailoverOutcomeNotStarted && reason != "":
+		return string(reason)
+	case reason == "":
+		return string(outcome)
+	}
+	return string(outcome) + ":" + string(reason)
 }
 
 func recoverySummary(fg *v1alpha1.MysqlFailoverGroup) string {

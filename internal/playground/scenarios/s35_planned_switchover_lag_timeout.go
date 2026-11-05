@@ -146,13 +146,14 @@ func s35ObserveLagTimeoutRollback() runner.Step {
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseWaitingForLag {
 						sawWaitingForLag = true
 					}
-					msg := fmt.Sprintf("phase=%q target=%q reason=%q waitingForLagSeen=%v", pf.Phase, pf.Target, pf.Reason, sawWaitingForLag)
+					msg := fmt.Sprintf("phase=%q target=%q reason=%q waitingForLagSeen=%v", pf.Phase, pf.Target, plannedReason(pf), sawWaitingForLag)
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
 						return false, msg, fmt.Errorf("planned switchover unexpectedly Succeeded (lag budget should have expired): %s", msg)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
-						if pf.Reason != "LagTimeout" {
-							return false, msg, fmt.Errorf("planned switchover Failed with reason %q, want LagTimeout: %s", pf.Reason, pf.Message)
+						if plannedReason(pf) != "LagTimeout" || plannedOutcome(pf) != v1alpha1.PlannedFailoverOutcomeRolledBack {
+							return false, msg, fmt.Errorf("planned switchover Failed with %s/%q, want RolledBack/LagTimeout: %s",
+								plannedOutcome(pf), plannedReason(pf), pf.Message)
 						}
 						if pf.Target != target {
 							return false, msg, fmt.Errorf("plannedFailover target=%q, want %q", pf.Target, target)

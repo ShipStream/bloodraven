@@ -22,7 +22,7 @@ func init() {
 // Asserts:
 //   - PlannedFailoverStatus reaches Succeeded with target=peer
 //   - status.activeSite (MySQL) flipped to target
-//   - status.plannedFailover.dragonfly.SessionsPreserved == false
+//   - status.plannedFailover.dragonfly.sessions == Lost
 //     (the headline contract for D4: a Dragonfly sync timeout MUST
 //     mark sessions as not preserved, never silently masquerade as
 //     a clean session-preserving failover)
@@ -48,7 +48,7 @@ func scenario26PlannedDragonflySyncTimeout() runner.Scenario {
 		Title: "Planned failover with Dragonfly sync timeout (onSyncTimeout=proceed) marks sessions lost but still succeeds",
 		Hypothesis: "Patching maxSyncWait=1ms and scaling the target's Dragonfly StatefulSet to 0 forces both " +
 			"the WaitingForDragonflySync target-poll and the PromotingDragonfly REPLTAKEOVER to fail. " +
-			"With onSyncTimeout=proceed, the operator stamps SessionsPreserved=false, completes MySQL " +
+			"With onSyncTimeout=proceed, the operator records dragonfly.sessions=Lost, completes MySQL " +
 			"failover anyway, and increments dragonfly_promotions_total{result=\"failed\"}.",
 		Risk:     "medium",
 		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D4)",
@@ -118,7 +118,7 @@ func tightenS26SyncBudget() runner.Step {
 // injection: with the target Dragonfly StatefulSet at 0 replicas,
 // both the WaitingForDragonflySync poll-target step and the later
 // PromotingDragonfly dial-target step fail with "no endpoints", which
-// independently is enough to drive the SessionsPreserved=false path.
+// independently is enough to drive the sessions=Lost path.
 // The 1ms budget from the prior step adds defense-in-depth in case
 // the operator manages to dial mid-scale-down.
 func scaleS26TargetDragonflyToZero() runner.Step {
@@ -171,9 +171,9 @@ func observeS26PlannedFailoverSucceeded() runner.Step {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
 							pf.StartTime, env.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, pf.Reason)
+					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, plannedReason(pf))
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
-						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", pf.Reason, pf.Message)
+						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", plannedReason(pf), pf.Message)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
 						if pf.Target != target {
@@ -210,7 +210,7 @@ func verifyS26MysqlActiveSiteFlipped() runner.Step {
 
 // verifyS26SessionsNotPreserved is the headline assertion for D4.
 // A timeout/failure must never silently masquerade as a clean
-// session-preserving failover, so SessionsPreserved is checked
+// session-preserving failover, so dragonfly.sessions is checked
 // against an explicit `false`. The Reason field is checked against
 // the two documented values for this code path: DragonflySyncTimeout
 // (the WaitingForDragonflySync handler fired its policy branch first)
@@ -221,7 +221,7 @@ func verifyS26MysqlActiveSiteFlipped() runner.Step {
 func verifyS26SessionsNotPreserved() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "plannedFailover.dragonfly: SessionsPreserved=false with documented timeout/failure reason",
+		Name:  "plannedFailover.dragonfly: sessions=Lost with documented timeout/failure reason",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
 			if err != nil {
@@ -231,9 +231,9 @@ func verifyS26SessionsNotPreserved() runner.Step {
 			if pf == nil || pf.Dragonfly == nil {
 				return fmt.Errorf("status.plannedFailover.dragonfly missing on Succeeded run")
 			}
-			if pf.Dragonfly.SessionsPreserved == nil || *pf.Dragonfly.SessionsPreserved {
-				return fmt.Errorf("SessionsPreserved=%v want false (reason=%q msg=%q)",
-					pf.Dragonfly.SessionsPreserved, pf.Dragonfly.Reason, pf.Dragonfly.Message)
+			if pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsLost {
+				return fmt.Errorf("sessions=%q want Lost (reason=%q msg=%q)",
+					pf.Dragonfly.Sessions, pf.Dragonfly.Reason, pf.Dragonfly.Message)
 			}
 			switch pf.Dragonfly.Reason {
 			case "DragonflySyncTimeout", "DragonflyPromotionFailed":

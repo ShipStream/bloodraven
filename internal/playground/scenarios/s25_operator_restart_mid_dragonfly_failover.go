@@ -190,7 +190,7 @@ func killOperatorWhenWaitingForDragonflySync() runner.Step {
 						env.Capture.Note(fmt.Sprintf("observed phase=%q; killing operator now", pf.Phase))
 						return env.Chaos.KillOperator(ctx)
 					case v1alpha1.PlannedFailoverPhasePromoting,
-						v1alpha1.PlannedFailoverPhaseResuming,
+						v1alpha1.PlannedFailoverPhasePublishing,
 						v1alpha1.PlannedFailoverPhaseSucceeded,
 						v1alpha1.PlannedFailoverPhaseFailed:
 						return fmt.Errorf("planned failover advanced past Dragonfly-prep before the kill could fire (phase=%q) — "+
@@ -255,10 +255,10 @@ func observePlannedFailoverConverges() runner.Step {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
 							pf.StartTime, env.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, pf.Reason)
+					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, plannedReason(pf))
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
 						return false, msg, fmt.Errorf("planned failover entered Failed after operator restart: %s (%s)",
-							pf.Reason, pf.Message)
+							plannedReason(pf), pf.Message)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
 						if pf.Target != target {

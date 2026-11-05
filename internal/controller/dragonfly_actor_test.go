@@ -1045,7 +1045,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	live.Status.ActiveSite = "dc2"
 	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
 		Phase: v1alpha1.PlannedFailoverPhasePromotingDragonfly, SourcePrimary: "dc2", Target: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true},
+		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{},
 	}
 	if err := c.Status().Update(context.Background(), live); err != nil {
 		t.Fatal(err)
@@ -1061,7 +1061,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	}
 	labelsBefore := podLabels(t, c, fg.Namespace)
 
-	requeue, err := r.plannedFailoverPromotingDragonfly(context.Background(), live, key)
+	requeue, err := pfDragonflyTakeoverPass(t, r, context.Background(), key)
 	if err != nil || requeue != dragonflyGateRetry {
 		t.Fatalf("planned phase with the gate held = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
 	}
@@ -1094,7 +1094,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	if err := c.Create(context.Background(), makeDragonflyPod(fg.Name, "dc1", "replica", true)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), getFGByKey(t, c, key), key); err != nil {
+	if _, err := pfDragonflyTakeoverPass(t, r, context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
 	if got := dragonflyActiveSite(getFGByKey(t, c, key)); got != "dc1" {
@@ -1116,7 +1116,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 func TestPlannedFailoverPromotingDragonfly_WaitsForSentEmergencyTakeover(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("proceed")
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
+	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	stored := fg.DeepCopy()
 	stored.Status.PlannedFailover = nil // the emergency started before the planned failover got here
 	scheme := testScheme()
@@ -1162,8 +1162,8 @@ func TestPlannedFailoverPromotingDragonfly_WaitsForSentEmergencyTakeover(t *test
 	if err := c.Status().Update(context.Background(), live); err != nil {
 		t.Fatalf("stamp planned failover: %v", err)
 	}
-	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), getFGByKey(t, c, nn), nn); err != nil {
-		t.Fatalf("plannedFailoverPromotingDragonfly: %v", err)
+	if _, err := pfDragonflyTakeoverPass(t, r, context.Background(), nn); err != nil {
+		t.Fatalf("planned Dragonfly takeover: %v", err)
 	}
 
 	mu.Lock()

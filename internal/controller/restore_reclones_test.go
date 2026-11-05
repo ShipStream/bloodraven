@@ -533,24 +533,37 @@ func TestRestoreReclone_AbandonedWhenQueuedSiteBecomesPrimary(t *testing.T) {
 // restored primary stays the primary and the peers still need recloning.
 func TestPlannedFailover_RollbackKeepsRecloneQueue(t *testing.T) {
 	fg := plannedFailoverFG("")
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhaseValidating, Target: "pdx", SourcePrimary: "iad",
-	}
+	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseAdmitting, time.Now())
 	fg.Status.RestoreReclones = drainingQueue("pdx")
-	r, c := newReconciler(fg)
-	r.Runner = &TopologyManagerRunner{}
+	r, topo := pfReconciler(t, fg)
+	c := r.Client
 
-	if _, err := r.plannedFailoverValidating(context.Background(), fg, fgNN(fg)); err != nil {
+	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
 	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil {
-		t.Fatal("validating a planned failover to a queued site abandoned the queue before any promotion")
+		t.Fatal("admitting a planned failover to a queued site abandoned the queue before any promotion")
 	}
-	*fg = *getFG(t, c, fg)
-	if _, err := r.plannedFailoverRollback(context.Background(), fg, fgNN(fg), "LagTimeout", "timeout", "failed_timeout"); err != nil {
+	topo.rollback = func(PlannedRunRef) (RollbackResult, error) {
+		return RollbackResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack}, nil
+	}
+	cur := getFG(t, c, fg)
+	// A later run that got as far as the lag wait and rolled back.
+	rb := pfRunAt(v1alpha1.PlannedFailoverPhaseRollingBack, time.Now())
+	rb.RunID = "run-2"
+	cur.Status.PlannedFailover = rb
+	if err := c.Status().Update(context.Background(), cur); err != nil {
 		t.Fatal(err)
 	}
-	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || !slices.Equal(q.Pending, []string{"pdx"}) {
+	topo.setHeld("run-2", false)
+	if _, err := r.reconcilePlannedFailover(context.Background(), getFG(t, c, fg)); err != nil {
+		t.Fatal(err)
+	}
+	got := getFG(t, c, fg)
+	if pf := got.Status.PlannedFailover; pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack {
+		t.Fatalf("block = %+v", pf)
+	}
+	if q := got.Status.RestoreReclones; q == nil || !slices.Equal(q.Pending, []string{"pdx"}) {
 		t.Fatalf("queue after a rolled-back planned failover = %+v, want pdx still queued", q)
 	}
 }
@@ -559,7 +572,7 @@ func TestPlannedFailover_RollbackKeepsRecloneQueue(t *testing.T) {
 // making a stale queued site the primary, which a new clone would copy.
 func TestRestoreReclone_NoRequestDuringPlannedFailover(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "pdx", SourcePrimary: "iad"}
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "pdx", Source: "iad"}
 	r, c := newReconciler(fg, dsnSecret())
 	if d := reconcileRestoreStep(t, r, fg); d <= 0 {
 		t.Errorf("want a requeue, got %s", d)

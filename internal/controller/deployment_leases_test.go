@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -350,6 +351,8 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	}
 	r := &MysqlFailoverGroupReconciler{Client: m.client, Recorder: record.NewFakeRecorder(100), Runner: NewTopologyManagerRunner(m.client, nil, nil, nil, testLogger())}
 	r.Runner.SetDeploymentLeases(m)
+	r.PlannedTopology = newPFFakeTopology()
+	r.plannedClock = clock.NewFakeClock(*now)
 	epoch := m.TopologyPending(client.ObjectKeyFromObject(fg))
 	if err := m.TopologyPersisted(context.Background(), fg, epoch); err != nil {
 		t.Fatal(err)
@@ -359,18 +362,21 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	}
 	fresh := fetchFG(t, r, client.ObjectKeyFromObject(fg))
 	pf := fresh.Status.PlannedFailover
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Reason != "DeploymentHold" || !pf.RetryAfter.Time.Equal(hold.ExpiresAt) || !strings.Contains(pf.Message, "op1") || !strings.Contains(pf.Message, "tenant") {
+	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil || pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold ||
+		pf.Admission.RetryAfter == nil || !pf.Admission.RetryAfter.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) ||
+		!strings.Contains(pf.Message, "op1") || !strings.Contains(pf.Message, "tenant") {
 		t.Fatalf("deferral = %+v", pf)
 	}
 	if _, err := m.Renew(context.Background(), fresh, "failover-hold", "op1", "tenant", "tenant-ns", "deployer", hold.Token, 30); err != nil {
 		t.Fatalf("deferred operation prevented renewal: %v", err)
 	}
 	*now = hold.ExpiresAt.Add(time.Nanosecond)
+	r.plannedClock.(*clock.FakeClock).Advance(now.Sub(r.plannedClock.Now()))
 	if _, err := r.reconcilePlannedFailover(context.Background(), fresh); err != nil {
 		t.Fatal(err)
 	}
 	fresh = fetchFG(t, r, client.ObjectKeyFromObject(fg))
-	if fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePending {
+	if fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseAdmitting {
 		t.Fatalf("did not resume: %+v", fresh.Status.PlannedFailover)
 	}
 }

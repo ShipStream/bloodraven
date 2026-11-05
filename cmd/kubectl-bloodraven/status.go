@@ -226,11 +226,32 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 func printPlannedFailover(out io.Writer, pf *v1alpha1.PlannedFailoverStatus) {
 	fmt.Fprintln(out, "Planned failover:")
 	fmt.Fprintf(out, "  Phase: %s\n", emptyDash(string(pf.Phase)))
-	if pf.SourcePrimary != "" || pf.Target != "" {
-		fmt.Fprintf(out, "  Source -> Target: %s -> %s\n", emptyDash(pf.SourcePrimary), emptyDash(pf.Target))
+	if pf.RunID != "" {
+		fmt.Fprintf(out, "  Run: %s (revision %d)\n", pf.RunID, pf.Revision)
 	}
-	if pf.Reason != "" {
-		fmt.Fprintf(out, "  Reason: %s\n", pf.Reason)
+	if pf.Source != "" || pf.Target != "" {
+		fmt.Fprintf(out, "  Source -> Target: %s -> %s\n", emptyDash(pf.Source), emptyDash(pf.Target))
+	}
+	if r := pf.Result; r != nil {
+		fmt.Fprintf(out, "  Outcome: %s\n", r.Outcome)
+		if r.Reason != "" {
+			fmt.Fprintf(out, "  Reason: %s\n", r.Reason)
+		}
+		if len(r.Warnings) > 0 {
+			ws := make([]string, len(r.Warnings))
+			for i, w := range r.Warnings {
+				ws[i] = string(w)
+			}
+			fmt.Fprintf(out, "  Warnings: %s\n", strings.Join(ws, ", "))
+		}
+	}
+	if a := pf.Admission; a != nil {
+		if a.WaitReason != "" {
+			fmt.Fprintf(out, "  Waiting for: %s\n", a.WaitReason)
+		}
+		if a.DeferReason != "" {
+			fmt.Fprintf(out, "  Deferred: %s\n", a.DeferReason)
+		}
 	}
 	if pf.Message != "" {
 		fmt.Fprintf(out, "  Message: %s\n", pf.Message)
@@ -238,17 +259,16 @@ func printPlannedFailover(out io.Writer, pf *v1alpha1.PlannedFailoverStatus) {
 	if pf.StartTime != nil {
 		fmt.Fprintf(out, "  Started: %s ago\n", age(pf.StartTime.Time))
 	}
-	if pf.CompletionTime != nil {
-		fmt.Fprintf(out, "  Completed: %s ago\n", age(pf.CompletionTime.Time))
+	if r := pf.Result; r != nil {
+		fmt.Fprintf(out, "  Completed: %s ago\n", age(r.CompletionTime.Time))
+		if pf.StartTime != nil {
+			if d := r.CompletionTime.Sub(pf.StartTime.Time); d >= 0 {
+				fmt.Fprintf(out, "  Duration: %ds\n", int64(d.Seconds()))
+			}
+		}
 	}
-	if pf.DurationSeconds != nil {
-		fmt.Fprintf(out, "  Duration: %ds\n", *pf.DurationSeconds)
-	}
-	if pf.TransactionsLost != nil {
-		fmt.Fprintf(out, "  Transactions lost: %d\n", *pf.TransactionsLost)
-	}
-	if pf.RetryAfter != nil {
-		fmt.Fprintf(out, "  Retry after: %s\n", pf.RetryAfter.Time.UTC().Format(time.RFC3339))
+	if a := pf.Admission; a != nil && a.RetryAfter != nil {
+		fmt.Fprintf(out, "  Retry after: %s\n", a.RetryAfter.Time.UTC().Format(time.RFC3339))
 	}
 }
 

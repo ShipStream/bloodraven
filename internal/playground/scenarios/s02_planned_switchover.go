@@ -25,7 +25,7 @@ func scenario02PlannedSwitchover() runner.Scenario {
 		ID:    "02-planned-switchover",
 		Title: "Planned switchover via annotation",
 		Hypothesis: "Annotating the MFG with bloodraven.shipstream.io/planned-failover=<peer> walks the " +
-			"PlannedFailoverStatus through Validating→Draining→WaitingForLag→Promoting→Resuming→Succeeded with transactionsLost==0.",
+			"PlannedFailoverStatus through Admitting→Fencing→Draining→WaitingForLag→Promoting→Publishing→Succeeded, with the promotion watermark equal to the fenced set.",
 		Risk:     "low",
 		DocLink:  "playground/chaos-scenarios.md#planned-switchover",
 		Timeout:  4 * time.Minute,
@@ -34,7 +34,7 @@ func scenario02PlannedSwitchover() runner.Scenario {
 			injectPlannedFailoverAnnotation(),
 			observePlannedFailoverSucceeded(),
 			verifyFollowersDirectlyFollowNewPrimary(),
-			verifyTransactionsLostZero(),
+			verifyPlannedFailoverWatermark(),
 			verifyPlannedFailoverMetric(),
 		},
 	}
@@ -173,9 +173,9 @@ func observePlannedFailoverSucceeded() runner.Step {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
 							pf.StartTime, env.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, pf.Reason)
+					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, plannedReason(pf))
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
-						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", pf.Reason, pf.Message)
+						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", plannedReason(pf), pf.Message)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
 						if pf.Target != target {
@@ -191,10 +191,10 @@ func observePlannedFailoverSucceeded() runner.Step {
 	}
 }
 
-func verifyTransactionsLostZero() runner.Step {
+func verifyPlannedFailoverWatermark() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "transactionsLost == 0",
+		Name:  "outcome Succeeded and the watermark is the fenced set",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
@@ -204,11 +204,20 @@ func verifyTransactionsLostZero() runner.Step {
 			if pf == nil {
 				return fmt.Errorf("no plannedFailover status to inspect")
 			}
-			if pf.TransactionsLost == nil {
-				return fmt.Errorf("transactionsLost not populated on Succeeded planned failover")
+			if plannedOutcome(pf) != v1alpha1.PlannedFailoverOutcomeSucceeded {
+				return fmt.Errorf("outcome=%q reason=%q, want Succeeded", plannedOutcome(pf), plannedReason(pf))
 			}
-			if *pf.TransactionsLost != 0 {
-				return fmt.Errorf("expected transactionsLost=0, got %d", *pf.TransactionsLost)
+			// The promotion proves the target held exactly the fenced set,
+			// so no acknowledged transaction was lost; the recorded
+			// watermark is that set.
+			if pf.Fence == nil || pf.Fence.GtidSet == nil || pf.Fence.SourceServerUUID == "" {
+				return fmt.Errorf("fence record incomplete on a Succeeded run: %+v", pf.Fence)
+			}
+			if pf.Promotion == nil || pf.Promotion.ConfirmedAt == nil || pf.Promotion.TargetServerUUID == "" {
+				return fmt.Errorf("promotion record incomplete on a Succeeded run: %+v", pf.Promotion)
+			}
+			if mfg.Status.PromotionGtidExecuted != *pf.Fence.GtidSet {
+				return fmt.Errorf("promotionGtidExecuted=%q, want the fenced set %q", mfg.Status.PromotionGtidExecuted, *pf.Fence.GtidSet)
 			}
 			return nil
 		},

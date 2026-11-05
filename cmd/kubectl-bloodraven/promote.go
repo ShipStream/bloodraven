@@ -210,18 +210,19 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 			fmt.Fprintln(stdout, "Planned failover succeeded.")
 			return nil
 		case v1alpha1.PlannedFailoverPhaseFailed:
-			reason := ""
-			msg := ""
+			outcome, reason, msg := "", "", ""
 			if pf != nil {
-				reason = pf.Reason
 				msg = pf.Message
+				if pf.Result != nil {
+					outcome, reason = string(pf.Result.Outcome), string(pf.Result.Reason)
+				}
 			}
-			fmt.Fprintf(stderr, "Planned failover failed: reason=%s message=%s\n", reason, msg)
+			fmt.Fprintf(stderr, "Planned failover failed: outcome=%s reason=%s message=%s\n", outcome, reason, msg)
 			return fmt.Errorf("planned failover failed: %s", reason)
 		case v1alpha1.PlannedFailoverPhaseDeferred:
 			retry := "(unset)"
-			if pf != nil && pf.RetryAfter != nil {
-				retry = pf.RetryAfter.Time.UTC().Format(time.RFC3339)
+			if pf != nil && pf.Admission != nil && pf.Admission.RetryAfter != nil {
+				retry = pf.Admission.RetryAfter.Time.UTC().Format(time.RFC3339)
 			}
 			fmt.Fprintf(stderr, "Planned failover deferred; the operator will retry after %s — rerun status to check.\n", retry)
 			return fmt.Errorf("planned failover deferred until %s; the operator has not performed the promotion yet", retry)

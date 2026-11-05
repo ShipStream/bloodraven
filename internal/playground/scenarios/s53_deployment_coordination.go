@@ -128,7 +128,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 				return state.observeHold(ctx, env, mode == "crash")
 			}})
 		}
-		s.Steps = append(s.Steps, observePlannedFailoverSucceeded(), verifyTransactionsLostZero())
+		s.Steps = append(s.Steps, observePlannedFailoverSucceeded(), verifyPlannedFailoverWatermark())
 	}
 	s.Steps = append(s.Steps, runner.Step{Phase: runner.PhaseVerify, Name: "verify topology and lease fencing", Do: func(ctx context.Context, env *runner.Env) error {
 		if mode == "emergency" || mode == "renew" {
@@ -337,14 +337,14 @@ func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, 
 		if pf == nil || pf.StartTime == nil || pf.StartTime.Time.Before(env.StartTime.Add(-2*time.Second)) {
 			return false, "waiting for current planned request", nil
 		}
-		if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Reason != "DeploymentHold" {
-			return false, fmt.Sprintf("phase=%s reason=%s", pf.Phase, pf.Reason), nil
+		if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
+			return false, fmt.Sprintf("phase=%s reason=%s", pf.Phase, plannedReason(pf)), nil
 		}
-		if pf.RetryAfter == nil || !strings.Contains(pf.Message, s.operation) || !strings.Contains(pf.Message, s.name) {
+		if pf.Admission.RetryAfter == nil || !strings.Contains(pf.Message, s.operation) || !strings.Contains(pf.Message, s.name) {
 			return false, "", fmt.Errorf("DeploymentHold missing retryAfter, operationId, or instance: %+v", pf)
 		}
-		if !kill && pf.RetryAfter.Time.Sub(s.expiry).Abs() > time.Second {
-			return false, "", fmt.Errorf("retryAfter=%s does not match hold expiry=%s", pf.RetryAfter, s.expiry)
+		if !kill && pf.Admission.RetryAfter.Time.Sub(s.expiry).Abs() > time.Second {
+			return false, "", fmt.Errorf("retryAfter=%s does not match hold expiry=%s", pf.Admission.RetryAfter, s.expiry)
 		}
 		return true, "hold deferred with owner and expiry", nil
 	})
@@ -384,7 +384,7 @@ func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, 
 			return false, err
 		}
 		pf := mfg.Status.PlannedFailover
-		if mfg.Status.ActiveSite != ctxFetch(env, "originalPrimary") || pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Reason != "DeploymentHold" {
+		if mfg.Status.ActiveSite != ctxFetch(env, "originalPrimary") || pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
 			return false, fmt.Errorf("planned failover advanced before hold expiry %s", s.expiry)
 		}
 		return false, nil

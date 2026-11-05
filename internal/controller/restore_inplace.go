@@ -599,7 +599,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		if err != nil {
 			wait, err = fmt.Sprintf("waiting for the topology manager: %v", err), nil
 		}
-		if wait == "" && plannedFailoverInFlight(fg.Status.PlannedFailover) {
+		if wait == "" && plannedFailoverActive(fg) {
 			wait = "waiting for the planned failover to finish"
 		}
 		if wait == "" {

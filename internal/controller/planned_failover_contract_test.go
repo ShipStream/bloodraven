@@ -350,10 +350,6 @@ func TestPlannedFailoverSentinelsDistinct(t *testing.T) {
 // The placeholders keep their final signatures and change nothing yet.
 func TestPlannedFailoverContractPlaceholders(t *testing.T) {
 	nn := types.NamespacedName{Namespace: "ns", Name: "fg"}
-	e := NewPlannedFailoverEngine(nil, nil, nil, nil, SimHooks{})
-	if _, err := e.Step(t.Context(), nn); err == nil {
-		t.Error("the placeholder engine reports success")
-	}
 	a, b := &PlannedClaimSlot{}, &PlannedClaimSlot{}
 	if a == b {
 		t.Error("two slots share an address")

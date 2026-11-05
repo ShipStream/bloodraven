@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
 func TestShortDuration(t *testing.T) {
@@ -124,14 +125,39 @@ func TestPlannedFailoverSummary(t *testing.T) {
 		t.Errorf("no planned failover -> %q, want -", got)
 	}
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		RunID: "run-1",
 		Phase: v1alpha1.PlannedFailoverPhaseFailed,
-		Reason: "CooldownActive",
+		Result: &v1alpha1.PlannedFailoverResult{
+			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonCooldownActive},
 	}
 	if got := plannedFailoverSummary(fg); got != "Failed(CooldownActive)" {
 		t.Errorf("failed planned failover -> %q, want Failed(CooldownActive)", got)
 	}
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseSucceeded
-	fg.Status.PlannedFailover.Reason = ""
+	fg.Status.PlannedFailover.Result = &v1alpha1.PlannedFailoverResult{
+		Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, Reason: v1alpha1.PlannedFailoverReasonLagTimeout}
+	if got := plannedFailoverSummary(fg); got != "Failed(RolledBack:LagTimeout)" {
+		t.Errorf("rolled-back planned failover -> %q, want Failed(RolledBack:LagTimeout)", got)
+	}
+	fg.Status.PlannedFailover.Result = &v1alpha1.PlannedFailoverResult{
+		Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1alpha1.PlannedFailoverReasonForeignWritable}
+	fg.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue}}
+	if got := plannedFailoverSummary(fg); got != "Failed(ManualRecoveryRequired:ForeignWritable)+held" {
+		t.Errorf("held planned failover -> %q, want Failed(ManualRecoveryRequired:ForeignWritable)+held", got)
+	}
+	fg.Status.Conditions = nil
+	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
+	fg.Annotations = map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: "run-1/SourceLeftFenced/StatusStalled"}
+	if got := plannedFailoverSummary(fg); got != "Ended(SourceLeftFenced:StatusStalled)" {
+		t.Errorf("marked planned failover -> %q, want Ended(SourceLeftFenced:StatusStalled)", got)
+	}
+	fg.Annotations = nil
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-2", Phase: v1alpha1.PlannedFailoverPhaseAdmitting,
+		Admission: &v1alpha1.PlannedFailoverAdmission{WaitReason: v1alpha1.PlannedFailoverWaitPeerUnreadable}}
+	if got := plannedFailoverSummary(fg); got != "Admitting(PeerUnreadable)" {
+		t.Errorf("waiting planned failover -> %q, want Admitting(PeerUnreadable)", got)
+	}
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-3", Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
+		Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded}}
 	if got := plannedFailoverSummary(fg); got != "Succeeded" {
 		t.Errorf("succeeded planned failover -> %q, want Succeeded", got)
 	}

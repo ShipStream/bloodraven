@@ -254,6 +254,30 @@ func failoverCooldown(mfg *v1alpha1.MysqlFailoverGroup) time.Duration {
 	return 5 * time.Minute
 }
 
+// plannedReason is the planned-failover run's reason: its result reason
+// once terminal, else its admission wait or defer reason.
+func plannedReason(pf *v1alpha1.PlannedFailoverStatus) string {
+	switch {
+	case pf == nil:
+		return ""
+	case pf.Result != nil:
+		return string(pf.Result.Reason)
+	case pf.Admission != nil && pf.Admission.WaitReason != "":
+		return string(pf.Admission.WaitReason)
+	case pf.Admission != nil:
+		return string(pf.Admission.DeferReason)
+	}
+	return ""
+}
+
+// plannedOutcome is the terminal run's outcome, or "".
+func plannedOutcome(pf *v1alpha1.PlannedFailoverStatus) v1alpha1.PlannedFailoverOutcome {
+	if pf == nil || pf.Result == nil {
+		return ""
+	}
+	return pf.Result.Outcome
+}
+
 func plannedTerminal(p v1alpha1.PlannedFailoverPhase) bool {
 	switch p {
 	case v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverPhaseFailed:
