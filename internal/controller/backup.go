@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 	"github.com/shipstream/bloodraven/internal/util"
 )
 
@@ -99,9 +100,10 @@ func scheduleCronJobName(fgName, scheduleName string) string {
 }
 
 // ownedBackupPVCName returns the operator-managed PVC name for a PVC-backed
-// profile when the user does not set claimName.
+// profile when the user does not set claimName. It delegates to
+// pitrprofile so the provisioned PVC and the archive destination agree.
 func ownedBackupPVCName(fgName, profileName string) string {
-	return truncateDNS1123(fmt.Sprintf("mysql-%s-backup-%s", fgName, profileName))
+	return pitrprofile.OwnedBackupPVCName(fgName, profileName)
 }
 
 // checkPVCSubPath rejects a PVC subPath with a ".." segment, which would

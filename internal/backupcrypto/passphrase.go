@@ -1,13 +1,12 @@
 package backupcrypto
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 )
 
 // ReadPassphraseFile reads a passphrase from the given file path,
-// stripping trailing newline characters and whitespace. Empty
+// stripping leading and trailing whitespace with TrimPassphrase. Empty
 // passphrases are rejected to catch "secret mounted but value missing"
 // mistakes at startup rather than during an encrypt call.
 //
@@ -23,12 +22,9 @@ func ReadPassphraseFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("backupcrypto: read passphrase file %s: %w", path, err)
 	}
-	trimmed := bytes.TrimFunc(data, func(r rune) bool {
-		return r == '\n' || r == '\r' || r == ' ' || r == '\t'
-	})
+	trimmed := TrimPassphrase(data)
 	if len(trimmed) == 0 {
 		return nil, fmt.Errorf("backupcrypto: passphrase file %s is empty", path)
 	}
 	return trimmed, nil
 }
-

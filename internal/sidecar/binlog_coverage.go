@@ -20,6 +20,18 @@ type BinlogGTIDCoverage struct {
 	GTIDs    string `json:"gtids,omitempty"`
 	// ContentID binds this proof to bytes inspected by an identity-aware writer.
 	ContentID string `json:"contentId,omitempty"`
+	// Manifest v2 content-bound hints, computed in the same inspection
+	// pass as GTIDs (D-4). A downloaded row whose verified values differ
+	// refuses PITRArchiveObjectInvalid.
+	//
+	// OriginalCommitMin and OriginalCommitMax are the smallest and largest
+	// original commit timestamps (µs since the Unix epoch) of the file's
+	// transactions; 0 when the file has no transactions.
+	OriginalCommitMin int64 `json:"originalCommitMin,omitempty"`
+	OriginalCommitMax int64 `json:"originalCommitMax,omitempty"`
+	// EmptyGTIDs are the file's transactions with no data or query events
+	// (a filtered replica's placeholders, or injected empty transactions).
+	EmptyGTIDs string `json:"emptyGtids,omitempty"`
 }
 
 type binlogCoverageCollector struct {

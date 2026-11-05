@@ -4,18 +4,47 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
-// ManifestVersion is the on-disk schema version for site manifests.
-// Bumped only when a reader from an older bloodraven release would
-// misinterpret a field written by a newer one. Additive changes (new
-// optional fields) do NOT bump this.
-const ManifestVersion = 1
+// ManifestVersion is the on-disk schema version for site manifests (D-4).
+// Version 2 adds the required ArchiveID, the per-row content hints in
+// BinlogGTIDCoverage, Promotions and HistoryIntegrity. Readers refuse every
+// other version: a version-1 writer rewrites the whole document and strips
+// fields it does not know (F1), so v2 data cannot survive an old writer and
+// an old manifest cannot be trusted by a new reader.
+const ManifestVersion = 2
+
+// Manifest load and save refusals. Each message starts with its PITR
+// refusal token, so it can surface unchanged as a sidecar LastError or a Job
+// termination message. Match with errors.Is.
+var (
+	// ErrManifestLegacy: a manifest with version < 2 (or none), written
+	// before archive identity existed.
+	ErrManifestLegacy = errors.New(string(pitrarchive.TokenArchiveLegacy))
+	// ErrManifestVersionUnsupported: a manifest from a newer release.
+	ErrManifestVersionUnsupported = errors.New(string(pitrarchive.TokenArchiveVersionUnsupported))
+	// ErrManifestInvalid: a v2 manifest that breaks a v2 invariant (no
+	// archiveId, too many promotion records).
+	ErrManifestInvalid = errors.New(string(pitrarchive.TokenArchiveObjectInvalid))
+)
+
+// PromotionRecord and HistoryIntegrity are defined in pitrarchive so the
+// planner and the sidecar status share one definition (D-43, D-34).
+type (
+	PromotionRecord  = pitrarchive.PromotionRecord
+	HistoryIntegrity = pitrarchive.HistoryIntegrity
+)
+
+// MaxPromotionRecords is how many promotion records a manifest keeps.
+const MaxPromotionRecords = pitrarchive.MaxPromotionRecords
 
 // ManifestEntry is a single row in a per-site manifest — one archived
 // binlog file.
@@ -84,16 +113,56 @@ type ArchiveEpoch struct {
 
 // Manifest is the JSON document at <prefix>/manifest-<site>.json. Each site's
 // sidecar owns its manifest; the restore Job combines their replay streams.
+// Saves are a plain Put by the site's single writer (F34), followed by a
+// read-back compare; there is no CAS.
 type Manifest struct {
 	Divergent    []ArchiveDivergence             `json:"divergent,omitempty"`
 	Acknowledged []ArchiveHistoryAcknowledgement `json:"acknowledged,omitempty"`
 	Quarantined  []ArchiveQuarantine             `json:"quarantined,omitempty"`
 	Epoch        *ArchiveEpoch                   `json:"epoch,omitempty"`
 
-	Version int             `json:"version"`
-	Site    string          `json:"site"`
-	Files   []ManifestEntry `json:"files"`
-	Pruned  []PrunedEntry   `json:"pruned,omitempty"`
+	Version int `json:"version"`
+	// ArchiveID is the archive's descriptor ID (required in v2). A
+	// manifest whose ArchiveID differs from the descriptor's belongs to
+	// another archive.
+	ArchiveID string          `json:"archiveId"`
+	Site      string          `json:"site"`
+	Files     []ManifestEntry `json:"files"`
+	Pruned    []PrunedEntry   `json:"pruned,omitempty"`
+	// Promotions are this site's promotion records, append-only, newest
+	// last, at most MaxPromotionRecords (D-43).
+	Promotions []PromotionRecord `json:"promotions,omitempty"`
+	// HistoryIntegrity is set once on the first history-integrity
+	// violation and never cleared by any writer (D-34).
+	HistoryIntegrity *HistoryIntegrity `json:"historyIntegrity,omitempty"`
+}
+
+// AppendPromotionRecord appends r and drops the oldest records beyond
+// MaxPromotionRecords. Dropping a record only removes anchors and loss
+// evidence, so the cap fails closed (D-43).
+func (m *Manifest) AppendPromotionRecord(r PromotionRecord) {
+	m.Promotions = append(m.Promotions, r)
+	if n := len(m.Promotions) - MaxPromotionRecords; n > 0 {
+		m.Promotions = append([]PromotionRecord(nil), m.Promotions[n:]...)
+	}
+}
+
+// checkManifestVersion refuses every manifest version except
+// ManifestVersion, and a v2 manifest without an archiveId.
+func checkManifestVersion(key string, m *Manifest) error {
+	switch {
+	case m.Version < ManifestVersion:
+		return fmt.Errorf("%w: manifest %s has version %d, written before archive identity; start a new archive prefix and take a full backup",
+			ErrManifestLegacy, key, m.Version)
+	case m.Version > ManifestVersion:
+		return fmt.Errorf("%w: manifest %s has version %d; this release reads only version %d; upgrade bloodraven",
+			ErrManifestVersionUnsupported, key, m.Version, ManifestVersion)
+	case m.ArchiveID == "":
+		return fmt.Errorf("%w: manifest %s is version %d but has no archiveId", ErrManifestInvalid, key, m.Version)
+	case len(m.Promotions) > MaxPromotionRecords:
+		return fmt.Errorf("%w: manifest %s holds %d promotion records, max %d", ErrManifestInvalid, key, len(m.Promotions), MaxPromotionRecords)
+	}
+	return nil
 }
 
 // ManifestKey returns the storage-relative key for a site's manifest.
@@ -145,9 +214,13 @@ func binlogObjectKey(prefix, site, filename string) string {
 }
 
 // loadManifest reads and decodes the current manifest for site, or
-// returns an empty Manifest{} if none exists yet. A decode error on an
-// existing object is propagated — the caller should surface it loudly
-// rather than silently reset the manifest.
+// returns an empty version-2 Manifest if none exists yet. The empty
+// manifest has no ArchiveID; the writer sets it from its verified
+// descriptor before saving. A decode error on an existing object is
+// propagated — the caller should surface it loudly rather than silently
+// reset the manifest. Any version other than ManifestVersion is refused
+// (ErrManifestLegacy, ErrManifestVersionUnsupported), as is a v2 manifest
+// without an archiveId (ErrManifestInvalid).
 func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) (*Manifest, error) {
 	data, ok, err := store.Get(ctx, manifestKey(prefix, site))
 	if err != nil {
@@ -160,9 +233,8 @@ func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) 
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("decode manifest %s: %w", manifestKey(prefix, site), err)
 	}
-	// Enforce the Version invariant even on legacy writes.
-	if m.Version == 0 {
-		m.Version = ManifestVersion
+	if err := checkManifestVersion(manifestKey(prefix, site), &m); err != nil {
+		return nil, err
 	}
 	// The site always comes from the caller, never the stored document:
 	// saveManifest writes back to manifestKey(prefix, m.Site), so a
@@ -196,6 +268,9 @@ func saveManifest(ctx context.Context, store ArchiveStore, prefix string, m *Man
 		return a.ContentID < b.ContentID
 	})
 	m.Version = ManifestVersion
+	if err := checkManifestVersion(manifestKey(prefix, m.Site), m); err != nil {
+		return fmt.Errorf("refusing to save: %w", err)
+	}
 	buf, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)

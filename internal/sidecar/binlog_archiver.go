@@ -17,6 +17,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // BinlogArchiver uploads sealed binlog files from the local MySQL data
@@ -632,6 +633,22 @@ type Status struct {
 	ManifestBytes      int64     `json:"manifestBytes"`
 	OldestArchivedTime time.Time `json:"oldestArchivedTime,omitempty"`
 	NewestArchivedTime time.Time `json:"newestArchivedTime,omitempty"`
+	// Archive is the archive identity this sidecar observes (§3.7): its
+	// destination, verified descriptor ID, encryption mode, state, refusal
+	// reason and key revision. nil when PITR is not configured.
+	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
+	// DivergentRows and QuarantinedRows count the Divergent and
+	// Quarantined entries in this site's own manifest. The runner warns
+	// PITRArchiveReissueRisk when a site with a non-zero sum is promoted.
+	DivergentRows   int64 `json:"divergentRows"`
+	QuarantinedRows int64 `json:"quarantinedRows"`
+	// PromotionRecordedAt is the ObservedAt of the promotion record that
+	// gates the current writable episode's uploads; zero while no record
+	// is confirmed (D-43).
+	PromotionRecordedAt time.Time `json:"promotionRecordedAt,omitzero"`
+	// HistoryIntegrity mirrors the site manifest's persisted marker
+	// (D-34); nil when unmarked.
+	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
 }
 
 // Snapshot returns a copy of the archiver's observable state. The
