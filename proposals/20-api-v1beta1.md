@@ -1,6 +1,6 @@
 # Proposal: API audit and cleanup before `shipstream.io/v1beta1`
 
-**Status:** Draft, revision 4 (after critique rounds 1, 2 and 3; see section 8.1)
+**Status:** Draft, revision 5 (after critique rounds 1, 2 and 3 and the ultra review of PR #242; see section 8.1)
 **Branch:** `docs/api-v1beta1-audit`
 **Tracking:** #237
 **Audited at:** `3fa1900` (origin/main after #232). **Re-checked at** `2340f6b` (this branch with origin/main
@@ -9,7 +9,8 @@ moved were re-mapped line by line, and citations whose content changed were re-o
 `api/`, `config/crd`, `site/`, `.agents/` and the Event reasons since `3fa1900` was triaged against sections
 1-4 (B.4). Revision 4's citations were checked at `b543405`. Outside `proposals/`, that commit differs from
 `2340f6b` only in `site/app/` and `site/content/index.md`, so the `2340f6b` line numbers still hold, and the
-`site/app/` citations refer to `b543405`.
+`site/app/` citations refer to `b543405`. Revision 5's citations were checked at `a5f155d`, which differs from
+`b543405` only in `proposals/`.
 **Appendix:** [`20-api-v1beta1-inventory.md`](20-api-v1beta1-inventory.md) (generated field inventory)
 
 ## Summary
@@ -33,23 +34,28 @@ proposed amendment to D6 that needs sign-off (C-8).
 | | Count |
 |---|---|
 | Raw findings from five audits (GPT 46, MFGSPEC 38, STATUS 33, KINDS 34, OPS 21) | 172 |
-| Merged findings | 115 (A-01 to A-115; A-114 and A-115 added in revision 2) |
+| Merged findings | 115 (A-01 to A-115; A-114 and A-115 added in revision 2; A-111 withdrawn into A-49 in revision 5) |
 | must-fix | 49 (one, A-83, already done on main) |
 | should-fix | 50 |
-| leave | 16 |
+| leave | 15 (revision 5 withdraws A-111, F-39) |
 | Breaking findings (one of them, A-50, owned by #235) | 81 (revision 3 adds A-33) |
-| Migration-table rows | 108 (revision 3 added five: A-33 and four served-surface rows; revision 4 adds two: A-28's `""` values and A-40's three timestamp names) |
+| Migration-table rows | 110 (revision 3 added five: A-33 and four served-surface rows; revision 4 added two: A-28's `""` values and A-40's three timestamp names; revision 5 adds two: the restore-reclone metric `phase` values and the lease revocation reasons) |
 | Raw findings dropped entirely / partially rejected | 1 / 22 |
 | Code and docs defects (Appendix A) | 15 |
 | Critique points, round 1 (GPT 19, Opus 28) | 47: all verified; none rejected as wrong; 9 suggested fixes replaced by another fix (section 8.1) |
 | Critique points, round 2 (GPT 9: 4 Major, 5 Minor; Opus 14: 4 Major, 10 Minor) | 23: all verified and applied; none rejected; one citation corrected and 4 suggested fixes, or parts of them, not taken (section 8.1) |
 | Critique points, round 3 (GPT 4: 4 Major; Opus 10: 5 Major, 5 Minor) | 14: all verified at `b543405` and applied; none rejected; one set of citations corrected and one suggested fix not taken; the v1.6.0 procedure split into a WS-F follow-up issue (section 8.1) |
+| Ultra review of PR #242 at `a5f155d` (GPT 6.1 Sol and Claude Opus 5.5) | 68 confirmed findings (8 high, 40 medium, 20 low), F-01 to F-68: all checked at `a5f155d` and applied, none rejected; 6 suggested fixes not taken; the A-52 rollout queue and the migration-check mechanism narrowed to requirements; WS-E split into five PRs (section 8.1) |
 | Open questions | 6, all settled by MBOD (section 7) |
 
 ### How to read this
 
 - **Section 2** is the decision list. Each finding names its severity, whether it is breaking, the raw findings
   it merges, its evidence at `2340f6b`, and the exact new shape.
+- **What is normative (revision 5, ultra-review merits point 3).** Section 2 and the section 3.4 table are
+  normative. Sections 6, 7 and 8 restate decisions as summaries. Where a summary differs from section 2, section 2
+  wins, and WS-E records the difference in its PR. The inline "revision N" markers are provenance only; 8.1 has the
+  history.
 - Findings that touch a pending redesign say **Owned by #N** and state the shape this cleanup expects that
   issue to leave. They do not plan the change. The redesigns are #235 (planned-failover claim), #206 (PITR
   archive identity), #203 (encryption identity), #205 (in-place PITR; its PR1-PR3, PR1 being #241, may land before
@@ -59,7 +65,8 @@ proposed amendment to D6 that needs sign-off (C-8).
   replaces one. WS-F writes and tests that procedure.
 - **Section 4** lists every hand-written status path and its replacement.
 - **Section 5** is the v1beta1 checklist rewritten for D1.
-- **Section 6** is the ordered WS-E commit list.
+- **Section 6** is the WS-E commit list, delivered as five sequential PRs, of which only the two freeze-critical
+  ones gate WS-F and rc.0.
 - **Sections 7 and 8** record the decisions and the alternatives rejected.
 - Kind abbreviations: MFG MysqlFailoverGroup, MBK MysqlBackup, MBV MysqlBackupVerification, MDB MysqlDatabase,
   MSC MysqlStandbyCluster.
@@ -84,7 +91,7 @@ Embedded upstream types (containers, resources, security contexts, conditions) c
 
 | Kind | Spec fields | Status fields | CEL rules (transition) | Condition types | Phase enums | Printer columns | shortNames | categories |
 |---|---|---|---|---|---|---|---|---|
-| MysqlFailoverGroup (MFG) | 267 | 192 (#233 added `restoreReclones.fencedGtidExecuted`) | 20 (0) | 9 | 8 (`updatePhase` untyped) | 3 | `mfg`, `mfgs` | bloodraven, mysql |
+| MysqlFailoverGroup (MFG) | 262 (revision 5: `sidecarResources` collapsed like every other resources block, F-09) | 192 (#233 added `restoreReclones.fencedGtidExecuted`) | 20 (0) | 9 | 8 (`updatePhase` untyped) | 3 | `mfg`, `mfgs` | bloodraven, mysql |
 | MysqlBackup (MBK) | 5 | 26 | 1 (1, `status.artifactStorage`, #232) | 4 | 1 | 8 | none | none |
 | MysqlBackupVerification (MBV) | 21 | 25 | 0 (0) | 2 | 1 (2 of 7 values never written) | 7 | none | none |
 | MysqlDatabase (MDB) | 23 | 18 | 7 (2) | 1 | 1 | 7 | `mydb`, `mydbs` | bloodraven, mysql |
@@ -152,11 +159,11 @@ Writers: U = user, P = kubectl plugin, O = operator, C = chaos runner and playgr
 | `bloodraven.shipstream.io/last-failover`, `…/last-failover-target` | MFG | O → O | RFC 3339 seconds; site | `failover_state.go:40-41` | A-104 (leave) |
 | `bloodraven.shipstream.io/restore-confirm` | Job | O → O | confirm token | `restore_inplace.go:133` | A-79 (Internal) |
 | `bloodraven.shipstream.io/deployment-lease` | Lease | O → O | JSON | `deployment_leases.go:30` | A-80 |
-| `shipstream.io/failover-group`, `/site`, `/role`, `/healthy` (`yes`/`no`) | owned objects, Pods | O → O, U (selectors) | names; `primary`/`replica`; `yes`/`no` | `reconciler.go:54-57` | A-77 |
+| `shipstream.io/failover-group`, `/site`, `/role`, `/healthy` (`yes`/`no`) | owned objects, Pods; `failover-group` also on MBK and MBV | O, and P for `failover-group` on the MBKs and MBVs it creates → O, U (selectors) | names; `primary`/`replica`; `yes`/`no` | `reconciler.go:54-57` | A-77 |
 | `shipstream.io/dragonfly-role`, `/dragonfly-traffic` (`enabled`) | Dragonfly Pods | O → O | `master`/`replica`; `enabled` | `dragonfly_resources.go:35,46` | A-77 |
 | `shipstream.io/spec-hash`, `/managed-service-annotations`, `/credential-hash`, `/system-schema-restriction` | Deployments, Services, Secrets | O → O | hash, JSON | `reconciler.go:61-62`, `credentials.go:24,30` | A-79 (Internal) |
 | `shipstream.io/keyring-version` (label), `/keyring-digest` | escrow Secret | O, and U in a runbook → O | int; `sha256:…` | `encryption_escrow.go:27,32` | A-84 |
-| `shipstream.io/mysqlbackup`, `/backup-profile`, `/backup-schedule`, `/resource`, `/backup-encrypted` | Job, CronJob, PVC, MBK | O → O (the schedule rollup reads `backup-schedule`) | names, bool | `backup.go:19-23` | A-106 (leave) |
+| `shipstream.io/mysqlbackup`, `/backup-profile`, `/backup-schedule`, `/resource`, `/backup-encrypted` | Job, CronJob, PVC, MBK, MBV | O, and P for `backup-profile` on the MBKs and MBVs it creates → O (the schedule rollup reads `backup-schedule`) | names, bool | `backup.go:19-23` | A-106 (leave) |
 | `shipstream.io/backup-retry-of`, `/backup-retry-root`, `/backup-retry-root-uid`, `/backup-attempt` | MBK | O → O | UID, name, int | `backup_retry.go:12-15` | A-106 (leave) |
 | `shipstream.io/cleanup-failure-recorded` (new in #232) | MBK | O → O | marker | `backup_cleanup.go:42` | A-79 (Internal) |
 | `shipstream.io/encryption-status-fence` (new in #234, missed in revision 2) | MFG | O → nobody reads the value | opaque RFC 3339 timestamp; the write is what matters: it advances `resourceVersion`, so any status write conditioned on an older version, such as one whose response was lost, can no longer commit | `encryption_reconcile.go:292-307` | A-79 (Internal); E1 exports the constant, E14 moves it to `bloodraven.shipstream.io/` |
@@ -168,8 +175,11 @@ Writers: U = user, P = kubectl plugin, O = operator, C = chaos runner and playgr
 | `shipstream.io/mysql-client=true` (namespace), `bloodraven.shipstream.io/deploy-client=true` (Pod) | user objects | U → chart NetworkPolicy | `"true"` | `charts/bloodraven/templates/networkpolicy-deploy-api.yaml` | A-77 |
 | `chaos.playground.bloodraven.io/*`, `playground.bloodraven.io/purpose` | MFG, test objects | C → C | JSON marker | `internal/playground/kube/marker.go:17` | A-77 |
 
-The plugin writes only `planned-failover` and `reclone-site`, and copies both key strings with a "must match"
-comment (`cmd/kubectl-bloodraven/promote.go:21`, `reclone.go:18`).
+The plugin writes two annotations, `planned-failover` and `reclone-site`, and copies both key strings with a "must
+match" comment (`cmd/kubectl-bloodraven/promote.go:21`, `reclone.go:18`). It also hard-codes two label keys,
+`shipstream.io/failover-group` and `shipstream.io/backup-profile`, as string literals on the MBKs and MBVs it
+creates (`cmd/kubectl-bloodraven/backup.go:119-120`, `verify.go:141-142`). Revision 4 said the plugin wrote only
+the two annotations (revision 5, F-52); E1 moves `backup.go` and `verify.go` onto the constants with the rest.
 
 ### 1.4 Event reasons that runbooks, alerts, the doctor skill and the chaos runner key on
 
@@ -193,14 +203,15 @@ generated one, which then becomes the full table.
 ### 1.5 Served contracts outside the CRD schema that carry API tokens
 
 These surfaces repeat enum values, reasons or status fields verbatim, so renaming a token or a field changes them
-too. Revision 2 listed the first and third rows; revision 3 added the last three (GPT-R2-04, OPUS-R2-10); revision 4
-adds the second (OPUS-R3-06). A-114 decides the spelling of each.
+too. Revision 2 listed the first and fourth rows; revision 3 added the last three (GPT-R2-04, OPUS-R2-10); revision 4
+adds the second (OPUS-R3-06), and revision 5 the third (F-17). A-114 decides the spelling of each.
 
 | Surface | Tokens it carries | Evidence | Consumers |
 |---|---|---|---|
 | Prometheus labels `role` on `bloodraven_site_state`, `bloodraven_replication_lag_seconds` and `bloodraven_replication_running` | `string(site.role)`: `primary-candidate`, `dr-only`, `read-only`; and label `state` on `bloodraven_site_state`: `writable`, `read-only`, `unreachable`, `unknown` | `internal/controller/topology.go:315`, `internal/metrics/metrics.go:132-135` | PromQL in `8.observability/3.monitoring-prometheus.md:112,118,139,144` and `2.monitoring.md:223` (`state="writable"`), `examples/prometheusrule.yaml`, user alert rules |
 | Prometheus labels `phase` on `bloodraven_keyring_phase`, `state` on `bloodraven_replication_source_state`, and `from`/`to` on `bloodraven_state_transitions_total` (revision 4, OPUS-R3-06) | `strings.ToLower` of `SiteKeyringPhase` (`sealed`, …) and `SourceConvergenceState` (`converged`, `pending`, `blocked`); `SiteState.String()` (`writable`, …) | `internal/controller/encryption_reconcile.go:993`, `source_convergence.go:304`, `topology.go:1440`; `internal/metrics/metrics.go:406,421` | `6.operations/4.runbooks.md:156` (`phase="sealed"`), `2.monitoring.md:150` (`to="writable"`), `charts/bloodraven/dashboards/failover.json:163`, user alert rules |
-| Prometheus `reason` labels on `bloodraven_planned_failovers_deferred_total`, `bloodraven_deploy_lease_revocations_total` and `bloodraven_backup_artifact_cleanup_failures_total` | reason tokens, already CamelCase: `DeploymentHold`, the lease revocation reasons, `CleanupFailed`, `CleanupRejected` | `internal/metrics/metrics.go:51-65,366-372`; written at `planned_failover_deployment.go:60`, `deployment_leases.go:263`, `backup_reconciler.go:809` | user alert rules and dashboards |
+| Prometheus label `phase` on `bloodraven_restore_reclone_pending` (new in #233; revision 5, F-17) | `string(q.Phase)`, the raw API enum `RestoreReclonesPhase`: `Armed`, `Draining`, `Held` (`api/v1alpha1/backup_types.go:886-913`) | `internal/controller/restore_peer_replication.go:645`; `internal/metrics/restore_reclones.go:15-18` | `8.observability/2.monitoring.md:70` (metric table) and `:212-213` (alert `BloodravenRestoreReclonesHeld`, `{phase="Held"}`), `3.monitoring-prometheus.md:134`, `7.backup-and-restore/2.backup-restore.md:790`, doctor `SKILL.md:171` |
+| Prometheus `reason` labels on `bloodraven_planned_failovers_deferred_total`, `bloodraven_deploy_lease_revocations_total` and `bloodraven_backup_artifact_cleanup_failures_total` | reason tokens: `DeploymentHold`, `CleanupFailed` and `CleanupRejected` in CamelCase, but the lease revocation reasons in snake_case, `operator_revoked` and `topology_changed` (`deployment_leases.go:193-199,263`), which the `/deploy/v1` 409 body also returns (`:630,636`). Revision 4 called them all CamelCase (revision 5, F-18) | `internal/metrics/metrics.go:51-65,366-372`; written at `planned_failover_deployment.go:60`, `deployment_leases.go:263`, `backup_reconciler.go:809` | user alert rules and dashboards |
 | `/deploy/v1` status JSON | `health.degradedReason`, `health.replicationRunning` (computed from `status.sites[].replicating`, which A-43 removes), `operations.updatePhase`, `operations.plannedFailover.{phase, reason}`, `operations.restoreInPlace`, `operations.dragonflyUpgrade`, `unstableReason` | `cmd/bloodraven/deploy_api.go:337-362`, `deployment_leases.go:270` | CI pipelines that gate deploys on the API (`4.configuration/11.deployment-api.md`) |
 | Operator `GET /status` JSON | per site `role` (`string(role)`, so the API spec value), `state` (`state.String()`, the internal lowercase form), `sourceConvergenceState`, `sourceConvergenceReason`, `recoveryState` | `cmd/bloodraven/main.go:490`; `internal/controller/topology.go:1124-1140` | `8.observability/2.monitoring.md:543-590` (documented with `"state": "writable"`), user scripts |
 | Operator `GET /ws/status` WebSocket broadcast | `TopologyMessage`: `activeSite`, `lastFailover`, `lastFailoverTarget`, `promotionGtidExecuted` (the flat record A-40 restructures), `updatePhase`, `alert`; per site `role`, `state`, `replicating` (the bool A-43 replaces), `recoveryState`, `divergentGtid` | `cmd/bloodraven/main.go:608`; `internal/controller/topology.go:2136-2140`; `internal/platform/websocket.go:19-44` | the playground dashboard, which compares `state === 'writable'` and `role === 'primary-candidate'` and uses the state as a CSS class (`playground/dashboard/index.html:17-18,131-150`); `2.monitoring.md:593-651` |
@@ -515,8 +526,20 @@ first in WS-E so the template stops carrying them.
   - MFG root rule: `oldSelf.spec.sites.all(o, self.spec.sites.exists(s, s.name == o.name))`, with the message
     "sites cannot be removed or renamed; see the site-replacement procedure".
   - Adding sites stays allowed.
-  - Document replacement as a new group restored from a backup, which is the section 3 procedure (D3). A future
-    decommission feature can relax the rule without a break.
+  - Document replacement as a new group restored from a backup (D3), in its own procedure (revision 5, F-19).
+    Revision 4 pointed at the section 3 procedure, which is the v1.6.0 → v1.7.0 move into a new cluster: it reads
+    the restore source from the MBK `status.location` that A-96 removes, and #243 scopes it to that one move. A
+    v1.7.0 user who loses a site needs a procedure for the same cluster. E6 adds "Replacing a site" to
+    `6.operations/2.operations.md`. It must cover:
+    - the restore source from the backup's `status.artifactStorage` (A-96), not `status.location`;
+    - a new group name, because the old MFG still exists in the namespace and U-8's rule against deleting an MFG
+      to recreate it applies here too;
+    - the endpoint cut-over: every derived name changes with the group name, including the
+      `mysql-<group>-primary` Service (`reconciler.go:1796-1800`), so clients move to the new endpoints;
+    - fresh backup and PITR prefixes and a new baseline, as U-3 requires, and the retirement of the old group only
+      after cut-over is verified.
+  - A future decommission feature can relax the rule without a break. While v1alpha1 is still served, the
+    relaxation lands in every served version identically (D1, C-4; revision 5, F-27).
 
 #### A-17 Site storage and zone are immutable
 
@@ -532,10 +555,13 @@ first in WS-E so the template stops carrying them.
 - **Problem:** storage edits are accepted and silently ignored. A zone edit reschedules the pods into a zone their
   volume cannot follow, so they stay Pending.
 - **Decision:**
-  - `self == oldSelf` on all three. The per-item rules work once A-08 lands.
+  - Immutable, per house rule T-1: `storageClassName` and `zone` (strings) by `self == oldSelf`, and `size` by
+    value, `quantity(self.size).compareTo(quantity(oldSelf.size)) == 0`, so the operator's re-encoding of
+    `1024Mi` as `1Gi` is not a change (revision 5, F-01). The per-item rules work once A-08 lands.
   - Size is immutable, not grow-only, because the operator does not implement PVC expansion. The CEL
     `quantity()` library that a grow-only rule needs is available at the A-115 floor. A later release that
-    implements expansion relaxes the rule, which is not breaking.
+    implements expansion relaxes the rule, which is not breaking, in every served version identically (A-59;
+    revision 5, F-27).
   - Fix `operations.md:381`.
 
 #### A-18 Backup PVC storage: an existing claim or a provisioned claim, not both
@@ -553,8 +579,12 @@ first in WS-E so the template stops carrying them.
   - `provisioned` is immutable, for the same reason as A-17. A field-level `self == oldSelf` would not stop
     removing the field and adding it back with new values (R04), so the transition rule sits on the `pvc`
     parent and checks presence too:
-    `has(self.provisioned) == has(oldSelf.provisioned) && (!has(self.provisioned) || self.provisioned == oldSelf.provisioned)`.
-    That also refuses switching between `claimName` and `provisioned`.
+    `has(self.provisioned) == has(oldSelf.provisioned) && (!has(self.provisioned) ||
+    (has(self.provisioned.storageClassName) == has(oldSelf.provisioned.storageClassName) &&
+    (!has(self.provisioned.storageClassName) || self.provisioned.storageClassName ==
+    oldSelf.provisioned.storageClassName) && quantity(self.provisioned.size).compareTo(quantity(oldSelf.provisioned.size)) == 0))`.
+    That also refuses switching between `claimName` and `provisioned`. Revision 4 compared `self.provisioned ==
+    oldSelf.provisioned`, which rejects the operator's own re-encoded `size` (house rule T-1; revision 5, F-01).
   - A transition rule cannot see a profile that was removed in one update and added back in the next. The
     controller therefore also compares the owned PVC `mysql-<fg>-backup-<profile>` with `provisioned`. On a
     class or size mismatch it refuses that profile's backups with a `BackupStorageMismatch` condition reason and
@@ -622,6 +652,39 @@ first in WS-E so the template stops carrying them.
 
 ### 2.4 Immutability and transition rules
 
+**House rule T-1: transition rules compare values, not encodings (revision 5, F-01).** The operator writes MFGs
+with typed `Update` calls: the finalizer add (`internal/controller/reconciler.go:279-283`) and every annotation
+consumer (`reconciler.go:2223`, `planned_failover_reconciler.go:932`, `restore_reclones.go:618,990`,
+`encryption_reconcile.go:1246`, `dragonfly_upgrade.go:388,402`). Go re-encodes what it decoded:
+`resource.Quantity` re-renders a non-canonical value (`1024Mi` becomes `1Gi`, `1.5Gi` becomes `1536Mi`;
+`apimachinery` `quantity.go:283,332-340,694-716`), `metav1.Duration` writes `60s` as `1m0s`, `metav1.Time` writes
+UTC at second precision, and a non-pointer `omitempty` field written as an explicit zero (`allowPartial: false`,
+`backup_types.go:225`) is dropped. The apiserver stores what the user wrote, so a whole-object `self == oldSelf`
+over such a value rejects the operator's own write: the MFG never gets its finalizer, and deletion hangs. One rule
+therefore applies to every transition rule in this audit (A-08, A-16, A-17, A-18, A-22, A-23, A-24) and to every
+rule #235, #203 and #205 add:
+
+- A rule never compares a struct with `self == oldSelf` when the struct holds a Quantity, a Duration, a
+  `metav1.Time` or a non-pointer `omitempty` field. Those fields are compared one by one, by value:
+  - Quantity: `quantity(...)` from the CEL quantity library, with `compareTo(...) == 0`.
+  - Duration: `duration(self.x) == duration(oldSelf.x)`.
+  - `metav1.Time`: as CEL timestamps (CEL types a `date-time` string as a timestamp, so equality is by instant),
+    and A-39's pattern admits no fractional seconds, so the operator's second-precision encoding never changes
+    the value.
+  - A non-pointer `omitempty` bool or number: with its zero substituted, `(has(self.f) && self.f) ==
+    (has(oldSelf.f) && oldSelf.f)`, unless A-37 already makes it a pointer.
+- Strings, string lists and pointers to them round-trip byte for byte, so whole-object equality stays allowed on a
+  sub-struct that holds only those (`source`, `decryption`, `loadOptions`).
+- **Test, in the commit that adds the rules (E6):** an envtest creates each kind through the unstructured client
+  with non-canonical values (`size: 1.5Gi` and `1024Mi`, a Duration `60s`, a `stopTime` with a `+05:00` offset,
+  an explicit `allowPartial: false`), then performs the operator's own typed finalizer `Update` and an
+  annotation consumer's `Update`, and asserts that both are accepted and that a real change to each field is
+  still rejected.
+- Rejected: canonical forms required at admission (Go's canonical Duration for an hour is `1h0m0s`, and a
+  canonical-Quantity pattern would reject `1024Mi`, which users write); and moving every operator write to a
+  metadata-only patch, which removes the operator's own trigger but leaves every other typed-client writer, and
+  every future operator write, exposed.
+
 #### A-22 MysqlBackup and MysqlBackupVerification execution fields are immutable
 
 - **Sev** must · **Brk** yes (rejects updates) · **Merges** GPT-12, KINDS-01
@@ -636,8 +699,10 @@ first in WS-E so the template stops carrying them.
   - Immutable fields:
     - MBK: `failoverGroupRef`, `profileName`, `sourceSite`.
     - MBV: `failoverGroupRef`, `profileName`, `backupRef`, `pointInTime`, `sanityCheck`.
-  - Optional fields use `has(self.x) == has(oldSelf.x) && (!has(self.x) || self.x == oldSelf.x)` on the spec
-    struct.
+  - Optional fields use `has(self.x) == has(oldSelf.x) && (!has(self.x) || <x unchanged>)` on the spec
+    struct, where "unchanged" follows house rule T-1: `pointInTime` compares `mode` as a string and `stopTime` as a
+    timestamp, and `sanityCheck` compares `query` as a string, `timeout` with `duration()` and the pointer
+    `minResult` by presence and value (revision 5, F-01). The references and `sourceSite` are strings.
   - `keepOnFailure`, `ttlSecondsAfterFinished` and `resources` stay mutable. `resources` only shapes a Job that
     is not yet created. Whole-struct equality on `corev1.ResourceRequirements` would also risk the CEL cost
     budget, because its upstream `claims` list has no `MaxItems` and upstream types take no markers (OPUS-11).
@@ -656,22 +721,30 @@ first in WS-E so the template stops carrying them.
 - **Problem:** a destructive load into a serving primary, with none of the fencing `restoreInPlace` has.
 - **Decision:**
   - MFG root rule: `has(self.spec.initFromBackup) == has(oldSelf.spec.initFromBackup) &&
-    (!has(self.spec.initFromBackup) || self.spec.initFromBackup == oldSelf.spec.initFromBackup)`.
+    (!has(self.spec.initFromBackup) || <initFromBackup unchanged>)`. Under house rule T-1 (revision 5, F-01),
+    "unchanged" is whole-object equality on `source`, `decryption` and `loadOptions`, which hold only strings,
+    string lists and pointers, and a field-by-field comparison inside `pointInTime`: `stopTime` as a timestamp,
+    `allowPartial` and `allowUnverifiedCrossSite` with their zero substituted, and the strings and `sites` list by
+    equality. Revision 4 compared the whole block, which rejects the operator's finalizer `Update` whenever the
+    user wrote `allowPartial: false` or a `stopTime` with an offset.
   - Restoring into a running group is `restoreInPlace` only.
-  - The rule is shape-agnostic, so #206 can reshape `pointInTime` freely.
+  - #206 can reshape `pointInTime` freely. The `pointInTime` part of the rule is written for the shape #206
+    leaves, by house rule T-1, in E6.
   - Whole-block equality is costed over every string in the block, so each one gets a `MaxLength` (A-92). E6's
     envtest installs the CRD and fails on a cost-budget error (OPUS-11).
-  - **Those bounds land in E6, with the rule (revision 4, OPUS-R3-05).** At HEAD, `.spec.initFromBackup` holds 16
-    strings and lists with no `maxLength` or `maxItems`: `source.s3.{bucket, prefix, endpointURL, region,
+  - **Those bounds land in E6, with the rule (revision 4, OPUS-R3-05).** At HEAD, `.spec.initFromBackup` holds 17
+    strings and lists with no `maxLength` or `maxItems` (revision 4 said 16; F-53): `source.s3.{bucket, prefix, endpointURL, region,
     credentialsSecret, storageClass}`, `source.pvc.{claimName, subPath}`, `source.mysqlBackupRef.name`,
     `decryption.passphraseSecret.{name, key}`, `loadOptions.{include,exclude}Schemas`, and
-    `pointInTime.{stopDatetime, excludeGtids, archiveProfileName, sites}`. Revision 3 left most of them to E16 (A-92)
+    `pointInTime.{stopDatetime, excludeGtids, archiveProfileName, sites}` (the `sites` items already carry a `maxLength`;
+    the list has no `maxItems`). Revision 3 left most of them to E16 (A-92)
     and E8 (A-34, A-39), so E6's rule would fail E6's own cost test. E6 therefore bounds every string and list
     reachable from `initFromBackup`, MBV `spec.pointInTime` and MBV `spec.sanityCheck` that E4 and E5 have not
     already bounded (E3 removes `storageClass`, A-56; E5 renames and bounds the Secret and backup references, A-02
     and A-04), before it adds A-22's and A-23's whole-block rules:
     - names and Secret keys `MaxLength=253`; `bucket` 63; `region` 64; `prefix`, `subPath` and `endpointURL` 1024;
-    - `stopDatetime` and MBV `pointInTime.timestamp` 64, until E8 replaces them with `stopTime`;
+    - both `stopTime` fields 64. E6 now runs after E8 (section 6, revision 5), so by then E8 has replaced
+      `stopDatetime` and MBV `pointInTime.timestamp` with them;
     - `sanityCheck.query` 4096 (A-34's bound, moved from E8);
     - `excludeGtids` `MaxLength=131072`. A GTID set can be long. 128 KiB is the Linux limit on one argument, and
       the replay passes the set as one `mysqlbinlog` argument, so no longer value could run. Proposal 21's
@@ -681,6 +754,24 @@ first in WS-E so the template stops carrying them.
 
     E16 keeps A-92 for every other field. If #206 reshapes `pointInTime` before WS-E branches, E6 bounds the shape
     #206 leaves, by the same rule.
+- **A failed bootstrap needs a remedy that the rule allows (revision 5, F-20).** Today a bootstrap that fails on
+  a recoverable input error is fixed by editing the block. The operator's own `RestoreBuildFailed` messages say so
+  ("set `…decryption.passphraseSecret`", "set `…source.<backend>` explicitly"; `internal/controller/restore.go:904-917,
+  1061-1064`), so do the doctor matrix (`alert_runbook_matrix.md:57`, which also says to remove `skipBinlog`) and
+  `7.backup-and-restore/5.backup-encryption.md:250-276`. Removing and re-adding the block is today's retry,
+  because removal clears `status.restore` (`restore.go:516-522`). Under this rule all of those are rejected.
+  - **Remedy: delete and recreate a group whose bootstrap never succeeded.** Such a group holds only a partial
+    load of a backup that still exists, and serves no application. The procedure checks that `status.restore`
+    has never reached `Succeeded`, that no application is connected, and that the backup is intact, then deletes
+    the MFG and re-applies it with the corrected `initFromBackup`. U-8's "never delete a MysqlFailoverGroup in
+    order to recreate it" gains this one exception. The cost: the partial load and the group's PVCs are deleted
+    and provisioned again.
+  - Rejected: allowing edits while `status.restore` reports a failure. Admission would then trust a status
+    field that can be lost or written by hand (A-89), and a forged `Failed` would reopen the destructive load
+    into a serving primary that this finding closes.
+  - E6 rewrites the `initFromBackup` branch of the shared messages to point at this procedure (the
+    `restoreInPlace` branch keeps its edit advice, which is still valid there), and updates the doctor row and
+    `5.backup-encryption.md` in the same commit.
 - **Disagreement:** MFGSPEC allowed edit and removal. Chosen: GPT's full immutability. The block is the
   bootstrap record, and removal followed by re-add is the rerun hazard.
 
@@ -720,7 +811,8 @@ first in WS-E so the template stops carrying them.
   - Keep `string`.
   - Add `+kubebuilder:validation:Format=date-time` and `MaxLength=64`.
   - Add A-39's RFC 3339 `Pattern` as well (revision 4, OPUS-R3-03). `Format=date-time` alone admits a lowercase
-    `t` or `z` and a non-digit fraction, which the reconcile-time parser then rejects.
+    `t` or `z`, a non-digit fraction and an out-of-range offset such as `+25:00` (revision 5, F-02), which the
+    reconcile-time parser then rejects. E6's envtest rejects all of them for `confirm`.
 - **Disagreement:** MFGSPEC proposed `metav1.Time`. Rejected: it normalises the value, which breaks the byte
   equality with the status tokens.
 
@@ -753,6 +845,13 @@ algorithm id).
     `EvalCrossSite`, including a writable `PrimaryCandidate` site, which must not be fenced.
   - `PointInTimeVerificationMode`: `Latest | Timestamp`, required inside the block. `none` is dropped: an
     absent `pointInTime` block means no replay.
+  - **The PITR mode wire keeps its lowercase values (revision 5, F-10).** The verification Job copies the API
+    value verbatim into `BLOODRAVEN_PITR_MODE` and `BLOODRAVEN_VERIFY_PITR_MODE`
+    (`internal/controller/backup_verification_job.go:158-161,181-182`), and the consumers accept only `latest` and
+    `timestamp` (`cmd/bloodraven/pitr_download.go:294`; `internal/controller/restore_script.py:450-464`). E7 adds an
+    exhaustive adapter from `PointInTimeVerificationMode` to those wire values in `backup_verification_job.go`, so
+    `pitr_download.go` and `restore_script.py` stay unchanged. A unit test renders a verification Job for each CR
+    mode and feeds its env to the download planner.
   - `DragonflySyncTimeoutPolicy`: `Proceed | Fail`. This is in the planned-failover path, so #235 may move it;
     the casing applies wherever it lands.
   - #235 is expected to leave `onCooldown` as a typed `Reject | Defer`, or remove it.
@@ -780,6 +879,14 @@ algorithm id).
 - **Decision:**
   - `type SiteState` with `Writable;ReadOnly;Unreachable;Unknown`.
   - `DragonflyRole` values `Unknown;Master;Replica;StaleMaster;Unconfigured;Unreachable`.
+  - **Every producer that casts an internal value into these types gets a mapping (revision 5, F-21).** A Go
+    string conversion compiles and silently emits the old spelling, which the new enum then rejects for the whole
+    status write. The Dragonfly writer casts the classifier result, `v1alpha1.DragonflyRole(role)`
+    (`dragonfly_topology.go:550,567`), and `internal/dragonfly.SiteRole` keeps its lowercase values because they
+    also drive the `dragonfly-role` pod label (`internal/dragonfly/siterole.go:9-14`; `dragonfly_labels.go:70-72`).
+    `siteStatusFromSnapshot` writes `State: s.State.String()` (`runner.go:2448`). E7 adds an exhaustive
+    internal-to-API mapping for each and routes both CR status writers through them. A unit test takes every
+    classifier and state value through its mapping and validates the result against the API enum.
   - `type SiteRecoveryState` and `type DivergenceDetector`, keeping their current values.
   - **No `""` enum value (revision 4, OPUS-R3-01).** Nine status enums admit `""` today. A-61 deletes one of them,
     `StandbyActivationPhase` (`mysqlstandbycluster_types.go:387`). The other eight are `RestoreInPlacePhase`
@@ -937,14 +1044,24 @@ algorithm id).
   - `MaxFailedKeep == 0` → 10 (`backup_reconciler.go:1357-1359`).
   - `backoffLimit` (`backup_types.go:68-70`) and `maxLagSecondsForSource` (`:53-55`) are defaulted
     non-pointers with `omitempty`, so typed clients cannot send 0.
-  - MBV `ttlSecondsAfterFinished` is `int32`, default 0 (`mysqlbackupverification_types.go:84-90,421`).
 - **Decision:**
   - Rule: a defaulted scalar whose zero is valid is a pointer, the CRD default applies only to nil, and the
     controller never maps zero to a default.
   - Pointers: `replication.maxLagSeconds *int64` (`Minimum=0`; 0 means caught up), `backup.backoffLimit
     *int32`, `backup.maxLagSecondsForSource *int64`.
-  - MBV `ttlSecondsAfterFinished *int32`, with no default: nil keeps the run until retention, 0 deletes it at
-    once (Job semantics).
+  - **MBV `ttlSecondsAfterFinished` is a separate lifecycle decision, not an instance of the rule (revision 5,
+    F-54).** It is `int32` with `default=0` (`mysqlbackupverification_types.go:84-90`), and the controller treats 0
+    as "clean up now" (`backup_verification_reconciler.go:716-723`), so no valid zero is rewritten today. The
+    decision is still to make it `*int32` with no default: nil keeps a successful verification's Pod, Service and
+    PVC until retention removes the record, and 0 deletes them at once (Job semantics). That changes the default
+    lifecycle of every verification whose manifest omits the field, and 3.4 says so.
+  - **The profile mirror changes with it (revision 5, F-11).** `VerificationSpec.ttlSecondsAfterFinished`, the
+    copy a profile carries for scheduled verifications, is also `int32` with `default=0`
+    (`mysqlbackupverification_types.go:417-421`), and both creators copy it unconditionally
+    (`cmd/bloodraven/trigger_verification.go:102`, `cmd/kubectl-bloodraven/verify.go:157`). Left as it is, every
+    scheduled or plugin-created MBV would get an explicit 0 and never see the nil meaning. It becomes `*int32` with
+    no default, and both creators copy the pointer so nil stays nil. E8 tests an omitted TTL and an explicit 0
+    through the scheduled trigger and through the plugin.
   - Retention counts are in A-55. A zero cooldown is rejected (A-38) rather than mapped.
 
 #### A-38 Bounds on every timer
@@ -1017,12 +1134,22 @@ algorithm id).
     undecodable item fails the whole List/Watch (3.1 item 1), so one typo would stop the operator's MFG or MBV
     informer for every object of the kind.
     - Both `stopTime` fields carry `+kubebuilder:validation:Pattern=` with
-      `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$`. This must
+      `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$` (revision 5).
+      Revision 4's pattern ended `(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$`, and the review measured two holes in
+      it (F-02, F-01). `IsDateTime` checks the date and range-checks the hour, minute and second, but never the
+      offset, so `+25:00`, `+99:00` and `+05:99` pass both checks on 1.31 and 1.37 envtest, are stored as written,
+      and fail `metav1.Time.UnmarshalJSON` ("time zone offset hour out of range"). The bounded offset is slightly
+      stricter than Go, which also takes `24` and `60`; stricter is safe. And a fractional second is admitted but
+      lost: `metav1.Time` encodes at second precision, so the operator's first typed write would silently move the
+      user's stop time and fail A-23's transition rule. The pattern therefore admits no fraction. This must
       be an OpenAPI pattern: CEL types a `date-time` string as a timestamp, so `matches()` is not available on it
       (the same reason A-38 avoids `Format=duration`). E8's CRD test asserts that the generated property carries
       the pattern.
-    - E8's envtest adds a lowercase `t`, a lowercase `z` and a non-digit fraction, all rejected.
-    - **House rule:** every user-written time is a pattern-checked `metav1.Time`. A-26's `confirm` string gets the
+    - E8's envtest adds a lowercase `t`, a lowercase `z`, a fraction, and the offsets `+25:00`, `+99:00` and
+      `+05:99`, all rejected. It also decodes every value the envtest admitted with `metav1.Time.UnmarshalJSON`,
+      so any other gap between the two checks fails CI rather than an informer.
+    - **House rule:** every user-written time is a pattern-checked `metav1.Time`, and the pattern rejects every
+      string that `time.Parse(time.RFC3339, …)` rejects. A-26's `confirm` string gets the
       same pattern, and #235's and proposal 21's request fields inherit the rule (A-50, A-59).
 
 #### A-40 Status timestamps and the failover record
@@ -1056,7 +1183,12 @@ algorithm id).
 - **Evidence:** `maxMemoryMb int32` and `proactorThreads int32`, where 0 means default
   (`dragonfly_types.go:48,54`).
 - **Decision:**
-  - `maxMemory *resource.Quantity`, rendered as bytes.
+  - `maxMemory *resource.Quantity`, rendered as bytes. Nil means Dragonfly's default. A Quantity admits signed
+    values and its int-or-string schema has no sign check, while today's field has `Minimum=0`
+    (`dragonfly_types.go:44-48`) and the renderer emits the flag only when it is positive
+    (`dragonfly_resources.go:279-280`). So `maxMemory` gets the CEL rule
+    `!has(self.maxMemory) || quantity(self.maxMemory).isGreaterThan(quantity('0'))`, and `-1Gi` and `0` are rejected
+    at admission instead of rendering `--maxmemory=-1073741824` or silently dropping the cap (revision 5, F-12).
   - `proactorThreads *int32` (`Minimum=1`); nil means Dragonfly's default.
 
 #### A-42 One binlog-coordinate type
@@ -1078,7 +1210,9 @@ algorithm id).
   - `Replicating bool` "indicates whether replication is running" (`types.go:671-672`), but it is set from
     `ReplicationHealthy` (`internal/controller/runner.go:2459`).
   - The lease gate refuses on `!s.Replicating` (`deployment_leases.go:360`).
-- **Problem:** `false` means the primary, not yet probed, threads stopped, or lagging.
+- **Problem:** `false` means the primary, not yet probed, threads stopped or no source host, or a healthy streak
+  still building. It is not set from lag: `replicating` is thread health with a source host, debounced
+  (`topology.go:1565-1578`). Revision 4 listed "lagging" here, which was wrong (revision 5, F-23).
 - **Decision:**
   - `replication SiteReplicationState`, `Enum=Healthy;Lagging;Broken;Unknown;NotApplicable`.
   - `NotApplicable` for the writable primary, `Unknown` before the first probe.
@@ -1093,14 +1227,30 @@ algorithm id).
     - `Unknown`: replica status could not be read, or the site has not been probed yet, or the healthy streak is
       still building.
     - The lease gate refuses unless the site is `Healthy` or `Lagging`, as it refuses on `!replicating` today.
-  - Update the lease gate, the kubectl plugin, `triage.sh` and the playground readers.
-  - **Served copies (OPUS-R2-10, A-114).** Today `replicating` means both replication threads run with a known
-    source, debounced over a streak of polls, whatever the lag (`topology.go:1565-1578`). Two served fields keep
-    that meaning:
+  - **Every reader keeps its meaning (revision 5, F-24).** Each `Replicating` predicate maps to `replication` in
+    `Healthy` or `Lagging`, and keeps whatever separate lag or source check it has. Mapping any of them to
+    `Healthy` alone would silently stop accepting a lagging replica. The production readers are:
+    - the deployment-lease gate (`deployment_leases.go:360`);
+    - the planned-failover target check (`planned_failover.go:245`), owned by #235, which accepts a lagging but
+      replicating target today;
+    - backup source selection (`backup_reconciler.go:1506`), which prefers a `read-only` replica that replicates;
+    - the reader pod label `healthy=yes` (`reconciler.go:2165-2169`), which routes reader traffic and applies its
+      own lag threshold;
+    - `/deploy/v1` `replicationRunning` (`cmd/bloodraven/deploy_api.go:341`).
+    E10 tests each one with a `Lagging` site.
+  - Update the lease gate, the three controller readers above, the kubectl plugin, `triage.sh` and the playground
+    readers.
+  - **Served copies (OPUS-R2-10, A-114).** In the CR, `replicating` means both replication threads run with a
+    known source, debounced over a streak of polls, whatever the lag (`topology.go:1565-1578`). The two served
+    fields:
     - `/deploy/v1` `health.replicationRunning` keeps its name. It is `true` when every non-active spec site has
       a status entry with `replication` in `Healthy` or `Lagging` (`deploy_api.go:337-349`). Lag stays in
       `health.replicationLagSeconds`. `11.deployment-api.md` documents this definition.
     - `/ws/status` `sites[].replicating` becomes `sites[].replication`, carrying the same enum value as the CR.
+      **That is a change of meaning, not only of shape (revision 5, F-23).** Today's WebSocket field is the raw
+      per-poll `IORunning && SQLRunning`, with no streak and no source-host check (`topology.go:2145-2147`), so
+      the dashboard (`playground/dashboard/index.html:159,182`) moves from a per-poll flag to the CR's debounced
+      enum. E10 updates those readers and says so in the release notes.
   - E10 changes both producers and adds a deploy-API test for each enum value.
 
 #### A-44 Dragonfly sync observations distinguish "not observed"
@@ -1113,6 +1263,12 @@ algorithm id).
     the parser stores `MasterSyncInProgress` as a plain `bool` (`internal/dragonfly/info.go:30,94`), so a reply
     without the key still yields `false`. The parser gains field-presence tracking, and the writer
     (`dragonfly_topology.go:572`) copies the pointer only when the field was present and parsed.
+  - **The same for `lastIOSecondsAgo` (revision 5, F-22).** A-36 makes it `*int64`, "nil when Dragonfly did
+    not report it". The parser initialises it to -1 and parses a reported value into the same `int`
+    (`internal/dragonfly/info.go:70-73,95-96`), and a reported -1 already means "never received data"
+    (`dragonfly_types.go:387-391`). So absence and a reported -1 cannot be told apart. The parser's presence
+    tracking covers `master_last_io_seconds_ago` too. E10 tests that an omitted key gives nil, and that a
+    reported -1 stays a non-nil -1.
   - `reachable` and `ready` (`:363,398`) stay plain observations: each has one meaning for `false`.
 
 #### A-45 Backup encryption attribution is a struct
@@ -1136,6 +1292,14 @@ algorithm id).
   and similar fields (`encryption_types.go:296-312`), filled incrementally from optional probe responses.
 - **Decision:** `*bool` for each observed flag; nil means the probe did not report it. Never fill an unknown
   value with false.
+- **The sidecar too (revision 5, F-13).** The operator receives flags whose presence is already lost. The
+  sidecar collapses unknowns to false before they leave the pod: no row for the `mysql` tablespace leaves
+  `SystemTablespaceEncrypted` false (`internal/sidecar/mysql.go:443-446`), and SQL NULL becomes false
+  (`:467-469`). The wire types are plain `bool` on both sides (`internal/sidecar/keyring.go:124-131`,
+  `internal/mysql/sidecar_client.go:51-57`). So E10 changes the sidecar as well: a missing row or NULL stays
+  unknown, `KeyringCoverage` uses `*bool` with `omitempty` on both sides of `/keyring/status`, and the operator
+  copies nil through. That payload is a doctor-skill contract, so `sidecar-probe.sh` and `SKILL.md` change in
+  the same commit. Unit tests cover missing, false and true for each flag.
 
 #### A-47 Remove `status.encryptionAtRest.sealed`
 
@@ -1150,7 +1314,10 @@ algorithm id).
 - **Decision:**
   - Remove it.
   - Alerting and the docs move to the `EncryptionAtRestReady` condition and its reasons, plus the keyring metrics.
-  - Update s48, s50 and `8.encryption-at-rest.md`.
+  - Update s48, s50 and `8.encryption-at-rest.md`, and `playground/enable-encryption.sh`, which polls
+    `{.status.encryptionAtRest.sealed}` for `true` for up to 15 minutes (`:341-357`) and runs in CI's encryption
+    E2E (`.github/workflows/_e2e.yml:134-139`). Its wait becomes `EncryptionAtRestReady=True` with reason
+    `AllSitesSealed` (revision 5, F-25).
 
 ### 2.8 Desired state in status, and spec written by the operator
 
@@ -1177,6 +1344,33 @@ algorithm id).
     `SnapshotRestore` and `spec.dragonfly.image` differs from the Dragonfly container image of the running
     StatefulSet, the operator runs the existing phases. If that image is unknown (no StatefulSet yet), it does
     nothing, so a new group or a group whose status was lost never starts an unrequested upgrade.
+  - **Level-trigger semantics (revision 5, F-03).** Today's annotation is one-shot: the operator removes it before
+    the run starts (`dragonfly_upgrade.go:125-156`), so a failure or a rejection is final. A spec drift is still
+    there after a failure, so the same phases would restart forever, and each start sheds the active site's cache
+    traffic before SAVE (`:170-173`). When a run is rejected, the reconcile returns no requeue and falls through
+    to the ordinary render, which rolls the StatefulSets onto `spec.dragonfly.image` the Rolling way
+    (`reconciler.go:419-430`; `dragonfly_resources.go:160-162`). So:
+    - **A terminal run is not restarted for the same target.** `upgrade` keeps `targetImage`, the outcome, and a
+      digest of `spec.dragonfly` as the run saw it. While `spec.dragonfly.image` equals the target of a `Failed`
+      or abandoned record and `spec.dragonfly` still matches its digest, the operator starts no new run. The
+      record (`phase: Failed`) stays until a re-arm, and the run's existing Warning Event is emitted once per
+      terminal run, not once per reconcile; no new condition reason is added. **Re-arm:** any change to `spec.dragonfly` (a new image, a
+      fixed `snapshot` block or a strategy change) starts a new run. If the fix was outside spec (a Secret's
+      contents), the user sets the image back to the running one, which clears the drift and the record, and
+      then forward again. That two-step retry is the stated cost. Rejected: a retry annotation (the GitOps-unsafe
+      trigger this finding removes), and re-arming on any `metadata.generation` change (an unrelated MFG edit
+      would shed cache traffic again).
+    - **Under `SnapshotRestore`, the ordinary render never moves the image.** The Dragonfly StatefulSet renderer
+      keeps each site's live image, and only the upgrade's own image-changing phases move a site to
+      `spec.dragonfly.image`. That also holds while admission is blocked (no `status.activeSite`, or a planned
+      failover in flight) and after a terminal failure. A blocked run waits and starts once admission clears; it
+      is not rejected and dropped.
+    - **Drift is per site, and the source is live.** `upgrade.sourceImage` is the live image of the active site's
+      StatefulSet, not `spec` (today it is copied from spec, `dragonfly_upgrade.go:153`, which is the target
+      once spec carries the request). A run interrupted after one site moved resumes from the per-site drift
+      after an operator restart; it does not start over.
+    - Switching `upgradeStrategy` to `Rolling` while drift exists rolls the ordinary way. That is the user's
+      choice, and the docs say so.
   - Add `status.dragonfly.image` as an observation only (the image actually running). Nothing compares spec
     with it.
   - `upgrade.sourceImage` and `upgrade.targetImage` remain as the run record.
@@ -1191,7 +1385,14 @@ algorithm id).
   - `status.dragonfly.enabled` (`dragonfly_types.go:232`), written at `dragonfly_topology.go:1625`.
 - **Decision:**
   - Remove both. Consumers read spec and the `PITRArchiveReady` condition.
-  - `status.pitr.profileName` stays (A-111).
+  - **`status.pitr.profileName` goes too (revision 5, F-39).** Revision 4 kept it as an observation that
+    attributes the archive counters (A-111). It is an echo: the API says it "mirrors
+    spec.backup.pitr.profileName" (`backup_types.go:162-164`), the writer copies it from spec
+    (`runner.go:1910-1913`), and on the path that keeps the old counters while a site has not answered, it
+    relabels them with the new spec profile (`:1976-1978`). So during the profile-switch lag A-111 cited, it
+    names the wrong profile. Its readers move to spec: the status-change check
+    (`pitr_archive_condition.go:615`), s31, s37 and `internal/playground/scenarios/backup_helpers.go:723`.
+    A-111's leave decision is withdrawn.
   - `plannedFailover.dragonfly.enabled` is in A-50.
 
 #### A-50 Planned-failover request and run record
@@ -1229,7 +1430,9 @@ algorithm id).
       `promotion-gtid-executed`.
 - **Decision (revision 3):** #235 owns the semantics of the claim and the record structure. Revision 2 said "WS-E
   does not touch this block", which left a must-fix with no owner while the branch diverged. Ownership is now:
-  - **WS-C lands the shape** and is asked to meet the checklist below while its branch is still at WP0.
+  - **WS-C lands the shape** and is asked to meet the checklist below. Revision 3 said "while its branch is still at
+    WP0"; the branch has since merged WP1 and WP3 (`2527bbe`), so WS-E's step 0 is the backstop that matters
+    (revision 5, F-55).
   - **WS-E's first step** (with the re-triage in section 6) re-audits `spec/status.plannedFailover`, the new
     condition and the new annotations against the same checklist. It fixes every gap in the commit that applies
     that rule elsewhere: E5 (site names), E7 (enums), E8 (timers and timestamps), E10 (`claimBaseline`), E11
@@ -1245,8 +1448,10 @@ algorithm id).
   2. **One record shape.** The v1beta1 freeze carries the durable-claim record only. The legacy phases (`Pending`,
      `Validating`, `Resuming`) and the legacy flat fields are gone: no `dragonfly.enabled`, no
      `offsetCaptureFailed` (a nil offset plus a reason instead), no free-string `reason`.
-  3. **Names.** `runID` (the house form, as in `requestID`, `sourceServerUUID` and proposal 21's `runID`), not
-     `runId`. `sourceSite` and `targetSite` (A-20), not `source` and `target`. Timestamps use the `…Time` suffix
+  3. **Names.** `runID` (the house form, as in the served `runID` and `jobUID`, `backup_types.go:1023,1087,1134`, and
+     proposal 21's `runID`), not `runId`. Revision 4 cited `requestID` and `sourceServerUUID`, which exist nowhere
+     (revision 5, F-56). The `/deploy/v1` lease payload's `operationId` is a separate log-contract field and keeps
+     its spelling (AGENTS.md). `sourceSite` and `targetSite` (A-20), not `source` and `target`. Timestamps use the `…Time` suffix
      (A-40): `claimTime`, `intentTime`, `completionTime`. Any baseline copy of the failover record uses A-40's
      `FailoverRecord{time, target, promotionGtidExecuted}`.
   4. **No desired state in status.** Request intent stays outside status: in the annotation, or, if the request
@@ -1276,7 +1481,9 @@ algorithm id).
   cleared, and is checked only while `status.encryptionAtRest` is nil (`encryption_reconcile.go:89-107`).
 - **Decision:**
   - `spec.encryptionAtRest.existingData` (`Enum=Refuse;LeavePlaintext`, default `Refuse`).
-  - The `AdoptionRefused` reason and its Event stay. Remove the annotation.
+  - The `AdoptionRefused` reason and its Event, `EncryptionAdoptionRefused`, stay: the policy blocks an automatic
+    action, which is A-74's `Refused` case (revision 5, F-57; revision 4's A-74 also renamed the Event). Remove the
+    annotation.
 
 ### 2.9 Defaults
 
@@ -1298,44 +1505,66 @@ algorithm id).
     `sidecar.image.repository` (default `ghcr.io/shipstream/bloodraven-sidecar`) and `sidecar.image.tag` (default
     `.Chart.AppVersion`), the same pattern as the operator's `image.{repository, tag}`
     (`charts/bloodraven/values.yaml:9-14`). A mirrored or air-gapped registry then sets one value, instead of
-    pinning every group, which would bring back the "never moves" behaviour this finding removes. The C-8 E2E
-    sets both to the branch build (`bloodraven-sidecar:playground`, `.github/workflows/_e2e.yml:120`), so the
-    rollout assertion sees a real image change. The critique suggested the key `sidecarImage.{repository, tag}`;
+    pinning every group, which would bring back the "never moves" behaviour this finding removes. Once the
+    rollout-pacing PR lands, the C-8 E2E sets both to the branch build (`bloodraven-sidecar:playground`,
+    `.github/workflows/_e2e.yml:120`), so its rollout assertion sees a real image change. The critique suggested the key `sidecarImage.{repository, tag}`;
     `sidecar.image` is used instead so that no values file carries the old spec field name that E19's gate
     looks for.
   - `spec.sidecarImage` → `spec.sidecar.image`, and `spec.sidecarResources` → `spec.sidecar.resources`.
   - `spec.sidecar` stays a value type (`types.go:117`) and gains `+kubebuilder:default={}` (OPUS-17). A manifest
     without the block then still gets the `leaseTimeout` and `peerCheckInterval` defaults (`types.go:463,468`),
     and the struct-level rules, including the 3× rule (`:459`), still run. A pointer would skip both.
-- **Cost (OPUS-07):** with no pin, an operator upgrade changes the effective pod spec of every unpinned group.
-  Each one then runs an `OrderedUpdate`: replica restart, one planned failover, old-primary restart
-  (`6.operations/10.upgrade-policy.md:149-152,227-230`). Today an operator upgrade never touches the data plane,
-  and a sidecar bump is a deliberate `spec.sidecarImage` edit.
-- **Mitigation chosen: serialized, health-gated rollouts driven by the default.**
-  - The operator runs at most one default-driven sidecar rollout at a time across all the groups it manages
-    (flag `--max-concurrent-default-sidecar-rollouts`, default `1`).
-  - The next group starts only after the previous group's ordered update has finished with `Ready=True`. So a
-    bad sidecar build stops at the first group.
-  - **Liveness (OPUS-R2-09).** A run that never starts must not hold the queue for every other tenant. Ordered
-    updates can be held or refused by actors unrelated to the sidecar: a group under restore, a group that is
-    not `Ready`, and on the #235 branch the `AutomaticFailoverHeld` hold, which blocks ordered updates until an
-    administrator acknowledges it. The queue therefore separates two cases:
-    - **Not admitted.** A group is offered the head of the queue only when it is `Ready=True`. If its ordered
-      update has not started (`status.updatePhase` still empty) within
-      `--default-sidecar-rollout-admission-timeout` (default 10m), it is skipped and re-queued at the back with
-      `Updating=False/SidecarRolloutDeferred`, and the next group is offered the slot.
-    - **Started and stalled.** Only a run that started and did not reach `Ready=True` holds the queue. That group
-      shows `Updating=True/OrderedUpdateStalled` (A-72), and the operator emits the Warning Event
-      `SidecarDefaultRolloutHalted` once. This is the bad-build case, and stopping there is the point.
-  - A waiting group reports `Updating=False/SidecarRolloutQueued`. Each start emits the Normal Event
-    `SidecarDefaultRolloutStarted`.
-  - A group with `spec.sidecar.image` set never rolls on an operator upgrade.
-  - Tests: E13 unit and component tests for the queue, the gate, the admission-timeout skip (a held group is
-    deferred and the next group rolls) and the halt (a started run that never reaches `Ready=True` stops the
-    queue). The C-8 E2E asserts that after the chart upgrade an unpinned group runs exactly one ordered update
-    with one planned failover, and a pinned group runs none.
-  - Docs: the upgrade policy's "Sidecar ↔ operator skew" section, the release notes and the course (unit 7
-    teaches "bump `spec.sidecarImage`"; see OPUS-06 in section 6).
+- **What the freeze needs, and what it does not (revision 5, scope rule).** The frozen API part of A-52 is only
+  the optional `spec.sidecar.image` with no persisted default, the `spec.sidecar.*` renames and `default={}`.
+  That lands in WS-E PR1 (E13, section 6). How the operator paces the rollouts that an unpinned default causes
+  is runtime behaviour, not API shape. Revisions 2 to 4 designed a cross-group queue here, and every round found
+  a Major problem in it (OPUS-07, OPUS-R2-09, then F-04, F-05 and F-06 in the ultra review). Under the program's
+  scope rule the queue design is removed from this audit. The rollout-pacing PR (WS-E PR3, its own `e2e` PR) and
+  the follow-up issue #244 own it, and must meet the requirements below.
+- **Cost (OPUS-07, corrected in revision 5, F-04):** with no pin, an operator upgrade that ships a new sidecar
+  default changes the effective pod spec of every unpinned group. A group on `updateStrategy: OrderedUpdate` then
+  runs an ordered update: replica restart, one planned failover, old-primary restart
+  (`6.operations/10.upgrade-policy.md:149-152,227-230`). A group on `Recreate` restarts both sites at once
+  (`internal/controller/reconciler.go:345-392`; `runner.go:686-691` keeps it out of the ordered updater).
+  Revision 4 said that today an operator upgrade never touches the data plane. That is false: a release that bumps
+  `deploymentPodRenderVersion`, `configMapRenderVersion` or `pitrPodRenderVersion` (`reconciler.go:62-68,
+  2238-2275`; bumped at least six times in `git log`) changes `ComputeSpecHash` for every group, pinned or not,
+  and `checkSpecDrift` starts an ordered update on each group independently (`runner.go:700-730`).
+- **Requirements for the rollout-pacing PR (#244).** They are the invariants F-04, F-05 and F-06
+  state. The design that meets them belongs to that PR and its issue, not to this audit.
+  - **R-1. Every release-driven pod-spec change is paced.** Pacing governs every change to a group's rendered pod
+    spec that an operator release causes: a new sidecar default, a render-version bump, or both at once. It is
+    not limited to the sidecar default. A pinned `spec.sidecar.image` does not exempt a group from a
+    render-version roll, and no doc or test may say that a pinned group "never rolls on an operator upgrade".
+  - **R-2. A group outside its slot does not roll.** A queued, deferred or not-yet-admitted group keeps its
+    current rendered pod spec, including through unrelated spec edits, until it is admitted. Both the renderer and
+    the drift hash honour the same admission decision, so the drift check cannot start a roll that the pacing has
+    not admitted.
+  - **R-3. Every `updateStrategy` has an admission and completion signal.** `Recreate` groups either are excluded
+    from automatic release-driven rolls (and the docs say how they move), or have a defined admission and
+    completion signal and behaviour. A signal that only `OrderedUpdate` writes, such as `status.updatePhase`,
+    cannot decide admission for `Recreate`.
+  - **R-4. "Never started" and "started and stalled" are told apart by a latched fact.** Whether a group's roll
+    has started is latched for the admitted target, and stays true for the whole of a stall. Today's
+    `status.updatePhase` does not: the updater resets it on return (`updater.go:313-317`), and a pod-not-ready
+    stall is reported only through `Updating=True/OrderedUpdateStalled` with an empty phase (`topology.go:3557-
+    3566,3612-3622`; `runner.go:1649-1668`). A stalled roll, or a group whose workload is already on the new
+    template, is never skipped as "not admitted". A bad build stops at the first group.
+  - **R-5. Pacing state survives an operator restart.** The operator upgrade that triggers the rolls restarts the
+    operator, and so can a second `helm upgrade` mid-rollout. In-flight admission and a halt are reconstructed
+    from durable evidence after a restart; a halt is not forgotten.
+  - **R-6. Liveness.** A group that is held or refused by an unrelated actor (a restore, a group that is not
+    `Ready`, the #235 `AutomaticFailoverHeld` hold) does not block every other tenant forever, and is not then
+    rolled outside its slot when the hold lifts (R-2).
+  - **R-7. Tests use the real updater.** The halt test runs the real updater with a replica that stays unready,
+    not a fake that keeps a phase set, and covers a combined render-version and sidecar-default change and a
+    `Recreate` group.
+- **When pacing must exist.** The rollout-pacing PR does not gate WS-F or `v1.7.0-rc.0`, because no release before
+  rc.0 runs groups with the new schema. It gates the first release that upgrades such groups to a new default,
+  which in practice is v1.7.0 itself (rc.0 groups upgrading to it). Until it lands, the C-8 E2E does not assert
+  sidecar-rollout behaviour.
+- Docs: the upgrade policy's "Sidecar ↔ operator skew" section, the release notes and the course (unit 7
+  teaches "bump `spec.sidecarImage`"; see OPUS-06 in section 6).
 - **Rejected mitigations:**
   - An observed `status.sidecar.image`, a `SidecarUpgradePending` condition and a one-shot `roll-sidecar`
     action. Every release would then need an imperative step per group, which GitOps cannot commit (A-81), so
@@ -1374,7 +1603,7 @@ algorithm id).
     - fsGroup 999 with `fsGroupChangePolicy: OnRootMismatch`.
     - The launcher's root filesystem writes, `/tmp` and `/var/run/mysqld` move to emptyDirs.
     - No root init phase, and no per-image branch.
-  - **Gate (timeboxed in WS-E):**
+  - **Gate (timeboxed, in WS-E's PR4, which does not gate WS-F or rc.0; revision 5):**
     - Restricted-PSS namespace admission.
     - Fresh init and restart on an existing volume.
     - Keyring seal and rotation, PITR archiving, backup and restore, and a chaos failover.
@@ -1386,7 +1615,7 @@ algorithm id).
       means a uid it does not define. The gate therefore runs Jobs on that image as uid 999 with an emptyDir
       `HOME`, and verifies mysqlsh dump, load and PITR replay there. If that fails, the fallback is a per-image
       uid table, and the record must drop the "no per-image branch" condition explicitly.
-  - **If the gate fails or cannot be completed:** ship C, which is the same merge helper with empty MySQL and
+  - **If the gate fails or cannot be completed by the v1.7.0 cut:** ship C, which is the same merge helper with empty MySQL and
     Dragonfly defaults, and record why in the PR.
 - **Rejected:** B, as-is semantics with renamed backup fields; it freezes two meanings for one field name. Also
   C without attempting the gate.
@@ -1409,7 +1638,14 @@ algorithm id).
     (default 10, Minimum=0)}`.
   - Documented semantics: a successful backup is pruned only when it is outside `keepLast` and older than
     `keepWithinDays`.
-  - Remove `minKeep`, the "0 disables" meanings and the legacy `retention` integer. Under keep-if-any, `count` and
+  - **Explicit zero (revision 5, F-26).** In the new shape an explicit `keepFailed: 0`, or a verification
+    `keepLast: 0`, means keep none. Today an explicit 0 in `maxFailedKeep`, `keepSuccessful` or `keepFailures`
+    means "use the default", 10, 30 and 10 (`backup_reconciler.go:1357-1361`;
+    `backup_verification_reconciler.go:1021-1034`). Revision 4 described those as "0 disables" meanings and mapped
+    the fields by plain rename, so a user who followed the table would have deleted every failed backup or
+    successful verification record that is kept today. The migration therefore maps a legacy explicit 0 in those
+    three fields to an omitted field, which gets the same default, and 3.4 says so.
+  - Remove `minKeep`, the zero-means-default meanings and the legacy `retention` integer. Under keep-if-any, `count` and
     `minKeep` combine as their maximum, so a v1.6.0 policy maps to `keepLast = max(count, minKeep, 1)` (R07).
     For example, `count: 2, minKeep: 7` keeps seven today and must become `keepLast: 7`.
   - The v1.6.0 "no pruning" configurations, `retention: 0` without a policy, or a policy with `count: 0` and
@@ -1468,6 +1704,12 @@ algorithm id).
   - Delete it.
   - #205 is expected to re-add `restoreInPlace.pointInTime` together with a `staging` block, as one additive
     change, reusing A-18's `ProvisionedVolumeSpec` body and A-30's scope.
+  - **"Targets v1beta1" means every served version (revision 5, F-27).** Proposal 21 plans "PR4 onward targets
+    v1beta1 only" (`21-in-place-pitr-staging.md:878,885`). Under D1, v1alpha1 stays served with an identical schema
+    until the next minor release (C-1), and C-4 fails on the first difference, which C-1 makes a webhook release
+    blocker. So any field added after the freeze, by #205's PR4 to PR6 or by anyone else, lands in every served
+    version identically until v1alpha1 is removed. The alternative is to hold PR4 until that removal. Adding it to
+    `api/v1beta1` only is not allowed.
   - Proposal 21 (#205, WS-B) is written against today's names (`mysqlBackupRef`, `stopDatetime`, a string
     `scope`, `status.location`). Where it lands after WS-E, it uses the v1.7.0 names: `backupRef` (A-04),
     `stopTime` (A-39), the scope as A-30 decides it, and `artifactStorage.location` (A-96). Its hold key follows the
@@ -1592,11 +1834,16 @@ algorithm id).
     rendered at `dragonfly_resources.go:290-291`).
 - **Decision:**
   - `s3Endpoint` and `s3UseHTTPS` → one `s3EndpointURL`, with the backup pattern narrowed to no path
-    (`^https?://[^\s/?#@]+/?$`). One URL convention then covers every S3 endpoint in the API.
+    (`^https?://[^\s/?#@]+/?$`, with the empty value admitted as below). One URL convention then covers every S3
+    endpoint in the API.
   - The operator adapts the URL for Dragonfly: the URL's host and port become `--s3_endpoint=<host:port>`, and
     the scheme becomes `--s3_use_https=<true|false>`. Unit tests pin both flags for `http://` and `https://`,
     with and without a port.
-  - An empty `s3EndpointURL` still means AWS S3, as an empty `s3Endpoint` does today (`dragonfly_types.go:125-128`).
+  - An omitted or empty `s3EndpointURL` still means AWS S3, as an empty `s3Endpoint` does today
+    (`dragonfly_types.go:125-128`). An OpenAPI pattern applies to an explicit `""` too, so the pattern admits it:
+    `^(https?://[^\s/?#@]+/?)?$` (revision 5, F-50; revision 4's pattern rejected the empty value this bullet
+    supports, which a Helm or Kustomize template that renders `""` would hit). E5's envtest admits `""` and
+    rejects `rustfs:9000` without a scheme.
   - `s3SignPayload` stays (A-103).
   - `credentialsSecretName` already matches Q3=B.
   - `dir` stays a raw passthrough of Dragonfly's own flag.
@@ -1617,6 +1864,15 @@ algorithm id).
   - Add `ObservedGeneration int64` (`+optional`, `Minimum=0`).
   - The topology manager snapshot carries the generation of the config it applied. Every MFG condition, and
     `status.observedGeneration`, uses it.
+  - **"Applied" includes an edit that does not change the topology config (revision 5, F-28).** The runner keeps
+    the live manager when the new `TopologyConfig` equals the old one and only runs its setters
+    (`runner.go:497-511`), and backup schedules and pod labels are not in that config (`topology.go:50-89`). Taken
+    literally, a backup-schedule edit would leave `observedGeneration` below `metadata.generation` forever, and the
+    Argo CD Lua would report "Progressing" indefinitely (`argocd-cm-patch.yaml:46-50`). So the applied generation
+    advances when the equal-config path has synchronised successfully as well as when a manager is created, and a
+    generation advance by itself schedules a status write (today `topology.go:1675-1684` publishes only on listed
+    changes). E11 tests a backup-schedule-only edit: `observedGeneration` and `Ready.observedGeneration` reach
+    `metadata.generation`.
   - Writers that own one condition stamp the generation they evaluated.
   - Point the MFG Lua at `status.observedGeneration`. The Lua already does this for other kinds (`:112-113`).
   - `encryptionAtRest.observedGeneration` stays, documented as the encryption reconcile's own generation.
@@ -1643,7 +1899,10 @@ algorithm id).
 - **Decision:**
   - MBV `Ready` mirrors `Verified`, with `False/InProgress` while running.
   - MSC `Ready=True` when both conditions are True, otherwise False with the first failing reason.
-  - MBK writes `Ready=False/Pending|Running` from creation.
+  - MBK writes `Ready=False` from creation: with the specific pending reason while it waits
+    (`WaitingForHealthySource`, `BackupJobConflict`, …; A-73), `Pending` only as the generic fallback before a
+    specific reason is known, and `Running` while the Job runs. Revision 4 gave `Pending|Running` only, which
+    contradicted A-73's specific reasons for the same state (revision 5, F-29).
   - Add `Ready` printer columns to MBK, MBV and MSC.
 - **Disagreement:** KINDS said this can wait. Chosen now: its reasons should freeze with the rest.
 
@@ -1672,9 +1931,31 @@ algorithm id).
 - **Decision:**
   - `Bootstrapping` is True only while a clone runs. On failure: `False/BootstrapFailed` plus
     `Degraded=True/BootstrapFailed`. Otherwise `False/NotBootstrapping`; drop `Done`.
+  - **When `Degraded=True/BootstrapFailed` clears (revision 5, F-30).** The failure is held in the topology
+    manager's bootstrap phase until the next bootstrap (`topology.go:4399-4404`), while `Degraded` is recomputed
+    from the snapshot every poll (`runner.go:1482-1519,2229-2234`), and a True `Degraded` gates deployment leases
+    (`deployment_leases.go:299-324`). So `BootstrapFailed` is one more input to `degradedReason`, computed each
+    poll, not latched in the condition. It holds while the bootstrap phase is failed and the target site's
+    `replication` is neither `Healthy` nor `Lagging`. It clears when a new clone starts or the site replicates by
+    another path. It ranks below `CrossSiteAlert` and above `SiteUnhealthy` and `ReplicationLagging`. E11 tests
+    that it persists across polls, clears on recovery without another clone, and that deployment leases are
+    granted again afterwards.
   - `Updating=True/OrderedUpdateStalled` while stalled.
   - `Degraded` reasons `Degraded` → `SiteUnhealthy`, `Alert` → `CrossSiteAlert`.
-  - Update the Lua (`:37,69,77`), the deploy-API docs, `crd-reference.md` and s19.
+  - Update the Lua (the `Bootstrapping` block at `:66-75`, which A-72 rewrites because failure moves to
+    `Degraded`, and the stalled-update block at `:77-87`; revision 4 cited `:37,69,77`, F-58), the deploy-API docs,
+    `crd-reference.md` and s19.
+  - **Every consumer of the old bootstrap vocabulary (revision 5, F-31).** Four more scenarios key on `Done` and
+    `True/Failed`, and run only in the E2E profiles, so `make test` does not catch them: s10 and s13 wait for
+    `False/Done` and fail fast on `Failed` (`s10_full_bootstrap_after_data_wipe.go:156-159`,
+    `s13_operator_kill_during_bootstrap.go:178-181`), s37 waits for `Done` after the request
+    (`s37_pitr_archive_handoff.go:281-292`), and s59 starts its repair on `Failed` (`s59_killed_clone.go:386-399`;
+    `repair_helpers.go:88-89` states the old polarity). `NotBootstrapping` is also the state before any clone, so
+    a token swap is not enough. Completion becomes `False/NotBootstrapping` with a `lastTransitionTime` after the
+    request (or after the observed bootstrap start) and the target's `replication` `Healthy`; failure and repair
+    key on `BootstrapFailed`. The docs that teach the old tokens change too: `playground/chaos-scenarios.md:39,43,
+    545,1479`, `6.operations/9.failure-mode-matrix.md:51` and the course (`unit-7-day-0-and-day-2/
+    topic-24-provisioning/read.md:287`, `SOURCES.md:228`). All of it is in E11.
 
 #### A-73 One meaning per reason token
 
@@ -1687,15 +1968,29 @@ algorithm id).
   - The deploy API returns raw condition reasons (`deployment_leases.go:270`).
 - **Decision:**
   - Pending uses `WaitingForHealthySource`, and MDB Pending uses `GroupNotYetCreated`.
+  - **The timeout escalation does not carry a pending reason (revision 5, F-29).** `pendBackup` turns a backup that
+    stays pending past `maxBackupPendingDuration` (30m) into a terminal failure with the caller's pending reason
+    (`backup_reconciler.go:45-49,979-982`; `failBackupOpts` keeps it, `:926,933-938`). Renamed as above, a timed-out
+    backup would read `Phase=Failed`, `Ready=False/WaitingForHealthySource`. The escalation maps each pending
+    reason to a terminal one: `WaitingForHealthySource` → `NoHealthySource`, and any other pending reason,
+    `BackupJobConflict` included, → `PendingTimedOut` with the pending reason in the message. E11 tests the
+    timeout path.
   - The Event `PITRArchiveReady` → `PITRArchiveRecovered`.
   - Document the closed `unstableReason` set in `11.deployment-api.md`, sourced from the A-69 constants.
-  - **That set is not closed today (revision 4, OPUS-R3-07).** `DeploymentUnstableReason` returns string literals
-    (`SiteNotReady`, `RestoreReclonePending`, `ReplicationNotRunning`), a concatenation
-    (`"SourceConvergence" + string(s.SourceConvergenceState)`) and the raw `s.RecoveryState`
-    (`deployment_leases.go:345-361`), next to the condition reasons. E1 declares every one as an A-69 constant
-    (`SourceConvergencePending`, `SourceConvergenceBlocked`, `SiteNotReady`, `RestoreReclonePending`,
-    `ReplicationNotRunning`, and one per recovery state), and the function returns only those. E11's deploy-API test
-    asserts that every value it returns is in the set.
+  - **That set is not closed today (revision 4, OPUS-R3-07; made exhaustive in revision 5, F-32).** Revision 4
+    cited only `:345-361`, and section 8.1 recorded the point as fixed while the list was still partial. The
+    whole function is `deployment_leases.go:270-364`. Its return branches are:
+    - the literals `DeploymentRevocationPending`, `Initializing`, `NoPrimary`, `PlannedFailover`, `OrderedUpdate`,
+      `Restore`, `DragonflyUpgrade`, `RestoreInPlace`, `NotReady`, `SiteNotObserved`, `SiteNotReady`,
+      `RestoreReclonePending` and `ReplicationNotRunning`;
+    - two concatenations: `"Dragonfly" + string(d.Phase)` (`:293-295`), whose values follow A-28's `DragonflyPhase`
+      values, and `"SourceConvergence" + string(s.SourceConvergenceState)`;
+    - the raw `s.RecoveryState` and `gatingRecoveryState(fg)` (`:317`);
+    - a True gating condition's reason, or its type name when the reason is empty (`return name`, `:300-324`).
+    E1 declares an A-69 constant for every literal, for each value of both concatenations over its enum, and for
+    every recovery state; the condition branch draws on the condition-type and reason constants. The function
+    returns only declared constants. E1's registry test derives the set from every return branch, not from this
+    list, and E11's deploy-API test asserts that every value returned is in it.
   - `DivergentTransactions` stays on both conditions: it is the same fact.
 
 ### 2.12 Event reasons
@@ -1710,26 +2005,39 @@ algorithm id).
   - Mixed acronyms: `PointInTime*` next to `PITR*`.
   - Mixed refusal words: `Rejected` and `Refused`.
 - **Decision:**
-  - Rule: `<Subject><PastTenseVerb>`. `Succeeded`/`Failed` for operations, `Rejected` for user requests that
+  - Rule: `<Subject><PastTenseVerb>`, optionally followed by a qualifier that names the cause
+    (`PromotionRefusedReclonePending`). Revision 5 states the qualifier explicitly, and removes the table's
+    targets that had no verb (F-33). `Succeeded`/`Failed` for operations, `Rejected` for user requests that
     are not admitted, `Refused` for automatic actions blocked for safety. US spelling, and `PITR` is the only
     acronym form.
-  - Apply STATUS-23's rename table in one commit, together with A-33, A-73, the log-schema doc, the doctor skill
-    and runner assertions:
-    - `PlannedFailoverCompleted` → `PlannedFailoverSucceeded`: E12 renames whatever completion Event #235 leaves.
-      #235 merges first (C-10). Revision 3 asks it to use the new name (the A-50 checklist), which reverses OPUS-15
-      for this one block because the branch is still at WP0.
+  - E12 applies STATUS-23's rename table, A-73's Event rename and A-75's, together with the log-schema doc, the
+    doctor skill and runner assertions (revision 5, F-34; revision 4 said "in one commit, together with A-33,
+    A-73", while the work list put A-33 in E7 and A-73 in E1 and E11). E7 types the status reasons (A-33). Where a
+    status reason shares an Event token (`status.restore.reason` reuses `PointInTimePartial`, section 1.4), E12
+    renames the Event, the status writer and its constant together.
+    - `PlannedFailoverCompleted` → `PlannedFailoverSucceeded`: E12 renames whatever completion Event #235 leaves,
+      and puts every other Event reason that survives #235 through the same rule. #235 merges first (C-10).
+      Revision 3 asked it to use the new name (the A-50 checklist), reversing OPUS-15 for this one block while the
+      branch was at WP0. The branch has since moved on (WP1 and WP3 merged; `2527bbe` on 2026-11-05) and again
+      emits `PlannedFailoverCompleted`, with about fifteen inline Event literals, several not in this rule's form
+      (`PlannedFailoverLagOK`, `PlannedFailoverStatusStalled`, …). The ownership stands: WS-C is asked to comply,
+      and WS-E's step 0 fixes whatever it leaves (A-50; revision 5, F-55).
     - `DragonflyPromotionCompleted` → `DragonflyPromotionSucceeded`
     - `DragonflyUpgradeCompleted` → `DragonflyUpgradeSucceeded`
     - `RecoveryComplete` → `OldPrimaryRecovered`
     - `RestoreReclonesComplete` → `RestoreReclonesDrained`
     - `RestoreInPlaceCancelled` → `RestoreInPlaceCanceled`
-    - `PointInTimePartial` → `PITRReplayPartial`
-    - `PointInTimeCrossSiteUnverified` → `PITRCrossSiteUnverified`
-    - `KeyringRotationRefused` → `KeyringRotationRejected` (update s48)
-    - `EncryptionAdoptionRefused` → `EncryptionAdoptionRejected`
+    - `PointInTimePartial` → `PITRReplayTruncated` (revision 4 said `PITRReplayPartial`, which has no verb)
+    - `PointInTimeCrossSiteUnverified` → `PITRCrossSiteVerificationSkipped` (revision 4: `PITRCrossSiteUnverified`)
+    - `KeyringRotationRefused` → `KeyringRotationRejected` (update s48): a rotation is a user request
     - `PromotionRefusedPendingReclone` → `PromotionRefusedReclonePending`
     - `KeyringPhase` → `KeyringPhaseChanged`
-    - `MetadataParseFailed` → `MetadataUnreadable`
+    - `PITRArchiveReady` → `PITRArchiveRecovered` (A-73; it is also a condition type)
+    - Revision 4 also renamed `EncryptionAdoptionRefused` → `EncryptionAdoptionRejected` and `MetadataParseFailed`
+      → `MetadataUnreadable`. Both rows are dropped (revision 5, F-33, F-57). Under A-51 adoption is a spec policy
+      that blocks an automatic action, which is the `Refused` case, and A-51 keeps that Event.
+      `MetadataParseFailed` already follows the rule; `MetadataUnreadable` stays the MSC condition reason
+      (`standbycluster_reconciler.go:336,348`).
   - The six reasons added since `3fa1900` (section 1.4) go through the same rule in E12. Today
     `RestorePeerReplicationIncomplete` and `RestoreInPlaceWaitingForPreviousQueue` are not `<Subject><PastTenseVerb>`.
   - Release notes carry the old → new table.
@@ -1747,7 +2055,10 @@ algorithm id).
   - `KeyringPhase` picks its type at runtime (`encryption_reconcile.go:184`).
 - **Decision:**
   - Drop the Warning at `:1402`.
-  - Use `OwnerUserDropSkipped` at `:1081,1086`, and rename the Normal case at `:756` to `DatabaseDropNotNeeded`.
+  - Use `OwnerUserDropSkipped` at `:1081,1086`. The Normal case at `:756` ("nothing to drop") keeps
+    `DatabaseDropSkipped`, and the Warning at `:973` ("another MysqlDatabase still declares database …") becomes
+    `DatabaseDropRefused`, A-74's word for an automatic action blocked for safety. Revision 4 renamed the Normal
+    case to `DatabaseDropNotNeeded`, which has no verb (revision 5, F-33).
   - Remove the emit at `restore_inplace.go:1005`.
   - `KeyringPhaseChanged` is always Normal; Warning-worthy transitions use their specific reasons.
   - The advisory `RestoreInPlaceRejected` becomes `RestoreInPlaceConfirmIgnored`.
@@ -1822,7 +2133,7 @@ algorithm id).
 
 #### A-78 One value grammar for one-shot action annotations
 
-- **Sev** should · **Brk** yes (reclone divergent form only) · **Merges** OPS-04 (annotation part), GPT-38
+- **Sev** should · **Brk** yes (both reclone forms; revision 4 broke only the divergent form) · **Merges** OPS-04 (annotation part), GPT-38
   (grammar part)
 - **Evidence:**
   - Reclone accepts `<site>:confirm=<group>` or a positional `<site>:<gtid-prefix>`
@@ -1840,17 +2151,25 @@ algorithm id).
     the same name also carries `uid=<metadata.uid>` (R12).
   - **An operation-id subject satisfies both rules (revision 4, OPUS-R3-01).** If the subject is an id that the
     operator minted and recorded in this group's status, and ids are never reused (a UUID run id, or A-86's
-    promotion id), the value cannot match another group or a re-created one. So it needs neither `confirm=` nor
+    promotion UUID; revision 5, F-14), the value cannot match another group or a re-created one. So it needs neither `confirm=` nor
     `uid=`. A site-name subject always needs them. Proposal 21's `restore-accept-damaged=<originRunID>` and
     `restore-staging-cleanup=<originRunID>` are destructive and use this form.
   - **A subject may be a comma-separated list of ids** (revision 4, OPUS-R3-10), for acknowledgements that clear
     several records at once (A-86). Each id matches `^[A-Za-z0-9._/+-]+$`. `,` is not a shell metacharacter, and it
     is in neither the value charset nor the pair syntax, so the split stays unambiguous. A site-name subject is
     never a list.
-  - The reclone divergent form becomes `<site>:gtidPrefix=<p>`. `<p>` is a prefix of the divergent GTID's
-    source UUID: hex and `-`, at least 8 characters (`minRecloneGtidPrefix`). Today the operator writes the GTID
-    up to its first comma, interval included (`reclone.go:148-152`), so the value can contain `:`. It then
-    writes the UUID part only.
+  - **Both reclone forms (revision 5, F-35).** A reclone wipes the site's datadir (`reclone.go:91-103`) and has a
+    site-name subject, so both forms carry `confirm=` and `uid=`. Revision 4 gave the divergent form as
+    `<site>:gtidPrefix=<p>` alone, which contradicted the two rules above. The forms are:
+    - cold: `<site>:confirm=<metadata.name>:uid=<metadata.uid>`;
+    - divergent: `<site>:confirm=<metadata.name>:uid=<metadata.uid>:gtidPrefix=<p>`. `gtidPrefix` is an extra
+      interlock that proves the requester read the divergence; it does not replace `confirm=`. `<p>` is a prefix
+      of the divergent GTID's source UUID: hex and `-`, at least 8 characters (`minRecloneGtidPrefix`). Today the
+      operator writes the GTID up to its first comma, interval included (`reclone.go:148-152`), so the value can
+      contain `:`. It then writes the UUID part only.
+    - The operator's own writer (`recloneAnnotationValue`, `reclone.go:143-160`) and `kubectl bloodraven
+      reclone` build the full form. A value missing any required pair is rejected with a message that prints the
+      full form.
   - #235, #204 and #205 (proposal 21's action annotations, A-59) are expected to follow this grammar.
 
 #### A-79 Well-known keys are exported and documented with a stability level
@@ -1989,17 +2308,40 @@ Section 4 lists every documented status write with its replacement.
   - Up to five records are packed into one condition message.
 - **Decision:**
   - Add `status.divergentPromotions[]` (`+listType=map`, `+listMapKey=id`, `MaxItems=16`) with items `{id
-    (promotion time in the A-78 basic form + "/" + site, for example `20261104T100000Z/iad`), site,
-    divergentGtid, divergentTransactions int64, comparedTo, promotionTime metav1.Time}` (the `…Time` suffix of
-    A-40; revision 2 said `promotedAt`).
-  - When full (OPUS-22): with 16 unacknowledged records, the operator keeps the 16 oldest. It counts the rest in
-    the condition message (`… and N more`) and emits `DivergentPromotionRecordsTruncated`. Each promotion's
-    `DivergentSitePromoted` Event and ERROR log remain the full record. The status write never fails on the
-    bound.
+    (required), site, divergentGtid (MaxLength=8192), divergentGtidTruncated bool, divergentTransactions int64,
+    comparedTo, promotionTime metav1.Time}` (the `…Time` suffix of A-40; revision 2 said `promotedAt`).
+  - **The id is a UUID minted once per promotion (revision 5, F-14, F-36).** Revision 4 built it from the
+    promotion second and the site (`20261104T100000Z/iad`). Site names repeat across groups, and a whole-site
+    outage fails many groups over to the same site in the same poll, so identical ids across groups were the
+    expected case, and A-78's claim that an operator-minted id "cannot match another group" was false for them.
+    Two promotions of one site within a second would also have produced a duplicate list-map key. A UUID
+    meets A-78's value charset and never repeats, so A-78's exemption from `confirm=` and `uid=` holds.
+    `promotionTime` and `site` stay separate fields. The list-map key is marked `required`, as the apiserver
+    demands of a list-map key with no default.
+  - **Bounded size (revision 5, F-49).** A long-diverged site can carry thousands of GTID intervals
+    (`handoff.go:366-367`), and 16 unbounded sets could exceed the request limit before any other status. Each
+    record stores at most 8 KiB of the set, and `divergentGtidTruncated: true` says when it was cut. 16 records
+    are then at most about 130 KiB.
+  - **When full (OPUS-22; revised in revision 5, F-16, F-36).** With 16 unacknowledged records, the operator keeps
+    the 16 oldest, counts every further promotion in a durable `status.divergentPromotionsOmitted int32`, and emits
+    `DivergentPromotionRecordsTruncated`. Revision 4 kept the count only in the condition message, so it was lost
+    on an operator restart, and acknowledging the 16 retained ids cleared the condition while an omitted
+    promotion had never been acknowledged. The status write never fails on the bound.
+  - **What the Events and logs keep (revision 5, F-15).** Revision 4 said each promotion's `DivergentSitePromoted`
+    Event and ERROR log "remain the full record". They do not: both cut the GTID set at 1 KiB
+    (`runner.go:1845,2309-2311`; `topology.go:5140-5142`; `handoff.go:366-376`). They carry the site, the
+    transaction count and the first 1 KiB of the set. So the complete set of an overflowed promotion, or of a set
+    longer than 8 KiB, is not retained by the operator, and the record says so. The runbook tells the
+    administrator to capture `gtid_executed` on the old primary before any reclone of it, which is where the
+    divergent transactions still are.
   - Add the one-shot annotation `bloodraven.shipstream.io/acknowledge-divergent-promotion=<id>[,<id>…]`, using
     A-78's list subject (revision 4, OPUS-R3-10). The operator removes the matching entries and emits
-    `DivergentPromotionAcknowledged`.
-  - The condition stays True while the list is non-empty, and its message counts the records.
+    `DivergentPromotionAcknowledged`. An id that is not in this group's list is ignored with a Warning Event, so
+    an id copied from another group's status clears nothing. The omitted count is acknowledged with the subject
+    `omitted`, which is not operator-minted and so needs A-78's binding:
+    `acknowledge-divergent-promotion=omitted:confirm=<metadata.name>:uid=<metadata.uid>`.
+  - The condition stays True while the list is non-empty or `divergentPromotionsOmitted` is above 0, and its
+    message counts both.
   - Plugin: `kubectl bloodraven ack-divergence`.
 - **Disagreement:** STATUS proposed a timestamp-bound annotation on the condition itself. OPS's per-record shape
   allows partial acknowledgement, so it is chosen.
@@ -2022,8 +2364,14 @@ Section 4 lists every documented status write with its replacement.
 - **Decision:**
   - Keep it.
   - Document it in `playground/chaos-scenarios.md` and `3.playground.md` as "break-glass, playground-only,
-    unsupported on real clusters; safe only after the data plane is wiped".
-  - `ClearFailoverState` stays in `internal/`. Fields #235 adds join the reset list.
+    unsupported on real clusters", with one prerequisite per pass (revision 5, F-59): the normalization pass
+    runs against a live, converged playground cluster, by design (`reset.go:359-364,378-381`, which is why it keeps
+    `encryptionAtRest`); the wipe pass is safe only after the data plane is wiped. Revision 4 gave both passes
+    the wipe's prerequisite.
+  - `ClearFailoverState` stays in `internal/`. Fields #235 adds join the reset list, and so do A-86's
+    `divergentPromotions` and `divergentPromotionsOmitted` (revision 5, F-37): they replace records that lived in
+    `conditions`, which the reset already clears (`reset.go:365-370`), and A-86 keeps `DivergentPromotion` True
+    while they are non-empty, so a wiped playground would otherwise re-raise it.
 
 #### A-89 The durable-status contract is written down
 
@@ -2060,14 +2408,24 @@ Section 4 lists every documented status write with its replacement.
     (`reconciler.go:925`) covers only `mysqlConf`, and only at reconcile time.
   - `dump.bytesPerChunk` has no pattern either (`backup_types.go:516-517`).
 - **Decision:**
-  - `Pattern=^[0-9]+[KMG]?$` on both fields. Keep them strings: MySQL's `M` is MiB, not Quantity's 10^6.
+  - A pattern per field, matching what each tool accepts (revision 5, F-60; revision 4 gave both
+    `^[0-9]+[KMG]?$`). Measured in the `mysql:9.7` image: `mysqld` takes its size suffixes in either case (`512m`
+    and `512M` both give 536870912), and mysqlsh 9.7.1's `bytesPerChunk` accepts `k`, `K`, `M` and `G` and rejects
+    `m` and `g`. So `maxBinlogSize` gets `^[0-9]+[kKmMgG]?$`, which keeps its documented "any value MySQL accepts"
+    contract (`backup_types.go:136-141`), and `bytesPerChunk` gets `^[0-9]+[kKMG]?$`. Keep them strings: MySQL's
+    `M` is MiB, not Quantity's 10^6.
   - On both `mysqlConf` maps (`types.go:128,378`): `MaxProperties=128`. Values get a named string type with
     `MaxLength=1024` and the OpenAPI `Pattern=^[^\r\n\x00]*$`, which costs nothing in the CEL budget (OPUS-11).
     Keys are checked by CEL `self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))`.
-  - Map keys cannot carry a `maxLength`, so the estimator sizes every key at the request limit. If E16's envtest
-    shows the key rule over budget, the recorded fallback is to reshape `mysqlConf` into a list-map of
-    `{name, value}` with bounded strings, keyed by `name`, with its own migration row. A reshape is not
-    replaced by a reconcile-time check.
+  - **The key rule fits the CEL budget (revision 5, F-61).** Revision 4 said the estimator sizes every map key at
+    the request limit, and recorded a reshape to a list-map as the fallback. The estimator does the opposite: it
+    sizes `@keys` from the map's key type, the shared `StringType`, whose `MaxElements` is 0
+    (`apiextensions-apiserver` v0.37.0 `pkg/apiserver/schema/cel/compilation.go:313-345`; `apiserver`
+    `pkg/cel/common/schemas.go:104`). Measured: the rule on a map with `MaxProperties=128` and 1024-byte values
+    costs about 1.2e3 against the 1e7 per-expression limit, while the same rule over an unbounded list of 128
+    strings is refused at 20 times the budget. The fallback is dropped. A long key is bounded only by the runtime
+    per-call cost limit and the request size, which is acceptable for a key that the pattern restricts to
+    `[A-Za-z0-9_.-]`.
   - The controller fix is D-03.
 
 #### A-91 Relationships checkable inside one object are checked at admission
@@ -2103,12 +2461,14 @@ Section 4 lists every documented status write with its replacement.
 - **Evidence:**
   - `spec.license` has no `MaxLength` (`types.go:247`).
   - `dragonfly.args` has no bounds (`dragonfly_types.go:62`).
-  - The operator-owned flag list lacks `--maxmemory` and `--proactor_threads`
-    (`internal/controller/dragonfly_resources.go:316-326`), although the docs call them reserved.
+  - The operator-owned flag list lacks `--maxmemory`, `--proactor_threads` and `--replicaof`
+    (`internal/controller/dragonfly_resources.go:316-327`), although the API doc calls all three reserved
+    (`dragonfly_types.go:56-60`). Revision 4 named only the first two (revision 5, F-38). `--replicaof` makes a
+    site's Dragonfly replicate from an arbitrary host at startup, outside the operator's `REPLICAOF` management.
 - **Decision:**
   - `license`: `MaxLength=4096` and the compact-JWS pattern.
   - `args`: `MaxItems=64`, `items:MaxLength=256`, and CEL rejecting the reserved flags (the controller list
-    plus the two missing ones; see D-05).
+    plus the three missing ones; see D-05). E16's envtest rejects `--replicaof=<host> <port>`.
   - Every string or list a CEL rule traverses gets a bound.
   - An envtest case installs every CRD and fails on a CEL cost-budget error.
 
@@ -2218,7 +2578,7 @@ These were considered and kept. They are recorded so they are not reopened.
 | A-108 | MDB privilege enum values with spaces (`mysqldatabase_types.go:80-127`) | MySQL grammar tokens, copied verbatim on purpose. | KINDS-26 |
 | A-109 | MBK `status.size` next to `sizeBytes` (`mysqlbackup_types.go:124,129`) | Printer columns cannot format bytes. Documented as derived. | KINDS-13 |
 | A-110 | No license status or condition (`types.go:247`) | License checks never change behaviour. A condition is additive later. | STATUS-L4 |
-| A-111 | MFG `status.pitr.profileName` (`backup_types.go:164`) | Attributes the archive counters, which can lag a profile switch. Observation, not an echo. | STATUS-L6 |
+| A-111 | MFG `status.pitr.profileName` (`backup_types.go:164`) | **Withdrawn in revision 5 (F-39), folded into A-49.** Revision 4 kept it as an observation that attributes the archive counters. The code copies it from spec, and relabels kept counters with the new profile, so it is an echo. | STATUS-L6 |
 | A-112 | Routing label semantics: `role=primary\|replica`, operator labels take precedence over template labels | The values are right. Only the prefix and boolean values change (A-77). | GPT-40 (semantics part) |
 | A-113 | PITR selectors `pointInTime.{sites,allowUnverifiedCrossSite,archiveProfileName,allowPartial}` (`backup_types.go:204-234`) | **Owned by #206 / #203.** Expected: #206 removes `allowUnverifiedCrossSite` or makes it a typed policy, and keeps `sites` as `listType=set` with the A-15 item pattern. #203 binds encryption identity with a root transition rule (A-25). Unsupported legacy archives are refused (D3). | GPT-46, MFGSPEC-36 |
 
@@ -2251,7 +2611,8 @@ The round 1 critiques (section 8.1) found two decisions the first draft lacked.
   - **Metric label values** are a documented contract. One exported function per label in `internal/metrics`
     produces the lowercase kebab-case form of the API enum value: `PrimaryCandidate` → `primary-candidate`,
     `DisasterRecovery` → `disaster-recovery`, `ReadOnly` → `read-only`, `Writable` → `writable`, and so on. So
-    only `dr-only` → `disaster-recovery` changes value. Lowercase label values are the Prometheus convention, and
+    among the labels revision 4 listed, only `dr-only` → `disaster-recovery` changes value (revision 5 adds the
+    restore-reclone `phase`, below). Lowercase label values are the Prometheus convention, and
     most documented queries keep working.
   - **Every enum-valued label goes through that mapping (revision 4, OPUS-R3-06).** Revision 3 covered only `role`
     and `state`. Three more labels carry API enum values, and their producers are ad hoc today:
@@ -2264,18 +2625,31 @@ The round 1 critiques (section 8.1) found two decisions the first draft lacked.
     - `bloodraven_state_transitions_total{from,to}`, set from `prevStates[i].String()` (`topology.go:1440`). The
       PromQL `{to="writable"}` (`8.observability/2.monitoring.md:150`) and the chart dashboard
       (`charts/bloodraven/dashboards/failover.json:163`) key on it.
+    - (revision 5, F-17) `bloodraven_restore_reclone_pending{phase}`, set from `string(q.Phase)`
+      (`restore_peer_replication.go:645`), so today it carries the CamelCase API values `Armed`, `Draining` and
+      `Held`. Revision 4 missed it. It goes through the mapping like every other enum-valued label, so its values
+      become `armed`, `draining` and `held`. That is a value change: the documented `BloodravenRestoreReclonesHeld`
+      alert (`2.monitoring.md:212-213`) becomes `{phase="held"}`, and 3.4 has a row for it. Rejected: an
+      exception that keeps this one label CamelCase, which would freeze two label spellings into v1beta1.
 
     `strings.ToLower` and the kebab-case mapping agree on today's one-word values, but they diverge on any two-word
     value (`ReadOnly` → `readonly`, not `read-only`). So every enum-valued label (`role`, `state`, `from`, `to`,
     `phase` and the source `state`) is produced by the one mapping function for its enum, and no producer lowercases
-    by hand. The values stay what they are today, so no 3.4 row is added.
+    by hand. The values of `role`, `state`, `from`, `to`, the keyring `phase` and the source `state` stay what
+    they are today. The restore-reclone `phase` changes value (above), and 3.4 has a row for it.
   - **`/deploy/v1` tokens** are the A-69 constants, verbatim. `11.deployment-api.md` documents every token field
     with its closed value set, generated from those constants. The release notes list each renamed value. The
     path stays `/deploy/v1`: v1.7.0 is the breaking release, and there are no production users.
   - **`health.replicationRunning`** keeps its name and today's meaning, defined over the A-43 enum: every
     non-active spec site reports `Healthy` or `Lagging`.
-  - **Metric `reason` labels** carry the A-69 reason constants verbatim, in CamelCase, as they do today. They are
-    reasons, not enum values, so no kebab-case mapping applies. A rename by A-73, A-74 or #235 changes the label
+  - **Metric `reason` labels** carry the A-69 reason constants verbatim, in CamelCase. They are reasons, not enum
+    values, so no kebab-case mapping applies. **Two are snake_case today (revision 5, F-18):** the lease
+    revocation reasons `operator_revoked` and `topology_changed` (`deployment_leases.go:193-199`), which are also
+    the `/deploy/v1` 409 `reason` (`:630,636`), the documented PromQL (`6.operations/2.operations.md:48`), the
+    documented 409 bodies (`4.configuration/11.deployment-api.md:199-200,232`) and s53's assertion
+    (`s53_deployment_coordination.go:149`). They become the A-69 constants `OperatorRevoked` and `TopologyChanged`
+    on the metric and on `/deploy/v1` alike, with a 3.4 row. Rejected: declaring them permanent exceptions, which
+    freezes a second reason spelling into the deploy API. A rename by A-73, A-74 or #235 changes the label
     value, and the release-note rename table lists it next to the Event and condition renames.
   - **Operator `/status` and `/ws/status`** are JSON views of the same facts as the CR status, so they use the CR
     vocabulary verbatim: `role` and `state` carry the A-27 and A-28 values (`PrimaryCandidate`, `Writable`, …),
@@ -2291,14 +2665,17 @@ The round 1 critiques (section 8.1) found two decisions the first draft lacked.
       (PromQL and the two endpoint examples at `:543-651`), `examples/prometheusrule.yaml` and the doctor scripts'
       PromQL. Tests: a test enumerates every enum-valued label of every metric and asserts that each enum value
       maps to its documented label value (revision 4: `phase`, the source `state`, `from` and `to` as well as `role`
-      and `state`); a payload test asserts that both endpoints serialize every role and state as the CR value; and
+      and `state`; revision 5: the restore-reclone `phase`, with the `BloodravenRestoreReclonesHeld` alert and its
+      docs updated in E7); a payload test asserts that both endpoints serialize every role and state as the CR value; and
       A-27's role-boundary test.
     - E10: the `/ws/status` `lastFailover` and `replication` reshapes and their dashboard readers;
       `replicationRunning` over the enum, with a deploy-API test per enum value.
     - E11: `11.deployment-api.md` (every token field with its closed value set, and the `replicationRunning`
       definition) and the deploy API tests.
     - E12: a unit test that every `reason` label value written is a declared A-69 constant, and the metric rows of
-      the release-note rename table.
+      the release-note rename table. E12 also renames `operator_revoked` and `topology_changed` in the controller,
+      the 409 body, `11.deployment-api.md`, `2.operations.md`, `2.monitoring.md:50`, the doctor
+      (`alert_runbook_matrix.md:64`, `SKILL.md`) and s53.
     - Section 3.4 carries a migration row for each surface.
 - **Rejected:**
   - Raw CamelCase metric values, which would break every documented query for no gain.
@@ -2325,9 +2702,23 @@ The round 1 critiques (section 8.1) found two decisions the first draft lacked.
     tested.
   - What 1.31 gives the API: the CEL `quantity()`, IP and CIDR libraries, and `CRDValidationRatcheting` on by
     default (beta since 1.30). Ratcheting lets an update keep an unchanged value that a tightened validation
-    would now reject. It does not cover transition rules, `required` changes, type changes or list-topology
-    changes (GPT-R2-09). It helps v1beta1 → v1, but it is not a general compatibility mechanism: each future
-    tightening still needs its own compatibility test against stored objects.
+    would now reject.
+  - **What ratcheting does, measured (revision 5, F-07, F-40).** Revision 4 said it does not cover `required`
+    or type changes (GPT-R2-09). That is wrong for an unchanged node. On 1.31, 1.32, 1.34 and 1.37 envtest, every
+    OpenAPI schema error on a node that is DeepEqual to the old value is downgraded (type, `required`, enum,
+    pattern, list-map), and no warning is returned for it (`apiextensions-apiserver` v0.37.0,
+    `pkg/apiserver/validation/ratcheting.go:136-156`). A transition rule passes on an unchanged value because
+    `self == oldSelf`. What still refuses is validation of any changed node, and a CEL evaluation error on
+    mistyped data (a `duration()` bound evaluated on an integer). **One exception at the floor:** on 1.31 and
+    1.32, a write through the status subresource re-runs the spec-level CEL rules without ratcheting them, so an
+    object whose unchanged spec violates a newly tightened non-transition spec CEL rule accepts main-endpoint
+    updates but rejects every status write. 1.34 and 1.37 ratchet it; 1.33 was not tested. Losing status writes
+    would lose the durable failover record (A-89) while the operator keeps acting on MySQL.
+  - **Rule for every later tightening.** Ratcheting helps v1beta1 → v1, but it is not a general compatibility
+    mechanism. Any change that tightens a spec CEL rule ships with an envtest on the 1.31 job (C-15) that stores
+    an object violating the new rule and then performs a status write on it; the change is accepted only if that
+    write succeeds or the release notes call the break out. The floor stays 1.31: raising it to 1.34 for this
+    one case would drop three supported minors, and the test catches it.
 - **Rejected:**
   - Keep 1.27 and add a 1.27 envtest job. The workarounds stay, there is no ratcheting, and 1.27 is long past
     upstream support.
@@ -2349,16 +2740,18 @@ below was verified at `2340f6b`:
    object under A-27. Every profile carries `retention: 7` (`backup_types.go:292-294`), which becomes an object
    under A-55. Pruning drops unknown fields but does not coerce types. The v1.7.0 operator's typed client therefore
    cannot decode a stored MFG, and one undecodable item fails the whole List/Watch.
-2. **Required fields and type changes are not ratcheted.** An update validates the whole object, status included
-   (`k8s.io/apiextensions-apiserver` v0.37.0, `pkg/registry/customresource/validator.go`, `ValidateUpdate`), and
-   a status update runs the CEL rules against the whole object, spec included (`status_strategy.go`,
-   `ValidateUpdate`). At the A-115 floor (1.31) `CRDValidationRatcheting` is on, so an unchanged value that only
-   fails a new enum, pattern or non-transition CEL rule is tolerated: old status values such as `sites[].state:
-   writable` no longer block a write by themselves (OPUS-R2-05; revision 2 cited them as a reason). Ratcheting
-   does not cover new `required` fields (`spec.sites[].serverID`, `spec.credentials`), type changes (item 1) or
-   transition rules (item 3), and every v1.6.0 MFG hits at least one of them.
-3. **The new transition rules reject the re-apply on any version.** Ratcheting does not apply to transition
-   rules.
+2. **Ratcheting tolerates an unchanged old object, which is a hazard, not a path.** An update validates the
+   whole object, status included (`k8s.io/apiextensions-apiserver` v0.37.0,
+   `pkg/registry/customresource/validator.go`, `ValidateUpdate`), and a status update runs the CEL rules against
+   the whole object, spec included (`status_strategy.go`, `ValidateUpdate`). At the A-115 floor
+   `CRDValidationRatcheting` is on, and it downgrades every schema error on a node that did not change: type,
+   `required`, enum, pattern and list-map errors alike, with no warning returned (A-115). Revision 4 said it does
+   not cover `required` fields or type changes; that was wrong (F-07, measured on 1.31, 1.32, 1.34 and 1.37). So
+   a no-op write of a pruned v1.6.0 object succeeds and persists the pruning, while the typed v1.7.0 client still
+   cannot decode it (item 1). A changed node is validated in full, so a re-applied, edited manifest must meet the
+   whole new schema, including the transition rules (item 3). Neither gives an upgrade path.
+3. **The new transition rules reject the re-apply on any version.** A transition rule passes only when the
+   value is unchanged, and the re-apply changes it.
    - A-23 rejects any change to `initFromBackup`, and every bootstrapped group's block is renamed:
      `mysqlBackupRef`, `credentialsSecret` and `stopDatetime`.
    - A-22's presence rules reject a renamed `sourceSiteOverride` and a reshaped MBV `pointInTime` or
@@ -2396,15 +2789,19 @@ tenant databases, verify, cut over, and retire the old group. Its text must meet
 
 | # | Requirement | Why |
 |---|---|---|
-| U-1 | **Never apply the v1.7.0 CRDs to a cluster that runs v1.6.0, by any route.** The procedure says so first, in a warning box. It names each route that does it: the documented "CRDs first, then the chart" routine (`6.operations/10.upgrade-policy.md:98`); a platform CRD app or a Helm release in Argo CD that renders the chart's `crds/` (`6.operations/11.gitops.md:11-27`); the course's answer that teaches the same routine (`course/course-bloodraven-in-production/unit-7-day-0-and-day-2/unit-test.md:125`); and (revision 4, OPUS-R3-08) the production install page, whose "CRDs managed separately" loop applies all five CRDs with `--force-conflicts` from the `main` branch (`3.get-started/4.install-production.md:39-46`). On the old cluster, pin both the chart and the CRD source in Git for as long as it runs. C-12 and E19 add the same warning to the first three pages. The install page's CRD URL is pinned to a release tag no later than the first WS-E commit (C-12, E1), and E19's gate fails on any `main`-branch CRD URL. | The API server prunes unknown fields when it reads objects, so the old field names vanish from every read while types stay wrong (3.1 item 1). The still-running v1.6.0 operator, or any v1.7.0 operator, would then persist pruned objects on its next `Update`. Nothing in v1.7.0 can stop a v1.6.0 operator (OPUS-R2-02). The install-page route needs no upgrade at all, and it goes live the moment the new schema reaches `main`, before v1.7.0 is tagged, because the published site is built from `main`. |
-| U-2 | **Recovery from U-1.** The procedure gives the recovery: scale every Bloodraven operator to 0, re-apply the v1.6.0 CRDs with server-side apply, roll the chart back, and audit the objects. It says plainly that stored data survives only where nothing has written since the CRDs changed. | Pruning on read does not change etcd until something writes. |
+| U-1 | **Never apply the v1.7.0 CRDs to a cluster that runs v1.6.0, by any route.** The procedure says so first, in a warning box. It names each route that does it: the documented "CRDs first, then the chart" routine (`6.operations/10.upgrade-policy.md:98`); a platform CRD app or a Helm release in Argo CD that renders the chart's `crds/` (`6.operations/11.gitops.md:11-27`); the production install examples, whose Argo CD layout commits the chart's CRDs and syncs them before the operator (`3.get-started/5.production-install-examples.md:80`; revision 5, F-62); the course's answer that teaches the same routine (`course/course-bloodraven-in-production/unit-7-day-0-and-day-2/unit-test.md:125`); and (revision 4, OPUS-R3-08) the production install page, whose "CRDs managed separately" loop applies all five CRDs with `--force-conflicts` from the `main` branch (`3.get-started/4.install-production.md:39-46`). On the old cluster, pin both the chart and the CRD source in Git for as long as it runs. C-12 and E19 add the same warning to the pages that teach the routine: the upgrade policy, the GitOps page, the production install examples and course unit 7. The install page's CRD URL is pinned to a release tag, and the site is built from the latest release tag, before any incompatible CRD change reaches `main`, including WS-C's and WS-D's (section 6 prerequisite; revision 5, F-41, F-42; revision 4 said "no later than the first WS-E commit"). E19's gate fails on any `main`-branch CRD URL. | The API server prunes unknown fields when it reads objects, so the old field names vanish from every read while types stay wrong (3.1 item 1). The still-running v1.6.0 operator, or any v1.7.0 operator, would then persist pruned objects on its next `Update`. Nothing in v1.7.0 can stop a v1.6.0 operator (OPUS-R2-02). The install-page route needs no upgrade at all, and it would go live the moment an incompatible schema reached `main`, before v1.7.0 is tagged, because the URL points at `main` and the published site is built from `main` today. |
+| U-2 | **Recovery from U-1 (rewritten in revision 5, F-08).** The procedure scales every Bloodraven operator to 0 first. Recovery of the stored objects is possible only while no Bloodraven object has been written since the v1.7.0 CRDs were applied, and then only by the steps #243 designs and tests (U-13 rules out simply re-applying the v1.6.0 CRDs). Once any object has been written, it is stored as v1beta1 with its old fields pruned, and the procedure restores those objects from a cluster backup or the exported manifests instead (status only from a backup that restores status, A-89), then rolls the chart back. | Pruning on read does not change etcd until something writes. `status.storedVersions` changes the moment the CRDs are applied (U-13). Revision 4's "re-apply the v1.6.0 CRDs with server-side apply" is rejected by the apiserver. |
 | U-3 | **Fresh writable destinations.** The new group's backup profiles and PITR profile use prefixes that no v1.6.0 group has used. The old artifact is referenced only as a restore source (`initFromBackup.source.s3`, or a per-schema `restoreInPlace.source`), never as a profile of the new group. After every restore, including the tenant restores, the procedure takes a new full backup as the new group's baseline, and when PITR is enabled waits for `PITRArchiveReady=True`, before cut-over. | The PITR archive destination is derived from the profile's prefix (`<prefix>/binlogs`, `internal/controller/pitr.go:125-134`). An old profile copied into the new manifest would archive into the identity-less archive that #203 and #206 refuse (D3). Without a new baseline and a ready archive, the new group has no point-in-time recovery at cut-over (GPT-R2-02). |
 | U-4 | **The right restore source.** The backup is taken on an **S3** profile that the new cluster can reach; a group with only PVC profiles adds one on v1.6.0 first. `source.s3.{bucket, prefix}` comes from that MysqlBackup's `status.location`, which is the dump's own path: `s3://<bucket>/<key>`, or a bare key in the profile's bucket (`internal/controller/restore.go:101-118`). It is not the profile prefix, which holds many dumps and `binlogs/`. The procedure adds `decryption` when the backup is encrypted (`backup_types.go:604-644`), and recreates the S3 credentials Secret in the new cluster. | A PVC backup is unreadable from a new cluster, and the profile prefix is not a dump (OPUS-R2-07). The docs' own example uses a dump path (`7.backup-and-restore/2.backup-restore.md:556-563`). |
-| U-5 | **Tenant databases.** Bootstrap with the MysqlDatabase-managed schemas excluded (`initFromBackup.loadOptions.excludeSchemas`, `backup_types.go:697-700`). Apply the MysqlDatabase objects so they create their schemas and users. Then load each schema with a per-schema `restoreInPlace` (`loadOptions.includeSchemas: [<schema>]`), which drops and reloads that schema and replicates (`restore_script.py:294-330`; `restore_inplace.go:1412-1438` forces `skipBinlog=false`). | A schema that the restore already loaded makes its MysqlDatabase fail with `DatabasePreExists` (`4.configuration/7.tenant-databases.md:276`), and D3 rules out adoption. |
-| U-6 | **Say what is not carried** (3.3), with the action for each: MySQL accounts and grants that neither the operator's credentials nor a MysqlDatabase create are recreated before cut-over; the new group mints its own keyrings, and the old escrow Secrets stay with the old cluster, which needs them while it runs; failover history, operation records, MysqlBackup and MysqlBackupVerification objects, and PITR across the old archive are dropped. | `util.dumpInstance` dumps carry no system users, and restores never set `loadUsers` (`2.backup-restore.md:602-604`). Accounts not created by the operator or a MysqlDatabase are otherwise lost silently (OPUS-R2-07). |
+| U-5 | **Tenant databases.** Bootstrap with the MysqlDatabase-managed schemas excluded (`initFromBackup.loadOptions.excludeSchemas`, `backup_types.go:697-700`). Apply the MysqlDatabase objects so they create their schemas and users. Then load each schema with a per-schema `restoreInPlace` (`loadOptions.includeSchemas: [<schema>]`), which drops and reloads that schema and replicates (`restore_script.py:294-330`; `restore_inplace.go:1412-1438` forces `skipBinlog=false`). If the tenant schemas exceed A-12's 256-entry bound on `excludeSchemas`, the bootstrap lists the non-tenant schemas in `includeSchemas` instead (revision 5, F-63). | A schema that the restore already loaded makes its MysqlDatabase fail with `DatabasePreExists` (`4.configuration/7.tenant-databases.md:276`), and D3 rules out adoption. |
+| U-6 | **Say what is not carried** (3.3), with the action for each: MySQL accounts and grants that neither the operator's credentials nor a MysqlDatabase create are recreated before cut-over; the new group mints its own keyrings, and the old escrow Secrets stay with the old cluster, which needs them while it runs; failover history, operation records, MysqlBackup and MysqlBackupVerification objects, and PITR across the old archive are dropped. | The backup Job passes no `users` option to `util.dumpInstance` (`internal/controller/backup_job.go:692-717`; `backup_script.py:320`), and mysqlsh's documented default (`users: true`) dumps the application accounts and grants and excludes only MySQL's internal accounts. So the accounts are in the dump; they are lost because restores never set `loadUsers` (`2.backup-restore.md:602-604`). Revision 4 said the dumps carry no users (revision 5, F-64). The procedure may extract them from the frozen dump (for example a users-only load on a scratch instance) or recreate them, but they must exist before cut-over. Otherwise they are lost silently (OPUS-R2-07). |
 | U-7 | **Manifests** follow the 3.4 table: names valid under A-15; an explicit `serverID` per site (A-08); keys that only restated a persisted default deleted, not translated; `status` and server-set metadata stripped. They are applied with `kubectl apply --server-side --validate=strict`, so a leftover old field name is rejected instead of pruned. | Unchanged from revision 2. |
-| U-8 | **Verify before cut-over:** `Ready=True` and `Degraded=False` on the group, `Ready` on every MysqlDatabase, `PITRArchiveReady=True` when PITR is on (U-3), a MysqlBackupVerification of the new baseline backup, and row counts or checksums of the application's tables against the frozen source. Retire the old group only after cut-over is verified, keep its backups as long as recovery policy requires, and never delete a MysqlFailoverGroup in order to recreate it. | Unchanged from revision 2, plus U-3. |
+| U-8 | **Verify before cut-over:** `Ready=True` and `Degraded=False` on the group, `Ready` on every MysqlDatabase, `PITRArchiveReady=True` when PITR is on (U-3), a MysqlBackupVerification of the new baseline backup, and row counts or checksums of the application's tables against the frozen source. Retire the old group only after cut-over is verified, keep its backups as long as recovery policy requires, and never delete a MysqlFailoverGroup in order to recreate it, except a group whose bootstrap restore never succeeded (A-23; revision 5, F-20). | Unchanged from revision 2, plus U-3. |
 | U-9 | **Tested end to end once** by WS-F (C-16): published v1.6.0 chart and images, an encrypted S3 backup, PITR enabled on the new group with fresh prefixes, one tenant database, and one account created outside the operator. The test asserts `PITRArchiveReady=True` on the new group, that no object under the old prefix changes, and that the recreated account works. | Two drafts of the steps had defects that only running them would show. |
+| U-10 | **Mechanism requirements moved here in revision 5 (U-10 to U-13).** Under the scope rule, C-7 and C-14 no longer design their object checks; WS-F designs them under #243 to meet these rows. **Refusal of non-conforming objects, by a check that does not ratchet.** `migrate-storage` (C-7) and the operator (C-14) refuse, before any write, every object of the five kinds that does not conform to the schema, listing each one with a migration-table pointer (generic, no legacy field names). A no-op `dryRun=All` update is not such a check (3.1 item 2, A-115). The C-7 and C-14 envtests include an object whose only incompatibility is a missing `required` field, and one whose only incompatibility is a type change with no CEL rule on it, and assert that both are refused and that no `resourceVersion` changed. | Revision 4's dry-run preflight would have refused v1.6.0 MFGs only by accident, because A-38's `duration()` bounds error on an integer `cloneTimeout`. It would have passed an MDB, MBK, MBV or MSC whose only problem is a missing required field, and `migrate-storage` would then have persisted the pruned object and trimmed `storedVersions` (F-07). |
+| U-11 | **Every kind, every cluster shape.** The operator's check covers all five kinds, not only MFGs. Any permission it needs beyond today's role is added to the RBAC markers and mirrored into `charts/bloodraven/templates/clusterrole.yaml`: today the operator has only `get`, `list` and `watch` on `mysqlstandbyclusters` (`config/rbac/role.yaml:189-196`). Envtest: a cluster with v1.6.0 MSCs and no MFG is refused. | A standby DR cluster holds MSCs and no MFG. Under v1.7.0, MSC `source.storage` and `template` are pruned (A-62, A-63), and the first MSC status write copies the stored, pruned spec (`validator.go:103-117`), which makes the pruning permanent (F-43). Revision 4 claimed `update` on all five kinds (F-68). |
+| U-12 | **Concurrent writers.** The checks and `migrate-storage`'s write pass run while an operator writes status on its poll cadence (`runner.go:2435,2454-2456`). They re-read and retry on `409 Conflict`; a conflict that outlasts the retries is reported as transient, never as a schema refusal with a migration-table pointer. `status.storedVersions` is trimmed only after every object was rewritten successfully. With `replicaCount > 1`, standby replicas run the check while the leader writes. A test runs `migrate-storage` against a concurrent status writer. | A custom resource cannot be updated without a `resourceVersion` (`pkg/registry/customresource/strategy.go:269-271`), and 3.1 runs `migrate-storage` after the chart upgrade, with the operator up (F-44). |
+| U-13 | **`storedVersions` is one-way.** Applying CRDs whose storage version is v1beta1 adds v1beta1 to `status.storedVersions` at once, before any object is written (`pkg/registry/customresourcedefinition/strategy.go:109-113`). The apiserver then rejects a CRD that drops v1beta1 from `spec.versions` (`pkg/apis/apiextensions/validation/validation.go:263-290`). No procedure, runbook or rollback doc tells a user to re-apply v1alpha1-only CRDs (v1.6.0 or rc.0) after that. Removing v1beta1 from `storedVersions` by hand is allowed only when no object is stored at v1beta1, and #243 says how that is established. | An object written at v1beta1 and then left in etcd under a CRD that no longer lists v1beta1 cannot be read (F-08). U-2 and C-14's rollback rule follow from this row. |
 
 ### 3.3 What a new group does not carry over
 
@@ -2417,9 +2814,9 @@ This replaces the first draft's "status-only rows: the operator rewrites them".
 | Operation records: `status.restore`, `restoreInPlace`, `restoreReclones` (including `fencedGtidExecuted`), `plannedFailover`, `recovery`, `dragonfly.upgrade` | **Dropped** | Each one describes an operation on the old group's data. None is in flight on the new group, which is still frozen for cut-over. |
 | Keyrings and escrow Secrets (`mysql-<group>-<site>-keyring-v<N>`) | **Not carried** (R09) | The new group generates its own keyring per site, so the old escrow Secrets and their `shipstream.io/*` label keys need no migration. Keep them with the old cluster, which needs them while it runs. Backups are logical dumps and do not depend on any keyring (`4.configuration/8.encryption-at-rest.md:532-534`). Backup encryption uses its own passphrase Secret, which the new cluster needs for `decryption` (3.2 U-4). |
 | MysqlBackup and MysqlBackupVerification objects, verification holds and the old PITR archive | **Not carried** | The new group's history starts with the new baseline backup (3.2 U-3). Old artifacts stay in the bucket under the old prefix, which the new group only reads, as a restore source. PITR across the old archive is refused: it has no source-archive identity (#206, D3). |
-| MySQL accounts and grants that neither the operator's `credentials.*` nor a MysqlDatabase create | **Not carried** (OPUS-R2-07) | Dumps carry no system users, and restores never set `loadUsers` (`7.backup-and-restore/2.backup-restore.md:602-604`). Recreate them in the new group before cut-over (3.2 U-6). |
+| MySQL accounts and grants that neither the operator's `credentials.*` nor a MysqlDatabase create | **Not carried** (OPUS-R2-07) | The dumps contain the application accounts (mysqlsh's documented default; only MySQL's internal accounts are excluded), but restores never set `loadUsers` (`7.backup-and-restore/2.backup-restore.md:602-604`), so the restore does not load them (revision 5, F-64). Extract them from the dump or recreate them in the new group before cut-over (3.2 U-6). |
 | MysqlDatabase ledger (`ownerUser`, `ownerHosts`, `appliedUsers[]`, …) | **Rebuilt** | The MysqlDatabase objects applied in the new cluster (3.2 U-5) write fresh records for what they create. |
-| A v1.6.0 object presented to a v1.7.0 schema | **Refused by v1.7.0 tools, with one gap** | `migrate-storage` refuses on a dry-run failure (C-7). The v1.7.0 operator refuses to start when its CRDs are not the schema it was built for, or when any MFG fails a dry-run update (C-14). `--validate=strict` rejects a re-applied old field name. **The gap (OPUS-R2-02):** when the v1.7.0 CRDs are applied to a v1.6.0 cluster, the still-running v1.6.0 operator is not stopped by anything in v1.7.0. Revision 2 called this case "refused"; only 3.2 U-1 and U-2 cover it. |
+| A v1.6.0 object presented to a v1.7.0 schema | **To be refused by v1.7.0 tools (U-10 to U-12); not refused by anything designed yet** | Revision 4 called this "refused, with one gap". Its dry-run preflights do not refuse what ratcheting downgrades (3.1 item 2; F-07), and the operator's preflight covered MFGs only (F-43). The refusal is now a set of requirements that WS-F meets under #243: all five kinds, a check that does not ratchet, conflict handling (U-10 to U-12). `--validate=strict` rejects a re-applied old field name. **The gap that remains by design (OPUS-R2-02):** when the v1.7.0 CRDs are applied to a v1.6.0 cluster, the still-running v1.6.0 operator is not stopped by anything in v1.7.0. Only 3.2 U-1 and U-2 cover it. |
 
 ### 3.4 Field-by-field table
 
@@ -2448,22 +2845,22 @@ nobody set them (OPUS-23).
 | MFG | `status.{sites, dragonfly.sites, backupSchedules, restoreReclones.failures}` atomic | list-maps | Status-only | A-11 |
 | MFG | `includeSchemas`, `excludeSchemas` atomic | sets, ≤ 256 items; in-place `includeSchemas` ≤ 1 | Deduplicate | A-12 |
 | MFG | `splitBrainPolicy.sitePriorities` duplicates allowed | unique | Deduplicate | A-13 |
-| MDB | `spec.deploymentClients` keyed by `namespace` only, unbounded | list-map keyed by (`namespace`, `serviceAccount`), ≤ 16 items | Split entries that grouped ServiceAccounts by namespace; keep at most 16 | A-14 |
+| MDB | `spec.deploymentClients` keyed by `namespace` only, unbounded | list-map keyed by (`namespace`, `serviceAccount`), ≤ 16 items | No change for the compound key (v1.6.0 already allows one ServiceAccount per namespace); keep at most 16 entries. Revision 4 said to split grouped entries, which no v1.6.0 manifest can have (revision 5, F-65) | A-14 |
 | MFG | `sites[].name` ≤ 253 chars, `^[a-z0-9-]+$` | DNS label ≤ 20; `len(group) + len(site) ≤ 41` | Choose valid names in the new group's manifest (3.2). Site names are part of PVC and Service names, so changing one means a new group, never an edit | A-15 |
 | MBK, MBV | `metadata.name` any length | ≤ 63 | Rename | A-15 |
 | MFG | `metadata.name` any DNS subdomain | DNS-1035 label (`^[a-z]([-a-z0-9]*[a-z0-9])?$`) | Name the new group with a letter first and no dots | A-15 |
-| MFG | removing a site allowed | refused | Replace the group (3.2) | A-16 |
+| MFG | removing a site allowed | refused | Replace the group with the "Replacing a site" procedure (A-16), not the v1.6.0 procedure in 3.2 (revision 5, F-19) | A-16 |
 | MFG | `sites[].storage.{storageClassName, size}`, `sites[].zone` mutable (ignored) | immutable | Set the intended values when the group is created; they cannot change later | A-17 |
 | MFG | `…storage.pvc{claimName, storageClassName, size, subPath}` | `pvc{claimName \| provisioned{storageClassName, size}, subPath}` | Keep `claimName`, or move class and size under `provisioned` | A-18 |
 | MFG | `sites[].lbIP` | `sites[].loadBalancerIP` (IPv4) | Rename | A-19 |
 | MBK | `spec.sourceSiteOverride` | `spec.sourceSite` | Rename | A-20 |
 | Node taint | `shipstream.io/db-readonly-<group>` | `<namespace>.db-readonly.bloodraven.shipstream.io/<group>` | Write tolerations for the new key. Old taints stay on the old cluster's nodes until its groups are retired; remove them there with `kubectl taint nodes --all <old>-` | A-21 |
 | MBK, MBV | execution fields mutable | immutable | Create a new object instead of editing | A-22 |
-| MFG | `spec.initFromBackup` addable, removable, editable | fixed at creation | Set it once, at creation (3.2 U-4). Never edit or remove it | A-23 |
+| MFG | `spec.initFromBackup` addable, removable, editable | fixed at creation | Set it once, at creation (3.2 U-4). Never edit or remove it. If the bootstrap restore fails, delete and recreate the never-bootstrapped group with the corrected block (A-23) | A-23 |
 | MFG | `encryptionAtRest.enabled: true → false` allowed; keyring paths mutable | refused | Keep the configuration | A-24 |
 | MFG | `restoreInPlace.confirm` any string | `format: date-time` plus an RFC 3339 pattern (upper-case `T` and `Z`, digits-only fraction) | Use RFC 3339 | A-26 |
 | MFG | `sites[].role: primary-candidate \| dr-only \| read-only` (present in every export) | `PrimaryCandidate \| DisasterRecovery \| ReadOnly` | Rewrite the values | A-27 |
-| MFG, MBV | `pointInTime.mode: none \| latest \| timestamp` | `Latest \| Timestamp`, required in the block | `none` → delete the block; capitalise the others | A-27 |
+| MBV | `pointInTime.mode: none \| latest \| timestamp` | `Latest \| Timestamp`, required in the block | `none` → delete the block; capitalise the others. The MFG restore `pointInTime` has no `mode` (revision 5, F-66) | A-27 |
 | MFG | `dragonfly.plannedFailover.onSyncTimeout: proceed \| fail` (present in every export with Dragonfly) | `Proceed \| Fail` | Capitalise | A-27 |
 | MFG | `spec.updateStrategy: OrderedUpdate \| Recreate` (present in every export) | `spec.updateStrategy: {type: …}` | Delete a defaulted `OrderedUpdate`; wrap `Recreate` in an object | A-27 |
 | MFG | `status.sites[].state`, `status.dragonfly.sites[].role` lowercase | CamelCase | Status-only | A-28 |
@@ -2480,10 +2877,10 @@ nobody set them (OPUS-23).
 | MFG | `backup.retry.{initialBackoffSeconds, maxBackoffSeconds}` (present in every export with a retry block) | `{initialBackoff, maxBackoff}` | `60` → `1m`, `1800` → `30m` | A-35 |
 | MFG | `spec.dns.ttl` (present in every export) | `spec.dns.ttlSeconds` | Rename, or delete the default `60` | A-35 |
 | MFG | `status.dragonfly.sites[].lastIOSecondsAgo` `int` | `*int64` | Status-only | A-36 |
-| MFG, MBV | zero rewritten to a default (`maxLagSeconds`, `backoffLimit`, `maxLagSecondsForSource`, `ttlSecondsAfterFinished`) | pointers; 0 means 0 | Review explicit zeros. MBV `ttlSecondsAfterFinished` no longer defaults to 0: set 0 to keep immediate cleanup. | A-37 |
+| MFG, MBV | zero rewritten to a default (`maxLagSeconds`, `backoffLimit`, `maxLagSecondsForSource`), and the TTL lifecycle change (`ttlSecondsAfterFinished` on the MBV and on the profile's `verification`) | pointers; 0 means 0 | Review explicit zeros. MBV `ttlSecondsAfterFinished` and the profile's `verification.ttlSecondsAfterFinished` no longer default to 0: an omitted value now keeps the verification's resources until retention (a lifecycle change, not a zero rewrite; F-54). Set 0 to keep immediate cleanup. | A-37 |
 | MFG, MSC | unbounded Durations | lower and upper bounds | Fix out-of-range values (e.g. `pollInterval: 0s`, `failoverCooldown` < 30s) | A-38 |
 | MFG | `pointInTime.stopDatetime: "2026-04-15 09:30:00"` | `pointInTime.stopTime: "2026-04-15T09:30:00Z"` | Rename; add the zone | A-39 |
-| MBV, MFG | `pointInTime.timestamp` | `pointInTime.stopTime` | Rename | A-39 |
+| MBV | `pointInTime.timestamp` | `pointInTime.stopTime` | Rename. The MFG restore `pointInTime` has no `timestamp`; its `stopDatetime` has its own row (revision 5, F-66) | A-39 |
 | MFG | `status.lastFailover`, `lastFailoverTarget`, `promotionGtidExecuted` | `status.lastFailover{time, target, promotionGtidExecuted}` | Status-only | A-40 |
 | MSC | `status.discovered.lastScanAt` | `status.discovered.lastScanTime` | Status-only | A-40, A-64 |
 | MFG | `status.restoreReclones.requestedAt`, `status.encryptionAtRest.sites[].unsealedSince`, `status.sites[].lastSeen` | `requestTime`, `unsealTime`, `lastSeenTime` (revision 4) | Status-only | A-40 |
@@ -2496,13 +2893,13 @@ nobody set them (OPUS-23).
 | MFG | `status.encryptionAtRest.sites[].coverage.*` `bool` | `*bool` | Status-only | A-46 |
 | MFG | `status.encryptionAtRest.sealed` | removed; use `EncryptionAtRestReady` | Status-only; update alerts | A-47 |
 | MFG | annotation `bloodraven.shipstream.io/dragonfly-snapshot-upgrade=<img>` | `spec.dragonfly.upgradeStrategy: SnapshotRestore` + edit `spec.dragonfly.image` | Replace the annotation with a spec edit | A-48 |
-| MFG | `status.pitr.enabled`, `status.dragonfly.enabled` | removed | Status-only | A-49 |
+| MFG | `status.pitr.enabled`, `status.pitr.profileName` (revision 5, F-39), `status.dragonfly.enabled` | removed | Status-only: read `spec.backup.pitr` and the `PITRArchiveReady` condition | A-49 |
 | MFG | `status.plannedFailover.{target, sourcePrimary, reason, …}` and the #235 additions | owned by #235, held to the A-50 checklist: one durable-claim record with `runID`, `sourceSite`, `targetSite`, typed CamelCase `outcome` and `reason`; condition `AutomaticFailoverHeld`; `acknowledge-planned-failover-hold` annotation | Per #235's table; status-only for the record | A-50 |
 | MFG | annotation `bloodraven.shipstream.io/encryption-adopt=confirm` | `spec.encryptionAtRest.existingData: LeavePlaintext` | Replace the annotation | A-51 |
 | MFG | `spec.sidecarImage` (present in every export: the persisted default 1.3.2), `spec.sidecarResources` | `spec.sidecar.image` (empty means the operator default), `spec.sidecar.resources` | Delete a persisted `1.3.2` value to track the operator, or move a pin. An unpinned group rolls its sidecar after every operator upgrade, one group at a time | A-52 |
 | MFG | MySQL and Dragonfly pods get no security context by default; Jobs use uid 27 | merged hardened defaults, uid 999 (if the A-54 gate passes) | Remove contexts that only restated defaults; check volume ownership | A-54 |
-| MFG | `profiles[].retention: N` and `retentionPolicy{count, maxAgeDays, minKeep, maxFailedKeep}` | `profiles[].retention{keepLast, keepWithinDays, keepFailed}` | `retention: N` (present in every export as `7`) → `retention: {keepLast: N}`. A policy maps to `keepLast: max(count, minKeep, 1)`, `maxAgeDays` → `keepWithinDays`, `maxFailedKeep` → `keepFailed`. `retention: 0`, or a policy with `count: 0` and `maxAgeDays: 0`, disabled pruning: there is no equivalent, so choose an explicit `keepLast` | A-55 |
-| MFG | `verification.retentionPolicy{keepSuccessful, keepFailures}` | `verification.retention{keepLast, keepFailed}` | Rename | A-55 |
+| MFG | `profiles[].retention: N` and `retentionPolicy{count, maxAgeDays, minKeep, maxFailedKeep}` | `profiles[].retention{keepLast, keepWithinDays, keepFailed}` | `retention: N` (present in every export as `7`) → `retention: {keepLast: N}`. A policy maps to `keepLast: max(count, minKeep, 1)`, `maxAgeDays` → `keepWithinDays`, `maxFailedKeep` → `keepFailed`, except that `maxFailedKeep: 0`, which means the default 10 today, is omitted, not translated to `keepFailed: 0` (keep none; revision 5, F-26). `retention: 0`, or a policy with `count: 0` and `maxAgeDays: 0`, disabled pruning: there is no equivalent, so choose an explicit `keepLast` | A-55 |
+| MFG | `verification.retentionPolicy{keepSuccessful, keepFailures}` | `verification.retention{keepLast, keepFailed}` | Rename, except an explicit 0: today it means the default (30 or 10), and in the new shape 0 means keep none, so omit the field instead (revision 5, F-26) | A-55 |
 | MFG | `loadOptions.resetProgress`, `s3.storageClass`, `verification.storage` | removed | Delete the keys | A-56 |
 | MBV | `spec.storage` | removed | Delete; bound disk through `spec.resources` | A-56 |
 | MBV | `status.{podName, pvcName, serviceName}` | removed | Status-only | A-57 |
@@ -2518,11 +2915,11 @@ nobody set them (OPUS-23).
 | MFG | `spec.dragonfly.snapshot.{s3Endpoint: host:port, s3UseHTTPS}` | `spec.dragonfly.snapshot.s3EndpointURL` | `s3Endpoint: rustfs:9000` plus `s3UseHTTPS: false` → `s3EndpointURL: http://rustfs:9000`. An unset `s3UseHTTPS` means `https://` | A-67 |
 | MFG | `Ready` reason `TopologyPolled`; `Bootstrapping`/`Updating`/`Degraded` reasons | per A-71 and A-72 | Status-only; update alert rules on reasons | A-71, A-72 |
 | MBK, MDB | reasons `NoHealthySource` (Pending), `GroupNotFound` (Pending) | `WaitingForHealthySource`, `GroupNotYetCreated` | Status-only | A-73 |
-| Events | the A-74 and A-75 rename lists | renamed reasons and types | Update Event routing | A-74, A-75 |
+| Events | the A-74 and A-75 rename lists, including A-73's `PITRArchiveReady` → `PITRArchiveRecovered` (revision 5, F-34) | renamed reasons and types | Update Event routing | A-73, A-74, A-75 |
 | Labels, annotations, finalizers | `shipstream.io/*`; `healthy=yes\|no`; `dragonfly-traffic=enabled` | `bloodraven.shipstream.io/*`; `"true"`/`"false"` | Write selectors, NetworkPolicies and monitors for the new keys in the new group's manifests | A-77 |
 | MBK annotation | `hold.verification.shipstream.io/<uid>` | `verification-hold.bloodraven.shipstream.io/<uid>` (`<kind>-hold.bloodraven.shipstream.io/<id>` family) | Operator-written; update scripts and queries that read it | A-77 |
 | MFG finalizer | `shipstream.io/graceful-shutdown` | `bloodraven.shipstream.io/failover-group` | Operator-written | A-77 |
-| MFG | `reclone-site=<site>:<gtid-prefix>` | `reclone-site=<site>:gtidPrefix=<uuid-prefix>` | Use the source-UUID part only; `kubectl bloodraven reclone` builds the value | A-78 |
+| MFG | `reclone-site=<site>:confirm=<group>` and `reclone-site=<site>:<gtid-prefix>` | `reclone-site=<site>:confirm=<name>:uid=<uid>`, plus `:gtidPrefix=<uuid-prefix>` when the site has diverged | Add `uid=`; add `confirm=` and `uid=` to the divergent form; use the source-UUID part only. `kubectl bloodraven reclone` builds the value (revision 5, F-35) | A-78 |
 | MFG | condition `DivergentPromotion` removed by hand | `status.divergentPromotions[]` + `acknowledge-divergent-promotion` annotation | Use `kubectl bloodraven ack-divergence` | A-86 |
 | MFG | `maxBinlogSize`, `bytesPerChunk`, `mysqlConf` unvalidated | patterns and CEL | Fix invalid values | A-90 |
 | MFG | PITR, schedule and verification cross-references unchecked | CEL | Fix dangling references | A-91 |
@@ -2532,6 +2929,8 @@ nobody set them (OPUS-23).
 | MFG | `status.restore.*` and `status.restoreInPlace.*` `source*`/`target*`/`pitr*` fields | `provenance{source, target, pointInTime}` | Status-only | A-97 |
 | MDB | `spec.collation` defaulted to `utf8mb4_unicode_ci` (present in every export) | no default; unset renders no `COLLATE` | Keep `collation: utf8mb4_unicode_ci` explicitly where new schemas must match the old behaviour | A-53 |
 | Metrics | label `role="dr-only"` | `role="disaster-recovery"` (other `role` and `state` values unchanged) | Update alert rules and dashboards | A-114 |
+| Metrics | `bloodraven_restore_reclone_pending{phase}` values `Armed`, `Draining`, `Held` | `armed`, `draining`, `held` | Update alert rules such as `BloodravenRestoreReclonesHeld` (revision 5, F-17) | A-114 |
+| Metrics, `/deploy/v1` | lease revocation reason `operator_revoked`, `topology_changed` (the `bloodraven_deploy_lease_revocations_total{reason}` label and the 409 `reason`) | `OperatorRevoked`, `TopologyChanged` | Update PromQL and deploy clients that compare the 409 reason (revision 5, F-18) | A-114 |
 | `/deploy/v1` | raw tokens in `updatePhase`, `degradedReason`, `plannedFailover`, `restoreInPlace`, `dragonflyUpgrade`, `unstableReason` | the A-69 constants, as renamed by A-29, A-72, A-73 and #235 | Update CI gates that compare the values (release-note table) | A-114 |
 | `/deploy/v1` | `health.replicationRunning` from the `replicating` bool | same name and meaning: every non-active spec site reports `Healthy` or `Lagging` | None; the definition is now documented | A-43, A-114 |
 | Metrics | `reason` label values on `bloodraven_planned_failovers_deferred_total`, `bloodraven_deploy_lease_revocations_total`, `bloodraven_backup_artifact_cleanup_failures_total` | the A-69 reason constants, as renamed by A-73, A-74 and #235 | Update alert rules that select on a renamed reason (release-note table) | A-114 |
@@ -2546,9 +2945,15 @@ tell someone to write by hand, re-checked at `2340f6b`. No doctor script writes 
 `keyring-escrow-recover.sh` says so in its header. The kubectl plugin never writes status.
 
 The rule for v1.7.0 is that no page under `site/`, no doctor reference, and no Event or condition message in
-`internal/` or `cmd/` instructs a status write, except where labelled break-glass below. E18's lint enforces it.
-The lint fails on `--subresource=status` outside a marked break-glass block in `site/` and `.agents/`, and in any
-string literal in production Go code under `internal/` or `cmd/` (OPUS-02).
+`internal/` or `cmd/` instructs a status write, except where labelled break-glass below. E18's lint enforces the
+command form of that rule, and review enforces the rest. The lint fails on `--subresource=status` and
+`--subresource status` outside a marked break-glass block in `site/` and `.agents/`, and in any string literal in
+production Go code under `internal/` or `cmd/` (OPUS-02). **It cannot see a status write given in prose or through
+`kubectl edit` (revision 5, F-67).** Two rows below are of that kind: the keyring-version rollback ("Patch the
+site's `keyringSecret`/`keyringVersion`/`keyringDigest` in status", `8.encryption-at-rest.md:536-541`) and the
+MDB "patch the record out of status" advice (`7.tenant-databases.md:352-356`). Revision 4 said the lint enforces
+the whole rule. For those two, E18 rewrites or deletes the text and its PR review checks the result, and the
+`8.encryption-at-rest.md` break-glass block is the one place such prose may appear.
 
 **Lint scope (revision 4, GPT-R3-04, OPUS-R3-09).** Revision 3 matched every string literal under `internal/` and
 `cmd/`. That rejects the regression test E18 requires, because a negative assertion has to contain the token it
@@ -2599,34 +3004,80 @@ steps (`:55-112`) are rewritten to match C-1 and C-7 (OPS-19).
 | C-5 | Generated CRDs in `config/crd/bases/` and `charts/bloodraven/crds/` are checked for drift in CI, and so is the hand-maintained chart ClusterRole against `config/rbac/role.yaml`. | CRDs done: the `generate-check` job (`.github/workflows/ci.yml:226-260`; `git diff --quiet` at `:245`, `diff -r` at `:256`). Gap: the ClusterRole is not checked (OPS-21, D-15). | WS-F (rule-coverage test) |
 | C-5b | **`migrate-storage` caller RBAC (R19).** D5 keeps CRD write permissions off the operator, so the person or job running `migrate-storage` holds them. It needs `get`, `list` and `update` on the five kinds, `get` on `customresourcedefinitions`, and `update` on `customresourcedefinitions/status` to trim `storedVersions`. The docs ship an example `bloodraven-storage-migrator` ClusterRole. `migrate-storage` checks these permissions with a `SelfSubjectAccessReview` before any write and refuses with the list of missing ones. A chart test asserts the operator ClusterRole has no write verb on `customresourcedefinitions`. | Missing. | WS-F |
 | C-6 | (OPS-20) Backward compatibility is tested against one real older CR fixture per kind. | Missing. The only `testdata` is `internal/sidecar/testdata`. | WS-F: `test/fixtures/v1alpha1/<kind>.yaml`, frozen at `v1.7.0-rc.0` |
-| C-7 | **D5 storage migration.** `kubectl bloodraven migrate-storage` does three things. (1) A server-side `dryRun=All` update of every object of the five kinds; it refuses the whole run before any write if one fails, listing each failing object with a migration-table pointer (generic, no legacy field names). (2) A read and write of every object. (3) It trims `status.storedVersions` to `[v1beta1]`. It never deletes and recreates objects (A-89). At the 1.31 floor a no-op dry-run update ratchets every unchanged enum, pattern and non-transition CEL violation, so the refusal comes from what ratcheting does not skip: type errors (`cloneTimeout: 3600`, a string `updateStrategy`, `retention: 7`), missing `required` fields (`sites[].serverID`, `credentials`) and transition rules (OPUS-R2-05). Every v1.6.0 MFG fails; an MBK or MBV whose only differences are renamed enums or removed fields may pass, which is why the run is refused as a whole. Envtest covers it: install the v1.6.0 CRDs, create objects, swap in the new CRDs, and assert that every v1.6.0 MFG is listed and no `resourceVersion` changed; then the happy path. That envtest stays even if C-8's amendment is approved: it pins what happens when someone applies v1.7.0 over v1.6.0 (3.2 U-1). | Missing. No subcommand in `cmd/kubectl-bloodraven/`. | WS-F |
-| C-8 | **D6 upgrade E2E. PROPOSED AMENDMENT to D6, pending orchestrator (Barry) and Colin sign-off and a program-plan update.** D6 as written installs the published v1.6.0 chart and images, creates objects through v1alpha1, upgrades to the branch build, runs `migrate-storage`, and asserts `storedVersions == [v1beta1]`, health and failover. **D6 as written cannot pass (R01, OPUS-05):** D6 conflicts with D2. D2's breaking renames include required fields and persisted defaults that change type, so a v1.6.0 object can be neither decoded nor re-applied under the cleaned schema (3.1). `migrate-storage`'s dry-run refuses every v1.6.0 MFG by design (C-7). A green D6 job would need the in-place path that 3.1 shows is impossible, or the legacy rewriting that D2 and D3 forbid (MBOD Q5 option C, rejected 3-0). **Until the amendment is signed off, WS-F builds C-7's refusal envtest and C-16's procedure test, and does not start the upgrade E2E job (OPUS-R2-12).** Revision 2 said "D6 as written stands", which told WS-F to build a job this row proves cannot pass. **Proposed (the MBOD Q5 outcome, 3-0):** the baseline is `v1.7.0-rc.0`, cut after WS-E merges (v1alpha1 only, cleaned schema). Install the rc.0 chart and images, create objects of every kind through v1alpha1, upgrade to the v1beta1 build, and run `migrate-storage`. Then assert `storedVersions == [v1beta1]`, group health, a working failover, and A-52's sidecar rollout: with `sidecar.image.{repository, tag}` set to the branch build, an unpinned group runs exactly one ordered update, and a pinned group runs none. **What still covers v1.6.0:** the C-7 refusal envtest on the v1.6.0 CRDs, C-14's startup refusal envtest, and C-16. **Prerequisite (OPUS-05):** `release.yml` triggers on `v*.*.*` (`.github/workflows/release.yml:5-6`), which matches `v1.7.0-rc.0`, and always adds `type=raw,value=latest` (`:157`). Cutting rc.0 today would move `ghcr.io/shipstream/bloodraven:latest` and `bloodraven-sidecar:latest` to a schema-breaking pre-release. Before the cut, pre-release tags (`-rc.N`) must not push `latest`, and their GitHub release must be marked as a pre-release. The program plan gains a wave between E and F: "cut `v1.7.0-rc.0`". | Missing. | WS-F (the job once signed off, and the `release.yml` pre-release rule); Barry (sign-off, the plan update, and the rc.0 cut after WS-E merges) |
+| C-7 | **D5 storage migration.** `kubectl bloodraven migrate-storage` reads and writes every object of the five kinds, then trims `status.storedVersions` to `[v1beta1]`. It never deletes and recreates objects (A-89). Before any write it refuses the objects that do not conform to the schema, listing each one with a migration-table pointer (generic, no legacy field names). **Revision 5 (F-07):** revisions 2 to 4 built that refusal from a server-side `dryRun=All` no-op update and said ratcheting would not skip type and `required` errors. Ratcheting does skip them on unchanged nodes (3.1 item 2, A-115), so a no-op dry-run update is not a reliable refusal. Under the scope rule this row no longer designs the check: the refusal, its conflict handling and its tests are requirements U-10 to U-13 in 3.2, which WS-F meets under #243. The v1.6.0 refusal envtest stays even if C-8's amendment is approved: install the v1.6.0 CRDs, create objects, swap in the new CRDs, and assert that every non-conforming object is listed, including U-10's required-field and type-only fixtures, and that no `resourceVersion` changed; then the happy path. It pins what happens when someone applies v1.7.0 over v1.6.0 (3.2 U-1). | Missing. No subcommand in `cmd/kubectl-bloodraven/`. | WS-F (#243 for the refusal mechanism) |
+| C-8 | **D6 upgrade E2E. PROPOSED AMENDMENT to D6, pending orchestrator (Barry) and Colin sign-off and a program-plan update.** D6 as written installs the published v1.6.0 chart and images, creates objects through v1alpha1, upgrades to the branch build, runs `migrate-storage`, and asserts `storedVersions == [v1beta1]`, health and failover. **D6 as written cannot pass (R01, OPUS-05):** D6 conflicts with D2. D2's breaking renames include required fields and persisted defaults that change type, so a v1.6.0 object can be neither decoded nor re-applied under the cleaned schema (3.1). `migrate-storage` must refuse every non-conforming v1.6.0 object (C-7, U-10). A green D6 job would need the in-place path that 3.1 shows is impossible, or the legacy rewriting that D2 and D3 forbid (MBOD Q5 option C, rejected 3-0). **Until the amendment is signed off, WS-F builds C-7's refusal envtest and C-16's procedure test, and does not start the upgrade E2E job (OPUS-R2-12).** Revision 2 said "D6 as written stands", which told WS-F to build a job this row proves cannot pass. **Proposed (the MBOD Q5 outcome, 3-0):** the baseline is `v1.7.0-rc.0`, cut after WS-E merges (v1alpha1 only, cleaned schema). Install the rc.0 chart and images, create objects of every kind through v1alpha1, upgrade to the v1beta1 build, and run `migrate-storage`. Then assert `storedVersions == [v1beta1]`, group health and a working failover. Once the A-52 rollout-pacing PR lands (WS-E PR3, #244), the job also sets `sidecar.image.{repository, tag}` to the branch build and asserts that PR's requirements (A-52 R-1 to R-7). Revision 4's assertion that a pinned group runs no ordered update is withdrawn: a render-version bump rolls pinned groups too (F-04). **What still covers v1.6.0:** the C-7 refusal envtest on the v1.6.0 CRDs, C-14's envtests, and C-16. **Prerequisite (OPUS-05):** `release.yml` triggers on `v*.*.*` (`.github/workflows/release.yml:5-6`), which matches `v1.7.0-rc.0`, and always adds `type=raw,value=latest` (`:157`). Cutting rc.0 today would move `ghcr.io/shipstream/bloodraven:latest` and `bloodraven-sidecar:latest` to a schema-breaking pre-release. Before the cut, pre-release tags (`-rc.N`) must not push `latest`, and their GitHub release must be marked as a pre-release. The program plan gains a wave between E and F: "cut `v1.7.0-rc.0`". Revision 4 gave the `release.yml` rule to WS-F, which starts only after that cut, so the prerequisite had no owner before it applied (F-45). It is now a precondition of the cut, owned by Barry: the `release.yml` change merges before the rc.0 tag is pushed. | Missing. | WS-F (the job once signed off); Barry (sign-off, the plan update, the `release.yml` pre-release rule before the cut, and the rc.0 cut after WS-E's freeze-critical PRs merge) |
 | C-9 | Status writes work through every served version, and destructive operations still require their confirmation through both versions. | Missing. Envtest installs only `config/crd/bases` (`test/envtest/suite_test.go:43-44`). | WS-F |
-| C-10 | The redesigns that reshape API semantics have landed (D4): #235, #206, #203. #204 is deferred and additive (A-85 labels its gap break-glass). #205's PR1-PR3 (PR1 is #241) touch the API version `main` serves, so their order relative to WS-E is fixed in the program plan, and whichever lands second applies the A-59 table (revision 4, OPUS-R3-01). PR4 onward targets v1beta1. #240 and #223 have no v1beta1 API impact (A-59). | All open at `2340f6b`. WS-C (#235) and WS-D (#206) are in progress. Proposal 21 (#205) merged at `38e0444`; #241 is open. | WS-C (#235), WS-D (#206, #203), WS-B (#205, #241), Barry (the #241/WS-E order) |
+| C-10 | The redesigns that reshape API semantics have landed (D4): #235, #206, #203. #204 is deferred and additive (A-85 labels its gap break-glass). #205's PR1-PR3 (PR1 is #241) touch the API version `main` serves, so their order relative to WS-E is fixed in the program plan, and whichever lands second applies the A-59 table (revision 4, OPUS-R3-01). PR4 onward targets v1beta1, which under D1 means every served version identically until v1alpha1 is removed (A-59; revision 5, F-27). #240 and #223 have no v1beta1 API impact (A-59). | All open at `2340f6b`. WS-C (#235) and WS-D (#206) are in progress. Proposal 21 (#205) merged at `38e0444`; #241 is open. | WS-C (#235), WS-D (#206, #203), WS-B (#205, #241), Barry (the #241/WS-E order) |
 | C-11 | The breaking cleanup (D2) has landed in v1alpha1. | Not started. | WS-E (section 6) |
-| C-12 | Docs match the contract. `3.crd-versioning.md` is rewritten for D1 and D5, and adds the confirmation-pattern rule (A-82). The CRD reference, the well-known metadata page (A-79), the Event registry (A-76), the log schema, the doctor skill and the published course are current. The upgrade docs say plainly that there is no in-place upgrade from v1.6.0 and carry the procedure that meets 3.2 (C-16). `10.upgrade-policy.md`, `11.gitops.md` and course unit 7 warn that their "CRDs first, then the chart" routine does not apply to v1.6.0 → v1.7.0 (3.2 U-1). `4.install-production.md` applies the CRDs from a release tag, set by a `BLOODRAVEN_VERSION` variable next to the chart version, never from `main` (revision 4, OPUS-R3-08). The site's Vue pages under `site/app/` match the contract too, not only `site/content/` (revision 4, OPUS-R3-10). | `3.crd-versioning.md` still requires a webhook and the storage-version migrator (`:28,33-34,55-112`). `4.install-production.md:39-46` applies CRDs from `raw.githubusercontent.com/ShipStream/bloodraven/main/`. `site/app/pages/compare.vue:156,781` says "v1alpha1, no conversion webhook yet", and `site/app/components/content/HomeFailoverStage.vue:73` shows `primary-candidate`. | WS-E (field docs, doctor, log schema, course, the renamed tokens in `site/app/`, the install-page pin in E1, and the U-1 warnings through E19), WS-F (`3.crd-versioning.md`, upgrade docs, and the API-version text in `compare.vue` when v1beta1 ships) |
+| C-12 | Docs match the contract. `3.crd-versioning.md` is rewritten for D1 and D5, and adds the confirmation-pattern rule (A-82). The CRD reference, the well-known metadata page (A-79), the Event registry (A-76), the log schema, the doctor skill and the published course are current. The upgrade docs say plainly that there is no in-place upgrade from v1.6.0 and carry the procedure that meets 3.2 (C-16). `10.upgrade-policy.md`, `11.gitops.md`, `5.production-install-examples.md` (revision 5, F-62) and course unit 7 warn that their "CRDs first, then the chart" routine does not apply to v1.6.0 → v1.7.0 (3.2 U-1). `4.install-production.md` applies the CRDs from a release tag, set by a `BLOODRAVEN_VERSION` variable next to the chart version, never from `main` (revision 4, OPUS-R3-08). The site's Vue pages under `site/app/` match the contract too, not only `site/content/` (revision 4, OPUS-R3-10). | `3.crd-versioning.md` still requires a webhook and the storage-version migrator (`:28,33-34,55-112`). `4.install-production.md:39-46` applies CRDs from `raw.githubusercontent.com/ShipStream/bloodraven/main/`. `site/app/pages/compare.vue:156,781` says "v1alpha1, no conversion webhook yet", and `site/app/components/content/HomeFailoverStage.vue:73` shows `primary-candidate`. | WS-E (field docs, doctor, log schema, course, the renamed tokens in `site/app/`, the install-page pin and the release-built site as a program prerequisite (section 6), and the U-1 warnings through E19), WS-F (`3.crd-versioning.md`, upgrade docs, and the API-version text in `compare.vue` when v1beta1 ships) |
 | C-13 | Release: `v1.7.0` (D7). A minor version that breaks v1alpha1 and has no in-place upgrade looks routine to anyone who reads only the number, so the release notes open with a breaking-change callout before any other content: no in-place upgrade from v1.6.0, never apply the v1.7.0 CRDs to a v1.6.0 cluster, and a link to the procedure (C-16). They then carry the section 3 table, the Event rename table, the metric, `/deploy/v1`, `/status` and `/ws/status` value changes (A-114), the log-schema breaks and the new Kubernetes floor (A-115). | — | WS-G |
-| C-14 | **The operator refuses a schema it was not built for.** Revision 2 checked only that each CRD serves `v1beta1`, which every CRD does from v1.7.0 on, so the check would stop protecting anything after this release (OPUS-R2-11). Before any controller starts, the operator runs two checks and on failure logs each problem with a pointer to the upgrade docs and exits non-zero. **(a) Live schema digest (revision 4, GPT-R3-02).** The operator reads each of the five CRDs from the apiserver and computes a digest of the **live** served schemas: the canonical JSON (sorted keys, no insignificant whitespace) of each served version's `openAPIV3Schema` exactly as the apiserver returns it, hashed in version-name order. It compares that digest with the one embedded at build time, which the same canonicaliser computes from the generated CRD. A different digest, or a CRD that does not serve `v1beta1`, refuses. Revision 3 compared an annotation stamped by `make manifests` with the embedded digest. That checked only metadata: annotations are arbitrary and survive object edits, so a schema edit or a partial CRD patch that kept the annotation would have passed. The annotation `bloodraven.shipstream.io/schema-digest: sha256:<hex>` stays, as diagnostic metadata only (Operator-owned read-only in the A-79 page): the refusal message prints it next to the live and expected digests, and the operator never trusts it. Canonicalisation is defined against the apiserver-returned form, not the YAML file, so an envtest asserts that, for every CRD installed from `config/crd/bases`, the live digest equals the embedded one. Any normalisation the apiserver applies then fails CI, not a production start. This catches a chart-only `helm upgrade`, which never upgrades CRDs from `crds/`, in every later release. The C-5 drift job checks that the annotations match the embedded digests, and C-4's identical-schema test shares the canonicaliser. **(b) Object preflight.** A server-side `dryRun=All` no-op update of every MFG, reusing C-7's code. It lists and updates through the dynamic (unstructured) client, as `migrate-storage` must, never the typed client: the typed client cannot decode a v1.6.0 object under the v1.7.0 CRDs (3.1 item 1), so a typed `List` would fail before any dry-run was sent, and the refusal would be a decode error (revision 4, OPUS-R3-10). It writes nothing and refuses rather than adopts, so D3 allows it. It catches v1.7.0 CRDs applied over v1.6.0 objects, the case (a) cannot see because the CRDs then match (OPUS-R2-02). **Cost:** a digest mismatch also refuses an operator rolled back without its CRDs. The rollback docs say to re-apply the matching CRDs, and `--allow-crd-schema-skew` (default off) starts anyway with a Warning Event and log line, for an operator who has checked the difference. Rejected: a monotonic schema revision that lets an older operator run against newer CRDs, which needs release bookkeeping and still cannot tell a compatible newer schema from an incompatible one. Envtest: v1.6.0 CRDs and objects, swap in the v1.7.0 CRDs, start the manager, and assert that it exits, that the refusal names each failing object, and that no object's `resourceVersion` changed; a CRD whose validation was changed (for example one `maxLength`) while its original `schema-digest` annotation was kept refuses; and the live digest of every unmodified CRD equals the embedded digest. RBAC: `get` and `list` on `customresourcedefinitions` (read-only, which D5 does not object to) and the `update` verb on the five kinds that the operator already holds. | Missing. | WS-F |
-| C-15 | **The supported Kubernetes floor is tested (A-115).** The chart `kubeVersion`, both docs pages, and a CI envtest job all say 1.31. | Chart `>=1.26.0`, docs 1.27, no job at either. | WS-E (E4: the job, the chart and the docs) |
-| C-16 | **The v1.6.0 → v1.7.0 procedure is written and tested.** The upgrade docs carry a procedure that meets every requirement in 3.2 (U-1 to U-8), and WS-F runs it end to end once as U-9 describes. The procedure is tracked as a separate follow-up issue owned by WS-F (#243). | Missing. Revisions 1 and 2 drafted steps here; revision 3 hands them to WS-F as requirements. | WS-F |
+| C-14 | **The operator refuses CRDs older than it was built for (a requirement for WS-F; rewritten in revision 5).** Revision 2 checked only that each CRD serves `v1beta1`, which every CRD does from v1.7.0 on (OPUS-R2-11). Revisions 3 and 4 designed an exact live-schema digest that refused on any mismatch, plus a dry-run object preflight. The ultra review found that an exact match takes the failover controller down during the routine "CRDs first, then the chart" upgrade: once two releases carry the check, the previous operator cannot restart between the two steps (a node drain, an OOM kill), and a description-only schema change refuses as well (merits point 2, F-46). It also found that the preflight does not refuse what ratcheting downgrades (F-07). Under the scope rule this row now states only what the operator must do; WS-F designs how under #243. **(1) Older CRDs refuse.** Before any controller starts, the operator exits non-zero, logging each problem with a pointer to the upgrade docs, when the live CRDs are older than the schema it was built for: a served version it needs is missing, or schema it requires is absent. This catches a chart-only `helm upgrade`, which never upgrades CRDs from `crds/`, in every later release. **(2) Newer CRDs warn.** A live schema newer than the build's, which is the previous operator during "CRDs first, then the chart", or an operator rolled back without its CRDs, starts with a Warning Event and a log line and does not refuse. So the documented upgrade window never takes the failover controller down, and a rollback needs neither an override flag nor older CRDs, which U-13 forbids across a storage-version change (F-08; revision 4 told rollbacks to re-apply the matching CRDs). **Cost:** an older operator against a newer schema that is not compatible with it only warns. The docs bound that to the minutes between the two upgrade steps, and say to roll forward rather than back across a schema change. **(3) Objects.** Before its first write the operator runs the object check of U-10 to U-12 (all five kinds, a check that does not ratchet, conflicts handled) through the dynamic client: the typed client cannot decode a v1.6.0 object under the v1.7.0 CRDs (3.1 item 1; OPUS-R3-10). It writes nothing and refuses rather than adopts, so D3 allows it. **Envtest:** CRDs missing a field the build requires refuse; CRDs with an extra optional field warn and start; U-10's and U-11's fixtures refuse. **RBAC:** `get` and `list` on `customresourcedefinitions` (read-only, which D5 does not object to), plus whatever U-11 adds. Rejected: the exact digest match (above). | Missing. | WS-F (#243 for the mechanism) |
+| C-15 | **The supported Kubernetes floor is tested (A-115).** The chart `kubeVersion`, both docs pages, and a CI envtest job all say 1.31. From then on, any change that tightens a spec CEL rule adds a test to that job that stores an object violating the new rule and performs a status write on it, because 1.31 and 1.32 do not ratchet spec CEL rules on status writes (A-115; revision 5, F-40). | Chart `>=1.26.0`, docs 1.27, no job at either. | WS-E (E4: the job, the chart and the docs) |
+| C-16 | **The v1.6.0 → v1.7.0 procedure is written and tested.** The upgrade docs carry a procedure that meets every requirement in 3.2 (U-1 to U-8; U-10 to U-13 govern the tools it uses), and WS-F runs it end to end once as U-9 describes. The procedure is tracked as a separate follow-up issue owned by WS-F (#243). | Missing. Revisions 1 and 2 drafted steps here; revision 3 hands them to WS-F as requirements. | WS-F |
 
 The v1 criteria in `3.crd-versioning.md:40-54` stay as they are. Its deprecation table still applies after
 v1beta1.
 
 **WS-F items that revision 3 adds.** They come with the C rows above and belong in WS-F's brief:
 
-- Write the v1.6.0 → v1.7.0 procedure in the upgrade docs so that it meets 3.2 U-1 to U-8, and run it end to end
+- Write the v1.6.0 → v1.7.0 procedure in the upgrade docs so that it meets 3.2 U-1 to U-8 and U-10 to U-13, and run it end to end
   once as U-9 describes (C-16). This replaces revision 2's instruction to "verify the 3.2 procedure". It is
   tracked as a separate follow-up issue (#243).
 - **Precondition for the upgrade E2E (OPUS-R2-12):** the D6 baseline decision (C-8) is signed off and the program
   plan updated before WS-F starts that job. Until then WS-F builds the C-7 and C-14 envtests and C-16.
-- Build both C-14 checks (the live-schema digest and the dynamic-client object preflight), the canonicaliser and the
-  embedded digests, the diagnostic `schema-digest` annotation in `make manifests`, and their envtests.
+- Build C-14's three requirements and U-10 to U-13's object checks, designing the mechanism under #243, with
+  their envtests (revision 5; revisions 3 and 4 specified a live-schema digest and a dry-run preflight here).
 
 ## 6. WS-E work list
 
+### Delivery as five sequential PRs (revision 5)
+
+Revision 4 put all nineteen commits on one branch: mechanical renames next to new runtime behaviour that the
+freeze does not need (A-52's rollout queue, A-54's gate, A-86's ledger, A-81's plugin verbs). Both ultra-review
+merits passes found that one stall in the runtime half would block every rename, and with it WS-F, rc.0 and
+v1.7.0. Three of the review's eight high findings (F-04, F-05, F-06) were in that runtime half. WS-E is therefore
+delivered as five PRs. Each branches from `main` after the previous one merges, and each runs the full gate below.
+
+- **Freeze-critical** means the item changes a schema, a served token (condition or Event reason, key, metric
+  label, endpoint value) or a validation rule that v1beta1 freezes, so under D2 it must land in v1alpha1 before
+  the freeze. **Only the freeze-critical PRs (PR1 and PR2) gate WS-F and the `v1.7.0-rc.0` cut.** PR3 to PR5 do not.
+- The commit numbers E1 to E19 are kept, so the commit references in section 2 still hold. Within a PR, commits
+  land in numeric order. Two changes from revision 4: E6 moves into PR2, after E8, because F-01's semantic
+  transition rules compare the Duration, Quantity and timestamp types that E8 introduces; and E13 is split into
+  E13 (the API shape) and E13b (rollout pacing).
+- A field that a non-freeze-critical PR adds after the freeze (A-86's `status.divergentPromotions[]`) is additive,
+  and lands in every served version identically (D1, C-4; F-27).
+
+| PR | Scope | Commits | Freeze-critical | Label | Gates |
+|---|---|---|---|---|---|
+| PR1 | Mechanical renames and reshapes | E1, E2, E3, E4, E5, E7, E8, E9, E10, E11, E12, E13, E14 | **Yes**, every commit | `e2e` (E4, E5, E10, E13 and E14 change failover, restore or sidecar wiring) | WS-F, rc.0 |
+| PR2 | Validation and immutability | E6, E16 | **Yes**, both commits | `e2e` (E6) | WS-F, rc.0 |
+| PR3 | A-52 rollout pacing | E13b | No: runtime behaviour; A-52's API part is in E13 | `e2e`, its own PR | The first release that upgrades v1.7.0-schema groups to a new default, in practice v1.7.0 (A-52); not WS-F or rc.0 |
+| PR4 | A-54 hardened security-context gate | E17 | No: A-54's API shape is the same in both outcomes | `e2e`, its own PR | Nothing. If it has not merged when v1.7.0 is cut, v1.7.0 ships option C (Q6) and records why |
+| PR5 | Non-freeze-critical behaviour and docs | E15, E18, E19 | No: E15 adds an additive status field, a key and plugin verbs; E18 and E19 change docs, messages and CI gates | `e2e` (E15) | v1.7.0, through C-12 and C-13; not WS-F or rc.0 |
+
+E14's taint-key length unit test uses A-15's bounds as constants; E6 then enforces them at admission. Until PR3
+merges, a change of the sidecar default rolls unpinned groups without pacing. No release is cut in that state
+for groups on the new schema except rc.0, whose groups are all new.
+
 ### Preconditions and sequencing
 
+- **Program prerequisite, before any incompatible CRD change reaches `main` (revision 5, F-41, F-42).** Revision 4
+  pinned the install page's CRD URL in E1. But WS-C (#235), WS-D (#206, #203) and proposal 21's PR1-PR3 (#241)
+  merge to `main` before WS-E branches, and each may change the schema incompatibly (A-113 expects #206 to remove
+  or retype `allowUnverifiedCrossSite`; A-25 expects #203 to add a root transition rule). Each such merge would
+  reach v1.6.0 clusters through the unpinned URL (`3.get-started/4.install-production.md:42-46`) before E1
+  existed. And the published site is deployed from `main` on every `site/**` push
+  (`.github/workflows/deploy-site.yml:16-21`), so from the first WS-E docs change it would describe fields that
+  no installable release has: a v1.6.0 CRD prunes MBK `deletionPolicy: Retain` silently, and then deletes the
+  artifact. Two changes therefore land before the first incompatible CRD change merges, by whichever workstream
+  merges first, and Barry checks them before that merge:
+  1. `4.install-production.md` applies the CRDs from a release tag, set by a `BLOODRAVEN_VERSION` variable next
+     to the chart version (3.2 U-1, C-12).
+  2. bloodraven.dev is built from the latest release tag, not from `main`, until v1.7.0 ships. Docs changes keep
+     landing on `main` with the code. The cost: a docs fix for the released version during that window needs its
+     own release-tag build. Rejected: an "unreleased" banner on pages built from `main`, which still serves
+     manifests that the installed CRDs prune.
 - WS-E branches from `main` after WS-C (#235) and WS-D (#206, then #203) merge, and after #233 and #234. It
   then reshapes on top of their fields instead of colliding with them.
 - **Step 0, `plannedFailover` re-audit (revision 3, OPUS-R2-03).** Before E1, WS-E checks `spec/status.plannedFailover`,
@@ -2647,12 +3098,18 @@ v1beta1.
   E11 (`Ready` and `unstableReason` sets), E12 (Event reasons) and E14 (keys and the hold). PRs that merge after
   WS-E use the v1.7.0 rules from the start. WS-E never changes their semantics. The order of #241 relative to
   WS-E is fixed by the program plan (C-10).
-- **Re-triage before E1 (OPUS-08).** This audit was re-checked at `2340f6b`. Before E1, WS-E diffs `api/`,
-  `config/crd`, `site/`, `.agents/` and the emitted Event and condition reasons between `2340f6b` and its own base.
-  WS-C and WS-D will have added fields, reasons and keys; WS-C's are named in A-50. WS-E triages each one against
-  sections 1-4 (inventory row, finding, migration row, status-write row) and records the result in its PR before
-  E1. This is the step
-  that found #233's `fencedGtidExecuted`, `RestoreReclonePending` and `RestorePeerHold` for this revision (B.4).
+- **Re-triage before E1 (OPUS-08; scope widened in revision 5, F-47).** This audit was re-checked at `2340f6b`.
+  Before E1, WS-E reviews every file changed between `2340f6b` and its own base, across the whole repository, and
+  filters the changes by the surfaces sections 1.2-1.5 govern: CRD fields, condition and Event reasons, metadata
+  keys (most are defined in `internal/controller` until E1 moves them), metric names and labels
+  (`internal/metrics`), the `/deploy/v1`, `/status` and `/ws/status` payloads (`cmd/bloodraven`,
+  `internal/controller/topology.go`, `internal/platform`), the chart (Lua health checks, NetworkPolicy),
+  `playground/`, `course/` and `examples/`. Revision 4 diffed a closed path list (`api/`, `config/crd`, `site/`,
+  `.agents/`), which missed both #234's `encryption-status-fence` key and #233's
+  `bloodraven_restore_reclone_pending{phase}` metric. WS-C and WS-D will have added fields, reasons and keys;
+  WS-C's are named in A-50. WS-E triages each one against sections 1-4 (inventory row, finding, migration row,
+  status-write row) and records the result in its PR before E1. This is the step that found #233's
+  `fencedGtidExecuted`, `RestoreReclonePending` and `RestorePeerHold` for this revision (B.4).
 - Regenerate the appendix (`proposals/tools/crd-inventory.py`) at the start and the end of WS-E.
 
 **Every commit runs the repo gate:**
@@ -2677,36 +3134,43 @@ v1beta1.
   the course uses updates `course/`, runs `make course`, and commits the rebuilt `site/public/courses` in the same
   commit, or the drift job fails. E19 closes any remainder with a CI gate.
 
-The commits below are ordered so each one builds and passes on its own.
+The commits below are listed by number. They land in the PR order above (PR1: E1-E5 and E7-E14; PR2: E6, then
+E16; PR3: E13b; PR4: E17; PR5: E15, E18, E19), and each one builds and passes on its own in that order.
 
 | # | Commit title | Findings | Areas touched | Tests to add | Docs, doctor, chart and log obligations |
 |---|---|---|---|---|---|
-| E1 | Export well-known keys, condition types, reasons and Event reasons from the API package | A-69, A-76 (registry scaffold), A-79 (constants and `ReadOnlyTaintKey` with today's values, including the `encryption-status-fence` key), A-73 (the `unstableReason` constants) | new `api/v1alpha1/{well_known,conditions,events}.go`; controller, plugin and runner use the constants | registry test: every `Eventf` reason and every condition reason is declared; every value `DeploymentUnstableReason` can return is a declared constant (A-73, revision 4) | `4.install-production.md`: the CRD URL is pinned to a release tag through a `BLOODRAVEN_VERSION` variable next to the chart version (3.2 U-1, C-12; revision 4, OPUS-R3-08). It lands in the first commit, so no WS-E commit puts the new schema on `main` while the published page still applies CRDs from `main`. No other behaviour change |
+| E1 | Export well-known keys, condition types, reasons and Event reasons from the API package | A-69, A-76 (registry scaffold), A-79 (constants and `ReadOnlyTaintKey` with today's values, including the `encryption-status-fence` key), A-73 (the `unstableReason` constants) | new `api/v1alpha1/{well_known,conditions,events}.go`; controller, plugin (including the label literals in `cmd/kubectl-bloodraven/backup.go` and `verify.go`, F-52) and runner use the constants | registry test: every `Eventf` reason and every condition reason is declared; every value `DeploymentUnstableReason` can return is a declared constant (A-73, revision 4) | None of its own. The install-page pin that revision 4 put here is now a program prerequisite that lands before any incompatible CRD change reaches `main` (Preconditions; revision 5, F-42). No behaviour change |
 | E2 | Remove MSC fields and status for unimplemented phases | A-60, A-61, A-62, A-63, A-06, A-64 | `mysqlstandbycluster_types.go`, `standbycluster_reconciler.go`, `examples/standby-cluster.yaml` | envtest: `Network` rejected, PVC source unrepresentable; discovery status unit tests | `5.architecture/3.multi-cluster-dr.md`, `crd-reference.md`; chart CRDs (MSC CRD shrinks by about 237 KB) |
 | E3 | Remove inert spec and status fields and the legacy DSN mode | A-03, A-56, A-57, A-58, A-59, A-65, A-31 | `types.go`, `backup_types.go`, `mysqlbackupverification_types.go`; credential and env rendering; `cmd/bloodraven/trigger*.go`, plugin `backup.go`/`verify.go`; `newTestFG` and fixtures; `playground/manifests` | envtest: an MFG without `spec.credentials` is rejected, and `spec.secretName` is pruned (OPUS-28); unit: a verification Job without storage | `security-model.md`, `production-hardening.md`, chart `NOTES.txt`, `6.backup-verification.md`; doctor references to `pvcName`/`podName` |
 | E4 | Require `spec`; add list-map, set and atomic semantics; explicit site `serverID`; the Kubernetes floor | A-05, A-07, A-08, A-09, A-10, A-11, A-12, A-13, A-14, A-115 | all `*_types.go`; `reconciler.go` (`--server-id` from spec); examples and playground (`serverID: 101…`); `charts/bloodraven/Chart.yaml` `kubeVersion`; a new CI envtest job on 1.31 assets | envtest: a spec-less object of each kind is rejected (moved from E3 because A-05 lands here; R11); two field managers co-own `sites`, `extraContainers` and `conditions`; duplicate `serverID` rejected; `serverID` immutable; unit: `serverID: 4294967295` renders unchanged (no `int32` wrap); every admission test also runs in the 1.31 job | `crd-reference.md`, `failover.md`, `2.getting-started.md` and `4.install-production.md` (1.31); course examples with `serverID`; `e2e` label (`server_id` rendering) |
-| E5 | One reference and Secret-reference shape | A-01, A-02, A-04, A-20, A-66, A-67 | types; `mysqldatabase_reconciler.go` index key; `cmd/bloodraven/deploy_api.go`; credential and S3 readers; plugin `backup`; `deployment.yaml` env name for `operatorEndpoint` | envtest: `backupRef: {}` rejected; MDB `failoverGroupRef` immutable; Secret name bounds; unit: A-67's URL becomes `--s3_endpoint` and `--s3_use_https` for `http`/`https`, with and without a port | every docs manifest; `11.deployment-api.md`; doctor scripts that read `spec.credentials.*`; the MDB `Group` printer column (A-94); course (`operatorSecret`, `groupRef`, `lbIP` via E6) |
-| E6 | Name bounds, the string and list bounds the whole-block rules need, site removal refusal, and immutability rules on the kind roots | A-15, A-16, A-17, A-18, A-19, A-22, A-23, A-24, A-25, A-26; the A-92 and A-34 bounds that A-22 and A-23 traverse (revision 4, OPUS-R3-05) | the bounds listed in A-23, added before the rules that traverse them; MFG, MBK and MBV root XValidations; `StorageSpec`/`SiteSpec`; `PVCStorage` union; `backup_schedule.go` (`provisioned`); remove the MBV Job-label workaround | CRD test: every string and list reachable from `initFromBackup`, MBV `spec.pointInTime` and MBV `spec.sanityCheck` has a `maxLength` or `maxItems`; envtest table: every transition rule accepts unchanged updates, rejects changes and passes the CEL cost check; `confirm` with a lowercase `t` rejected (A-26); root `metadata.name` bounds and grammar (`a.b` and `1orders` rejected, R08); `provisioned` cannot be removed and re-added (R04); unit: `BackupStorageMismatch` on an owned PVC of the wrong class or size | `operations.md:381` (resize); `encryption-at-rest.md` (disable is refused); `4.backup-pvc.md`; course (`lbIP`); `e2e` label |
-| E7 | CamelCase, typed enums for spec and status; stable metric label values; one vocabulary on the operator's JSON endpoints | A-27, A-28, A-29, A-30, A-32, A-33, A-114 (metrics, `/status`, `/ws/status` role and state) | types and constants; the API-to-internal `state.SiteRole` adapter replacing the cast at `reconciler.go:2383`, and its reverse for the endpoints and metrics (GPT-R3-01); `""` removed from the A-28 status enums; `UpdatePhaseComplete` deleted or mapped to `""` in the snapshot (A-29); literal sweep across the controller, plugin, `internal/playground`, doctor `triage.sh`/`gtid-audit.sh`; `internal/metrics` label-value functions; the role and state adapter for `/status` (`topology.go:1124-1140`) and `/ws/status` (`:2136-2140`); the playground dashboard's comparisons and CSS classes (`playground/dashboard/index.html:17-18,131-150`) | unit: enum round-trip; unit: each API role taken through the topology configuration into `EvalCrossSite`, with a writable `PrimaryCandidate` left unfenced (GPT-R3-01); unit: every enum value of every enum-valued metric label (`role`, `state`, `phase`, the source `state`, `from`, `to`) maps to its documented value (OPUS-R3-06); unit: a snapshot taken between `setPhase(Complete)` and the reset carries no `updatePhase` (OPUS-R3-07); payload test: `/status` and `/ws/status` serialize every role and state as the CR value; envtest: old lowercase values and A-33's invalid reasons rejected | docs that show `primary-candidate` or `writable`; `3.monitoring-prometheus.md` and `2.monitoring.md` (PromQL, and the `/status` and `/ws/status` examples at `:543-651`), `examples/prometheusrule.yaml`; doctor references; log-schema fields that carry state values; course (`primary-candidate`, `dr-only`) |
-| E8 | Timers, timestamps and numeric types: the Duration rule, bounds, zero semantics and `stopTime` | A-35, A-36, A-37, A-38, A-41, A-34, A-39 (R11, OPUS-03) | types; `topology.go` (drop the 0 → 5m mapping); `site_helpers.go` (drop the 0 → 300 mapping); retry and escrow readers; `restore_script.py` stop-time conversion and the verification Job's timestamp argument (A-39) | CRD test: reflects over the Go Duration fields and asserts both CEL bounds (OPUS-10); envtest bound checks; zero-value unit tests; envtest: `stopTime` without a zone, with a lowercase `t` or `z`, or with a non-digit fraction rejected (OPUS-R3-03), `mode: Timestamp` needs `stopTime`, `mode: Latest` forbids it; CRD test: both `stopTime` properties carry the RFC 3339 pattern | `crd-reference.md` timer table; `production-hardening.md`; PITR docs (`stopTime`); course (`stopDatetime`) |
-| E9 | One retention shape | A-55 | `backup_types.go`, `mysqlbackupverification_types.go`; `resolveRetention`, `pruneSuccessful` and the verification sweep | table test of keep-if-any (`keepLast`, `keepWithinDays`, `keepFailed`, explicit 0) | `2.backup-restore.md` retention section, with the `max(count, minKeep, 1)` mapping and the no-pruning note (R07); doctor playbook entries on retention |
-| E10 | Status reshapes: replication state, encryption attribution, failover record, the `…Time` timestamp names, binlog coordinates, artifact identity, provenance; the durable-status markers | A-40 (including `requestTime`, `unsealTime` and `lastSeenTime`, revision 4), A-42, A-43, A-44, A-45, A-46, A-47, A-49, A-96, A-97, A-89 (markers and fail-safe test), A-114 (`replicationRunning`, `/ws/status` shapes) | status types; writers; `cmd/bloodraven/deploy_api.go` (`replicationRunning`); `internal/platform/websocket.go` `TopologyMessage` and its dashboard readers; `internal/dragonfly/info.go` field presence (A-44); restore and verification readers of `artifactStorage` (D-12); plugin `status.go`; s31, s37, s48 and s50; `// Durable:` markers | unit: verification and restore use the recorded claim and endpoint; lease gate uses the `replication` enum; unit: A-43's producer mapping (`Unknown` while the healthy streak builds, `Lagging` above `maxLagSeconds`, `Broken` with a stopped thread, the gate refusing `Unknown`); deploy API: `replicationRunning` for each `replication` value; `/ws/status` carries `lastFailover{…}` and `sites[].replication`; unit: INFO without `master_sync_in_progress` leaves `syncInProgress` nil; component (`test/component`): the A-89 lost-status and fresh-deploy cases (R11) | doctor `triage.sh`, `SKILL.md`, alert matrix (`sealed` → condition); `8.encryption-at-rest.md`; the MBK `Location` printer column moves here with A-96 (OPUS-26) |
-| E11 | Honest generations, the condition vocabulary and the deploy-API token set | A-68, A-70, A-71, A-72, A-73, A-114 (`/deploy/v1`) | `runner.go` (snapshot config generation); MBK, MBV and MSC `Ready` and their printer columns; chart ArgoCD Lua; `cmd/bloodraven/deploy_api.go` | unit: conditions are stamped with the applied generation; s19 assertion fixed; Lua test fixtures; course fixtures; deploy API test: every token field, `unstableReason` included, is drawn from the A-69 constants | `crd-reference.md` conditions; `11.deployment-api.md`, with the closed value set of every token field and the `replicationRunning` definition (A-43); `gitops.md`; the ArgoCD Lua in the chart |
-| E12 | Event reason naming and types | A-74, A-75, A-76 (generated docs table) | Event call sites, including the six reasons added since `3fa1900` and the completion Event #235 leaves; s48 assertion | registry test (from E1) extended to doc coverage; unit: every metric `reason` label value written is a declared A-69 constant (A-114) | `2.monitoring.md` (generated), `7.log-schema.md` Event reference, doctor `SKILL.md`/alert matrix/playbooks; release-note rename table, including renamed metric `reason` values |
-| E13 | Desired state out of annotations and status; no persisted sidecar default | A-48, A-51, A-52, A-53, A-98 | `dragonfly_upgrade.go` (no spec writes), encryption adoption gate, sidecar image env from the new chart values `sidecar.image.{repository, tag}` (chart `values.yaml`, `deployment.yaml`), the rollout queue and `--default-sidecar-rollout-admission-timeout`, MDB DDL, MBK finalizer | envtest: `SnapshotRestore` needs `snapshot.dir`, and `snapshot: {}` gets the rule's message, not an evaluation error; unit: a spec image that differs from the live StatefulSet drives the snapshot upgrade, an unknown live image does nothing (OPUS-18), and the operator never calls `Update` on spec; unit and component: the default-sidecar rollout queue runs one group at a time and waits for `Ready=True` (OPUS-07), skips and re-queues a group not admitted within the timeout, and halts on a started run that never reaches `Ready=True` (OPUS-R2-09); chart test: the env renders from `sidecar.image.*`; a `Retain` backup keeps its artifact | `5.app-integration.md` (Dragonfly upgrade); `10.upgrade-policy.md` (operator upgrades now roll unpinned sidecars, one group at a time); `7.tenant-databases.md`; doctor; course unit 7 (`sidecarImage`); `e2e` label |
-| E14 | One key prefix, boolean label values, namespace-scoped taint, the hold family, and action-annotation grammar | A-77, A-21, A-78, A-80 | every label, annotation and finalizer constant (E1 makes this a one-file change plus selectors), including the MFG finalizer rename, `encryption-status-fence`, and the verification hold (`backup_verification_hold.go`, `cmd/bloodraven/pitr_retention.go`); any proposal 21 label or restore hold already on WS-E's base, with its `<group name>/<group UID>` value kept (A-59, A-77; revision 4); `tainter.go` (delete `LegacyTaintKey`); selector-mismatch refusal; chart NetworkPolicy; playground and chaos tooling; the doctor escrow helper's keys | envtest and unit: selector-mismatch condition and Event without a retry loop; unit: taint key format and length; the new hold key protects a backup under an active verification and under a Terminating one (retention, cleanup and PITR cutoff); A-78 parsing (`gtidPrefix=`, values with `:` rejected, basic-form instants, a comma-separated id list, and an operation-id subject accepted without `confirm=`) | `12.well-known-metadata.md` (generated), `5.app-integration.md` tolerations, `architecture.md` labels, doctor scripts' selectors and hold queries (`triage.sh`, `support-bundle.sh`, `keyring-escrow-recover.sh`), `SKILL.md` and playbook 36; course (`shipstream.io/role`); `e2e` label |
-| E15 | Divergent-promotion records and acknowledgement; GitOps-safe actions; plugin wrappers | A-86, A-81 | `gtid_audit.go`, `runner.go`; plugin `ack-divergence`, `rotate-keyring`, `revoke-leases` | unit: acknowledging one record keeps the others; a 17th record is counted in the message and emits `DivergentPromotionRecordsTruncated` (OPUS-22); plugin tests | `log-schema.md:169`, `crd-reference.md:709`, doctor playbook `troubleshooting_playbooks.md:931-937`, `gitops.md` |
-| E16 | Admission validation for my.cnf inputs, cross-references and bounds; kind metadata; doc comments | A-90, A-91, A-92, A-93, A-94, A-95 | types; the D-03 controller fix | envtest: injection strings rejected, dangling profile references rejected, CEL cost passes | `crd-reference.md` |
-| E17 | Hardened security-context defaults, gated | A-54 | one merge helper for MySQL, Dragonfly and Jobs; uid and gid 999; emptyDirs for `/tmp` and `/var/run/mysqld` | the Q6 gate: Restricted-PSS admission, fresh init, existing-volume restart, keyring, PITR, backup and restore, chaos failover, both images, local-path plus one CSI class. If it fails, ship option C and record why. | `production-hardening.md` (drop the FSGroup upgrade procedure); doctor; `e2e` label |
-| E18 | Runbooks and operator messages without status writes | A-83 (rule only; the patch is already gone), A-84, A-85, A-87, A-88, A-89 (docs) | docs and doctor; the `backup_types.go:901-913` comment; the two operator messages (`runner.go:2149-2152`, `internal/state/matrix.go:219-221`; OPUS-02) | unit: neither message contains `--subresource=status`. This is the existing `TestRunner_PendingRecloneRefusalNamesWorkingRemedy` (`internal/controller/restore_reclones_test.go:952-961`) inverted: today it fails unless the `PromotionRefusedPendingReclone` Event contains the token (`:958`), so E18 must change it, not only add a test (OPUS-R3-09). Add the same assertion for the `Degraded=NoPrimary` message. The lint below runs in CI, with its self-test (section 4; GPT-R3-04) | `4.runbooks.md`, `8.encryption-at-rest.md` (escrow and keyring-rollback break-glass labels), `2.backup-restore.md`, `2.monitoring.md`, `7.tenant-databases.md`, `7.log-schema.md:268` (checked; `msg` unchanged), `chaos-scenarios.md`, `3.playground.md`, doctor `troubleshooting_playbooks.md` and `alert_runbook_matrix.md`; a lint that fails on `--subresource=status` outside break-glass blocks in `site/` and `.agents/`, and in string literals in production Go code under `internal/` and `cmd/` (excluding `_test.go`, fixtures, the lint's own test inputs and the playground tooling; section 4) |
-| E19 | Course sweep, the U-1 warnings, and the old-token gate | OPUS-06 (no finding of its own); 3.2 U-1 | `course/`; the rebuilt `site/public/courses`; `site/app/` (`HomeFailoverStage.vue:73`, OPUS-R3-10); `10.upgrade-policy.md`, `11.gitops.md` and course unit 7 get the "not for v1.6.0 → v1.7.0" warning (C-12) | **A context-aware CI gate (revision 3; GPT-R2-03, OPUS-R2-04).** Revision 2 grepped bare substrings, so it failed on a correct tree: `operatorSecret` is a prefix of `operatorSecretName`, `shipstream.io/role` is inside `bloodraven.shipstream.io/role`, and A-114 keeps `primary-candidate` as a metric value. The gate scans `course/`, `site/content/`, `site/app/` (revision 4, OPUS-R3-10), `.agents/` and `examples/`, case-sensitively, matching whole tokens in context only: (1) obsolete field names as YAML or JSON keys or as path segments, a token with no word character on either side followed by `:` or preceded by `.` (`lbIP`, `sidecarImage`, `sidecarResources`, `operatorSecret`, `groupRef`, `stopDatetime`, `sourceSiteOverride`, `mysqlBackupRef`, `maxMemoryMb`, … from the 3.4 table); (2) exact old metadata keys not preceded by a DNS-label character or `.`, so `bloodraven.shipstream.io/…` and the API group `shipstream.io/v1alpha1` never match (`shipstream.io/{role,site,failover-group,healthy,graceful-shutdown,db-readonly…}`, `hold.verification.shipstream.io/`); (3) obsolete CR enum values only as a YAML or JSON field value (`role: primary-candidate`, `"state": "writable"`, `mode: timestamp`, a scalar `updateStrategy:`), plus `healthy=yes\|no`, `dragonfly-traffic=enabled`, and `dr-only` anywhere; (4) the A-74 old Event reasons as whole tokens; (5) (revision 4, OPUS-R3-08) any `raw.githubusercontent.com/ShipStream/bloodraven/main/` URL that points at `config/crd` or `charts/*/crds`, in those paths and in `README.md`. **Allowed:** PromQL label selectors (`role="…"`, `role=~"…"`, `state="…"`), whose kebab-case values A-114 keeps; metric `reason` values, which are the A-69 constants; and the migration mapping on the C-12 upgrade page, inside a marked allow block. Unit test of the gate: one old and one new sample per pattern (`operatorSecret:` fails and `operatorSecretName:` passes; `shipstream.io/role` fails and `bloodraven.shipstream.io/role` passes; `role: primary-candidate` fails and `{role="primary-candidate"}` passes; `…/bloodraven/main/config/crd/…` fails and `…/bloodraven/${BLOODRAVEN_VERSION}/config/crd/…` passes). | the course; `make course` |
+| E5 | One reference and Secret-reference shape | A-01, A-02, A-04, A-20, A-66, A-67 | types; `mysqldatabase_reconciler.go` index key; `cmd/bloodraven/deploy_api.go`; credential and S3 readers; plugin `backup`; `deployment.yaml` env name for `operatorEndpoint` | envtest: `backupRef: {}` rejected; MDB `failoverGroupRef` immutable; Secret name bounds; unit: A-67's URL becomes `--s3_endpoint` and `--s3_use_https` for `http`/`https`, with and without a port; envtest: `s3EndpointURL: ""` admitted and a scheme-less value rejected (F-50) | every docs manifest; `11.deployment-api.md`; doctor scripts that read `spec.credentials.*`; the MDB `Group` printer column (A-94); course (`operatorSecret`, `groupRef`, `lbIP` via E6) |
+| E6 | Name bounds, the string and list bounds the whole-block rules need, site removal refusal, and immutability rules on the kind roots | A-15, A-16, A-17, A-18, A-19, A-22, A-23, A-24, A-25, A-26; the A-92 and A-34 bounds that A-22 and A-23 traverse (revision 4, OPUS-R3-05) | the bounds listed in A-23, added before the rules that traverse them; MFG, MBK and MBV root XValidations; `StorageSpec`/`SiteSpec`; `PVCStorage` union; `backup_schedule.go` (`provisioned`); remove the MBV Job-label workaround | CRD test: every string and list reachable from `initFromBackup`, MBV `spec.pointInTime` and MBV `spec.sanityCheck` has a `maxLength` or `maxItems`; envtest table: every transition rule accepts unchanged updates, rejects changes and passes the CEL cost check; `confirm` with a lowercase `t` or the offset `+25:00` rejected (A-26, F-02); the house rule T-1 envtest: non-canonical Quantity, Duration, offset and explicit-zero values survive the operator's own typed finalizer and annotation-consumer `Update`s, and real changes are still rejected (F-01); root `metadata.name` bounds and grammar (`a.b` and `1orders` rejected, R08); `provisioned` cannot be removed and re-added (R04); unit: `BackupStorageMismatch` on an owned PVC of the wrong class or size | `playground/manifests/failovergroup.yaml` and `failovergroup-3site.yaml` (`lbIP` → `loadBalancerIP`; F-48); `operations.md:381` (resize); `2.operations.md` "Replacing a site" (A-16, F-19); the `initFromBackup` branch of the `RestoreBuildFailed` messages (`restore.go:904-917,1061-1064`), doctor `alert_runbook_matrix.md:57` and `5.backup-encryption.md:250-276`, pointing at the failed-bootstrap procedure (A-23, F-20); `encryption-at-rest.md` (disable is refused); `4.backup-pvc.md`; course (`lbIP`); `e2e` label |
+| E7 | CamelCase, typed enums for spec and status; stable metric label values; one vocabulary on the operator's JSON endpoints | A-27, A-28, A-29, A-30, A-32, A-33, A-114 (metrics, `/status`, `/ws/status` role and state) | types and constants; the API-to-internal `state.SiteRole` adapter replacing the cast at `reconciler.go:2383`, and its reverse for the endpoints and metrics (GPT-R3-01); the internal-to-API mappings for `DragonflyRole` (`dragonfly_topology.go:550,567`) and `SiteState` (`runner.go:2448`) (F-21); the PITR verification-mode wire adapter in `backup_verification_job.go` (F-10); `""` removed from the A-28 status enums; `UpdatePhaseComplete` deleted or mapped to `""` in the snapshot (A-29); literal sweep across the controller, plugin, `internal/playground`, `playground/manifests` (the `role:` values in `failovergroup.yaml` and `failovergroup-3site.yaml`; F-48), doctor `triage.sh`/`gtid-audit.sh`; `internal/metrics` label-value functions; the role and state adapter for `/status` (`topology.go:1124-1140`) and `/ws/status` (`:2136-2140`); the playground dashboard's comparisons and CSS classes (`playground/dashboard/index.html:17-18,131-150`) | unit: enum round-trip; unit: every Dragonfly classifier value and every internal site state maps into the API enum (F-21); unit: a verification Job rendered for each `PointInTimeVerificationMode` feeds a mode the download planner accepts (F-10); unit: each API role taken through the topology configuration into `EvalCrossSite`, with a writable `PrimaryCandidate` left unfenced (GPT-R3-01); unit: every enum value of every enum-valued metric label (`role`, `state`, the keyring `phase`, the restore-reclone `phase`, the source `state`, `from`, `to`) maps to its documented value (OPUS-R3-06, F-17); unit: a snapshot taken between `setPhase(Complete)` and the reset carries no `updatePhase` (OPUS-R3-07); payload test: `/status` and `/ws/status` serialize every role and state as the CR value; envtest: old lowercase values and A-33's invalid reasons rejected | docs that show `primary-candidate` or `writable`; `3.monitoring-prometheus.md` and `2.monitoring.md` (PromQL, and the `/status` and `/ws/status` examples at `:543-651`), `examples/prometheusrule.yaml`; the `BloodravenRestoreReclonesHeld` alert and the restore-reclone metric docs (`2.monitoring.md:70,212-213`, `3.monitoring-prometheus.md:134`, `2.backup-restore.md:790`, doctor `SKILL.md:171`; F-17); doctor references; log-schema fields that carry state values; course (`primary-candidate`, `dr-only`) |
+| E8 | Timers, timestamps and numeric types: the Duration rule, bounds, zero semantics and `stopTime` | A-35, A-36, A-37, A-38, A-41, A-34, A-39 (R11, OPUS-03) | types; `topology.go` (drop the 0 → 5m mapping); `site_helpers.go` (drop the 0 → 300 mapping); the profile `VerificationSpec` TTL mirror and its two creators (`trigger_verification.go`, plugin `verify.go`; F-11); retry and escrow readers; `restore_script.py` stop-time conversion and the verification Job's timestamp argument (A-39) | CRD test: reflects over the Go Duration fields and asserts both CEL bounds (OPUS-10); envtest bound checks; zero-value unit tests; an omitted `ttlSecondsAfterFinished` stays nil and an explicit 0 stays 0 through the scheduled trigger and through the plugin (F-11); envtest: `maxMemory` of `-1Gi` or `0` rejected, and a unit test pins its byte rendering (F-12); envtest: `stopTime` without a zone, with a lowercase `t` or `z`, with a fraction, or with the offsets `+25:00`, `+99:00` or `+05:99` rejected (OPUS-R3-03, F-02), and every admitted value decodes with `metav1.Time.UnmarshalJSON`, `mode: Timestamp` needs `stopTime`, `mode: Latest` forbids it; CRD test: both `stopTime` properties carry the RFC 3339 pattern | `crd-reference.md` timer table; `production-hardening.md`; PITR docs (`stopTime`); course (`stopDatetime`) |
+| E9 | One retention shape | A-55 | `backup_types.go`, `mysqlbackupverification_types.go`; `resolveRetention`, `pruneSuccessful` and the verification sweep | table test of keep-if-any (`keepLast`, `keepWithinDays`, `keepFailed`, explicit 0 meaning keep none, an omitted field meaning the default); the documented mapping of a legacy explicit 0 to omission (F-26) | `2.backup-restore.md` retention section, with the `max(count, minKeep, 1)` mapping and the no-pruning note (R07); doctor playbook entries on retention |
+| E10 | Status reshapes: replication state, encryption attribution, failover record, the `…Time` timestamp names, binlog coordinates, artifact identity, provenance; the durable-status markers | A-40 (including `requestTime`, `unsealTime` and `lastSeenTime`, revision 4), A-42, A-43, A-44, A-45, A-46, A-47, A-49, A-96, A-97, A-89 (markers and fail-safe test), A-114 (`replicationRunning`, `/ws/status` shapes) | status types; writers; `cmd/bloodraven/deploy_api.go` (`replicationRunning`); `internal/platform/websocket.go` `TopologyMessage` and its dashboard readers; `internal/dragonfly/info.go` field presence for `master_sync_in_progress` and `master_last_io_seconds_ago` (A-44, F-22); the sidecar's coverage probes and the `/keyring/status` wire types on both sides (`internal/sidecar/mysql.go`, `keyring.go`, `internal/mysql/sidecar_client.go`; A-46, F-13); the `Replicating` readers in `planned_failover.go`, `backup_reconciler.go` and `reconciler.go` (A-43, F-24); `playground/enable-encryption.sh` (A-47, F-25); restore and verification readers of `artifactStorage` (D-12); plugin `status.go`; s31, s37, s48 and s50; the `status.pitr.profileName` readers (`pitr_archive_condition.go:615`, `internal/playground/scenarios/backup_helpers.go:723`; A-49, F-39); `// Durable:` markers | unit: verification and restore use the recorded claim and endpoint; lease gate uses the `replication` enum; unit: A-43's producer mapping (`Unknown` while the healthy streak builds, `Lagging` above `maxLagSeconds`, `Broken` with a stopped thread, the gate refusing `Unknown`); deploy API: `replicationRunning` for each `replication` value; `/ws/status` carries `lastFailover{…}` and `sites[].replication`; unit: INFO without `master_sync_in_progress` leaves `syncInProgress` nil, INFO without `master_last_io_seconds_ago` leaves `lastIOSecondsAgo` nil, and a reported -1 stays -1 (F-22); unit: each coverage flag missing, false and true through the sidecar and the operator (F-13); unit: the planned-failover target check, backup source selection and the `healthy=yes` label each accept a `Lagging` site (F-24); component (`test/component`): the A-89 lost-status and fresh-deploy cases (R11) | doctor `triage.sh`, `SKILL.md`, `sidecar-probe.sh` (F-13), alert matrix (`sealed` → condition); the `/ws/status` meaning change in the release notes (F-23); `8.encryption-at-rest.md`; the MBK `Location` printer column moves here with A-96 (OPUS-26) |
+| E11 | Honest generations, the condition vocabulary and the deploy-API token set | A-68, A-70, A-71, A-72, A-73, A-114 (`/deploy/v1`) | `runner.go` (snapshot config generation, advanced on the equal-config path too, F-28; `BootstrapFailed` in `degradedReason`, F-30); `backup_reconciler.go` `pendBackup` escalation (F-29); MBK, MBV and MSC `Ready` and their printer columns; chart ArgoCD Lua (`:66-75,77-87`); `cmd/bloodraven/deploy_api.go`; the bootstrap predicates in s10, s13, s19, s37, s59 and `repair_helpers.go` (F-31) | unit: conditions are stamped with the applied generation; a backup-schedule-only edit brings `observedGeneration` and `Ready.observedGeneration` to `metadata.generation` (F-28); a backup pending past 30m fails with `NoHealthySource` or `PendingTimedOut`, never a pending reason (F-29); `Degraded=True/BootstrapFailed` persists across polls, clears on recovery without a clone, and deployment leases are granted again (F-30); s10, s13, s19, s37 and s59 use the new completion and failure predicates (F-31); Lua test fixtures; course fixtures; deploy API test: every token field, `unstableReason` included, is drawn from the A-69 constants, and every value `DeploymentUnstableReason` returns is declared (F-32) | `crd-reference.md` conditions; `11.deployment-api.md`, with the closed value set of every token field and the `replicationRunning` definition (A-43); `gitops.md`; the ArgoCD Lua in the chart; `playground/chaos-scenarios.md:39,43,545,1479`, `9.failure-mode-matrix.md:51` and the course's bootstrap tokens (`topic-24-provisioning/read.md:287`, `SOURCES.md:228`; F-31) |
+| E12 | Event reason naming and types | A-74, A-75, A-76 (generated docs table), A-73 (the `PITRArchiveReady` Event rename, F-34), A-114 (the lease revocation reasons, F-18) | Event call sites, including the six reasons added since `3fa1900` and every Event reason that survives #235, not only its completion Event (F-55); status writers and constants that share a renamed Event token, such as `status.restore.reason` (F-34); `operator_revoked`/`topology_changed` → `OperatorRevoked`/`TopologyChanged` in `deployment_leases.go`, the 409 body and s53 (F-18); s48 assertion | registry test (from E1) extended to doc coverage; unit: every metric `reason` label value written is a declared A-69 constant (A-114) | `2.monitoring.md` (generated), `7.log-schema.md` Event reference, doctor `SKILL.md`/alert matrix/playbooks; release-note rename table, including renamed metric `reason` values |
+| E13 | Desired state out of annotations and status; no persisted sidecar default (the API shape) | A-48, A-51, A-52 (the field, the chart values and `default={}`; not pacing), A-53, A-98 | `dragonfly_upgrade.go` (no spec writes; the A-48 level-trigger rules), the Dragonfly StatefulSet renderer (live image kept under `SnapshotRestore`), encryption adoption gate, sidecar image env from the new chart values `sidecar.image.{repository, tag}` (chart `values.yaml`, `deployment.yaml`), MDB DDL, MBK finalizer | envtest: `SnapshotRestore` needs `snapshot.dir`, and `snapshot: {}` gets the rule's message, not an evaluation error; unit: a spec image that differs from the live StatefulSet drives the snapshot upgrade, an unknown live image does nothing (OPUS-18), and the operator never calls `Update` on spec; unit (F-03): a failed SAVE ends in one terminal run and no restart while `spec.dragonfly` is unchanged, a `spec.dragonfly` change re-arms it, a run blocked by a planned failover or a missing `activeSite` waits without the Rolling render moving any site, `sourceImage` comes from the live active site, and a run interrupted after one site resumes after an operator restart; chart test: the env renders from `sidecar.image.*`; a `Retain` backup keeps its artifact | `5.app-integration.md` (Dragonfly upgrade, including the two-step retry); `7.tenant-databases.md`; doctor; course unit 7 (`sidecarImage`); `e2e` label |
+| E13b | Rollout pacing for release-driven pod-spec changes (PR3, not freeze-critical) | A-52 (R-1 to R-7) | designed in that PR against #244 | A-52 R-7: the real updater with a replica that stays unready; a combined render-version and sidecar-default change; a `Recreate` group; an operator restart mid-rollout | `10.upgrade-policy.md` (how operator upgrades roll unpinned groups, and that a render-version bump rolls pinned groups too); release notes; `e2e` label |
+| E14 | One key prefix, boolean label values, namespace-scoped taint, the hold family, and action-annotation grammar | A-77, A-21, A-78, A-80 | every label, annotation and finalizer constant (E1 makes this a one-file change plus selectors), including the MFG finalizer rename, `encryption-status-fence`, and the verification hold (`backup_verification_hold.go`, `cmd/bloodraven/pitr_retention.go`); any proposal 21 label or restore hold already on WS-E's base, with its `<group name>/<group UID>` value kept (A-59, A-77; revision 4); `tainter.go` (delete `LegacyTaintKey`); the playground object store's tolerations (`playground/manifests/rustfs.yaml:58-66`), which otherwise lose their `NoExecute` toleration after the rename and get evicted on every failover (F-48); selector-mismatch refusal; chart NetworkPolicy; playground and chaos tooling; the doctor escrow helper's keys | envtest and unit: selector-mismatch condition and Event without a retry loop; unit: taint key format and length; the new hold key protects a backup under an active verification and under a Terminating one (retention, cleanup and PITR cutoff); A-78 parsing (both reclone forms with `confirm=` and `uid=`, a divergent form without `confirm=` rejected, the operator's `recloneAnnotationValue` output accepted (F-35), `gtidPrefix=`, values with `:` rejected, basic-form instants, a comma-separated id list, and an operation-id subject accepted without `confirm=`) | `12.well-known-metadata.md` (generated), `5.app-integration.md` tolerations, `architecture.md` labels, doctor scripts' selectors and hold queries (`triage.sh`, `support-bundle.sh`, `keyring-escrow-recover.sh`), `SKILL.md` and playbook 36; course (`shipstream.io/role`); `e2e` label |
+| E15 | Divergent-promotion records and acknowledgement; GitOps-safe actions; plugin wrappers (PR5, not freeze-critical) | A-86, A-81 | `gtid_audit.go`, `runner.go`; plugin `ack-divergence`, `rotate-keyring`, `revoke-leases`; the playground reset lists (`cmd/playground-chaos/reset.go:365-370`) gain `divergentPromotions` and `divergentPromotionsOmitted` (F-37) | unit: acknowledging one record keeps the others; a 17th record increments `divergentPromotionsOmitted` and emits `DivergentPromotionRecordsTruncated` (OPUS-22); 17 promotions, 16 acknowledged: the condition stays True until `omitted` is acknowledged with `confirm=` and `uid=` (F-16, F-36); an id taken from another group's status clears nothing (F-14); two promotions of one site in the same second get distinct ids (F-36); 16 records with sets over 8 KiB stay under the size budget and carry `divergentGtidTruncated` (F-49); a set over 1 KiB is cut in the Event and log as documented (F-15); a playground wipe clears both new fields (F-37); plugin tests | `log-schema.md:169`, `crd-reference.md:709`, doctor playbook `troubleshooting_playbooks.md:931-937` (including the step to capture `gtid_executed` before a reclone, F-15), `gitops.md` |
+| E16 | Admission validation for my.cnf inputs, cross-references and bounds; kind metadata; doc comments | A-90, A-91, A-92, A-93, A-94, A-95 | types; the D-03 controller fix | envtest: injection strings rejected, dangling profile references rejected, CEL cost passes; `bytesPerChunk: 512k` and `maxBinlogSize: 512m` admitted and `bytesPerChunk: 64m` rejected (F-60); `--replicaof` in `dragonfly.args` rejected (F-38) | `crd-reference.md` |
+| E17 | Hardened security-context defaults, gated (PR4, not freeze-critical) | A-54 | one merge helper for MySQL, Dragonfly and Jobs; uid and gid 999; emptyDirs for `/tmp` and `/var/run/mysqld` | the Q6 gate: Restricted-PSS admission, fresh init, existing-volume restart, keyring, PITR, backup and restore, chaos failover, both images, local-path plus one CSI class. If it fails, ship option C and record why. | `production-hardening.md` (drop the FSGroup upgrade procedure); doctor; `e2e` label |
+| E18 | Runbooks and operator messages without status writes (PR5, not freeze-critical) | A-83 (rule only; the patch is already gone), A-84, A-85, A-87, A-88, A-89 (docs) | docs and doctor; the `backup_types.go:901-913` comment; the two operator messages (`runner.go:2149-2152`, `internal/state/matrix.go:219-221`; OPUS-02) | unit: neither message contains `--subresource=status`. This is the existing `TestRunner_PendingRecloneRefusalNamesWorkingRemedy` (`internal/controller/restore_reclones_test.go:952-961`) inverted: today it fails unless the `PromotionRefusedPendingReclone` Event contains the token (`:958`), so E18 must change it, not only add a test (OPUS-R3-09). Add the same assertion for the `Degraded=NoPrimary` message. The lint below runs in CI, with its self-test (section 4; GPT-R3-04), and the self-test covers both `--subresource=status` and `--subresource status` (F-67) | `4.runbooks.md`, `8.encryption-at-rest.md` (escrow and keyring-rollback break-glass labels), `2.backup-restore.md`, `2.monitoring.md`, `7.tenant-databases.md`, `7.log-schema.md:268` (checked; `msg` unchanged), `chaos-scenarios.md`, `3.playground.md` (A-88's prerequisite per pass, F-59), doctor `troubleshooting_playbooks.md` and `alert_runbook_matrix.md`; a lint that fails on `--subresource=status` and `--subresource status` outside break-glass blocks in `site/` and `.agents/` (it checks command tokens only; prose status-write instructions are a review item, F-67), and in string literals in production Go code under `internal/` and `cmd/` (excluding `_test.go`, fixtures, the lint's own test inputs and the playground tooling; section 4) |
+| E19 | Course sweep, the U-1 warnings, and the old-token gate (PR5, not freeze-critical) | OPUS-06 (no finding of its own); 3.2 U-1 | `course/`; the rebuilt `site/public/courses`; `site/app/` (`HomeFailoverStage.vue:73`, OPUS-R3-10); `10.upgrade-policy.md`, `11.gitops.md`, `5.production-install-examples.md` (F-62) and course unit 7 get the "not for v1.6.0 → v1.7.0" warning (C-12) | **A context-aware CI gate (revision 3; GPT-R2-03, OPUS-R2-04).** Revision 2 grepped bare substrings, so it failed on a correct tree: `operatorSecret` is a prefix of `operatorSecretName`, `shipstream.io/role` is inside `bloodraven.shipstream.io/role`, and A-114 keeps `primary-candidate` as a metric value. The gate scans `course/`, `site/content/`, `site/app/` (revision 4, OPUS-R3-10), `.agents/`, `examples/` and `playground/` manifests and scripts (revision 5, F-48), case-sensitively, matching whole tokens in context only: (1) obsolete field names as YAML or JSON keys or as path segments, a token with no word character on either side followed by `:` or preceded by `.` (`lbIP`, `sidecarImage`, `sidecarResources`, `operatorSecret`, `groupRef`, `stopDatetime`, `sourceSiteOverride`, `mysqlBackupRef`, `maxMemoryMb`, … from the 3.4 table); (2) exact old metadata keys not preceded by a DNS-label character or `.`, so `bloodraven.shipstream.io/…` and the API group `shipstream.io/v1alpha1` never match (`shipstream.io/{role,site,failover-group,healthy,graceful-shutdown,db-readonly…}`, `hold.verification.shipstream.io/`); (3) obsolete CR enum values only as a YAML or JSON field value (`role: primary-candidate`, `"state": "writable"`, `mode: timestamp`, a scalar `updateStrategy:`), plus `healthy=yes\|no`, `dragonfly-traffic=enabled`, and `dr-only` anywhere; (4) the A-74 old Event reasons as whole tokens; (5) (revision 4, OPUS-R3-08) any `raw.githubusercontent.com/ShipStream/bloodraven/main/` URL that points at `config/crd` or `charts/*/crds`, in those paths and in `README.md`. **Allowed:** PromQL label selectors (`role="…"`, `role=~"…"`, `state="…"`), whose kebab-case values A-114 keeps; metric `reason` values, which are the A-69 constants; and the migration mapping on the C-12 upgrade page, inside a marked allow block. Unit test of the gate: one old and one new sample per pattern (`operatorSecret:` fails and `operatorSecretName:` passes; `shipstream.io/role` fails and `bloodraven.shipstream.io/role` passes; `role: primary-candidate` fails and `{role="primary-candidate"}` passes; `…/bloodraven/main/config/crd/…` fails and `…/bloodraven/${BLOODRAVEN_VERSION}/config/crd/…` passes). | the course; `make course` |
 
-After E19:
+After PR2 (the last freeze-critical PR):
+
+- Regenerate the inventory appendix.
+- Hand the cleaned schema to Barry for the `v1.7.0-rc.0` cut, once C-8 is signed off and the `release.yml`
+  pre-release rule has merged (C-8).
+
+After PR5:
 
 - File the follow-up issues: A-84 re-escrow and the keyring-version rollback action, the D-01…D-14 defects that
   WS-E does not fix itself, and the #204 scope addition (`resume`, and the UID binding of both actions).
-- Regenerate the inventory appendix.
-- Hand the cleaned schema to Barry for the `v1.7.0-rc.0` cut, once C-8 is signed off.
+- Regenerate the inventory appendix again if PR3 to PR5 changed the schema.
 
 ## 7. Open questions
 
@@ -2729,7 +3193,7 @@ Six questions were hard to undo after v1beta1 and had no obvious answer. They we
 | Q2 | Timer encoding | **A**: spec timers are `*metav1.Duration`. Integer `xxxSeconds` only when forwarded to a core field or compared with a MySQL or DNS seconds value. Status measurements are integers with the unit in the name. | Round 2, 3-0 (GPT moved from B) | B: integer seconds everywhere (about 12 renames, including #235's timers). C: status quo | Every Duration has field-specific CEL `duration()` lower and upper bounds that fit `time.Duration`. A zero is rejected or documented per field. A generated-CRD test fails on a Duration without both bounds. Admission tests on Kubernetes 1.27 (revision 2: on the 1.31 floor, A-115). | A-35, A-36, A-38 |
 | Q3 | Secret reference shape | **B**: `xxxSecretName` strings for whole Secrets; `xxxSecretKeyRef{name, key}` only where a key is selected | Round 1, 3-0 | A: `xxxSecretRef{name}` everywhere (re-keys the MDB `users` and `appliedUsers` ledger). C: status quo | MDB `secretName` list-map keys unchanged | A-02, A-58 |
 | Q4 | Key prefix for labels, annotations, finalizers and the taint | **A**: everything Bloodraven-owned under `bloodraven.shipstream.io/`; boolean label values `"true"`/`"false"` | Round 2, 3-0 (Grok moved from B) | B: a documented split. C: status quo | Immutable selectors: the operator refuses on a mismatch with a condition and Event, without an update loop. The runbook recreates workloads one site at a time with a cascading delete (never orphaning), and never deletes the MFG. Old finalizers are reported and removed by a documented patch. Bundled with the namespace-scoped taint key. No dual-key code. (Revision 2: the runbook and old-finalizer conditions lapse with the in-place path; the selector-mismatch refusal stays. See A-77.) | A-77, A-21 |
-| Q5 | Baseline for the D6 upgrade E2E | **A**: `v1.7.0-rc.0`, cut after WS-E (v1alpha1 only, cleaned schema). The E2E goes rc.0 → v1beta1 build → `migrate-storage` → `storedVersions == [v1beta1]`, health and failover. | Round 2, 3-0 (GPT moved from B) | B: a v1.6.0 baseline with a manual-path E2E. C: `migrate-storage` rewrites old field names (a D2/D3 shim) | `migrate-storage` first runs a server-side `dryRun=All` update of every object and refuses before any write, listing each failing object with a migration-table pointer (generic, no legacy names). Envtest pins this with the v1.6.0 CRDs (refusal list, unchanged `resourceVersion`s). v1.6.0 → v1.7.0 is documented as: export manifests, re-apply, never delete the MFG, recreate workloads per Q4, or a fresh install plus logical restore. (Revision 2: the in-place half is impossible (3.1), so only the second half remains, as the new-group procedure, whose requirements are now 3.2. The baseline amends D6 and needs sign-off; see C-8.) | C-7, C-8, section 3 |
+| Q5 | Baseline for the D6 upgrade E2E | **A**: `v1.7.0-rc.0`, cut after WS-E (v1alpha1 only, cleaned schema). The E2E goes rc.0 → v1beta1 build → `migrate-storage` → `storedVersions == [v1beta1]`, health and failover. | Round 2, 3-0 (GPT moved from B) | B: a v1.6.0 baseline with a manual-path E2E. C: `migrate-storage` rewrites old field names (a D2/D3 shim) | `migrate-storage` first runs a server-side `dryRun=All` update of every object and refuses before any write, listing each failing object with a migration-table pointer (generic, no legacy names). Envtest pins this with the v1.6.0 CRDs (refusal list, unchanged `resourceVersion`s). v1.6.0 → v1.7.0 is documented as: export manifests, re-apply, never delete the MFG, recreate workloads per Q4, or a fresh install plus logical restore. (Revision 2: the in-place half is impossible (3.1), so only the second half remains, as the new-group procedure, whose requirements are now 3.2. The baseline amends D6 and needs sign-off; see C-8. Revision 5: a no-op dry-run update does not refuse what ratcheting downgrades (F-07), so the refusal condition stands but its mechanism is now requirement U-10, which #243 designs.) | C-7, C-8, section 3 |
 | Q6 | Security-context defaults for MySQL and Dragonfly | **"A-gated"**: hardened defaults merged under user fields, one uid and gid 999 for MySQL, Dragonfly and every Job (replacing the hard-coded 27), launcher root filesystem writes plus `/tmp` and `/var/run/mysqld` on emptyDirs, no root init phase, no per-image branch | Round 3, 3-0 (Grok moved from C) | B: as-is semantics with renamed backup fields. C now, without attempting the gate | A timeboxed gate: Restricted-PSS admission, fresh init, existing-volume restart, keyring, PITR, backup and restore, chaos failover, on both images and on local-path plus one CSI class. If the gate fails or is incomplete, ship C (one merge helper, empty MySQL and Dragonfly defaults) and record why. The API shape is identical in both outcomes. | A-54, E17 |
 
 ## 8. Decisions record
@@ -2753,14 +3217,14 @@ using the zero-production-users rule. "MBOD" means the section 7 debate decided.
 | A-12, A-13 | Sets for schema lists; ordered lists explicitly atomic; `sitePriorities` unique | Implicit atomic | Settled |
 | A-14 | `deploymentClients` keyed by (namespace, serviceAccount); breaking (revision 2) | Keep one ServiceAccount per namespace | Settled |
 | A-15 | Admission bounds: site ≤ 20, group + site ≤ 41 (revision 3), MBK/MBV names ≤ 63; group name a DNS-1035 label (revision 2) | Hash-truncate generated names (GPT) | Settled |
-| A-16 | Site removal and rename refused | Allow, and implement pruning now | Settled |
+| A-16 | Site removal and rename refused; replacement by its own same-cluster procedure (revision 5, F-19) | Allow, and implement pruning now; pointing at the v1.6.0 procedure | Settled |
 | A-17 | Site storage class, size and zone immutable | Grow-only size rule (expressible at the 1.31 floor, but PVC expansion is not implemented) | Settled |
 | A-18 | Backup PVC `claimName \| provisioned` union; presence-checked parent rule plus a reconcile-time `BackupStorageMismatch` whose comparison is defined (nil class matches any; size against the PVC request; larger accepted; revision 3); shared `ProvisionedVolumeSpec` with #205 | CEL forbidding size and class next to `claimName` only; a field-level `self == oldSelf`; a literal or `status.capacity` compare | Settled |
 | A-19 | `loadBalancerIP` with `Format=ipv4` | CEL `isIP()` (available at the floor, but it adds CEL cost) | Settled |
 | A-20 | `sourceSite`/`targetSite`/`site` naming rule | `sourceSiteOverride` | Settled |
 | A-21 | Taint `<ns>.db-readonly.bloodraven.shipstream.io/<group>`; no legacy key | Hashed key (GPT); keep stripping the legacy key | Settled and MBOD Q4 |
 | A-22 | MBK/MBV execution fields immutable; cleanup knobs mutable | Defend against edits in the controller | Settled |
-| A-23 | `initFromBackup` fully fixed at creation | Allow edit and removal, forbid only adding (MFGSPEC) | Settled |
+| A-23 | `initFromBackup` fully fixed at creation, compared by value (T-1); a never-bootstrapped group is deleted and recreated to fix a failed bootstrap (revision 5, F-20) | Allow edit and removal, forbid only adding (MFGSPEC); allowing edits while status reports a failure | Settled |
 | A-24 | Encryption disable refused; keyring paths immutable while enabled | Toggle back and forth | Settled |
 | A-25 | MFG transition rules on the kind root | Rules on the shared spec type | Settled |
 | A-26 | `confirm` stays a string with `Format=date-time` | `metav1.Time` (breaks token byte equality) | Settled |
@@ -2772,23 +3236,23 @@ using the zero-production-users rule. "MBOD" means the section 7 debate decided.
 | A-34 | `sanityCheck{query, minResult, timeout}` and an `outcome` enum | Keep `expect` wrapper and `ran bool` | Settled |
 | A-35 | Duration rule | Integer seconds everywhere | MBOD Q2 |
 | A-36 | No Go `int` in the API | Add a format only | Settled |
-| A-37 | Pointers where zero is valid; no zero-to-default mapping | Non-pointer with an `omitempty` default | Settled |
+| A-37 | Pointers where zero is valid; no zero-to-default mapping; the MBV TTL's nil-keeps-until-retention is a separate lifecycle decision, applied to the profile mirror too (revision 5, F-11, F-54) | Non-pointer with an `omitempty` default | Settled |
 | A-38 | Lower and upper bounds on every Duration; CRD test; cooldown ≥ 30s | Lower bounds only; allow a zero cooldown | MBOD Q2, settled (cooldown) |
-| A-39 | `stopTime` as `metav1.Time` everywhere, with an RFC 3339 OpenAPI pattern on every user-written time (revision 4) | Keep `stopDatetime` with its MySQL form; `format: date-time` alone; a CEL `matches()` (unavailable on a timestamp) | Settled |
+| A-39 | `stopTime` as `metav1.Time` everywhere, with an RFC 3339 OpenAPI pattern on every user-written time (revision 4) that bounds the offset and admits no fraction (revision 5, F-02, F-01) | Keep `stopDatetime` with its MySQL form; `format: date-time` alone; a CEL `matches()` (unavailable on a timestamp) | Settled |
 | A-40 | `lastFailover{time,target,promotionGtidExecuted}` struct; `*Time` names on every status timestamp, including `requestTime`, `unsealTime` and `lastSeenTime` (revision 4) | Rename to `lastFailoverTime` only; applying the rule to new fields only | Settled |
 | A-41, A-42 | `maxMemory` Quantity; shared `BinlogCoordinate` | Keep `maxMemoryMb`; keep two coordinate shapes | Settled |
 | A-43 | `replication` enum; `/deploy/v1` `replicationRunning` keeps its name, defined as `Healthy` or `Lagging` on every non-active site (revision 3); `Healthy`/`Lagging` only after the debounce streak, `Lagging` above `maxLagSeconds` (revision 4) | `replicationHealthy *bool` | Settled |
 | A-44, A-46 | `*bool` for observed flags | Fill unknowns with `false` | Settled |
 | A-45 | `status.encryption{mode, algorithm}`, extended by #203 | `encrypted *bool` | Settled |
 | A-47 | Remove `encryptionAtRest.sealed` | Make it `*bool`; keep it | Settled |
-| A-48 | `spec.dragonfly.upgradeStrategy`; the operator never writes spec | Annotation carrying the image | Settled |
-| A-49 | Remove `status.pitr.enabled` and `status.dragonfly.enabled` | Keep the echoes | Settled |
+| A-48 | `spec.dragonfly.upgradeStrategy`; the operator never writes spec; a terminal run is not restarted until `spec.dragonfly` changes, the ordinary render keeps the live image under `SnapshotRestore`, and the source image is live (revision 5, F-03) | Annotation carrying the image; a retry annotation; re-arming on any generation change | Settled |
+| A-49 | Remove `status.pitr.enabled`, `status.pitr.profileName` (revision 5, F-39, which withdraws A-111) and `status.dragonfly.enabled` | Keep the echoes; keep `profileName` as an attribution | Settled |
 | A-50 | #235 owns semantics and record structure; WS-C lands the shape against the A-50 checklist, and WS-E's first step re-audits and fixes any gap (revision 3) | "WS-E does not touch this block" (revision 2), which left the must-fix with no owner; WS-E redesigning the claim | Settled (revision 3; orchestrator ruling on OPUS-R2-03) |
 | A-51 | `spec.encryptionAtRest.existingData` | Keep the persistent `encryption-adopt` annotation | Settled |
-| A-52 | `spec.sidecar.image` with no default (operator-built default from chart values `sidecar.image.{repository, tag}`); default-driven rollouts serialized one group at a time and health-gated, with an admission timeout so a group that never starts cannot block the queue (revision 3); `spec.sidecar` stays a value type with `default={}` | A persisted CRD default bumped every release; a one-shot `roll-sidecar` action; a required pin; the chart key `sidecarImage.*`; a queue that waits forever on a group that never starts | Settled |
+| A-52 | `spec.sidecar.image` with no default (operator-built default from chart values `sidecar.image.{repository, tag}`); `spec.sidecar` stays a value type with `default={}`. Rollout pacing is runtime behaviour: revision 5 removes the queue design and states requirements R-1 to R-7 for WS-E PR3 and #244, which gate v1.7.0, not rc.0 | A persisted CRD default bumped every release; a one-shot `roll-sidecar` action; a required pin; the chart key `sidecarImage.*`; designing the queue inside this audit a fourth time | Settled (revision 5; orchestrator ruling on F-04, F-05, F-06) |
 | A-53 | No collation default; breaking (revision 2) | `utf8mb4_0900_ai_ci` default | Settled |
 | A-54 | Hardened merged defaults, uid 999, behind a gate; fallback C | As-is semantics (B); C without trying | MBOD Q6 |
-| A-55 | `retention{keepLast, keepWithinDays, keepFailed}` on both kinds; migration `keepLast = max(count, minKeep, 1)`; no-pruning has no equivalent | `count`/`minKeep`/`maxFailedKeep`; keep the legacy integer; a finite default silently replacing no-pruning | Settled |
+| A-55 | `retention{keepLast, keepWithinDays, keepFailed}` on both kinds; migration `keepLast = max(count, minKeep, 1)`; a legacy explicit 0 that means the default migrates to omission (revision 5, F-26); no-pruning has no equivalent | `count`/`minKeep`/`maxFailedKeep`; keep the legacy integer; a finite default silently replacing no-pruning | Settled |
 | A-56 to A-61 | Remove inert or unimplemented fields, values and status | Keep them "for compatibility" | Settled |
 | A-59 | Proposal 21's planned API is checked against the A-59 table: keys, the hold, `…Time`, typed reasons, no `""`, the A-71 and A-73 sets, no `kind`. PR1-PR3 on WS-E's base go through step 0 (revision 4) | "#205 lands after the freeze and needs four renames" (revision 3) | Settled (revision 4) |
 | A-56 | Remove `s3.storageClass` | Wire it to mysqlsh before the freeze | Settled |
@@ -2799,15 +3263,15 @@ using the zero-production-users rule. "MBOD" means the section 7 debate decided.
 | A-68 | `status.observedGeneration` from the applied config generation | The fetched object's generation | Settled |
 | A-69, A-70 | Constants in `api/`; `Ready` on every kind now | Defer `Ready` (KINDS) | Settled |
 | A-71 to A-73 | Specific `Ready` reasons; polarity fixes; one meaning per token | `TopologyPolled` for both values | Settled |
-| A-74, A-75 | Full Event rename table and one type per reason | Fix only within-family inconsistencies | Settled |
+| A-74, A-75 | Full Event rename table and one type per reason; the rule allows a trailing cause qualifier, and every target has a verb (revision 5, F-33, F-57) | Fix only within-family inconsistencies | Settled |
 | A-76 | Generated Event registry with a test | Hand-maintained page | Settled |
 | A-77 | One `bloodraven.shipstream.io/` prefix; `"true"`/`"false"` values; hold family `<kind>-hold.bloodraven.shipstream.io/<id>`, with only the prefix changing and the restore-hold value staying `<group name>/<group UID>` (revision 4); MFG finalizer → `failover-group` | Documented split; status quo; dual-key reads for in-flight holds | MBOD Q4; hold and finalizer settled in revision 2 |
-| A-78, A-82 | Annotation grammar `<subject>(:k=v)*` with values restricted to `[A-Za-z0-9._/+-]`, basic-form instants, `uid=` binding; an operator-minted operation-id subject satisfies `confirm=` and `uid=`, and a subject may be a comma-separated id list (revision 4); monotonic spec tokens | Positional reclone prefix; `;` as separator (a shell metacharacter) | Settled |
+| A-78, A-82 | Annotation grammar `<subject>(:k=v)*` with values restricted to `[A-Za-z0-9._/+-]`, basic-form instants, `uid=` binding; both reclone forms carry `confirm=` and `uid=` (revision 5, F-35); an operator-minted operation-id subject satisfies `confirm=` and `uid=`, and a subject may be a comma-separated id list (revision 4); monotonic spec tokens | Positional reclone prefix; `;` as separator (a shell metacharacter) | Settled |
 | A-79, A-80 | Exported keys, a generated metadata page, versioned payloads | Copied strings | Settled |
 | A-83 | Delete the `Sealed` patch; rely on `KeyringRecovered` | A typed recovery request (GPT) | Settled |
 | A-84 | Escrow forging is break-glass; follow-up issue | Build re-escrow before v1beta1 | Settled |
 | A-85 | Reclone patches are break-glass until #204, plus `resume` added to its scope | Pull #204 into v1.7.0 | Settled |
-| A-86 | `divergentPromotions[]` and a per-id acknowledgement annotation | A condition-timestamp acknowledgement (STATUS) | Settled |
+| A-86 | `divergentPromotions[]` keyed by a UUID per promotion, 8 KiB per GTID set, a durable `divergentPromotionsOmitted` count with its own bound acknowledgement, and a per-id acknowledgement annotation (revision 5) | A condition-timestamp acknowledgement (STATUS); a time-and-site id; an overflow count kept only in the message | Settled |
 | A-87, A-88 | Delete the MDB patch advice; playground resets are break-glass | Keep them documented as supported | Settled |
 | A-89 | Durable status stays in status, with a written contract | Move it to annotations or a ConfigMap | Settled |
 | A-90 to A-92 | Admission patterns, cross-reference CEL, bounds | Reconcile-time checks only | Settled |
@@ -2815,13 +3279,16 @@ using the zero-production-users rule. "MBOD" means the section 7 debate decided.
 | A-96 | Fold `storageType` into #232's `artifactStorage`; every consumer reads it | A tagged sub-union; keep the top-level duplicates | Settled |
 | A-97 | Shared `provenance` struct, after #206 | Three copies of the fields | Settled |
 | A-98 | MBK `deletionPolicy`, default `Delete` | Always delete artifacts | Settled |
-| A-99 to A-113 | Leave (section 2.18) | See each row | Settled |
-| A-114 | Metric label values are the kebab-case form of the API enums (only `dr-only` changes), produced by one mapping function for every enum-valued label, including `phase`, the source `state`, `from` and `to` (revision 4); metric `reason` labels are the A-69 constants; `/deploy/v1`, `/status` and `/ws/status` carry the CR values and shapes (revision 3), documented | Raw CamelCase metric values; freezing `dr-only`; lowercase or kebab-case on the JSON endpoints | Settled (revision 2; extended in revision 3) |
+| A-99 to A-113 | Leave (section 2.18), except A-111, withdrawn into A-49 in revision 5 | See each row | Settled |
+| A-114 | Metric label values are the kebab-case form of the API enums (`dr-only` changes, and in revision 5 the restore-reclone `phase`, F-17), lease revocation reasons become `OperatorRevoked`/`TopologyChanged` (F-18), produced by one mapping function for every enum-valued label, including `phase`, the source `state`, `from` and `to` (revision 4); metric `reason` labels are the A-69 constants; `/deploy/v1`, `/status` and `/ws/status` carry the CR values and shapes (revision 3), documented | Raw CamelCase metric values; freezing `dr-only`; lowercase or kebab-case on the JSON endpoints | Settled (revision 2; extended in revision 3) |
 | A-115 | Kubernetes floor 1.31, tested by a CI envtest job | Keep 1.27 with a 1.27 job; an untested floor | Settled (revision 2) |
-| Section 3 | No in-place v1.6.0 → v1.7.0 upgrade; a new group restored from a backup, with a per-field classification of what is dropped. Revision 3 replaces the step-by-step with requirements U-1 to U-9 that WS-F's written and tested procedure must meet. Revision 4 tracks the procedure as a separate WS-F follow-up issue (#243) after a third round of Major findings | The first draft's export/re-apply path; patching the steps a third time; reviewing the procedure inside this proposal again | Settled (revision 2; orchestrator rulings on R02, R03, OPUS-01, and in revisions 3 and 4 the scope rule) |
-| C-7 | Dry-run preflight in `migrate-storage`; the v1.6.0 refusal envtest stays | Rewriting legacy fields | MBOD Q5 |
+| T-1 (2.4) | Transition rules compare values, not encodings: Quantity, Duration and timestamps by value, omitted zeros substituted, whole-object equality only on string-only sub-structs; tested against the operator's own typed writes in E6 (revision 5, F-01) | Canonical forms at admission; metadata-only operator patches | Settled (revision 5) |
+| A-115 (ratcheting) | Ratcheting downgrades every schema error on an unchanged node; 1.31 and 1.32 do not ratchet spec CEL on status writes, so every later spec CEL tightening ships a 1.31 status-write test (revision 5, F-07, F-40) | Raising the floor to 1.34 | Settled (revision 5) |
+| Section 6 | WS-E as five PRs; only the freeze-critical PR1 and PR2 gate WS-F and rc.0; A-52's pacing (PR3) and A-54's gate (PR4) are their own `e2e` PRs; A-86, A-81, E18 and E19 in PR5 (revision 5) | One 19-commit branch | Settled (revision 5; orchestrator ruling on merits point 1) |
+| Section 3 | No in-place v1.6.0 → v1.7.0 upgrade; a new group restored from a backup, with a per-field classification of what is dropped. Revision 3 replaces the step-by-step with requirements U-1 to U-9 that WS-F's written and tested procedure must meet. Revision 4 tracks the procedure as a separate WS-F follow-up issue (#243) after a third round of Major findings. Revision 5 states only what is true about ratcheting and `storedVersions`, rewrites U-2, and moves the object-check mechanism into requirements U-10 to U-13 for #243 | The first draft's export/re-apply path; patching the steps a third time; reviewing the procedure inside this proposal again | Settled (revision 2; orchestrator rulings on R02, R03, OPUS-01, and in revisions 3 and 4 the scope rule) |
+| C-7 | `migrate-storage` rewrites every object and trims `storedVersions`; its refusal of non-conforming objects is a requirement (U-10 to U-13) that WS-F meets under #243; the v1.6.0 refusal envtest stays (revision 5) | Rewriting legacy fields; a no-op dry-run update as the refusal, which ratcheting defeats (F-07) | MBOD Q5; revision 5 scope rule |
 | C-8 | **Proposed amendment to D6:** `v1.7.0-rc.0` baseline, without moving `latest`. Until sign-off WS-F does not start the upgrade E2E (revision 3) | D6 as written (v1.6.0 baseline), which conflicts with D2 | MBOD Q5; **pending Barry and Colin sign-off** |
-| C-14 | The operator digests each CRD's live served schemas and compares the result with its embedded digest; the `schema-digest` annotation is diagnostic only (revision 4). It dry-runs every MFG through the dynamic client before starting; `--allow-crd-schema-skew` for rollbacks (revision 3) | Trusting the annotation, which a schema edit can keep (revision 3, GPT-R3-02); "Serves `v1beta1`" only, which stops protecting after v1.7.0; a monotonic schema revision | Settled (revision 3; orchestrator ruling on OPUS-R2-11) |
+| C-14 | Requirement for WS-F: the operator refuses CRDs older than its build, warns on newer ones, and runs the U-10 to U-12 object check before its first write; WS-F designs the mechanism under #243 (revision 5) | An exact live-schema digest, which takes the failover controller down between "CRDs first" and "then the chart" (merits point 2, F-46); trusting an annotation (revision 3, GPT-R3-02); "serves `v1beta1`" only | Settled (revision 5; orchestrator ruling on merits point 2) |
 
 ### 8.1 Review rounds
 
@@ -3023,6 +3490,96 @@ Suggested fix not taken. The point itself was accepted:
 |---|---|---|
 | OPUS-R3-05 | `excludeGtids` `MaxLength=65536` | Proposal 21 accepts a set of up to 96 KiB in canonical form at reconcile time, so a 64 KiB admission bound would refuse what #205 accepts. `MaxLength=131072` is the Linux limit on one argument, which no longer value could pass. It bounds the CEL cost and leaves #205's semantic limit in place. |
 
+**Ultra review** reviewed revision 4 (`a5f155d`, PR #242) with two model families: GPT 6.1 Sol and Claude Opus 5.5.
+A third family was dropped after its slots produced no output. The findings are cited here as F-01 to F-68.
+
+- **Counts:** 185 raw candidates, cross-validated by the other model family where it could run: 131 confirmed,
+  deduplicated by root cause into 68 findings (0 critical, 8 high, 40 medium, 20 low), and 54 rejected on
+  validation. The review's own
+  rejections are recorded so they are not re-raised. Among them: A-82 confirm-token replay on lost status;
+  U-8's backups under a foreground delete; `managedFields` size; A-18's `claimName`/`provisioned` switch; the
+  unusable-exit variant of A-16 (confirmed separately as F-19); A-90's key-rule cost; C-14's description-only
+  refusals (handled as merits point 2); A-92's Abseil flag spellings (the `--replicaof` omission was confirmed as
+  F-38); E8's `maxLength` test; A-53's collation migration; A-48's scalar enum; and D-06.
+- **Each confirmed finding was checked against the proposal text at `a5f155d` before it was applied**, and where
+  the cited code decides the fix, that code was re-read (among others F-03 to F-06, F-10, F-11, F-17, F-18,
+  F-21 to F-25, F-35, F-38, F-39, F-52 and kube-openapi's date-time check for F-02). None was wrong on its main
+  claim, so none is rejected. The highs F-02 and F-07 and the
+  medium F-40 rest on envtest measurements the validators made on 1.31, 1.32, 1.34 and 1.37; their results are
+  restated in A-39 and A-115.
+- **Merits verdict: sound with reservations (both models).** Both accept the problem framing and the load-bearing
+  freeze decisions: an explicit immutable `serverID`, bounded Duration timers, `xxxSecretName`/`xxxSecretKeyRef`,
+  one key prefix, the tested 1.31 floor, and the clean-break new-group path (still pending D6 sign-off, C-8). Their
+  reservations, and what revision 5 did with each:
+  1. **Split WS-E and separate post-freeze behaviour** (both models). Section 6 now delivers WS-E as five PRs and
+     marks every commit freeze-critical or not. Only PR1 (renames and reshapes) and PR2 (validation and
+     immutability) gate WS-F and rc.0. A-52's rollout pacing (PR3) and A-54's gate (PR4) are their own `e2e` PRs,
+     and A-86, A-81, E18 and E19 are in PR5.
+  2. **C-14's exact digest is a permanent availability coupling** (both models). C-14 is now a requirement: refuse
+     CRDs older than the build, warn on newer ones, and never take the failover controller down in the "CRDs
+     first, then the chart" window. The mechanism is WS-F's, under #243.
+  3. **Make the normative text unambiguous** (Opus). "How to read this" now declares section 2 and the 3.4 table
+     normative, with section 2 winning over sections 6 to 8. Not taken in full: moving the roughly 84 inline
+     revision markers into 8.1, which would rewrite every finding between review rounds; the markers are declared
+     provenance only instead.
+- **Narrowing (program scope rule).** Two areas drew Major findings in every round, so they were narrowed rather
+  than patched again:
+  - **A-52's rollout queue** (OPUS-07, OPUS-R2-09, then F-04, F-05, F-06). The queue design is removed. A-52 keeps
+    the frozen API part (optional `spec.sidecar.image`, no persisted default) and states requirements R-1 to R-7
+    for the rollout-pacing PR and its follow-up issue, #244. The C-8 E2E no longer asserts that a
+    pinned group never rolls.
+  - **Migration mechanics** (round 1 R02, R03, OPUS-01; round 2 OPUS-R2-02, OPUS-R2-05, OPUS-R2-11; round 3
+    GPT-R3-02, OPUS-R3-10; then F-07, F-08 and merits point 2). 3.1 item 2, A-115, C-7 and C-14 now state only
+    what is true: ratcheting downgrades type and `required` errors on unchanged nodes, so a no-op dry-run update is
+    not a reliable refusal, and `storedVersions` rules out re-applying the v1.6.0 CRDs. U-2 is rewritten. The
+    remaining mechanism, the object check, its coverage, conflicts and RBAC (F-43, F-44, F-68), is requirements
+    U-10 to U-13 for #243, and this audit no longer designs it.
+- **What else changed:**
+  - **Transition rules and timestamps.** House rule T-1 (2.4) makes every transition rule compare values, not
+    encodings, so the operator's own re-encoded Quantity, Duration, `metav1.Time` and omitted zeros pass (F-01).
+    It is applied to A-17, A-18, A-22 and A-23 and tested in E6. A-39's pattern bounds the offset and drops the
+    fraction (F-02).
+  - **Runtime semantics the API change creates:** A-48's level-trigger rules for the Dragonfly snapshot upgrade
+    (F-03); A-23's failed-bootstrap remedy (F-20); A-72's `BootstrapFailed` clearing rule (F-30); A-68's applied
+    generation on the equal-config path (F-28); A-73's timeout reasons (F-29).
+  - **Producer and reader mappings:** the PITR mode wire (F-10), the Dragonfly role and site state casts (F-21),
+    every `Replicating` reader (F-24), the `/ws/status` meaning change (F-23), presence for `lastIOSecondsAgo`
+    (F-22) and for the sidecar's coverage flags (F-13), `enable-encryption.sh` (F-25), the TTL mirror (F-11) and
+    the plugin's label literals (F-52).
+  - **A-86's ledger:** a UUID id (F-14), an 8 KiB bound per set (F-49), a durable omitted count with its own
+    acknowledgement (F-16, F-36), an honest statement of what Events and logs keep (F-15), and the playground
+    reset (F-37).
+  - **Served tokens:** the restore-reclone metric `phase` (F-17) and the lease revocation reasons (F-18), each
+    with a 3.4 row; the Event rename table follows its own rule (F-33, F-57), includes A-73's rename (F-34), and
+    covers every reason that survives #235 (F-55).
+  - **Validation:** `maxMemory` sign (F-12), the empty `s3EndpointURL` (F-50), per-field size suffixes (F-60),
+    `--replicaof` (F-38), the A-90 cost explanation (F-61), and the retention zeros (F-26).
+  - **Sequencing and docs:** the CRD URL pin and a release-built site land before any incompatible CRD change
+    reaches `main` (F-41, F-42); `release.yml`'s pre-release rule is Barry's rc.0 precondition (F-45); the re-triage
+    reviews the whole repository (F-47); `playground/` joins the sweeps and the E19 gate (F-48); a post-freeze
+    field lands in every served version (F-27); A-16 has its own site-replacement procedure (F-19).
+  - **Corrections:** A-111's leave is withdrawn into A-49 (F-39); A-37's TTL is a lifecycle decision (F-54); the
+    A-43 problem statement (F-23); counts and citations (F-53, F-56, F-58, F-65, F-66); the dump contents (F-64);
+    the `excludeSchemas` bound (F-63); the production install examples page (F-62); the lint's real scope (F-67);
+    the 1.31 status-write exception (F-40).
+  - **Generator** (F-09, F-51). `crd-inventory.py` now matches its docstring: it collapses a resources block by
+    shape (`sidecarResources`), types int-or-string map values, prints the bounds on list items and map values and
+    the root `required`, and refuses served versions whose schemas differ. The appendix was regenerated; the MFG
+    spec count drops from 267 to 262.
+- **Counts:** findings unchanged at 115 IDs (49 must, 50 should, 15 leave; A-111 withdrawn); breaking unchanged at
+  81; migration rows 108 → 110.
+
+Suggested fixes not taken. The finding itself was accepted in every case:
+
+| Finding | Suggested fix not taken | Why |
+|---|---|---|
+| F-02 | Keep the fraction in A-39's pattern and bound only the offset | `metav1.Time` encodes at second precision, so an admitted fraction would be lost on the operator's first write and would trip A-23's transition rule (F-01). The pattern rejects it instead. |
+| F-07 | Build the C-7 and C-14 refusal from a `dryRun=All` create of each object's copy | The orchestrator's scope ruling: this audit states what is true and the requirements (U-10 to U-13); #243 designs the check. |
+| F-08 | A recovery CRD that serves both versions with the old schema and v1alpha1 storage | Same ruling. U-2 states when recovery of the stored objects is possible at all, and #243 designs the steps. |
+| F-18 | Declare `operator_revoked` and `topology_changed` permanent exceptions | That freezes a second reason spelling into `/deploy/v1` and the metric. They are renamed to the A-69 constants with a 3.4 row instead. |
+| F-46 | Keep the exact digest and document the forward-upgrade window | The orchestrator's ruling on merits point 2: the window must not take the failover controller down, so newer CRDs warn. |
+| F-50 | Reject an explicit empty `s3EndpointURL` | Templates that render `""` are common, and the field already means AWS S3 when empty. The pattern admits it. |
+
 ## Appendix A. Code defects found during the audit
 
 These are code or docs bugs with no API-shape change. File each as an issue; WS-E fixes those its commits
@@ -3034,7 +3591,7 @@ already touch.
 | D-02 (STATUS-21) | `EncryptionAtRestReady` survives disabling encryption. | `encryption_reconcile.go:1136-1139` writes the old condition back when encryption is off. | Issue. Remove the condition when disabled, as `PITRArchiveReady` does. |
 | D-03 | `pitr.maxBinlogSize` is written into my.cnf without the CR/LF/NUL check. | `reconciler.go:1079-1084` vs `unsafeMySQLSetting` at `:925`. | Issue, security label. Route it through the same check (admission half: A-90). |
 | D-04 | The encryption adoption refusal is advisory: rendering follows spec regardless. | Refusal Event at `encryption_reconcile.go:93`; rendering keyed only on `Spec.EncryptionEnabled()` (`reconciler.go:811,825,854,1363`). | Issue. Rendering must honour the refusal. |
-| D-05 | `--maxmemory` and `--proactor_threads` are documented as reserved but missing from the operator-owned flags, so a user arg wins. | `dragonfly_resources.go:316-326`. | Issue (admission half: A-92). |
+| D-05 | `--maxmemory`, `--proactor_threads` and `--replicaof` are documented as reserved but missing from the operator-owned flags, so a user arg wins (revision 5 adds `--replicaof`, F-38). | `dragonfly_resources.go:316-327`; `dragonfly_types.go:56-60`. | Issue (admission half: A-92). |
 | D-06 | CronJob names are truncated to 63 characters, but the CronJob limit is 52, so the create fails and aborts the reconcile. | `scheduleCronJobName` (`backup.go:97-99`) uses `truncateDNS1123` (`:124`). | Issue. Truncate CronJob names to 52 with the hash. |
 | D-07 | `pollInterval: 0s` makes the topology loop spin. Only the Dragonfly runner clamps it. | `topology.go:1262`; `runner.go:943-945`. | Issue. Clamp in the controller as well as A-38. |
 | D-08 | `initFromBackup` added to a live group loads a dump into the serving primary without fencing. | `restore.go:474-480,516-560`. | Admission fix in A-23. Also add a controller refusal (condition plus Event) when `status.activeSite` predates the restore. |
