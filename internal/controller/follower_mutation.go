@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"time"
 
@@ -15,11 +14,6 @@ import (
 // runs outside any admitted section, so a slow API server never holds a
 // handoff at the barrier.
 const recoveryAttemptTimeout = 30 * time.Second
-
-// errHandoffNotAdmitted is returned by PlannedPromote when its context ended
-// while it waited for an admitted follower mutation to finish. Nothing has
-// been sent to the target, so the planned failover can roll back.
-var errHandoffNotAdmitted = errors.New("planned promote: a recovery or source-convergence step on the sites was still running")
 
 // mutationGate is the admission barrier between follower mutations
 // (recovery drain, old-primary recovery, source convergence) and topology
@@ -312,11 +306,6 @@ func (tm *TopologyManager) waitUpdateWorkers() {
 	tm.updateWorkers.Wait()
 }
 
-// errPredecessorUpdateInFlight is returned by PlannedPromote while a
-// replaced manager's ordered update is still unwinding on the sites.
-// Nothing has been sent to the target.
-var errPredecessorUpdateInFlight = errors.New("planned promote: a replaced topology manager's ordered update is still finishing on the sites")
-
 // setPredecessorUpdateInFlight sets or clears the predecessor guard and
 // logs each transition, since while it holds this manager takes no
 // failover, re-assert, recovery or update and status shows no update.
@@ -339,10 +328,4 @@ func (tm *TopologyManager) setPredecessorUpdateInFlight(v bool) {
 		tm.logger.Info("predecessor's ordered update exited; topology manager resuming",
 			"fg", tm.cfg.Name, "heldFor", heldFor.String())
 	}
-}
-
-func (tm *TopologyManager) predecessorUpdateUnwinding() bool {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	return tm.predecessorUpdateInFlight
 }

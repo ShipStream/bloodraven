@@ -10,6 +10,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -29,27 +30,6 @@ func plannedFailoverTerminal(s *v1alpha1.PlannedFailoverStatus) bool {
 	}
 	return s.Phase == v1alpha1.PlannedFailoverPhaseSucceeded ||
 		s.Phase == v1alpha1.PlannedFailoverPhaseFailed
-}
-
-// plannedFailoverInFlight is the status-derived guard of the old state
-// machine. Nothing in the planned-failover engine or its status consumers
-// calls it; it is removed together with the runner's guard.
-func plannedFailoverInFlight(s *v1alpha1.PlannedFailoverStatus) bool {
-	if s == nil {
-		return false
-	}
-	switch s.Phase {
-	case v1alpha1.PlannedFailoverPhasePending,
-		v1alpha1.PlannedFailoverPhaseValidating,
-		v1alpha1.PlannedFailoverPhaseDraining,
-		v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting,
-		v1alpha1.PlannedFailoverPhaseResuming:
-		return true
-	}
-	return false
 }
 
 // reconcilePlannedFailover runs one engine pass for the group when one is
@@ -107,7 +87,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverEngine() *PlannedFailoverE
 		}
 		topo := r.PlannedTopology
 		if topo == nil {
-			topo = newRunnerPlannedTopology(r.Runner)
+			topo = productionPlannedTopology(r.Runner)
 		}
 		e := NewPlannedFailoverEngine(newAPIPlannedFailoverStore(r.Client, r.APIReader, clk), topo,
 			reconcilerPlannedSink{r: r}, clk, SimHooks{})
@@ -173,78 +153,41 @@ func mapOutcomeToMetricResult(r *v1alpha1.PlannedFailoverResult) string {
 	return "failed_other"
 }
 
-// newRunnerPlannedTopology builds the production topology facade over the
-// runner. Until the facade over the runner's claim slot is wired in, it is
-// pendingRunnerPlannedTopology: the runner's claim stubs, and errManagerAbsent
-// for every MySQL operation, so a run waits in admission and nothing is sent.
-var newRunnerPlannedTopology = func(r *TopologyManagerRunner) PlannedFailoverTopology {
-	return pendingRunnerPlannedTopology{r: r}
-}
-
-// pendingRunnerPlannedTopology is the facade placeholder described at
-// newRunnerPlannedTopology. It sends nothing.
-type pendingRunnerPlannedTopology struct {
-	r *TopologyManagerRunner
-}
-
-var _ PlannedFailoverTopology = pendingRunnerPlannedTopology{}
-
-func (t pendingRunnerPlannedTopology) ClaimPlannedFailover(ctx context.Context, nn types.NamespacedName, req PlannedClaimRequest) (PlannedClaimDecision, error) {
-	if t.r == nil {
-		return PlannedClaimDecision{Kind: ClaimWait, WaitReason: v1alpha1.PlannedFailoverWaitManagerAbsent}, nil
+// productionPlannedTopology is the facade the reconciler's engine uses
+// when none is injected: the runner's process-wide facade, so the memos of
+// what this process sent survive between passes. Without a runner (tests
+// that build a bare reconciler) it is a facade over a registry with no
+// manager, which sends nothing: every run waits in admission.
+func productionPlannedTopology(r *TopologyManagerRunner) PlannedFailoverTopology {
+	if r == nil {
+		return NewPlannedFailoverTopology(&noManagerRegistry{})
 	}
-	return t.r.ClaimPlannedFailover(ctx, nn, req)
+	return r.PlannedTopology()
 }
-func (t pendingRunnerPlannedTopology) EnsureClaim(context.Context, PlannedRunRef, *v1alpha1.MysqlFailoverGroup) (PlannedClaimDecision, error) {
-	return PlannedClaimDecision{}, errManagerAbsent
+
+// noManagerRegistry is a ManagerRegistry with no topology manager.
+type noManagerRegistry struct {
+	mu    sync.Mutex
+	slots map[types.NamespacedName]*PlannedClaimSlot
 }
-func (t pendingRunnerPlannedTopology) ReleasePlannedFailoverClaim(nn types.NamespacedName, runID string, why ClaimReleaseReason) bool {
-	return t.r != nil && t.r.ReleasePlannedFailoverClaim(nn, runID, why)
+
+func (n *noManagerRegistry) Snapshot(nn types.NamespacedName) RegistrySnapshot {
+	return RegistrySnapshot{Slot: n.Slot(nn)}
 }
-func (t pendingRunnerPlannedTopology) ConvertToHold(types.NamespacedName, string) bool { return false }
-func (t pendingRunnerPlannedTopology) PlannedClaimHeld(nn types.NamespacedName) bool {
-	return t.r != nil && t.r.PlannedClaimHeld(nn)
-}
-func (t pendingRunnerPlannedTopology) Reprove(context.Context, PlannedRunRef, *v1alpha1.MysqlFailoverGroup) (ReproveResult, error) {
-	return ReproveResult{}, errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) Fence(context.Context, PlannedRunRef, string) (FenceProof, error) {
-	return FenceProof{}, errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) ProveFence(context.Context, PlannedRunRef, v1alpha1.PlannedFailoverFenceRecord) (FenceProof, error) {
-	return FenceProof{}, errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) KillAppConnections(context.Context, PlannedRunRef) (int32, error) {
-	return 0, errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) ProbeLag(context.Context, PlannedRunRef, string) (LagProbe, error) {
-	return LagProbe{}, errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) ReadTargetServerUUID(context.Context, PlannedRunRef) (string, error) {
-	return "", errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) Promote(context.Context, PlannedRunRef, *v1alpha1.PlannedFailoverStatus) (PromoteOutcome, error) {
-	return PromoteOutcome{}, errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) RecordPlannedPromotion(context.Context, PlannedRunRef, time.Time, string) error {
-	return errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) ApplyDNS(context.Context, PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error) {
-	return "", errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) NameUnconfirmedTarget(PlannedRunRef) error {
-	return errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) NameFencedSource(PlannedRunRef) error { return errManagerAbsent }
-func (t pendingRunnerPlannedTopology) Rollback(context.Context, PlannedRunRef, *v1alpha1.PlannedFailoverStatus) (RollbackResult, error) {
-	return RollbackResult{}, errManagerAbsent
-}
-func (t pendingRunnerPlannedTopology) ActiveSite(nn types.NamespacedName) (string, bool) {
-	if t.r == nil {
-		return "", false
+
+func (n *noManagerRegistry) Slot(nn types.NamespacedName) *PlannedClaimSlot {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.slots == nil {
+		n.slots = make(map[types.NamespacedName]*PlannedClaimSlot)
 	}
-	return t.r.ActiveSite(nn)
+	if n.slots[nn] == nil {
+		n.slots[nn] = &PlannedClaimSlot{}
+	}
+	return n.slots[nn]
 }
+
+func (n *noManagerRegistry) LeaderContext() context.Context { return context.Background() }
 
 // truncateGtidHint returns a short prefix of a GTID set suitable for
 // status.message. Keeping it short avoids flooding the event / status

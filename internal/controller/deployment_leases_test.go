@@ -685,30 +685,6 @@ func TestDeploymentLeaseSnapshotRejectsTornObservation(t *testing.T) {
 	}
 }
 
-func TestDeploymentLeaseUnconfirmedPromotionFencesGeneration(t *testing.T) {
-	m, fg, _ := deploymentLeaseFixture(t)
-	old := &mockMySQL{readOnly: false}
-	target := &mockMySQL{readOnly: true, err: errors.New("probe unavailable")}
-	tm, _, _ := newTestTopologyManager(old, target)
-	tm.cfg.Namespace, tm.cfg.Name = fg.Namespace, fg.Name
-	tm.deploymentLeases = m
-	tm.topologyGeneration, tm.deploymentActiveSite = 7, "dc1"
-	tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
-	if _, err := tm.PlannedPromote(context.Background(), "dc2", "dc1"); err == nil {
-		t.Fatal("expected failed confirmation")
-	}
-	snap := tm.buildSnapshot(nil)
-	if target.readOnly || snap.TopologyGeneration != 8 || snap.DeploymentEpoch != 0 || snap.DeploymentActiveSite != "dc2" {
-		t.Fatalf("unconfirmed promotion reopened stale authority: %+v", snap)
-	}
-	target.setError(nil)
-	tm.Poll(context.Background())
-	snap = tm.buildSnapshot(nil)
-	if snap.TopologyGeneration != 8 || snap.DeploymentEpoch == 0 {
-		t.Fatalf("fresh observation = %+v", snap)
-	}
-}
-
 func TestDeploymentLeaseUpdateDiscardsPlanAfterAdmissionWait(t *testing.T) {
 	m, fg, _ := deploymentLeaseFixture(t)
 	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "dc1-host"}})

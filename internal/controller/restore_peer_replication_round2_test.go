@@ -24,32 +24,36 @@ import (
 
 // Second review round for #212.
 
+const restoreRoundTwoUUID = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+
 // A planned failover already in flight when a full-instance restore is
 // requested is still driven while the restore waits in Preflight, reaches
 // a terminal phase, and only then does the restore start Fencing.
 func TestReconcile_PlannedFailoverInFlightFinishesBeforeRestoreFences(t *testing.T) {
 	fg := plannedFailoverFG("")
 	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fenced := restoreRoundTwoUUID + ":1-10"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
-		DrainTimeout: &metav1.Duration{Duration: 30 * time.Second}, MaxLagWait: &metav1.Duration{Duration: time.Nanosecond},
+		RunID: "run-before-restore", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "pdx", Source: "iad",
+		StartTime: &start, ClaimedAt: &start, ClaimBaseline: &v1alpha1.PlannedFailoverRecordRef{},
+		Settings: &v1alpha1.PlannedFailoverSettings{DrainTimeout: metav1.Duration{Duration: 30 * time.Second}, MaxLagWait: metav1.Duration{Duration: time.Nanosecond}},
+		Fence:    &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntendedAt: start, SourceServerUUID: restoreRoundTwoUUID, GtidSet: &fenced},
+		Drain:    &v1alpha1.PlannedFailoverDrainRecord{StartTime: start},
 	}
 	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{
 		Confirm: testRestoreConfirm,
 		Source:  v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}},
 	}
 	nn := fgNN(fg)
-	iad := &mockMySQL{readOnly: false, gtidExecuted: unfenceTestUUID + ":1-10"}
-	pdx := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: unfenceTestUUID + ":1-5"}
+	iad := &mockMySQL{readOnly: false, gtidExecuted: restoreRoundTwoUUID + ":1-10"}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: restoreRoundTwoUUID + ":1-5"}
 	r, c := newReconciler(fg)
 	r.Recorder = record.NewFakeRecorder(200)
 	r.Runner = plannedDrainRunner(nn, iad, pdx)
 	r.Runner.client, r.Runner.recorder = c, r.Recorder
-	tm, err := r.Runner.restoreFenceManager(nn)
-	if err != nil {
+	if _, err := r.Runner.restoreFenceManager(nn); err != nil {
 		t.Fatal(err)
 	}
-	tm.SetPlannedFailoverActive(true) // as the runner's sync sets it from status
 
 	pfTerminalBeforeFencing := false
 	for pass := 0; pass < 12; pass++ {

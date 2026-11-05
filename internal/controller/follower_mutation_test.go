@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ var handoffConditions = []struct {
 	set   func(tm *TopologyManager)
 	clear func(tm *TopologyManager)
 }{
-	{"planned failover", func(tm *TopologyManager) { tm.plannedFailoverActive = true }, func(tm *TopologyManager) { tm.plannedFailoverActive = false }},
+	{"planned failover", func(tm *TopologyManager) { holdPlannedClaimLockedForTest(tm, true) }, func(tm *TopologyManager) { holdPlannedClaimLockedForTest(tm, false) }},
 	{"ordered update running", func(tm *TopologyManager) { tm.deploymentUpdateRunning = true }, func(tm *TopologyManager) { tm.deploymentUpdateRunning = false }},
 	{"topology change", func(tm *TopologyManager) { tm.deploymentChanging = 1 }, func(tm *TopologyManager) { tm.deploymentChanging = 0 }},
 	{"awaiting observation", func(tm *TopologyManager) { tm.deploymentAwaitingObservation = true }, func(tm *TopologyManager) { tm.deploymentAwaitingObservation = false }},
@@ -85,7 +86,7 @@ func TestCheckRecovery_FinishedDrainStillClearsDuringHandoff(t *testing.T) {
 	repl := recoveringReplica(tm)
 	tm.mu.Lock()
 	tm.recovery["dc2"].drainComplete = true
-	tm.plannedFailoverActive = true
+	holdPlannedClaimLockedForTest(tm, true)
 	tm.mu.Unlock()
 
 	if !tm.checkRecovery(context.Background(), repl) {
@@ -109,11 +110,11 @@ func TestCheckRecovery_DeferralRestartsDrainBudget(t *testing.T) {
 	if tm.checkRecovery(ctx, repl) {
 		t.Fatal("first pass evicted sessions; the drain is not complete yet")
 	}
-	tm.SetPlannedFailoverActive(true)
+	setPlannedClaimForTest(tm, true)
 	tm.checkRecovery(ctx, repl)
 	clk.Advance(2 * defaultConnectionDrainTimeout)
 	tm.checkRecovery(ctx, repl)
-	tm.SetPlannedFailoverActive(false)
+	setPlannedClaimForTest(tm, false)
 
 	if !tm.checkRecovery(ctx, repl) {
 		t.Fatal("drain did not complete after the handoff")
@@ -185,7 +186,7 @@ func TestAdmitTopologyHandoffWaitsForAdmittedFollowerMutation(t *testing.T) {
 	published := make(chan struct{})
 	go func() {
 		_ = tm.admitTopologyHandoff(context.Background(), func() {
-			tm.SetPlannedFailoverActive(true)
+			setPlannedClaimForTest(tm, true)
 			close(published)
 		})
 	}()
@@ -202,90 +203,6 @@ func TestAdmitTopologyHandoffWaitsForAdmittedFollowerMutation(t *testing.T) {
 	}
 	if _, ok := tm.beginFollowerMutation(); ok {
 		t.Fatal("follower mutation admitted while a planned failover is in flight")
-	}
-}
-
-// A recovery drain pass already killing sessions on the target when the
-// planned failover reaches PlannedPromote must finish before Execute
-// touches MySQL, and no further pass may start.
-func TestPlannedPromote_WaitsForInFlightRecoveryDrain(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false}
-	site1 := &mockMySQL{readOnly: true, killConnectionResults: []int{1, 0}}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-	repl := recoveringReplica(tm)
-
-	entered := make(chan struct{})
-	unblock := make(chan struct{})
-	var once sync.Once
-	site1.onKill = func() {
-		once.Do(func() {
-			close(entered)
-			<-unblock
-		})
-	}
-	recoveryDone := make(chan struct{})
-	go func() {
-		defer close(recoveryDone)
-		tm.checkRecovery(context.Background(), repl)
-	}()
-	<-entered
-
-	tm.SetPlannedFailoverActive(true)
-	promoted := make(chan error, 1)
-	go func() {
-		_, err := tm.PlannedPromote(context.Background(), "dc2", "dc1")
-		promoted <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	site0.mu.Lock()
-	fenced := site0.superReadOnlyCalls
-	site0.mu.Unlock()
-	site1.mu.Lock()
-	promotedEarly := site1.promoted
-	site1.mu.Unlock()
-	if fenced != 0 || promotedEarly {
-		t.Fatal("PlannedPromote started while a recovery drain pass was still killing sessions on its target")
-	}
-
-	close(unblock)
-	<-recoveryDone
-	if err := <-promoted; err != nil {
-		t.Fatalf("PlannedPromote: %v", err)
-	}
-	tm.checkRecovery(context.Background(), repl)
-	site1.mu.Lock()
-	kills := site1.killConnectionCalls
-	site1.mu.Unlock()
-	if kills != 1 {
-		t.Fatalf("recovery kill passes = %d, want only the one admitted before the handoff", kills)
-	}
-}
-
-// Even if the planned-failover flag flaps off (the Dragonfly upgrade path
-// writes the same flag), a poll during Execute must not drain the target:
-// the topology change itself suppresses recovery.
-func TestPlannedPromote_MidPromotionPollDoesNotDrainTarget(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false}
-	site1 := &mockMySQL{readOnly: true}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-	repl := recoveringReplica(tm)
-	site1.onStopReplica = func() {
-		tm.SetPlannedFailoverActive(false)
-		tm.checkRecovery(context.Background(), repl)
-	}
-	tm.SetPlannedFailoverActive(true)
-	if _, err := tm.PlannedPromote(context.Background(), "dc2", "dc1"); err != nil {
-		t.Fatalf("PlannedPromote: %v", err)
-	}
-	if site1.killConnectionCalls != 0 {
-		t.Fatalf("recovery drained the promotion target mid-promotion: %d kills", site1.killConnectionCalls)
-	}
-
-	// After the promotion and before any poll has observed it, the stale
-	// tracker still shows dc2 read-only; promotedSite holds recovery off.
-	tm.checkRecovery(context.Background(), repl)
-	if site1.killConnectionCalls != 0 {
-		t.Fatalf("recovery drained the new primary from pre-promotion observations: %d kills", site1.killConnectionCalls)
 	}
 }
 
@@ -317,7 +234,7 @@ func TestRecoveryStatusWriteDoesNotHoldHandoffBarrier(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := tm.admitTopologyHandoff(ctx, func() { tm.SetPlannedFailoverActive(true) }); err != nil {
+	if err := tm.admitTopologyHandoff(ctx, func() { setPlannedClaimForTest(tm, true) }); err != nil {
 		t.Fatalf("handoff waited on a blocked status write: %v", err)
 	}
 	close(unblock)
@@ -329,86 +246,10 @@ func TestRecoveryStatusWriteDoesNotHoldHandoffBarrier(t *testing.T) {
 		t.Fatalf("recovery rewrote the old primary after a handoff was admitted: %d CHANGE SOURCE", changes)
 	}
 
-	tm.SetPlannedFailoverActive(false)
+	setPlannedClaimForTest(tm, false)
 	tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
 	if got := site1.startReplicaCallCount(); got != 1 {
 		t.Fatalf("deferred rewrite did not run on the next poll: %d sequences", got)
-	}
-}
-
-// A promotion whose context ends while an admitted recovery step still
-// runs returns errHandoffNotAdmitted without touching MySQL, and leaves the
-// gate usable.
-func TestPlannedPromote_CancelledWhileRecoveryHoldsGate(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false}
-	site1 := &mockMySQL{readOnly: true}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-	tm.mu.Lock()
-	tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
-	tm.mu.Unlock()
-
-	release, ok := tm.beginFollowerMutation()
-	if !ok {
-		t.Fatal("setup: mutation refused")
-	}
-	tm.SetPlannedFailoverActive(true)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_, err := tm.PlannedPromote(ctx, "dc2", "dc1")
-	if !errors.Is(err, errHandoffNotAdmitted) {
-		t.Fatalf("PlannedPromote = %v, want errHandoffNotAdmitted", err)
-	}
-	if waited := time.Since(start); waited > 2*time.Second {
-		t.Fatalf("PlannedPromote ignored its context for %v", waited)
-	}
-	site0.mu.Lock()
-	fenced := site0.superReadOnlyCalls
-	site0.mu.Unlock()
-	if fenced != 0 || site1.promoted {
-		t.Fatal("a promotion that was never admitted touched MySQL")
-	}
-	release()
-
-	tm.SetPlannedFailoverActive(false)
-	again, ok := tm.beginFollowerMutation()
-	if !ok {
-		t.Fatal("the abandoned handoff left the gate closed")
-	}
-	again()
-	if err := tm.admitTopologyHandoff(context.Background(), func() {}); err != nil {
-		t.Fatalf("gate refused a later handoff: %v", err)
-	}
-}
-
-// A promotion that fails after admission releases everything: once the
-// planned failover ends, the next poll drains and clears the recovering
-// replica.
-func TestPlannedPromote_FailureAfterAdmissionReleasesRecovery(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false}
-	site1 := &mockMySQL{readOnly: true, stopReplicaErr: errors.New("stop replica failed"),
-		replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-	pollN(tm, 4)
-	tm.mu.Lock()
-	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateInProgress}
-	tm.mu.Unlock()
-
-	tm.SetPlannedFailoverActive(true)
-	if _, err := tm.PlannedPromote(context.Background(), "dc2", ""); err == nil {
-		t.Fatal("setup: promotion should fail at STOP REPLICA")
-	}
-	tm.SetPlannedFailoverActive(false)
-	pollN(tm, 2)
-
-	tm.mu.RLock()
-	rec := tm.recovery["dc2"]
-	tm.mu.RUnlock()
-	if rec != nil {
-		t.Fatalf("recovery did not resume after the failed promotion: %+v", rec)
-	}
-	if site1.killConnectionCalls != 1 {
-		t.Fatalf("drain passes = %d, want 1", site1.killConnectionCalls)
 	}
 }
 
@@ -438,36 +279,12 @@ func TestFirstPollsAfterRestartLeavePlannedFailoverSitesAlone(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
 	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-	tm.SetPlannedFailoverActive(true)
+	setPlannedClaimForTest(tm, true)
 	tm.SetRecoveryInProgress("dc2")
 	pollN(tm, 4)
 	if site1.killConnectionCalls != 0 || site1.superReadOnlyCalls != 0 || site1.changeSourceCalls != 0 {
 		t.Fatalf("first polls mutated the planned failover's target: kill=%d fence=%d changeSource=%d",
 			site1.killConnectionCalls, site1.superReadOnlyCalls, site1.changeSourceCalls)
-	}
-}
-
-// A replaced manager's ordered update may still be fencing or promoting on
-// the sites. The replacement's planned promotion takes no claim and touches
-// no MySQL (the planned failover then fails closed; see
-// TestPlannedFailoverPromoting_PredecessorUpdateFailsClosed).
-func TestPlannedPromote_RefusedWhilePredecessorUpdateUnwinding(t *testing.T) {
-	source := &mockMySQL{readOnly: false}
-	target := &mockMySQL{readOnly: true}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(source, target)
-	tm.setPredecessorUpdateInFlight(true)
-	tm.SetPlannedFailoverActive(true)
-	if _, err := tm.PlannedPromote(context.Background(), "dc2", "dc1"); !errors.Is(err, errPredecessorUpdateInFlight) {
-		t.Fatalf("PlannedPromote = %v, want errPredecessorUpdateInFlight", err)
-	}
-	source.mu.Lock()
-	fenced := source.superReadOnlyCalls
-	source.mu.Unlock()
-	target.mu.Lock()
-	promoted := target.promoted
-	target.mu.Unlock()
-	if fenced != 0 || promoted {
-		t.Fatal("a refused promotion touched MySQL")
 	}
 }
 
@@ -488,7 +305,7 @@ func TestStartUpdate_RefusedWhilePlannedFailoverGuardSet(t *testing.T) {
 			return PodReadiness{}, errors.New("stop here")
 		}
 		tm.ApplyUpdate = func(context.Context, string) error { return nil }
-		tm.SetPlannedFailoverActive(guard)
+		setPlannedClaimForTest(tm, guard)
 		tm.SetSpecDriftSites([]string{"dc1"})
 		return tm
 	}
@@ -525,7 +342,7 @@ func retireForTest(t *testing.T, r *TopologyManagerRunner, nn types.NamespacedNa
 func TestRotationRefusedWhileRetiringManagerUpdateClaimed(t *testing.T) {
 	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
 	r := plannedDrainRunner(nn, &mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
-	old, err := r.plannedFailoverManager(nn)
+	old, err := registeredTopologyManager(r, nn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +350,7 @@ func TestRotationRefusedWhileRetiringManagerUpdateClaimed(t *testing.T) {
 	old.mu.Lock()
 	old.deploymentUpdateRunning = true
 	old.mu.Unlock()
-	replacement, err := plannedDrainRunner(nn, &mockMySQL{readOnly: false}, &mockMySQL{readOnly: true}).plannedFailoverManager(nn)
+	replacement, err := registeredTopologyManager(plannedDrainRunner(nn, &mockMySQL{readOnly: false}, &mockMySQL{readOnly: true}), nn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,4 +365,14 @@ func TestRotationRefusedWhileRetiringManagerUpdateClaimed(t *testing.T) {
 	if ok, why := r.ReserveKeyringRotation(nn, "pdx"); !ok {
 		t.Fatalf("rotation still refused once the retiring update is out: %s", why)
 	}
+}
+
+// registeredTopologyManager returns nn's registered manager.
+func registeredTopologyManager(r *TopologyManagerRunner, nn types.NamespacedName) (*TopologyManager, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if mt := r.managers[nn]; mt != nil {
+		return mt.tm, nil
+	}
+	return nil, fmt.Errorf("no topology manager running for %s", nn)
 }

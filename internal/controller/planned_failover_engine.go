@@ -92,9 +92,9 @@ const (
 
 // Engine yield points (§15.1). Production leaves SimHooks.Yield nil.
 const (
-	plannedYieldAfterLoad   = "engine:after-load"
-	plannedYieldAfterWrite  = "engine:after-write"
-	plannedYieldAfterSettle = "engine:after-settle"
+	plannedYieldAfterLoad   = YieldEngineLoadForSim
+	plannedYieldAfterWrite  = YieldEngineWriteForSim
+	plannedYieldAfterSettle = YieldEngineSettleForSim
 )
 
 // plannedAdmissionGuard wraps an admission pass with the deployment
@@ -1702,7 +1702,13 @@ func (e *PlannedFailoverEngine) terminalRecord(pf *v1alpha1.PlannedFailoverStatu
 // terminalMutate is the status mutation that goes with a terminal record:
 // the failover record for Succeeded, the hold condition for
 // ManualRecoveryRequired.
-func (e *PlannedFailoverEngine) terminalMutate(next *v1alpha1.PlannedFailoverStatus, sites []string) func(*v1alpha1.MysqlFailoverGroupStatus) {
+//
+// The Succeeded write also takes status.activeSite and
+// status.topologyGeneration from the current manager through
+// MergePlannedAuthority, the rule the runner's snapshot writes use, so the
+// terminal record never lands beside an activeSite that still names the
+// source (§5.3, §12).
+func (e *PlannedFailoverEngine) terminalMutate(nn types.NamespacedName, next *v1alpha1.PlannedFailoverStatus, sites []string) func(*v1alpha1.MysqlFailoverGroupStatus) {
 	switch next.Result.Outcome {
 	case v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
 		runID, reason, now := next.RunID, next.Result.Reason, e.clk.Now()
@@ -1714,7 +1720,11 @@ func (e *PlannedFailoverEngine) terminalMutate(next *v1alpha1.PlannedFailoverSta
 			return nil
 		}
 		confirmedAt, target, watermark := next.Promotion.ConfirmedAt.Time, next.Target, plannedFenceSet(next)
+		authority, haveAuthority := e.topo.ManagerAuthority(nn)
 		return func(st *v1alpha1.MysqlFailoverGroupStatus) {
+			if haveAuthority {
+				MergePlannedAuthority(st, authority)
+			}
 			applyPlannedFailoverRecord(st, confirmedAt, target, watermark)
 		}
 	}
@@ -1761,7 +1771,7 @@ func (e *PlannedFailoverEngine) finish(ctx context.Context, fg *v1alpha1.MysqlFa
 			return nil, nil, false
 		}
 		written = e.terminalRecord(cur, end)
-		return written, e.terminalMutate(written, end.holdSites), true
+		return written, e.terminalMutate(nn, written, end.holdSites), true
 	})
 	if next != nil {
 		m.pendingTerminal = next.DeepCopy()
@@ -1898,15 +1908,17 @@ func (e *PlannedFailoverEngine) release(ctx context.Context, nn types.Namespaced
 
 // releaseZombie releases a Run-mode claim whose run is no longer live in
 // the uncached block (terminal, marked, absent, or another run's), §3.4.
+// The held run comes from the slot, so a claim hydrated by startManager for
+// a run this process never saw live is cleared too.
 func (e *PlannedFailoverEngine) releaseZombie(ctx context.Context, nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) {
-	g := e.groupMemo(nn)
-	if g.lastRunID == "" || !e.topo.PlannedClaimHeld(nn) {
+	runID, ok := e.topo.HeldRunClaim(nn)
+	if !ok || runID == "" {
 		return
 	}
-	if pf != nil && pf.RunID == g.lastRunID && !plannedFailoverTerminal(pf) {
+	if pf != nil && pf.RunID == runID && !plannedFailoverTerminal(pf) {
 		return
 	}
-	e.release(ctx, nn, g.lastRunID, ReleaseZombie, "")
+	e.release(ctx, nn, runID, ReleaseZombie, "")
 }
 
 // ---------- status stall (§6.4) ----------
@@ -2064,7 +2076,7 @@ func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.
 		}
 		next := final.DeepCopy()
 		next.Revision = cur.Revision + 1
-		return next, e.terminalMutate(next, sites), true
+		return next, e.terminalMutate(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, next, sites), true
 	})
 	if out != WriteCommitted {
 		return plannedFailoverMarkerRetryInterval, nil

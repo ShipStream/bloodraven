@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -973,5 +974,35 @@ func TestProbeLag(t *testing.T) {
 	f.tgt.down = true
 	if lp, _ = f.topo.ProbeLag(context.Background(), f.ref, opsF); lp.TargetReachable {
 		t.Fatalf("down target reported reachable: %+v", lp)
+	}
+}
+
+// TestPF_I20e_SameProcessMemoAttributesFence and the cross-process Fence
+// re-run: a Fencing re-run that finds super_read_only=ON calls Fence again;
+// the facade attributes it (memo, or intent plus uuid) instead of reporting
+// that authority moved.
+func TestPF_I20e_SameProcessMemoAttributesFence(t *testing.T) {
+	f := newOpsFixture(t, "")
+	f.hold(false)
+	if proof, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA); err != nil || proof.Kind != FenceApplied {
+		t.Fatalf("first Fence = %+v, %v", proof, err)
+	}
+	proof, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA)
+	if err != nil || proof.Kind != FenceApplied || proof.Attribution != FenceByMemo {
+		t.Fatalf("Fence re-run = %+v, %v; want Applied by memo", proof, err)
+	}
+	if n := strings.Count(strings.Join(f.src.statements(), ","), "sro=ON"); n != 1 {
+		t.Fatalf("the fence was sent %d times, want once", n)
+	}
+	other := newOpsFixture(t, "")
+	other.hold(false)
+	other.fenced()
+	proof, err = other.topo.Fence(context.Background(), other.ref, opsUUIDA)
+	if err != nil || proof.Kind != FenceApplied || proof.Attribution != FenceByIntentAndUUID {
+		t.Fatalf("cross-process Fence re-run = %+v, %v; want Applied by intent+uuid", proof, err)
+	}
+	other.src.uuid = "replaced"
+	if proof, _ = other.topo.Fence(context.Background(), other.ref, opsUUIDA); proof.Kind != FenceNotAttributable {
+		t.Fatalf("Fence on a replaced, read-only pod = %+v; want NotAttributable", proof)
 	}
 }

@@ -38,11 +38,11 @@ const (
 type PlannedClaimSlot struct {
 	mu       sync.Mutex // leaf: tm.mu → slot.mu, never the reverse
 	held     *plannedClaim
-	releases []claimReleaseNote // instrumentation (tests and DST): runId, why
+	releases []ClaimReleaseNote // instrumentation (tests and DST): runId, why
 }
 
-// claimReleaseNote records one release (or conversion to a hold).
-type claimReleaseNote struct {
+// ClaimReleaseNote records one release (or conversion to a hold).
+type ClaimReleaseNote struct {
 	RunID string
 	Why   ClaimReleaseReason
 }
@@ -108,7 +108,7 @@ func (s *PlannedClaimSlot) View() (v PlannedClaimView, ok bool) {
 }
 
 // ReleaseNotes returns every release recorded on the slot, oldest first.
-func (s *PlannedClaimSlot) ReleaseNotes() []claimReleaseNote {
+func (s *PlannedClaimSlot) ReleaseNotes() []ClaimReleaseNote {
 	if s == nil {
 		return nil
 	}
@@ -181,7 +181,7 @@ func (s *PlannedClaimSlot) release(runID string, why ClaimReleaseReason) bool {
 		return false
 	}
 	s.held = nil
-	s.releases = append(s.releases, claimReleaseNote{RunID: runID, Why: why})
+	s.releases = append(s.releases, ClaimReleaseNote{RunID: runID, Why: why})
 	return true
 }
 
@@ -200,20 +200,16 @@ func (s *PlannedClaimSlot) toHold(runID string) bool {
 		s.held.mode = claimModeHold
 		s.held.provisional, s.held.needsReprove = false, false
 	}
-	s.releases = append(s.releases, claimReleaseNote{RunID: runID, Why: ReleaseToHold})
+	s.releases = append(s.releases, ClaimReleaseNote{RunID: runID, Why: ReleaseToHold})
 	return true
 }
 
 // plannedClaimHeldLocked reports whether the group's planned-failover
-// claim slot is held, in either mode. Must hold tm.mu (read or write).
-//
-// tm.plannedFailoverActive is the legacy status-derived guard, set only by
-// the pre-claim planned-failover reconciler through
-// Runner.SetPlannedFailoverActive. It is honoured here until that
-// reconciler is replaced, so the legacy path keeps its protection; the
-// claim slot is the source of truth for everything else.
+// claim slot is held, in either mode (a run, its provisional grant, or a
+// hold). It is the only planned-failover guard: nothing derives it from
+// status. Must hold tm.mu (read or write).
 func (tm *TopologyManager) plannedClaimHeldLocked() bool {
-	return tm.plannedFailoverActive || tm.plannedSlot.Held()
+	return tm.plannedSlot.Held()
 }
 
 // plannedClaimHeld is plannedClaimHeldLocked under tm.mu.
@@ -333,7 +329,7 @@ func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req Planned
 	}
 
 	ev := tm.plannedGrantEvidence(ctx, polled, req.Target)
-	hooks.yield("claim.afterProbe")
+	hooks.yield(YieldPeerProbeForSim)
 	if ev.wait != nil {
 		return *ev.wait, nil
 	}
@@ -352,7 +348,7 @@ func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req Planned
 		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRecoveryInFlight, "a follower mutation was still running at the last gate attempt"), nil
 	}
 
-	hooks.yield("claim.beforePublish")
+	hooks.yield(YieldBeforePublishForSim)
 	var out PlannedClaimDecision
 	err := tm.followerMutationGate.tryAdmit(req.RunID, plannedClaimGateTTL, func() {
 		out = tm.publishPlannedClaim(req, epoch, polled, inMemory, ev.sourceUUID)
@@ -363,7 +359,7 @@ func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req Planned
 		tm.mu.Unlock()
 		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRecoveryInFlight, "a recovery or source-convergence step is still running on the sites"), nil
 	}
-	hooks.yield("claim.afterPublish")
+	hooks.yield(YieldAfterPublishForSim)
 	if out.Kind == ClaimGranted {
 		tm.logger.Info("planned failover: claim granted", "fg", tm.cfg.Name, "runId", req.RunID, "source", out.Source, "target", req.Target)
 	}
@@ -423,6 +419,12 @@ func (tm *TopologyManager) requireRunClaim(leader context.Context, ref PlannedRu
 		return errClaimLost
 	case held.needsReprove && !reprove:
 		return errReproveRequired
+	}
+	if held.provisional {
+		// Every mutating call runs only after the record that announces it
+		// committed, and the first one follows the committed Fencing write:
+		// the grant is no longer provisional.
+		tm.plannedSlot.update(ref.RunID, func(c *plannedClaim) { c.provisional = false })
 	}
 	return nil
 }
@@ -518,6 +520,33 @@ func (h SimHooks) yield(point string) {
 	if h.Yield != nil {
 		h.Yield(point)
 	}
+}
+
+// stmt yields immediately before (or after) a facade statement on site.
+func (h SimHooks) stmt(before bool, site, statement string) {
+	if h.Yield == nil {
+		return
+	}
+	point := YieldAfterStmtForSim
+	if before {
+		point = YieldBeforeStmtForSim
+	}
+	h.Yield(point + ":" + site + ":" + statement)
+}
+
+// statement names the statement a promote memo stage sends.
+func (s promoteMemoStage) statement() string {
+	switch s {
+	case promoteMemoStopSent:
+		return "STOP REPLICA"
+	case promoteMemoResetSent:
+		return "RESET REPLICA ALL"
+	case promoteMemoSROClearSent:
+		return "super_read_only=OFF"
+	case promoteMemoROClearSent:
+		return "read_only=OFF"
+	}
+	return ""
 }
 
 // plannedRunStartTime is when the run was accepted (zero if unknown).

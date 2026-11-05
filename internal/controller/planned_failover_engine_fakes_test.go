@@ -46,7 +46,8 @@ type pfFakeTopology struct {
 	record     func(ref PlannedRunRef) error
 	dns        func(ref PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error)
 	rollback   func(ref PlannedRunRef) (RollbackResult, error)
-	needsProof bool // the next mutating call returns errReproveRequired
+	needsProof bool              // the next mutating call returns errReproveRequired
+	authority  *PlannedAuthority // ManagerAuthority's answer; nil: no manager
 
 	calls    []string
 	releases []string // "<runId>:<why>"
@@ -170,6 +171,21 @@ func (f *pfFakeTopology) ConvertToHold(_ types.NamespacedName, runID string) boo
 		f.releases = append(f.releases, runID+":"+string(ReleaseToHold))
 	}
 	return true
+}
+
+func (f *pfFakeTopology) ManagerAuthority(types.NamespacedName) (PlannedAuthority, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.authority == nil {
+		return PlannedAuthority{}, false
+	}
+	return *f.authority, true
+}
+
+func (f *pfFakeTopology) HeldRunClaim(types.NamespacedName) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.heldRun, f.heldRun != "" && !f.holdMode
 }
 
 func (f *pfFakeTopology) PlannedClaimHeld(types.NamespacedName) bool {

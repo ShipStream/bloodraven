@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -364,4 +365,34 @@ func NewerFailoverRecord(a, b FailoverRecord) FailoverRecord {
 		return b
 	}
 	return a
+}
+
+// plannedFailoverInternalAnnotations are the planned failover's
+// operator-internal and acknowledgement annotations.
+var plannedFailoverInternalAnnotations = []string{
+	PlannedFailoverStatusFenceAnnotation,
+	PlannedFailoverTerminalAnnotation,
+	AckPlannedFailoverHoldAnnotation,
+	PlannedFailoverStallSinceAnnotation,
+	PlannedFailoverManagerAbsentSinceAnnotation,
+}
+
+// ClearPlannedFailoverAnnotations deletes the planned failover's internal
+// and acknowledgement annotations. A reset that clears status.plannedFailover
+// and the conditions must call it too: a terminal marker left behind with
+// outcome ManualRecoveryRequired rebuilds an automation hold on the next
+// operator start. Like ClearFailoverState, call it with the operator
+// stopped.
+func ClearPlannedFailoverAnnotations(ctx context.Context, c client.Client, nn types.NamespacedName) error {
+	annotations := make(map[string]any, len(plannedFailoverInternalAnnotations))
+	for _, k := range plannedFailoverInternalAnnotations {
+		annotations[k] = nil
+	}
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": annotations}})
+	if err != nil {
+		return fmt.Errorf("marshal planned-failover annotation patch: %w", err)
+	}
+	obj := &v1alpha1.MysqlFailoverGroup{}
+	obj.Namespace, obj.Name = nn.Namespace, nn.Name
+	return c.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patch))
 }

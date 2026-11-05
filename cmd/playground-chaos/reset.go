@@ -393,6 +393,9 @@ func (r *resetter) clearMFGStatusFields(ctx context.Context, names []string) err
 	if err := brcontroller.ClearFailoverState(ctx, r.k.Controller, types.NamespacedName{Namespace: r.namespace, Name: r.fg}); err != nil {
 		return fmt.Errorf("clear out-of-band failover history: %w", err)
 	}
+	if err := brcontroller.ClearPlannedFailoverAnnotations(ctx, r.k.Controller, types.NamespacedName{Namespace: r.namespace, Name: r.fg}); err != nil {
+		return fmt.Errorf("clear planned-failover annotations: %w", err)
+	}
 	status, err := json.Marshal(mfg.Status)
 	if err != nil {
 		return err

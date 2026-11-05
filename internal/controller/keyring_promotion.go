@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"fmt"
 	"slices"
 	"sort"
 
@@ -11,12 +10,6 @@ import (
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/state"
 )
-
-// errKeyringRotationBlocked is returned by PlannedPromote when the
-// target is mid-keyring-rotation. plannedFailoverPromoting maps it to
-// a rollback (unfence the source) with reason KeyringRotation rather
-// than the generic ExecuteFailed / manual-recovery path.
-var errKeyringRotationBlocked = fmt.Errorf("planned promote: target is mid-keyring-rotation")
 
 // rotationBlockedSites returns the names of sites whose UnsealReason is
 // Rotation. Order is spec-stable (sorted) so slice compares are not
@@ -258,8 +251,9 @@ func (r *TopologyManagerRunner) SetKeyringRotationBlocked(nn types.NamespacedNam
 //	held   manager replaced or retired                  copied to the replacement before
 //	                                                    its Run; retired managers start
 //	                                                    no update
-//	held   promotion claim (beginAutoPromotionOf,       claim refused; dirty bit re-armed
-//	       beginPromotionOf)                            (automatic promotions)
+//	held   promotion claim (beginAutoPromotionOf)       claim refused; dirty bit re-armed
+//	held   planned-failover claim (claimPlanned-        Wait{KeyringRotation} while
+//	       Failover)                                    reserved
 //	any    claim taken / promotion unobserved           reserve refused until observed
 //	held   encryption disabled / group deleted          none
 //

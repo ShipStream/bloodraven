@@ -378,12 +378,19 @@ func TestPlannedInvariant_WatermarkRegressed(t *testing.T) {
 		st.LastFailover = &confirmed
 	})
 	f.want()
-	// The runner rewrites status with an older watermark.
+	// A runner snapshot with the same lastFailover and an older watermark
+	// cannot regress it: the merge moves only the target on equal times
+	// (OPEN-2).
 	if err := f.store.MergeSnapshot(controller.TopologySnapshot{
 		LastFailover: confirmed.Time, LastFailoverTarget: "beta", PromotionGtidExecuted: "00000000-0000-0000-0000-000000000001:1-50",
 	}); err != nil {
 		t.Fatal(err)
 	}
+	f.want()
+	// A status writer that bypasses the merge does, and the monitor sees it.
+	f.write(v1alpha1.PlannedFailoverPhasePublishing, nil, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		st.PromotionGtidExecuted = "00000000-0000-0000-0000-000000000001:1-50"
+	})
 	f.want("WatermarkRegressed")
 
 	// A later promotion record supersedes the watermark.

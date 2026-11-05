@@ -347,8 +347,12 @@ func TestPlannedFailoverSentinelsDistinct(t *testing.T) {
 	}
 }
 
-// The placeholders keep their final signatures and change nothing yet.
-func TestPlannedFailoverContractPlaceholders(t *testing.T) {
+// TestRunnerPlannedClaim_NoManager: with no topology manager registered the
+// runner's planned-failover entry points accept nothing (a claim waits on
+// ManagerAbsent, no Dragonfly manager takes a pause or a follow-up), and
+// the group's slot is still the one source of truth: a held claim is
+// reported, and only its own run releases it.
+func TestRunnerPlannedClaim_NoManager(t *testing.T) {
 	nn := types.NamespacedName{Namespace: "ns", Name: "fg"}
 	a, b := &PlannedClaimSlot{}, &PlannedClaimSlot{}
 	if a == b {
@@ -358,7 +362,7 @@ func TestPlannedFailoverContractPlaceholders(t *testing.T) {
 	r := &TopologyManagerRunner{}
 	if r.PlannedClaimHeld(nn) || r.SetDragonflyUpgradePaused(nn, true) || r.EnqueueDragonflyFollowUp(nn, "pdx", "iad") ||
 		r.ReleasePlannedFailoverClaim(nn, "run-1", ReleaseTerminal) {
-		t.Error("a runner stub reports success")
+		t.Error("a runner with no manager accepted a planned-failover call")
 	}
 	if site, ok := r.ActiveSite(nn); site != "" || ok {
 		t.Errorf("ActiveSite = %q, %v", site, ok)
@@ -366,5 +370,12 @@ func TestPlannedFailoverContractPlaceholders(t *testing.T) {
 	d, err := r.ClaimPlannedFailover(t.Context(), nn, PlannedClaimRequest{RunID: "run-1", Target: "pdx"})
 	if err != nil || d.Kind != ClaimWait || d.WaitReason != v1alpha1.PlannedFailoverWaitManagerAbsent {
 		t.Errorf("ClaimPlannedFailover = %+v, %v; want Wait{ManagerAbsent}", d, err)
+	}
+	r.Slot(nn).hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "iad", target: "pdx"})
+	if !r.PlannedClaimHeld(nn) {
+		t.Error("a held slot is not reported")
+	}
+	if r.ReleasePlannedFailoverClaim(nn, "run-2", ReleaseTerminal) || !r.ReleasePlannedFailoverClaim(nn, "run-1", ReleaseTerminal) {
+		t.Error("the slot was released by another run, or not by its own")
 	}
 }

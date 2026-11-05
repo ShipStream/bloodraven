@@ -2,6 +2,10 @@ package controller
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,7 +241,7 @@ func TestPlannedClaim_ClaimBetweenProbeAndPublishStopsIt(t *testing.T) {
 			f := newOpsFixture(t, "")
 			fired := false
 			SetSimHooksForSim(f.topo, SimHooks{Yield: func(point string) {
-				if point == "claim.afterProbe" && !fired {
+				if point == YieldPeerProbeForSim && !fired {
 					fired = true
 					intrude(t, f.tm)
 				}
@@ -366,5 +370,48 @@ func TestSync_NeverTouchesClaim(t *testing.T) {
 	mustSync(t, r)
 	if r.Slot(nn).Held() {
 		t.Fatal("a sync hydrated a claim from the cache")
+	}
+}
+
+// TestNoStatusDerivedPlannedGuard: the status-derived planned-failover
+// guard is gone. No source file sets or reads a manager flag, re-derives
+// the guard from status, or pauses Dragonfly from it; the claim slot is the
+// only guard. The plannedFailoverActive(fg) status predicate, used for
+// informational and conservative refusals, shares the name and is allowed.
+func TestNoStatusDerivedPlannedGuard(t *testing.T) {
+	forbidden := []*regexp.Regexp{
+		regexp.MustCompile(`\.plannedFailoverActive\b`),
+		regexp.MustCompile(`\bplannedFailoverActive\s+bool\b`),
+		regexp.MustCompile(`\bSetPlannedFailoverActive\b`),
+		regexp.MustCompile(`\bplannedFailoverInFlight\b`),
+		regexp.MustCompile(`\bdragonflyMaintenanceActive\b`),
+		regexp.MustCompile(`\bisPlannedFailoverActive\b`),
+	}
+	var files []string
+	for _, dir := range []string{".", "../../cmd/bloodraven", "../../cmd/kubectl-bloodraven", "../dst"} {
+		matches, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, matches...)
+	}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			for _, re := range forbidden {
+				if re.MatchString(line) {
+					t.Errorf("%s:%d uses the status-derived planned guard (%s): %s", name, i+1, re, strings.TrimSpace(line))
+				}
+			}
+		}
 	}
 }

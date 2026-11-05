@@ -134,11 +134,21 @@ func TestSupersededPromotionRequest(t *testing.T) {
 		{"newer MySQL failover to dc1", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.LastFailoverTarget, fg.Status.LastFailover = "dc1", at(2*time.Second)
 		}, true},
-		{"planned failover started after", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Target: "dc1", StartTime: at(time.Second)}
+		{"planned failover claimed after", func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Target: "dc1",
+				StartTime: at(-time.Minute), ClaimedAt: at(time.Second)}
 		}, true},
+		{"planned request accepted earlier, claimed after", func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseFencing, Target: "dc1",
+				StartTime: at(-time.Hour), ClaimedAt: at(0)}
+		}, true},
+		{"planned request still waiting", func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, Target: "dc1",
+				StartTime: at(time.Second)}
+		}, false},
 		{"planned failover from yesterday", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Target: "dc1", StartTime: at(-24 * time.Hour)}
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Target: "dc1",
+				StartTime: at(-24 * time.Hour), ClaimedAt: at(-24 * time.Hour)}
 		}, false},
 		{"newer Dragonfly promotion to dc1", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: at(time.Second)}

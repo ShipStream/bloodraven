@@ -182,15 +182,9 @@ func (m *DragonflyManager) paused() bool {
 // plannedFailoverOwnsDragonfly reports whether a planned failover owns the
 // group's Dragonfly: its run owns the sites (fg, read under the gate), or
 // the claim slot holds a run or a hold (claimHeld). A request that is only
-// waiting (Admitting, Deferred) owns nothing. A block written by the
-// pre-claim reconciler (no runId) keeps that reconciler's in-flight rule
-// until it is replaced.
+// waiting (Admitting, Deferred) owns nothing.
 func plannedFailoverOwnsDragonfly(fg *v1alpha1.MysqlFailoverGroup, claimHeld bool) bool {
-	if claimHeld || plannedFailoverOwnsSites(fg) {
-		return true
-	}
-	pf := fg.Status.PlannedFailover
-	return pf != nil && pf.RunID == "" && plannedFailoverInFlight(pf)
+	return claimHeld || plannedFailoverOwnsSites(fg)
 }
 
 // SetConnector overrides the default connector. Tests use this to inject
@@ -395,11 +389,15 @@ func (m *DragonflyManager) mysqlActivePromotionCandidate(fg *v1alpha1.MysqlFailo
 	if mysqlActive == "" {
 		return "", "", false
 	}
-	if pf := fg.Status.PlannedFailover; pf != nil {
+	// While a run is taking over Dragonfly, promoting MySQL or publishing,
+	// or rolling back after a takeover, Dragonfly and MySQL disagree on
+	// purpose: the run decides, and Dragonfly follows MySQL after release.
+	if pf, marked := plannedFailoverRun(fg); pf != nil && !marked {
 		switch pf.Phase {
 		case v1alpha1.PlannedFailoverPhasePromotingDragonfly,
 			v1alpha1.PlannedFailoverPhasePromoting,
-			v1alpha1.PlannedFailoverPhaseResuming:
+			v1alpha1.PlannedFailoverPhasePublishing,
+			v1alpha1.PlannedFailoverPhaseRollingBack:
 			return "", "", false
 		}
 	}
@@ -778,17 +776,6 @@ func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps [
 	if site := plannedTakeoverMasterSite(fg); site != "" {
 		return site
 	}
-	if pf := fg.Status.PlannedFailover; pf != nil && pf.RunID == "" {
-		switch pf.Phase {
-		case v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-			v1alpha1.PlannedFailoverPhasePromoting,
-			v1alpha1.PlannedFailoverPhaseResuming:
-			if pf.Target != "" && pf.Dragonfly != nil && pf.Dragonfly.PromotionMethod != "" {
-				return pf.Target
-			}
-		}
-	}
-
 	rawMasters := make([]string, 0, 1)
 	for _, s := range snaps {
 		if s.Reachable && s.Info.Role == "master" {
@@ -1240,11 +1227,7 @@ func rolloutPromotionBlocked(fg *v1alpha1.MysqlFailoverGroup, target, oldSource 
 func supersededPromotionRequest(fg *v1alpha1.MysqlFailoverGroup, req *dragonflyPromotionRequest) string {
 	issued := req.issued.Truncate(time.Second)
 	if pf := fg.Status.PlannedFailover; pf != nil {
-		at := pf.ClaimedAt
-		if pf.RunID == "" {
-			at = pf.StartTime // a block written by the pre-claim reconciler
-		}
-		if at != nil && !at.Time.Before(issued) {
+		if at := pf.ClaimedAt; at != nil && !at.Time.Before(issued) {
 			return fmt.Sprintf("planned failover to %q claimed the group after the request", pf.Target)
 		}
 	}

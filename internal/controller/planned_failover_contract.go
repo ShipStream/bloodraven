@@ -587,6 +587,14 @@ type PlannedFailoverTopology interface {
 	ReleasePlannedFailoverClaim(nn types.NamespacedName, runID string, why ClaimReleaseReason) bool
 	ConvertToHold(nn types.NamespacedName, runID string) bool // why=toHold
 	PlannedClaimHeld(nn types.NamespacedName) bool
+	// HeldRunClaim returns the run whose Run-mode claim the slot holds
+	// (ok=false: empty, or a hold). The engine's zombie clear (§3.4) uses
+	// it to release a claim hydrated for a run this process never saw live.
+	HeldRunClaim(nn types.NamespacedName) (runID string, ok bool)
+	// ManagerAuthority is the current manager's view of authority, which
+	// the terminal Succeeded write merges into status beside the failover
+	// record (§5.3); ok=false when no manager is registered.
+	ManagerAuthority(nn types.NamespacedName) (PlannedAuthority, bool)
 
 	Reprove(ctx context.Context, ref PlannedRunRef, fg *v1alpha1.MysqlFailoverGroup) (ReproveResult, error)
 	Fence(ctx context.Context, ref PlannedRunRef, sourceServerUUID string) (FenceProof, error)
@@ -601,6 +609,16 @@ type PlannedFailoverTopology interface {
 	NameFencedSource(ref PlannedRunRef) error      // errManagerAbsent: restoreFailoverState names it later
 	Rollback(ctx context.Context, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (RollbackResult, error)
 	ActiveSite(nn types.NamespacedName) (site string, ok bool)
+}
+
+// PlannedAuthority is the slice of a topology manager's snapshot that the
+// planned failover's terminal Succeeded write takes: the fields
+// MergeTopologySnapshotStatus derives status.activeSite and
+// status.topologyGeneration from.
+type PlannedAuthority struct {
+	ActiveSite           string
+	DeploymentActiveSite string
+	TopologyGeneration   int64
 }
 
 // ManagerRegistry is what the facade needs from the runner. Implemented by

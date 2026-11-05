@@ -12,6 +12,7 @@ import (
 
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // claimFixture is a two-site group, dc1 the settled primary and dc2 a
@@ -168,14 +169,6 @@ func TestTopologyClaimMatrix(t *testing.T) {
 		{"Auto promotion", "RRRRRW", func(t *testing.T, f *claimFixture) {
 			if began, _ := f.tm.beginAutoPromotionOf("dc2"); !began {
 				t.Fatal("setup: auto promotion not claimed")
-			}
-		}},
-		// The promotion's own claim, without the planned-failover guard
-		// (that is the next row), so the row fails if the claim stops
-		// holding the sites.
-		{"PlannedPromote", "RRRRRW", func(t *testing.T, f *claimFixture) {
-			if err := f.tm.claimPlannedPromotion(ctx, "dc2"); err != nil {
-				t.Fatalf("setup: %v", err)
 			}
 		}},
 		{"promotion not yet observed", "RRRRAW", func(t *testing.T, f *claimFixture) {
@@ -360,6 +353,65 @@ func TestAutoPromotion_ClaimBetweenEligibilityAndClaimStopsIt(t *testing.T) {
 			tm.mu.RUnlock()
 			if !readOnly || !stamped.IsZero() {
 				t.Fatalf("re-assert unfenced=%v cooldown charged=%v after a %s claimed the sites", !readOnly, !stamped.IsZero(), h.name)
+			}
+		})
+	}
+}
+
+// holdPlannedClaimLockedForTest makes tm's group hold a planned-failover
+// claim (another run's), wiring a slot if tm has none. The caller holds
+// tm.mu or no other goroutine uses tm yet.
+func holdPlannedClaimLockedForTest(tm *TopologyManager, held bool) {
+	if tm.plannedSlot == nil {
+		tm.plannedSlot = &PlannedClaimSlot{}
+	}
+	slot := tm.plannedSlot
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if held {
+		slot.held = &plannedClaim{mode: claimModeRun, runID: "run-test", source: "dc1", target: "dc2"}
+	} else {
+		slot.held = nil
+	}
+}
+
+// setPlannedClaimForTest is holdPlannedClaimLockedForTest under tm.mu.
+func setPlannedClaimForTest(tm *TopologyManager, held bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	holdPlannedClaimLockedForTest(tm, held)
+}
+
+// TestTopologyClaimMatrix_ReaderBootstrap is the matrix's "bootstrap
+// (reader)" row on a group with a read-only reader dc3: a clone into the
+// reader holds off neither Auto nor PF (A10), the rest as for a promotable
+// recipient.
+func TestTopologyClaimMatrix_ReaderBootstrap(t *testing.T) {
+	const want = "ARARRA"
+	for i, col := range claimants {
+		t.Run(col.name, func(t *testing.T) {
+			f := newClaimFixture(t)
+			cfg := testTopologyConfig()
+			cfg.Sites = append(cfg.Sites, SiteTopologyConfig{Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRoleReadOnly, Host: "mysql-dc3"})
+			dc1 := &claimMySQL{mockMySQL: &mockMySQL{}, uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+			dc2 := &claimMySQL{mockMySQL: &mockMySQL{readOnly: true, superReadOnly: true,
+				replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}},
+				uuid: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}
+			dc3 := &claimMySQL{mockMySQL: &mockMySQL{readOnly: true}, uuid: "cccccccc-cccc-cccc-cccc-cccccccccccc"}
+			tm := NewTopologyManager(cfg, []mysql.Checker{dc1, dc2, dc3}, NewFailoverController(testLogger()), nil, nil,
+				BootstrapConfig{}, newMockTainter(), platform.NewHub(testLogger()), &mockDNS{}, testLogger())
+			tm.failoverCooldown = 0
+			tm.mu.Lock()
+			tm.sites[0].state, tm.sites[1].state, tm.sites[2].state = state.StateWritable, state.StateReadOnly, state.StateReadOnly
+			tm.mu.Unlock()
+			tm.SetReadyForSim()
+			f.tm = tm
+			f.r.registerManager(f.nn, &managedTopology{tm: tm})
+			if _, why := tm.claimBootstrap("dc3", "auto-clone"); why != "" {
+				t.Fatalf("setup: %s", why)
+			}
+			if got := col.claim(t, f); got != claimOutcome(want[i]) {
+				t.Fatalf("%s while a reader clone runs: got %c, want %c", col.name, got, want[i])
 			}
 		})
 	}

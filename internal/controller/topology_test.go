@@ -2537,7 +2537,7 @@ func TestPrimaryReassert_DefersDuringPlannedFailover(t *testing.T) {
 	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
 	tm, _, _ := newTestTopologyManager(site0, site1)
 	setWedgedTopology(tm, "dc1")
-	tm.SetPlannedFailoverActive(true)
+	setPlannedClaimForTest(tm, true)
 
 	if tm.checkPrimaryReassert(context.Background()) {
 		t.Fatal("re-assert must defer while a planned failover is active")

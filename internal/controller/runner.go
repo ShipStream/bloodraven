@@ -160,23 +160,6 @@ func (r *TopologyManagerRunner) SetDeploymentReconciler(dr DeploymentReconciler)
 	r.deployReconciler = dr
 }
 
-// SetPlannedFailoverActive sets the legacy status-derived planned-failover
-// guard on the managed TopologyManager (see
-// TopologyManager.plannedFailoverActive). Only the pre-claim
-// planned-failover reconciler calls it; the group's Dragonfly manager sees
-// it through its planned-owner check. Returns true when the flag was
-// applied; false when no manager is running for this CR.
-func (r *TopologyManagerRunner) SetPlannedFailoverActive(nn types.NamespacedName, active bool) bool {
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	mt.tm.SetPlannedFailoverActive(active)
-	return true
-}
-
 // PlannedClaimHeld reports whether the group's planned-failover claim slot
 // is held, in either mode (a provisional grant included).
 func (r *TopologyManagerRunner) PlannedClaimHeld(nn types.NamespacedName) bool {
@@ -317,20 +300,6 @@ func (r *TopologyManagerRunner) SetCloneTimeout(nn types.NamespacedName, d time.
 	return true
 }
 
-// plannedFailoverManager returns the managed TopologyManager for the
-// given CR, or an error when no manager is running. The caller must not
-// cache the returned pointer; a reconfiguration can replace the manager
-// at any time.
-func (r *TopologyManagerRunner) plannedFailoverManager(nn types.NamespacedName) (*TopologyManager, error) {
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("planned-failover: no topology manager running for %s", nn)
-	}
-	return mt.tm, nil
-}
-
 // SetAPIReader sets the uncached reader the runner's Dragonfly managers read
 // the group through once they hold its gate. Call before Start.
 func (r *TopologyManagerRunner) SetAPIReader(reader client.Reader) {
@@ -364,47 +333,6 @@ func (r *TopologyManagerRunner) dragonflyManager(nn types.NamespacedName) *Drago
 	return nil
 }
 
-// PlannedFailoverFence applies super_read_only=ON on the named site
-// and returns its GTID_EXECUTED after the fence takes effect.
-func (r *TopologyManagerRunner) PlannedFailoverFence(ctx context.Context, nn types.NamespacedName, site string) (string, error) {
-	tm, err := r.plannedFailoverManager(nn)
-	if err != nil {
-		return "", err
-	}
-	return tm.FenceSite(ctx, site)
-}
-
-// PlannedFailoverUnfence clears super_read_only and read_only on the named
-// site. Used by the rollback path when the target fails to catch up.
-func (r *TopologyManagerRunner) PlannedFailoverUnfence(ctx context.Context, nn types.NamespacedName, site string) error {
-	tm, err := r.plannedFailoverManager(nn)
-	if err != nil {
-		return err
-	}
-	return tm.UnfenceSite(ctx, site)
-}
-
-// PlannedFailoverWritablePeers probes every site but except (see
-// TopologyManager.WritablePeers).
-func (r *TopologyManagerRunner) PlannedFailoverWritablePeers(ctx context.Context, nn types.NamespacedName, except string) (writable, unknown []string, err error) {
-	tm, err := r.plannedFailoverManager(nn)
-	if err != nil {
-		return nil, nil, err
-	}
-	writable, unknown = tm.WritablePeers(ctx, except)
-	return writable, unknown, nil
-}
-
-// PlannedFailoverGtidExecuted returns the named site's current
-// GTID_EXECUTED. Used to poll the target during the zero-lag gate.
-func (r *TopologyManagerRunner) PlannedFailoverGtidExecuted(ctx context.Context, nn types.NamespacedName, site string) (string, error) {
-	tm, err := r.plannedFailoverManager(nn)
-	if err != nil {
-		return "", err
-	}
-	return tm.GetSiteGtidExecuted(ctx, site)
-}
-
 // EnsurePartialRevokes turns partial_revokes ON on every site of the group;
 // see TopologyManager.EnsurePartialRevokes.
 func (r *TopologyManagerRunner) EnsurePartialRevokes(ctx context.Context, nn types.NamespacedName) error {
@@ -415,28 +343,6 @@ func (r *TopologyManagerRunner) EnsurePartialRevokes(ctx context.Context, nn typ
 		return fmt.Errorf("no topology manager running for %s", nn)
 	}
 	return mt.tm.EnsurePartialRevokes(ctx)
-}
-
-// PlannedFailoverDrainConnections kills non-replication connections on
-// the named site and returns the count killed. Polled by the Draining
-// state until it returns zero (clean drain) or the drainTimeout budget
-// elapses.
-func (r *TopologyManagerRunner) PlannedFailoverDrainConnections(ctx context.Context, nn types.NamespacedName, site string) (int, error) {
-	tm, err := r.plannedFailoverManager(nn)
-	if err != nil {
-		return 0, err
-	}
-	return tm.KillSiteAppConnections(ctx, site)
-}
-
-// PlannedFailoverPromote runs FailoverController.Execute against the
-// named target and flips DNS. Returns the promotion GTID.
-func (r *TopologyManagerRunner) PlannedFailoverPromote(ctx context.Context, nn types.NamespacedName, target, source string) (string, error) {
-	tm, err := r.plannedFailoverManager(nn)
-	if err != nil {
-		return "", err
-	}
-	return tm.PlannedPromote(ctx, target, source)
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
@@ -1448,9 +1354,12 @@ func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.Namespaced
 }
 
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.
+// The manager is wired to the group's planned-failover claim slot, as
+// registerManager wires every production manager.
 func (r *TopologyManagerRunner) SetManagerForTest(nn types.NamespacedName, tm *TopologyManager) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	WireRegisteredManager(tm, ManagerWiring{Slot: r.slotLocked(nn)})
 	r.managers[nn] = &managedTopology{tm: tm}
 }
 
@@ -2033,6 +1942,23 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 	}
 
 	st.UpdatePhase = snap.UpdatePhase
+	return true
+}
+
+// MergePlannedAuthority merges a manager's authority into st with
+// MergeTopologySnapshotStatus's rule for status.activeSite and
+// status.topologyGeneration: never from an older generation, and from a
+// newer one the deployment's active site when it names one. It returns
+// false, touching nothing, for an older generation.
+func MergePlannedAuthority(st *v1alpha1.MysqlFailoverGroupStatus, a PlannedAuthority) bool {
+	if a.TopologyGeneration < st.TopologyGeneration {
+		return false
+	}
+	st.ActiveSite = a.ActiveSite
+	if a.TopologyGeneration > st.TopologyGeneration && a.DeploymentActiveSite != "" {
+		st.ActiveSite = a.DeploymentActiveSite
+	}
+	st.TopologyGeneration = a.TopologyGeneration
 	return true
 }
 

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // Hooks for the deterministic simulation's step model of an ordered update
@@ -113,3 +114,111 @@ func (tm *TopologyManager) SetReadyForSim() {
 	tm.lastPollTime = tm.clock.Now()
 	tm.mu.Unlock()
 }
+
+// Yield points the planned-failover engine and its topology facade pass to
+// SimHooks.Yield (§15.1). A statement point carries ":<site>:<statement>".
+const (
+	YieldEngineLoadForSim    = "engine.load"          // after the uncached Load
+	YieldEngineWriteForSim   = "engine.write"         // after each store Write
+	YieldEngineSettleForSim  = "engine.settle"        // after each Settle
+	YieldPeerProbeForSim     = "facade.peerProbe"     // after a live peer probe (grant, fence, rollback)
+	YieldBeforePublishForSim = "facade.beforePublish" // before the grant's publish under tm.mu
+	YieldAfterPublishForSim  = "facade.afterPublish"  // after the grant's publish
+	YieldBeforeStmtForSim    = "facade.beforeStmt"    // before a facade statement
+	YieldAfterStmtForSim     = "facade.afterStmt"     // after a facade statement
+	YieldGateProbeForSim     = "facade.gateProbe"     // after the pre-write gate's probe
+	YieldConfirmProbeForSim  = "facade.confirmProbe"  // after the confirm path's peer probe
+)
+
+// RetireForSim retires tm as the runner does before unregistering it.
+func (tm *TopologyManager) RetireForSim() { tm.retire() }
+
+// ChangingSitesForSim reports whether tm is changing the sites now (a
+// claimed promotion or update, or an admitted follower mutation); the
+// simulator's registry uses it for ManagerWiring.RetiringBusy.
+func (tm *TopologyManager) ChangingSitesForSim() bool { return tm.changingSites() }
+
+// OrderedUpdateClaimedForSim reports whether tm's ordered update has
+// claimed its mutation window (ManagerWiring.RetiringUpdateInFlight).
+func (tm *TopologyManager) OrderedUpdateClaimedForSim() bool { return tm.orderedUpdateClaimed() }
+
+// SetPredecessorUpdateInFlightForSim sets or clears the predecessor guard,
+// as the runner does when a retired manager's update goroutine exits.
+func (tm *TopologyManager) SetPredecessorUpdateInFlightForSim(v bool) {
+	tm.setPredecessorUpdateInFlight(v)
+}
+
+// The TryLock probes report whether a mutex is free, leaving it unlocked.
+// The simulator calls them at every yield: a yield must hold no mutex.
+func (tm *TopologyManager) TryLockManagerForSim() bool { return tryUnlock(&tm.mu) }
+
+func (tm *TopologyManager) TryLockFailoverStateWriteForSim() bool {
+	return tryUnlock(&tm.failoverStateWriteMu)
+}
+
+func (tm *TopologyManager) TryLockRestoreProtectionForSim() bool {
+	return tryUnlock(&tm.restoreProtectionMu)
+}
+
+func (tm *TopologyManager) TryLockRestoreFenceForSim() bool { return tryUnlock(&tm.restoreFenceMu) }
+
+type tryLocker interface {
+	TryLock() bool
+	Unlock()
+}
+
+func tryUnlock(m tryLocker) bool {
+	if !m.TryLock() {
+		return false
+	}
+	m.Unlock()
+	return true
+}
+
+// HeldForSim returns the held claim's run and whether it is a hold;
+// ok=false when the slot is empty.
+func (s *PlannedClaimSlot) HeldForSim() (runID string, hold, ok bool) {
+	c, held := s.snapshot()
+	if !held {
+		return "", false, false
+	}
+	return c.runID, c.mode == claimModeHold, true
+}
+
+// ReleasesForSim returns the releases recorded since the last call and
+// forgets them.
+func (s *PlannedClaimSlot) ReleasesForSim() []ClaimReleaseNote {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.releases
+	s.releases = nil
+	return out
+}
+
+// SetArmCrossSiteRetryHookForSim installs fn, run with no lock held each
+// time tm arms a deferred cross-site decision for retry. Call before Run.
+func (tm *TopologyManager) SetArmCrossSiteRetryHookForSim(fn func()) {
+	tm.mu.Lock()
+	tm.armCrossSiteRetryHook = fn
+	tm.mu.Unlock()
+}
+
+// SetBeforePromotionClaimForTest installs fn, run between an emergency
+// failover's (or primary re-assert's) eligibility checks and its claim.
+// Call before Run.
+func (tm *TopologyManager) SetBeforePromotionClaimForTest(fn func(target string)) {
+	tm.mu.Lock()
+	tm.beforePromotionClaim = fn
+	tm.mu.Unlock()
+}
+
+// SetTickIntervalForTest sets how often the ordered update polls replica
+// and pod readiness. Call before the update starts.
+func (u *UpdateController) SetTickIntervalForTest(d time.Duration) { u.tickInterval = d }
+
+// UpdaterForTest returns tm's ordered-update controller (nil when none), for
+// harnesses that shrink its tick.
+func (tm *TopologyManager) UpdaterForTest() *UpdateController { return tm.updater }

@@ -154,30 +154,6 @@ func TestKeyringPromotion_SealedReplicaStillPromotes(t *testing.T) {
 	}
 }
 
-func TestKeyringPromotion_PlannedPromoteRefusesRotatingTarget(t *testing.T) {
-	h := newTestHarness(t)
-	h.pollN(2)
-	h.tm.SetKeyringRotationBlocked([]string{"dc2"})
-	_, err := h.tm.PlannedPromote(context.Background(), "dc2", "dc1")
-	if err == nil || !strings.Contains(err.Error(), "mid-keyring-rotation") {
-		t.Fatalf("PlannedPromote err = %v, want mid-keyring-rotation", err)
-	}
-	if !h.dc2MySQL.isReadOnly() {
-		t.Fatal("planned promote must not make the rotating target writable")
-	}
-}
-
-func TestKeyringPromotion_PlannedPromoteAllowsSealedTarget(t *testing.T) {
-	h := newTestHarness(t)
-	h.pollN(2)
-	if _, err := h.tm.PlannedPromote(context.Background(), "dc2", "dc1"); err != nil {
-		t.Fatalf("PlannedPromote sealed target: %v", err)
-	}
-	if h.dc2MySQL.isReadOnly() {
-		t.Fatal("sealed planned-promote target should be writable")
-	}
-}
-
 type threeSiteHarness struct {
 	tm       *controller.TopologyManager
 	dc1MySQL *mockMySQL

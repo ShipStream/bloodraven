@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -40,7 +39,6 @@ import (
 //
 //	held \ claimant              Auto Upd Rot Fol Boot  PF
 //	Auto promotion               R    R   R   R   R     W
-//	PlannedPromote (legacy)      R    R   R   R   R     W
 //	planned-failover claim       R    R   R   R   R     W7
 //	(incl. provisional grant)
 //	planned-failover hold        R    R   R   R   R     R12
@@ -82,9 +80,6 @@ import (
 //	W11 The runner routes the claim to the current manager; the next pass
 //	   reaches the replacement.
 //	R12 A new request ends Failed{NotStarted, ManualRecoveryPending}.
-//
-// The legacy PlannedPromote row is the pre-claim planned failover's
-// promotion; it goes with that reconciler.
 //
 // A bootstrap into a read-only reader does not hold off Auto (see
 // bootstrapBlocksCrossSite); its row is otherwise the promotable one's.
@@ -151,44 +146,6 @@ func (tm *TopologyManager) beginAutoPromotionOf(target string) (began, rotationB
 		return false, false
 	}
 	return tm.beginDeploymentTopologyChangeLocked(), false
-}
-
-// beginPromotionOf claims the topology-change window for a planned
-// failover's promotion of target, refusing (rotationBlocked) when target is
-// mid-keyring-rotation, durably or by reservation. The check and the claim
-// share mu with ReserveKeyringRotation, which refuses while a change is
-// claimed, so a rotation admitted before the claim stops the promotion and
-// one requested after it is refused. It refuses, too, while a replaced
-// manager's ordered update is still unwinding (beginDeploymentTopologyChange-
-// Locked): the planned failover then fails closed (see PlannedPromote).
-func (tm *TopologyManager) beginPromotionOf(target string) (began, rotationBlocked bool) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.keyringRotationBlockedLocked(target) {
-		tm.keyringRotationBlockedDirty = true
-		return false, true
-	}
-	return tm.beginDeploymentTopologyChangeLocked(), false
-}
-
-// claimPlannedPromotion takes PlannedPromote's claim, published at the
-// follower-mutation barrier so a recovery step admitted before the planned
-// failover's flag was set has finished before Execute starts. It returns
-// errHandoffNotAdmitted if ctx ends first; nothing has then been sent.
-func (tm *TopologyManager) claimPlannedPromotion(ctx context.Context, target string) error {
-	var began, rotationBlocked bool
-	if err := tm.admitTopologyHandoff(ctx, func() { began, rotationBlocked = tm.beginPromotionOf(target) }); err != nil {
-		return fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
-	}
-	switch {
-	case rotationBlocked:
-		return fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
-	case !began && tm.predecessorUpdateUnwinding():
-		return errPredecessorUpdateInFlight
-	case !began:
-		return fmt.Errorf("topology change already in progress")
-	}
-	return nil
 }
 
 // orderedUpdateClaimRefusedLocked reports whether an ordered update planned

@@ -60,6 +60,14 @@ func (f *pfEnvTopology) ConvertToHold(_ types.NamespacedName, runID string) bool
 	f.held, f.hold = runID, true
 	return true
 }
+func (f *pfEnvTopology) ManagerAuthority(types.NamespacedName) (controller.PlannedAuthority, bool) {
+	return controller.PlannedAuthority{}, false
+}
+func (f *pfEnvTopology) HeldRunClaim(types.NamespacedName) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.held, f.held != "" && !f.hold
+}
 func (f *pfEnvTopology) PlannedClaimHeld(types.NamespacedName) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
