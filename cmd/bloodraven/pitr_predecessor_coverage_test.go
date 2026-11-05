@@ -15,7 +15,7 @@ import (
 )
 
 // Rebuild native event positions and CRCs after inserting or replacing queries.
-func round4Reframe(events [][]byte) []byte {
+func reframeBinlogEvents(events [][]byte) []byte {
 	out := []byte("\xfebin")
 	for _, event := range events {
 		event = bytes.Clone(event)
@@ -26,7 +26,7 @@ func round4Reframe(events [][]byte) []byte {
 	}
 	return out
 }
-func round4Events(raw []byte) [][]byte {
+func splitBinlogEvents(raw []byte) [][]byte {
 	var events [][]byte
 	for off := 4; off < len(raw); {
 		size := int(binary.LittleEndian.Uint32(raw[off+9 : off+13]))
@@ -35,25 +35,25 @@ func round4Events(raw []byte) [][]byte {
 	}
 	return events
 }
-func round4Query(event []byte) string {
+func queryEventSQL(event []byte) string {
 	body := event[19 : len(event)-4]
 	start := 13 + int(binary.LittleEndian.Uint16(body[11:13])) + int(body[8]) + 1
 	return string(body[start:])
 }
-func round4SetQuery(event []byte, query string) []byte {
-	old := round4Query(event)
+func setQueryEventSQL(event []byte, query string) []byte {
+	old := queryEventSQL(event)
 	out := bytes.Clone(event[:len(event)-4-len(old)])
 	out = append(out, query...)
 	return append(out, make([]byte, 4)...)
 }
-func round4Savepoint(t *testing.T, raw []byte) []byte {
+func insertSavepointFixture(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var events [][]byte
 	inserted, xid := false, false
-	for _, event := range round4Events(raw) {
+	for _, event := range splitBinlogEvents(raw) {
 		events = append(events, event)
-		if event[4] == 2 && round4Query(event) == "BEGIN" {
-			events = append(events, round4SetQuery(event, "SAVEPOINT `s1`"))
+		if event[4] == 2 && queryEventSQL(event) == "BEGIN" {
+			events = append(events, setQueryEventSQL(event, "SAVEPOINT `s1`"))
 			inserted = true
 		}
 		xid = xid || event[4] == 16
@@ -61,26 +61,26 @@ func round4Savepoint(t *testing.T, raw []byte) []byte {
 	if !inserted || !xid {
 		t.Fatal("native fixture must contain BEGIN ... XID")
 	}
-	return round4Reframe(events)
+	return reframeBinlogEvents(events)
 }
-func round4MoveClock(raw []byte, at time.Time) []byte {
-	events := round4Events(raw)
+func moveBinlogClock(raw []byte, at time.Time) []byte {
+	events := splitBinlogEvents(raw)
 	for _, event := range events {
 		if binary.LittleEndian.Uint32(event[:4]) != 0 {
 			binary.LittleEndian.PutUint32(event[:4], uint32(at.Unix()))
 		}
 	}
-	return round4Reframe(events)
+	return reframeBinlogEvents(events)
 }
-func TestRound4NativePredecessorCoverage(t *testing.T) {
+func TestPITRNativePredecessorCoverage(t *testing.T) {
 	for _, savepoint := range []bool{false, true} {
 		t.Run(map[bool]string{false: "BEGIN to XID", true: "native SAVEPOINT"}[savepoint], func(t *testing.T) {
 			raw := pitrFixture(t, "native/initial.bin")
 			if savepoint {
-				raw = round4Savepoint(t, raw)
+				raw = insertSavepointFixture(t, raw)
 			} else {
 				// Verify the control uses the native transactional shape too.
-				_ = round4Savepoint(t, raw)
+				_ = insertSavepointFixture(t, raw)
 			}
 			evidence, err := sidecar.InspectBinlog(bytes.NewReader(raw), time.Time{})
 			if err != nil {
@@ -94,8 +94,8 @@ func TestRound4NativePredecessorCoverage(t *testing.T) {
 				sid = key
 			}
 			at := evidence.NewestEventTime
-			idle := round4MoveClock(pitrFixture(t, "native/flush-empty.bin"), at.Add(10*time.Minute))
-			store := round1Archive(t, map[string][][]byte{"iad": {raw, idle}})
+			idle := moveBinlogClock(pitrFixture(t, "native/flush-empty.bin"), at.Add(10*time.Minute))
+			store := coverageArchive(t, map[string][][]byte{"iad": {raw, idle}})
 			for _, partial := range []bool{false, true} {
 				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, at.Add(5*time.Minute), t.TempDir(), sid+":1", partial, false, "timestamp", slog.Default())
 				if err != nil || !result.TargetCovered || result.Partial {
@@ -105,20 +105,20 @@ func TestRound4NativePredecessorCoverage(t *testing.T) {
 		})
 	}
 }
-func TestRound4AdminAndCompressedPredecessors(t *testing.T) {
+func TestPITRAdminAndCompressedPredecessors(t *testing.T) {
 	for _, query := range []string{"ANALYZE TABLE replay.markers", "OPTIMIZE TABLE replay.markers", "FLUSH PRIVILEGES", "compressed transaction"} {
 		t.Run(query, func(t *testing.T) {
-			raw := round1Stream(t, 10, round1Time(9, 0, 0), false, false)
+			raw := coverageStream(t, 10, coverageTime(9, 0, 0), false, false)
 			if query == "compressed transaction" {
 				raw = pitrFixture(t, "compressed-transaction.bin")
 			} else {
-				events := round4Events(raw)
+				events := splitBinlogEvents(raw)
 				for i, event := range events {
 					if event[4] == 2 {
-						events[i] = round4SetQuery(event, query)
+						events[i] = setQueryEventSQL(event, query)
 					}
 				}
-				raw = round4Reframe(events)
+				raw = reframeBinlogEvents(events)
 			}
 			evidence, err := sidecar.InspectBinlog(bytes.NewReader(raw), time.Time{})
 			if err != nil {
@@ -127,10 +127,10 @@ func TestRound4AdminAndCompressedPredecessors(t *testing.T) {
 			if !evidence.Metadata.GTIDCoverage.Complete {
 				t.Fatal("whole-file coverage must be complete")
 			}
-			barrier := round1PatchTimestamp(t, round1Stream(t, 11, round1Time(9, 20, 0), false, false), 3, uint32(round1Time(9, 35, 0).Unix()))
-			store := round1Archive(t, map[string][][]byte{"iad": {raw, barrier}})
+			barrier := patchEventTimestamp(t, coverageStream(t, 11, coverageTime(9, 20, 0), false, false), 3, uint32(coverageTime(9, 35, 0).Unix()))
+			store := coverageArchive(t, map[string][][]byte{"iad": {raw, barrier}})
 			for _, partial := range []bool{false, true} {
-				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, false, "timestamp", slog.Default())
+				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, coverageTime(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, false, "timestamp", slog.Default())
 				if err != nil || !result.TargetCovered || result.Partial {
 					t.Fatalf("archived predecessor refused: %+v %v", result, err)
 				}
@@ -139,12 +139,12 @@ func TestRound4AdminAndCompressedPredecessors(t *testing.T) {
 	}
 }
 
-func round4CompressNativeTransaction(t *testing.T, raw []byte) []byte {
+func compressNativeTransaction(t *testing.T, raw []byte) []byte {
 	t.Helper()
-	events := round4Events(raw)
+	events := splitBinlogEvents(raw)
 	begin, end := -1, -1
 	for i, event := range events {
-		if event[4] == 2 && round4Query(event) == "BEGIN" {
+		if event[4] == 2 && queryEventSQL(event) == "BEGIN" {
 			begin = i
 		}
 		if begin >= 0 && event[4] == 16 {
@@ -186,15 +186,15 @@ func round4CompressNativeTransaction(t *testing.T, raw []byte) []byte {
 	result := append([][]byte{}, events[:begin]...)
 	result = append(result, payload)
 	result = append(result, events[end+1:]...)
-	return round4Reframe(result)
+	return reframeBinlogEvents(result)
 }
 
-func TestRound4NativeStopPrefixContainment(t *testing.T) {
+func TestPITRNativeStopPrefixContainment(t *testing.T) {
 	for _, compressed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "savepoint prefix", true: "decoded compressed prefix"}[compressed], func(t *testing.T) {
-			raw := round4Savepoint(t, pitrFixture(t, "native/initial.bin"))
+			raw := insertSavepointFixture(t, pitrFixture(t, "native/initial.bin"))
 			if compressed {
-				raw = round4CompressNativeTransaction(t, raw)
+				raw = compressNativeTransaction(t, raw)
 			}
 			full, err := sidecar.InspectBinlog(bytes.NewReader(raw), time.Time{})
 			if err != nil {
@@ -205,7 +205,7 @@ func TestRound4NativeStopPrefixContainment(t *testing.T) {
 				sid = key
 			}
 			stop := full.NewestEventTime.Add(5 * time.Minute)
-			events := round4Events(raw)
+			events := splitBinlogEvents(raw)
 			last := events[len(events)-1]
 			if last[4] != 4 {
 				last = bytes.Clone(last[:19])
@@ -214,7 +214,7 @@ func TestRound4NativeStopPrefixContainment(t *testing.T) {
 				events = append(events, last)
 			}
 			binary.LittleEndian.PutUint32(last[:4], uint32(full.NewestEventTime.Add(10*time.Minute).Unix()))
-			barrier := round4Reframe(events)
+			barrier := reframeBinlogEvents(events)
 			prefix, err := sidecar.InspectBinlog(bytes.NewReader(barrier), stop)
 			if err != nil {
 				t.Fatal(err)
@@ -222,7 +222,7 @@ func TestRound4NativeStopPrefixContainment(t *testing.T) {
 			if !prefix.StopReached || !prefix.CompletedBeforeStopGTIDs.Contains(full.GTIDs) {
 				t.Fatalf("decoded native prefix was not credited: %+v", prefix)
 			}
-			store := round1Archive(t, map[string][][]byte{"iad": {barrier}, "pdx": {raw}})
+			store := coverageArchive(t, map[string][][]byte{"iad": {barrier}, "pdx": {raw}})
 			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, stop, t.TempDir(), sid+":1", false, true, "timestamp", slog.Default())
 			if err != nil || !result.TargetCovered || !result.CrossSiteUnverified {
 				t.Fatalf("native completed-prefix containment refused: %+v %v", result, err)

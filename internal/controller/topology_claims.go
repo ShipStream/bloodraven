@@ -221,6 +221,11 @@ func (tm *TopologyManager) bootstrapClaimRefusedLocked() string {
 	return ""
 }
 
+// bootstrapRefusedRestoreHold is claimBootstrap's reason when an in-place
+// restore has frozen the topology or queued the recipient; the caller
+// reports it with noteBootstrapRefused.
+const bootstrapRefusedRestoreHold = "the recipient is held by an in-place restore"
+
 // claimBootstrap starts a bootstrap of recipient unless another actor
 // holds the sites; it returns why not, or "", and the owner of a pending
 // reclone of recipient.
@@ -230,16 +235,24 @@ func (tm *TopologyManager) claimBootstrap(recipient, source string) (recloneOwne
 	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	// Re-checked under the same lock as the commit, so a clone never
+	// starts after an in-place restore has frozen the topology or queued
+	// the recipient (see startBootstrapByName's admission reservation).
+	if tm.bootstrapAdmissionRefusedLocked(recipient) {
+		return "", bootstrapRefusedRestoreHold
+	}
 	if why := tm.bootstrapClaimRefusedLocked(); why != "" {
 		return "", why
 	}
 	if source == "reclone" && tm.reclonePendingSite == recipient {
 		recloneOwner = tm.reclonePendingOwner
 	}
+	tm.bootstrapAdmitting = ""
 	tm.bootstrapPhase = BootstrapPhaseCloning
 	tm.bootstrapErr = nil
 	tm.bootstrapSource = source
 	tm.bootstrapRecipient = recipient
+	tm.bootstrapRefusedSite = ""
 	// A leftover release from a previous attempt must not fire while
 	// this clone is running — that would reseal the pod mid-CLONE.
 	if tm.cloneHoldReleaseSite == recipient {

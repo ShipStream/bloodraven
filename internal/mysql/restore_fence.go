@@ -38,6 +38,29 @@ type RestoreFencer interface {
 	EvictSessions(ctx context.Context, keepUsers []string) (remaining int, protected []string, err error)
 }
 
+// ReplicaIOStopper stops a peer's replication receiver while a
+// full-instance in-place restore runs on the primary. In credentials mode
+// the peers replicate as the operator account, which offline_mode does
+// not disconnect, and a legacy replicator reconnects once the fence is
+// released, so either way the restore's binlogged DROP DATABASE would
+// reach the peers unless their IO thread is stopped. Only the receiver
+// is stopped: the applier keeps applying the relay log received before
+// the stop (transactions committed before the fence). The production
+// checker implements it; the topology manager type-asserts and refuses
+// a checker that does not.
+type ReplicaIOStopper interface {
+	// MissingReplicaIOStopPrivileges lists the ReplicaIOStopPrivileges
+	// the checker's own account lacks on *.* (nil when it holds them).
+	MissingReplicaIOStopPrivileges(ctx context.Context) ([]string, error)
+	// StopReplicaIOThread runs STOP REPLICA IO_THREAD.
+	StopReplicaIOThread(ctx context.Context) error
+}
+
+// ReplicaIOStopPrivileges are the global privileges the operator account
+// needs on each peer to stop its replication receiver. SUPER or ALL
+// PRIVILEGES cover it.
+var ReplicaIOStopPrivileges = []string{"REPLICATION_SLAVE_ADMIN"}
+
 // RestoreFencePrivileges are the global privileges the operator account
 // needs for the full-instance restore fence and the restore Job that runs
 // under it, beyond DDL and DML. CONNECTION_ADMIN keeps the account
@@ -57,6 +80,30 @@ const errUnknownThread = 1094
 const errKillDenied = 1095
 
 func (m *checker) MissingRestoreFencePrivileges(ctx context.Context) ([]string, error) {
+	grants, err := m.showGrants(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return missingRestoreFencePrivileges(grants), nil
+}
+
+func (m *checker) MissingReplicaIOStopPrivileges(ctx context.Context) ([]string, error) {
+	grants, err := m.showGrants(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return missingGlobalPrivileges(grants, ReplicaIOStopPrivileges), nil
+}
+
+func (m *checker) StopReplicaIOThread(ctx context.Context) error {
+	if _, err := m.db.ExecContext(ctx, "STOP REPLICA IO_THREAD"); err != nil {
+		return fmt.Errorf("stop replica io_thread: %w", err)
+	}
+	return nil
+}
+
+// showGrants returns the session's SHOW GRANTS lines.
+func (m *checker) showGrants(ctx context.Context) ([]string, error) {
 	// SHOW GRANTS without FOR reports the session's effective privileges,
 	// including those of its active roles (information_schema only lists
 	// direct grants).
@@ -76,12 +123,19 @@ func (m *checker) MissingRestoreFencePrivileges(ctx context.Context) ([]string, 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return missingRestoreFencePrivileges(grants), nil
+	return grants, nil
 }
 
 // missingRestoreFencePrivileges returns the RestoreFencePrivileges that
 // the SHOW GRANTS lines do not grant on *.*.
 func missingRestoreFencePrivileges(grants []string) []string {
+	return missingGlobalPrivileges(grants, RestoreFencePrivileges)
+}
+
+// missingGlobalPrivileges returns the wanted privileges that the SHOW
+// GRANTS lines do not grant on *.*. SUPER covers all but PROCESS; ALL
+// PRIVILEGES covers every one.
+func missingGlobalPrivileges(grants, wanted []string) []string {
 	held := map[string]bool{}
 	for _, g := range grants {
 		for _, p := range globalPrivileges(g) {
@@ -89,7 +143,7 @@ func missingRestoreFencePrivileges(grants []string) []string {
 		}
 	}
 	var missing []string
-	for _, want := range RestoreFencePrivileges {
+	for _, want := range wanted {
 		switch {
 		case held[want], held["ALL"], held["ALL PRIVILEGES"]:
 		case held["SUPER"] && want != "PROCESS":

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,11 @@ import (
 	"github.com/shipstream/bloodraven/internal/platform"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const retentionTestSID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -44,7 +49,7 @@ func TestPITRCutoffRequiresEveryBackupGTIDBoundary(t *testing.T) {
 			if tc.name == "missing start time" {
 				second.Status.StartTime = nil
 			}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(first, second, retentionRound2Group()).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(first, second, cutoffTestGroup()).Build()
 			mux := newAuxMux(nil, platform.NewHub(slog.Default()), c)
 			request := func(query string) map[string]any {
 				t.Helper()
@@ -95,7 +100,7 @@ func TestPITRCutoffDoesNotCachePositiveCoverage(t *testing.T) {
 	}
 	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
 	first := retentionBoundaryBackup("old", retentionTestSID+":1-20", start)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(first, retentionRound2Group()).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(first, cutoffTestGroup()).Build()
 	mux := newAuxMux(nil, platform.NewHub(slog.Default()), c)
 	read := func() map[string]any {
 		t.Helper()
@@ -122,5 +127,122 @@ func TestPITRCutoffDoesNotCachePositiveCoverage(t *testing.T) {
 	sets, ok := proof["retainedGTIDs"].([]any)
 	if !ok || len(sets) != 2 {
 		t.Fatalf("new retained backup was hidden by cached proof or label filter: %v", proof)
+	}
+}
+
+// TestPITRCutoffKeepsHeldTerminatingBackup pins #211: a backup deleted
+// while a verification reads it keeps its artifact until the run stops, so
+// it must keep bounding binlog retention for that long too, including for a
+// run started by an operator that did not stamp holds.
+func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
+	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+	reading := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "ns", UID: "uid-v"},
+		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "fg"}, ProfileName: "p"},
+		Status: v1alpha1.MysqlBackupVerificationStatus{Phase: v1alpha1.VerificationPhaseRestoring,
+			BackupRef: &v1alpha1.VerificationBackupRef{Name: "deleting", UID: "uid-deleting", Location: "x/deleting", StorageType: v1alpha1.BackupStorageS3}},
+	}
+	for _, tc := range []struct {
+		name      string
+		held      bool
+		reader    bool
+		listError bool
+		cutoff    time.Time
+		wantErr   bool
+	}{
+		{name: "stamped hold", held: true, cutoff: start},
+		{name: "unstamped, verification still reading", reader: true, cutoff: start},
+		{name: "not read", cutoff: start.Add(time.Hour)},
+		{name: "reader lookup fails closed", listError: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := clientgoscheme.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := v1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			deleting := retentionBoundaryBackup("deleting", retentionTestSID+":1-10", start)
+			deleting.UID = "uid-deleting"
+			now := metav1.Now()
+			deleting.DeletionTimestamp = &now
+			deleting.Finalizers = []string{"shipstream.io/mysqlbackup"}
+			if tc.held {
+				deleting.Annotations = map[string]string{"hold.verification.shipstream.io/uid-v": "v"}
+			}
+			kept := retentionBoundaryBackup("kept", retentionTestSID+":1-20", start.Add(time.Hour))
+			objs := []client.Object{deleting, kept}
+			if tc.reader {
+				objs = append(objs, reading)
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+			var holdReader client.Reader = c
+			if tc.listError {
+				holdReader = interceptor.NewClient(c, interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*v1alpha1.MysqlBackupVerificationList); ok {
+							return errors.New("injected")
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+			}
+			resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", "p")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("an unknown reader set produced a cutoff: %v", resp)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp["cutoffTime"] != tc.cutoff.Format(time.RFC3339) {
+				t.Fatalf("cutoff %v, want %s", resp["cutoffTime"], tc.cutoff.Format(time.RFC3339))
+			}
+		})
+	}
+}
+
+// TestPITRCutoffListsVerificationsOnce pins that a lookup with many stuck
+// Terminating backups costs one uncached verification List, not one each.
+func TestPITRCutoffListsVerificationsOnce(t *testing.T) {
+	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	objs := []client.Object{retentionBoundaryBackup("kept", retentionTestSID+":1-20", start.Add(time.Hour))}
+	now := metav1.Now()
+	for _, name := range []string{"stuck-a", "stuck-b", "stuck-c", "stuck-d"} {
+		b := retentionBoundaryBackup(name, retentionTestSID+":1-10", start)
+		b.UID = types.UID("uid-" + name)
+		b.DeletionTimestamp = &now
+		b.Finalizers = []string{"shipstream.io/mysqlbackup"}
+		objs = append(objs, b)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	lists := 0
+	holdReader := interceptor.NewClient(c, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*v1alpha1.MysqlBackupVerificationList); ok {
+				lists++
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lists != 1 {
+		t.Fatalf("verification Lists = %d, want 1 per request", lists)
+	}
+	if resp["cutoffTime"] != start.Add(time.Hour).Format(time.RFC3339) {
+		t.Fatalf("cutoff %v", resp["cutoffTime"])
 	}
 }

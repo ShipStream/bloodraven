@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
 const credentialHashAnnotation = "shipstream.io/credential-hash"
@@ -430,7 +431,7 @@ func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.Mys
 	if !ok {
 		return "", "", "", fmt.Errorf("secret %s missing 'dsn' key", secretName)
 	}
-	parsed, err := mysqldriver.ParseDSN(string(dsnBytes))
+	parsed, err := internalmysql.ParseDSN(string(dsnBytes))
 	if err != nil {
 		return "", "", "", fmt.Errorf("parse dsn from secret %s: %w", secretName, err)
 	}
@@ -510,7 +511,7 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 			// A dsn that does not parse hides the account it names, so it
 			// fails the gate like an unreadable Secret does — a corrupt
 			// group Secret must not un-reserve the group's own principal.
-			parsed, err := mysqldriver.ParseDSN(string(dsn))
+			parsed, err := internalmysql.ParseDSN(string(dsn))
 			if err != nil {
 				return nil, fmt.Errorf("parse dsn in group credential secret %s/%s: %w", fg.Namespace, name, err)
 			}

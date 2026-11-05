@@ -721,13 +721,7 @@ func TestBuildCleanupJob_S3_SetsStorageTypeEnvAndMountsAWSCreds(t *testing.T) {
 			StorageType: v1alpha1.BackupStorageS3,
 		},
 	}
-	job, err := buildCleanupJob(cleanupJobInputs{
-		FailoverGroup:        fg,
-		Profile:              &profile,
-		Backup:               backup,
-		CredsSecretName:      backupCredsSecretName(backup.Name),
-		ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
-	})
+	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
 	if err != nil {
 		t.Fatalf("buildCleanupJob: %v", err)
 	}
@@ -754,8 +748,11 @@ func TestBuildCleanupJob_S3_SetsStorageTypeEnvAndMountsAWSCreds(t *testing.T) {
 	if !hasAWS {
 		t.Error("aws-creds volume must be attached for S3 cleanup")
 	}
-	if !strings.HasSuffix(c.Command[len(c.Command)-1], "/cleanup.py") {
-		t.Errorf("want cleanup.py command, got %v", c.Command)
+	if strings.Join(c.Command, " ") != operatorBinaryPath+" artifact-cleanup" || c.Image != cleanupTestImage {
+		t.Errorf("want operator-image artifact-cleanup, got %s %v", c.Image, c.Command)
+	}
+	if envMap["BLOODRAVEN_BACKUP_NAME"] != "lion-done" {
+		t.Errorf("want BLOODRAVEN_BACKUP_NAME=lion-done, got %q", envMap["BLOODRAVEN_BACKUP_NAME"])
 	}
 }
 
@@ -773,13 +770,7 @@ func TestBuildCleanupJob_PVC_AttachesVolumeAndSetsMountPath(t *testing.T) {
 			StorageType: v1alpha1.BackupStoragePVC,
 		},
 	}
-	job, err := buildCleanupJob(cleanupJobInputs{
-		FailoverGroup:        fg,
-		Profile:              &profile,
-		Backup:               backup,
-		CredsSecretName:      backupCredsSecretName(backup.Name),
-		ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
-	})
+	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
 	if err != nil {
 		t.Fatalf("buildCleanupJob: %v", err)
 	}
@@ -812,13 +803,7 @@ func TestBuildCleanupJob_NoLocation_Errors(t *testing.T) {
 			ProfileName:      "nightly-s3",
 		},
 	}
-	if _, err := buildCleanupJob(cleanupJobInputs{
-		FailoverGroup:        fg,
-		Profile:              &profile,
-		Backup:               backup,
-		CredsSecretName:      "x",
-		ScriptsConfigMapName: "y",
-	}); err == nil {
+	if _, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup)); err == nil {
 		t.Error("expected error for empty status.location")
 	}
 }
@@ -828,7 +813,7 @@ func TestBuildCleanupJob_NoLocation_Errors(t *testing.T) {
 func TestFinalize_NoLocationIsImmediatelyDone(t *testing.T) {
 	b := backupCR("bare", "lion", "nightly-s3")
 	r, _ := newBackupReconciler(t, b)
-	done, err := r.finalize(context.Background(), b)
+	done, _, err := r.finalize(context.Background(), b)
 	if err != nil || !done {
 		t.Errorf("want (true, nil), got (%v, %v)", done, err)
 	}
@@ -838,7 +823,7 @@ func TestFinalize_MissingFailoverGroup_ReleasesWithWarning(t *testing.T) {
 	b := backupCR("orphan", "ghost", "nightly-s3")
 	b.Status.Location = "ghost/orphan/"
 	r, _ := newBackupReconciler(t, b)
-	done, err := r.finalize(context.Background(), b)
+	done, _, err := r.finalize(context.Background(), b)
 	if err != nil || !done {
 		t.Errorf("want (true, nil), got (%v, %v)", done, err)
 	}
@@ -855,14 +840,18 @@ func TestFinalize_MissingFailoverGroup_ReleasesWithWarning(t *testing.T) {
 }
 
 func TestFinalize_CreatesCleanupJobAndWaits(t *testing.T) {
+	SetOperatorImageDefaults(cleanupTestImage, "bloodraven")
+	t.Cleanup(func() { SetOperatorImageDefaults("", "") })
 	fg := fgWithBackup()
 	b := backupCR("done", "lion", "nightly-s3")
 	b.Status.Location = "lion/done/"
 	b.Status.StorageType = v1alpha1.BackupStorageS3
-	r, c := newBackupReconciler(t, fg, b, dsnSecret())
+	b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{Location: "lion/done/", Bucket: "bloodraven-backups"}
+	// No MySQL credentials Secret: cleanup only talks to storage.
+	r, c := newBackupReconciler(t, fg, b)
 
 	// First pass: creates cleanup Job, returns (false, nil).
-	done, err := r.finalize(context.Background(), b)
+	done, _, err := r.finalize(context.Background(), b)
 	if err != nil || done {
 		t.Fatalf("first pass: want (false, nil), got (%v, %v)", done, err)
 	}
@@ -884,7 +873,7 @@ func TestFinalize_CreatesCleanupJobAndWaits(t *testing.T) {
 	if err := c.Status().Update(context.Background(), &cj); err != nil {
 		t.Fatalf("status update: %v", err)
 	}
-	done, err = r.finalize(context.Background(), b)
+	done, _, err = r.finalize(context.Background(), b)
 	if err != nil || !done {
 		t.Errorf("second pass: want (true, nil), got (%v, %v)", done, err)
 	}

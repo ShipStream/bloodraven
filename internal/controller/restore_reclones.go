@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // The restore-owned reclone queue (status.restoreReclones).
@@ -144,8 +146,7 @@ func (r *MysqlFailoverGroupReconciler) mutateRestoreReclones(ctx context.Context
 		return false, err
 	}
 	if changed && r.Runner != nil {
-		r.Runner.SetRestoreRecloneBlocked(client.ObjectKeyFromObject(fg), restoreRecloneBlockedSites(fg))
-		r.Runner.SetRestoreReclonePending(client.ObjectKeyFromObject(fg), restoreReclonePendingSites(fg))
+		r.Runner.SetRestorePeerHold(ctx, fg)
 	}
 	return changed, nil
 }
@@ -204,8 +205,12 @@ func (r *MysqlFailoverGroupReconciler) restoreReclonesReadyForNewRestore(ctx con
 // overwrites the primary again, so every peer needs the new data. An
 // older queue that was still draining (or held) is kept in Superseded
 // until the new restore succeeds, so a new restore that is cancelled or
-// fails cannot release peers the older one never recloned.
-func (r *MysqlFailoverGroupReconciler) armRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, confirm string) error {
+// fails cannot release peers the older one never recloned. An older
+// queue still Armed under a confirm other than this run's (confirm or
+// ownTokens) belongs to an earlier restore whose outcome was never settled
+// (an operator restart or a lost status write right after it ended): it
+// may have dropped the primary's schemas, so it is carried as Held.
+func (r *MysqlFailoverGroupReconciler) armRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, confirm string, ownTokens ...string) error {
 	recipients := restoreRecloneRecipients(fg, target)
 	_, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1alpha1.MysqlFailoverGroup) bool {
 		old := fresh.Status.RestoreReclones
@@ -224,6 +229,14 @@ func (r *MysqlFailoverGroupReconciler) armRestoreReclones(ctx context.Context, f
 		switch {
 		case old != nil && old.ConfirmToken == confirm:
 			next.Superseded = old.Superseded
+		case old != nil && old.Phase == v1alpha1.RestoreReclonesArmed && slices.Contains(ownTokens, old.ConfirmToken):
+			next.Superseded = old.Superseded
+		case old != nil && old.Phase == v1alpha1.RestoreReclonesArmed:
+			next.Superseded = &v1alpha1.RestoreReclonesCarryover{
+				ConfirmToken: old.ConfirmToken,
+				Pending:      unsettledQueueSites(old),
+				Held:         true,
+			}
 		case old != nil && (old.Phase == v1alpha1.RestoreReclonesDraining || old.Phase == v1alpha1.RestoreReclonesHeld) && len(old.Pending) > 0:
 			next.Superseded = &v1alpha1.RestoreReclonesCarryover{
 				ConfirmToken: old.ConfirmToken,
@@ -237,6 +250,20 @@ func (r *MysqlFailoverGroupReconciler) armRestoreReclones(ctx context.Context, f
 		return true
 	})
 	return err
+}
+
+// unsettledQueueSites returns every site an unsettled Armed queue covers:
+// its own pending sites and those of the queue it had replaced.
+func unsettledQueueSites(q *v1alpha1.RestoreReclonesStatus) []string {
+	sites := append([]string(nil), q.Pending...)
+	if q.Superseded != nil {
+		for _, s := range q.Superseded.Pending {
+			if !slices.Contains(sites, s) {
+				sites = append(sites, s)
+			}
+		}
+	}
+	return sites
 }
 
 // rebindRestoreReclones moves the Armed queue of a run whose confirm was
@@ -339,7 +366,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		return 0, nil
 	}
 	if q.Phase != v1alpha1.RestoreReclonesDraining && q.Phase != v1alpha1.RestoreReclonesHeld {
-		return 0, r.settleArmedRestoreReclones(ctx, fg)
+		return r.settleArmedRestoreReclones(ctx, fg)
 	}
 
 	known := make([]string, 0, len(q.Pending))
@@ -347,6 +374,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		if specDeclaresSite(fg, site) {
 			known = append(known, site)
 		}
+	}
+	if q.Phase == v1alpha1.RestoreReclonesHeld {
+		// The primary is no trusted donor (settleArmedRestoreReclones);
+		// the sites wait, excluded and with replication stopped, for an
+		// administrator's decision. A Held queue keeps every site,
+		// including one removed from spec.sites: re-adding it must not
+		// resume its replication from the untrusted primary.
+		if active := fg.Status.ActiveSite; active != "" && slices.Contains(q.Pending, active) {
+			return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesAbandoned",
+				"site %s became the primary before the in-place restore recloned it; it keeps its pre-restore data and the remaining reclone queue (%s) is abandoned",
+				active, strings.Join(q.Pending, ", "))
+		}
+		return 0, nil
 	}
 	if len(known) > 0 && len(known) != len(q.Pending) {
 		// A queued site was removed from spec.sites; drop it so it cannot
@@ -372,14 +412,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		q = fg.Status.RestoreReclones
 	}
 	if len(known) == 0 {
-		if q.Phase == v1alpha1.RestoreReclonesHeld {
-			r.clearRestoreReclones(ctx, fg, corev1.EventTypeNormal, "RestoreReclonesComplete",
-				"no site of the held reclone queue (confirm=%s) is left in spec.sites", q.ConfirmToken)
-			return 0, nil
-		}
-		r.clearRestoreReclones(ctx, fg, corev1.EventTypeNormal, "RestoreReclonesComplete",
+		return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeNormal, "RestoreReclonesComplete",
 			"every peer of the in-place restore (confirm=%s) has been recloned", q.ConfirmToken)
-		return 0, nil
 	}
 	active := fg.Status.ActiveSite
 	if active == "" {
@@ -389,15 +423,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		// Something other than this queue (a planned failover, a manual
 		// promotion) made a site with pre-restore data the primary.
 		// Cloning the rest from it would spread that data, so stop.
-		r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesAbandoned",
+		return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesAbandoned",
 			"site %s became the primary before the in-place restore recloned it; it keeps its pre-restore data and the remaining reclone queue (%s) is abandoned",
 			active, strings.Join(known, ", "))
-		return 0, nil
-	}
-	if q.Phase == v1alpha1.RestoreReclonesHeld {
-		// The primary is no trusted donor (settleArmedRestoreReclones);
-		// the sites wait, excluded, for an administrator's decision.
-		return 0, nil
 	}
 	raw := fg.GetAnnotations()[RecloneAnnotation]
 	nn := client.ObjectKeyFromObject(fg)
@@ -597,39 +625,117 @@ func (r *MysqlFailoverGroupReconciler) removeOwnRecloneAnnotation(ctx context.Co
 
 // settleArmedRestoreReclones keeps an Armed queue while its restore runs
 // and settles it once that restore can no longer succeed. Nothing is ever
-// cloned from a primary whose restore failed.
+// cloned from a primary whose restore failed. It returns a requeue
+// interval while it cannot decide yet; the restore's offline_mode fence
+// stays up meanwhile (reconcileRestoreOfflineFence settles first).
 //
-// If the restore replaced an earlier restore's queue, that queue is put
-// back: its sites still hold data from before the earlier restore. It
-// drains again only when the failed restore provably changed nothing on
-// the primary (no Job was created: cancelled, rejected, or the Job could
-// not be built). Once its Job was created the restore may have dropped
-// or half-loaded the primary, so the earlier queue is put back Held: its
-// sites stay excluded, and may be the only intact copies, until an
-// administrator decides.
-func (r *MysqlFailoverGroupReconciler) settleArmedRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+// Whether the failed restore may have changed the primary decides the
+// rest. It may have once its Job was created (status jobName or the
+// write-ahead jobCreating; a missing status counts too), unless every pod
+// of that Job has terminated and the primary still reports the
+// gtid_executed recorded when the peers' receivers were stopped
+// (FencedGtidExecuted): then its binlog holds nothing replication could
+// carry to the peers, and nothing can still add to it.
+//
+//   - Unchanged: the peers resume. The queue is discarded, or, if the
+//     restore had replaced an earlier restore's queue, that queue is put
+//     back as it was (draining again unless it was already Held).
+//   - Changed, or not provable within restoreSettleBound: every queued
+//     site, and any site of a replaced earlier queue, stays queued and
+//     Held. Their receivers stay stopped, so they keep the data they had
+//     before the restore and may be the only intact copies; nothing is
+//     cloned or replicated into them until an administrator decides.
+//
+// A queue still Armed under another confirm when a new run is in
+// Preflight belongs to an earlier restore whose settlement was lost (an
+// operator restart right after it ended): its outcome is unknown, so it is
+// Held before the new run releases that restore's fence.
+func (r *MysqlFailoverGroupReconciler) settleArmedRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	rip := fg.Status.RestoreInPlace
+	q := fg.Status.RestoreReclones
 	if rip != nil {
 		switch rip.Phase {
-		case v1alpha1.RestoreInPlacePreflight, v1alpha1.RestoreInPlaceFencing,
-			v1alpha1.RestoreInPlaceRestoring, v1alpha1.RestoreInPlaceResuming:
-			return nil
+		case v1alpha1.RestoreInPlacePreflight:
+			if !restoreQueueOwnedByRun(fg, q) {
+				return 0, r.holdUnsettledRestoreReclones(ctx, fg, q)
+			}
+			return 0, nil
+		case v1alpha1.RestoreInPlaceFencing, v1alpha1.RestoreInPlaceRestoring, v1alpha1.RestoreInPlaceResuming:
+			return 0, nil
 		}
 	}
-	q := fg.Status.RestoreReclones
 	if rip != nil && rip.Phase == v1alpha1.RestoreInPlaceSucceeded && rip.ConfirmTokenUsed == q.ConfirmToken {
 		// The queue's own restore succeeded (an Armed copy written back
 		// after the release, or a release lost to a crash): release it
 		// rather than discard it, so its peers are still recloned.
-		return r.releaseRestoreReclones(ctx, fg, rip.TargetSite, q.ConfirmToken)
+		return 0, r.releaseRestoreReclones(ctx, fg, rip.TargetSite, q.ConfirmToken)
 	}
-	if sup := q.Superseded; sup != nil && len(sup.Pending) > 0 {
-		// Without a status the run's Job cannot be ruled out, and
-		// JobCreating is set before the Job is created, so a Job whose
-		// name was never recorded still counts.
-		executed := rip == nil || rip.JobName != "" || rip.JobCreating
+	// Without a status the run's Job cannot be ruled out, and
+	// JobCreating is set before the Job is created, so a Job whose name
+	// was never recorded still counts.
+	executed := rip == nil || rip.JobName != "" || rip.JobCreating
+	unchanged := false
+	if executed {
+		var wait time.Duration
+		unchanged, wait = r.restorePrimaryUnchanged(ctx, fg)
+		if wait > 0 {
+			return wait, nil
+		}
+		executed = !unchanged
+	}
+	sup := q.Superseded
+	if executed {
+		pending := unsettledQueueSites(q)
+		var earlier []string
+		if sup != nil {
+			earlier = append(earlier, sup.Pending...)
+		}
+		if len(pending) == 0 {
+			return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesDiscarded",
+				"the in-place restore (confirm=%s) did not succeed and has no peers to hold", q.ConfirmToken)
+		}
+		// An earlier queue that was put back keeps its identity; it now
+		// also covers the failed restore's other peers.
+		token := q.ConfirmToken
+		if sup != nil && sup.ConfirmToken != "" {
+			token = sup.ConfirmToken
+		}
+		held, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1alpha1.MysqlFailoverGroup) bool {
+			fq := fresh.Status.RestoreReclones
+			if fq == nil || fq.Phase != v1alpha1.RestoreReclonesArmed || fq.ConfirmToken != q.ConfirmToken {
+				return false
+			}
+			fresh.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
+				ConfirmToken:       token,
+				Phase:              v1alpha1.RestoreReclonesHeld,
+				FencedGtidExecuted: fq.FencedGtidExecuted,
+				Pending:            append([]string(nil), pending...),
+			}
+			return true
+		})
+		if err != nil || !held {
+			return 0, err
+		}
+		older := ""
+		if len(earlier) > 0 {
+			older = fmt.Sprintf(" %s still hold data from before the earlier restore (confirm=%s).", strings.Join(earlier, ", "), sup.ConfirmToken)
+		}
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreReclonesHeld",
+			"the in-place restore (confirm=%s) ran on the primary and did not succeed, so the primary may hold dropped or half-loaded data. "+
+				"%s keep their replication receivers stopped and the data they had before the restore; they are not recloned from this primary "+
+				"and stay excluded from promotion and the reader Services.%s Restore the primary (for example from a backup taken from a held site "+
+				"with sourceSiteOverride) and let the new restore reclone them, set status.restoreReclones.phase to Draining once the primary's data is good, "+
+				"or remove status.restoreReclones to resume their replication from the current primary",
+			q.ConfirmToken, strings.Join(pending, ", "), older)
+		return 0, nil
+	}
+	why := "ended before its Job ran"
+	if unchanged {
+		why = "left the primary's gtid_executed unchanged"
+	}
+	if sup != nil && len(sup.Pending) > 0 {
 		phase := v1alpha1.RestoreReclonesDraining
-		if executed || sup.Held {
+		if sup.Held {
 			phase = v1alpha1.RestoreReclonesHeld
 		}
 		restored, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1alpha1.MysqlFailoverGroup) bool {
@@ -645,34 +751,206 @@ func (r *MysqlFailoverGroupReconciler) settleArmedRestoreReclones(ctx context.Co
 			return true
 		})
 		if err != nil {
-			return err
+			return 0, err
 		}
 		switch {
 		case !restored:
 		case phase == v1alpha1.RestoreReclonesDraining:
 			r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreReclonesRestored",
-				"the in-place restore (confirm=%s) ended before its Job ran, so the primary is unchanged; "+
+				"the in-place restore (confirm=%s) %s, so the primary is unchanged; "+
 					"the earlier restore's reclone queue (confirm=%s: %s) resumes",
-				q.ConfirmToken, sup.ConfirmToken, strings.Join(sup.Pending, ", "))
+				q.ConfirmToken, why, sup.ConfirmToken, strings.Join(sup.Pending, ", "))
 		default:
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreReclonesHeld",
-				"the in-place restore (confirm=%s) ran on the primary and did not succeed, so the primary no longer holds the earlier restore's data. "+
-					"%s still hold data from before that restore (confirm=%s) and are not recloned from this primary; they stay excluded from promotion "+
-					"and the reader Services. Restore the primary and set status.restoreReclones.phase to Draining, run a new full-instance restore, "+
-					"or accept their data by removing status.restoreReclones",
-				q.ConfirmToken, strings.Join(sup.Pending, ", "), sup.ConfirmToken)
+				"the in-place restore (confirm=%s) %s, so the primary is unchanged; the earlier restore's queue (confirm=%s: %s) "+
+					"was already Held, or its outcome is unknown, and is put back Held",
+				q.ConfirmToken, why, sup.ConfirmToken, strings.Join(sup.Pending, ", "))
 		}
-		return nil
+		return 0, nil
 	}
-	r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesDiscarded",
-		"the in-place restore (confirm=%s) did not succeed; %s are not recloned from its primary and are eligible for promotion again. "+
-			"They may have replicated the restore's DROP statements; check their data before relying on them",
-		q.ConfirmToken, strings.Join(q.Pending, ", "))
+	msg := "the in-place restore (confirm=%s) %s, so the primary is unchanged; %s are not recloned and resume replicating, and are eligible for promotion again"
+	if unchanged {
+		msg += ". The restore Job may still have loaded data without binlogging it into a primary that had no user schemas; check the primary"
+	}
+	// The fence is released only once the discard is written: a failed
+	// write must not let application writes change gtid_executed under
+	// a queue that is still Armed.
+	return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeWarning, "RestoreReclonesDiscarded", msg,
+		q.ConfirmToken, why, strings.Join(q.Pending, ", "))
+}
+
+// restoreQueueOwnedByRun reports whether the Armed queue q belongs to the
+// run in fg's status (its runConfirm, or the spec confirm it is armed with
+// at Preflight).
+func restoreQueueOwnedByRun(fg *v1alpha1.MysqlFailoverGroup, q *v1alpha1.RestoreReclonesStatus) bool {
+	if rip := fg.Status.RestoreInPlace; rip != nil && rip.RunConfirm != "" && rip.RunConfirm == q.ConfirmToken {
+		return true
+	}
+	return fg.Spec.RestoreInPlace != nil && fg.Spec.RestoreInPlace.Confirm == q.ConfirmToken
+}
+
+// holdUnsettledRestoreReclones puts an earlier restore's Armed queue,
+// whose outcome was never settled, Held.
+func (r *MysqlFailoverGroupReconciler) holdUnsettledRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, q *v1alpha1.RestoreReclonesStatus) error {
+	pending := unsettledQueueSites(q)
+	held, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1alpha1.MysqlFailoverGroup) bool {
+		fq := fresh.Status.RestoreReclones
+		if fq == nil || fq.Phase != v1alpha1.RestoreReclonesArmed || fq.ConfirmToken != q.ConfirmToken {
+			return false
+		}
+		if len(pending) == 0 {
+			fresh.Status.RestoreReclones = nil
+			return true
+		}
+		fresh.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
+			ConfirmToken:       q.ConfirmToken,
+			Phase:              v1alpha1.RestoreReclonesHeld,
+			FencedGtidExecuted: fq.FencedGtidExecuted,
+			Pending:            pending,
+		}
+		return true
+	})
+	if err != nil || !held || len(pending) == 0 {
+		return err
+	}
+	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreReclonesHeld",
+		"the reclone queue of an earlier in-place restore (confirm=%s) was never settled, so whether that restore changed the primary is unknown; "+
+			"%s keep their replication receivers stopped and are held before a new restore starts",
+		q.ConfirmToken, strings.Join(pending, ", "))
 	return nil
 }
 
-// clearRestoreReclones removes the queue and records why.
-func (r *MysqlFailoverGroupReconciler) clearRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, eventType, reason, format string, args ...any) {
+// restoreSettleBound bounds how long settlement waits, with the fence up,
+// for a failed restore's Job pods to terminate or for the primary's
+// gtid_executed to be readable, before it holds the peers.
+const (
+	restoreSettleBound     = 10 * time.Minute
+	restoreGTIDReadBound   = 2 * time.Minute
+	restoreSettleRetryWait = 15 * time.Second
+)
+
+// restorePrimaryUnchanged reports whether the failed restore provably left
+// the primary unchanged: every pod of its Job has terminated (an orphaned
+// or still-terminating pod could yet drop schemas) and the primary reports
+// the gtid_executed recorded when the peers' receivers were stopped. While
+// it cannot tell yet it returns a requeue interval: for live pods, or no
+// topology manager yet, at most restoreSettleBound from the run's
+// completionTime; for an unreadable primary at most restoreGTIDReadBound
+// from this process's first failed read. Any doubt after that is false.
+func (r *MysqlFailoverGroupReconciler) restorePrimaryUnchanged(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (bool, time.Duration) {
+	q, rip := fg.Status.RestoreReclones, fg.Status.RestoreInPlace
+	if q == nil || rip == nil || rip.TargetSite == "" || q.FencedGtidExecuted == "" || r.Runner == nil {
+		return false, 0
+	}
+	since := restoreSettleBound
+	if rip.CompletionTime != nil {
+		since = time.Since(rip.CompletionTime.Time)
+	}
+	jobName := rip.JobName
+	if jobName == "" {
+		jobName = inPlaceRestoreJobName(fg.Name, rip.TargetSite)
+	}
+	alive, err := r.restoreJobPodsAlive(ctx, fg.Namespace, jobName)
+	if err != nil || alive {
+		if since < restoreSettleBound {
+			return false, restoreSettleRetryWait
+		}
+		kv := []any{"fg", fg.Name, "job", jobName}
+		if err != nil {
+			kv = append(kv, "error", err)
+		}
+		log.FromContext(ctx).Info("holding the reclone queue: the failed restore's Job pods did not terminate in time", kv...)
+		return false, 0
+	}
+	now, err := r.Runner.RestoreGtidExecuted(ctx, client.ObjectKeyFromObject(fg), rip.TargetSite)
+	if errors.Is(err, errNoTopologyManager) {
+		// Not unreadable: the manager starts at the runner's next sync
+		// (operator start, replacement). Wait, within the pod bound.
+		if since < restoreSettleBound {
+			return false, restoreSettleRetryWait
+		}
+		log.FromContext(ctx).Error(err, "read the primary's gtid_executed after a failed in-place restore", "fg", fg.Name, "site", rip.TargetSite)
+		return false, 0
+	}
+	if err != nil {
+		// Retried for restoreGTIDReadBound from the first failed read, not
+		// from completionTime: the pod wait above may already have used
+		// that much.
+		if time.Since(r.restoreGTIDReadFailedSince(fg)) < restoreGTIDReadBound {
+			return false, restoreSettleRetryWait
+		}
+		log.FromContext(ctx).Error(err, "read the primary's gtid_executed after a failed in-place restore", "fg", fg.Name, "site", rip.TargetSite)
+		return false, 0
+	}
+	r.forgetRestoreGTIDReadFailure(fg)
+	before, berr := mysql.ParseGTIDSet(q.FencedGtidExecuted)
+	after, aerr := mysql.ParseGTIDSet(now)
+	if berr != nil || aerr != nil {
+		return false, 0
+	}
+	return before.Contains(after) && after.Contains(before), 0
+}
+
+// restoreGTIDReadFailure is when this process first failed to read the
+// primary's gtid_executed while settling a run's queue.
+type restoreGTIDReadFailure struct {
+	key   string
+	since time.Time
+}
+
+// restoreGTIDReadKey identifies the settlement a GTID read belongs to.
+func restoreGTIDReadKey(fg *v1alpha1.MysqlFailoverGroup) string {
+	key := fg.Status.RestoreReclones.ConfirmToken
+	if rip := fg.Status.RestoreInPlace; rip != nil && rip.CompletionTime != nil {
+		key += "@" + rip.CompletionTime.UTC().Format(time.RFC3339Nano)
+	}
+	return key
+}
+
+// restoreGTIDReadFailedSince records (once per settlement) and returns
+// when the first GTID read of fg's settlement failed.
+func (r *MysqlFailoverGroupReconciler) restoreGTIDReadFailedSince(fg *v1alpha1.MysqlFailoverGroup) time.Time {
+	nn, key := client.ObjectKeyFromObject(fg), restoreGTIDReadKey(fg)
+	r.restorePeerStopMu.Lock()
+	defer r.restorePeerStopMu.Unlock()
+	if r.restoreGTIDReadFailures == nil {
+		r.restoreGTIDReadFailures = map[types.NamespacedName]restoreGTIDReadFailure{}
+	}
+	f, ok := r.restoreGTIDReadFailures[nn]
+	if !ok || f.key != key {
+		f = restoreGTIDReadFailure{key: key, since: time.Now()}
+		r.restoreGTIDReadFailures[nn] = f
+	}
+	return f.since
+}
+
+func (r *MysqlFailoverGroupReconciler) forgetRestoreGTIDReadFailure(fg *v1alpha1.MysqlFailoverGroup) {
+	r.restorePeerStopMu.Lock()
+	defer r.restorePeerStopMu.Unlock()
+	delete(r.restoreGTIDReadFailures, client.ObjectKeyFromObject(fg))
+}
+
+// restoreJobPodsAlive reports whether any pod of the in-place restore Job
+// jobName has not terminated, read uncached (the Job object may be gone
+// while an orphaned or terminating pod still runs the restore script).
+func (r *MysqlFailoverGroupReconciler) restoreJobPodsAlive(ctx context.Context, namespace, jobName string) (bool, error) {
+	for _, label := range []string{"batch.kubernetes.io/job-name", "job-name"} {
+		var pods corev1.PodList
+		if err := r.inPlaceJobReader().List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{label: jobName}); err != nil {
+			return false, fmt.Errorf("list restore Job %s pods: %w", jobName, err)
+		}
+		for i := range pods.Items {
+			if p := pods.Items[i].Status.Phase; p != corev1.PodSucceeded && p != corev1.PodFailed {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// clearRestoreReclones removes the queue and records why. The error is
+// returned, and also logged for callers that only report it.
+func (r *MysqlFailoverGroupReconciler) clearRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, eventType, reason, format string, args ...any) error {
 	cleared, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1alpha1.MysqlFailoverGroup) bool {
 		if fresh.Status.RestoreReclones == nil {
 			return false
@@ -682,11 +960,12 @@ func (r *MysqlFailoverGroupReconciler) clearRestoreReclones(ctx context.Context,
 	})
 	if err != nil {
 		log.FromContext(ctx).Error(err, "clear restore reclone queue", "fg", fg.Name)
-		return
+		return err
 	}
 	if cleared {
 		r.Recorder.Eventf(fg, eventType, reason, format, args...)
 	}
+	return nil
 }
 
 // writeRecloneAnnotation sets the reclone annotation to value unless some
@@ -725,9 +1004,9 @@ func (r *MysqlFailoverGroupReconciler) writeRecloneAnnotation(ctx context.Contex
 // other queued sites go first.
 func (r *TopologyManagerRunner) recordRestoreRecloneOutcome(ctx context.Context, nn types.NamespacedName, site string, outcome RecloneOutcome) error {
 	var (
-		event     func(fg *v1alpha1.MysqlFailoverGroup)
-		remaining []string
-		updated   bool
+		event   func(fg *v1alpha1.MysqlFailoverGroup)
+		updated bool
+		written *v1alpha1.MysqlFailoverGroup
 	)
 	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		event, updated = nil, false
@@ -773,7 +1052,7 @@ func (r *TopologyManagerRunner) recordRestoreRecloneOutcome(ctx context.Context,
 			return err
 		}
 		updated = true
-		remaining = restoreReclonePendingSites(&fresh)
+		written = fresh.DeepCopy()
 		if event != nil && r.recorder != nil {
 			event(&fresh)
 		}
@@ -786,7 +1065,7 @@ func (r *TopologyManagerRunner) recordRestoreRecloneOutcome(ctx context.Context,
 		return err
 	}
 	if updated {
-		r.SetRestoreReclonePending(nn, remaining)
+		r.SetRestorePeerHold(ctx, written)
 	}
 	return nil
 }

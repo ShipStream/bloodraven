@@ -54,7 +54,7 @@ differs is what happens when it fails.
     {
       "aspect": "What is tried?",
       "cells": [
-        "REPLTAKEOVER on the target, inside a hard-coded 10 s budget",
+        "REPLTAKEOVER on the target with a 2 s budget, only if the old master answers a 1 s probe",
         "REPLTAKEOVER on the target, with maxSyncWait as the timeout argument"
       ]
     },
@@ -88,17 +88,30 @@ The asymmetry is the same boundary again. An emergency promotion cannot be retri
 failed over and a cache that refuses to promote serves nothing — so it takes the empty master and says
 so in the log. A planned switchover *can* be retried, so it refuses to buy availability with sessions.
 
-## The 10 s budget, and why MySQL never waits
+## Bounded steps, and why MySQL never waits
 
-The emergency path wraps everything in `const budget = 10 * time.Second`. Its contract, written in the
-source, is three nevers: it "never returns an error to the caller, never blocks longer than a small
-bounded budget, and never leaves Dragonfly in a state that affects MySQL durability"
+MySQL does not run the emergency Dragonfly promotion at all. Once MySQL has promoted, its poll loop only
+*queues* a request for the new active site and carries on; the group's Dragonfly manager runs it on its
+own goroutine. The contract, written in the source, is three promises: it "never returns an error to the
+caller, every step is bounded, and it never leaves Dragonfly in a state that affects MySQL durability"
 (`internal/controller/dragonfly_topology.go`).
+
+There is no single budget; each step has its own:
+
+- A 1 s dial and `PING` of the old master. A takeover is coordinated by the master, so if it does not
+  answer, `REPLTAKEOVER` is skipped.
+- `REPLTAKEOVER` with a 2 s budget, which the client waits up to 5 s for (the budget plus 3 s for the reply).
+- The `REPLICAOF NO ONE` fallback, on a fresh connection: up to 14 s after a failed takeover, because
+  Dragonfly holds the replica's `REPLICAOF` lock for the takeover budget plus 10 s, or 5 s when the takeover
+  was skipped.
+- An outcome that stays unconfirmed (the fallback could not be sent, or its reply was lost) is settled by
+  reading the target's role once 13 s have passed since the takeover was sent (1 s after `REPLICAOF NO ONE`
+  when no takeover was sent).
+- Every other step, from the preliminary reads to the label stamps, gets 5 s.
 
 Operationally that is one sentence: **MySQL failover is never delayed by cache.** A wedged Dragonfly, an
 unreachable target, a takeover that hangs — none of it extends your measured 12.0 s emergency promotion.
-The attempt runs *after* MySQL has already succeeded, and its deadline fires at 10 s regardless of what
-timeout the takeover was handed.
+The attempt runs *after* MySQL has already succeeded, on a goroutine MySQL never waits for.
 
 ## Reading `sessionsPreserved` — it is tri-state
 
@@ -118,8 +131,9 @@ emergency promotion never writes it; that outcome lives in the log line and the 
 Two settings shape which of the three you get:
 
 - `maxSyncWait`, default `30s`. It bounds `WaitingForDragonflySync` **and** doubles as the timeout
-  argument passed to `REPLTAKEOVER`. The client adds 5 s of I/O grace on top so it cannot give up before
-  the server has spent its full drain budget — 30 s + 5 s = a 35 s client read deadline at the default.
+  argument passed to `REPLTAKEOVER`, rounded up to whole seconds. The target lets its master run 10 s past
+  that budget, and the client waits 2 s more for the reply so it cannot give up before the server has —
+  30 s + 12 s = a 42 s client read deadline at the default.
 - `onSyncTimeout`, enum `proceed;fail`, default `proceed`. Spell `proceed` out: the promotion goes ahead
   and the cache outcome is whatever it is. `fail` aborts before MySQL promotion and rolls the source
   fence back.

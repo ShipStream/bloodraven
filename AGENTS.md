@@ -9,7 +9,7 @@ Run commands from the repository root:
 - `make build` builds the operator binary at `bin/bloodraven`.
 - `go build ./cmd/sidecar` builds the sidecar binary.
 - `make build-kubectl-plugin` builds `bin/kubectl-bloodraven` (the day-2 `kubectl` plugin). Override `KUBECTL_PLUGIN_VERSION=<tag>` to stamp a release; `make install-kubectl-plugin` drops the binary onto `$PATH`.
-- `make test` runs `go test ./...` across unit and e2e-style packages.
+- `make test` runs the fast PR gate: `test-unit` (`go test -race ./internal/... ./cmd/... ./charts/...`), `test-component` and `test-license-roundtrip`. The chart render tests in `charts/bloodraven` need `helm` on `PATH`; they skip without it locally and fail under `CI`. The `cmd/bloodraven` PITR coverage contract test needs `python3` on `PATH` and fails without it, locally too.
 - `make test-e2e` runs the release profile of real-cluster E2E tests against the current playground cluster (requires kind/k3d/minikube context prepared with `./playground/setup.sh`; CI creates kind and runs setup first).
 - `make test-e2e-smoke` runs the smoke profile (~3 scenarios, fast feedback).
 - `make vet` runs `go vet ./...`.
@@ -40,7 +40,7 @@ Before pushing a branch that opens or updates a PR, run all of the following fro
 1. `make generate && make manifests` — regenerates deep-copy code, CRD YAML under `config/crd/bases`, and RBAC under `config/rbac`. If this produces a diff, commit it. The `Generate Check` CI job fails PRs that leave generated files stale.
 2. `make vet`
 3. `make lint` — install `golangci-lint` if missing (see Build section). Staticcheck findings like `SA9003` (empty branches), `SA1019` (deprecation), and `errcheck` are all enforced here and will block the Lint CI job.
-4. `make test` (unit + component). Run `make test-envtest` too when you touch anything that interacts with the API server (CRD validation, Owns/Watches wiring, status subresource writes).
+4. `make test` (unit, including `cmd/` and the chart render tests with `helm` on `PATH`, plus component). Run `make test-envtest` too when you touch anything that interacts with the API server (CRD validation, Owns/Watches wiring, status subresource writes).
 5. When you modify kubebuilder RBAC markers on a reconciler, also update `charts/bloodraven/templates/clusterrole.yaml` to mirror them — the Helm chart RBAC is hand-maintained and drifts silently from `config/rbac/role.yaml`.
 6. When you add or modify a CRD, copy the regenerated file(s) from `config/crd/bases/` to `charts/bloodraven/crds/` so Helm installs ship the same schema.
 

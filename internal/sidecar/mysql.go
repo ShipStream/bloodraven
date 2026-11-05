@@ -11,6 +11,8 @@ import (
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
+
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // StatusInfo holds the MySQL status information returned by the sidecar.
@@ -49,12 +51,19 @@ type LiveMysql struct {
 	db *sql.DB
 }
 
-// NewLiveMysqlFromDSN creates a new LiveMysql from a DSN string.
+// NewLiveMysqlFromDSN creates a new LiveMysql from a DSN string. The DSN is
+// parsed with internalmysql.ParseDSN, whose errors never quote it: the
+// driver's own parser, which sql.Open would run, can echo the password.
 func NewLiveMysqlFromDSN(dsn string) (*LiveMysql, error) {
-	db, err := sql.Open("mysql", dsn)
+	cfg, err := internalmysql.ParseDSN(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
 	}
+	connector, err := mysqldriver.NewConnector(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("open mysql: %w", err)
+	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(3)
 	db.SetMaxIdleConns(1)
 	return &LiveMysql{db: db}, nil

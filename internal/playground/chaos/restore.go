@@ -101,6 +101,26 @@ func (a *Actions) ReadRustFSObject(ctx context.Context, bucket, key string) (dat
 	return pgrustfs.GetObject(ctx, endpoint, bucket, key, creds)
 }
 
+// ListRustFSKeys lists every key under prefix in the playground RustFS bucket
+// through a port-forward. The backup scenarios use it to check that deleting
+// a MysqlBackup removed its artifact from storage.
+func (a *Actions) ListRustFSKeys(ctx context.Context, bucket, prefix string) ([]string, error) {
+	creds, err := a.rustfsCredentials(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pod, err := a.K.FindPodWithLabel(ctx, a.Namespace, "app.kubernetes.io/name=rustfs")
+	if err != nil {
+		return nil, fmt.Errorf("find RustFS pod: %w", err)
+	}
+	pf, err := a.K.PortForwardPod(ctx, a.Namespace, pod.Name, 9000)
+	if err != nil {
+		return nil, fmt.Errorf("port-forward RustFS: %w", err)
+	}
+	defer pf.Stop()
+	return pgrustfs.ListKeys(ctx, fmt.Sprintf("http://127.0.0.1:%d", pf.LocalPort), bucket, prefix, creds)
+}
+
 func (a *Actions) rustfsCredentials(ctx context.Context) (pgrustfs.Credentials, error) {
 	const secretName = "dragonfly-s3-credentials"
 	secret, err := a.K.Kubernetes.CoreV1().Secrets(a.Namespace).Get(ctx, secretName, metav1.GetOptions{})

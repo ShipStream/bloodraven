@@ -86,8 +86,8 @@ make build-kubectl-plugin    # Build kubectl-bloodraven plugin
 make install-kubectl-plugin  # Build and install plugin onto $PATH
 
 # Test
-make test                # Fast tests: unit and component
-make test-unit           # Unit tests only, with no network listeners
+make test                # Fast tests: unit, component and license roundtrip
+make test-unit           # Unit tests under internal/, cmd/ and charts/ (chart tests need helm, cmd/ tests need python3)
 make test-component      # Component tests with fakes
 make test-envtest        # envtest controller tests with a real API server
 make test-integration    # Integration tests with network listeners

@@ -53,18 +53,18 @@ The reversal: a re-applied manifest re-runs nothing, and that is the whole point
 
 **Type:** MULTIPLE_CHOICE
 
-You apply a group with `spec.restoreInPlace.pointInTime` set while `spec.backup.pitr.enabled=false`. Where does the rejection reach you?
+You apply a new group with `spec.initFromBackup.pointInTime` set, no `pointInTime.archiveProfileName`, and `spec.backup.pitr.enabled=false`. Where does the rejection reach you?
 
 - As a `kubectl apply` failure from an admission webhook, before the object is persisted.
 - As a CEL validation message from the API server, which refuses to store the object.
-- In the CR status and the operator log, seconds after a `kubectl apply` that succeeded.
+- In the CR status and a Warning Event, seconds after a `kubectl apply` that succeeded.
 - Only in the restore Job's container logs, once the Job pod starts and fails to replay.
 
 **Correct option index:** 2
 
 **Explanation:**
 
-The check lives in the reconciler's PITR fragment builder, not in the admission chain, so the write is accepted and the error surfaces afterwards on the object and in the operator log — watch there, not at the exit code of your apply. It is not an admission webhook rejection and not a CEL rule: neither runs this check, which is why the apply comes back clean. Nor does it wait for the restore Job — the builder returns the error while assembling the Job's init containers, so no Job is ever created. The same rejection covers `spec.initFromBackup.pointInTime`, because both entry points share one builder. (objective 6)
+The check lives in the reconciler's PITR fragment builder, not in the admission chain, so the write is accepted and the error surfaces afterwards in `status.restore` and a `RestoreBuildFailed` Warning Event — watch there, not at the exit code of your apply. It is not an admission webhook rejection and not a CEL rule: neither runs this check, which is why the apply comes back clean. Nor does it wait for the restore Job — the builder returns the error while assembling the Job's init containers, so no Job is ever created. `spec.restoreInPlace.pointInTime` is refused at the same stage for a different reason: in place it is never supported, because the live primary already executed the archived GTIDs. (objective 6)
 
 ## Question 5
 

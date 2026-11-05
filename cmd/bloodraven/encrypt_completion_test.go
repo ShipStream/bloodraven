@@ -13,6 +13,7 @@ import (
 
 func TestEncryptUploadCompletionSentinel(t *testing.T) {
 	if os.Getenv("BLOODRAVEN_TEST_ENCRYPT_SENTINEL") == "1" {
+		useTempDirMountVerifier(t)
 		runEncryptUpload(nil)
 		return
 	}

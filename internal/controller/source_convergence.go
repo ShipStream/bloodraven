@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -87,6 +88,12 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 			continue
 		}
 
+		if tm.restorePeerHeldSite(site.name) {
+			// Awaiting its post-restore reclone: its replication stays
+			// stopped (restore_peer_replication.go).
+			changed = tm.setSourceConvergence(site, repl, sourceConvergencePending, sourceReasonRestoreHold, active.host) || changed
+			continue
+		}
 		if suppressed {
 			changed = tm.setSourceConvergence(site, repl, sourceConvergencePending, sourceReasonSourceMismatch, active.host) || changed
 			continue
@@ -101,10 +108,19 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 		}
 
 		opCtx, cancel := context.WithTimeout(ctx, sourceConvergenceOperationTimeout)
-		if current == expected {
-			err = tm.restartDirectReplica(opCtx, active, site)
-		} else {
-			err = tm.repointReplica(opCtx, active, site, repl.SourceHost)
+		// The gate re-checks the hold and keeps a restore from stopping
+		// this site's receiver until the operation (including its rollback
+		// starts) has finished.
+		err = tm.withReplicaStartGate(site.name, func() error {
+			if current == expected {
+				return tm.restartDirectReplica(opCtx, active, site)
+			}
+			return tm.repointReplica(opCtx, active, site, repl.SourceHost)
+		})
+		if errors.Is(err, errRestorePeerHeld) {
+			cancel()
+			changed = tm.setSourceConvergence(site, repl, sourceConvergencePending, sourceReasonRestoreHold, active.host) || changed
+			continue
 		}
 		if err != nil {
 			release()

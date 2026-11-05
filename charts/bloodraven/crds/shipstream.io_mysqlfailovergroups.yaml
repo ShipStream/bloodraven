@@ -7778,6 +7778,15 @@ spec:
                       - time
                       type: object
                     type: array
+                  fencedGtidExecuted:
+                    description: |-
+                      FencedGtidExecuted is the primary's @@GLOBAL.gtid_executed when the
+                      owning restore stopped the peers' replication receivers, after the
+                      offline_mode fence evicted application sessions. If the restore
+                      fails and the primary still reports this set, the restore changed
+                      nothing that replication could carry, so the queue is discarded and
+                      the peers resume replicating instead of being held.
+                    type: string
                   pending:
                     description: |-
                       Pending lists the peer sites still to be recloned, in the order
@@ -7790,8 +7799,8 @@ spec:
                   phase:
                     description: |-
                       Phase is Armed while the owning restore runs and Draining after it
-                      succeeded. Held means a later restore that replaced this queue ran
-                      on the primary and failed, so nothing is cloned from it.
+                      succeeded. Held means a restore ran on the primary and failed, so
+                      nothing is cloned from it.
                     enum:
                     - Armed
                     - Draining

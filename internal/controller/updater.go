@@ -57,6 +57,27 @@ type UpdateController struct {
 	mu       sync.Mutex
 	phase    UpdatePhase
 	updating bool
+
+	// replicaStartGate, when set, runs a replication start on a site
+	// unless an in-place restore holds that site's replication (see
+	// TopologyManager.withReplicaStartGate). Set once by the topology
+	// manager before the updater runs.
+	replicaStartGate func(site string, start func() error) error
+}
+
+// SetReplicaStartGate installs the restore hold gate for replication
+// starts. Call before the updater runs.
+func (u *UpdateController) SetReplicaStartGate(gate func(site string, start func() error) error) {
+	u.replicaStartGate = gate
+}
+
+// startReplica restarts site's replication through the gate.
+func (u *UpdateController) startReplica(ctx context.Context, target UpdateTarget) error {
+	start := func() error { return target.Checker.StartReplica(ctx) }
+	if u.replicaStartGate == nil {
+		return start()
+	}
+	return u.replicaStartGate(target.Name, start)
 }
 
 // UpdateTarget describes one site in an N-site ordered rollout.
@@ -574,7 +595,7 @@ func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateT
 	var podErr error
 	deadline := time.Now().Add(timeout)
 	for {
-		replicating := directReplicaReady(ctx, target.Checker, expected)
+		replicating := directReplicaReady(ctx, target.Checker, expected, func() error { return u.startReplica(ctx, target) })
 		podReady := true
 		if target.PodReady != nil {
 			pod, podErr = u.probePod(ctx, target)
@@ -621,7 +642,7 @@ func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateT
 // threads run against expected. It re-fences a follower whose pod
 // replacement left it writable and restarts a stopped channel that already
 // points at expected.
-func directReplicaReady(ctx context.Context, checker mysql.Checker, expected string) bool {
+func directReplicaReady(ctx context.Context, checker mysql.Checker, expected string, startReplica func() error) bool {
 	readOnly, roleErr := checker.CheckReadOnly(ctx)
 	if roleErr == nil && !readOnly {
 		// MySQL does not persist SET GLOBAL read_only across a pod
@@ -638,7 +659,7 @@ func directReplicaReady(ctx context.Context, checker mysql.Checker, expected str
 		return false
 	}
 	if canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) && (!rs.IORunning || !rs.SQLRunning) {
-		_ = checker.StartReplica(ctx)
+		_ = startReplica()
 	}
 	return rs.IORunning && rs.SQLRunning && canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected)
 }

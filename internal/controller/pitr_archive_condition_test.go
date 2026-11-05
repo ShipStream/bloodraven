@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -473,6 +474,47 @@ func TestPITRArchiveConditionTopologyWriteDoesNotClobberOrRefire(t *testing.T) {
 // real sidecar server whose archive store cannot be built, the operator's
 // HTTP client and poller, and the poller's status writer.
 func TestPITRArchiveInitFailureSurfacesThroughPoller(t *testing.T) {
+	tests := []struct {
+		name       string
+		linuxOnly  bool
+		pitrConfig func(t *testing.T) *sidecar.PITRConfig
+		wantPrefix string
+		wantText   string
+	}{
+		{
+			name: "unreadable passphrase",
+			pitrConfig: func(t *testing.T) *sidecar.PITRConfig {
+				return &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), MountVerifier: sidecar.TempDirMountVerifierForTest},
+					ManifestPrefix: "pitr/orders", PassphraseFile: t.TempDir() + "/missing", BinlogDir: t.TempDir(),
+					BinlogIndex: "mysql-bin.index", PollInterval: time.Minute}
+			},
+			wantPrefix: "iad: archive store init: archive store: read passphrase",
+		},
+		{
+			// Issue #221: the production mount check, with the archive
+			// volume missing from the pod.
+			name:      "archive volume not mounted",
+			linuxOnly: true,
+			pitrConfig: func(t *testing.T) *sidecar.PITRConfig {
+				return &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir(), Writable: true},
+					ManifestPrefix: "pitr/orders", BinlogDir: t.TempDir(),
+					BinlogIndex: "mysql-bin.index", PollInterval: time.Minute}
+			},
+			wantPrefix: "iad: archive store init: pvc archive store: ",
+			wantText:   "is not a mount point",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.linuxOnly && runtime.GOOS != "linux" {
+				t.Skip("mountinfo is Linux-only")
+			}
+			testPITRArchiveInitFailureThroughPoller(t, tt.pitrConfig(t), tt.wantPrefix, tt.wantText)
+		})
+	}
+}
+
+func testPITRArchiveInitFailureThroughPoller(t *testing.T, pitrCfg *sidecar.PITRConfig, wantPrefix, wantText string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -486,9 +528,6 @@ func TestPITRArchiveInitFailureSurfacesThroughPoller(t *testing.T) {
 		t.Fatalf("mysql: %v", err)
 	}
 	defer liveMySQL.Close()
-	pitrCfg := &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()},
-		ManifestPrefix: "pitr/orders", PassphraseFile: t.TempDir() + "/missing", BinlogDir: t.TempDir(),
-		BinlogIndex: "mysql-bin.index", PollInterval: time.Minute}
 	sup := sidecar.NewArchiverSupervisor(pitrCfg, "iad", liveMySQL, sidecar.NewArchiveStore, logger)
 	srv := sidecar.NewServer(liveMySQL, "127.0.0.1:0", logger)
 	srv.SetArchiver(sup)
@@ -527,8 +566,8 @@ func TestPITRArchiveInitFailureSurfacesThroughPoller(t *testing.T) {
 	if cond == nil || cond.Status != cFalse || cond.Reason != reasonPITRArchiveStoreInitFailed {
 		t.Fatalf("condition = %+v, want False/%s", cond, reasonPITRArchiveStoreInitFailed)
 	}
-	if !strings.HasPrefix(cond.Message, "iad: archive store init: archive store: read passphrase") {
-		t.Fatalf("message = %q", cond.Message)
+	if !strings.HasPrefix(cond.Message, wantPrefix) || !strings.Contains(cond.Message, wantText) {
+		t.Fatalf("message = %q, want prefix %q containing %q", cond.Message, wantPrefix, wantText)
 	}
 	if pitr == nil || !strings.Contains(pitr.Message, "iad: archive store init:") {
 		t.Fatalf("status.pitr = %+v, want the init error in the message", pitr)

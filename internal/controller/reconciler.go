@@ -172,6 +172,20 @@ type MysqlFailoverGroupReconciler struct {
 
 	restorePrivMu       sync.Mutex
 	restorePrivRejected map[types.NamespacedName]restorePrivilegeCheck
+
+	// restorePeerStopStart records, per group, when this process first
+	// tried to stop the peers' replication receivers for a restore run
+	// (see stopRestorePeerReplication).
+	restorePeerStopMu    sync.Mutex
+	restorePeerStopStart map[types.NamespacedName]restorePeerStopWait
+	// restoreSettleNoted is the (previous queue, requested confirm) a
+	// RestoreInPlaceWaitingForPreviousQueue Event was last emitted for.
+	// Guarded by restorePeerStopMu.
+	restoreSettleNoted map[types.NamespacedName]string
+	// restoreGTIDReadFailures records the first failed read of the
+	// primary's gtid_executed per settlement (restorePrimaryUnchanged).
+	// Guarded by restorePeerStopMu.
+	restoreGTIDReadFailures map[types.NamespacedName]restoreGTIDReadFailure
 }
 
 type dragonflyRolloutKey struct {
@@ -458,6 +472,17 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if inPlaceRequeue, err := r.reconcileInPlaceRestore(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile in-place restore: %w", err)
 	} else if inPlaceRequeue > 0 {
+		// A restore still in Preflight has not frozen anything, and waits
+		// for a planned failover already in flight to finish
+		// (inPlacePreflight). Keep driving that failover on this pass, or
+		// the two wait for each other.
+		if !inPlaceRestoreFreezesTopology(&fg) && plannedFailoverInFlight(fg.Status.PlannedFailover) {
+			pfRequeue, err := r.reconcilePlannedFailover(ctx, &fg)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcile planned failover during in-place restore preflight: %w", err)
+			}
+			inPlaceRequeue = minPositiveDuration(inPlaceRequeue, pfRequeue)
+		}
 		// Still sync labels before we bounce: the fence needs pod labels
 		// re-applied on the same pass that transitions into Fencing.
 		if err := r.syncPodLabels(ctx, &fg); err != nil {
@@ -2002,6 +2027,17 @@ func mutateServiceSpec(svc *corev1.Service, serviceType corev1.ServiceType, etp 
 	}
 }
 
+// podsNotLabelled reports whether any of pods does not carry key=value
+// (a different value, or no such label yet).
+func podsNotLabelled(pods []corev1.Pod, key, value string) bool {
+	for i := range pods {
+		if pods[i].Labels[key] != value {
+			return true
+		}
+	}
+	return false
+}
+
 // syncPodLabels updates pod labels based on the CR status.
 // It updates replicas first, then primary, to prevent dual-primary in Service endpoints.
 func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
@@ -2094,6 +2130,24 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 		return false
 	})
 
+	// confirmPending reports whether site is queued for a post-restore
+	// reclone according to an uncached read, taken at most once per call.
+	// An unreadable group counts as queued.
+	var fresh *v1alpha1.MysqlFailoverGroup
+	var freshErr error
+	confirmPending := func(site string) bool {
+		if r.APIReader == nil {
+			return false
+		}
+		if fresh == nil && freshErr == nil {
+			var got v1alpha1.MysqlFailoverGroup
+			if freshErr = r.APIReader.Get(ctx, client.ObjectKeyFromObject(fg), &got); freshErr == nil {
+				fresh = &got
+			}
+		}
+		return freshErr != nil || restoreReclonePending(fresh, site)
+	}
+
 	for _, si := range sites {
 		pods := &corev1.PodList{}
 		if err := r.List(ctx, pods,
@@ -2121,6 +2175,13 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 		// A peer the in-place restore has not recloned yet still serves
 		// pre-restore data: keep it out of the reader Services.
 		if si.role != "primary" && restoreReclonePending(fg, si.spec.Name) {
+			healthy = "no"
+		}
+		// The cached view may predate the queue: before a pod that is not
+		// in the reader Services yet (labelled unhealthy, or a new pod not
+		// labelled at all) is put in, confirm uncached that the site is not
+		// queued.
+		if healthy == "yes" && si.role != "primary" && podsNotLabelled(pods.Items, labelHealthy, "yes") && confirmPending(si.spec.Name) {
 			healthy = "no"
 		}
 

@@ -151,7 +151,7 @@ func TestRetirementCompactionRequiresAcknowledgementAndLocalAbsence(t *testing.T
 	for _, mode := range []string{"readable index", "empty index", "missing index", "unreadable index"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
-			store, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+			store, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 			if err != nil {
 				t.Fatal(err)
 			}

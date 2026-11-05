@@ -188,7 +188,7 @@ A failover group protects you from losing a site. It does not protect you from l
 
   4. Run a backup verification and say precisely what a `Succeeded` result proved
   5. Restore `playground` in place using the RFC 3339 confirmation token
-  6. Explain why a `pointInTime` request is rejected when PITR is disabled
+  6. Explain why a `pointInTime` request is rejected: on `initFromBackup` when PITR is disabled, and always on `restoreInPlace`
 
 **Encryption at rest and the keyring lifecycle** — Five phases, one steady state, and the moment etcd becomes part of your key custody. Plus the one site you must never rotate.
 

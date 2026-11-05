@@ -74,6 +74,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `54-deployment-hold-owner-kill` ([deployment coordination](#deployment-coordination); full profile, terminate a real renewing client Pod without releasing its hold; expiry unblocks planned failover)
 - `55-deployment-emergency-revocation` ([deployment coordination](#deployment-coordination); release profile, sustained primary outage bypasses live migration and hold leases, both renewals return `409`, and the MFG receives `DeploymentLeaseRevoked`)
 - `56-deployment-live-renewal-fenced` ([deployment coordination](#deployment-coordination); full profile, a migration client renewing every five seconds observes `409 revoked` after a planned topology change and stops)
+- `62-full-restore-fails-after-drop-keeps-peers` ([§62](#62-full-instance-restore-failing-after-its-drop); full profile, `ResetBeforeRunAll`; a full-instance in-place restore whose RustFS storage is scaled to 0 while it fences drops the user schemas and fails; the reclone queue is `Held` and every peer keeps its replication receiver `OFF` and its marker rows for two minutes, issue #212)
 
 Scenarios `32`–`39` are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. As of 2026-07-11, all eight have passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). All eight remain full-profile-only while this new, high-risk coverage matures. Scenarios `36` and `37` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
 
@@ -826,6 +827,8 @@ The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `Mysql
 
 **Timing**: Scenario timeout is 18 minutes; backup and verification waits each have a 12-minute sub-budget. Cleanup deletes verification then backup CRs, drops `chaos_s30_backup`, restores the original `spec.backup`, and waits for a healthy baseline.
 
+**Artifact deletion check** (scenarios 30, 30-encrypted, 31, 36 and 37, through the shared backup-deletion helper): before deleting the `MysqlBackup`, the helper reads the bucket and exact artifact location from `status.artifactStorage`, lists `<artifact>/` in RustFS through a port-forward and requires at least one object. After the CR is gone (up to 5 minutes, which covers the first pull of the operator image that runs `artifact-cleanup`), the same listing must be empty. The listing uses 5-key pages, so a dump spans several. A cleanup that exits successfully without deleting anything fails the scenario.
+
 **Encrypted variant** (`make chaos-run SCENARIO=30-encrypted-backup-verification-rustfs`): creates a per-run passphrase Secret `bloodraven-backup-e2e-passphrase-<run-stamp>` with a random passphrase (it refuses to reuse an existing one), sets `encryption.algorithm=AES-256-GCM` on the `rustfs-e2e` profile, and uses objects under `e2e/30-encrypted-backup-verification-rustfs/<run-stamp>/` and schema `chaos_s30_encrypted_backup`. The backup must also report `status.encrypted=true`, and `status.location` is `s3://bloodraven-backup-e2e/<prefix>/<backup>/`, the URL form `encrypt-upload` writes. This is the only scenario that renders the operator-image `encrypt-upload` and `decrypt-download` containers. Before it existed, every scenario ran unencrypted backups, so two encrypted-path bugs shipped without an E2E failure, both fixed in 1.3.2. The first was a bare `bloodraven` command (`exec: "bloodraven": executable file not found in $PATH`). The second passed the `s3://` location to `decrypt-download` as the object-key prefix, which RustFS rejects with `InvalidArgument`. Cleanup deletes that Secret by UID, and only if this run created it.
 
 ---
@@ -1490,6 +1493,17 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 **Injection**: An egress NetworkPolicy cuts only the candidate's replication link for 10s while the primary keeps committing. The policy excludes the active site's Service ClusterIPs as well as its pod, and the candidate's IO thread is restarted, because a NetworkPolicy does not cut an established connection. Then the primary is scaled to 0. The scenario fails fast unless the reader really holds transactions the new primary lacks. Losing those 10s of writes is the documented asynchronous RPO and is not asserted.
 
 **Today (F6, open)**: The reader keeps the transactions as errant GTIDs, its source convergence stays `Blocked`, and its Service has no endpoints until someone reclones it. Rewriting scenario 09 hit the same thing unprompted: a reader that received writes the newly promoted site lacked was left `Blocked`.
+
+### 62. Full-Instance Restore Failing After Its DROP {#62-full-instance-restore-failing-after-its-drop}
+**Category**: Backup/restore | **Risk**: High | **Automated**: `62-full-restore-fails-after-drop-keeps-peers` (full profile, `ResetBeforeRunAll`)
+
+**Hypothesis**: A full-instance in-place restore stops every peer's replication receiver before its Job runs (#212). When the Job drops the user schemas and then fails, `status.restoreReclones` is `Held`, every peer's receiver stays `OFF` across a two-minute window with the topology unfrozen, and every peer still holds the marker rows written before the restore (one in the backup, one after it).
+
+**Injection**: Seed `chaos_s62_marker`, take a backup, write a second marker row, start a full-instance restore, and scale RustFS to 0 once the restore reaches `Fencing`, so the Job passes its `offline_mode` check, logs `BLOODRAVEN_DROP_ALL_USER_SCHEMAS_DONE`, and fails reading the dump. The scenario fails if the Job did not reach its DROP step.
+
+**Cleanup**: removes the spec and Job, and removes `status.restoreReclones`, which resumes the peers' replication from the damaged primary; run-all resets before the next destructive scenario.
+
+**Status**: written and compiled, not yet run on a live cluster.
 
 ### Recorded, not automated
 
