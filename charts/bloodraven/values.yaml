@@ -198,4 +198,6 @@ auxiliary:
     # Handshakes still in progress count against it. Beyond this limit,
     # additional upgrades are rejected with 429.
     # Defends against an attacker pinning the hub's clients map.
+    # A whole number from 0 to 2147483647; anything else fails the render.
+    # 0 removes the cap (unlimited clients) and is not recommended.
     wsMaxClients: 100

@@ -51,8 +51,8 @@
       "orderIndex": 9
     },
     {
-      "front": "You set pointInTime on a restore while spec.backup.pitr.enabled=false",
-      "back": "Rejected, identically for both spec.initFromBackup and spec.restoreInPlace: PITR restore requires continuous binlog archival configured on the source.",
+      "front": "pointInTime on spec.initFromBackup versus spec.restoreInPlace: when is each rejected?",
+      "back": "initFromBackup: when spec.backup.pitr.enabled=false and no pointInTime.archiveProfileName names the source archive. restoreInPlace: always, because the live primary already executed the archived GTIDs and the replay would be skipped; restore to a point in time into a new group with initFromBackup instead.",
       "orderIndex": 10
     },
     {
@@ -96,17 +96,17 @@
       "explanation": "The reversal: a re-applied manifest re-runs nothing, and that is the whole point of the token design. `confirm` must be an RFC 3339 timestamp strictly greater than `status.restoreInPlace.confirmTokenUsed`. After a run, the executed token is recorded, so the identical manifest now carries a token that is not greater — the reconciler sees a terminal status that already reflects it and returns. The same protection covers the older failure mode of applying last month's manifest by accident. To restore again you must deliberately bump `confirm` forward, which is a decision no sync loop makes for you. (objective 5)"
     },
     {
-      "question": "You apply a group with `spec.restoreInPlace.pointInTime` set while `spec.backup.pitr.enabled=false`. Where does the rejection reach you?",
+      "question": "You apply a new group with `spec.initFromBackup.pointInTime` set, no `pointInTime.archiveProfileName`, and `spec.backup.pitr.enabled=false`. Where does the rejection reach you?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 3,
       "options": [
         "As a `kubectl apply` failure from an admission webhook, before the object is persisted.",
         "As a CEL validation message from the API server, which refuses to store the object.",
-        "In the CR status and the operator log, seconds after a `kubectl apply` that succeeded.",
+        "In the CR status and a Warning Event, seconds after a `kubectl apply` that succeeded.",
         "Only in the restore Job's container logs, once the Job pod starts and fails to replay."
       ],
       "correctOptionIndex": 2,
-      "explanation": "The check lives in the reconciler's PITR fragment builder, not in the admission chain, so the write is accepted and the error surfaces afterwards on the object and in the operator log — watch there, not at the exit code of your apply. It is not an admission webhook rejection and not a CEL rule: neither runs this check, which is why the apply comes back clean. Nor does it wait for the restore Job — the builder returns the error while assembling the Job's init containers, so no Job is ever created. The same rejection covers `spec.initFromBackup.pointInTime`, because both entry points share one builder. (objective 6)"
+      "explanation": "The check lives in the reconciler's PITR fragment builder, not in the admission chain, so the write is accepted and the error surfaces afterwards in `status.restore` and a `RestoreBuildFailed` Warning Event — watch there, not at the exit code of your apply. It is not an admission webhook rejection and not a CEL rule: neither runs this check, which is why the apply comes back clean. Nor does it wait for the restore Job — the builder returns the error while assembling the Job's init containers, so no Job is ever created. `spec.restoreInPlace.pointInTime` is refused at the same stage for a different reason: in place it is never supported, because the live primary already executed the archived GTIDs. (objective 6)"
     },
     {
       "question": "Chaos scenario 31 failed with `ERROR 1062 Duplicate entry` because the ephemeral verify `mysqld` was started with `gtid_mode=OFF`, defeating server-side GTID dedup on binlog replay. What does that bug argue for, and why?",

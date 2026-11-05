@@ -609,7 +609,7 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
 5. Old active not repointed after the handoff (`not repointing it` or `before repointing`). Leave it fenced and do not run `CHANGE REPLICATION SOURCE` on it by hand. Old-primary recovery picks it up on a later poll:
    - If the fence failed or a set was only unreadable, recovery fences the site itself, compares the sets, and rejoins it as a replica when nothing is missing from the new primary. Until then a site whose fence failed has `read_only=ON` but may lack `super_read_only`: check `SELECT @@GLOBAL.super_read_only, @@GLOBAL.read_only` on it.
    - If it really holds transactions the new primary lacks, recovery reports them in `status.sites[].divergentGtid` (`divergenceDetectedBy=OldPrimaryRecovery`) and blocks: follow playbook 2 to extract or replay them before recloning the site.
-   - If the old active came back on an empty datadir (a replaced or wiped PVC), its set holds only server-init transactions under a new `server_uuid`. The rollout still refuses and pages, but recovery treats the site as empty and leaves it to auto-clone: no `divergentGtid` appears. Confirm with `SELECT @@server_uuid, @@GLOBAL.gtid_executed` on it (no UUID shared with the new primary) and let the clone run.
+   - If the old active came back on an empty datadir (a replaced or wiped PVC), its set holds only server-init transactions under a new `server_uuid`. The rollout still refuses and pages, but recovery treats the site as empty and leaves it to auto-clone: no `divergentGtid` appears. Confirm with `SELECT @@server_uuid, @@GLOBAL.gtid_executed` on it (no server UUID shared with the new primary; GTID tags are ignored, so `uuid:tag` and `uuid` count as shared. A site that shares a server UUID but holds transactions the primary lacks is blocked as divergent, not cloned) and let the clone run.
 
 ## 24. One group stopped updating (no running topology manager)
 
@@ -619,11 +619,17 @@ A healthy operator pod does not guarantee that every group has a live topology m
 - One group's `status.sites[]` and conditions stop changing while other groups keep updating.
 - Losing the primary does not trigger failover.
 - Operator log: ERROR `failed to start topology manager` for that `fg`, repeating every 30s.
+- Warning Event `TopologyManagerStartFailed` on the group, carrying the same error. It is rate-limited (at once when a running manager was torn down, otherwise after one 30s retry, then at most every 5 minutes), so read the log for the latest attempt. A Normal `TopologyManagerStarted` Event marks a recovery the same operator process saw.
+- These Events are history, not current state, in either direction. A group that recovered and broke again within 5 minutes can still show `TopologyManagerStarted` last. The operator forgets a failure episode when it restarts, so a group fixed after an operator restart never gets `TopologyManagerStarted` and can still show `TopologyManagerStartFailed` last. Before declaring the manager absent, confirm it from current evidence: the ERROR repeating every 30s in the last couple of minutes of operator log, and `status.sites[].lastSeen` no longer advancing.
 
 ### Diagnostic steps
 1. Read the error:
    ```bash
+   kubectl get events -n <ns> --field-selector involvedObject.name=<group>,reason=TopologyManagerStartFailed
    kubectl logs -n bloodraven deploy/bloodraven | grep -E 'failed to start topology manager|topology manager exited|connection material unreadable' | grep '<ns>/<group>'
+   # Current state: a line every 30s here means no manager right now.
+   kubectl logs -n bloodraven deploy/bloodraven --since=2m | grep 'failed to start topology manager' | grep '<ns>/<group>'
+   kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{range .status.sites[*]}{.name}{" lastSeen="}{.lastSeen}{"\n"}{end}'
    ```
 2. Typical causes:
    - The operator Secret is missing (`get operator secret ... not found`).

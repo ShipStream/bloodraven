@@ -33,9 +33,9 @@
 
 ---
 
-**Front:** How long is the emergency Dragonfly budget, and where is it set?
+**Front:** What bounds the emergency Dragonfly promotion, and is any of it configurable?
 
-**Back:** 10 seconds, hard-coded in the operator (const budget = 10 * time.Second). It is not configurable.
+**Back:** Per-step budgets hard-coded in the operator, none configurable: a 1 s probe of the old master, a 2 s REPLTAKEOVER (5 s client wait), up to 14 s for the REPLICAOF NO ONE fallback, and 5 s for every other step. It runs on the Dragonfly manager's goroutine, so MySQL never waits for it.
 
 ---
 
@@ -51,9 +51,9 @@
 
 ---
 
-**Front:** Why does the Dragonfly client set its read deadline to maxSyncWait + 5 s?
+**Front:** Why does the Dragonfly client set its REPLTAKEOVER read deadline to maxSyncWait + 12 s?
 
-**Back:** So the client cannot give up before the server has spent its full drain budget and leave the caller unsure whether the promotion happened. At the 30 s default that is a 35 s deadline.
+**Back:** The target lets its master run 10 s past the budget, and the client allows 2 s more for the reply, so it cannot give up before the server has and leave the caller unsure whether the promotion happened. At the 30 s default that is a 42 s deadline.
 
 ---
 

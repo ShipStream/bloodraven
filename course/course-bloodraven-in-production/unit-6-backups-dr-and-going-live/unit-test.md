@@ -28,13 +28,13 @@ The `nightly` profile on `playground` fires at 02:00 with no `sourceSiteOverride
 
 **Type:** TRUE_FALSE
 
-You add `pointInTime.stopDatetime` under `spec.restoreInPlace` on `playground` while `spec.backup.pitr.enabled` is still `false`. Your `kubectl apply` will be rejected by the API server, carrying the message `pointInTime is set but spec.backup.pitr.enabled=false; PITR restore requires the failover group to have continuous binlog archival configured on the source`.
+You bootstrap a new group from `playground`'s nightly dump with `pointInTime.stopDatetime` under `spec.initFromBackup`, no `pointInTime.archiveProfileName`, and `spec.backup.pitr.enabled` still `false`. Your `kubectl apply` will be rejected by the API server, carrying the message `pointInTime is set but spec.backup.pitr.enabled=false; PITR restore requires the failover group to have continuous binlog archival configured on the source, or pointInTime.archiveProfileName`.
 
 **Correct answer:** false
 
 **Explanation:**
 
-The message is exactly right; where it arrives is not. This is a **reconciler error, not an admission rejection** — your `kubectl apply` succeeds and prints `configured`, and the failure shows up seconds later in the CR's status and the operator log. Watch there, not at the exit code of the apply. Contrast this with the CEL rule behind `spec.encryptionAtRest.enabled requires spec.tls`, which genuinely is a hard admission rejection: the two look similar in a doc and behave nothing alike at the terminal. The substance of the rejection is not a style preference either — replay material only exists if something archived it, and with PITR off nothing did. Both restore entry points share one builder, so `spec.initFromBackup.pointInTime` fails identically. (objective 6)
+The message is exactly right; where it arrives is not. This is a **reconciliation-time rejection, not an admission rejection** — your `kubectl apply` succeeds, and the failure shows up seconds later in `status.restore` and a `RestoreBuildFailed` Warning Event. Watch there, not at the exit code of the apply. Contrast this with the CEL rule behind `spec.encryptionAtRest.enabled requires spec.tls`, which genuinely is a hard admission rejection: the two look similar in a doc and behave nothing alike at the terminal. The substance of the rejection is not a style preference either — replay material only exists if something archived it, and the restore must be told where: `archiveProfileName` can name the source's archive instead. `spec.restoreInPlace.pointInTime` is refused whatever the PITR settings, because the live primary already executed the archived GTIDs. (objective 6)
 
 ## Question 3
 

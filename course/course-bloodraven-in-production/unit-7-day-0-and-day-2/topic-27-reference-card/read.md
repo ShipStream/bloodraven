@@ -29,8 +29,8 @@ quote a version, an issue number or a documentation defect.
 | `plannedFailover.maxLagWait` | `5m` | same | The GTID-superset gate. Rollback lives here. |
 | `plannedFailover.drainTimeout` | `30s` | same | Connection drain before the write endpoint moves. Exhaustion proceeds anyway. |
 | `plannedFailover.onCooldown` | `reject` | same | `defer` parks the request instead of refusing it. |
-| `dragonfly.plannedFailover.maxSyncWait` | `30s` | same | Also the `REPLTAKEOVER` timeout argument; the client adds 5 s of I/O grace. |
-| Dragonfly emergency budget | `10s` | same | Hard-coded. MySQL failover is never delayed by cache. |
+| `dragonfly.plannedFailover.maxSyncWait` | `30s` | same | Also the `REPLTAKEOVER` timeout argument; the client waits 12 s beyond it for the reply. |
+| Dragonfly emergency steps | 1 s probe, 2 s takeover, ≤ 14 s fallback, 5 s other steps | same | Hard-coded, per step. MySQL only queues the promotion, so failover is never delayed by cache. |
 | `backup.maxLagSecondsForSource` | `300` | — | Picks the backup source. A different setting from `maxLagSeconds`, with the same default. |
 | `backup.pitr.archivePollInterval` | `60s` | — | Archiver ticker beside inotify. |
 | `backup.pitr.maxBinlogSize` | `100M` | — | Written *before* `spec.mysqlConf`, so your override wins. |

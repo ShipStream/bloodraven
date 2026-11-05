@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
+
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // mysqlTLSConfigName is the name the sidecar registers its MySQL TLS
@@ -125,7 +127,7 @@ func loadMySQLRootCAs(caFile string) (*x509.CertPool, error) {
 // pins their own tls= parameter in the legacy spec.secretName DSN keeps
 // control.
 func withMySQLTLSConfig(dsn, name string) (string, error) {
-	cfg, err := mysqldriver.ParseDSN(dsn)
+	cfg, err := internalmysql.ParseDSN(dsn)
 	if err != nil {
 		return "", fmt.Errorf("parse MySQL DSN: %w", err)
 	}

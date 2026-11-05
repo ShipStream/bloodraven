@@ -50,7 +50,7 @@ func TestRealCompressedRetentionAndPrefix(t *testing.T) {
 	}
 }
 
-func TestRound5PayloadLengthEncodingBoundaries(t *testing.T) {
+func TestPayloadLengthEncodingBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		wire []byte
 		want uint64

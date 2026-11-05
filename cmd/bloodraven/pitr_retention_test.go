@@ -49,7 +49,7 @@ func TestPITRCutoffRequiresEveryBackupGTIDBoundary(t *testing.T) {
 			if tc.name == "missing start time" {
 				second.Status.StartTime = nil
 			}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(first, second, retentionRound2Group()).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(first, second, cutoffTestGroup()).Build()
 			mux := newAuxMux(nil, platform.NewHub(slog.Default()), c)
 			request := func(query string) map[string]any {
 				t.Helper()
@@ -100,7 +100,7 @@ func TestPITRCutoffDoesNotCachePositiveCoverage(t *testing.T) {
 	}
 	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
 	first := retentionBoundaryBackup("old", retentionTestSID+":1-20", start)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(first, retentionRound2Group()).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(first, cutoffTestGroup()).Build()
 	mux := newAuxMux(nil, platform.NewHub(slog.Default()), c)
 	read := func() map[string]any {
 		t.Helper()

@@ -112,6 +112,14 @@ type TopologyManagerRunner struct {
 	// apiReader is the uncached reader the Dragonfly managers use for the
 	// group's authoritative state (see DragonflyManager.SetAuthorityReader).
 	apiReader client.Reader
+
+	// startFailures tracks groups whose topology manager failed to start,
+	// and lastStartWarning when each was last warned about; both drive the
+	// rate-limited TopologyManagerStartFailed Event. Guarded by mu.
+	startFailures    map[types.NamespacedName]*startFailureState
+	lastStartWarning map[types.NamespacedName]startWarning
+	// now is the clock for start-failure Events; nil means time.Now.
+	now func() time.Time
 }
 
 // NewTopologyManagerRunner creates a new runner.
@@ -531,6 +539,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		if materialErr != nil {
 			r.logger.Error("failed to start topology manager", "fg", nn, "error", materialErr)
+			r.noteStartFailure(fg, nn, materialErr, ok)
 			continue
 		}
 		// A stopped manager passes its PITR archive history on.
@@ -540,8 +549,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		}
 		if err := r.startManager(ctx, fg, cfg, prev); err != nil {
 			r.logger.Error("failed to start topology manager", "fg", nn, "error", err)
+			r.noteStartFailure(fg, nn, err, ok)
 			continue
 		}
+		r.noteStartSuccess(fg, nn)
 		// Apply the suppression flag on the freshly-started manager so the
 		// first poll cycle already respects an in-flight restore.
 		r.mu.RLock()
@@ -577,6 +588,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		stopManagedTopology(mt)
 		clearManagedSiteGauges(mt.tm)
 	}
+	r.pruneStartFailures(seen)
 
 	return nil
 }
@@ -1136,6 +1148,8 @@ func (r *TopologyManagerRunner) stopAll() {
 		stopping = append(stopping, mt)
 	}
 	r.managers = make(map[types.NamespacedName]*managedTopology)
+	r.startFailures = nil
+	r.lastStartWarning = nil
 	r.mu.Unlock()
 	for _, mt := range stopping {
 		stopManagedTopology(mt)
@@ -2357,7 +2371,7 @@ func removeCondition(conditions *[]metav1.Condition, condType string) {
 // sets require_secure_transport=ON — would have every site probe fail
 // with Error 3159, and no failover could ever run.
 func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsConfigName string) (string, error) {
-	parsed, err := mysql.ParseDSN(baseDSN)
+	parsed, err := internalmysql.ParseDSN(baseDSN)
 	if err != nil {
 		return "", fmt.Errorf("parse DSN: %w", err)
 	}
