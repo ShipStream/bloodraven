@@ -14,7 +14,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
-func round2Retag(t *testing.T, raw []byte, number uint64) []byte {
+func retagGTIDFixture(t *testing.T, raw []byte, number uint64) []byte {
 	t.Helper()
 	raw = bytes.Clone(raw)
 	sid, _ := hex.DecodeString("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -30,7 +30,7 @@ func round2Retag(t *testing.T, raw []byte, number uint64) []byte {
 	return raw
 }
 
-func round2Join(t *testing.T, files ...[]byte) []byte {
+func joinBinlogFixtures(t *testing.T, files ...[]byte) []byte {
 	t.Helper()
 	out := []byte("\xfebin")
 	for i, raw := range files {
@@ -50,25 +50,25 @@ func round2Join(t *testing.T, files ...[]byte) []byte {
 	return out
 }
 
-func TestRound2StraddlingLineage(t *testing.T) {
-	for _, shape := range []string{"mid file", "mid file rotated", "straddling idle successor", "round1 exact idle", "s31 seed backup markers rotation"} {
+func TestPITRBackupStraddlingLineageAccepted(t *testing.T) {
+	for _, shape := range []string{"mid file", "mid file rotated", "straddling idle successor", "exact idle boundary", "s31 seed backup markers rotation"} {
 		t.Run(shape, func(t *testing.T) {
-			file := round2Join(t, round1Stream(t, 9, round1Time(8, 0, 0), false, false), round1Stream(t, 10, round1Time(9, 0, 0), false, false), round1Stream(t, 11, round1Time(9, 40, 0), false, false))
+			file := joinBinlogFixtures(t, coverageStream(t, 9, coverageTime(8, 0, 0), false, false), coverageStream(t, 10, coverageTime(9, 0, 0), false, false), coverageStream(t, 11, coverageTime(9, 40, 0), false, false))
 			files := [][]byte{file}
 			bound := retentionTestSID + ":1-10"
 			switch shape {
 			case "mid file rotated":
-				files = append(files, round1Stream(t, 12, round1Time(9, 45, 0), true, false))
+				files = append(files, coverageStream(t, 12, coverageTime(9, 45, 0), true, false))
 			case "straddling idle successor":
-				file = round2Join(t, round1Stream(t, 9, round1Time(9, 0, 0), false, false), round1Stream(t, 10, round1Time(9, 20, 0), false, false))
-				file = round1PatchTimestamp(t, file, 3, uint32(round1Time(9, 31, 0).Unix()))
-				files = [][]byte{file, round1Stream(t, 11, round1Time(9, 40, 0), true, false)}
-			case "round1 exact idle":
-				files = [][]byte{round1PatchTimestamp(t, pitrFixture(t, "incarnation-a.bin"), 3, uint32(round1Time(9, 31, 0).Unix()))}
+				file = joinBinlogFixtures(t, coverageStream(t, 9, coverageTime(9, 0, 0), false, false), coverageStream(t, 10, coverageTime(9, 20, 0), false, false))
+				file = patchEventTimestamp(t, file, 3, uint32(coverageTime(9, 31, 0).Unix()))
+				files = [][]byte{file, coverageStream(t, 11, coverageTime(9, 40, 0), true, false)}
+			case "exact idle boundary":
+				files = [][]byte{patchEventTimestamp(t, pitrFixture(t, "incarnation-a.bin"), 3, uint32(coverageTime(9, 31, 0).Unix()))}
 				bound = retentionTestSID + ":1-11"
 			}
-			store := round1Archive(t, map[string][][]byte{"iad": files})
-			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, round1Time(9, 30, 0), t.TempDir(), bound, false, false, "timestamp", slog.Default())
+			store := coverageArchive(t, map[string][][]byte{"iad": files})
+			result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad"}, coverageTime(9, 30, 0), t.TempDir(), bound, false, false, "timestamp", slog.Default())
 			if err != nil || !result.TargetCovered || result.Partial {
 				t.Fatalf("valid backup-straddling history refused: %+v %v", result, err)
 			}
@@ -79,17 +79,17 @@ func TestRound2StraddlingLineage(t *testing.T) {
 // A stop that falls inside a transaction committed before the target drops
 // that transaction's body, so the stop cannot certify coverage.
 func TestPITRInterruptedEarlyCommitRefused(t *testing.T) {
-	old := round1Stream(t, 10, round1Time(9, 0, 0), false, false)
-	interrupted := round1PatchTimestamp(t, old, 2, uint32(round1Time(9, 30, 0).Unix()))
-	interrupted = round1PatchTimestamp(t, interrupted, 3, uint32(round1Time(9, 31, 0).Unix()))
+	old := coverageStream(t, 10, coverageTime(9, 0, 0), false, false)
+	interrupted := patchEventTimestamp(t, old, 2, uint32(coverageTime(9, 30, 0).Unix()))
+	interrupted = patchEventTimestamp(t, interrupted, 3, uint32(coverageTime(9, 31, 0).Unix()))
 	for _, streams := range []map[string][][]byte{{"east": {interrupted}}, {"east": {interrupted}, "iad": {old}}} {
 		var sites []string
 		for site := range streams {
 			sites = append(sites, site)
 		}
-		store := round1Archive(t, streams)
+		store := coverageArchive(t, streams)
 		for _, partial := range []bool{false, true} {
-			_, err := downloadPITRArchive(context.Background(), store, "binlogs", sites, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, true, "timestamp", slog.Default())
+			_, err := downloadPITRArchive(context.Background(), store, "binlogs", sites, coverageTime(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, true, "timestamp", slog.Default())
 			if err == nil || !strings.Contains(err.Error(), "replay would not apply it") {
 				t.Fatalf("interrupted pre-target commit certified: %v", err)
 			}
@@ -97,11 +97,11 @@ func TestPITRInterruptedEarlyCommitRefused(t *testing.T) {
 	}
 }
 
-func TestRound2ReclonedSparseHistoryRefused(t *testing.T) {
-	a := round1Stream(t, 10, round1Time(9, 0, 0), false, false)
-	b := round2Retag(t, round1Stream(t, 11, round1Time(10, 0, 0), false, false), 1)
-	r := round2Join(t, round1Stream(t, 11, round1Time(11, 0, 0), false, false), round1Stream(t, 12, round1Time(11, 40, 0), false, false))
-	store := round1Archive(t, map[string][][]byte{"iad": {a, r}, "pdx": {b}})
+func TestPITRReclonedSparseHistoryRefused(t *testing.T) {
+	a := coverageStream(t, 10, coverageTime(9, 0, 0), false, false)
+	b := retagGTIDFixture(t, coverageStream(t, 11, coverageTime(10, 0, 0), false, false), 1)
+	r := joinBinlogFixtures(t, coverageStream(t, 11, coverageTime(11, 0, 0), false, false), coverageStream(t, 12, coverageTime(11, 40, 0), false, false))
+	store := coverageArchive(t, map[string][][]byte{"iad": {a, r}, "pdx": {b}})
 	// Physical clone carries B in baseGtids, but it does not create B's replay bytes.
 	m, err := sidecar.LoadManifest(context.Background(), store, "binlogs", "iad")
 	if err != nil {
@@ -116,7 +116,7 @@ func TestRound2ReclonedSparseHistoryRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, partial := range []bool{false, true} {
-		_, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, round1Time(11, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, false, "timestamp", slog.Default())
+		_, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, coverageTime(11, 30, 0), t.TempDir(), retentionTestSID+":1-10", partial, false, "timestamp", slog.Default())
 		if err == nil || !strings.Contains(err.Error(), "archive does not contain transactions between the backup bound and") {
 			t.Fatalf("clone checkpoint pruned absent transaction bytes: %v", err)
 		}

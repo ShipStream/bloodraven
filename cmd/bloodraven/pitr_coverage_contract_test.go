@@ -13,17 +13,17 @@ import (
 // Only the replaying site can certify coverage. Another site's stop barrier,
 // which applies nothing before the target, is left out of the replay.
 func TestPITROnlyReplayingSiteCertifiesCoverage(t *testing.T) {
-	writer := round2Join(t, round2Retag(t, round1Stream(t, 10, round1Time(9, 0, 0), false, false), 1), round2Retag(t, round1Stream(t, 10, round1Time(9, 10, 0), false, false), 2))
+	writer := joinBinlogFixtures(t, retagGTIDFixture(t, coverageStream(t, 10, coverageTime(9, 0, 0), false, false), 1), retagGTIDFixture(t, coverageStream(t, 10, coverageTime(9, 10, 0), false, false), 2))
 	for _, shape := range []string{"staged barrier", "idle barrier"} {
 		for _, nonwriter := range []string{"iad", "zzz"} {
 			t.Run(shape+" "+nonwriter, func(t *testing.T) {
-				other := round1Stream(t, 10, round1Time(10, 0, 0), shape == "idle barrier", false)
-				store := round1Archive(t, map[string][][]byte{"pdx": {writer}, nonwriter: {other}})
-				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"pdx", nonwriter}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", false, false, "timestamp", slog.Default())
+				other := coverageStream(t, 10, coverageTime(10, 0, 0), shape == "idle barrier", false)
+				store := coverageArchive(t, map[string][][]byte{"pdx": {writer}, nonwriter: {other}})
+				result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"pdx", nonwriter}, coverageTime(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", false, false, "timestamp", slog.Default())
 				if err == nil || !strings.Contains(err.Error(), "PITRTargetNotCovered") || result.TargetCovered {
 					t.Fatalf("another site's barrier certified the writer's missing tail: %+v %v", result, err)
 				}
-				result, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"pdx", nonwriter}, round1Time(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", true, false, "timestamp", slog.Default())
+				result, err = downloadPITRArchive(context.Background(), store, "binlogs", []string{"pdx", nonwriter}, coverageTime(9, 30, 0), t.TempDir(), retentionTestSID+":1-10", true, false, "timestamp", slog.Default())
 				if err != nil || result.TargetCovered || !result.Partial || result.CrossSiteUnverified {
 					t.Fatalf("partial single-site replay refused: %+v %v", result, err)
 				}
@@ -37,16 +37,16 @@ func TestPITROnlyReplayingSiteCertifiesCoverage(t *testing.T) {
 	}
 }
 
-func TestRound3UnverifiedCoverageScriptContract(t *testing.T) {
+func TestPITRUnverifiedCoverageScriptContract(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Fatal("python3 is required for the restore coverage contract")
 	}
-	old := round1Stream(t, 10, round1Time(9, 0, 0), false, false)
-	primary := round2Join(t, round2Retag(t, round1Stream(t, 11, round1Time(9, 10, 0), false, false), 1), round2Retag(t, round1Stream(t, 11, round1Time(9, 40, 0), false, false), 2))
-	store := round1Archive(t, map[string][][]byte{"iad": {old}, "pdx": {old, primary}})
+	old := coverageStream(t, 10, coverageTime(9, 0, 0), false, false)
+	primary := joinBinlogFixtures(t, retagGTIDFixture(t, coverageStream(t, 11, coverageTime(9, 10, 0), false, false), 1), retagGTIDFixture(t, coverageStream(t, 11, coverageTime(9, 40, 0), false, false), 2))
+	store := coverageArchive(t, map[string][][]byte{"iad": {old}, "pdx": {old, primary}})
 	out := t.TempDir()
-	result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, round1Time(9, 30, 0), out, retentionTestSID+":1-10", false, true, "timestamp", slog.Default())
+	result, err := downloadPITRArchive(context.Background(), store, "binlogs", []string{"iad", "pdx"}, coverageTime(9, 30, 0), out, retentionTestSID+":1-10", false, true, "timestamp", slog.Default())
 	if err != nil || !result.TargetCovered {
 		t.Fatalf("unverified replay planning: %+v %v", result, err)
 	}

@@ -234,6 +234,14 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 			"planned-failover: site %q is in state %q; target must be a healthy read-only replica",
 			req.Site, targetStatus.State)
 	}
+	if restoreReclonePending(fg, req.Site) {
+		// Its replication receiver is held stopped until its post-restore
+		// reclone, so it cannot catch up; refuse before fencing the source
+		// even when the observed status still says it replicates.
+		return PlannedFailoverReject, "TargetUnhealthy", fmt.Errorf(
+			"planned-failover: site %q awaits its post-restore reclone (status.restoreReclones.pending) and its replication is held stopped; refusing to promote it",
+			req.Site)
+	}
 	if !targetStatus.Replicating {
 		return PlannedFailoverReject, "TargetUnhealthy", fmt.Errorf(
 			"planned-failover: site %q is read-only but not replicating; refusing to promote a non-replicating target",

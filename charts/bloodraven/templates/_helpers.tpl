@@ -76,3 +76,33 @@ Operator image reference.
 {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
+
+{{/*
+BLOODRAVEN_WS_MAX_CLIENTS value. Missing, null or blank keeps the default
+100 and 0 disables the cap. Anything that is not a whole number from 0 to
+2147483647 fails the render: the operator would otherwise fall back to 100
+silently, and a lossy int64 coercion would turn junk into 0 (unlimited).
+*/}}
+{{- define "bloodraven.wsMaxClients" -}}
+{{- $v := .Values.auxiliary.service.wsMaxClients -}}
+{{- $msg := printf "auxiliary.service.wsMaxClients must be a whole number from 0 (unlimited) to 2147483647, got %v" $v -}}
+{{- if kindIs "invalid" $v -}}
+100
+{{- else if kindIs "string" $v -}}
+{{- $s := trim $v -}}
+{{- if eq $s "" -}}
+100
+{{- else if regexMatch "^[0-9]{1,10}$" $s -}}
+{{- if gt (atoi $s) 2147483647 }}{{ fail $msg }}{{ end -}}
+{{- atoi $s -}}
+{{- else -}}
+{{- fail $msg -}}
+{{- end -}}
+{{- else if or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v) -}}
+{{- $f := float64 $v -}}
+{{- if or (lt $f 0.0) (gt $f 2147483647.0) (ne $f (float64 (int64 $f))) }}{{ fail $msg }}{{ end -}}
+{{- int64 $f -}}
+{{- else -}}
+{{- fail $msg -}}
+{{- end -}}
+{{- end }}

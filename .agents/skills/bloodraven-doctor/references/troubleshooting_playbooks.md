@@ -48,6 +48,8 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
 - `SHOW REPLICA STATUS` shows replication stopped with GTID error (e.g. error 1236).
 - A replica that is still replicating normally can be divergent too (`divergenceDetectedBy=ReplicaAudit`): use playbook 33.
 
+Before treating a site stuck in `RecoveryInProgress` (or an old primary that has not rejoined) as a stall, check whether a handoff owns the sites. Old-primary recovery, its connection drain and replication-source convergence stand down while a planned failover or ordered update is in flight (`.status.plannedFailover.phase`, `.status.updatePhase`) and resume, with a fresh drain budget, once it ends. A Dragonfly snapshot upgrade defers them only intermittently, so it does not explain a stall that lasts the whole upgrade. A planned failover that ends with `reason: RecoveryInFlight` hit its promotion deadline while such a step was still running on the sites; nothing was promoted, and the source was unfenced unless another site was already writable (message ends `left fenced`; see that matrix row). After an operator config or credential change restarts a group's topology manager mid-update, the new manager takes no failover, re-assert, recovery or update until the old manager's ordered update exits. A planned failover that reaches `Promoting` in that window fails closed: `reason: ExecuteFailed` with `a replaced topology manager's ordered update is still finishing on the sites` in the message, nothing sent to the target and the source left fenced (see the matrix row). Meanwhile `status.updatePhase` is empty. The operator log brackets this window with `topology manager deferring to its predecessor's ordered update; no failover, recovery or update until it exits` and `predecessor's ordered update exited; topology manager resuming` (`heldFor`).
+
 ### Diagnostic Steps
 1. Inspect GTID executed sets:
    ```bash
@@ -78,19 +80,33 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
 > If the keyring escrow Secret in Kubernetes is deleted or corrupt while the pod is running with an in-memory or unsealed keyring, restarting the pod will cause total loss of the tablespace encryption master key, rendering the database files unrecoverable.
 
 ### Diagnostic Steps
-1. Check sidecar keyring status:
+1. Check sidecar keyring status (metadata and digests only; `/keyring/status` never returns key material):
    ```bash
    ./.agents/skills/bloodraven-doctor/scripts/sidecar-probe.sh -n <ns> <group> keyring
    ```
-2. Check escrow Secret:
+2. Find the site's escrow Secret through the CR, not by guessing its name. Escrow Secrets are named `mysql-<group>-<site>-keyring-v<N>` (immutable, one per keyring version):
    ```bash
-   kubectl get secret -n <ns> <group>-keyring-escrow -o yaml
+   SECRET=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringSecret}')
+   VERSION=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringVersion}')
+   DIGEST=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringDigest}')
+   kubectl get secret -n <ns> "$SECRET"
+   kubectl get secret -n <ns> -l shipstream.io/failover-group=<group>,app.kubernetes.io/name=mysql-keyring
    ```
 
 ### Safe Remediation Steps
-1. If the pod is still running, query the sidecar `/keyring/status` endpoint to extract the active keyring digest and key metadata.
-2. Re-populate the escrow Secret using operator credentials or backup keys.
-3. Once the escrow Secret is restored, verify that `status.encryptionAtRest.sites[].phase` settles to `Sealed`.
+The only surviving copy of a sealed site's keys is the keyring file in its running pod's `mysql` container (`$KEYRING_DIR/keyring`; `KEYRING_DIR` is `spec.encryptionAtRest.keyring.dataFileDir`, default `/run/mysql-keyring`). Do not delete, restart, evict or drain that pod, and do not force an unseal or rollout.
+
+1. `KeyringEscrowMissing` (the Secret is gone): recreate it from the running pod with the helper. It runs only on a site that is `Sealed` or `Failed` with no `unsealReason` (a rotation, bootstrap or clone in progress owns its Secret). It reads the pod's keyring and checks it against `status…keyringDigest` before writing anything, refuses if the Secret exists, never deletes a Secret, and re-reads the group before writing, stopping if its UID or the site's phase, unseal reason, Secret, version or digest changed. It then adds the labels (including `shipstream.io/keyring-version`), the digest annotation, the ownerReference and `immutable: true`. It never writes the group's status: the operator returns the site to `Sealed` itself once MySQL confirms it runs that keyring (Event `KeyringRecovered`), and the script waits up to `KEYRING_RECOVER_WAIT` seconds (default 120) to report it:
+   ```bash
+   ./.agents/skills/bloodraven-doctor/scripts/keyring-escrow-recover.sh -n <ns> <group> <site>
+   ```
+   It reads from the site's one Running, Ready MySQL pod, selected as its Deployment selects it, and refuses if there is not exactly one; `--pod <name>` names it explicitly, and also accepts a terminating pod (with a warning): with Recreate, a pod in its grace period may hold the last copy, so read it before the grace period ends. It runs with GNU or macOS/BSD tools (`sha256sum` or `shasum`).
+2. `KeyringEscrowCorrupt` (the Secret exists but no longer hashes to the recorded digest): the helper refuses by default and changes nothing. Replacing the Secret is a separate, explicit step: re-run it with `--replace-corrupt <secret-name>`, repeating the exact Secret name. It then confirms the existing Secret really fails the digest check and the pod's keyring passes it, writes a backup to `./keyring-escrow-backup-<secret>-<timestamp>.yaml`, and only then deletes and recreates that one Secret. Get the human operator's go-ahead before passing `--replace-corrupt`.
+   The canonical procedure is "Keyring escrow lost" in `site/content/docs/6.operations/4.runbooks.md`; "Disaster recovery" in `site/content/docs/4.configuration/8.encryption-at-rest.md` points to it. Neither, nor this helper, writes the site's phase: the operator re-seals it.
+3. Verify the operator returns the site to `Sealed` (Event `KeyringRecovered`) and the `KeyringEscrowMissing` / `KeyringEscrowCorrupt` events stop. Do not patch the phase by hand: a rotation started meanwhile would be overwritten.
 
 ---
 
@@ -146,7 +162,7 @@ Before executing a planned failover with `kubectl bloodraven promote <group> -n 
 
 ### Diagnostic steps
 
-1. Run `bash ./.agents/skills/bloodraven-doctor/scripts/deployment-probe.sh <namespace> <group>`. Collect the deployment operation ID, grant generation, current `status.topologyGeneration`, lease expiry/state/reason, and planned-operation status. The helper projects public fields; never collect raw ownership hashes.
+1. Run `bash ./.agents/skills/bloodraven-doctor/scripts/deployment-probe.sh <namespace> <group>`. An `unstableReason` of `RestoreReclonePending` means a full-instance in-place restore still has peers to reclone (or holds them after a failure); follow [playbook 20](#20-peers-not-yet-recloned-after-a-full-instance-in-place-restore). Collect the deployment operation ID, grant generation, current `status.topologyGeneration`, lease expiry/state/reason, and planned-operation status. The helper projects public fields; never collect raw ownership hashes.
 2. Inspect Events for `DeploymentLeaseRevoked` and `PlannedFailoverDeferred`, metrics `bloodraven_deploy_leases_active`, `bloodraven_deploy_lease_age_seconds`, `bloodraven_deploy_lease_revocations_total`, `bloodraven_deploy_lease_expirations_total`, and `bloodraven_planned_failovers_deferred_total`. A restart does not clear durable Leases.
 3. Correlate `msg="deploy api"` logs by `group`, `instance`, `namespace`, and `operationId`. HTTP `status` and `duration_ms` identify authorization failures and slow requests without credential dumps. `401` means authentication failure; `403 forbidden` means the caller is not declared for the requested group; `403 token_mismatch` can indicate a stale token after same-operation POST rotation.
 4. For network failures, verify the shared TLS listener and Secret, projected token audience, and client CA/SAN validation. Check both deployment pod and namespace selectors. Preserve sidecar `/active-site` and `/pitr-cutoff` access on 8082 and escrow on 8443 when changing policies.
@@ -505,7 +521,8 @@ A full-instance in-place restore replaces the primary's data. The other sites st
 ### Symptoms
 - `status.restoreReclones.pending` is non-empty long after the restore succeeded.
 - `RestoreRecloneFailed` events, or `status.restoreReclones.failures` lists a site.
-- `status.restoreReclones.phase: Held` and a `RestoreReclonesHeld` event: a later full-instance restore ran its Job on the primary and failed. The pending sites keep older data, and nothing is cloned. A reclone annotation for a held (or `Armed`) site is refused with `RecloneRejected` and removed.
+- `status.restoreReclones.phase: Held` and a `RestoreReclonesHeld` event: a full-instance restore ran its Job on the primary, failed, and changed the primary. Every pending site keeps its replication receiver stopped and the data it had before the restore; nothing is cloned or replicated into it. A reclone annotation for a held (or `Armed`) site is refused with `RecloneRejected` and removed.
+- Every queued site shows `Replica_IO_Running: No` (or `performance_schema.replication_connection_status.SERVICE_STATE = OFF`), `sourceConvergenceReason: RestorePeerHold`, `Degraded=RestoreReclonePending`, and `bloodraven_replication_running{thread="io"}=0`. This is by design: the restore stopped the receivers before its Job dropped anything, and only each site's reclone restarts replication.
 - A full-instance restore waits in Preflight with `waiting for the running clone of <site> to finish before restoring`: a clone was running when the restore was accepted. It proceeds once the clone ends.
 - `PromotionRefusedPendingReclone` events, or `Degraded=NoPrimary` with a `pending post-restore reclone` message after the primary failed.
 - Readers return old data from a site that is still queued. A queued site is labelled `shipstream.io/healthy=no`, which takes it out of the `-replica` Service and a read-only site's Service; the per-site Service of a primary-candidate or dr-only site does not select on it, so check for clients that connect there directly.
@@ -523,10 +540,14 @@ A full-instance in-place restore replaces the primary's data. The other sites st
 ### Safe remediation
 1. A failing clone: fix the cause (donor reachability, the clone plugin, recipient disk space, a sealed keyring) and let the queue retry. Do not set your own reclone annotation for a queued site. The queue would wait for it, and a clone it did not request does not remove the site.
 2. The primary failed while only queued sites remain: prefer bringing the primary back; the queue then resumes. Promoting a queued site means serving its pre-restore data:
-   - With the primary up: `kubectl bloodraven promote <group> <site>`. Once the site is the primary, the rest of the queue is abandoned (`RestoreReclonesAbandoned`); a planned failover that rolls back leaves the queue in place.
+   - With the primary up there is no in-place promotion: a queued site's receiver is stopped, so it cannot catch up and a planned failover to it is refused (`TargetUnhealthy`).
    - With the primary down: clear the queue with `kubectl patch mfg <group> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/restoreReclones"}]'`, after which automatic failover proceeds. Then reclone the remaining sites by hand from whichever primary you keep.
-3. `RestoreReclonesDiscarded` after a failed restore is expected: the peers are not recloned from the broken primary. They are not guaranteed to be intact. The restore's `DROP DATABASE` statements are binlogged, so a peer that was replicating may have dropped the same schemas; check its data before promoting it. If the failed restore had replaced an earlier restore's queue, a `RestoreReclonesRestored` event means that queue is draining again (the failed restore never reached its Job).
-4. A `Held` queue (`RestoreReclonesHeld`): the primary may hold the failed restore's dropped or half-loaded data, and the held sites may be the only intact copies. Do not clone from the primary until its data is checked. Then choose one: run a new full-instance restore (it reclones every peer once it succeeds); set the phase back to `Draining` once the primary's data is good (`kubectl patch mfg <group> -n <ns> --subresource=status --type=merge -p '{"status":{"restoreReclones":{"phase":"Draining"}}}'`); or remove `status.restoreReclones` to keep the held sites' data as it is.
+3. `RestoreReclonesDiscarded` after a failed restore means the restore left the primary unchanged: it never created its Job, or the primary's `gtid_executed` still equals `status.restoreReclones.fencedGtidExecuted` (for example the Job failed before its `DROP`). The peers resume replicating and are eligible for promotion again. If the failed restore had replaced an earlier restore's queue, a `RestoreReclonesRestored` event means that queue is draining again. If the event says the primary is unchanged but the Job ran, check the primary: a load without binlogging into a primary that had no user schemas changes data without GTIDs.
+4. A `Held` queue (`RestoreReclonesHeld`): the primary may hold the failed restore's dropped or half-loaded data, and the held sites keep their pre-restore data with replication stopped. Do not `START REPLICA` on a held site and do not clone from the primary until its data is checked. Scheduled backups skip the held sites (they do not replicate) and fall back to the primary: suspend schedules whose retention could age out the last good backup. A `RestorePeerReplicationIncomplete` event names a held site that is missing its last pre-fence transactions. Then choose one:
+   - Restore the held data into the primary: create a `MysqlBackup` with `spec.sourceSiteOverride: <held-site>`, then run a new full-instance restore from it (it reclones every peer once it succeeds).
+   - Keep the primary's data once it is verified good: `kubectl patch mfg <group> -n <ns> --subresource=status --type=merge -p '{"status":{"restoreReclones":{"phase":"Draining"}}}'`; the held sites are recloned from it.
+   - Remove `status.restoreReclones`: this resumes the held sites' replication from the current primary, which replicates whatever the failed restore did to it.
+   A `Held` queue keeps a site removed from `spec.sites`, so re-adding it does not resume its replication.
 
 ## 21. In-place restore stays fenced after `spec.restoreInPlace` was removed, or ends "cancelled"
 
@@ -554,7 +575,13 @@ A full-instance in-place restore fences the primary with `SET GLOBAL offline_mod
 - `Failed` with `restoreInPlace rejected: the operator MySQL account lacks <privileges>` (any of `CONNECTION_ADMIN`, `SYSTEM_VARIABLES_ADMIN`, `PROCESS`, `REPLICATION_SLAVE_ADMIN`): preflight refused the restore (nothing fenced, confirm not consumed).
 - Stuck in `Fencing` with a message such as `waiting to read offline_mode`, `waiting to apply the offline_mode fence`, or `offline_mode is ON on <site>; waiting for N application session(s) to disconnect`.
 - After the restore, applications get `ERROR 3032 ... offline mode`, with `RestoreOfflineFenceReleaseFailed` events and `status.restoreOfflineFence` still set.
-- During the restore, replicas whose replication user lacks `CONNECTION_ADMIN` (legacy `secretName` installs) show their IO thread failing against the primary, and non-admin monitoring has gaps. Both are expected. With `spec.credentials` the replicator is the exempt operator account and keeps replicating.
+- During the restore every peer's replication receiver is stopped (`RestorePeerReplicationStopped`), whatever the replication account, and non-admin monitoring of the primary has gaps. Both are expected.
+- Stuck in `Fencing` with `waiting to stop replication on peer <site>: ...` (unreachable peer, refused `STOP REPLICA IO_THREAD`), `receiving the primary's last transactions` (a running receiver catching up, at most 30 s), or `waiting for the running ordered update / planned failover / clone`. After two minutes the run ends `Failed` with `RestoreInPlacePeerStopFailed`: nothing was restored, the confirm is consumed, and `offline_mode` is released.
+- Stuck in `Preflight` with `waiting for peer <site> to be reachable: ...`: a peer is unreachable. Nothing is fenced yet. `Failed` with `... lacks REPLICATION_SLAVE_ADMIN on <peer>` rejects the restore without consuming the confirm.
+- A new `confirm` does not start a new run while `status.restoreReclones` is still `Armed` from the previous restore: the previous queue is settled first (up to ten minutes while that restore's Job pods are still running), with a `RestoreInPlaceWaitingForPreviousQueue` event. `status.restoreInPlace` keeps showing the previous run meanwhile, and `offline_mode` stays enforced on the primary (re-asserted after a `mysqld` restart) until the settlement finishes.
+- `waiting for the planned failover to finish` in Preflight: a planned failover already in flight is still driven to completion; the restore starts afterwards.
+- Stuck in `Preflight` or `Fencing` with `waiting for the clone admission of <site> to finish` or `waiting for the running clone of <site> to finish`: a clone was starting or running when the restore began. It finishes (or is refused with `BootstrapRefusedRestoreHold`) first.
+- `status.restoreInPlace` is `Failed` but `offline_mode` stays ON and `status.restoreReclones` stays `Armed`: a pod of the failed restore's Job has not terminated (check `kubectl get pods -l batch.kubernetes.io/job-name=<job>`), or the primary is briefly unreadable. The operator waits up to ten minutes (two for an unreadable primary) before holding the peers, because the pod could still drop schemas. Do not lift `offline_mode` by hand meanwhile; delete a stuck pod only once you know it is not mid-restore.
 - A `RestoreOfflineFenceSessionsKept` Warning: the operator account lacks `SYSTEM_USER` and left the named accounts' sessions connected.
 
 ### Diagnostic steps
@@ -568,6 +595,7 @@ A full-instance in-place restore fences the primary with `SET GLOBAL offline_mod
 3. Locked out after a terminal restore because the release keeps failing: fix operator reachability to the primary. If applications must come back now, run `SET GLOBAL offline_mode = OFF;` on the primary. If `priorOfflineMode` was `true`, the primary was already in offline mode before the restore; leave it ON. The operator clears the record once its release succeeds.
 4. Applications running as accounts with `CONNECTION_ADMIN`/`SUPER` are not fenced at all. Remove those privileges from application accounts.
 5. After an operator downgrade during a full-instance restore, nothing releases the fence (older operators do not know `status.restoreOfflineFence`). Once the restore is terminal, run `SET GLOBAL offline_mode = OFF;` on the primary unless `priorOfflineMode` was `true`.
+6. Fencing waits on a peer, or the run ended `RestoreInPlacePeerStopFailed`: restore the operator's connectivity to the peer (or its `REPLICATION_SLAVE_ADMIN` grant), or remove the peer from `spec.sites`, then bump `spec.restoreInPlace.confirm`. Do not stop the peer's replication by hand to get past the check and then start it again: while a full-instance restore runs or its queue is `Armed`/`Held`, a running receiver pulls the restore's `DROP` statements. Do not downgrade the operator while `status.restoreReclones` is `Armed` or `Held`: an older operator restarts the held receivers.
 
 ## 23. Ordered update stalls on the active site (`maintenance handoff aborted`)
 
@@ -609,7 +637,7 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
 5. Old active not repointed after the handoff (`not repointing it` or `before repointing`). Leave it fenced and do not run `CHANGE REPLICATION SOURCE` on it by hand. Old-primary recovery picks it up on a later poll:
    - If the fence failed or a set was only unreadable, recovery fences the site itself, compares the sets, and rejoins it as a replica when nothing is missing from the new primary. Until then a site whose fence failed has `read_only=ON` but may lack `super_read_only`: check `SELECT @@GLOBAL.super_read_only, @@GLOBAL.read_only` on it.
    - If it really holds transactions the new primary lacks, recovery reports them in `status.sites[].divergentGtid` (`divergenceDetectedBy=OldPrimaryRecovery`) and blocks: follow playbook 2 to extract or replay them before recloning the site.
-   - If the old active came back on an empty datadir (a replaced or wiped PVC), its set holds only server-init transactions under a new `server_uuid`. The rollout still refuses and pages, but recovery treats the site as empty and leaves it to auto-clone: no `divergentGtid` appears. Confirm with `SELECT @@server_uuid, @@GLOBAL.gtid_executed` on it (no UUID shared with the new primary) and let the clone run.
+   - If the old active came back on an empty datadir (a replaced or wiped PVC), its set holds only server-init transactions under a new `server_uuid`. The rollout still refuses and pages, but recovery treats the site as empty and leaves it to auto-clone: no `divergentGtid` appears. Confirm with `SELECT @@server_uuid, @@GLOBAL.gtid_executed` on it (no server UUID shared with the new primary; GTID tags are ignored, so `uuid:tag` and `uuid` count as shared. A site that shares a server UUID but holds transactions the primary lacks is blocked as divergent, not cloned) and let the clone run.
 
 ## 24. One group stopped updating (no running topology manager)
 
@@ -619,11 +647,17 @@ A healthy operator pod does not guarantee that every group has a live topology m
 - One group's `status.sites[]` and conditions stop changing while other groups keep updating.
 - Losing the primary does not trigger failover.
 - Operator log: ERROR `failed to start topology manager` for that `fg`, repeating every 30s.
+- Warning Event `TopologyManagerStartFailed` on the group, carrying the same error. It is rate-limited (at once when a running manager was torn down, otherwise after one 30s retry, then at most every 5 minutes), so read the log for the latest attempt. A Normal `TopologyManagerStarted` Event marks a recovery the same operator process saw.
+- These Events are history, not current state, in either direction. A group that recovered and broke again within 5 minutes can still show `TopologyManagerStarted` last. The operator forgets a failure episode when it restarts, so a group fixed after an operator restart never gets `TopologyManagerStarted` and can still show `TopologyManagerStartFailed` last. Before declaring the manager absent, confirm it from current evidence: the ERROR repeating every 30s in the last couple of minutes of operator log, and `status.sites[].lastSeen` no longer advancing.
 
 ### Diagnostic steps
 1. Read the error:
    ```bash
+   kubectl get events -n <ns> --field-selector involvedObject.name=<group>,reason=TopologyManagerStartFailed
    kubectl logs -n bloodraven deploy/bloodraven | grep -E 'failed to start topology manager|topology manager exited|connection material unreadable' | grep '<ns>/<group>'
+   # Current state: a line every 30s here means no manager right now.
+   kubectl logs -n bloodraven deploy/bloodraven --since=2m | grep 'failed to start topology manager' | grep '<ns>/<group>'
+   kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{range .status.sites[*]}{.name}{" lastSeen="}{.lastSeen}{"\n"}{end}'
    ```
 2. Typical causes:
    - The operator Secret is missing (`get operator secret ... not found`).
@@ -802,7 +836,7 @@ The PVC store checks its volume when it is built: the mount path must be a mount
 ### Safe remediation
 - `ArchiveStoreInitFailed`: fix what the error names (Secret projection mode or content, endpoint URL, PVC mount path). The next retry picks it up; look for `archive store initialized after retries`. No pod restart is needed for Secret or endpoint fixes. For `is not a mount point`, compare the pod's `volumes`/`volumeMounts` with the Deployment's pod template: the operator always renders the `pitr-archive` volume, so a missing one was removed by a mutating webhook, policy engine or manual edit. Fix that; restoring the volume changes the pod spec and restarts the pod, which also restarts MySQL, so on the primary site run a planned failover away from it first (`kubectl bloodraven promote <group> <other-site>`). For `is not writable`, the error ends with the cause: `permission denied` means ownership or fsGroup (compare the volume's owner with the sidecar UID, 999 unless overridden); `read-only file system` means the claim's access mode or a filesystem the kernel remounted read-only after an I/O error (check the node's `dmesg`); `no space left on device` means the volume has no free inodes (expand or prune it). The probe creates an empty file, so a volume that is only out of data blocks does not fail init; it shows as `ArchiverError` while retention keeps freeing space. For passphrase `permission denied`, see playbook 25. Do not change an existing archive's passphrase to make the error go away; see playbook 26.
 - `ArchiverError`: follow the error text (storage reachability, credentials, playbook 26 for authentication or BRV1 errors).
-- `AwaitingRollout`: let the ordered update finish; check `status.updatePhase`. If it stays, the update is blocked (operator log `ordered update: deferring active-site update`, for example no healthy promotable standby). After 30 minutes the condition turns `False`/`ArchiverDisabled` with `ordered update still pending after 30m`; unblock the update (restore the standby) rather than restarting pods by hand.
+- `AwaitingRollout`: let the ordered update finish; check `status.updatePhase`. If it stays, the update is blocked (operator log `ordered update: deferring active-site update`, for example no healthy promotable standby, or `ordered update: deferring follower update; no drifted follower is a healthy direct replica` when only followers are drifted and none replicates directly from the active site yet, such as an old primary recovery has not rejoined). After 30 minutes the condition turns `False`/`ArchiverDisabled` with `ordered update still pending after 30m`; unblock the update (restore the standby) rather than restarting pods by hand.
 - `ArchiverDisabled`: if it persists after the rollout, check that `spec.backup.pitr.profileName` names an existing profile (look for a `BackupPITRInvalid` Event). With an empty or unknown profile the operator renders no PITR configuration into the sidecar, so it reports archiving disabled indefinitely.
 - `SidecarUnreachable` on an older sidecar image: upgrade the sidecar image; the operator rolls it through the ordered update. The ordered update stops on a rolled pod that is not Ready (playbook 34), but a current sidecar stays Ready through archive failures, so watch `PITRArchiveReady` site by site instead of assuming a finished rollout means archiving works.
 - Recovery to `True` needs 2 consecutive clean poll rounds (about a minute) and emits a Normal `PITRArchiveReady` Event. Binlogs sealed during the outage are uploaded once the archiver runs, as long as MySQL still has them; check `backlogFiles` and the coverage fields afterwards.

@@ -27,8 +27,7 @@ import (
 // Tests for the Dragonfly manager as an actor: emergency requests are
 // queued without blocking and executed by the manager's own Run goroutine
 // between Ticks, and every Dragonfly routing writer for a group holds the
-// group's stable gate. Several tests are ports of the review reproductions
-// for finding 4155662865055545 (rounds 1-4); their names say which.
+// group's stable gate.
 
 // waitUntil polls cond until it holds or 5s pass.
 func waitUntil(t *testing.T, what string, cond func() bool) {
@@ -333,8 +332,7 @@ func TestDragonflyManager_StopJoinsRunAndAdmitsNothing(t *testing.T) {
 	}
 }
 
-// Round-4 review (Opus R1, TestRereview4RetireAbortsAcknowledgedRoleChange):
-// the manager is stopped (config or credential restart) just as a
+// The manager is stopped (config or credential restart) just as a
 // REPLTAKEOVER reply lands. The acknowledged role change must still be
 // labelled and stamped before Stop returns, so the replacement starts from
 // a recorded topology with dc2 behind the active Service.
@@ -392,8 +390,7 @@ func TestDragonflyManager_StopAfterAcknowledgedRoleChangeRecordsIt(t *testing.T)
 
 // --- yielding and waiting ------------------------------------------------------
 
-// Round-4 review (Opus R2, TestRereview4AcquireDuringTakeoverLeavesUnrecordedPromotion):
-// a planned owner asks for the gate while an emergency REPLTAKEOVER is on
+// A planned owner asks for the gate while an emergency REPLTAKEOVER is on
 // the wire, and the server completes the takeover although the client
 // stops waiting for the reply. The promotion is not cut short: it falls
 // back, records the outcome, and only then hands over the gate, so the
@@ -571,8 +568,7 @@ func TestDragonflyManager_TickYieldsBeforePublishing(t *testing.T) {
 
 // --- revalidation ------------------------------------------------------------
 
-// Review round 1 (TestReviewQueuedEmergencyDoesNotOverridePlannedPromotion):
-// an emergency request is queued while another writer holds the gate, and
+// An emergency request is queued while another writer holds the gate, and
 // a newer planned failover promotes Dragonfly back to dc1 meanwhile. When
 // the request finally runs it is revalidated and dropped: it neither
 // promotes dc2 nor deletes the planned primary's pod.
@@ -710,7 +706,7 @@ func (h promotionLogBarrier) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-// Rounds 2-3 (TestRereviewTickDuplicateAfterPassingGuard): Tick decides to
+// Tick decides to
 // promote and stalls, while the MySQL failover asks for the same promotion.
 // The callback returns at once; Tick's promotion runs; the queued request,
 // executed after it on the same goroutine, sees the target already promoted
@@ -774,7 +770,7 @@ func (c *orderRecorder) ReplTakeover(context.Context, time.Duration) error {
 	return nil
 }
 
-// Rounds 2-3 (TestRereviewTickRepointsPromotedTarget): Tick is repairing a
+// Tick is repairing a
 // replica when the MySQL failover asks for that replica to be promoted.
 // The repair, from an observation that is still current, finishes first;
 // the promotion follows it. Nothing re-points dc2 once it is master.
@@ -831,7 +827,7 @@ func TestDragonflyManager_TickRepairAndPromotionAreOrdered(t *testing.T) {
 	}
 }
 
-// Round 4 (TestRereview4StaleTickCannotOverwritePromotionAuthority): Tick
+// Tick
 // stalls between its observation and status publication while the MySQL
 // failover asks for a promotion. Tick publishes an observation that is
 // still current; the promotion runs after it, so its stamp stands and the
@@ -923,7 +919,7 @@ func blockingSourceDialer(entered, resume chan struct{}) DragonflyConnector {
 	}
 }
 
-// Round 3 (TestRereview3RetiredManagerCannotDeleteNewOwnerMaster): a config
+// A config
 // restart replaces the managers while the old Dragonfly manager is in the
 // completion tail of a promotion, and the stop wait runs out. The old tail
 // still holds the group's gate, so the replacement can neither Tick nor
@@ -1000,7 +996,7 @@ func TestDragonflyManager_StopTimeoutKeepsReplacementOut(t *testing.T) {
 	}
 }
 
-// Round 4 (TestRereview4PlannedPromotionDuringRunnerUnregister): while the
+// While the
 // runner replaces a group's managers it unregisters the old one before
 // joining it. A planned failover, a rollout promotion and the label sweep
 // reaching the group in that window find the group's gate held by the old

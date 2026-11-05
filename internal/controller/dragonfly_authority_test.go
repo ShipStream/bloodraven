@@ -21,14 +21,14 @@ import (
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
-// Round-5 review reproductions for finding 4155662865055545: queued
+// Dragonfly ownership races: queued
 // requests made obsolete by a newer decision, authority read through the
 // informer cache after taking the gate, and the snapshot upgrade writing
 // Dragonfly routing outside the gate.
 
-// --- obsolete queued requests (GPT R1) ---------------------------------------
+// --- obsolete queued requests ------------------------------------------------
 
-// From TestRereview5QueuedEmergencyAfterCompletedPlannedFailover: a dc1->dc2
+// A dc1->dc2
 // emergency request waits for the gate while a planned failback to dc1
 // completes and unpauses the manager. When it finally runs it must be
 // rejected as obsolete, not promote dc2 and delete the newer dc1 master.
@@ -172,7 +172,7 @@ func TestSupersededPromotionRequest(t *testing.T) {
 	}
 }
 
-// --- authority reads after taking the gate (GPT R2 = Opus R1) ----------------
+// --- authority reads after taking the gate -----------------------------------
 
 // staleFGClient serves one fixed, older copy of the group, as an informer
 // cache that has not caught up does; everything else passes through.
@@ -189,7 +189,7 @@ func (c *staleFGClient) Get(ctx context.Context, k client.ObjectKey, obj client.
 	return c.Client.Get(ctx, k, obj, opts...)
 }
 
-// From TestRereview5RolloutMustUseConfiguredAPIReader: the authoritative
+// The authoritative
 // group records a planned promotion to dc1 still in Promoting; the informer
 // cache returns the snapshot before it. The rollout promotion, holding the
 // gate, must read the APIReader and send nothing.
@@ -331,7 +331,7 @@ func (c *lagTargetConn) ReplicaOf(_ context.Context, host string, _ int32) error
 	return nil
 }
 
-// From TestRereview5ImmediateTickAfterPromotionActsOnCachedAuthority: a
+// A
 // promotion that outlasts the poll interval leaves a tick buffered, so Run
 // Ticks right after the promotion releases the gate. With the old source
 // still a reachable master, a Tick that read the group through the lagging
@@ -396,7 +396,7 @@ func TestDragonflyManager_TickAfterPromotionReadsAuthorityUncached(t *testing.T)
 	}
 }
 
-// --- snapshot upgrade under the gate (GPT R3) ---------------------------------
+// --- snapshot upgrade under the gate -----------------------------------------
 
 type upgradeRoleConn struct {
 	*fakeDragonflyConn
@@ -417,7 +417,7 @@ func (c *upgradeRoleConn) ReplicaOf(context.Context, string, int32) error {
 	return nil
 }
 
-// From TestRereview5SnapshotUpgradeDemotesMasterWhileEmergencyOwnsGate: an
+// An
 // upgrade that retained dc1 reaches replica reattachment while an emergency
 // dc2 takeover, already sent, awaits its reply. The upgrade must wait for
 // the gate rather than demote dc2 inside the emergency's critical section;

@@ -63,9 +63,9 @@
 
 ---
 
-**Front:** You set pointInTime on a restore while spec.backup.pitr.enabled=false
+**Front:** pointInTime on spec.initFromBackup versus spec.restoreInPlace: when is each rejected?
 
-**Back:** Rejected, identically for both spec.initFromBackup and spec.restoreInPlace: PITR restore requires continuous binlog archival configured on the source.
+**Back:** initFromBackup: when spec.backup.pitr.enabled=false and no pointInTime.archiveProfileName names the source archive. restoreInPlace: always, because the live primary already executed the archived GTIDs and the replay would be skipped; restore to a point in time into a new group with initFromBackup instead.
 
 ---
 

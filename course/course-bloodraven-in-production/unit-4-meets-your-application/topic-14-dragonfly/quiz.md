@@ -35,7 +35,7 @@ Your primary dies. The Dragonfly target's REPLTAKEOVER fails. What does the oper
 
 **Explanation:**
 
-The emergency path is REPLTAKEOVER first, REPLICAOF NO ONE second, and the operator logs "target promoted via REPLICAOF NO ONE (sessions lost)". It buys availability with sessions because an emergency promotion cannot be retried — that trade is only acceptable because Dragonfly holds cache, never durable data. Retrying until maxSyncWait misreads the budget: the emergency attempt is bounded at 10 s regardless. Rolling back MySQL inverts the whole design — no Dragonfly outcome is ever permitted to affect MySQL. Leaving both as replicas would mean the cache serves nothing at all, which is worse than an empty master. (objectives 10, 11)
+The emergency path is REPLTAKEOVER first, REPLICAOF NO ONE second, and the operator logs "target promoted via REPLICAOF NO ONE (sessions lost)". It buys availability with sessions because an emergency promotion cannot be retried — that trade is only acceptable because Dragonfly holds cache, never durable data. Retrying until maxSyncWait misreads the budget: the emergency attempt uses fixed per-step bounds (a 2 s takeover, up to 14 s for the fallback), not maxSyncWait. Rolling back MySQL inverts the whole design — no Dragonfly outcome is ever permitted to affect MySQL. Leaving both as replicas would mean the cache serves nothing at all, which is worse than an empty master. (objectives 10, 11)
 
 ## Question 3
 
@@ -47,7 +47,7 @@ A Dragonfly pod is wedged and answers nothing. Your MySQL primary then dies. The
 
 **Explanation:**
 
-The opposite is true: MySQL failover is never delayed by cache. The Dragonfly attempt runs after MySQL has already been promoted, under a hard-coded 10 s budget, and by explicit design it never returns an error to its caller, never blocks longer than that budget, and never leaves Dragonfly in a state that affects MySQL durability. The tempting reasoning — "co-managed subsystems must be waited on" — is exactly what the 10 s bound and the best-effort contract exist to refuse. (objective 10)
+The opposite is true: MySQL failover is never delayed by cache. MySQL only queues the Dragonfly promotion after it has already been promoted; the Dragonfly manager runs it on its own goroutine, every step under its own hard-coded bound, and by explicit design it never returns an error to its caller and never leaves Dragonfly in a state that affects MySQL durability. The tempting reasoning — "co-managed subsystems must be waited on" — is exactly what the queue, the bounded steps and the best-effort contract exist to refuse. (objective 10)
 
 ## Question 4
 

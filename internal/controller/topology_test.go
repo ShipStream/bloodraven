@@ -71,6 +71,39 @@ type mockMySQL struct {
 	evictCalls        int
 	evictKeepUsers    []string
 	fenceErr          error
+	// onKill and onStopReplica, when set, run at the start of the call
+	// without m.mu held, so a test can interleave another goroutine.
+	onKill        func()
+	onStopReplica func()
+	// restore peer receiver stop (mysql.ReplicaIOStopper)
+	stopIOCalls       int
+	stopIOErr         error
+	stopIOIgnored     bool
+	missingIOStopPriv []string
+	ioStopPrivErr     error
+	// offlineAtGTIDRead records offline_mode at each GetGtidExecuted.
+	offlineAtGTIDRead []bool
+}
+
+func (m *mockMySQL) MissingReplicaIOStopPrivileges(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.missingIOStopPriv...), m.ioStopPrivErr
+}
+
+func (m *mockMySQL) StopReplicaIOThread(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopIOCalls++
+	if m.stopIOErr != nil {
+		return m.stopIOErr
+	}
+	if m.replicaStatusVal != nil && !m.stopIOIgnored {
+		rs := *m.replicaStatusVal
+		rs.IORunning, rs.IOConnecting = false, false
+		m.replicaStatusVal = &rs
+	}
+	return nil
 }
 
 func (m *mockMySQL) MissingRestoreFencePrivileges(_ context.Context) ([]string, error) {
@@ -279,6 +312,9 @@ func TestEmitStatusSnapshotPreservesPersistentTopologyDegradation(t *testing.T) 
 	}
 }
 func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
+	if m.onKill != nil {
+		m.onKill()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := m.killConnectionCalls
@@ -294,6 +330,9 @@ func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
 	return killed, err
 }
 func (m *mockMySQL) StopReplica(_ context.Context) error {
+	if m.onStopReplica != nil {
+		m.onStopReplica()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopReplicaCalls++
@@ -361,6 +400,7 @@ func (m *mockMySQL) GetGtidExecuted(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, m.gtidExecutedHadDeadline = ctx.Deadline()
+	m.offlineAtGTIDRead = append(m.offlineAtGTIDRead, m.offlineMode)
 	if m.respectContext && ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -1554,6 +1594,30 @@ func TestDetectEmptySite_SharedHistorySchemalessNotEmpty(t *testing.T) {
 	}
 }
 
+// TestDetectEmptySite_TaggedSharedHistorySchemalessNotEmpty: GTID tags do not
+// change which server wrote a transaction, so a schemaless site whose only
+// overlap with the primary is tagged history under the cluster's server UUID
+// is a returning member, not a fresh datadir to clone over.
+func TestDetectEmptySite_TaggedSharedHistorySchemalessNotEmpty(t *testing.T) {
+	for _, tc := range []struct{ name, primary, old string }{
+		{"tagged vs untagged", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-12", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3"},
+		{"different tags", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:ops:1-12", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			site0 := &mockMySQL{readOnly: false, gtidExecuted: tc.primary}
+			site1 := &mockMySQL{readOnly: true, gtidExecuted: tc.old, hasUserSchemas: testBoolPtr(false)}
+			tm, _, _ := newTestTopologyManager(site0, site1)
+			tm.sites[0].state = state.StateWritable
+			tm.sites[1].state = state.StateReadOnly
+
+			donor, empty := tm.detectEmptySite(context.Background())
+			if donor != "" || empty != "" {
+				t.Errorf("tagged shared-history schemaless site must not be empty, got donor=%q empty=%q", donor, empty)
+			}
+		})
+	}
+}
+
 // TestDetectEmptySite_SkipsSitesUnderRecovery ensures auto-clone cannot
 // race a RecoveryBlocked / RecoveryInProgress report on the same poll.
 func TestDetectEmptySite_SkipsSitesUnderRecovery(t *testing.T) {
@@ -2449,8 +2513,12 @@ func TestPrimaryReassert_CooldownRateLimits(t *testing.T) {
 	}
 
 	// The sidecar fenced the target again for a persistent reason: the
-	// operator must not fight it at poll frequency.
+	// operator must not fight it at poll frequency. (A poll observes the
+	// re-assert in between, as it would in Run.)
 	site0.setReadOnly(true)
+	tm.mu.Lock()
+	tm.deploymentAwaitingObservation = false
+	tm.mu.Unlock()
 	clk.Advance(5 * time.Second)
 	if tm.checkPrimaryReassert(context.Background()) {
 		t.Fatal("re-assert must be rate-limited by the failover cooldown")
@@ -2749,8 +2817,11 @@ func TestPoll_StatusCallbackFiresWhenReplicaStatusErrorsAfterHealthy(t *testing.
 	}
 }
 
-// TestCheckUpdate_RetainsUnhealthyStandbyDrift verifies an unsafe follower is
-// retained by the ordered plan without applying its Deployment update.
+// TestCheckUpdate_RetainsUnhealthyStandbyDrift verifies follower-only drift
+// on a site that is not a healthy direct replica is retained without
+// starting an update: every attempt would retain it as unsafe, and an
+// attempt restarted every poll would keep old-primary recovery, which is
+// what heals such a site, standing down.
 func TestCheckUpdate_RetainsUnhealthyStandbyDrift(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{
@@ -2771,17 +2842,12 @@ func TestCheckUpdate_RetainsUnhealthyStandbyDrift(t *testing.T) {
 
 	// Drift on standby — the classic trigger for an ordered update.
 	tm.SetSpecDriftSites([]string{"dc2"})
-	done := make(chan struct{})
-	tm.StatusCallback = func(TopologySnapshot) { close(done) }
 
-	started := tm.checkUpdate(context.Background())
-	if !started {
-		t.Fatal("checkUpdate must start so independently safe targets can be processed")
+	if tm.checkUpdate(context.Background()) {
+		t.Fatal("checkUpdate started an update whose only target would be retained as unsafe")
 	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("ordered plan did not complete")
+	if tm.isUpdating() {
+		t.Fatal("an update is running for drift no attempt can process")
 	}
 	select {
 	case site := <-applied:
@@ -2808,6 +2874,7 @@ func TestCheckUpdate_ProcessesHealthyCandidateBeforeUnhealthyReader(t *testing.T
 		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly,
 	}, primary, candidate, reader)
 	tm.sites[1].replicating = true
+	tm.sites[1].sourceHost = "mysql-primary-internal.ns.svc.cluster.local"
 	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
 	var applied []string
 	tm.ApplyUpdate = func(_ context.Context, site string) error {
@@ -3038,10 +3105,12 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 
 	tests := []struct {
 		name             string
+		primaryGTID      string // defaults to clusterGTID
 		oldGTID          string
 		wantRecovery     bool
 		wantState        string
 		wantStartReplica bool
+		wantDivergent    string
 	}{
 		{
 			// Contained by the new primary's set: safe to rejoin as a replica.
@@ -3067,11 +3136,35 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			oldGTID:      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-3",
 			wantRecovery: false,
 		},
+		{
+			// Tagged history from the cluster's server is shared history,
+			// not fresh-datadir noise. Subtraction stays tag-exact, so the
+			// tagged transactions are reported and the site is blocked.
+			name:             "tagged history under a cluster uuid: blocked, never cloned over",
+			oldGTID:          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
+			wantRecovery:     true,
+			wantState:        recoveryStateBlocked,
+			wantStartReplica: false,
+			wantDivergent:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
+		},
+		{
+			name:             "different tag than the primary's: blocked, never cloned over",
+			primaryGTID:      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:ops:1-12",
+			oldGTID:          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
+			wantRecovery:     true,
+			wantState:        recoveryStateBlocked,
+			wantStartReplica: false,
+			wantDivergent:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			site0 := &mockMySQL{readOnly: false, gtidExecuted: clusterGTID}
+			primaryGTID := tt.primaryGTID
+			if primaryGTID == "" {
+				primaryGTID = clusterGTID
+			}
+			site0 := &mockMySQL{readOnly: false, gtidExecuted: primaryGTID}
 			site1 := &mockMySQL{readOnly: true, gtidExecuted: tt.oldGTID, hasUserSchemas: testBoolPtr(false)}
 			clk := clock.NewFakeClock(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
 			tm, _, _ := newTestTopologyManagerWithBootstrapClock(site0, site1, clk)
@@ -3102,6 +3195,15 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			if started != tt.wantStartReplica {
 				t.Errorf("StartReplica called = %v, want %v (calls=%d)",
 					started, tt.wantStartReplica, site1.startReplicaCallCount())
+			}
+			if tt.wantDivergent != "" {
+				gotDivergent := ""
+				if rec != nil {
+					gotDivergent = rec.divergentGtid
+				}
+				if gotDivergent != tt.wantDivergent {
+					t.Errorf("divergent GTID = %q, want %q (rec=%+v)", gotDivergent, tt.wantDivergent, rec)
+				}
 			}
 		})
 	}

@@ -91,7 +91,13 @@ if [[ -n "$RESTORE_STATUS" ]]; then
 fi
 RESTORE_RECLONES=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.phase}{" pending=["}{.status.restoreReclones.pending[*]}{"] requested="}{.status.restoreReclones.requested}{" failures="}{.status.restoreReclones.failures[*].message}' 2>/dev/null || true)
 if [[ "$RESTORE_RECLONES" != " pending=[] requested= failures=" && -n "$RESTORE_RECLONES" ]]; then
-    echo "Post-restore reclones: $RESTORE_RECLONES (pending sites are not promoted automatically and are out of the -replica and read-only Services; Held = nothing is cloned)"
+    echo "Post-restore reclones: $RESTORE_RECLONES (pending sites are not promoted automatically and are out of the -replica and read-only Services; their replication receiver is stopped until their reclone; Held = nothing is cloned or replicated into them after a failed restore)"
+    # Replication state of the queued sites as the operator last saw it. A
+    # stopped IO thread (sourceConvergenceReason RestorePeerHold) is by design.
+    for site in $(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.pending[*]}' 2>/dev/null || true); do
+        SITE_REPL=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{range .status.sites[?(@.name==\"$site\")]}replicating={.replicating} source={.sourceConvergenceState}/{.sourceConvergenceReason}{end}" 2>/dev/null || true)
+        echo "  queued $site: ${SITE_REPL:-not observed} (do not START REPLICA on a queued site)"
+    done
 fi
 PITR_ARCHIVE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="PITRArchiveReady")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
 if [[ -n "$PITR_ARCHIVE" ]]; then
@@ -143,6 +149,19 @@ kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME" -o wi
 echo ""
 echo "--- 6. Recent Anomalous Events (Last 10) ---"
 kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -n 10 || echo "No events found."
+# An aggregated, rate-limited Event can fall out of the last 10: ask for the
+# topology manager start history directly. It is history, not current state.
+MANAGER_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.name=$MFG_NAME" --sort-by=.lastTimestamp \
+    -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
+    | grep -E 'TopologyManagerStart(ed|Failed)' || true)
+if [[ -n "$MANAGER_EVENTS" ]]; then
+    echo "Topology manager start history for $MFG_NAME. History only, not current state, in either direction:"
+    echo "  - Warnings are throttled to one per 5 minutes, so a group that recovered and then broke again can still show TopologyManagerStarted last."
+    echo "  - The operator forgets a failure episode when it restarts, so a group fixed after an operator restart never gets TopologyManagerStarted and can still show TopologyManagerStartFailed last."
+    echo "  Confirm the current state before declaring the manager absent: the operator logs ERROR 'failed to start topology manager' for $NAMESPACE/$MFG_NAME every 30s while it is down"
+    echo "  (kubectl logs -n <operator-ns> deploy/bloodraven --since=2m | grep 'failed to start topology manager' | grep '$NAMESPACE/$MFG_NAME'), and status.sites[].lastSeen stops advancing. See playbook 24."
+    echo "$MANAGER_EVENTS"
+fi
 
 echo ""
 echo "--- 7. Deployment Coordination ---"

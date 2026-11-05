@@ -94,13 +94,17 @@ Look at what that buys. Re-applying last week's manifest does nothing: its token
 
 ## Why `pointInTime` gets rejected
 
-Ask for `pointInTime` while `spec.backup.pitr.enabled=false` and you get:
+The two restore fields reject `pointInTime` for different reasons.
 
-> `pointInTime is set but spec.backup.pitr.enabled=false; PITR restore requires the failover group to have continuous binlog archival configured on the source`
+On `spec.initFromBackup`, ask for `pointInTime` while `spec.backup.pitr.enabled=false`, without a `pointInTime.archiveProfileName` naming the source's archive, and you get:
 
-Both entry points share one builder, so the rejection is identical for `spec.initFromBackup.pointInTime` and `spec.restoreInPlace.pointInTime`. It is not a style preference: replay material only exists if something archived it, and with PITR off nothing did.
+> `pointInTime is set but spec.backup.pitr.enabled=false; PITR restore requires the failover group to have continuous binlog archival configured on the source, or pointInTime.archiveProfileName`
 
-Where it surfaces matters more than the wording. This is a **reconciler error, not an admission rejection**. Your `kubectl apply` succeeds. The failure arrives seconds later, in the CR's status and the operator log. Look there, not at the exit code of the apply.
+It is not a style preference: replay material only exists if something archived it, and the restore has to be told where. A group that does not archive itself (a fresh DR group, say) can still replay the source's binlogs by naming that archive in `archiveProfileName`.
+
+On `spec.restoreInPlace`, `pointInTime` is refused outright, whatever the PITR settings, with a message that begins `restoreInPlace.pointInTime is not supported`. The archived binlogs carry their original GTIDs, and the live primary has already executed every one of them, so MySQL would skip the whole replay and the restore would quietly stop at the backup. To get back to a point in time, restore into a new failover group with `spec.initFromBackup.pointInTime`.
+
+Where it surfaces matters more than the wording. Both are **reconciliation-time checks, not admission rejections**. Your `kubectl apply` succeeds. The failure arrives seconds later in the CR's status — `status.restore` with a `RestoreBuildFailed` Warning Event, or `status.restoreInPlace` with a `RestoreInPlaceRejected` Event, before anything is fenced and without consuming your `confirm`. Look there, not at the exit code of the apply.
 
 ## Handoff
 

@@ -65,9 +65,13 @@ func (tm *TopologyManager) restoreRecloneBlockedSite(site string) bool {
 }
 
 // restoreReclonePendingLocked reports whether site is waiting for its
-// post-restore reclone. Caller holds tm.mu.
+// post-restore reclone: in the pending set, or held with its replication
+// stopped (the two come from the same queue; either alone is enough to
+// keep a site that may lack the restore, or hold a failed restore's
+// pre-restore data, from being promoted automatically). Caller holds
+// tm.mu.
 func (tm *TopologyManager) restoreReclonePendingLocked(site string) bool {
-	return slices.Contains(tm.restoreReclonePending, site)
+	return slices.Contains(tm.restoreReclonePending, site) || slices.Contains(tm.restorePeerHeld, site)
 }
 
 // restoreReclonePendingCandidates returns the read-only primary-candidates
@@ -93,40 +97,6 @@ func (tm *TopologyManager) recordRestoreReclonePromotionRefused(sites []string) 
 	tm.mu.Lock()
 	tm.restoreReclonePromotionRefused = append([]string(nil), sites...)
 	tm.mu.Unlock()
-}
-
-// SetRestoreReclonePending pushes the pending set onto the managed
-// TopologyManager. Returns false when no manager is running; the next
-// sync or startManager call applies it.
-func (r *TopologyManagerRunner) SetRestoreReclonePending(nn types.NamespacedName, sites []string) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	mt.tm.SetRestoreReclonePending(sites)
-	return true
-}
-
-// SetRestoreRecloneBlocked pushes the blocked set onto the managed
-// TopologyManager. Returns false when no manager is running; the next
-// sync or startManager call applies it.
-func (r *TopologyManagerRunner) SetRestoreRecloneBlocked(nn types.NamespacedName, sites []string) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.RLock()
-	mt, ok := r.managers[nn]
-	r.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	mt.tm.SetRestoreRecloneBlocked(sites)
-	return true
 }
 
 // CloneInProgress reports the recipient of a clone the topology manager is
