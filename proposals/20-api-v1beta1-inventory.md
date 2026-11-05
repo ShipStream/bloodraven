@@ -293,7 +293,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.updateStrategy` | string |  | `"OrderedUpdate"` | enum: `OrderedUpdate`, `Recreate` |
 
 
-### MysqlFailoverGroup `status` (191 fields)
+### MysqlFailoverGroup `status` (192 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -463,6 +463,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restoreReclones.failures[].message` | string | yes |  |  |
 | `status.restoreReclones.failures[].site` | string | yes |  |  |
 | `status.restoreReclones.failures[].time` | string (date-time) | yes |  |  |
+| `status.restoreReclones.fencedGtidExecuted` | string |  |  |  |
 | `status.restoreReclones.pending` | []string |  |  |  |
 | `status.restoreReclones.phase` | string | yes |  | enum: `Armed`, `Draining`, `Held` |
 | `status.restoreReclones.requested` | string |  |  |  |
@@ -652,7 +653,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.appliedUsers[].pendingUsername` | string |  |  |  |
 | `status.appliedUsers[].secretName` | string | yes |  |  |
 | `status.appliedUsers[].username` | string |  |  |  |
-| `status.conditions` | []metav1.Condition |  |  |  |
+| `status.conditions` | []metav1.Condition |  |  | listType=map keys=type |
 | `status.databaseCreated` | boolean |  |  |  |
 | `status.lastAppliedHash` | string |  |  |  |
 | `status.message` | string |  |  |  |
@@ -702,7 +703,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.source.storage.type` | string | yes |  | enum: `S3`, `PVC` |
 | `spec.template` | object | yes |  |  |
 | `spec.template.name` | string | yes |  | minLength=1 |
-| `spec.template.spec` | MysqlFailoverGroupSpec (see MysqlFailoverGroup spec) | yes |  |  |
+| `spec.template.spec` | MysqlFailoverGroupSpec (see MysqlFailoverGroup spec) | yes |  | CEL: `(has(self.secretName) && self.secretName != "" && !has(self.credentials)) \|\| ((!has(self.secretName) \|\| self.secretName == "") && has(self.credentials))`; CEL: `self.sites.all(x, self.sites.filter(y, y.name == x.name).size() == 1)`; CEL: `self.sites.filter(s, s.role == 'primary-candidate').size() >= 2`; CEL: `!has(self.splitBrainPolicy) \|\| !has(self.splitBrainPolicy.sitePriorities) \|\| self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))`; CEL: `!has(self.serviceTemplate) \|\| !has(self.serviceTemplate.externalTrafficPolicy) \|\| (has(self.serviceTemplate.type) && self.serviceTemplate.type in ['NodePort', 'LoadBalancer'])`; CEL: `self.sites.all(s, !has(s.serviceTemplate) \|\| !has(s.serviceTemplate.externalTrafficPolicy) \|\| ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`; CEL: `self.sites.all(s, !has(s.serviceTemplate) \|\| !has(s.serviceTemplate.nodePort) \|\| ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`; CEL: `self.sites.all(s, !has(self.serviceTemplate) \|\| !has(self.serviceTemplate.externalTrafficPolicy) \|\| ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`; CEL: `!has(self.encryptionAtRest) \|\| !self.encryptionAtRest.enabled \|\| has(self.tls)`; CEL: `!has(self.encryptionAtRest) \|\| !self.encryptionAtRest.enabled \|\| !has(self.encryptionAtRest.keyring) \|\| !has(self.encryptionAtRest.keyring.dataFileDir) \|\| (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))` |
 | `spec.transport` | string |  | `"ObjectStore"` | enum: `ObjectStore`, `Network` |
 
 

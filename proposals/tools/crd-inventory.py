@@ -99,7 +99,7 @@ def rows(s, path, acc, collapse_paths):
         dflt = ""
         if "default" in p:
             dflt = "`" + json.dumps(p["default"]) + "`"
-        acc.append((full, t, "yes" if name in req else "", dflt, validation(p) if not collapsed else ""))
+        acc.append((full, t, "yes" if name in req else "", dflt, validation(p)))
         if collapsed:
             continue
         if p.get("type") == "object" and p.get("properties"):
