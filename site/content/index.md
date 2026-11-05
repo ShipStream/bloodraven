@@ -40,7 +40,7 @@ items:
     label: to declare a site unreachable (3 failed 2s polls)
   - value: "RPO 0"
     label: on a planned switchover, by construction
-  - value: "47+"
+  - value: "60+"
     label: scripted chaos scenarios run in CI
   - value: "1"
     label: CRD, one controller, one reconcile loop
@@ -397,7 +397,7 @@ chaos-label: Chaos-tested in CI
 chaos-title: Primary kills. Partitions. Self-fencing. GTID divergence. Data wipes.
 chaos-to: /docs/get-started/playground#automated-chaos-suite
 chaos-description: >-
-  47+ scripted chaos scenarios, including operator crashes mid-failover, rolling updates,
+  60+ scripted chaos scenarios, including operator crashes mid-failover, rolling updates,
   Dragonfly failover, and backup and PITR verification. Each one states a hypothesis,
   injects a real fault, asserts on operator behaviour and captures full forensics when it
   fails. A smoke subset gates every release before artifacts are published.
