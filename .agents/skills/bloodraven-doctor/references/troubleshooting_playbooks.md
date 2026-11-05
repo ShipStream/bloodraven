@@ -48,6 +48,8 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
 - `SHOW REPLICA STATUS` shows replication stopped with GTID error (e.g. error 1236).
 - A replica that is still replicating normally can be divergent too (`divergenceDetectedBy=ReplicaAudit`): use playbook 33.
 
+Before treating a site stuck in `RecoveryInProgress` (or an old primary that has not rejoined) as a stall, check whether a handoff owns the sites. Old-primary recovery, its connection drain and replication-source convergence stand down while a planned failover or ordered update is in flight (`.status.plannedFailover.phase`, `.status.updatePhase`) and resume, with a fresh drain budget, once it ends. A Dragonfly snapshot upgrade defers them only intermittently, so it does not explain a stall that lasts the whole upgrade. A planned failover that ends with `reason: RecoveryInFlight` hit its promotion deadline while such a step was still running on the sites; nothing was promoted, and the source was unfenced unless another site was already writable (message ends `left fenced`; see that matrix row). After an operator config or credential change restarts a group's topology manager mid-update, the new manager takes no failover, re-assert, recovery or update until the old manager's ordered update exits. A planned failover that reaches `Promoting` in that window fails closed: `reason: ExecuteFailed` with `a replaced topology manager's ordered update is still finishing on the sites` in the message, nothing sent to the target and the source left fenced (see the matrix row). Meanwhile `status.updatePhase` is empty. The operator log brackets this window with `topology manager deferring to its predecessor's ordered update; no failover, recovery or update until it exits` and `predecessor's ordered update exited; topology manager resuming` (`heldFor`).
+
 ### Diagnostic Steps
 1. Inspect GTID executed sets:
    ```bash
@@ -78,19 +80,33 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
 > If the keyring escrow Secret in Kubernetes is deleted or corrupt while the pod is running with an in-memory or unsealed keyring, restarting the pod will cause total loss of the tablespace encryption master key, rendering the database files unrecoverable.
 
 ### Diagnostic Steps
-1. Check sidecar keyring status:
+1. Check sidecar keyring status (metadata and digests only; `/keyring/status` never returns key material):
    ```bash
    ./.agents/skills/bloodraven-doctor/scripts/sidecar-probe.sh -n <ns> <group> keyring
    ```
-2. Check escrow Secret:
+2. Find the site's escrow Secret through the CR, not by guessing its name. Escrow Secrets are named `mysql-<group>-<site>-keyring-v<N>` (immutable, one per keyring version):
    ```bash
-   kubectl get secret -n <ns> <group>-keyring-escrow -o yaml
+   SECRET=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringSecret}')
+   VERSION=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringVersion}')
+   DIGEST=$(kubectl get mysqlfailovergroup <group> -n <ns> \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringDigest}')
+   kubectl get secret -n <ns> "$SECRET"
+   kubectl get secret -n <ns> -l shipstream.io/failover-group=<group>,app.kubernetes.io/name=mysql-keyring
    ```
 
 ### Safe Remediation Steps
-1. If the pod is still running, query the sidecar `/keyring/status` endpoint to extract the active keyring digest and key metadata.
-2. Re-populate the escrow Secret using operator credentials or backup keys.
-3. Once the escrow Secret is restored, verify that `status.encryptionAtRest.sites[].phase` settles to `Sealed`.
+The only surviving copy of a sealed site's keys is the keyring file in its running pod's `mysql` container (`$KEYRING_DIR/keyring`; `KEYRING_DIR` is `spec.encryptionAtRest.keyring.dataFileDir`, default `/run/mysql-keyring`). Do not delete, restart, evict or drain that pod, and do not force an unseal or rollout.
+
+1. `KeyringEscrowMissing` (the Secret is gone): recreate it from the running pod with the helper. It runs only on a site that is `Sealed` or `Failed` with no `unsealReason` (a rotation, bootstrap or clone in progress owns its Secret). It reads the pod's keyring and checks it against `status…keyringDigest` before writing anything, refuses if the Secret exists, never deletes a Secret, and re-reads the group before writing, stopping if its UID or the site's phase, unseal reason, Secret, version or digest changed. It then adds the labels (including `shipstream.io/keyring-version`), the digest annotation, the ownerReference and `immutable: true`. It never writes the group's status: the operator returns the site to `Sealed` itself once MySQL confirms it runs that keyring (Event `KeyringRecovered`), and the script waits up to `KEYRING_RECOVER_WAIT` seconds (default 120) to report it:
+   ```bash
+   ./.agents/skills/bloodraven-doctor/scripts/keyring-escrow-recover.sh -n <ns> <group> <site>
+   ```
+   It reads from the site's one Running, Ready MySQL pod, selected as its Deployment selects it, and refuses if there is not exactly one; `--pod <name>` names it explicitly, and also accepts a terminating pod (with a warning): with Recreate, a pod in its grace period may hold the last copy, so read it before the grace period ends. It runs with GNU or macOS/BSD tools (`sha256sum` or `shasum`).
+2. `KeyringEscrowCorrupt` (the Secret exists but no longer hashes to the recorded digest): the helper refuses by default and changes nothing. Replacing the Secret is a separate, explicit step: re-run it with `--replace-corrupt <secret-name>`, repeating the exact Secret name. It then confirms the existing Secret really fails the digest check and the pod's keyring passes it, writes a backup to `./keyring-escrow-backup-<secret>-<timestamp>.yaml`, and only then deletes and recreates that one Secret. Get the human operator's go-ahead before passing `--replace-corrupt`.
+   The canonical procedure is "Keyring escrow lost" in `site/content/docs/6.operations/4.runbooks.md`; "Disaster recovery" in `site/content/docs/4.configuration/8.encryption-at-rest.md` points to it. Neither, nor this helper, writes the site's phase: the operator re-seals it.
+3. Verify the operator returns the site to `Sealed` (Event `KeyringRecovered`) and the `KeyringEscrowMissing` / `KeyringEscrowCorrupt` events stop. Do not patch the phase by hand: a rotation started meanwhile would be overwritten.
 
 ---
 
@@ -820,7 +836,7 @@ The PVC store checks its volume when it is built: the mount path must be a mount
 ### Safe remediation
 - `ArchiveStoreInitFailed`: fix what the error names (Secret projection mode or content, endpoint URL, PVC mount path). The next retry picks it up; look for `archive store initialized after retries`. No pod restart is needed for Secret or endpoint fixes. For `is not a mount point`, compare the pod's `volumes`/`volumeMounts` with the Deployment's pod template: the operator always renders the `pitr-archive` volume, so a missing one was removed by a mutating webhook, policy engine or manual edit. Fix that; restoring the volume changes the pod spec and restarts the pod, which also restarts MySQL, so on the primary site run a planned failover away from it first (`kubectl bloodraven promote <group> <other-site>`). For `is not writable`, the error ends with the cause: `permission denied` means ownership or fsGroup (compare the volume's owner with the sidecar UID, 999 unless overridden); `read-only file system` means the claim's access mode or a filesystem the kernel remounted read-only after an I/O error (check the node's `dmesg`); `no space left on device` means the volume has no free inodes (expand or prune it). The probe creates an empty file, so a volume that is only out of data blocks does not fail init; it shows as `ArchiverError` while retention keeps freeing space. For passphrase `permission denied`, see playbook 25. Do not change an existing archive's passphrase to make the error go away; see playbook 26.
 - `ArchiverError`: follow the error text (storage reachability, credentials, playbook 26 for authentication or BRV1 errors).
-- `AwaitingRollout`: let the ordered update finish; check `status.updatePhase`. If it stays, the update is blocked (operator log `ordered update: deferring active-site update`, for example no healthy promotable standby). After 30 minutes the condition turns `False`/`ArchiverDisabled` with `ordered update still pending after 30m`; unblock the update (restore the standby) rather than restarting pods by hand.
+- `AwaitingRollout`: let the ordered update finish; check `status.updatePhase`. If it stays, the update is blocked (operator log `ordered update: deferring active-site update`, for example no healthy promotable standby, or `ordered update: deferring follower update; no drifted follower is a healthy direct replica` when only followers are drifted and none replicates directly from the active site yet, such as an old primary recovery has not rejoined). After 30 minutes the condition turns `False`/`ArchiverDisabled` with `ordered update still pending after 30m`; unblock the update (restore the standby) rather than restarting pods by hand.
 - `ArchiverDisabled`: if it persists after the rollout, check that `spec.backup.pitr.profileName` names an existing profile (look for a `BackupPITRInvalid` Event). With an empty or unknown profile the operator renders no PITR configuration into the sidecar, so it reports archiving disabled indefinitely.
 - `SidecarUnreachable` on an older sidecar image: upgrade the sidecar image; the operator rolls it through the ordered update. The ordered update stops on a rolled pod that is not Ready (playbook 34), but a current sidecar stays Ready through archive failures, so watch `PITRArchiveReady` site by site instead of assuming a finished rollout means archiving works.
 - Recovery to `True` needs 2 consecutive clean poll rounds (about a minute) and emits a Normal `PITRArchiveReady` Event. Binlogs sealed during the outage are uploaded once the archiver runs, as long as MySQL still has them; check `backlogFiles` and the coverage fields afterwards.

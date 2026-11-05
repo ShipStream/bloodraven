@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -711,6 +712,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 					cur.Target),
 				"rejected")
 		}
+		if errors.Is(err, errHandoffNotAdmitted) {
+			return r.plannedFailoverRollback(ctx, fg, nn, "RecoveryInFlight",
+				fmt.Sprintf("%v before the promotion deadline; nothing was sent to %q",
+					err, cur.Target),
+				"failed_other")
+		}
 		if errors.Is(err, errDivergentTarget) {
 			return r.plannedFailoverRollback(ctx, fg, nn, "DivergentTarget",
 				fmt.Sprintf("%v; reclone it or make the primary contain the set before it can be promoted; source %q unfenced",
@@ -814,6 +821,17 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Conte
 	// carries the warning. The unfence is detached from ctx's cancellation
 	// so an operator shutdown mid-rollback does not abandon it.
 	if cur != nil && cur.SourcePrimary != "" && r.Runner != nil {
+		// Never hand the source its writes back while another site
+		// already accepts them: that is a split brain, not a rollback.
+		probeCtx, cancelProbe := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		writable, _, probeErr := r.Runner.PlannedFailoverWritablePeers(probeCtx, nn, cur.SourcePrimary)
+		cancelProbe()
+		if probeErr == nil && len(writable) > 0 {
+			return r.plannedFailoverFail(ctx, fg, reason,
+				fmt.Sprintf("%s (source %q left fenced: %s already writable; manual recovery required)",
+					msg, cur.SourcePrimary, strings.Join(writable, ", ")),
+				metricResult)
+		}
 		unfenceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		if err := r.Runner.PlannedFailoverUnfence(unfenceCtx, nn, cur.SourcePrimary); err != nil {
 			log.FromContext(ctx).Error(err, "planned-failover: unfence after rollback",

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -312,6 +313,14 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// a memory-backed emptyDir for the keyring volume) are driven by the
 	// per-site keyring phase this call maintains.
 	encryptionRequeueAfter, err := r.reconcileEncryptionAtRest(ctx, &fg)
+	if stderrors.Is(err, errEncryptionStatusMoved) {
+		// fg's keyring state was computed from a stale baseline and not
+		// persisted. Rendering it could move a site's keyring projection
+		// against the durable lifecycle (sealing a site mid-rotation, or
+		// unsealing a sealed one), so nothing renders this pass.
+		logger.V(1).Info("encryption status moved under this reconcile; requeueing before rendering")
+		return ctrl.Result{RequeueAfter: encryptionRequeueAfter}, nil
+	}
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile encryption at rest: %w", err)
 	}

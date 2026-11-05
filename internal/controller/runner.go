@@ -107,6 +107,10 @@ type TopologyManagerRunner struct {
 	mu            sync.RWMutex
 	leaderContext context.Context
 	managers      map[types.NamespacedName]*managedTopology
+	// retiring holds managers unregistered from managers whose ordered-
+	// update goroutines may still be running. Rotation admission consults
+	// them until those goroutines exit (see retireManagerLocked).
+	retiring map[types.NamespacedName][]*managedTopology
 	// dragonflyGates holds each group's Dragonfly ownership gate. Entries
 	// are never removed: a gate must outlive every manager that used it,
 	// including one whose stop timed out, so a recreated group cannot get a
@@ -116,6 +120,11 @@ type TopologyManagerRunner struct {
 	// group's authoritative state (see DragonflyManager.SetAuthorityReader).
 	apiReader client.Reader
 
+	// reservationMu guards rotationReservations, each group's admitted but
+	// not yet finished keyring rotations, and orders them against manager
+	// registration. Taken before mu. See ReserveKeyringRotation.
+	reservationMu        sync.Mutex
+	rotationReservations map[types.NamespacedName][]string
 	// startFailures tracks groups whose topology manager failed to start,
 	// and lastStartWarning when each was last warned about; both drive the
 	// rate-limited TopologyManagerStartFailed Event. Guarded by mu.
@@ -264,6 +273,17 @@ func (r *TopologyManagerRunner) PlannedFailoverUnfence(ctx context.Context, nn t
 		return err
 	}
 	return tm.UnfenceSite(ctx, site)
+}
+
+// PlannedFailoverWritablePeers probes every site but except (see
+// TopologyManager.WritablePeers).
+func (r *TopologyManagerRunner) PlannedFailoverWritablePeers(ctx context.Context, nn types.NamespacedName, except string) (writable, unknown []string, err error) {
+	tm, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		return nil, nil, err
+	}
+	writable, unknown = tm.WritablePeers(ctx, except)
+	return writable, unknown, nil
 }
 
 // PlannedFailoverGtidExecuted returns the named site's current
@@ -503,7 +523,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			// next sync retries the start.
 			r.mu.Lock()
 			if r.managers[nn] == existing {
-				delete(r.managers, nn)
+				r.retireManagerLocked(nn, existing)
 			}
 			r.mu.Unlock()
 			// Wait for the old poll loop to exit before dropping its
@@ -547,11 +567,18 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 	// Stop managers for deleted CRs.
 	var stopping []*managedTopology
+	r.reservationMu.Lock()
+	for nn := range r.rotationReservations {
+		if _, ok := seen[nn]; !ok {
+			delete(r.rotationReservations, nn)
+		}
+	}
+	r.reservationMu.Unlock()
 	r.mu.Lock()
 	for nn, mt := range r.managers {
 		if _, ok := seen[nn]; !ok {
 			r.logger.Info("stopping topology manager for deleted fg", "fg", nn)
-			delete(r.managers, nn)
+			r.retireManagerLocked(nn, mt)
 			stopping = append(stopping, mt)
 		}
 	}
@@ -830,6 +857,10 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// Must land before Run: the first Poll otherwise sees an empty
 	// blocked set and can promote a mid-rotation replica.
 	tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
+	// Likewise the planned-failover guard: the RecoveryInProgress markers
+	// restored below would otherwise let the first Poll drain or recover
+	// sites a planned failover that survived the restart is using.
+	tm.SetPlannedFailoverActive(plannedFailoverInFlight(fg.Status.PlannedFailover))
 	// Must land before Run, like the set above: a held peer's stopped
 	// receiver must not be restarted, nor a held site cloned into, by the
 	// first poll. Read uncached: the cached list may predate the queue.
@@ -932,8 +963,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	done := make(chan struct{})
 	archiverDone := make(chan struct{})
-	r.mu.Lock()
-	r.managers[nn] = &managedTopology{
+	r.registerManager(nn, &managedTopology{
 		tm:           tm,
 		cancel:       cancel,
 		done:         done,
@@ -941,8 +971,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		archiver:     archiver,
 		archiverDone: archiverDone,
 		dragonfly:    dfMgr,
-	}
-	r.mu.Unlock()
+	})
 
 	go func() {
 		defer close(done)
@@ -1123,9 +1152,9 @@ func (r *TopologyManagerRunner) stopAll() {
 	stopping := make([]*managedTopology, 0, len(r.managers))
 	for nn, mt := range r.managers {
 		r.logger.Info("stopping topology manager", "fg", nn)
+		r.retireManagerLocked(nn, mt)
 		stopping = append(stopping, mt)
 	}
-	r.managers = make(map[types.NamespacedName]*managedTopology)
 	r.startFailures = nil
 	r.lastStartWarning = nil
 	r.mu.Unlock()
@@ -1169,6 +1198,102 @@ func (r *TopologyManagerRunner) Ready() bool {
 	return false
 }
 
+// retireManagerLocked unregisters mt and keeps it admission-visible until
+// its mutation workers have exited. The manager is retired first, so it
+// starts no ordered update once it can no longer be found in managers;
+// one already running is found in retiring, and rotation admission refuses
+// while it is in flight. Caller holds r.mu.
+func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt *managedTopology) {
+	if mt == nil {
+		return
+	}
+	if mt.tm != nil {
+		mt.tm.retire()
+	}
+	if r.managers[nn] == mt {
+		delete(r.managers, nn)
+	}
+	if mt.tm == nil {
+		return
+	}
+	if r.retiring == nil {
+		r.retiring = make(map[types.NamespacedName][]*managedTopology)
+	}
+	r.retiring[nn] = append(r.retiring[nn], mt)
+	// A retired manager adds no update worker, so the first wait ends when
+	// the last one exits, whether or not its Run has returned; that
+	// releases the replacement's predecessor guard. The entry itself stays
+	// until Run has returned too, so rotation admission still sees a
+	// promotion the old Run may be finishing (mutationInFlight).
+	go func() {
+		mt.tm.waitUpdateWorkers()
+		r.mu.Lock()
+		if cur := r.managers[nn]; cur != nil && !r.retiringUpdateInFlightLocked(nn) {
+			cur.tm.setPredecessorUpdateInFlight(false)
+		}
+		r.mu.Unlock()
+		if mt.done != nil {
+			<-mt.done
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.retiring[nn] = slices.DeleteFunc(r.retiring[nn], func(m *managedTopology) bool { return m == mt })
+		if len(r.retiring[nn]) == 0 {
+			delete(r.retiring, nn)
+		}
+	}()
+}
+
+// registerManager makes mt nn's running manager. Call it before mt's Run
+// starts. It registers under reservationMu with the group's pending
+// rotation reservations already applied: a rotation admitted against the
+// manager this one replaces must block promotion here before Run can claim
+// an ordered update. And a predecessor's ordered update can outlive its
+// Run: until it exits (retireManagerLocked clears the flag), mt leaves the
+// sites to it, with no recovery drain, old-primary recovery, source repoint
+// or update of its own.
+func (r *TopologyManagerRunner) registerManager(nn types.NamespacedName, mt *managedTopology) {
+	r.reservationMu.Lock()
+	defer r.reservationMu.Unlock()
+	mt.tm.restoreKeyringRotationReservations(r.pendingKeyringRotationReservations(nn))
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.retiringUpdateInFlightLocked(nn) {
+		mt.tm.setPredecessorUpdateInFlight(true)
+	}
+	if len(r.retiring[nn]) > 0 {
+		mt.tm.mu.Lock()
+		mt.tm.predecessorBusy = func() bool { return r.retiringChangingSites(nn) }
+		mt.tm.mu.Unlock()
+	}
+	r.managers[nn] = mt
+}
+
+// retiringChangingSites reports whether a retiring manager of nn is still
+// changing the sites (see TopologyManager.changingSites).
+func (r *TopologyManagerRunner) retiringChangingSites(nn types.NamespacedName) bool {
+	r.mu.RLock()
+	retiring := append([]*managedTopology(nil), r.retiring[nn]...)
+	r.mu.RUnlock()
+	for _, mt := range retiring {
+		if mt.tm.changingSites() {
+			return true
+		}
+	}
+	return false
+}
+
+// retiringUpdateInFlightLocked reports whether a retiring manager of nn
+// still has a claimed ordered update. Caller holds r.mu.
+func (r *TopologyManagerRunner) retiringUpdateInFlightLocked(nn types.NamespacedName) bool {
+	for _, mt := range r.retiring[nn] {
+		if mt.tm.orderedUpdateClaimed() {
+			return true
+		}
+	}
+	return false
+}
+
 // SetManagerForTest injects a TopologyManager for testing. Not for production use.
 func (r *TopologyManagerRunner) SetManagerForTest(nn types.NamespacedName, tm *TopologyManager) {
 	r.mu.Lock()
@@ -1193,7 +1318,7 @@ func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
 		return
 	}
 	r.logger.Info("stopping topology manager via StopManager", "fg", nn)
-	delete(r.managers, nn)
+	r.retireManagerLocked(nn, mt)
 	r.mu.Unlock()
 	stopManagedTopology(mt)
 	clearManagedSiteGauges(mt.tm)

@@ -385,9 +385,9 @@ func TestInitiateRecovery_HeldSiteNotMarkedInProgress(t *testing.T) {
 	tm, _, peer := heldTopologyManager(t)
 	peer.replicaStatusVal = nil
 	tm.SetRestorePeerHold([]string{"dc2"}, nil, true)
-	changed, acted := tm.initiateRecovery(context.Background(), 1, 0, []*mysql.ReplicaStatus{nil, nil})
-	if changed || acted {
-		t.Fatalf("changed=%v acted=%v, want recovery skipped", changed, acted)
+	changed, acted, rewrite := tm.initiateRecovery(context.Background(), 1, 0, []*mysql.ReplicaStatus{nil, nil})
+	if changed || acted || rewrite {
+		t.Fatalf("changed=%v acted=%v rewrite=%v, want recovery skipped", changed, acted, rewrite)
 	}
 	tm.mu.RLock()
 	rec := tm.recovery["dc2"]

@@ -71,6 +71,10 @@ type mockMySQL struct {
 	evictCalls        int
 	evictKeepUsers    []string
 	fenceErr          error
+	// onKill and onStopReplica, when set, run at the start of the call
+	// without m.mu held, so a test can interleave another goroutine.
+	onKill        func()
+	onStopReplica func()
 	// restore peer receiver stop (mysql.ReplicaIOStopper)
 	stopIOCalls       int
 	stopIOErr         error
@@ -308,6 +312,9 @@ func TestEmitStatusSnapshotPreservesPersistentTopologyDegradation(t *testing.T) 
 	}
 }
 func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
+	if m.onKill != nil {
+		m.onKill()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := m.killConnectionCalls
@@ -323,6 +330,9 @@ func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
 	return killed, err
 }
 func (m *mockMySQL) StopReplica(_ context.Context) error {
+	if m.onStopReplica != nil {
+		m.onStopReplica()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopReplicaCalls++
@@ -2503,8 +2513,12 @@ func TestPrimaryReassert_CooldownRateLimits(t *testing.T) {
 	}
 
 	// The sidecar fenced the target again for a persistent reason: the
-	// operator must not fight it at poll frequency.
+	// operator must not fight it at poll frequency. (A poll observes the
+	// re-assert in between, as it would in Run.)
 	site0.setReadOnly(true)
+	tm.mu.Lock()
+	tm.deploymentAwaitingObservation = false
+	tm.mu.Unlock()
 	clk.Advance(5 * time.Second)
 	if tm.checkPrimaryReassert(context.Background()) {
 		t.Fatal("re-assert must be rate-limited by the failover cooldown")
@@ -2803,8 +2817,11 @@ func TestPoll_StatusCallbackFiresWhenReplicaStatusErrorsAfterHealthy(t *testing.
 	}
 }
 
-// TestCheckUpdate_RetainsUnhealthyStandbyDrift verifies an unsafe follower is
-// retained by the ordered plan without applying its Deployment update.
+// TestCheckUpdate_RetainsUnhealthyStandbyDrift verifies follower-only drift
+// on a site that is not a healthy direct replica is retained without
+// starting an update: every attempt would retain it as unsafe, and an
+// attempt restarted every poll would keep old-primary recovery, which is
+// what heals such a site, standing down.
 func TestCheckUpdate_RetainsUnhealthyStandbyDrift(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{
@@ -2825,17 +2842,12 @@ func TestCheckUpdate_RetainsUnhealthyStandbyDrift(t *testing.T) {
 
 	// Drift on standby — the classic trigger for an ordered update.
 	tm.SetSpecDriftSites([]string{"dc2"})
-	done := make(chan struct{})
-	tm.StatusCallback = func(TopologySnapshot) { close(done) }
 
-	started := tm.checkUpdate(context.Background())
-	if !started {
-		t.Fatal("checkUpdate must start so independently safe targets can be processed")
+	if tm.checkUpdate(context.Background()) {
+		t.Fatal("checkUpdate started an update whose only target would be retained as unsafe")
 	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("ordered plan did not complete")
+	if tm.isUpdating() {
+		t.Fatal("an update is running for drift no attempt can process")
 	}
 	select {
 	case site := <-applied:
@@ -2862,6 +2874,7 @@ func TestCheckUpdate_ProcessesHealthyCandidateBeforeUnhealthyReader(t *testing.T
 		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly,
 	}, primary, candidate, reader)
 	tm.sites[1].replicating = true
+	tm.sites[1].sourceHost = "mysql-primary-internal.ns.svc.cluster.local"
 	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
 	var applied []string
 	tm.ApplyUpdate = func(_ context.Context, site string) error {

@@ -710,6 +710,7 @@ func TestDeploymentLeaseUpdateDiscardsPlanAfterAdmissionWait(t *testing.T) {
 	tm.deploymentLeases = m
 	tm.topologyGeneration, tm.deploymentActiveSite = 7, "dc1"
 	tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
+	tm.sites[1].replicating, tm.sites[1].sourceHost = true, "mysql-dc1"
 	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
 	tm.specDriftSites = []string{"dc2"}
 	applied := make(chan struct{}, 1)
