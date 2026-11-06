@@ -29,6 +29,24 @@ const (
 	handoffLostSourceRollbackTimeout = 2 * time.Second
 )
 
+// HandoffWriteAttemptedError is a maintenance handoff whose candidate
+// read_only=OFF returned an error: the statement may have applied, so the
+// candidate may already accept writes, and the source stays fenced.
+// PromotionGtid is the candidate's set proven equal to the fenced source
+// set after RESET REPLICA ALL. A caller that finds the candidate writable
+// must record the handoff as the promotion it is.
+type HandoffWriteAttemptedError struct {
+	Candidate     string
+	PromotionGtid string
+	Err           error
+}
+
+func (e *HandoffWriteAttemptedError) Error() string {
+	return fmt.Sprintf("maintenance handoff: promote %s: %v (source left fenced: the candidate may already accept writes)", e.Candidate, e.Err)
+}
+
+func (e *HandoffWriteAttemptedError) Unwrap() error { return e.Err }
+
 // HandoffOptions bounds a maintenance handoff. Zero values use the defaults.
 type HandoffOptions struct {
 	// PreFenceCatchUp bounds everything before the source is fenced: the
@@ -186,7 +204,7 @@ func (f *FailoverController) ExecuteHandoff(ctx context.Context, candidate, sour
 	promotionGtid, stage, err := f.promoteVerified(ctx, candidate, candidateSite, fenced)
 	if err != nil {
 		if stage == promoteStageWriteAttempted {
-			return "", fmt.Errorf("maintenance handoff: promote %s: %w (source left fenced: the candidate may already accept writes)", candidateSite, err)
+			return "", &HandoffWriteAttemptedError{Candidate: candidateSite, PromotionGtid: promotionGtid, Err: err}
 		}
 		abortErr := fmt.Errorf("maintenance handoff: promote %s: %w", candidateSite, err)
 		switch stage {

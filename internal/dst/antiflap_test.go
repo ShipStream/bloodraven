@@ -237,3 +237,24 @@ func TestAntiFlapStateLostInvariantIsArmed(t *testing.T) {
 func mustFakeNow() time.Time {
 	return time.Date(2030, 1, 1, 0, 1, 0, 0, time.UTC)
 }
+
+// TestFingerprint_StateLostKeepsPrecedenceOverReplacement: a cooldown
+// violation across a restart that lost both durable copies stays the
+// inherent restart+stateLost class even when its record was made on a
+// replaced manager (K171); the replacement tag still narrows the others.
+func TestFingerprint_StateLostKeepsPrecedenceOverReplacement(t *testing.T) {
+	for _, c := range []struct {
+		detail, want string
+	}{
+		{"promotions 3 polls apart (cooldown 30 polls, operator restarts between: 1, of which lost the durable anti-flap record: 1) " +
+			replacedBeforeRecordMarker, "CooldownViolated(restart+stateLost)"},
+		{"promotions 3 polls apart (cooldown 30 polls, operator restarts between: 1, of which lost the durable anti-flap record: 0) " +
+			replacedBeforeRecordMarker, "CooldownViolated(replacement)"},
+		{"promotions 3 polls apart (cooldown 30 polls, operator restarts between: 0, of which lost the durable anti-flap record: 0) " +
+			replacedBeforeRecordMarker, "CooldownViolated(replacement)"},
+	} {
+		if got := fingerprint([]Violation{{Invariant: "CooldownViolated", Detail: c.detail}}); got != c.want {
+			t.Errorf("fingerprint(%q) = %s, want %s", c.detail, got, c.want)
+		}
+	}
+}

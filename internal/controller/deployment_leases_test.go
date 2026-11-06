@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -350,6 +351,8 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	}
 	r := &MysqlFailoverGroupReconciler{Client: m.client, Recorder: record.NewFakeRecorder(100), Runner: NewTopologyManagerRunner(m.client, nil, nil, nil, testLogger())}
 	r.Runner.SetDeploymentLeases(m)
+	r.PlannedTopology = newPFFakeTopology()
+	r.plannedClock = clock.NewFakeClock(*now)
 	epoch := m.TopologyPending(client.ObjectKeyFromObject(fg))
 	if err := m.TopologyPersisted(context.Background(), fg, epoch); err != nil {
 		t.Fatal(err)
@@ -359,18 +362,21 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	}
 	fresh := fetchFG(t, r, client.ObjectKeyFromObject(fg))
 	pf := fresh.Status.PlannedFailover
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Reason != "DeploymentHold" || !pf.RetryAfter.Time.Equal(hold.ExpiresAt) || !strings.Contains(pf.Message, "op1") || !strings.Contains(pf.Message, "tenant") {
+	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil || pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold ||
+		pf.Admission.RetryTime == nil || !pf.Admission.RetryTime.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) ||
+		!strings.Contains(pf.Message, "op1") || !strings.Contains(pf.Message, "tenant") {
 		t.Fatalf("deferral = %+v", pf)
 	}
 	if _, err := m.Renew(context.Background(), fresh, "failover-hold", "op1", "tenant", "tenant-ns", "deployer", hold.Token, 30); err != nil {
 		t.Fatalf("deferred operation prevented renewal: %v", err)
 	}
 	*now = hold.ExpiresAt.Add(time.Nanosecond)
+	r.plannedClock.(*clock.FakeClock).Advance(now.Sub(r.plannedClock.Now()))
 	if _, err := r.reconcilePlannedFailover(context.Background(), fresh); err != nil {
 		t.Fatal(err)
 	}
 	fresh = fetchFG(t, r, client.ObjectKeyFromObject(fg))
-	if fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePending {
+	if fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseAdmitting {
 		t.Fatalf("did not resume: %+v", fresh.Status.PlannedFailover)
 	}
 }
@@ -469,7 +475,7 @@ func TestDeploymentLeaseStatusRetryPreservesNewerOperations(t *testing.T) {
 				}
 				fresh.Status.TopologyGeneration = 9
 				fresh.Status.ActiveSite = "pdx"
-				fresh.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseResuming}
+				fresh.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhasePublishing, TargetSite: "pdx"}
 				fresh.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing}
 				if err := c.Status().Update(ctx, fresh); err != nil {
 					return err
@@ -488,7 +494,7 @@ func TestDeploymentLeaseStatusRetryPreservesNewerOperations(t *testing.T) {
 	if err := m.reader.Get(context.Background(), client.ObjectKeyFromObject(fg), fresh); err != nil {
 		t.Fatal(err)
 	}
-	if persisted == nil || fresh.Status.TopologyGeneration != 9 || fresh.Status.ActiveSite != "pdx" || fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseResuming || fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing {
+	if persisted == nil || fresh.Status.TopologyGeneration != 9 || fresh.Status.ActiveSite != "pdx" || fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePublishing || fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing {
 		t.Fatalf("retry clobbered newer state: %+v", fresh.Status)
 	}
 }
@@ -676,30 +682,6 @@ func TestDeploymentLeaseSnapshotRejectsTornObservation(t *testing.T) {
 				t.Fatalf("snapshot = %+v, %+v, %v", fresh, leases, err)
 			}
 		})
-	}
-}
-
-func TestDeploymentLeaseUnconfirmedPromotionFencesGeneration(t *testing.T) {
-	m, fg, _ := deploymentLeaseFixture(t)
-	old := &mockMySQL{readOnly: false}
-	target := &mockMySQL{readOnly: true, err: errors.New("probe unavailable")}
-	tm, _, _ := newTestTopologyManager(old, target)
-	tm.cfg.Namespace, tm.cfg.Name = fg.Namespace, fg.Name
-	tm.deploymentLeases = m
-	tm.topologyGeneration, tm.deploymentActiveSite = 7, "dc1"
-	tm.sites[0].state, tm.sites[1].state = state.StateWritable, state.StateReadOnly
-	if _, err := tm.PlannedPromote(context.Background(), "dc2", "dc1"); err == nil {
-		t.Fatal("expected failed confirmation")
-	}
-	snap := tm.buildSnapshot(nil)
-	if target.readOnly || snap.TopologyGeneration != 8 || snap.DeploymentEpoch != 0 || snap.DeploymentActiveSite != "dc2" {
-		t.Fatalf("unconfirmed promotion reopened stale authority: %+v", snap)
-	}
-	target.setError(nil)
-	tm.Poll(context.Background())
-	snap = tm.buildSnapshot(nil)
-	if snap.TopologyGeneration != 8 || snap.DeploymentEpoch == 0 {
-		t.Fatalf("fresh observation = %+v", snap)
 	}
 }
 

@@ -63,7 +63,7 @@ The direction you meet on call is the opposite. The cooldown **blocks a second f
 
 ## Wait, or promote by hand
 
-Objective 12 turns on one fact about the break-glass tool. `kubectl bloodraven promote playground pdx` writes the `bloodraven.shipstream.io/planned-failover` annotation and returns. The plugin only writes resources the operator already reads; it never talks to MySQL. It is not a back door around the operator's logic — it is a request *to* that logic, and it needs a live operator to execute it. Inside the cooldown it hits the same gate: `spec.plannedFailover.onCooldown` defaults to `reject`, so the request fails outright unless you set `defer`, which parks it until cooldown expiry.
+Objective 12 turns on one fact about the break-glass tool. `kubectl bloodraven promote playground pdx` writes the `bloodraven.shipstream.io/planned-failover` annotation and returns. The plugin only writes resources the operator already reads; it never talks to MySQL. It is not a back door around the operator's logic — it is a request *to* that logic, and it needs a live operator to execute it. Inside the cooldown it hits the same gate: `spec.plannedFailover.onCooldown` defaults to `Reject`, so the request ends `NotStarted` with reason `CooldownActive` unless you set `Defer`, which parks it in `Deferred` until cooldown expiry.
 
 The rule that falls out:
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -84,9 +83,6 @@ func TestReserveKeyringRotation_BlocksPromotionUntilStampedOrReleased(t *testing
 	}
 	if err := tm.liveHandoffRefusal("dc2")(); err == nil {
 		t.Fatal("live handoff check accepted a reserved site")
-	}
-	if _, err := tm.PlannedPromote(context.Background(), "dc2", "dc1"); !errors.Is(err, errKeyringRotationBlocked) {
-		t.Fatalf("PlannedPromote onto a reserved site: err = %v, want errKeyringRotationBlocked", err)
 	}
 
 	// A cache-derived push never drops a reservation, even one that lacks
@@ -208,63 +204,6 @@ func TestBeginPromotionOf_ExcludesRotationAdmission(t *testing.T) {
 	tm.finishDeploymentTopologyChange()
 	if ok, why := tm.ReserveKeyringRotation("dc2"); ok || why != rotationRefusedPromotionInFlight {
 		t.Fatalf("rotation before the promotion is observed = %v, %q; want refused", ok, why)
-	}
-}
-
-// GPT's interleaving: the rotation is admitted after PlannedPromote's
-// eligibility check but before its claim (here, while it waits at the
-// follower-mutation gate). The claim must see it and touch nothing.
-func TestPlannedPromote_RotationAdmittedBeforeClaimStopsPromotion(t *testing.T) {
-	source := &mockMySQL{readOnly: false}
-	target := &mockMySQL{readOnly: true}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(source, target)
-	settleAuthority(tm)
-	release, ok := tm.beginFollowerMutation()
-	if !ok {
-		t.Fatal("setup: gate refused")
-	}
-	tm.SetPlannedFailoverActive(true)
-	done := make(chan error, 1)
-	go func() {
-		_, err := tm.PlannedPromote(context.Background(), "dc2", "dc1")
-		done <- err
-	}()
-	// Wait until PlannedPromote is past its eligibility check and waiting
-	// at the gate.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		tm.followerMutationGate.mu.Lock()
-		waiting := tm.followerMutationGate.pending > 0
-		tm.followerMutationGate.mu.Unlock()
-		if waiting {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("PlannedPromote never reached the gate")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if ok, _ := tm.ReserveKeyringRotation("dc2"); ok {
-		t.Fatal("rotation admitted while the planned-failover flag is set")
-	}
-	// The runner's planned-failover sync and the Dragonfly upgrade write
-	// the same flag, so it can flap off; the claim is the last line.
-	tm.SetPlannedFailoverActive(false)
-	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
-		t.Fatalf("rotation refused before any claim: %s", why)
-	}
-	release()
-	if err := <-done; !errors.Is(err, errKeyringRotationBlocked) {
-		t.Fatalf("PlannedPromote = %v, want errKeyringRotationBlocked", err)
-	}
-	source.mu.Lock()
-	fenced := source.superReadOnlyCalls
-	source.mu.Unlock()
-	target.mu.Lock()
-	promoted := target.promoted
-	target.mu.Unlock()
-	if fenced != 0 || promoted {
-		t.Fatal("a promotion refused at its claim touched MySQL")
 	}
 }
 

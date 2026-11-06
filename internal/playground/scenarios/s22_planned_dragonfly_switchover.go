@@ -22,8 +22,8 @@ func init() {
 // asserts:
 //
 //   - status.dragonfly.activeSite flipped to the failover target
-//   - status.plannedFailover.dragonfly.PromotionMethod is "REPLTAKEOVER"
-//   - status.plannedFailover.dragonfly.SessionsPreserved is true
+//   - status.plannedFailover.dragonfly.takeover is Succeeded via REPLTAKEOVER
+//   - status.plannedFailover.dragonfly.sessions is Preserved
 //   - the seed counter is readable on the new master at the original
 //     value (sessions preserved end-to-end via the active Service)
 //   - the kube Endpoints object for the active Service has converged
@@ -46,7 +46,7 @@ func scenario22PlannedDragonflySwitchover() runner.Scenario {
 		Title: "Planned MySQL+Dragonfly coordinated switchover preserves sessions",
 		Hypothesis: "Annotating the MFG with bloodraven.shipstream.io/planned-failover=<peer> walks both MySQL " +
 			"and Dragonfly through coordinated promotion: dragonfly.activeSite flips to the target, " +
-			"PromotionMethod=REPLTAKEOVER, SessionsPreserved=true, the seed counter survives the failover " +
+			"takeover=REPLTAKEOVER, sessions=Preserved, the seed counter survives the failover " +
 			"reachable through the active Service, and the active Service's Endpoints converge to the new master pod.",
 		Risk:     "medium",
 		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D3)",
@@ -154,7 +154,7 @@ func verifyDragonflyActiveSiteFlipped() runner.Step {
 func verifyDragonflyPromotionMethodAndSessions() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "plannedFailover.dragonfly.PromotionMethod=REPLTAKEOVER, SessionsPreserved=true",
+		Name:  "plannedFailover.dragonfly.takeover=REPLTAKEOVER, sessions=Preserved",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
 			if err != nil {
@@ -164,13 +164,14 @@ func verifyDragonflyPromotionMethodAndSessions() runner.Step {
 			if pf == nil || pf.Dragonfly == nil {
 				return fmt.Errorf("status.plannedFailover.dragonfly missing on Succeeded run")
 			}
-			if pf.Dragonfly.PromotionMethod != "REPLTAKEOVER" {
-				return fmt.Errorf("PromotionMethod=%q want REPLTAKEOVER (reason=%q msg=%q)",
-					pf.Dragonfly.PromotionMethod, pf.Dragonfly.Reason, pf.Dragonfly.Message)
+			if tk := pf.Dragonfly.Takeover; tk == nil || tk.State != v1alpha1.DragonflyTakeoverSucceeded ||
+				tk.Method != v1alpha1.DragonflyTakeoverMethodReplTakeover {
+				return fmt.Errorf("takeover=%+v want Succeeded via REPLTAKEOVER (reason=%q msg=%q)",
+					tk, pf.Dragonfly.Reason, pf.Dragonfly.Message)
 			}
-			if pf.Dragonfly.SessionsPreserved == nil || !*pf.Dragonfly.SessionsPreserved {
-				return fmt.Errorf("SessionsPreserved=%v want true (reason=%q msg=%q)",
-					pf.Dragonfly.SessionsPreserved, pf.Dragonfly.Reason, pf.Dragonfly.Message)
+			if pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsPreserved {
+				return fmt.Errorf("sessions=%q want Preserved (reason=%q msg=%q)",
+					pf.Dragonfly.Sessions, pf.Dragonfly.Reason, pf.Dragonfly.Message)
 			}
 			return nil
 		},
@@ -196,7 +197,7 @@ func verifyDragonflyCounterPreserved() runner.Step {
 				return fmt.Errorf("GET on new master: %w", err)
 			}
 			if !ok {
-				return fmt.Errorf("scenario22:counter missing on new master %s — sessions LOST despite SessionsPreserved=true", target)
+				return fmt.Errorf("scenario22:counter missing on new master %s — sessions LOST despite sessions=Preserved", target)
 			}
 			if got != expected {
 				return fmt.Errorf("scenario22:counter=%q want %q on new master %s", got, expected, target)

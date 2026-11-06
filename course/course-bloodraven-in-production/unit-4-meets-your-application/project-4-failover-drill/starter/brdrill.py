@@ -197,8 +197,8 @@ def stale_read_window(samples, drill):
 # Return the RPO verdict for this drill as a string. Exactly these three:
 #
 #   mode "planned", status.plannedFailover.phase == "Succeeded" and
-#   transactionsLost == 0:
-#     "RPO 0 by construction (target GTID_EXECUTED contained sourceGtidAtFence
+#   status.plannedFailover.result.outcome == "Succeeded":
+#     "RPO 0 by construction (target GTID_EXECUTED contained fence.gtidSet
 #      before promotion)"            <- one line, single spaces
 #
 #   mode "planned", any other phase:

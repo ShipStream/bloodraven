@@ -91,7 +91,7 @@ spec:
     proactorThreads: 1
     plannedFailover:
       maxSyncWait: 30s
-      onSyncTimeout: proceed
+      onSyncTimeout: Proceed
     resources:
       requests:
         cpu: 100m

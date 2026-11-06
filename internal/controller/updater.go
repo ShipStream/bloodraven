@@ -422,6 +422,17 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	}
 	promotionGTID, err := u.failover.ExecuteHandoff(ctx, handoff.Checker, active.Checker, handoff.Name, opts)
 	if err != nil {
+		var attempted *HandoffWriteAttemptedError
+		if errors.As(err, &attempted) && onPromoted != nil && u.handoffCandidateWritable(ctx, handoff.Checker, handoff.Name) {
+			// read_only=OFF applied although it returned an error: the
+			// handoff happened. Record it (failover record, cooldown,
+			// watermark, DNS) before reporting the error; otherwise the
+			// manager adopts the writable standby with no record and a
+			// later failover is not held by the anti-flap cooldown.
+			u.logger.Warn("ordered update: handoff promotion returned an error but the standby is writable; recording the handoff",
+				"site", handoff.Name, "error", attempted.Err)
+			onPromoted(handoff.Name, attempted.PromotionGtid)
+		}
 		return processed, fmt.Errorf("failover during update: %w", err)
 	}
 	// ExecuteHandoff has already moved MySQL authority. Record that change
@@ -509,6 +520,37 @@ func (u *UpdateController) requireOldActiveContained(ctx context.Context, active
 func divergentStandbyMessage(t UpdateTarget) string {
 	return fmt.Sprintf("%s is divergent (%d transactions the primary lacks); reclone or reconcile before the active site can be updated",
 		t.Name, t.DivergentTransactions)
+}
+
+// handoffWritableProbeAttempts bounds the probes that decide whether a
+// handoff whose read_only=OFF returned an error made the candidate writable.
+const handoffWritableProbeAttempts = 3
+
+// handoffCandidateWritable reports whether the candidate answers
+// read_only=OFF, on the pooled checker (the pinned promotion session may be
+// what failed) and a context detached from the update's cancellation. Only
+// positive evidence counts: a candidate that stays unreadable is not
+// recorded as promoted, and the next poll observes it.
+func (u *UpdateController) handoffCandidateWritable(ctx context.Context, candidate mysql.Checker, name string) bool {
+	probeCtx := context.WithoutCancel(ctx)
+	var lastErr error
+	for attempt := 0; attempt < handoffWritableProbeAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(u.handoffOptions().withDefaults().PollInterval)
+		}
+		var ro bool
+		lastErr = withMySQLSafetyTimeout(probeCtx, func(c context.Context) error {
+			var err error
+			ro, err = candidate.CheckReadOnly(c)
+			return err
+		})
+		if lastErr == nil {
+			return !ro
+		}
+	}
+	u.logger.Warn("ordered update: could not read the standby's read_only after a failed handoff promotion",
+		"site", name, "error", lastErr)
+	return false
 }
 
 // handoffOptions returns the handoff budgets, watching the source with

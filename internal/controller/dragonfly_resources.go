@@ -636,7 +636,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 	}
 
 	if activeDrift != nil {
-		if plannedFailoverInFlight(fg.Status.PlannedFailover) {
+		// A planned failover that owns the group's Dragonfly owns its active
+		// site too (plannedOwnsDragonfly): with the topology manager
+		// registered, the claim slot decides (a run, its provisional grant,
+		// or a hold; a run that released its claim after recording its
+		// promotion owns nothing, whatever status says); before that, the
+		// status form does (a run that still needs the claim, or a durable
+		// hold). A request that is only waiting owns nothing.
+		if r.plannedOwnsDragonfly(fg) {
 			return requeueAfter, nil
 		}
 		promotionTarget := ""
@@ -711,6 +718,14 @@ func (r *MysqlFailoverGroupReconciler) rollDragonflyReplicaStatefulSet(ctx conte
 		log.FromContext(ctx).Info("dragonfly rollout: site became the active Dragonfly master; holding its restart", "site", site.Name, "fg", nn)
 		return dragonflyGateRetry, nil
 	}
+	if pf := fresh.Status.PlannedFailover; pf != nil && pf.TargetSite == site.Name && r.plannedOwnsDragonfly(fresh) {
+		// The planned run is about to take the Dragonfly master over to this
+		// site: a restart now brings it back as an empty standalone master
+		// (no --replicaof, emptyDir data), and the paused Dragonfly manager
+		// would not re-attach it before the takeover.
+		log.FromContext(ctx).Info("dragonfly rollout: site is the planned failover's Dragonfly target; holding its restart", "site", site.Name, "fg", nn)
+		return dragonflyGateRetry, nil
+	}
 	if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
 		return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
 	}
@@ -740,8 +755,17 @@ func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Co
 		logger.Info("dragonfly rollout: re-read failover group failed", "fg", nn, "error", err)
 		return false, true
 	}
-	if why := rolloutPromotionBlocked(fresh, target, oldSource); why != "" {
+	if why := rolloutPromotionBlocked(fresh, target, oldSource, r.plannedOwnsDragonfly(fresh)); why != "" {
 		logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target, "reason", why, "fg", nn)
+		return false, true
+	}
+	// Under the gate: a planned-failover claim (a run, its provisional
+	// grant, or an automation hold) or a standing hold owns the active
+	// Dragonfly. The temporary promoter has no planned owner of its own,
+	// so the check is here.
+	if r.plannedClaimHeld(nn) || PlannedHoldFrom(fresh) != nil {
+		logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target,
+			"reason", "a planned failover claim or automation hold owns the sites", "fg", nn)
 		return false, true
 	}
 	if ready, err := r.dragonflyRolloutCandidateSyncReady(ctx, fresh, target, oldSource); err != nil || !ready {
@@ -1000,25 +1024,19 @@ func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1
 // effectiveDragonflyMasterSite returns the site name whose Dragonfly pod
 // should currently carry dragonfly-role=master.
 //
-// Normally that's status.activeSite. During the planned-failover window
-// where we have promoted the target Dragonfly but have not yet flipped
-// status.activeSite (PromotingDragonfly through Resuming), the target
-// already holds the master, so we return the target instead. A
+// Normally that's status.activeSite. Once a planned-failover run's
+// Dragonfly takeover has succeeded, the target already holds the master
+// while the run is in PromotingDragonfly, Promoting, Publishing or
+// RollingBack and no later promotion was stamped
+// (plannedTakeoverMasterSite), so we return the target instead. A
 // Dragonfly-only emergency promotion can also intentionally diverge from
 // MySQL; in that case status.dragonfly.activeSite is authoritative for
 // cache routing until a later MySQL/Dragonfly promotion moves it again.
 // Without these branches syncDragonflyPodLabels would re-apply the label
 // to the stale source and fight the promotion path.
 func effectiveDragonflyMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
-	if pf := fg.Status.PlannedFailover; pf != nil {
-		switch pf.Phase {
-		case v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-			v1alpha1.PlannedFailoverPhasePromoting,
-			v1alpha1.PlannedFailoverPhaseResuming:
-			if pf.Target != "" && pf.Dragonfly != nil && pf.Dragonfly.PromotionMethod != "" {
-				return pf.Target
-			}
-		}
+	if site := plannedTakeoverMasterSite(fg); site != "" {
+		return site
 	}
 	if fg.Status.Dragonfly != nil && fg.Status.Dragonfly.ActiveSite != "" {
 		return fg.Status.Dragonfly.ActiveSite

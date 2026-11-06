@@ -573,7 +573,7 @@ func TestDragonflyManager_Tick_PausedSkipsReplicationReconfigure(t *testing.T) {
 	c := cb.Build()
 	rec := record.NewFakeRecorder(8)
 	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
-	mgr.SetPaused(true)
+	mgr.SetUpgradePaused(true)
 
 	dc1Conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}
 	// dc2 is unconfigured (empty role) — manager would normally REPLICAOF it.

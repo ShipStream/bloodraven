@@ -139,7 +139,7 @@ func TestSourceConvergence_MutationFailuresAndSuppression(t *testing.T) {
 		{name: "bootstrap", suppress: func(tm *TopologyManager) { tm.bootstrapPhase = BootstrapPhaseCloning }},
 		{name: "restore", suppress: func(tm *TopologyManager) { tm.autoBootstrapSuppressed = true }},
 		{name: "topology freeze", suppress: func(tm *TopologyManager) { tm.topologyFrozen = true }},
-		{name: "planned failover", suppress: func(tm *TopologyManager) { tm.plannedFailoverActive = true }},
+		{name: "planned failover", suppress: func(tm *TopologyManager) { holdPlannedClaimLockedForTest(tm, true) }},
 		{name: "ordered update", suppress: func(tm *TopologyManager) {
 			tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
 			tm.updater.updating = true

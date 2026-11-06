@@ -59,9 +59,9 @@ demoted site at or after `promotion_instant(drill)`, and report `count`, `first`
 same as stale; and a clean kill produces zero stale reads, because the host is gone.
 
 **TODO D — `verdict(drill)`.** Return the RPO verdict, in exactly the wording given in the
-docstring. A planned failover that reached `Succeeded` with `transactionsLost: 0` may claim RPO 0 by
-construction — the operator fenced the source, snapshotted its `GTID_EXECUTED`, and promoted only
-once the target's set *contained* that snapshot. An emergency failover may claim nothing of the
+docstring. A planned failover that reached `Succeeded` with `result.outcome: Succeeded` may claim RPO 0 by
+construction — the operator fenced the source, snapshotted its `GTID_EXECUTED` into `fence.gtidSet`, and
+promoted only once the target's set *contained* that snapshot (`status.promotionGtidExecuted` is that set). An emergency failover may claim nothing of the
 kind; its RPO comes from `divergentGtid` on the old primary, which this drill did not look at.
 
 Then run the comparison, and write `starter/drill-record.md`.
@@ -121,7 +121,7 @@ DRILL RECORD — playground / emergency / iad -> pdx
 - [ ] **TODO C — find the stale-read window** — Implement `stale_read_window`. Successful reads served by the demoted site at or after `status.lastFailover`. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the `shipstream.io/db-readonly-playground:NoExecute` taint's `tolerationSeconds` expires and the pod is evicted.
   *Done when:* `brdrill.py --probe tests/fixtures/planned-probe-unbounded.jsonl --drill tests/fixtures/planned-drill-unbounded.json` prints `staleReads` as `56` and `staleReadSeconds` as `27.5`, while the emergency capture prints `staleReads` as `0`.
 
-- [ ] **TODO D — say what the drill did and did not prove** — Implement `verdict`, in the exact wording from the docstring. Planned reaching `Succeeded` with `transactionsLost: 0` claims RPO 0 by construction — fence, snapshot `GTID_EXECUTED`, promote only on a superset. Emergency claims nothing; its RPO is a `divergentGtid` audit, which this capture does not contain.
+- [ ] **TODO D — say what the drill did and did not prove** — Implement `verdict`, in the exact wording from the docstring. Planned reaching `Succeeded` with `result.outcome: Succeeded` claims RPO 0 by construction — fence, snapshot `GTID_EXECUTED`, promote only on a superset. Emergency claims nothing; its RPO is a `divergentGtid` audit, which this capture does not contain.
   *Done when:* The planned run prints a `verdict` beginning `RPO 0 by construction`, the emergency run prints one beginning `RPO not established by this drill`, and the emergency command now exits 0.
 
 - [ ] **Prove the pool fix, do not assert it** — Compare the fixed writer's planned drill against the baseline capture taken with the unfixed one. Same procedure, same operator, same 30 s `drainTimeout` — the only difference is bounded connection lifetime, a read/write split, and error-class retry.

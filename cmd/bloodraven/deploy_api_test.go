@@ -533,7 +533,8 @@ func TestDeployAPIUnstableAndFreshSnapshot(t *testing.T) {
 	f.group.Status.TopologyGeneration = 8
 	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "pdx", State: "writable"}, {Name: "iad", State: "read-only", SecondsBehindSource: &lag, RecoveryState: "Recloning", SourceConvergenceState: v1alpha1.SourceConvergencePending}}
 	f.group.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse}, {Type: "Degraded", Status: metav1.ConditionTrue, Reason: "ReplicaDown"}, {Type: "RecoveryPending", Status: metav1.ConditionTrue}}
-	f.group.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDeferred, Reason: "DeploymentHold"}
+	f.group.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseDeferred,
+		Admission: &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferDeploymentHold}}
 	f.group.Status.UpdatePhase = "UpdatingReplicas"
 	f.group.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceSucceeded}
 	f.group.Status.Dragonfly = &v1alpha1.DragonflyStatus{Upgrade: &v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseSucceeded}}
@@ -550,11 +551,77 @@ func TestDeployAPIUnstableAndFreshSnapshot(t *testing.T) {
 		t.Fatalf("stale snapshot returned: %v", response)
 	}
 	wantHealth := map[string]any{"ready": false, "degradedReason": "ReplicaDown", "replicationRunning": false, "replicationLagSeconds": float64(9), "recoveryPending": true}
-	wantOperations := map[string]any{"plannedFailover": map[string]any{"phase": string(v1alpha1.PlannedFailoverPhaseDeferred), "reason": "DeploymentHold"}, "updatePhase": "UpdatingReplicas", "restoreInPlace": string(v1alpha1.RestoreInPlaceSucceeded), "dragonflyUpgrade": string(v1alpha1.DragonflyUpgradePhaseSucceeded)}
+	wantOperations := map[string]any{"plannedFailover": map[string]any{"phase": string(v1alpha1.PlannedFailoverPhaseDeferred), "outcome": "", "reason": "DeploymentHold"}, "updatePhase": "UpdatingReplicas", "restoreInPlace": string(v1alpha1.RestoreInPlaceSucceeded), "dragonflyUpgrade": string(v1alpha1.DragonflyUpgradePhaseSucceeded)}
 	if !reflect.DeepEqual(response["health"], wantHealth) || !reflect.DeepEqual(response["operations"], wantOperations) {
 		t.Fatalf("persisted fields missing: %v", response)
 	}
 	f.grant(t, "migration", "op1", "tenant", 30, 423)
+}
+
+// TestPlannedFailoverOperationProjection pins operations.plannedFailover:
+// a reason belongs to the run's current phase (an admission reason is not
+// reported after admission), a terminal run reports its result (even an
+// empty reason), and a terminal marker naming the run wins over a stale
+// live phase.
+func TestPlannedFailoverOperationProjection(t *testing.T) {
+	marker := func(runID string, outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) map[string]string {
+		return map[string]string{controller.PlannedFailoverTerminalAnnotation: controller.TerminalMarker{RunID: runID, Outcome: outcome, Reason: reason}.String()}
+	}
+	waited := &v1alpha1.PlannedFailoverAdmission{WaitReason: v1alpha1.PlannedFailoverWaitPeerUnreadable}
+	for name, tc := range map[string]struct {
+		pf          *v1alpha1.PlannedFailoverStatus
+		annotations map[string]string
+		want        map[string]string
+	}{
+		"no run": {want: map[string]string{"phase": "", "outcome": "", "reason": ""}},
+		"admitting reports its wait reason": {
+			pf:   &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, Admission: waited},
+			want: map[string]string{"phase": "Admitting", "outcome": "", "reason": "PeerUnreadable"},
+		},
+		"deferred reports its defer reason": {
+			pf: &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseDeferred,
+				Admission: &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive}},
+			want: map[string]string{"phase": "Deferred", "outcome": "", "reason": "CooldownActive"},
+		},
+		"a live phase drops the admission reason": {
+			pf:   &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, Admission: waited},
+			want: map[string]string{"phase": "WaitingForLag", "outcome": "", "reason": ""},
+		},
+		"succeeded with an empty reason is not the admission reason": {
+			pf: &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Admission: waited,
+				Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded}},
+			want: map[string]string{"phase": "Succeeded", "outcome": "Succeeded", "reason": ""},
+		},
+		"failed reports its result reason": {
+			pf: &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseFailed, Admission: waited,
+				Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, Reason: v1alpha1.PlannedFailoverReasonLagTimeout}},
+			want: map[string]string{"phase": "Failed", "outcome": "RolledBack", "reason": "LagTimeout"},
+		},
+		"a matching marker ends a live-looking run": {
+			pf:          &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag},
+			annotations: marker("r1", v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout),
+			want:        map[string]string{"phase": "Failed", "outcome": "RolledBack", "reason": "LagTimeout"},
+		},
+		"a matching success marker": {
+			pf:          &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhasePublishing},
+			annotations: marker("r1", v1alpha1.PlannedFailoverOutcomeSucceeded, ""),
+			want:        map[string]string{"phase": "Succeeded", "outcome": "Succeeded", "reason": ""},
+		},
+		"another run's marker is ignored": {
+			pf:          &v1alpha1.PlannedFailoverStatus{RunID: "r2", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag},
+			annotations: marker("r1", v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout),
+			want:        map[string]string{"phase": "WaitingForLag", "outcome": "", "reason": ""},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fg := &v1alpha1.MysqlFailoverGroup{}
+			fg.Annotations = tc.annotations
+			fg.Status.PlannedFailover = tc.pf
+			if got := plannedFailoverOperation(fg); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("plannedFailoverOperation = %v; want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestDeployAPITLSMuxLogsAndMetrics(t *testing.T) {

@@ -264,7 +264,7 @@ func TestEnvtest_PlannedFailoverSpecAndStatus(t *testing.T) {
 	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
 		MaxLagWait:   &metav1.Duration{Duration: 2 * time.Minute},
 		DrainTimeout: &metav1.Duration{Duration: 10 * time.Second},
-		OnCooldown:   "defer",
+		OnCooldown:   v1alpha1.PlannedFailoverCooldownDefer,
 	}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("failed to create fg with spec.plannedFailover: %v", err)
@@ -273,20 +273,17 @@ func TestEnvtest_PlannedFailoverSpecAndStatus(t *testing.T) {
 	// Stamp a Deferred status with all the fields that need schema validation.
 	now := metav1.Now()
 	retry := metav1.NewTime(now.Add(2 * time.Minute))
-	lagWrap := metav1.Duration{Duration: 2 * time.Minute}
-	drainWrap := metav1.Duration{Duration: 10 * time.Second}
-	lost := int64(0)
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase:            v1alpha1.PlannedFailoverPhaseDeferred,
-		Target:           "dc2",
-		SourcePrimary:    "dc1",
-		StartTime:        &now,
-		MaxLagWait:       &lagWrap,
-		DrainTimeout:     &drainWrap,
-		RetryAfter:       &retry,
-		Reason:           "CooldownActive",
-		Message:          "cooldown active; retrying at " + retry.Format(time.RFC3339),
-		TransactionsLost: &lost,
+		RunID:      "run-1",
+		Revision:   1,
+		Phase:      v1alpha1.PlannedFailoverPhaseDeferred,
+		TargetSite: "dc2",
+		StartTime:  now,
+		Settings: v1alpha1.PlannedFailoverSettings{
+			MaxLagWait: metav1.Duration{Duration: 2 * time.Minute}, DrainTimeout: metav1.Duration{Duration: 10 * time.Second},
+		},
+		Admission: &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive, RetryTime: &retry},
+		Message:   "cooldown active; retrying at " + retry.Format(time.RFC3339),
 	}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatalf("failed to update planned-failover status: %v", err)
@@ -297,7 +294,7 @@ func TestEnvtest_PlannedFailoverSpecAndStatus(t *testing.T) {
 		t.Fatalf("failed to read back: %v", err)
 	}
 	if fetched.Spec.PlannedFailover == nil ||
-		fetched.Spec.PlannedFailover.OnCooldown != "defer" ||
+		fetched.Spec.PlannedFailover.OnCooldown != v1alpha1.PlannedFailoverCooldownDefer ||
 		fetched.Spec.PlannedFailover.MaxLagWait.Duration != 2*time.Minute ||
 		fetched.Spec.PlannedFailover.DrainTimeout.Duration != 10*time.Second {
 		t.Errorf("spec.plannedFailover round-trip mismatch: %+v", fetched.Spec.PlannedFailover)
@@ -306,11 +303,11 @@ func TestEnvtest_PlannedFailoverSpecAndStatus(t *testing.T) {
 		fetched.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseDeferred {
 		t.Fatalf("status.plannedFailover round-trip mismatch: %+v", fetched.Status.PlannedFailover)
 	}
-	if fetched.Status.PlannedFailover.Reason != "CooldownActive" {
-		t.Errorf("reason = %q, want CooldownActive", fetched.Status.PlannedFailover.Reason)
+	if a := fetched.Status.PlannedFailover.Admission; a == nil || a.DeferReason != v1alpha1.PlannedFailoverDeferCooldownActive {
+		t.Errorf("admission = %+v, want deferReason CooldownActive", a)
 	}
-	if fetched.Status.PlannedFailover.RetryAfter == nil {
-		t.Error("RetryAfter not round-tripped")
+	if a := fetched.Status.PlannedFailover.Admission; a == nil || a.RetryTime == nil {
+		t.Error("retryTime not round-tripped")
 	}
 }
 
@@ -326,6 +323,23 @@ func TestEnvtest_PlannedFailoverOnCooldownEnumRejectsGarbage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected CRD enum validation to reject onCooldown=bogus")
 	}
+	// The v1alpha1 lower-case spelling is gone too.
+	fg = newTestFG(ns)
+	fg.Name = "lower-case"
+	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: "defer"}
+	if err := k8sClient.Create(ctx, fg); err == nil {
+		t.Fatal("expected CRD enum validation to reject onCooldown=defer")
+	}
+	// An omitted policy defaults to Reject.
+	fg = newTestFG(ns)
+	fg.Name = "defaulted"
+	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{}
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if fg.Spec.PlannedFailover.OnCooldown != v1alpha1.PlannedFailoverCooldownReject {
+		t.Fatalf("onCooldown defaulted to %q, want Reject", fg.Spec.PlannedFailover.OnCooldown)
+	}
 }
 
 func TestEnvtest_PlannedFailoverPhaseEnumRejectsGarbage(t *testing.T) {
@@ -338,9 +352,12 @@ func TestEnvtest_PlannedFailoverPhaseEnumRejectsGarbage(t *testing.T) {
 	}
 	now := metav1.Now()
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase:     v1alpha1.PlannedFailoverPhase("NotARealPhase"),
-		Target:    "dc2",
-		StartTime: &now,
+		RunID:      "run-1",
+		Revision:   1,
+		Phase:      v1alpha1.PlannedFailoverPhase("NotARealPhase"),
+		TargetSite: "dc2",
+		StartTime:  now,
+		Settings:   v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute}},
 	}
 	err := k8sClient.Status().Update(ctx, fg)
 	if err == nil {

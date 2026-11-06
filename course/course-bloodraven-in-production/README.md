@@ -126,10 +126,10 @@ Bloodraven's job ends at a label selector and a DNS record; your application's j
   8. Explain why planned failover is RPO 0 by construction and what the lag gate actually compares
   9. Choose the rollback behaviour for a lag gate that never closes
 
-**Cache and sessions that follow the primary** — Optional Dragonfly moves with the primary on a best-effort budget. What `sessionsPreserved` actually tells you, and why the version floor is a promise rather than a check.
+**Cache and sessions that follow the primary** — Optional Dragonfly moves with the primary on a best-effort budget. What `dragonfly.sessions` actually tells you, and why the version floor is a promise rather than a check.
 
   10. Say what Bloodraven guarantees about Dragonfly and what it explicitly does not
-  11. Trace a Dragonfly promotion through `REPLTAKEOVER` and its fallback, and read `sessionsPreserved`
+  11. Trace a Dragonfly promotion through `REPLTAKEOVER` and its fallback, and read `dragonfly.sessions`
   12. Explain how the active Dragonfly Service sheds an endpoint atomically during a takeover
 
 **Deployments that ask first: the lease API** — The deploy pipeline is the other thing that touches your primary on a schedule. A migration mutex, a hold that defers planned disruption and nothing else, and a generation counter that fences any migration the topology moved underneath.
@@ -138,7 +138,7 @@ Bloodraven's job ends at a label selector and a DNS record; your application's j
   14. Say exactly which operations a live hold defers, and which paths never consult a lease
   15. Answer a `409 revoked`, `404` or `403 token_mismatch` renewal correctly: stop the heartbeat, decide by the DDL boundary, never reconnect to the new primary
 
-*Unit test — The application's half of failover* (12 questions, pass at 70%). Quick check: can you say why a pooled connection keeps serving stale reads after a correct promotion, name the one path that actually drains connections, and read a `sessionsPreserved` of nil without guessing, and say what a deployment hold defers and what it never touches?
+*Unit test — The application's half of failover* (12 questions, pass at 70%). Quick check: can you say why a pooled connection keeps serving stale reads after a correct promotion, name the one path that actually drains connections, and read an absent `dragonfly.sessions` without guessing, and say what a deployment hold defers and what it never touches?
 
 *Project — Make the writer survive.* Instrument a writer against `playground`, run both a planned and an emergency failover underneath it, and produce a drill record with the measured write-gap for each — so the recovery time you claim for your application is one you observed rather than one you assumed.
 

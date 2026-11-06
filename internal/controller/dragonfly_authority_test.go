@@ -45,15 +45,16 @@ func TestDragonflyManager_QueuedRequestObsoleteAfterCompletedPlannedFailover(t *
 	latest := getFGByKey(t, c, mgr.fgKey)
 	latest.Status.ActiveSite = "dc1"
 	latest.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhaseSucceeded, SourcePrimary: "dc2", Target: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{PromotionMethod: "REPLTAKEOVER"},
+		Phase: v1alpha1.PlannedFailoverPhaseSucceeded, RunID: "run-1", SourceSite: "dc2", TargetSite: "dc1",
+		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{Takeover: &v1alpha1.DragonflyTakeoverRecord{
+			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	now := metav1.Now()
 	latest.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: &now}
 	if err := c.Status().Update(context.Background(), latest); err != nil {
 		t.Fatal(err)
 	}
-	mgr.SetPaused(false)
+	mgr.SetUpgradePaused(false)
 	var dials atomic.Int32
 	mgr.SetConnector(func(context.Context, string, string) (DragonflyConnection, error) {
 		dials.Add(1)
@@ -134,11 +135,21 @@ func TestSupersededPromotionRequest(t *testing.T) {
 		{"newer MySQL failover to dc1", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.LastFailoverTarget, fg.Status.LastFailover = "dc1", at(2*time.Second)
 		}, true},
-		{"planned failover started after", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Target: "dc1", StartTime: at(time.Second)}
+		{"planned failover claimed after", func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, TargetSite: "dc1",
+				StartTime: *at(-time.Minute), ClaimTime: at(time.Second)}
 		}, true},
+		{"planned request accepted earlier, claimed after", func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseFencing, TargetSite: "dc1",
+				StartTime: *at(-time.Hour), ClaimTime: at(0)}
+		}, true},
+		{"planned request still waiting", func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, TargetSite: "dc1",
+				StartTime: *at(time.Second)}
+		}, false},
 		{"planned failover from yesterday", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Target: "dc1", StartTime: at(-24 * time.Hour)}
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, TargetSite: "dc1",
+				StartTime: *at(-24 * time.Hour), ClaimTime: at(-24 * time.Hour)}
 		}, false},
 		{"newer Dragonfly promotion to dc1", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: at(time.Second)}
@@ -198,8 +209,9 @@ func TestPromoteDragonflyForRollout_ReadsAuthorityUncached(t *testing.T) {
 	stale := getFGByKey(t, liveClient, mgr.fgKey)
 	latest := stale.DeepCopy()
 	latest.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, SourcePrimary: "dc2", Target: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{PromotionMethod: "REPLTAKEOVER"},
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, RunID: "run-1", SourceSite: "dc2", TargetSite: "dc1",
+		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{Takeover: &v1alpha1.DragonflyTakeoverRecord{
+			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	if err := liveClient.Status().Update(context.Background(), latest); err != nil {
 		t.Fatal(err)
@@ -483,12 +495,15 @@ func TestDragonflySnapshotUpgrade_WaitsForAndYieldsToEmergencyPromotion(t *testi
 		return nil, errors.New("old source not ready")
 	}
 
+	// The in-flight upgrade paused the manager when it was accepted (the
+	// pause follows only the upgrade state read under the gate).
+	mgr.SetUpgradePaused(true)
 	requeue, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), live)
 	if err != nil || requeue != dragonflyGateRetry {
 		t.Fatalf("upgrade while the emergency held the gate = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
 	}
-	if !mgr.paused.Load() {
-		t.Error("fixture: snapshot upgrade did not pause the registered manager")
+	if !mgr.paused() {
+		t.Error("the in-flight upgrade's pause was lifted while it waited for the gate")
 	}
 	if n := upgradeDials.Load(); n != 0 {
 		t.Fatalf("upgrade dialled Dragonfly %d times while the emergency held the gate", n)
@@ -511,21 +526,49 @@ func TestDragonflySnapshotUpgrade_WaitsForAndYieldsToEmergencyPromotion(t *testi
 	}
 }
 
-// A runner resync derives the Dragonfly manager's pause from persisted
-// status, so it cannot unpause a manager while a snapshot upgrade runs.
-func TestDragonflyMaintenanceActive(t *testing.T) {
+// TestDragonflyPauseSourcesIndependent: the Dragonfly manager pauses while
+// either source says so, and neither source can revoke the other. A
+// snapshot upgrade ending (or a runner resync deriving the upgrade pause
+// from status) does not unpause a manager whose group's planned-failover
+// claim is held, and releasing the claim does not unpause an upgrade.
+func TestDragonflyPauseSourcesIndependent(t *testing.T) {
+	mgr := NewDragonflyManager(nil, nil, slog.Default(), client.ObjectKey{Namespace: "ns", Name: "fg"}, time.Second)
+	if mgr.paused() {
+		t.Fatal("fresh manager is paused")
+	}
+	slot := &PlannedClaimSlot{}
+	mgr.SetPlannedOwner(slot.Held)
+	slot.hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2"})
+	if !mgr.paused() {
+		t.Fatal("a held claim did not pause the manager")
+	}
+	mgr.SetUpgradePaused(true)
+	mgr.SetUpgradePaused(false) // the upgrade ends
+	if !mgr.paused() {
+		t.Fatal("ending the upgrade unpaused a manager whose claim is held")
+	}
+	mgr.SetUpgradePaused(true)
+	slot.release("run-1", ReleaseTerminal)
+	if !mgr.paused() {
+		t.Fatal("releasing the claim unpaused an upgrade")
+	}
+	mgr.SetUpgradePaused(false)
+	if mgr.paused() {
+		t.Fatal("manager still paused with neither source set")
+	}
+	if !slot.toHold("run-2") || !mgr.paused() {
+		t.Fatal("a hold must pause the manager like a running claim")
+	}
+	// A waiting request owns nothing: a status block in Admitting does not
+	// make the group's Dragonfly owned.
 	fg := fgWithDragonflyEnabledAndActive()
-	if dragonflyMaintenanceActive(fg) {
-		t.Fatal("idle group reported maintenance")
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-3", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, TargetSite: "dc2"}
+	if plannedFailoverOwnsDragonfly(fg, false) {
+		t.Error("a waiting planned-failover request owns the group's Dragonfly")
 	}
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Upgrade: &v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseUpdatingActive}}
-	if !dragonflyMaintenanceActive(fg) {
-		t.Error("in-flight snapshot upgrade not reported as maintenance")
-	}
-	fg.Status.Dragonfly.Upgrade.Phase = v1alpha1.DragonflyUpgradePhaseSucceeded
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining}
-	if !dragonflyMaintenanceActive(fg) {
-		t.Error("in-flight planned failover not reported as maintenance")
+	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseDraining
+	if !plannedFailoverOwnsDragonfly(fg, false) {
+		t.Error("a run that owns the sites does not own the group's Dragonfly")
 	}
 }
 
@@ -534,9 +577,9 @@ func TestDragonflyMaintenanceActive(t *testing.T) {
 // A planned failover that finds the gate held says so: MySQL writes stay
 // paused on the fenced source while it waits.
 func TestPlannedFailoverPromotingDragonfly_ReportsGateWait(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
+	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	cb, nn := newDragonflyFakeClient(fg)
 	c := cb.Build()
 	runner := &TopologyManagerRunner{}
@@ -549,8 +592,7 @@ func TestPlannedFailoverPromotingDragonfly_ReportsGateWait(t *testing.T) {
 	defer release()
 
 	for range 2 {
-		live := getFGByKey(t, c, nn)
-		if requeue, err := r.plannedFailoverPromotingDragonfly(context.Background(), live, nn); err != nil || requeue != dragonflyGateRetry {
+		if requeue, err := pfDragonflyTakeoverPass(t, r, context.Background(), nn); err != nil || requeue != dragonflyGateRetry {
 			t.Fatalf("planned phase with the gate held = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
 		}
 	}
@@ -587,7 +629,7 @@ func TestTopologyManagerRunner_NewDragonflyManagerWiring(t *testing.T) {
 	if mgr.authority() != client.Reader(reader) {
 		t.Error("manager does not read the group through the runner's uncached reader")
 	}
-	if !mgr.paused.Load() {
+	if !mgr.paused() {
 		t.Error("manager started unpaused during a snapshot upgrade")
 	}
 }

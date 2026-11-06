@@ -1,7 +1,6 @@
 package component
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -91,19 +90,5 @@ func TestRestoreReclonePending_SplitBrainWinnerNotPromoted(t *testing.T) {
 	h.pollN(5)
 	if h.dc1MySQL.isReadOnly() {
 		t.Fatal("priority loser must not be fenced when the winner awaits its reclone")
-	}
-}
-
-// kubectl bloodraven promote (PlannedPromote) is the explicit override
-// and is not blocked by a pending reclone.
-func TestRestoreReclonePending_PlannedPromoteOverrides(t *testing.T) {
-	h := newTestHarness(t)
-	h.pollN(2)
-	h.tm.SetRestoreReclonePending([]string{"dc2"})
-	if _, err := h.tm.PlannedPromote(context.Background(), "dc2", "dc1"); err != nil {
-		t.Fatalf("PlannedPromote of a pending site: %v", err)
-	}
-	if h.dc2MySQL.isReadOnly() {
-		t.Fatal("explicitly promoted site should be writable")
 	}
 }

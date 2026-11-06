@@ -84,6 +84,28 @@ func TestAssertHealthyBaselineUsesAnnotationFailoverRecord(t *testing.T) {
 	}
 }
 
+// A standing automation hold fails the baseline with the acknowledgement
+// command as the remediation (O-m2).
+func TestAssertHealthyBaselineRejectsPlannedFailoverHold(t *testing.T) {
+	mfg := testBaselineMFG(false)
+	mfg.Status.PlannedFailoverHold = &v1alpha1.PlannedFailoverHold{RunID: "run-7",
+		Reason: v1alpha1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}
+	err := AssertHealthyBaseline(context.Background(), testScenarioEnv(t, mfg))
+	want := "kubectl bloodraven ack-planned-failover-hold " + mfg.Name + " -n " + mfg.Namespace
+	if err == nil || !strings.Contains(err.Error(), "automation hold stands (run run-7") || !strings.Contains(err.Error(), want) {
+		t.Fatalf("hold baseline error = %v, want the hold and %q", err, want)
+	}
+
+	// A hand-edited True condition without the field names no run.
+	mfg = testBaselineMFG(false)
+	mfg.Status.Conditions = append(mfg.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionAutomaticFailoverHeld,
+		Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPlannedFailoverManualRecoveryRequired, LastTransitionTime: metav1.Now()})
+	err = AssertHealthyBaseline(context.Background(), testScenarioEnv(t, mfg))
+	if err == nil || !strings.Contains(err.Error(), "names no planned-failover run") {
+		t.Fatalf("condition-only hold baseline error = %v", err)
+	}
+}
+
 func testScenarioEnv(t *testing.T, mfg *v1alpha1.MysqlFailoverGroup) *runner.Env {
 	t.Helper()
 	scheme := runtime.NewScheme()

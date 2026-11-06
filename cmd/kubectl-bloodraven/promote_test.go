@@ -31,6 +31,12 @@ func TestBuildPlannedFailoverValue(t *testing.T) {
 			want:   "pdx:maxLagWait=30s",
 		},
 		{
+			name:   "sub-millisecond override stays in the annotation charset",
+			site:   "pdx",
+			maxLag: 1500 * time.Nanosecond,
+			want:   "pdx:maxLagWait=1500ns",
+		},
+		{
 			name:        "empty site is rejected",
 			site:        "",
 			wantErr:     true,

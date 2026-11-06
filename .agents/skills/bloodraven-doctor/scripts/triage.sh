@@ -114,6 +114,81 @@ if [[ -n "$UPDATING" ]]; then
         echo "  The ordered update stopped on a site whose pod is not Ready and rolls nothing else until it is: see playbook 34."
     fi
 fi
+# status.plannedFailoverHold (summarised by a True AutomaticFailoverHeld
+# condition) means a planned failover ended ManualRecoveryRequired: automatic
+# failover is off for this group until a human resolves the split brain and
+# acknowledges the hold. A planned-failover-terminal marker with outcome
+# ManualRecoveryRequired holds the same way on its own: it is all there is
+# when the run ended while status writes were stalled. This mirrors the
+# operator's PlannedHoldFrom: the status record wins, a True condition with
+# no record is a nameless hold, and otherwise the marker's run is held.
+PF_MARKER=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/planned-failover-terminal}' 2>/dev/null || true)
+MARKER_RUN=""
+MARKER_OUTCOME=""
+MARKER_REASON=""
+if [[ -n "$PF_MARKER" ]]; then
+    # The marker is {"schemaVersion":1,"runID":...,"outcome":...,"reason":...}.
+    # A marker the operator cannot parse proves nothing, so neither do we.
+    if command -v jq >/dev/null 2>&1; then
+        MARKER_FIELDS=$(printf '%s' "$PF_MARKER" | jq -r 'select(type == "object" and .schemaVersion == 1 and (.runID | type) == "string" and .runID != "") | [.runID, (.outcome // ""), (.reason // "")] | join("|")' 2>/dev/null || true)
+    elif [[ "$PF_MARKER" =~ \"schemaVersion\":1[,}] ]]; then
+        MARKER_FIELDS="$(printf '%s' "$PF_MARKER" | sed -n 's/.*"runID":"\([^"]*\)".*/\1/p')|$(printf '%s' "$PF_MARKER" | sed -n 's/.*"outcome":"\([^"]*\)".*/\1/p')|$(printf '%s' "$PF_MARKER" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')"
+    else
+        MARKER_FIELDS=""
+    fi
+    IFS='|' read -r MARKER_RUN MARKER_OUTCOME MARKER_REASON <<<"$MARKER_FIELDS" || true
+fi
+HOLD=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="AutomaticFailoverHeld")]}{.status}{" "}{.reason}{end}' 2>/dev/null || true)
+HOLD_RECORD=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailoverHold.runID}{" reason="}{.status.plannedFailoverHold.reason}{" "}{.status.plannedFailoverHold.sourceSite}{"->"}{.status.plannedFailoverHold.targetSite}{" ambiguousSites="}{.status.plannedFailoverHold.ambiguousSites}' 2>/dev/null || true)
+HOLD_RUN=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailoverHold.runID}' 2>/dev/null || true)
+HOLD_FROM_MARKER=""
+if [[ -n "$MARKER_RUN" && "$MARKER_OUTCOME" == "ManualRecoveryRequired" && -z "$HOLD_RUN" && "$HOLD" != True* ]]; then
+    HOLD_RUN="$MARKER_RUN"
+    HOLD_RECORD="$MARKER_RUN reason=$MARKER_REASON"
+    HOLD_FROM_MARKER=1
+fi
+if [[ "$HOLD" == True* || -n "$HOLD_RUN" ]]; then
+    if [[ -n "$HOLD_FROM_MARKER" ]]; then
+        echo "🔴 AutomaticFailoverHeld: held by the terminal marker only (status writes stalled, so no condition or status.plannedFailoverHold was written); run=$HOLD_RUN reason=${MARKER_REASON:-<none>}"
+    else
+        echo "🔴 AutomaticFailoverHeld: ${HOLD:-<no condition>}; plannedFailoverHold: run=${HOLD_RUN:-<none>}${HOLD_RUN:+ ${HOLD_RECORD#"$HOLD_RUN"}}"
+    fi
+    echo "  Emergency failover, split-brain resolution, the re-assert, ordered updates, rotations, recovery and DNS reconcile are held for this group."
+    if [[ -n "$HOLD_RUN" ]]; then
+        echo "  Resolve the split brain by hand, then (with approval) kubectl bloodraven ack-planned-failover-hold $MFG_NAME -n $NAMESPACE, or annotate bloodraven.shipstream.io/acknowledge-planned-failover-hold=$HOLD_RUN: see playbook 38."
+    else
+        echo "  The condition names no run (no status.plannedFailoverHold): no acknowledgement can clear it; see playbook 38."
+    fi
+elif [[ -n "$HOLD" ]]; then
+    echo "AutomaticFailoverHeld: $HOLD"
+fi
+PF_PHASE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailover.phase}' 2>/dev/null || true)
+if [[ -n "$PF_PHASE" ]]; then
+    PF_SUMMARY=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='run={.status.plannedFailover.runID} {.status.plannedFailover.sourceSite}->{.status.plannedFailover.targetSite} outcome={.status.plannedFailover.result.outcome} reason={.status.plannedFailover.result.reason} warnings={.status.plannedFailover.result.warnings} waitReason={.status.plannedFailover.admission.waitReason} deferReason={.status.plannedFailover.admission.deferReason}' 2>/dev/null || true)
+    PF_OUTCOME=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailover.result.outcome}' 2>/dev/null || true)
+    PF_WAIT=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailover.admission.waitReason}' 2>/dev/null || true)
+    PF_RUN=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailover.runID}' 2>/dev/null || true)
+    echo "Planned failover:    phase=$PF_PHASE $PF_SUMMARY"
+    if [[ -n "$PF_MARKER" ]]; then
+        echo "  Terminal marker $PF_MARKER: status writes stalled and the marker ended the run it names (runID), whatever phase says."
+    fi
+    # The marker's outcome is the run's outcome when it names this run and
+    # the status result has not been written yet.
+    if [[ -z "$PF_OUTCOME" && -n "$MARKER_RUN" && "$MARKER_RUN" == "$PF_RUN" ]]; then
+        PF_OUTCOME="$MARKER_OUTCOME"
+    fi
+    case "$PF_OUTCOME" in
+        SourceLeftFenced)
+            echo "  Nothing was written to the target and the source stays read-only. Check which site is writable before anything else: see playbook 37." ;;
+        PromotedUnconfirmed)
+            echo "  super_read_only=OFF may have reached the target. Read read_only/super_read_only/gtid_executed on the source and the target: see the PromotedUnconfirmed row of the alert matrix." ;;
+        ManualRecoveryRequired)
+            echo "  The run may have written to the target and could not explain the result; automation is held: see playbook 38." ;;
+    esac
+    if [[ "$PF_PHASE" == "Admitting" && "$PF_WAIT" == "PeerUnreadable" ]]; then
+        echo "  Waiting because a primary-candidate or dr-only site does not answer. Planned failovers are strict: it ends NotStarted/AdmissionTimeout after 2 minutes unless the site answers."
+    fi
+fi
 
 echo ""
 echo "--- 2. Sites & Replication Summary ---"

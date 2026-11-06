@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/sidecar"
@@ -137,6 +138,19 @@ type MysqlFailoverGroupReconciler struct {
 	// group's Dragonfly gate (default defaultDragonflyGateWait). Tests shorten it.
 	dragonflyGateWait time.Duration
 
+	// PlannedTopology is the planned-failover engine's topology facade. Nil
+	// means production: the facade over Runner. Tests inject a fake.
+	PlannedTopology PlannedFailoverTopology
+	// plannedClock overrides the planned-failover engine's clock (tests).
+	plannedClock clock.Clock
+	// encryptionClock overrides the clock stamped on encryption status
+	// (tests that compare status writes byte for byte across passes).
+	encryptionClock clock.Clock
+	// plannedEngine is built on first use (plannedFailoverEngine) and kept:
+	// its memo of what this process sent must survive between passes.
+	plannedEngineOnce sync.Once
+	plannedEngine     *PlannedFailoverEngine
+
 	// keyringStatus overrides the production sidecar-backed fetcher used
 	// by the encryption-at-rest state machine. Tests inject a scripted
 	// fake; production wiring leaves this nil so
@@ -227,7 +241,7 @@ type dragonflyRolloutState struct {
 // path) produce an operator that crash-loops at startup. AUDIT M3.
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
-func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := log.FromContext(ctx)
 
 	var fg v1alpha1.MysqlFailoverGroup
@@ -260,6 +274,20 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{}, nil
 	}
+
+	// The planned-failover engine is the only driver of an in-flight run's
+	// deadlines (fence, lag, promotion, rollback, the status stall, manager
+	// absence) and of a hold's acknowledgement. A reconcile that returns
+	// before the regular planned-failover step below, on an error or a
+	// requeue of an earlier step, still runs one pass for such a run, or
+	// a fenced source could stay fenced for as long as that step fails.
+	// New requests are admitted only by the regular step.
+	pfDriven := false
+	defer func() {
+		if !pfDriven {
+			result, retErr = r.drivePlannedFailoverOnEarlyReturn(ctx, &fg, result, retErr)
+		}
+	}()
 
 	if m := r.deploymentLeaseManager(); m != nil {
 		if err := m.reconcileRevocation(ctx, &fg); err != nil {
@@ -472,20 +500,20 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if inPlaceRequeue, err := r.reconcileInPlaceRestore(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile in-place restore: %w", err)
 	} else if inPlaceRequeue > 0 {
-		// A restore still in Preflight has not frozen anything, and waits
-		// for a planned failover already in flight to finish
-		// (inPlacePreflight). Keep driving that failover on this pass, or
-		// the two wait for each other.
-		if !inPlaceRestoreFreezesTopology(&fg) && plannedFailoverInFlight(fg.Status.PlannedFailover) {
-			pfRequeue, err := r.reconcilePlannedFailover(ctx, &fg)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcile planned failover during in-place restore preflight: %w", err)
-			}
-			inPlaceRequeue = minPositiveDuration(inPlaceRequeue, pfRequeue)
+		// A restore in Preflight waits for a planned failover already in
+		// flight, and for a held claim or automation hold
+		// (inPlacePreflight). Keep driving the engine on this pass (its
+		// deadlines, a hold's acknowledgement), or the two wait for each
+		// other. A new request waits until the restore returns.
+		pfDriven = true
+		pfRequeue, pfRan, err := r.reconcilePlannedFailoverInFlight(ctx, &fg)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile planned failover during in-place restore: %w", err)
 		}
+		inPlaceRequeue = minPositiveDuration(inPlaceRequeue, pfRequeue)
 		// Still sync labels before we bounce: the fence needs pod labels
 		// re-applied on the same pass that transitions into Fencing.
-		if err := r.syncPodLabels(ctx, &fg); err != nil {
+		if err := r.syncPodLabels(ctx, r.plannedPostPassView(ctx, &fg, pfRan)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("sync pod labels during in-place restore: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: inPlaceRequeue}, nil
@@ -512,25 +540,33 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	deferredRequeue = minPositiveDuration(deferredRequeue, reclonesRequeue)
 
-	// Drive the planned-failover state machine when
-	// spec / status / annotation indicate a graceful switchover is armed
-	// or in flight. This must run AFTER reconcileInPlaceRestore (the two
-	// guard against each other) and BEFORE syncPodLabels (so the source
-	// primary's role label is stripped on the same reconcile that
-	// stamps Draining). The state machine is driven by
-	// status.plannedFailover.phase, not by the annotation alone, so
-	// operator restarts resume cleanly.
+	// Drive the planned-failover engine when a request, a run, a hold or
+	// a held claim is pending. This must run AFTER reconcileInPlaceRestore
+	// (the two guard against each other) and BEFORE syncPodLabels, which
+	// reads the group again after the pass, so the source's role label is
+	// stripped on the same reconcile that records the fence. Each pass
+	// reads the group uncached, so operator restarts resume from the
+	// durable records. Only a run that owns the sites or is Publishing, or
+	// a Run-mode claim, returns early: a pass for a run that owns nothing
+	// (Admitting or Deferred without a claim, a standing automation hold,
+	// a marker retry) only contributes a requeue and does not hold up the
+	// rest of the reconcile, so backups, keyring and label work keep
+	// running for as long as it waits.
+	pfDriven = true
+	pfRan := r.plannedFailoverPassRuns(&fg)
 	if pfRequeue, err := r.reconcilePlannedFailover(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile planned failover: %w", err)
-	} else if pfRequeue > 0 {
-		if err := r.syncPodLabels(ctx, &fg); err != nil {
+	} else if pfRequeue > 0 && r.plannedFailoverHoldsReconcile(&fg) {
+		if err := r.syncPodLabels(ctx, r.plannedPostPassView(ctx, &fg, pfRan)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("sync pod labels during planned failover: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: pfRequeue}, nil
+	} else {
+		deferredRequeue = minPositiveDuration(deferredRequeue, pfRequeue)
 	}
 
 	// Sync pod labels based on status
-	if err := r.syncPodLabels(ctx, &fg); err != nil {
+	if err := r.syncPodLabels(ctx, r.plannedPostPassView(ctx, &fg, pfRan)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
 	}
 
@@ -2106,17 +2142,16 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 		}
 	}
 
-	// During a planned failover we strip the source primary's role
-	// label as soon as we enter Draining so the -primary Service stops
-	// directing writes to it. At that point status.activeSite still
-	// names the source (it is not rewritten until Resuming), so the
-	// matcher below is the fenced site. Once Resuming writes
-	// status.activeSite=<target>, this branch skips over the new
-	// primary and the label sweep on the following reconcile re-adds
-	// the primary label to the target's pod.
-	if plannedFailoverFencesSourcePrimary(fg) {
+	// While a planned-failover run owns the sites (Fencing through
+	// Promoting, and RollingBack until it ends) the -primary Service must
+	// not send writes to the run's source, so its primary label is
+	// stripped. The source is matched by name (the run records it), not by
+	// "whichever site status calls primary": once the promotion has moved
+	// status.activeSite to the target, the target keeps its primary label.
+	// A run that is terminal or marked fences nothing.
+	if fenced := plannedFailoverFencedSite(fg); fenced != "" {
 		for i := range sites {
-			if sites[i].role == "primary" {
+			if sites[i].spec.Name == fenced && sites[i].role == "primary" {
 				sites[i].role = "fenced"
 			}
 		}

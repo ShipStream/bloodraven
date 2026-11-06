@@ -187,14 +187,19 @@ func (g GTIDSet) IsEmpty() bool {
 }
 
 // Contains returns true if this set contains all transactions in other.
+// Each UUID's intervals are sorted and coalesced once, then every interval
+// of other is looked up by binary search: O((n+m) log n) per UUID rather
+// than a sort per interval of other (a fragmented set of thousands of
+// intervals is checked under the runner's registration locks).
 func (g GTIDSet) Contains(other GTIDSet) bool {
 	for uuid, otherIntervals := range other {
 		myIntervals, ok := g[uuid]
 		if !ok {
 			return false
 		}
+		merged := coalesceIntervals(myIntervals)
 		for _, oi := range otherIntervals {
-			if !intervalsContain(myIntervals, oi) {
+			if !coalescedContain(merged, oi) {
 				return false
 			}
 		}
@@ -202,31 +207,33 @@ func (g GTIDSet) Contains(other GTIDSet) bool {
 	return true
 }
 
-// intervalsContain returns true if the intervals collectively cover the target interval.
-func intervalsContain(intervals []Interval, target Interval) bool {
-	// For each position in target, check if it's covered by some interval.
-	// Since intervals may not be merged, we need to check coverage.
-	// Sort intervals by start for efficient checking.
+// coalesceIntervals returns intervals sorted by start with overlapping and
+// adjacent ones merged. The input is not modified.
+func coalesceIntervals(intervals []Interval) []Interval {
 	sorted := make([]Interval, len(intervals))
 	copy(sorted, intervals)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].Start < sorted[j].Start
 	})
-
-	pos := target.Start
+	out := sorted[:0]
 	for _, iv := range sorted {
-		if iv.Start > pos {
-			// Gap: pos is not covered.
-			return false
+		if n := len(out); n > 0 && iv.Start <= out[n-1].End+1 {
+			if iv.End > out[n-1].End {
+				out[n-1].End = iv.End
+			}
+			continue
 		}
-		if iv.End >= pos {
-			pos = iv.End + 1
-		}
-		if pos > target.End {
-			return true
-		}
+		out = append(out, iv)
 	}
-	return pos > target.End
+	return out
+}
+
+// coalescedContain reports whether merged (coalesceIntervals' output)
+// covers target: one merged interval must span it.
+func coalescedContain(merged []Interval, target Interval) bool {
+	// The last interval starting at or before target.Start.
+	i := sort.Search(len(merged), func(i int) bool { return merged[i].Start > target.Start }) - 1
+	return i >= 0 && merged[i].End >= target.End
 }
 
 // Subtract returns the transactions in g that are not in other.

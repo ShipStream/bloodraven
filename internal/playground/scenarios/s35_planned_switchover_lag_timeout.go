@@ -35,7 +35,7 @@ func scenario35PlannedSwitchoverLagTimeout() runner.Scenario {
 		Title: "Planned switchover rolls back on lag timeout, source stays active",
 		Hypothesis: "With SOURCE_DELAY=60 on the target and maxLagWait=5s, a planned switchover fences the source, " +
 			"waits for the target GTID to cover the fenced GTID, times out, and rolls back: plannedFailover.phase=Failed " +
-			"reason=LagTimeout, planned_failovers_total{result=failed_timeout} increments, status.activeSite stays the " +
+			"outcome=RolledBack reason=LagTimeout, planned_failovers_total{result=failed_timeout} increments, status.activeSite stays the " +
 			"source, and the failover history does not advance to the target.",
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#35-planned-switchover-lag-timeout-rollback",
@@ -140,22 +140,23 @@ func s35ObserveLagTimeoutRollback() runner.Step {
 					// Ignore stale blocks from prior runs (metav1.Time truncates
 					// to seconds, so allow 2s of slack like scenario 02).
 					staleCutoff := env.StartTime.Add(-2 * time.Second)
-					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseWaitingForLag {
 						sawWaitingForLag = true
 					}
-					msg := fmt.Sprintf("phase=%q target=%q reason=%q waitingForLagSeen=%v", pf.Phase, pf.Target, pf.Reason, sawWaitingForLag)
+					msg := fmt.Sprintf("phase=%q target=%q reason=%q waitingForLagSeen=%v", pf.Phase, pf.TargetSite, plannedReason(pf), sawWaitingForLag)
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
 						return false, msg, fmt.Errorf("planned switchover unexpectedly Succeeded (lag budget should have expired): %s", msg)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
-						if pf.Reason != "LagTimeout" {
-							return false, msg, fmt.Errorf("planned switchover Failed with reason %q, want LagTimeout: %s", pf.Reason, pf.Message)
+						if plannedReason(pf) != "LagTimeout" || plannedOutcome(pf) != v1alpha1.PlannedFailoverOutcomeRolledBack {
+							return false, msg, fmt.Errorf("planned switchover Failed with %s/%q, want RolledBack/LagTimeout: %s",
+								plannedOutcome(pf), plannedReason(pf), pf.Message)
 						}
-						if pf.Target != target {
-							return false, msg, fmt.Errorf("plannedFailover target=%q, want %q", pf.Target, target)
+						if pf.TargetSite != target {
+							return false, msg, fmt.Errorf("plannedFailover target=%q, want %q", pf.TargetSite, target)
 						}
 						return true, msg, nil
 					}
@@ -164,7 +165,7 @@ func s35ObserveLagTimeoutRollback() runner.Step {
 			if err != nil {
 				return err
 			}
-			env.Capture.Note(fmt.Sprintf("planned switchover rolled back on lag timeout (observed WaitingForLag=%v; Validating not asserted as it may not persist)", sawWaitingForLag))
+			env.Capture.Note(fmt.Sprintf("planned switchover rolled back on lag timeout (observed WaitingForLag=%v; Admitting and Fencing not asserted as they may not persist)", sawWaitingForLag))
 			return nil
 		},
 	}

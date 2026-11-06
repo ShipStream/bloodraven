@@ -100,7 +100,7 @@ func stallDragonflyTargetForOperatorRestart() runner.Step {
 		Name:  "hold target Dragonfly offline to create a deterministic sync window",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			target := ctxFetch(env, "switchoverTarget")
-			if err := env.Chaos.PatchDragonflySyncBudget(ctx, "45s", "proceed"); err != nil {
+			if err := env.Chaos.PatchDragonflySyncBudget(ctx, "45s", string(v1alpha1.DragonflySyncTimeoutProceed)); err != nil {
 				return err
 			}
 			if err := env.Chaos.ScaleDragonflyToZero(ctx, target); err != nil {
@@ -175,7 +175,7 @@ func killOperatorWhenWaitingForDragonflySync() runner.Step {
 				}
 				if pf := mfg.Status.PlannedFailover; pf != nil {
 					staleCutoff := env.StartTime.Add(-2 * time.Second)
-					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						select {
 						case <-ctx.Done():
 							return ctx.Err()
@@ -190,7 +190,7 @@ func killOperatorWhenWaitingForDragonflySync() runner.Step {
 						env.Capture.Note(fmt.Sprintf("observed phase=%q; killing operator now", pf.Phase))
 						return env.Chaos.KillOperator(ctx)
 					case v1alpha1.PlannedFailoverPhasePromoting,
-						v1alpha1.PlannedFailoverPhaseResuming,
+						v1alpha1.PlannedFailoverPhasePublishing,
 						v1alpha1.PlannedFailoverPhaseSucceeded,
 						v1alpha1.PlannedFailoverPhaseFailed:
 						return fmt.Errorf("planned failover advanced past Dragonfly-prep before the kill could fire (phase=%q) — "+
@@ -229,8 +229,8 @@ func restoreDragonflyTargetForOperatorRestart() runner.Step {
 // drive the in-flight planned failover to Succeeded with the
 // originally-requested target. A 4-minute deadline covers operator
 // restart (~10s in this environment), CR-status re-read, and the
-// remainder of the failover state machine (DrainingApps through
-// Resuming).
+// remainder of the failover state machine (Draining through
+// Publishing).
 //
 // Re-uses the stale-cutoff guard from observePlannedFailoverSucceeded
 // so a leftover pf block from a prior scenario can't satisfy the
@@ -251,19 +251,19 @@ func observePlannedFailoverConverges() runner.Step {
 						return false, "no plannedFailover status yet", nil
 					}
 					staleCutoff := env.StartTime.Add(-2 * time.Second)
-					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
 							pf.StartTime, env.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, pf.Reason)
+					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.TargetSite, plannedReason(pf))
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
 						return false, msg, fmt.Errorf("planned failover entered Failed after operator restart: %s (%s)",
-							pf.Reason, pf.Message)
+							plannedReason(pf), pf.Message)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
-						if pf.Target != target {
+						if pf.TargetSite != target {
 							return false, msg, fmt.Errorf("plannedFailover succeeded but target=%q want %q "+
-								"(operator silently swapped targets on resume)", pf.Target, target)
+								"(operator silently swapped targets on resume)", pf.TargetSite, target)
 						}
 						return true, msg, nil
 					}

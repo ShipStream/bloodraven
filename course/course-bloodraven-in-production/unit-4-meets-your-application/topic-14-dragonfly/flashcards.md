@@ -29,7 +29,7 @@
 
 **Front:** What does the planned Dragonfly path do when REPLTAKEOVER fails?
 
-**Back:** There is no REPLICAOF NO ONE fallback. onSyncTimeout decides: proceed continues flagged unpreserved, fail rolls back the MySQL fence.
+**Back:** There is no REPLICAOF NO ONE fallback. onSyncTimeout decides: Proceed promotes MySQL anyway with dragonfly.sessions: Lost, Fail rolls back the MySQL fence.
 
 ---
 
@@ -39,7 +39,7 @@
 
 ---
 
-**Front:** Where does status.plannedFailover.dragonfly.sessionsPreserved come from after an emergency promotion?
+**Front:** Where does status.plannedFailover.dragonfly.sessions come from after an emergency promotion?
 
 **Back:** Nowhere — emergency promotions never write the field. The outcome lives only in the log line and the Kubernetes event.
 
@@ -59,7 +59,7 @@
 
 **Front:** onSyncTimeout — allowed values and default?
 
-**Back:** An enum of proceed or fail, defaulting to proceed: the promotion goes ahead and the cache outcome is whatever it is.
+**Back:** An enum of Proceed or Fail (CamelCase; the lower-case spellings of older releases are rejected), defaulting to Proceed: the promotion goes ahead and the cache outcome is whatever it is.
 
 ---
 

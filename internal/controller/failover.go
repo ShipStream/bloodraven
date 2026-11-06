@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -112,29 +113,123 @@ func (f *FailoverController) promoteVerified(ctx context.Context, candidate mysq
 		return "", promoteStageNotStarted, err
 	}
 	defer func() { _ = sess.Close() }()
+	return f.promoteVerifiedFrom(ctx, sess, candidateSite, require, PromotionStageNotStarted, promoteHooks{})
+}
 
-	if err := sess.StopReplica(ctx); err != nil {
-		return "", promoteStageReplicaStopped, err
+// promoteHooks instrument promoteVerifiedFrom for the planned failover.
+// The maintenance handoff passes the zero value.
+type promoteHooks struct {
+	// before runs immediately before each statement, with the stage it
+	// sends; the planned failover records it in its promotion memo.
+	before func(promoteMemoStage)
+	// after runs after each statement returns.
+	after func()
+	// gate runs immediately before SET super_read_only=OFF; an error
+	// stops the promotion with nothing written by this attempt.
+	gate func(ctx context.Context) error
+	// guard runs immediately before each statement, after the gate's
+	// probes for the writes: the planned failover re-checks the leader
+	// context and the run's claim there (§3.3), so a pass that lost either
+	// while it waited on a probe sends nothing more. An error stops the
+	// promotion before the statement.
+	guard func() error
+	// statementTimeout, when positive, bounds each statement on its own
+	// (§2.4 step 8: 5s per statement for the planned failover), so one slow
+	// statement cannot use up the pass.
+	statementTimeout time.Duration
+	// planned suppresses the "failover complete" log line: the planned
+	// failover emits it only after its live confirmation.
+	planned bool
+}
+
+func (h promoteHooks) send(ctx context.Context, s promoteMemoStage, stmt func(context.Context) error) error {
+	if h.guard != nil {
+		if err := h.guard(); err != nil {
+			return err
+		}
 	}
-	if _, err := requireCandidateGTIDs(ctx, sess, candidateSite, require); err != nil {
-		return "", promoteStageReplicaStopped, fmt.Errorf("after STOP REPLICA: %w", err)
+	if h.before != nil {
+		h.before(s)
 	}
-	if err := sess.ResetReplicaAll(ctx); err != nil {
-		return "", promoteStageReplicaReset, err
+	var err error
+	if h.statementTimeout > 0 {
+		stmtCtx, cancel := context.WithTimeout(ctx, h.statementTimeout)
+		err = stmt(stmtCtx)
+		cancel()
+	} else {
+		err = stmt(ctx)
 	}
-	promotionGtid, err := requireCandidateGTIDs(ctx, sess, candidateSite, require)
-	if err != nil {
-		return "", promoteStageReplicaReset, fmt.Errorf("after RESET REPLICA ALL: %w", err)
+	if h.after != nil {
+		h.after()
 	}
-	if err := sess.SetSuperReadOnly(ctx, false); err != nil {
-		return "", promoteStageReplicaReset, err
+	return err
+}
+
+// promoteVerifiedFrom resumes the staged pinned promotion on sess from the
+// classified stage (§7.1). It never repeats a STOP or RESET the live stage
+// is already past, and never sends KILL or anything to another site:
+//
+//	NotStarted      STOP, prove (= require), RESET, prove, gate, clear SRO, clear RO
+//	ReplicaStopped  prove, RESET, prove, gate, clear SRO, clear RO
+//	ReplicaReset    gate, clear SRO, clear RO
+//	WasWritable     gate, clear SRO, clear RO
+//
+// From ReplicaReset and WasWritable the gate re-reads the GTID set itself.
+// The returned promoteStage is promoteVerified's: how far it got.
+func (f *FailoverController) promoteVerifiedFrom(ctx context.Context, sess mysql.Session, candidateSite string, require mysql.GTIDSet,
+	from PromotionStage, h promoteHooks) (string, promoteStage, error) {
+	reached := promoteStageNotStarted
+	promotionGtid := ""
+	switch from {
+	case PromotionStageNotStarted, PromotionStageReplicaStopped:
+		if from == PromotionStageNotStarted {
+			if err := h.send(ctx, promoteMemoStopSent, sess.StopReplica); err != nil {
+				return "", promoteStageReplicaStopped, err
+			}
+		}
+		reached = promoteStageReplicaStopped
+		if _, err := requireCandidateGTIDs(ctx, sess, candidateSite, require); err != nil {
+			return "", reached, fmt.Errorf("after STOP REPLICA: %w", err)
+		}
+		if err := h.send(ctx, promoteMemoResetSent, sess.ResetReplicaAll); err != nil {
+			return "", promoteStageReplicaReset, err
+		}
+		reached = promoteStageReplicaReset
+		raw, err := requireCandidateGTIDs(ctx, sess, candidateSite, require)
+		if err != nil {
+			return "", reached, fmt.Errorf("after RESET REPLICA ALL: %w", err)
+		}
+		promotionGtid = raw
+	case PromotionStageReplicaReset, PromotionStageWasWritable:
+		reached = promoteStageReplicaReset
+		promotionGtid = require.String()
+	default:
+		return "", reached, fmt.Errorf("promotion cannot resume from stage %q", from)
 	}
-	if err := sess.SetReadOnly(ctx, false); err != nil {
-		return "", promoteStageWriteAttempted, err
+	if h.gate != nil {
+		if err := h.gate(ctx); err != nil {
+			return "", reached, err
+		}
 	}
-	f.logger.Info("failover complete", "promotedSite", candidateSite, "promotionGtid", promotionGtid)
+	if err := h.send(ctx, promoteMemoSROClearSent, func(c context.Context) error { return sess.SetSuperReadOnly(c, false) }); err != nil {
+		return "", reached, err
+	}
+	if err := h.send(ctx, promoteMemoROClearSent, func(c context.Context) error { return sess.SetReadOnly(c, false) }); err != nil {
+		// The statement may have applied: the proven set comes back with
+		// the error, so a caller that confirms the candidate writable can
+		// record the promotion it made.
+		return promotionGtid, promoteStageWriteAttempted, err
+	}
+	if !h.planned {
+		f.logger.Info("failover complete", "promotedSite", candidateSite, "promotionGtid", promotionGtid)
+	}
 	return promotionGtid, promoteStageWriteAttempted, nil
 }
+
+// errCandidateGTIDMismatch marks a proof that read the candidate's set and
+// found it missing part of the required set (as opposed to a failed read);
+// a candidate holding extras returns a *DivergentCandidateError instead.
+var errCandidateGTIDMismatch = errors.New("candidate GTID set does not equal the fenced source set")
 
 // requireCandidateGTIDs reads the candidate's GTID_EXECUTED and fails
 // unless it equals want: it must contain every fenced source transaction
@@ -146,8 +241,8 @@ func requireCandidateGTIDs(ctx context.Context, candidate gtidExecutedReader, ca
 	}
 	if !have.Contains(want) {
 		missing := want.Subtract(have)
-		return "", fmt.Errorf("candidate GTID set no longer contains the fenced source set: %d transactions missing (%s)",
-			missing.TransactionCount(), truncateGtidHint(missing.String()))
+		return "", fmt.Errorf("%w: candidate GTID set no longer contains the fenced source set: %d transactions missing (%s)",
+			errCandidateGTIDMismatch, missing.TransactionCount(), truncateGtidHint(missing.String()))
 	}
 	if extra := have.Subtract(want); !extra.IsEmpty() {
 		return "", newDivergentCandidateError(candidateSite, extra)
