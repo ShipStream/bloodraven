@@ -73,6 +73,16 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 	}
 }
 
+// seedPublished marks fg's default seed site as the published, writable
+// active site: the state the topology manager's fresh-deploy seeding
+// leaves a new initFromBackup group in, and the only one in which
+// reconcileRestoreJob starts the restore Job.
+func seedPublished(fg *v1alpha1.MysqlFailoverGroup) {
+	seed := fg.Spec.DefaultSeedSite().Name
+	fg.Status.ActiveSite = seed
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: seed, State: "writable"}}
+}
+
 // primaryReadyDeployment returns a Deployment matching the first site with
 // ReadyReplicas=1 so reconcileRestoreJob will proceed.
 func primaryReadyDeployment(fgName, site string) *appsv1.Deployment {
@@ -115,6 +125,7 @@ func TestReconcileRestoreJob_WaitsForPrimaryReady(t *testing.T) {
 
 func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
 
@@ -317,6 +328,7 @@ func TestIsS3Location(t *testing.T) {
 
 func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
 
@@ -353,6 +365,105 @@ func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 
 	if fresh.Status.Restore == nil || fresh.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded {
 		t.Errorf("want Succeeded, got %+v", fresh.Status.Restore)
+	}
+}
+
+// TestReconcileRestoreJob_WaitsForSeededWritableTarget: every site of a new
+// group boots fenced (read_only=ON, and the sidecar adds super_read_only
+// until the operator names the site active), so a load started before the
+// operator seeded the target fails with ERROR 1290, and a failed restore
+// Job is final. The Job must wait for the seed to be published and
+// observed writable, however ready its Deployment is.
+func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
+	ctx := context.Background()
+	fg := fgInitFromMysqlBackup()
+	seed := succeededSeedBackup()
+	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
+	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	jobKey := types.NamespacedName{Name: restoreJobName("lion", "iad"), Namespace: "ns"}
+
+	steps := []struct {
+		name   string
+		status v1alpha1.MysqlFailoverGroupStatus
+		wait   string
+	}{
+		{"not seeded", v1alpha1.MysqlFailoverGroupStatus{}, `waiting for the operator to seed site "iad"`},
+		{"seeded, still observed read-only", v1alpha1.MysqlFailoverGroupStatus{
+			ActiveSite: "iad",
+			Sites:      []v1alpha1.SiteStatus{{Name: "iad", State: "read-only"}, {Name: "pdx", State: "read-only"}},
+		}, `waiting for active site "iad" to be observed writable`},
+	}
+	for _, step := range steps {
+		fg.Status = step.status
+		d, err := r.reconcileRestoreJob(ctx, fg)
+		if err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		if d == 0 {
+			t.Fatalf("%s: no requeue", step.name)
+		}
+		if err := c.Get(ctx, jobKey, &batchv1.Job{}); err == nil {
+			t.Fatalf("%s: restore Job created before the target was writable", step.name)
+		}
+		rs := fg.Status.Restore
+		if rs == nil || rs.Phase != v1alpha1.BackupPhasePending || rs.TargetSite != "iad" || !strings.HasPrefix(rs.Message, step.wait) {
+			t.Fatalf("%s: status.restore = %+v, want Pending on iad %q", step.name, rs, step.wait)
+		}
+	}
+
+	seedPublished(fg)
+	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, jobKey, &batchv1.Job{}); err != nil {
+		t.Fatalf("restore Job not created once the seed is writable: %v", err)
+	}
+	if rs := fg.Status.Restore; rs == nil || rs.Phase != v1alpha1.BackupPhaseRunning {
+		t.Fatalf("status.restore = %+v, want Running", rs)
+	}
+}
+
+// TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced: once the Job
+// exists, a target that reads non-writable (fenced mid-load, unreachable)
+// must not reset the running restore to Pending: the Job's outcome is still
+// recorded against the site it was created for.
+func TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced(t *testing.T) {
+	ctx := context.Background()
+	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
+	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), dsnSecret())
+	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if rs := fg.Status.Restore; rs == nil || rs.Phase != v1alpha1.BackupPhaseRunning {
+		t.Fatalf("status.restore = %+v, want Running", rs)
+	}
+
+	for _, st := range []string{"read-only", "unreachable"} {
+		fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: st}}
+		if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
+			t.Fatal(err)
+		}
+		if rs := fg.Status.Restore; rs.Phase != v1alpha1.BackupPhaseRunning || rs.JobName == "" {
+			t.Fatalf("target %s: running restore reset to %+v", st, rs)
+		}
+	}
+
+	var job batchv1.Job
+	if err := c.Get(ctx, types.NamespacedName{Name: restoreJobName("lion", "iad"), Namespace: "ns"}, &job); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.Now()
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now}}
+	job.Status.Succeeded = 1
+	if err := c.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if rs := fg.Status.Restore; rs.Phase != v1alpha1.BackupPhaseSucceeded || rs.TargetSite != "iad" {
+		t.Fatalf("status.restore = %+v, want Succeeded on iad", rs)
 	}
 }
 

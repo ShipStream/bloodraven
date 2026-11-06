@@ -111,10 +111,21 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 	if len(got.Spec.Sites) != 2 {
 		t.Fatalf("sites=%d, want the two primary candidates", len(got.Spec.Sites))
 	}
+	zones := map[string]string{}
 	for _, s := range got.Spec.Sites {
-		if s.LBIP != "" || s.TaintNodeSelector != nil {
-			t.Errorf("site %s keeps lbIP %q / taints %v", s.Name, s.LBIP, s.TaintNodeSelector)
+		zones[s.Name] = s.Zone
+		// The CRD requires both on a primary candidate.
+		if s.LBIP == "" || s.LBIP == "10.0.0.1" || s.LBIP == "10.0.0.2" {
+			t.Errorf("site %s lbIP %q, want its own placeholder", s.Name, s.LBIP)
 		}
+		if len(s.TaintNodeSelector) != 1 || s.TaintNodeSelector["shipstream.io/failover-group.s37-restored"] != "true" {
+			t.Errorf("site %s taintNodeSelector %v must name only the restored group's own label", s.Name, s.TaintNodeSelector)
+		}
+	}
+	// The seed stays on the source's active (untainted) node; the other
+	// site moves off the source's tainted standby node to the reader's zone.
+	if zones["pdx"] != "zone-pdx" || zones["iad"] != "zone-reader" {
+		t.Errorf("zones %v, want pdx in zone-pdx and iad in zone-reader", zones)
 	}
 	if p := got.Spec.SplitBrainPolicy.SitePriorities; len(p) != 2 || p[0] != "pdx" {
 		t.Errorf("priorities %v must seed the source's active site pdx", p)
@@ -126,7 +137,7 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 	if pit.ArchiveProfileName != backupE2EProfile || pit.StopDatetime != "2026-11-05T10:00:01Z" || got.Spec.InitFromBackup.Source.MysqlBackupRef.Name != "bk" {
 		t.Errorf("initFromBackup = %+v", got.Spec.InitFromBackup)
 	}
-	if src.Spec.Backup.PITR == nil || src.Spec.Sites[0].LBIP == "" {
+	if src.Spec.Backup.PITR == nil || src.Spec.Sites[0].LBIP != "10.0.0.1" || src.Spec.Sites[0].Zone != "zone-iad" || src.Spec.Sites[0].TaintNodeSelector["a"] != "b" {
 		t.Error("the source spec must not be mutated")
 	}
 }

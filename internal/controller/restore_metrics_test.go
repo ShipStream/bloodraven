@@ -103,6 +103,7 @@ func TestPodBelongsToJobMatchesExactJob(t *testing.T) {
 func TestReconcileRestoreJob_JobSucceeded_EmitsMetricsOnce(t *testing.T) {
 	fggroup := "lion-metrics-init"
 	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
 	fg.Name = fggroup
 	fg.Spec.Sites[0].Name = "iad"
 	fg.Spec.Sites[1].Name = "pdx"
@@ -169,6 +170,7 @@ func TestReconcileRestoreJob_JobSucceeded_EmitsMetricsOnce(t *testing.T) {
 func TestReconcileRestoreJob_JobFailed_DoesNotEmitSuccessMetrics(t *testing.T) {
 	fggroup := "lion-metrics-failed-init"
 	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
 	fg.Name = fggroup
 	fg.Spec.Sites[0].Name = "iad"
 	fg.Spec.Sites[1].Name = "pdx"

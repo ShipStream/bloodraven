@@ -482,3 +482,94 @@ func TestPrimaryRestart_BootReadOnlyIsRestored(t *testing.T) {
 		t.Errorf("bootstrap phase = %q; a populated group must not be bootstrapped", h.tm.BootstrapPhase())
 	}
 }
+
+// TestFreshDeploy_InitFromBackupSeedsThenClonesAfterRestore: a new group
+// with spec.initFromBackup boots every site fenced, and the restore Job can
+// only load into a writable seed. While the restore is in flight the
+// operator must seed (lift the seed's fence and publish it active) without
+// cloning, since a clone taken before the load would carry none of it; once
+// the restore succeeds the empty site is cloned from the loaded seed.
+func TestFreshDeploy_InitFromBackupSeedsThenClonesAfterRestore(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	h := newBootstrapHarness(t, dc1, dc2)
+	h.tm.SetAutoBootstrapSuppressed(true)
+
+	h.pollN(6)
+	if seedFenced(dc1) {
+		t.Fatal("seed dc1 still fenced while the initFromBackup restore waits for a writable target")
+	}
+	if got := h.tm.Status().ActiveSite; got != "dc1" {
+		t.Fatalf("active site = %q, want the seed dc1 published for the sidecar's safety net", got)
+	}
+	if !seedFenced(dc2) {
+		t.Error("non-seed dc2 must stay fenced")
+	}
+
+	// The restore Job loads the dump into the seed. Nothing is cloned
+	// while the restore is in flight.
+	const loaded = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10"
+	dc1.setGtidExecuted(loaded)
+	dc2.onClone = func() { dc2.setGtidExecuted(loaded) }
+	h.pollN(6)
+	time.Sleep(50 * time.Millisecond)
+	dc2.mu.Lock()
+	clonedEarly := dc2.cloneInstanceCalled
+	dc2.mu.Unlock()
+	if clonedEarly || h.tm.BootstrapPhase() != controller.BootstrapPhaseNone {
+		t.Fatalf("clone started while the restore was in flight (phase %q)", h.tm.BootstrapPhase())
+	}
+	if seedFenced(dc1) {
+		t.Fatal("seed dc1 fenced during the restore")
+	}
+
+	h.tm.SetAutoBootstrapSuppressed(false)
+	h.pollN(2)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+	dc2.mu.Lock()
+	cloned, replStarted, host := dc2.cloneInstanceCalled, dc2.replicaStarted, dc2.changeReplicationOpts.Host
+	dc2.mu.Unlock()
+	if !cloned || !replStarted || host != "mysql-lion-dc1.default.svc.cluster.local" {
+		t.Fatalf("dc2 not cloned from the loaded seed: cloned=%v replicaStarted=%v source=%q", cloned, replStarted, host)
+	}
+	dc1.mu.Lock()
+	seedCloned := dc1.cloneInstanceCalled
+	dc1.mu.Unlock()
+	if seedCloned || seedFenced(dc1) {
+		t.Fatalf("seed dc1 touched: cloned=%v fenced=%v", seedCloned, seedFenced(dc1))
+	}
+}
+
+// TestFreshDeploy_InitFromBackupSeedRequiresFreshDeploy: the seed-only path
+// keeps every fresh-deploy guard. A populated all-read-only group (restart
+// amnesia) or one with replication history is not seeded.
+func TestFreshDeploy_InitFromBackupSeedRequiresFreshDeploy(t *testing.T) {
+	cases := []struct {
+		name     string
+		dc1, dc2 *mockMySQL
+	}{
+		{
+			name: "populated",
+			dc1:  &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "uuid1:1-100"},
+			dc2:  &mockMySQL{readOnly: true, superReadOnly: true},
+		},
+		{
+			name: "replication history",
+			dc1:  &mockMySQL{readOnly: true, superReadOnly: true},
+			dc2:  &mockMySQL{readOnly: true, superReadOnly: true, replicaStatus: &mysql.ReplicaStatus{}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBootstrapHarness(t, tc.dc1, tc.dc2)
+			h.tm.SetAutoBootstrapSuppressed(true)
+			h.pollN(6)
+			if !seedFenced(tc.dc1) {
+				t.Error("dc1 unfenced")
+			}
+			if got := h.tm.Status().ActiveSite; got != "" {
+				t.Errorf("active site = %q, want none", got)
+			}
+		})
+	}
+}

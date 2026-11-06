@@ -1244,28 +1244,51 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 
 // pitrSourceSpecForRestore derives a minimal group spec that restores from
 // the source group's backup and archive: the source's two primary-candidate
-// sites (same zones, so pods land on the same nodes) without taints, load
-// balancer IPs, readers, Dragonfly or encryption at rest, the source's
-// backup profiles with PITR off and no schedules, and the restore. The seed
-// (first priority) is the source's current active site, whose nodes carry
-// no read-only taint.
+// sites without load balancers, readers, Dragonfly or encryption at rest,
+// the source's backup profiles with PITR off and no schedules, and the
+// restore. The seed (first priority) is the source's current active site,
+// in its zone, whose node carries no read-only taint.
+//
+// The other site must be schedulable too: the operator seeds a new group
+// (lifts the seed's fence and publishes it active, so the restore Job can
+// load into it) only when every site is reachable, and the source's
+// standby node carries the source's NoExecute read-only taint, which only
+// the source's own pods tolerate. It goes in the zone of the source's
+// read-only site, which the source never taints, when there is one.
+//
+// lbIP and taintNodeSelector are required for a primary candidate. The
+// lbIPs are documentation addresses (RFC 5737; the Services are ClusterIP,
+// so only the restored group's own DNS name points at them), and the
+// selector is a group-scoped label no node carries: the restored group's
+// taint must never land on a node where the source's MySQL runs, since the
+// source does not tolerate it.
 func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName, stop string) (*v1alpha1.MysqlFailoverGroup, error) {
 	spec := src.Spec.DeepCopy()
+	untaintedZone := ""
+	for _, s := range spec.Sites {
+		if s.Role == v1alpha1.SiteRoleReadOnly {
+			untaintedZone = s.Zone
+			break
+		}
+	}
 	var sites []v1alpha1.SiteSpec
 	var priorities []string
 	for _, s := range spec.Sites {
 		if !s.IsPromotable() {
 			continue
 		}
-		s.TaintNodeSelector = nil
-		s.LBIP = ""
+		s.TaintNodeSelector = map[string]string{"shipstream.io/failover-group." + name: "true"}
+		s.LBIP = fmt.Sprintf("192.0.2.%d", len(sites)+1)
 		s.ServiceTemplate = nil
-		sites = append(sites, s)
 		if s.Name == src.Status.ActiveSite {
 			priorities = append([]string{s.Name}, priorities...)
 		} else {
+			if untaintedZone != "" {
+				s.Zone = untaintedZone
+			}
 			priorities = append(priorities, s.Name)
 		}
+		sites = append(sites, s)
 	}
 	if len(sites) < 2 {
 		return nil, fmt.Errorf("source group has %d primary-candidate sites, want 2", len(sites))

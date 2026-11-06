@@ -94,6 +94,7 @@ func testVerdict(v verdictFields) string {
 func outcomeRestore(t *testing.T, pit v1alpha1.PointInTimeSpec) (*MysqlFailoverGroupReconciler, client.Client, *v1alpha1.MysqlFailoverGroup, *batchv1.Job) {
 	t.Helper()
 	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
 	seed := succeededSeedBackup()
 	seed.UID = "uid-seed"
 	seed.Status.FailoverGroupUID = outcomeSourceUID
@@ -427,6 +428,7 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInitFromMysqlBackup()
+			seedPublished(fg)
 			seed := succeededSeedBackup()
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
 			fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, ArchiveProfileName: addSourceArchiveProfile(fg)}

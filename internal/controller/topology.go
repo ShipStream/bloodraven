@@ -564,9 +564,11 @@ type TopologyManager struct {
 	keyringGate KeyringGate
 
 	// autoBootstrapSuppressed is set by the runner while a one-shot
-	// initFromBackup restore is in flight. It prevents the fresh-deploy
-	// auto-clone path from racing the restore Job to populate the
-	// primary. Protected by mu. See runner.sync().
+	// initFromBackup restore is in flight. It prevents every clone (the
+	// fresh-deploy and auto-clone paths) from racing the restore Job to
+	// populate the primary; the fresh-deploy path still seeds, since the
+	// Job needs a writable seed (see maybeStartFreshDeployBootstrap).
+	// Protected by mu. See runner.sync().
 	autoBootstrapSuppressed bool
 
 	// topologyFrozen is set by the runner while an in-place restore
@@ -2308,17 +2310,18 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				tm.startBootstrapByName(ctx, donor, empty, "auto-clone")
 				return
 			}
-			// A recorded lastFailoverTarget means a failover has already
-			// happened in this cluster's lifetime, so the split-brain state
-			// here is "old primary respawned writable after failover" —
-			// handled by the fence-returning-old-primary branch below, not
-			// a fresh deploy. Without this guard the fresh-deploy bootstrap
-			// reverts the failover by re-cloning the promoted site back to
-			// the respawned old primary.
-			if lastFailoverTarget == "" && tm.isFreshDeploy(ctx) {
-				tm.startBootstrap(ctx)
-				return
-			}
+		}
+		// A recorded lastFailoverTarget means a failover has already
+		// happened in this cluster's lifetime, so the split-brain state
+		// here is "old primary respawned writable after failover" —
+		// handled by the fence-returning-old-primary branch below, not
+		// a fresh deploy. Without this guard the fresh-deploy bootstrap
+		// reverts the failover by re-cloning the promoted site back to
+		// the respawned old primary. maybeStartFreshDeployBootstrap
+		// applies it, and seeds without cloning while an initFromBackup
+		// restore is in flight.
+		if tm.maybeStartFreshDeployBootstrap(ctx, lastFailoverTarget) {
+			return
 		}
 	}
 
@@ -3842,6 +3845,16 @@ func (tm *TopologyManager) SetSpecDriftSites(sites []string) {
 // maybeStartFreshDeployBootstrap starts the fresh-deploy bootstrap when no
 // failover has happened in this cluster's lifetime, auto-bootstrap is
 // enabled and idle, and isFreshDeploy holds. It reports whether it started.
+//
+// While an initFromBackup restore is in flight (autoBootstrapSuppressed) it
+// only seeds: the restore Job loads the dump into the seed, which therefore
+// has to be the writable, published primary, while cloning the other sites
+// from it has to wait until the load finished. Without the seed step
+// nothing would lift the fence the seed boots with (read_only=ON, plus the
+// sidecar's super_read_only until the operator names it active), and the
+// load would fail with ERROR 1290. Once the restore succeeds the
+// suppression lifts and the poll's auto-clone (detectEmptySite) clones the
+// empty sites from the seed, now the confirmed active primary.
 func (tm *TopologyManager) maybeStartFreshDeployBootstrap(ctx context.Context, lastFailoverTarget string) bool {
 	if lastFailoverTarget != "" || tm.bootstrap == nil || tm.bootstrapCfg.ReplUser == "" {
 		return false
@@ -3850,8 +3863,16 @@ func (tm *TopologyManager) maybeStartFreshDeployBootstrap(ctx context.Context, l
 	phase := tm.bootstrapPhase
 	suppressed := tm.autoBootstrapSuppressed
 	tm.mu.RUnlock()
-	if suppressed || !bootstrapIdlePhase(phase) || !tm.isFreshDeploy(ctx) {
+	if !bootstrapIdlePhase(phase) || !tm.isFreshDeploy(ctx) {
 		return false
+	}
+	if suppressed {
+		seed := tm.seedFreshDeploy(ctx)
+		if seed != "" {
+			tm.logger.Info("fresh-deploy seed published; cloning deferred until the initFromBackup restore succeeds",
+				"seed", seed)
+		}
+		return seed != ""
 	}
 	tm.startBootstrap(ctx)
 	return true
@@ -4154,72 +4175,10 @@ func (tm *TopologyManager) selectSeedSite() string {
 // pick up additional empty sites via detectEmptySite → auto-clone).
 // Caller must hold no locks.
 func (tm *TopologyManager) startBootstrap(ctx context.Context) {
-	seed := tm.selectSeedSite()
+	seed := tm.seedFreshDeploy(ctx)
 	if seed == "" {
-		err := fmt.Errorf("no primary-candidate site available to seed")
-		tm.mu.Lock()
-		tm.bootstrapPhase = BootstrapPhaseFailed
-		tm.bootstrapErr = err
-		tm.mu.Unlock()
-		tm.emitBootstrapStatus()
 		return
 	}
-	seedSite := tm.getSite(seed)
-	for i := range tm.sites {
-		if tm.sites[i].name == seed {
-			continue
-		}
-		var readOnly bool
-		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
-			if err := tm.sites[i].mysql.SetSuperReadOnly(probeCtx, true); err != nil {
-				return err
-			}
-			var err error
-			readOnly, err = tm.sites[i].mysql.CheckReadOnly(probeCtx)
-			return err
-		})
-		if err != nil {
-			tm.logger.Error("fresh-deploy bootstrap: failed to fence non-seed site", "site", tm.sites[i].name, "error", err)
-			return
-		}
-		if !readOnly {
-			tm.logger.Error("fresh-deploy bootstrap: non-seed fence not confirmed", "site", tm.sites[i].name, "error", err)
-			return
-		}
-	}
-	if seedSite == nil || !seedSite.isPromotable() || seedSite.host == "" {
-		tm.logger.Error("fresh-deploy bootstrap: seed authority could not be confirmed", "site", seed)
-		return
-	}
-	// The seed's sidecar may have fenced it on startup. The operator is the
-	// authority that lifts that fence, as it does for a promoted candidate.
-	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
-		if err := seedSite.mysql.SetSuperReadOnly(probeCtx, false); err != nil {
-			return err
-		}
-		return seedSite.mysql.SetReadOnly(probeCtx, false)
-	}); err != nil {
-		tm.logger.Error("fresh-deploy bootstrap: could not make the seed writable", "site", seed, "error", err)
-		return
-	}
-	if err := tm.confirmWritable(ctx, seedSite); err != nil {
-		tm.logger.Error("fresh-deploy bootstrap: seed authority could not be confirmed", "site", seed, "error", err)
-		return
-	}
-	// Publish the seed as the active site now, not after RecoveryThreshold
-	// polls observe it writable. Until then /active-site would answer "",
-	// and a seed sidecar whose startup safety net is still pending fences
-	// on that answer. The pending promotion reports the seed in the
-	// meantime, the same as after a failover; lastActiveSite lets
-	// checkPrimaryReassert restore the seed if a fence lands anyway.
-	tm.mu.Lock()
-	tm.authorityEpoch++
-	tm.authorityChanges++
-	tm.lastActiveSite, tm.lastActiveSiteNamed = seed, true
-	tm.deploymentAuthorityLocked(seed)
-	tm.promotedSite = seed
-	tm.promotedAt = tm.clock.Now()
-	tm.mu.Unlock()
 
 	// Pick any non-seed site as the first clone recipient. We prefer
 	// primary-candidate sites first so that post-fresh-deploy there is
@@ -4254,6 +4213,80 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 	}
 
 	tm.startBootstrapByName(ctx, seed, recipient, "fresh-deploy")
+}
+
+// seedFreshDeploy is the first half of the fresh-deploy bootstrap: it
+// fences every non-seed site, lifts the seed's fence and publishes the
+// seed as the active site. It returns the seed's name, or "" when it did
+// not complete (logged; the next poll retries). Caller must hold no locks.
+func (tm *TopologyManager) seedFreshDeploy(ctx context.Context) string {
+	seed := tm.selectSeedSite()
+	if seed == "" {
+		err := fmt.Errorf("no primary-candidate site available to seed")
+		tm.mu.Lock()
+		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapErr = err
+		tm.mu.Unlock()
+		tm.emitBootstrapStatus()
+		return ""
+	}
+	seedSite := tm.getSite(seed)
+	for i := range tm.sites {
+		if tm.sites[i].name == seed {
+			continue
+		}
+		var readOnly bool
+		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			if err := tm.sites[i].mysql.SetSuperReadOnly(probeCtx, true); err != nil {
+				return err
+			}
+			var err error
+			readOnly, err = tm.sites[i].mysql.CheckReadOnly(probeCtx)
+			return err
+		})
+		if err != nil {
+			tm.logger.Error("fresh-deploy bootstrap: failed to fence non-seed site", "site", tm.sites[i].name, "error", err)
+			return ""
+		}
+		if !readOnly {
+			tm.logger.Error("fresh-deploy bootstrap: non-seed fence not confirmed", "site", tm.sites[i].name, "error", err)
+			return ""
+		}
+	}
+	if seedSite == nil || !seedSite.isPromotable() || seedSite.host == "" {
+		tm.logger.Error("fresh-deploy bootstrap: seed authority could not be confirmed", "site", seed)
+		return ""
+	}
+	// The seed's sidecar may have fenced it on startup. The operator is the
+	// authority that lifts that fence, as it does for a promoted candidate.
+	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		if err := seedSite.mysql.SetSuperReadOnly(probeCtx, false); err != nil {
+			return err
+		}
+		return seedSite.mysql.SetReadOnly(probeCtx, false)
+	}); err != nil {
+		tm.logger.Error("fresh-deploy bootstrap: could not make the seed writable", "site", seed, "error", err)
+		return ""
+	}
+	if err := tm.confirmWritable(ctx, seedSite); err != nil {
+		tm.logger.Error("fresh-deploy bootstrap: seed authority could not be confirmed", "site", seed, "error", err)
+		return ""
+	}
+	// Publish the seed as the active site now, not after RecoveryThreshold
+	// polls observe it writable. Until then /active-site would answer "",
+	// and a seed sidecar whose startup safety net is still pending fences
+	// on that answer. The pending promotion reports the seed in the
+	// meantime, the same as after a failover; lastActiveSite lets
+	// checkPrimaryReassert restore the seed if a fence lands anyway.
+	tm.mu.Lock()
+	tm.authorityEpoch++
+	tm.authorityChanges++
+	tm.lastActiveSite, tm.lastActiveSiteNamed = seed, true
+	tm.deploymentAuthorityLocked(seed)
+	tm.promotedSite = seed
+	tm.promotedAt = tm.clock.Now()
+	tm.mu.Unlock()
+	return seed
 }
 
 // startBootstrapByName kicks off the async bootstrap goroutine for the
