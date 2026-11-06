@@ -58,7 +58,7 @@ func TestWaitForPlannedFailover_HonoursTerminalMarker(t *testing.T) {
 			cl := waitClient(t, waitFixture(tc.marker, v1alpha1.PlannedFailoverPhasePromoting)).Build()
 			var out, errOut bytes.Buffer
 			start := time.Now()
-			err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second, plannedWaitBaseline{})
+			err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second, plannedWaitBaseline{site: "pdx"})
 			if time.Since(start) > 3*time.Second {
 				t.Fatalf("waited %s for a marker-ended run", time.Since(start))
 			}
@@ -89,7 +89,7 @@ func TestPlannedFailoverOutput_WarningsAndMarker(t *testing.T) {
 		CompletionTime: metav1.Now(), Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningDNSUpdateFailed}}
 	cl := waitClient(t, fg).Build()
 	var out, errOut bytes.Buffer
-	if err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second, plannedWaitBaseline{}); err != nil {
+	if err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second, plannedWaitBaseline{site: "pdx"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "warnings: DNSUpdateFailed") {

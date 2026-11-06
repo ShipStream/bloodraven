@@ -179,6 +179,8 @@ type plannedRunMemo struct {
 	fence   pfFenceMemo
 	promote pfPromoteMemo
 
+	dragonfly pfDragonflyMemo // the Dragonfly takeover (planned_failover_df.go)
+
 	warnings []v1alpha1.PlannedFailoverWarning
 
 	sourceLossSince time.Time
@@ -1828,7 +1830,11 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 		}
 		m.warnings = addPlannedWarnings(m.warnings, res.Warnings...)
 		if res.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
-			return e.endManualRecovery(ctx, fg, pf, r, "the rollback found writes on the target outside the fenced set")
+			why := "the rollback found writes on the target outside the fenced set"
+			if r == v1alpha1.PlannedFailoverReasonForeignWritable {
+				why = "the rollback found another writable site beside the writable source"
+			}
+			return e.endManualRecovery(ctx, fg, pf, r, why)
 		}
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: res.Outcome, reason: r,
 			msg: plannedRollbackMessage(pf, res.Outcome, r)})
@@ -1997,7 +2003,8 @@ func (e *PlannedFailoverEngine) terminalRecord(pf *v1alpha1.PlannedFailoverStatu
 		at := metav1.NewTime(end.confirmedAt.UTC().Truncate(time.Second))
 		next.Promotion.ConfirmationTime = &at
 	}
-	if pf.Dragonfly != nil && pf.Dragonfly.Takeover != nil && pf.Dragonfly.Takeover.State == v1alpha1.DragonflyTakeoverSucceeded &&
+	e.applyPendingTakeoverOutcome(next)
+	if next.Dragonfly != nil && next.Dragonfly.Takeover != nil && next.Dragonfly.Takeover.State == v1alpha1.DragonflyTakeoverSucceeded &&
 		end.outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
 		warnings = addPlannedWarnings(warnings, v1alpha1.PlannedFailoverWarningDragonflySessionsLost)
 	}
@@ -2043,11 +2050,12 @@ func (e *PlannedFailoverEngine) terminalMutate(base *v1alpha1.MysqlFailoverGroup
 		}
 		confirmedAt, target, watermark := next.Promotion.ConfirmationTime.Time, next.TargetSite, plannedFenceSet(next)
 		authority, haveAuthority := e.topo.ManagerAuthority(nn)
+		now := e.clk.Now()
 		return func(st *v1alpha1.MysqlFailoverGroupStatus) {
 			if haveAuthority {
 				MergePlannedAuthority(st, authority)
 			}
-			applyPlannedFailoverRecord(st, confirmedAt, target, watermark)
+			applyPlannedFailoverRecord(st, confirmedAt, target, watermark, now)
 		}
 	}
 	return nil
@@ -2057,11 +2065,11 @@ func (e *PlannedFailoverEngine) terminalMutate(base *v1alpha1.MysqlFailoverGroup
 // {confirmedAt, target, watermark} to status under the timestamp-monotonic
 // rule (§5.3): never to a strictly older lastFailover; on an equal one
 // (second precision) only the target and watermark may change.
-func applyPlannedFailoverRecord(st *v1alpha1.MysqlFailoverGroupStatus, confirmedAt time.Time, target, watermark string) {
+func applyPlannedFailoverRecord(st *v1alpha1.MysqlFailoverGroupStatus, confirmedAt time.Time, target, watermark string, now time.Time) {
 	rec := newFailoverRecordRef(confirmedAt, target)
 	if st.LastFailover != nil {
 		stored := st.LastFailover.UTC().Truncate(time.Second)
-		if stored.After(rec.LastFailover) {
+		if stored.After(rec.LastFailover) && !failoverStampFutureDated(stored, now) {
 			return
 		}
 	}
@@ -2150,7 +2158,7 @@ func (e *PlannedFailoverEngine) afterTerminal(ctx context.Context, nn types.Name
 	e.markTerminated(final.RunID)
 	outcome := final.Result.Outcome
 	if outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
-		e.topo.ConvertToHold(nn, final.RunID)
+		e.topo.ConvertToHold(nn, final.RunID, m.holdSites...)
 		log.FromContext(ctx).Info("planned failover: automation held pending acknowledgement", "fg", nn.String(),
 			"runId", final.RunID, "sites", strings.Join(m.holdSites, ","))
 	} else {
@@ -2232,7 +2240,21 @@ func (e *PlannedFailoverEngine) release(ctx context.Context, nn types.Namespaced
 // the uncached block (terminal, marked, absent, or another run's), §3.4.
 // The held run comes from the slot, so a claim hydrated by startManager for
 // a run this process never saw live is cleared too.
+//
+// Its callers have found no durable hold record in the uncached read (and
+// no acknowledgement to finish), so a Hold-mode claim is an orphan here:
+// hydrated from a read an acknowledgement then cleared, inherited by a
+// recreated group, or rebuilt from a run-less condition since removed by
+// hand. It is released (why=orphanHold) rather than left to hold
+// automation with nothing to acknowledge.
 func (e *PlannedFailoverEngine) releaseZombie(ctx context.Context, nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) {
+	if holdRun, held := e.topo.HeldHoldClaim(nn); held {
+		if e.topo.ReleasePlannedFailoverClaim(nn, holdRun, ReleaseOrphanHold) {
+			log.FromContext(ctx).Info("planned failover: released an automation hold no durable record backs",
+				"fg", nn.String(), "runId", holdRun)
+		}
+		return
+	}
 	runID, ok := e.topo.HeldRunClaim(nn)
 	if !ok || runID == "" {
 		return
@@ -2310,7 +2332,8 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 	}
 	e.nameForOutcome(ctx, cur, plannedRunRef(nn, cur), end)
 	final := e.terminalRecord(cur, end)
-	marker := TerminalMarker{RunID: cur.RunID, Outcome: final.Result.Outcome, Reason: final.Result.Reason}
+	marker := TerminalMarker{RunID: cur.RunID, Outcome: final.Result.Outcome, Reason: final.Result.Reason,
+		Warnings: final.Result.Warnings}
 	base := fresh
 	var out WriteOutcome
 	var err error
@@ -2422,7 +2445,7 @@ func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.
 	final := m.pendingTerminal
 	if final == nil || final.RunID != pf.RunID {
 		end := plannedEnd{outcome: marker.Outcome, reason: marker.Reason,
-			warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningStatusStalled},
+			warnings: addPlannedWarnings(slices.Clone(marker.Warnings), v1alpha1.PlannedFailoverWarningStatusStalled),
 			msg:      fmt.Sprintf("ended %s (%s) by the terminal marker after status writes stalled", marker.Outcome, marker.Reason)}
 		if marker.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
 			// The marker was written only once the run's own failover record

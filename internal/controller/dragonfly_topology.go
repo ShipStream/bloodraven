@@ -181,12 +181,14 @@ func (m *DragonflyManager) paused() bool {
 
 // plannedFailoverOwnsDragonfly is the status form of Dragonfly ownership,
 // for a caller with no hydrated claim slot to ask: the claim slot holds a
-// run or a hold (claimHeld), or fg's run (read under the gate) still needs
-// the claim (PlannedRunNeedsClaim). A request that is only waiting
-// (Admitting, Deferred) owns nothing, and neither does a run that released
-// its claim once its promotion was recorded (DST-4, O-m1).
+// run or a hold (claimHeld), fg's run (read under the gate) still needs the
+// claim (PlannedRunNeedsClaim), or fg carries durable hold evidence
+// (PlannedHoldFrom): a hold the slot has not been hydrated with yet, after
+// a restart, owns Dragonfly as the hydrated hold will. A request that is
+// only waiting (Admitting, Deferred) owns nothing, and neither does a run
+// that released its claim once its promotion was recorded (DST-4, O-m1).
 func plannedFailoverOwnsDragonfly(fg *v1alpha1.MysqlFailoverGroup, claimHeld bool) bool {
-	return claimHeld || PlannedRunNeedsClaim(fg, time.Now())
+	return claimHeld || PlannedRunNeedsClaim(fg, time.Now()) || PlannedHoldFrom(fg) != nil
 }
 
 // plannedOwnsDragonfly reports whether a planned failover owns the group's
@@ -772,32 +774,25 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 	}
 }
 
-// plannedTakeoverMasterSite is the run's target while its Dragonfly
-// takeover has succeeded and the run is past it (PromotingDragonfly,
-// Promoting, Publishing or RollingBack): the target already holds the
-// master, though status.activeSite has not moved yet (§8.4). "" otherwise.
-func plannedTakeoverMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
-	pf, marked := plannedFailoverRun(fg)
-	if pf == nil || marked || pf.RunID == "" || pf.TargetSite == "" || pf.Dragonfly == nil || pf.Dragonfly.Takeover == nil ||
-		pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
-		return ""
-	}
-	switch pf.Phase {
-	case v1alpha1.PlannedFailoverPhasePromotingDragonfly, v1alpha1.PlannedFailoverPhasePromoting,
-		v1alpha1.PlannedFailoverPhasePublishing, v1alpha1.PlannedFailoverPhaseRollingBack:
-		return pf.TargetSite
-	}
-	return ""
-}
-
 // activeDragonflySiteFromObservation chooses the site that should be treated
 // as Dragonfly master for status, label reconciliation, and replica wiring.
+// A planned run's succeeded takeover (plannedTakeoverMasterSite) names its
+// target, unless the target is observed as a replica: the takeover made it
+// master, so a replica target means a later promotion moved the master on.
 // A persisted status.dragonfly.activeSite is honored only when that site is
 // still observed as a raw Dragonfly master; otherwise a single observed raw
 // master self-heals stale status after operator upgrades or restarts.
 func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) string {
 	if site := plannedTakeoverMasterSite(fg); site != "" {
-		return site
+		demoted := false
+		for _, s := range snaps {
+			if s.Name == site && s.Reachable && s.Info.Role == "slave" {
+				demoted = true
+			}
+		}
+		if !demoted {
+			return site
+		}
 	}
 	rawMasters := make([]string, 0, 1)
 	for _, s := range snaps {

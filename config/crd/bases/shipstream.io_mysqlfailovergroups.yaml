@@ -7332,14 +7332,11 @@ spec:
                     type: object
                   claimBaseline:
                     description: |-
-                      ClaimBaseline is the durable failover record at the grant (the newer
-                      of status and the out-of-band record): its time, at second
-                      precision, and its target. A re-proof compares those two by value;
-                      promotionGtidExecuted is not recorded here.
+                      ClaimBaseline identifies the durable failover record at the grant
+                      (the newer of status and the out-of-band record): its time, at
+                      second precision, and its target. A re-proof compares those two by
+                      value.
                     properties:
-                      promotionGtidExecuted:
-                        description: PromotionGtidExecuted is the promotion watermark.
-                        type: string
                       target:
                         description: Target is the site the failover promoted.
                         type: string
@@ -7527,7 +7524,7 @@ spec:
                       describe.
                     type: string
                   phase:
-                    description: Phase of the run.
+                    description: Phase of the run. Always set by this operator.
                     enum:
                     - Admitting
                     - Deferred
@@ -7668,6 +7665,7 @@ spec:
                     description: |-
                       Revision increments on every write the run makes. Settlement of an
                       ambiguous write identifies a committed write by (runID, revision).
+                      Always set with runID.
                     format: int64
                     minimum: 1
                     type: integer
@@ -7723,13 +7721,15 @@ spec:
                     description: |-
                       RunID identifies the run this block belongs to. It is minted when a
                       request is first stamped (Admitting or Deferred) and is the token
-                      of the run's claim.
+                      of the run's claim. Always set by this operator; absent only on a
+                      block an older operator wrote.
                     minLength: 1
                     type: string
                   settings:
                     description: |-
                       Settings are the run's effective timing settings, snapshotted at
-                      acceptance from the annotation overrides and the spec.
+                      acceptance from the annotation overrides and the spec. Always set
+                      with runID.
                     properties:
                       dragonfly:
                         description: Dragonfly is set when spec.dragonfly was enabled
@@ -7766,20 +7766,17 @@ spec:
                       primary when it granted the claim. Empty until Fencing.
                     type: string
                   startTime:
-                    description: StartTime is when the request was first accepted.
+                    description: |-
+                      StartTime is when the request was first accepted. Always set by
+                      this operator.
                     format: date-time
                     type: string
                   targetSite:
-                    description: TargetSite is the site the admin asked to promote.
+                    description: |-
+                      TargetSite is the site the admin asked to promote. Always set with
+                      runID.
                     minLength: 1
                     type: string
-                required:
-                - phase
-                - revision
-                - runID
-                - settings
-                - startTime
-                - targetSite
                 type: object
               plannedFailoverHold:
                 description: |-

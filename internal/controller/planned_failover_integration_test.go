@@ -43,11 +43,27 @@ func TestEngine_ZombieClearReleasesHydratedClaimNeverSeen(t *testing.T) {
 		})
 	}
 	t.Run("a hold is never a zombie", func(t *testing.T) {
-		h := newPFEngineHarness(t, plannedFailoverFG(""))
+		fg := plannedFailoverFG("")
+		setPlannedHold(&fg.Status, v1alpha1.PlannedFailoverHold{RunID: "run-held",
+			Reason: v1alpha1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}, 1)
+		h := newPFEngineHarness(t, fg)
 		h.topo.setHeld("run-held", true)
 		h.step()
 		if run, hold := h.topo.held(); run != "run-held" || !hold {
-			t.Fatal("a hold was cleared as a zombie")
+			t.Fatal("a durably recorded hold was cleared")
+		}
+	})
+	// K001/K002/K004: a hold with no durable record left (and no ack to
+	// finish) is an orphan, released as such rather than as a zombie.
+	t.Run("an unrecorded hold is released as an orphan", func(t *testing.T) {
+		h := newPFEngineHarness(t, plannedFailoverFG(""))
+		h.topo.setHeld("run-held", true)
+		h.step()
+		if run, _ := h.topo.held(); run != "" {
+			t.Fatalf("the orphaned hold of %q is still held", run)
+		}
+		if got := h.topo.releasesCopy(); !slices.Equal(got, []string{"run-held:" + string(ReleaseOrphanHold)}) {
+			t.Fatalf("releases = %v, want only run-held:%s", got, ReleaseOrphanHold)
 		}
 	})
 }

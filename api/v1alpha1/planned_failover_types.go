@@ -61,12 +61,12 @@ const (
 	// stamped with a runID, and the run is waiting for the topology
 	// manager to grant its claim. The run owns nothing yet; it ends
 	// Failed{NotStarted, AdmissionTimeout} if no grant arrives before
-	// admission.deadline.
+	// admission.deadlineTime.
 	PlannedFailoverPhaseAdmitting PlannedFailoverPhase = "Admitting"
 
 	// PlannedFailoverPhaseDeferred means admission is deferred: the
 	// anti-flap cooldown is active with spec.plannedFailover.onCooldown
-	// "defer", or a deployment failover-hold lease stands. The run owns
+	// Defer, or a deployment failover-hold lease stands. The run owns
 	// nothing; the annotation remains in place and admission is retried
 	// at admission.retryTime.
 	PlannedFailoverPhaseDeferred PlannedFailoverPhase = "Deferred"
@@ -273,39 +273,50 @@ const (
 // object's resourceVersion and refuses a non-terminal block without a
 // runID (a block written by an older operator).
 //
-// The required fields use omitempty/omitzero so that an unchanged block
-// written by an older operator re-serializes byte for byte and stays
-// writable under CRD validation ratcheting until the operator refuses it.
+// RunID, Revision, Phase, TargetSite, Settings and StartTime are always
+// written by this operator (every run block is minted whole), but the
+// schema does not require them: an operator rolled back across this release
+// (a Helm rollback leaves the CRD in place) decodes the block into its older
+// struct, drops these fields and writes the whole status back; requiring
+// them would fail every one of its status writes. The operator enforces
+// presence instead: a non-terminal block without a runID is refused as a
+// legacy run. The fields use omitempty/omitzero so that a block written
+// by an older operator re-serializes byte for byte.
 type PlannedFailoverStatus struct {
 	// RunID identifies the run this block belongs to. It is minted when a
 	// request is first stamped (Admitting or Deferred) and is the token
-	// of the run's claim.
-	// +kubebuilder:validation:Required
+	// of the run's claim. Always set by this operator; absent only on a
+	// block an older operator wrote.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
 	RunID string `json:"runID,omitempty"`
 
 	// Revision increments on every write the run makes. Settlement of an
 	// ambiguous write identifies a committed write by (runID, revision).
-	// +kubebuilder:validation:Required
+	// Always set with runID.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
 	Revision int64 `json:"revision,omitempty"`
 
-	// Phase of the run.
-	// +kubebuilder:validation:Required
+	// Phase of the run. Always set by this operator.
+	// +optional
 	Phase PlannedFailoverPhase `json:"phase,omitempty"`
 
-	// TargetSite is the site the admin asked to promote.
-	// +kubebuilder:validation:Required
+	// TargetSite is the site the admin asked to promote. Always set with
+	// runID.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
 	TargetSite string `json:"targetSite,omitempty"`
 
 	// Settings are the run's effective timing settings, snapshotted at
-	// acceptance from the annotation overrides and the spec.
-	// +kubebuilder:validation:Required
+	// acceptance from the annotation overrides and the spec. Always set
+	// with runID.
+	// +optional
 	Settings PlannedFailoverSettings `json:"settings,omitzero"`
 
-	// StartTime is when the request was first accepted.
-	// +kubebuilder:validation:Required
+	// StartTime is when the request was first accepted. Always set by
+	// this operator.
+	// +optional
 	StartTime metav1.Time `json:"startTime,omitzero"`
 
 	// SourceSite is the site the topology manager named the unique writable
@@ -317,12 +328,12 @@ type PlannedFailoverStatus struct {
 	// +optional
 	ClaimTime *metav1.Time `json:"claimTime,omitempty"`
 
-	// ClaimBaseline is the durable failover record at the grant (the newer
-	// of status and the out-of-band record): its time, at second
-	// precision, and its target. A re-proof compares those two by value;
-	// promotionGtidExecuted is not recorded here.
+	// ClaimBaseline identifies the durable failover record at the grant
+	// (the newer of status and the out-of-band record): its time, at
+	// second precision, and its target. A re-proof compares those two by
+	// value.
 	// +optional
-	ClaimBaseline *FailoverRecord `json:"claimBaseline,omitempty"`
+	ClaimBaseline *FailoverRecordRef `json:"claimBaseline,omitempty"`
 
 	// Admission records why a run that owns nothing yet is waiting or
 	// deferred, and its admission deadline.
@@ -368,22 +379,19 @@ type PlannedFailoverStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
-// FailoverRecord is the failover record {time, target,
-// promotionGtidExecuted}: when the last failover was recorded, the site it
-// promoted, and the promotion watermark. Every field is optional because a
-// group may have no failover history. A planned run's claimBaseline carries
-// time (at second precision, the precision of both durable copies) and
-// target only.
-type FailoverRecord struct {
+// FailoverRecordRef identifies a failover record by {time, target}: when the
+// last failover was recorded (at second precision, the precision of both
+// durable copies) and the site it promoted. It is what a planned run's
+// claimBaseline needs; the record's promotion watermark is not part of the
+// reference. Every field is optional because a group may have no failover
+// history.
+type FailoverRecordRef struct {
 	// Time is when the failover was recorded.
 	// +optional
 	Time *metav1.Time `json:"time,omitempty"`
 	// Target is the site the failover promoted.
 	// +optional
 	Target string `json:"target,omitempty"`
-	// PromotionGtidExecuted is the promotion watermark.
-	// +optional
-	PromotionGtidExecuted string `json:"promotionGtidExecuted,omitempty"`
 }
 
 // PlannedFailoverSettings are a run's effective timing settings.

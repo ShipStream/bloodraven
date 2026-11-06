@@ -81,6 +81,23 @@ func (m *checker) KillAppConnections(ctx context.Context) (int, error) {
 	return killed, rows.Err()
 }
 
+// CountAppConnections counts the sessions KillAppConnections targets that
+// are still connected: every other session except replication dumps,
+// sessions already marked Killed (KILL is asynchronous), server daemons
+// and replication workers ('system user'), which KILL cannot end.
+func (m *checker) CountAppConnections(ctx context.Context) (int, error) {
+	var n int
+	err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.processlist
+		 WHERE id != CONNECTION_ID()
+		 AND command NOT IN ('Binlog Dump', 'Binlog Dump GTID', 'Killed', 'Daemon')
+		 AND user != 'system user'`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count app connections: %w", err)
+	}
+	return n, nil
+}
+
 func (m *checker) StopReplica(ctx context.Context) error {
 	return stopReplica(ctx, m.db)
 }

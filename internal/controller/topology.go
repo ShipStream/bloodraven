@@ -193,6 +193,9 @@ type TopologySnapshot struct {
 	BootstrapSource    string // "fresh-deploy", "auto-clone", or "reclone"
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
+	// ObservedAt is the manager's clock when the snapshot was built; the
+	// status merge uses it to recognise a future-dated stored record.
+	ObservedAt time.Time
 
 	// RecoverySite/RecoveryState/DivergentGtid/DivergentTxnCount summarize
 	// one site with active recovery state for the RecoveryPending condition
@@ -619,11 +622,6 @@ type TopologyManager struct {
 	predecessorUpdateInFlight bool
 	predecessorUpdateSince    time.Time
 
-	// armCrossSiteRetryHook, when set (simulation only), runs with no lock
-	// held each time a deferred cross-site decision is armed for retry.
-	// Protected by mu.
-	armCrossSiteRetryHook func()
-
 	// beforePromotionClaim, when set (tests only), runs between the
 	// emergency failover's or primary re-assert's eligibility checks and
 	// their beginAutoPromotionOf claim.
@@ -927,8 +925,8 @@ func (tm *TopologyManager) SetFailoverStateRecorder(rec FailoverStateRecorder) {
 }
 
 // recordFailover stamps the in-memory promotion state for a promotion that
-// has already been confirmed writable, then persists the anti-flap half of
-// it out of band.
+// has already been confirmed writable, then persists the whole failover
+// record (time, target and promotion watermark) out of band.
 //
 // Every path that promotes — emergency failover, planned switchover, and the
 // ordered-update handoff — goes through here, so the durable record can
@@ -2084,6 +2082,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		ActiveSite:              tm.activeSiteLocked(),
 		LastFailover:            tm.lastFailover,
 		LastFailoverTarget:      tm.lastFailoverTarget,
+		ObservedAt:              tm.clock.Now(),
 		Alert:                   alert,
 		DegradedReason:          degradedReason,
 		UpdatePhase:             updatePhase,
@@ -3242,11 +3241,7 @@ func (tm *TopologyManager) armCrossSiteRetryAfter(notBefore time.Time) {
 	if notBefore.After(tm.crossSiteRetryNotBefore) {
 		tm.crossSiteRetryNotBefore = notBefore
 	}
-	hook := tm.armCrossSiteRetryHook
 	tm.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
 }
 
 func (tm *TopologyManager) clearCrossSiteRetry() {

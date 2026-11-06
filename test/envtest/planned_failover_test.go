@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -20,7 +21,8 @@ import (
 
 // TestCRD_PlannedFailoverRoundTrip pins the final shape of
 // status.plannedFailover: every field and enum value persists unpruned, the
-// run identity and parameters are required, and invalid phase, outcome,
+// run identity and parameters are optional in the schema (rollback safety),
+// and invalid phase, outcome,
 // reason and wait-reason values (including the removed phases) are rejected
 // by the API server.
 func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
@@ -49,7 +51,7 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 		StartTime:     ts(0),
 		SourceSite:    "dc1",
 		ClaimTime:     ptrTime(1),
-		ClaimBaseline: &v1alpha1.FailoverRecord{Time: ptrTime(2), Target: "dc1"},
+		ClaimBaseline: &v1alpha1.FailoverRecordRef{Time: ptrTime(2), Target: "dc1"},
 		Admission: &v1alpha1.PlannedFailoverAdmission{
 			DeadlineTime: ptrTime(3), WaitReason: v1alpha1.PlannedFailoverWaitRecoveryInFlight,
 			DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive, RetryTime: ptrTime(4),
@@ -133,8 +135,11 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 		}
 	}
 
-	// A new block without its run identity or parameters is rejected:
-	// runID, revision, phase, targetSite, settings and startTime are required.
+	// The run identity and parameters are not required by the schema: an
+	// operator rolled back across this release writes the block back
+	// without them, and requiring them would fail every one of its status
+	// writes (TestCRD_PlannedFailoverRollbackWriteBack). The operator always
+	// writes them and refuses a non-terminal block without a runID.
 	for name, mutate := range map[string]func(pf *v1alpha1.PlannedFailoverStatus){
 		"no runID":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.RunID = "" },
 		"no revision":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Revision = 0 },
@@ -142,18 +147,18 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 		"no target":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.TargetSite = "" },
 		"no settings":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Settings = v1alpha1.PlannedFailoverSettings{} },
 		"no startTime": func(pf *v1alpha1.PlannedFailoverStatus) { pf.StartTime = metav1.Time{} },
-		"old phase":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "Validating" },
 	} {
-		target := create("required-" + strings.ToLower(strings.ReplaceAll(name, " ", "-")))
+		target := create("optional-" + strings.ToLower(strings.ReplaceAll(name, " ", "-")))
 		pf := full.DeepCopy()
 		mutate(pf)
-		if err := writeStatus(target, pf); !apierrors.IsInvalid(err) {
-			t.Errorf("%s: status update error = %v; want Invalid", name, err)
+		if err := writeStatus(target, pf); err != nil {
+			t.Errorf("%s: status update error = %v; want accepted", name, err)
 		}
 	}
 
 	// Invalid values are rejected server-side.
 	invalid := map[string]func(pf *v1alpha1.PlannedFailoverStatus){
+		"old phase":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "Validating" },
 		"phase":        func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "Exploding" },
 		"outcome":      func(pf *v1alpha1.PlannedFailoverStatus) { pf.Result.Outcome = "Partial" },
 		"reason":       func(pf *v1alpha1.PlannedFailoverStatus) { pf.Result.Reason = "SourceCrashed" },
@@ -178,6 +183,61 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 		if err := writeStatus(target, pf); !apierrors.IsInvalid(err) {
 			t.Errorf("%s: status update error = %v; want Invalid", name, err)
 		}
+	}
+}
+
+// TestCRD_PlannedFailoverRollbackWriteBack: an operator rolled back across
+// #235 with the CRD left in place (a Helm rollback never downgrades CRDs)
+// decodes status.plannedFailover into its older struct and writes the whole
+// status back. That write must be accepted: the block loses the fields the
+// older struct does not know, and the rest of status (activeSite, sites,
+// conditions, the failover record) keeps updating.
+func TestCRD_PlannedFailoverRollbackWriteBack(t *testing.T) {
+	ns := createNamespace(t, "pf-rollback")
+	fg := newTestFG(ns)
+	fg.Name = "rollback"
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	start := metav1.NewTime(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC))
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		RunID: "run-1", Revision: 9, Phase: v1alpha1.PlannedFailoverPhaseSucceeded, TargetSite: "dc2", StartTime: start,
+		Settings: v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute}, DrainTimeout: metav1.Duration{Duration: time.Second}},
+		Result:   &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: start},
+		Message:  "done",
+	}
+	if err := k8sClient.Status().Update(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pre-#235 struct: phase, target, sourcePrimary, startTime,
+	// completionTime, reason, message (no runID, revision, targetSite,
+	// settings or result).
+	var u unstructured.Unstructured
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &u); err != nil {
+		t.Fatal(err)
+	}
+	old := map[string]any{
+		"phase": "Succeeded", "target": "dc2", "sourcePrimary": "dc1", "startTime": "2026-11-04T12:00:00Z",
+		"completionTime": "2026-11-04T12:00:00Z", "message": "done",
+	}
+	if err := unstructured.SetNestedField(u.Object, old, "status", "plannedFailover"); err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedField(u.Object, "dc2", "status", "activeSite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Status().Update(ctx, &u); err != nil {
+		t.Fatalf("an older operator's status write-back was rejected: %v", err)
+	}
+	var got v1alpha1.MysqlFailoverGroup
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ActiveSite != "dc2" || got.Status.PlannedFailover == nil || got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseSucceeded ||
+		got.Status.PlannedFailover.RunID != "" {
+		t.Fatalf("status after the write-back = activeSite %q plannedFailover %+v", got.Status.ActiveSite, got.Status.PlannedFailover)
 	}
 }
 

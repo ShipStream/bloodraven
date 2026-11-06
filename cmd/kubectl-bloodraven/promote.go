@@ -12,6 +12,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -46,9 +47,15 @@ Flags:
   --wait               block until this request's run is terminal
                        (Succeeded / Failed); Deferred (cooldown still
                        pending) returns non-zero because the operator has
-                       not performed the promotion. The run already in
-                       status is ignored; a refusal without a run is
-                       reported from its PlannedFailoverRejected Event
+                       not performed the promotion. A run that ends
+                       NotStarted/AlreadyActive (the site became active
+                       first) exits 0, like a skipped request. The run
+                       already in status is ignored unless the request
+                       joins it (an Admitting run to the same site, or a
+                       Deferred run, which resumes for this site); a run
+                       for another site is never this request's result. A
+                       refusal without a run is reported from its
+                       PlannedFailoverRejected Event
   --timeout DURATION   timeout for --wait (default: 10m)
   --kubeconfig string  path to kubeconfig
   --context string     kubeconfig context
@@ -95,31 +102,9 @@ func runPromote(args []string, stdout, stderr *os.File) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var fg v1alpha1.MysqlFailoverGroup
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: group}, &fg); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("MysqlFailoverGroup %s/%s not found", ns, group)
-		}
-		return fmt.Errorf("get failover group: %w", err)
-	}
-	if !groupHasSite(&fg, site) {
-		return fmt.Errorf("site %q is not defined in spec.sites of %s/%s", site, ns, group)
-	}
-
-	// Recorded before the patch, so --wait never reports the previous
-	// run's outcome as this request's result.
-	var baseline plannedWaitBaseline
-	if wait {
-		baseline = newPlannedWaitBaseline(ctx, cl, &fg, site)
-	}
-
-	patched := fg.DeepCopy()
-	if patched.Annotations == nil {
-		patched.Annotations = map[string]string{}
-	}
-	patched.Annotations[PlannedFailoverAnnotation] = value
-	if err := cl.Patch(ctx, patched, client.MergeFrom(&fg)); err != nil {
-		return fmt.Errorf("annotate failover group: %w", err)
+	baseline, err := annotatePlannedFailover(ctx, cl, ns, group, site, value, wait)
+	if err != nil {
+		return err
 	}
 	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, PlannedFailoverAnnotation, value)
 
@@ -130,34 +115,105 @@ func runPromote(args []string, stdout, stderr *os.File) error {
 	return waitForPlannedFailover(stdout, stderr, cl, ns, group, timeout, baseline)
 }
 
+// promoteConflictRetries bounds how often annotatePlannedFailover re-reads
+// the group after a resourceVersion conflict.
+const promoteConflictRetries = 5
+
+// annotatePlannedFailover writes the request annotation, conditioned on the
+// resourceVersion of the read it validated (and, with wait, took the
+// baseline from). A conflict means the group changed in between, perhaps a
+// run was admitted for another request, so the read, the validation and
+// the baseline are redone: the baseline then describes exactly the state the
+// request was written over.
+func annotatePlannedFailover(ctx context.Context, cl client.Client, ns, group, site, value string, wait bool) (plannedWaitBaseline, error) {
+	for attempt := 1; ; attempt++ {
+		var fg v1alpha1.MysqlFailoverGroup
+		if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: group}, &fg); err != nil {
+			if apierrors.IsNotFound(err) {
+				return plannedWaitBaseline{}, fmt.Errorf("MysqlFailoverGroup %s/%s not found", ns, group)
+			}
+			return plannedWaitBaseline{}, fmt.Errorf("get failover group: %w", err)
+		}
+		if !groupHasSite(&fg, site) {
+			return plannedWaitBaseline{}, fmt.Errorf("site %q is not defined in spec.sites of %s/%s", site, ns, group)
+		}
+		// Recorded before the patch, so --wait never reports the previous
+		// run's outcome as this request's result.
+		baseline := plannedWaitBaseline{site: site}
+		if wait {
+			baseline = newPlannedWaitBaseline(ctx, cl, &fg, site)
+		}
+		patched := fg.DeepCopy()
+		if patched.Annotations == nil {
+			patched.Annotations = map[string]string{}
+		}
+		patched.Annotations[PlannedFailoverAnnotation] = value
+		err := cl.Patch(ctx, patched, client.MergeFromWithOptions(&fg, client.MergeFromWithOptimisticLock{}))
+		switch {
+		case err == nil:
+			return baseline, nil
+		case apierrors.IsConflict(err) && attempt < promoteConflictRetries:
+			continue
+		}
+		return plannedWaitBaseline{}, fmt.Errorf("annotate failover group: %w", err)
+	}
+}
+
 // plannedWaitBaseline is what --wait knew before it wrote the request: the
 // run already in status.plannedFailover, and the planned-failover refusal
 // Events already recorded for the group.
 type plannedWaitBaseline struct {
+	// site is the requested site. A new run is this request's only when it
+	// targets site: a run admitted for a concurrent request to another site
+	// is not this request's result.
+	site string
 	// runID is the run in status before the patch ("" for none). Its
 	// block and its terminal marker are not this request's result.
 	runID string
-	// follow is set when the request joins that run instead: a pending
-	// (Admitting or Deferred) run to the same site absorbs the request.
+	// follow is set when the request joins that run instead: an Admitting
+	// run to the same site absorbs the request, and a Deferred run re-reads
+	// the annotation when it resumes, so it carries the request whatever
+	// site it was deferred for.
 	follow bool
+	// deferredFor is the site a followed Deferred run was deferred for,
+	// when that is not site (status keeps it until the run resumes).
+	deferredFor string
+	// hadBlock and startTime describe the block before the patch. An
+	// operator older than this plugin writes no runID; its run is
+	// recognised by a startTime that changed (legacyRun).
+	hadBlock  bool
+	startTime metav1.Time
 	// events maps each refusal Event's UID to its count; nil when the
-	// Events could not be listed.
-	events map[types.UID]int32
+	// Events could not be listed, and eventsErr says why.
+	events    map[types.UID]int32
+	eventsErr error
 }
 
 func newPlannedWaitBaseline(ctx context.Context, cl client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) plannedWaitBaseline {
-	var b plannedWaitBaseline
+	b := plannedWaitBaseline{site: site}
 	if pf := fg.Status.PlannedFailover; pf != nil {
-		b.runID = pf.RunID
+		b.runID, b.hadBlock, b.startTime = pf.RunID, true, pf.StartTime
 		_, _, marked := plannedTerminalMarker(fg)
-		pending := pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting || pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred
-		b.follow = pf.RunID != "" && pf.TargetSite == site && pending && !marked
-	}
-	if evs, err := plannedRefusalEvents(ctx, cl, fg.Namespace, fg.Name); err == nil {
-		b.events = make(map[types.UID]int32, len(evs))
-		for _, ev := range evs {
-			b.events[ev.UID] = ev.Count
+		switch {
+		case pf.RunID == "" || marked:
+		case pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting:
+			// Another site's request is refused beside an Admitting run.
+			b.follow = pf.TargetSite == site
+		case pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred:
+			b.follow = true
+			if pf.TargetSite != site {
+				b.deferredFor = pf.TargetSite
+			}
 		}
+	}
+	evs, err := plannedRefusalEvents(ctx, cl, fg.Namespace, fg.Name)
+	if err != nil {
+		b.eventsErr = err
+		return b
+	}
+	b.events = make(map[types.UID]int32, len(evs))
+	for _, ev := range evs {
+		b.events[ev.UID] = ev.Count
 	}
 	return b
 }
@@ -165,7 +221,19 @@ func newPlannedWaitBaseline(ctx context.Context, cl client.Client, fg *v1alpha1.
 // ours reports whether pf is the block of the run this request started
 // (or joined).
 func (b plannedWaitBaseline) ours(pf *v1alpha1.PlannedFailoverStatus) bool {
-	return pf != nil && pf.RunID != "" && (b.follow || pf.RunID != b.runID)
+	switch {
+	case pf == nil || pf.RunID == "":
+		return false
+	case pf.RunID != b.runID:
+		return pf.TargetSite == b.site
+	}
+	return b.follow
+}
+
+// legacyRun reports a run written by an operator older than this plugin:
+// a block without a runID whose startTime is not the baseline's.
+func (b plannedWaitBaseline) legacyRun(pf *v1alpha1.PlannedFailoverStatus) bool {
+	return pf != nil && pf.RunID == "" && !pf.StartTime.IsZero() && (!b.hadBlock || !pf.StartTime.Equal(&b.startTime))
 }
 
 // plannedRefusalEvents lists the group's PlannedFailoverRejected and
@@ -190,14 +258,15 @@ func plannedRefusalEvents(ctx context.Context, cl client.Client, ns, group strin
 }
 
 // newRefusalEvent returns the newest refusal Event recorded after the
-// baseline: a new Event, or an aggregated one whose count grew.
-func (b plannedWaitBaseline) newRefusalEvent(ctx context.Context, cl client.Client, ns, group string) (*corev1.Event, bool) {
+// baseline: a new Event, or an aggregated one whose count grew. err is why
+// the Events could not be read (at the baseline or now).
+func (b plannedWaitBaseline) newRefusalEvent(ctx context.Context, cl client.Client, ns, group string) (*corev1.Event, error) {
 	if b.events == nil {
-		return nil, false
+		return nil, b.eventsErr
 	}
 	evs, err := plannedRefusalEvents(ctx, cl, ns, group)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	var newest *corev1.Event
 	for i := range evs {
@@ -209,7 +278,7 @@ func (b plannedWaitBaseline) newRefusalEvent(ctx context.Context, cl client.Clie
 			newest = ev
 		}
 	}
-	return newest, newest != nil
+	return newest, nil
 }
 
 func eventTime(ev *corev1.Event) time.Time {
@@ -273,7 +342,9 @@ func groupHasSite(fg *v1alpha1.MysqlFailoverGroup, site string) bool {
 // is terminal *for this wait* but the operator will retry the request
 // once the anti-flap cooldown ticks — it is NOT operator-terminal, so
 // we surface the retry time and return a non-zero error to make sure
-// scripts don't treat it as a successful promotion.
+// scripts don't treat it as a successful promotion. A run that ended
+// NotStarted because its target already became the active primary is
+// reported like a skipped request (exit 0): the requested end state holds.
 //
 // Individual Get calls run with a short request-scoped context so a
 // transient apiserver blip doesn't end the wait, and so the curated
@@ -282,8 +353,9 @@ func groupHasSite(fg *v1alpha1.MysqlFailoverGroup, site string) bool {
 // Get.
 //
 // The run in status before the request (baseline.runID) is ignored until a
-// new run appears, unless the request joined it (baseline.follow). A
-// request the operator consumes without writing a run was refused with an
+// new run for the requested site appears, unless the request joined it
+// (baseline.follow). Once a run is adopted the wait reports only that run.
+// A request the operator consumes without writing a run was refused with an
 // Event only; the wait reports that Event, or says it could not find it.
 func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, group string, timeout time.Duration, baseline plannedWaitBaseline) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -295,8 +367,12 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 	startedAt := time.Now()
 	consecutiveErrors := 0
 	var consumedAt time.Time
-	admitted := false
-	if baseline.follow {
+	adopted, legacy := "", false
+	switch {
+	case baseline.follow && baseline.deferredFor != "":
+		fmt.Fprintf(stdout, "The request replaces the target of deferred planned failover %s (was %q); it runs for %q when it resumes.\n",
+			baseline.runID, baseline.deferredFor, baseline.site)
+	case baseline.follow:
 		fmt.Fprintf(stdout, "The request joins pending planned failover %s.\n", baseline.runID)
 	}
 
@@ -326,13 +402,38 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 		}
 		consecutiveErrors = 0
 		pf := fg.Status.PlannedFailover
-		if !baseline.ours(pf) {
+		_, pending := fg.Annotations[PlannedFailoverAnnotation]
+		_, _, marked := plannedTerminalMarker(&fg)
+		switch {
+		case legacy:
+			if !baseline.legacyRun(pf) {
+				return fmt.Errorf("the planned failover this request started was replaced in status before its result was read; see kubectl describe mysqlfailovergroup %s -n %s", group, ns)
+			}
+		case adopted != "" && adopted == baseline.runID && pf != nil && pf.RunID != adopted && baseline.ours(pf):
+			// The followed run ended without absorbing the request, and the
+			// operator admitted the request as a new run.
+			adopted = pf.RunID
+			fmt.Fprintf(stdout, "Request admitted as planned failover %s.\n", pf.RunID)
+		case adopted != "":
+			if pf == nil || pf.RunID != adopted {
+				return fmt.Errorf("planned failover %s was replaced in status before its result was read; see kubectl describe mysqlfailovergroup %s -n %s", adopted, group, ns)
+			}
+		case baseline.ours(pf):
+			adopted = pf.RunID
+			if pf.RunID != baseline.runID {
+				fmt.Fprintf(stdout, "Request admitted as planned failover %s.\n", pf.RunID)
+			}
+		case baseline.legacyRun(pf):
+			// An operator older than this plugin writes no runID.
+			legacy = true
+			fmt.Fprintln(stderr, "warning: the operator wrote status.plannedFailover without a runID: it is older than this plugin; following the run it started by its start time")
+		default:
 			// Not admitted yet, or refused without a run.
-			if _, pending := fg.Annotations[PlannedFailoverAnnotation]; !pending {
+			if !pending {
 				if consumedAt.IsZero() {
 					consumedAt = time.Now()
 				}
-				if done, err := reportPlannedRefusal(ctx, stdout, stderr, cl, ns, group, baseline, time.Since(consumedAt) >= refusalEventWait); done {
+				if done, err := reportPlannedRefusal(ctx, stdout, stderr, cl, ns, group, baseline, pf, time.Since(consumedAt) >= refusalEventWait); done {
 					return err
 				}
 			}
@@ -346,17 +447,22 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 				continue
 			}
 		}
-		if !admitted && !baseline.follow {
-			admitted = true
-			fmt.Fprintf(stdout, "Request admitted as planned failover %s.\n", pf.RunID)
+		if !legacy && adopted == baseline.runID && pending && (marked || plannedPhaseTerminal(pf.Phase)) {
+			// The followed run ended while the request is still set: the
+			// run's last pass may still consume it (its result is then this
+			// request's), or the run ended without absorbing it and the
+			// operator admits it as a new run. Wait for the request to go.
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("timed out after %s: planned failover %s ended but the operator has not taken the request (the annotation is still set)", timeout, adopted)
+			case <-tick.C:
+				continue
+			}
 		}
-		phase := v1alpha1.PlannedFailoverPhase("")
-		if pf != nil {
-			phase = pf.Phase
-		}
+		phase := pf.Phase
 		if phase != lastPhase {
 			elapsed := time.Since(startedAt).Round(time.Second)
-			if pf != nil && pf.Message != "" {
+			if pf.Message != "" {
 				fmt.Fprintf(stdout, "[%s] phase: %s — %s\n", elapsed, emptyDash(string(phase)), pf.Message)
 			} else {
 				fmt.Fprintf(stdout, "[%s] phase: %s\n", elapsed, emptyDash(string(phase)))
@@ -366,8 +472,12 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 		if outcome, reason, ok := plannedTerminalMarker(&fg); ok {
 			// The terminal marker ended the run while status writes were
 			// failing: status may still show a non-terminal phase.
-			if outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
+			switch {
+			case outcome == v1alpha1.PlannedFailoverOutcomeSucceeded:
 				fmt.Fprintln(stdout, "Planned failover succeeded (ended by the terminal marker after status writes stalled; warnings: StatusStalled).")
+				return nil
+			case plannedAlreadyActive(outcome, reason):
+				fmt.Fprintf(stdout, "Planned failover skipped: site %q became the active primary before the run started (ended by the terminal marker).\n", baseline.site)
 				return nil
 			}
 			fmt.Fprintf(stderr, "Planned failover ended by the terminal marker after status writes stalled: outcome=%s reason=%s\n", outcome, reason)
@@ -375,7 +485,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 		}
 		switch phase {
 		case v1alpha1.PlannedFailoverPhaseSucceeded:
-			if pf != nil && pf.Result != nil && len(pf.Result.Warnings) > 0 {
+			if pf.Result != nil && len(pf.Result.Warnings) > 0 {
 				ws := make([]string, len(pf.Result.Warnings))
 				for i, w := range pf.Result.Warnings {
 					ws[i] = string(w)
@@ -386,18 +496,22 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 			fmt.Fprintln(stdout, "Planned failover succeeded.")
 			return nil
 		case v1alpha1.PlannedFailoverPhaseFailed:
-			outcome, reason, msg := "", "", ""
-			if pf != nil {
-				msg = pf.Message
-				if pf.Result != nil {
-					outcome, reason = string(pf.Result.Outcome), string(pf.Result.Reason)
+			outcome, reason := "", ""
+			if pf.Result != nil {
+				outcome, reason = string(pf.Result.Outcome), string(pf.Result.Reason)
+				if plannedAlreadyActive(pf.Result.Outcome, pf.Result.Reason) {
+					fmt.Fprintf(stdout, "Planned failover skipped: site %q became the active primary before the run started.\n", baseline.site)
+					return nil
 				}
 			}
-			fmt.Fprintf(stderr, "Planned failover failed: outcome=%s reason=%s message=%s\n", outcome, reason, msg)
+			fmt.Fprintf(stderr, "Planned failover failed: outcome=%s reason=%s message=%s\n", outcome, reason, pf.Message)
+			if legacy {
+				return fmt.Errorf("planned failover failed: %s", pf.Message)
+			}
 			return fmt.Errorf("planned failover failed: %s", reason)
 		case v1alpha1.PlannedFailoverPhaseDeferred:
 			retry := "(unset)"
-			if pf != nil && pf.Admission != nil && pf.Admission.RetryTime != nil {
+			if pf.Admission != nil && pf.Admission.RetryTime != nil {
 				retry = pf.Admission.RetryTime.Time.UTC().Format(time.RFC3339)
 			}
 			fmt.Fprintf(stderr, "Planned failover deferred; the operator will retry after %s — rerun status to check.\n", retry)
@@ -411,26 +525,47 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 	}
 }
 
+func plannedPhaseTerminal(p v1alpha1.PlannedFailoverPhase) bool {
+	return p == v1alpha1.PlannedFailoverPhaseSucceeded || p == v1alpha1.PlannedFailoverPhaseFailed
+}
+
+// plannedAlreadyActive: the run never started because its target already
+// was the active primary. A request refused for that reason before a run
+// was written is Skipped (exit 0); a run that learns it after being stamped
+// ends this way, and --wait reports both alike.
+func plannedAlreadyActive(outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) bool {
+	return outcome == v1alpha1.PlannedFailoverOutcomeNotStarted && reason == v1alpha1.PlannedFailoverReasonAlreadyActive
+}
+
 // reportPlannedRefusal reports a request the operator consumed without
 // writing a run, from its refusal Event. done is false while the Event has not
-// arrived and giveUp is false; the caller then polls again.
+// arrived and giveUp is false; the caller then polls again. cur is the block
+// in status, named when a run for another site took the request's place.
 func reportPlannedRefusal(ctx context.Context, stdout, stderr io.Writer, cl client.Client, ns, group string,
-	baseline plannedWaitBaseline, giveUp bool) (bool, error) {
+	baseline plannedWaitBaseline, cur *v1alpha1.PlannedFailoverStatus, giveUp bool) (bool, error) {
 	getCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	ev, ok := baseline.newRefusalEvent(getCtx, cl, ns, group)
+	ev, listErr := baseline.newRefusalEvent(getCtx, cl, ns, group)
 	cancel()
 	switch {
-	case ok && ev.Reason == v1alpha1.EventPlannedFailoverSkipped:
+	case ev != nil && ev.Reason == v1alpha1.EventPlannedFailoverSkipped:
 		fmt.Fprintf(stdout, "Planned failover skipped: %s\n", ev.Message)
 		return true, nil
-	case ok:
+	case ev != nil:
 		fmt.Fprintf(stderr, "Planned failover refused: %s\n", ev.Message)
 		return true, fmt.Errorf("planned failover refused: %s", ev.Message)
-	case giveUp:
-		return true, fmt.Errorf("the operator removed the request without starting a run, and no %s Event was found; see kubectl describe mysqlfailovergroup %s -n %s",
-			v1alpha1.EventPlannedFailoverRejected, group, ns)
+	case !giveUp:
+		return false, nil
 	}
-	return false, nil
+	other := ""
+	if cur != nil && cur.RunID != "" && cur.RunID != baseline.runID && cur.TargetSite != baseline.site {
+		other = fmt.Sprintf(" (planned failover %s runs for site %q, from another request)", cur.RunID, cur.TargetSite)
+	}
+	if listErr != nil {
+		return true, fmt.Errorf("the operator removed the request without starting a run%s, and its refusal Event could not be read: %w; see kubectl describe mysqlfailovergroup %s -n %s",
+			other, listErr, group, ns)
+	}
+	return true, fmt.Errorf("the operator removed the request without starting a run%s, and no %s Event was found; see kubectl describe mysqlfailovergroup %s -n %s",
+		other, v1alpha1.EventPlannedFailoverRejected, group, ns)
 }
 
 // maxWaitGetFailures bounds how many consecutive cl.Get failures a

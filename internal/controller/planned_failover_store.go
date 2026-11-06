@@ -224,7 +224,7 @@ func (s *apiPlannedFailoverStore) ClearTerminalMarker(ctx context.Context, base 
 		if !ok {
 			return false
 		}
-		if m, parsed := ParseTerminalMarker(v); !parsed || m.RunID != runID {
+		if !TerminalMarkerNames(v, runID) {
 			return false
 		}
 		delete(a, PlannedFailoverTerminalAnnotation)

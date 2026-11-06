@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -159,6 +160,13 @@ func TestPlannedFailoverEnumListsMatchAPI(t *testing.T) {
 	if want := contractEnumValues(t, "PlannedFailoverOutcome"); !slices.Equal(outcomes, want) {
 		t.Errorf("plannedFailoverOutcomes = %v, want the API enum %v", outcomes, want)
 	}
+	var warnings []string
+	for _, w := range plannedFailoverWarnings {
+		warnings = append(warnings, string(w))
+	}
+	if want := contractEnumValues(t, "PlannedFailoverWarning"); !slices.Equal(warnings, want) {
+		t.Errorf("plannedFailoverWarnings = %v, want the API enum %v", plannedFailoverWarnings, want)
+	}
 	if want := contractEnumValues(t, "PlannedFailoverReason"); !slices.Equal(reasons, want) {
 		t.Errorf("plannedFailoverReasons = %v, want the API enum %v", reasons, want)
 	}
@@ -169,9 +177,11 @@ func TestTerminalMarker_RoundTrip(t *testing.T) {
 		{RunID: "3f1c2a9e-0000-4000-8000-000000000001", Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded},
 		{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled},
 		{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1alpha1.PlannedFailoverReasonForeignWritable},
+		{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+			Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningFenceNotAttributable, v1alpha1.PlannedFailoverWarningStatusStalled}},
 	} {
 		got, ok := ParseTerminalMarker(m.String())
-		if !ok || got != m {
+		if !ok || !reflect.DeepEqual(got, m) {
 			t.Errorf("ParseTerminalMarker(%q) = %+v, %v; want %+v", m.String(), got, ok, m)
 		}
 	}
@@ -194,6 +204,7 @@ func TestTerminalMarker_RoundTrip(t *testing.T) {
 		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"}}`,
 		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"}]`,
 		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"} x`,
+		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded","warnings":["NotAWarning"]}`,
 	} {
 		if m, ok := ParseTerminalMarker(bad); ok {
 			t.Errorf("ParseTerminalMarker(%q) = %+v, accepted", bad, m)
@@ -311,7 +322,7 @@ func TestPlannedHoldFrom(t *testing.T) {
 		{
 			name:   "status hold",
 			status: held(),
-			want:   &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromStatus: true},
+			want:   &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true},
 		},
 		{name: "acknowledged (condition False)", status: acknowledged()},
 		{
@@ -328,14 +339,34 @@ func TestPlannedHoldFrom(t *testing.T) {
 			name:        "both",
 			status:      held(),
 			annotations: map[string]string{PlannedFailoverTerminalAnnotation: holdMarker.String()},
-			want:        &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromStatus: true, FromMarker: true},
+			want:        &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true, FromMarker: true},
 		},
 		{
 			name:   "both, different runs",
 			status: held(),
 			annotations: map[string]string{PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-2",
 				Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}.String()},
-			want: &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromStatus: true},
+			want: &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true},
+		},
+		// K085: hold detection fails closed on a marker the strict parse
+		// rejects but which still names a run ending ManualRecoveryRequired.
+		{
+			name:        "hold marker with an unknown field",
+			annotations: map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"ExecuteFailed","writer":"v2"}`},
+			want:        &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonExecuteFailed, FromMarker: true},
+		},
+		{
+			name:        "hold marker with an unfamiliar reason and schemaVersion",
+			annotations: map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":2,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"SomethingNew"}`},
+			want:        &PlannedHold{RunID: "run-1", FromMarker: true},
+		},
+		{
+			name:        "lenient marker with another outcome holds nothing",
+			annotations: map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"RolledBack","extra":true}`},
+		},
+		{
+			name:        "garbage marker holds nothing",
+			annotations: map[string]string{PlannedFailoverTerminalAnnotation: `ManualRecoveryRequired`},
 		},
 		{
 			name: "True condition without the status hold still holds, naming no run",
@@ -353,7 +384,7 @@ func TestPlannedHoldFrom(t *testing.T) {
 			switch {
 			case tc.want == nil && got != nil:
 				t.Fatalf("PlannedHoldFrom = %+v, want nil", *got)
-			case tc.want != nil && (got == nil || *got != *tc.want):
+			case tc.want != nil && (got == nil || !reflect.DeepEqual(*got, *tc.want)):
 				t.Fatalf("PlannedHoldFrom = %+v, want %+v", got, *tc.want)
 			}
 		})

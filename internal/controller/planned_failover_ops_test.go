@@ -284,7 +284,7 @@ func opsRun(phase v1alpha1.PlannedFailoverPhase) *v1alpha1.PlannedFailoverStatus
 	t0 := metav1.NewTime(time.Date(2026, 11, 4, 11, 59, 0, 0, time.UTC))
 	pf := &v1alpha1.PlannedFailoverStatus{
 		RunID: "run-1", Revision: 3, Phase: phase, TargetSite: "dc2", SourceSite: "dc1", StartTime: t0, ClaimTime: &t0,
-		ClaimBaseline: &v1alpha1.FailoverRecord{},
+		ClaimBaseline: &v1alpha1.FailoverRecordRef{},
 		Fence:         &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: t0, SourceServerUUID: opsUUIDA, GtidSet: &gtid},
 	}
 	if phase == v1alpha1.PlannedFailoverPhasePromoting {
@@ -673,8 +673,10 @@ func TestRollbackPreconditions(t *testing.T) {
 			mutate: func(f *opsFixture) { f.fenced(); f.src.down = true }, outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
 		{name: "source unreachable retries", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
 			mutate: func(f *opsFixture) { f.fenced(); f.src.down = true }, outcome: ""},
-		{name: "possible write, target unreachable", phase: v1alpha1.PlannedFailoverPhasePromoting, reason: v1alpha1.PlannedFailoverReasonPromotionAborted,
-			mutate: func(f *opsFixture) { f.fenced(); f.tgt.down = true }, outcome: v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed},
+		// One failed read opens the target-loss window (K053); the source
+		// stays fenced. TestPF_RollbackTargetLossWindow pins the expiry.
+		{name: "possible write, target unreachable retries", phase: v1alpha1.PlannedFailoverPhasePromoting, reason: v1alpha1.PlannedFailoverReasonPromotionAborted,
+			mutate: func(f *opsFixture) { f.fenced(); f.tgt.down = true }, outcome: ""},
 		{name: "possible write, target extras", phase: v1alpha1.PlannedFailoverPhasePromoting, reason: v1alpha1.PlannedFailoverReasonPromotionAborted,
 			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDB + ":1" }, outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired},
 		{name: "divergent target before Promoting still unfences", reason: v1alpha1.PlannedFailoverReasonDivergentTarget,
@@ -822,9 +824,10 @@ func TestReprove_RecognisesOwnRecord(t *testing.T) {
 	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
 	fg := opsReproveGroup(f, pf, pf.Promotion.IntentTime.Add(2*time.Second), "dc2")
 	fg.Annotations = map[string]string{
-		LastFailoverAnnotation:          failoverStampFormat(pf.Promotion.IntentTime.Add(2 * time.Second)),
-		LastFailoverTargetAnnotation:    "dc2",
-		PromotionGtidExecutedAnnotation: opsF,
+		LastFailoverAnnotation:             failoverStampFormat(pf.Promotion.IntentTime.Add(2 * time.Second)),
+		LastFailoverTargetAnnotation:       "dc2",
+		PromotionGtidExecutedAnnotation:    opsF,
+		PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(pf.Promotion.IntentTime.Add(2*time.Second), "dc2"),
 	}
 	res, err := f.topo.Reprove(context.Background(), f.ref, fg)
 	if err != nil || !res.OK {

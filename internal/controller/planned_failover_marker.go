@@ -45,7 +45,12 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 			// empty; a wait or refusal changes nothing here.
 			_, _ = e.topo.EnsureClaim(ctx, ref, fg)
 		}
-		e.topo.ConvertToHold(nn, hold.RunID)
+		e.topo.ConvertToHold(nn, hold.RunID, hold.Sites...)
+	} else {
+		// A True AutomaticFailoverHeld condition naming no run holds
+		// automation too (fail closed), as startManager's hydration of it
+		// does; removing the condition by hand releases it (releaseZombie).
+		e.topo.ConvertToHold(nn, "")
 	}
 
 	msg := fmt.Sprintf("planned failover refused: automation is held by planned failover %s (%s); resolve it, then annotate %s=%s",

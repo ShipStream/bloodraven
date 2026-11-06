@@ -25,7 +25,8 @@ import (
 // removing the traffic label sheds the endpoint atomically without
 // depending on the order of role-label flips. The planned-failover
 // state machine drives the strip→takeover→restore sequence directly
-// (see plannedFailoverPromotingDragonfly); this function only enforces
+// (reconcilerDragonflyOps.Takeover in planned_failover_df.go, run by the
+// engine's PromotingDragonfly step); this function only enforces
 // steady state and is a no-op while the sequence is mid-flight on the
 // source pod.
 //
@@ -136,8 +137,9 @@ func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Con
 
 // setDragonflyRoleOnSite forces the role label on every Dragonfly pod
 // for the named site to the given value. Used by the planned-failover
-// PromotingDragonfly handler so role transitions land deterministically
-// in-phase rather than waiting for the next reconcile sweep.
+// takeover (reconcilerDragonflyOps in planned_failover_df.go) so role
+// transitions land deterministically in-phase rather than waiting for the
+// next reconcile sweep.
 func (r *MysqlFailoverGroupReconciler) setDragonflyRoleOnSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, role string) error {
 	return setDragonflyRoleOnSite(ctx, r.Client, fg, siteName, role)
 }

@@ -47,23 +47,55 @@ func plannedFailoverSourceSite(fg *v1alpha1.MysqlFailoverGroup) string {
 }
 
 // plannedDragonflyTakeoverSucceeded reports whether the run's Dragonfly
-// takeover has succeeded and the run is past it (PromotingDragonfly,
-// Promoting, Publishing or RollingBack): the target holds the Dragonfly
-// master (§8.4).
+// takeover is the group's current Dragonfly authority; see
+// plannedTakeoverMasterSite.
 func plannedDragonflyTakeoverSucceeded(fg *v1alpha1.MysqlFailoverGroup) bool {
-	pf, marked := plannedFailoverRun(fg)
-	if pf == nil || marked || pf.TargetSite == "" || pf.Dragonfly == nil || pf.Dragonfly.Takeover == nil ||
+	return plannedTakeoverMasterSite(fg) != ""
+}
+
+// plannedTakeoverMasterSite is the run's target while the run's Dragonfly
+// takeover is the latest Dragonfly authority, or "" (§8.4). It is the one
+// takeover-success predicate: effectiveDragonflyMasterSite (labels,
+// rollouts) and activeDragonflySiteFromObservation (status, replica wiring)
+// both use it. The takeover counts when:
+//
+//   - the run has an ID and a target, and its takeover is recorded
+//     Succeeded;
+//   - the run is past the takeover and not terminal (PromotingDragonfly,
+//     Promoting, Publishing or RollingBack). A terminal marker does not end
+//     it: until the run's terminal record lands, the block is the only
+//     record that the target took the Dragonfly master (its promotion stamp
+//     is best-effort), and nothing has moved Dragonfly since;
+//   - no successful Dragonfly promotion to another site was stamped at or
+//     after the takeover completed. Once the run releases its claim (its
+//     promotion is recorded) an emergency follow-up may legitimately move
+//     the master while status still reads Promoting; its stamp supersedes
+//     the run's takeover.
+func plannedTakeoverMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
+	pf := fg.Status.PlannedFailover
+	if pf == nil || pf.RunID == "" || pf.TargetSite == "" || pf.Dragonfly == nil || pf.Dragonfly.Takeover == nil ||
 		pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
-		return false
+		return ""
 	}
 	switch pf.Phase {
 	case v1alpha1.PlannedFailoverPhasePromotingDragonfly,
 		v1alpha1.PlannedFailoverPhasePromoting,
 		v1alpha1.PlannedFailoverPhasePublishing,
 		v1alpha1.PlannedFailoverPhaseRollingBack:
-		return true
+	default:
+		return ""
 	}
-	return false
+	tk := pf.Dragonfly.Takeover
+	completed := tk.IntentTime.Time
+	if tk.CompletionTime != nil {
+		completed = tk.CompletionTime.Time
+	}
+	if df := fg.Status.Dragonfly; df != nil && df.LastPromotionTime != nil && df.LastPromotionTarget != "" &&
+		df.LastPromotionTarget != pf.TargetSite && df.ActiveSite == df.LastPromotionTarget &&
+		!df.LastPromotionTime.Time.Before(completed.Truncate(time.Second)) {
+		return ""
+	}
+	return pf.TargetSite
 }
 
 // effectiveDragonflyOnSyncTimeout returns the configured policy, or the
@@ -105,6 +137,89 @@ type plannedTakeoverResult struct {
 	Succeeded    bool
 	TargetOffset *int64
 	Why          string // failure detail
+	// Sent is what this attempt sent: plannedTakeoverMaybe when a
+	// REPLTAKEOVER went out whose outcome could have been a promotion,
+	// plannedTakeoverDone when it was answered OK.
+	Sent plannedTakeoverAttempt
+	// Unresolved: REPLTAKEOVER was sent, its reply was lost, and the
+	// target's role could not be observed afterwards. Nothing is concluded;
+	// the takeover stays Intended and the next pass observes again.
+	Unresolved bool
+}
+
+// plannedTakeoverAttempt is what this process knows it sent for a run's
+// Dragonfly takeover. It is evidence that the run itself made a target that
+// now reports role:master the master. A restart loses it; the durable
+// evidence takeoverEvidence reads remains.
+type plannedTakeoverAttempt int
+
+const (
+	// plannedTakeoverNone: no REPLTAKEOVER whose outcome could have been a
+	// promotion (none sent, or the server answered with an error).
+	plannedTakeoverNone plannedTakeoverAttempt = iota
+	// plannedTakeoverMaybe: a REPLTAKEOVER was sent and its reply lost (a
+	// transport error or deadline): the target may have taken over.
+	plannedTakeoverMaybe
+	// plannedTakeoverDone: a REPLTAKEOVER was answered OK.
+	plannedTakeoverDone
+)
+
+// pfDragonflyMemo is this process's memory of a run's Dragonfly takeover.
+type pfDragonflyMemo struct {
+	attempt plannedTakeoverAttempt
+	// outcome is the takeover result this process established and has not
+	// seen commit. A pass records it before anything else (the loss windows
+	// included), and a terminal record built while it is pending carries
+	// it, so a completed takeover is never left behind an Intended record.
+	outcome *pfTakeoverOutcome
+}
+
+// pfTakeoverOutcome is an established takeover result.
+type pfTakeoverOutcome struct {
+	succeeded    bool
+	targetOffset *int64
+	why          string
+	at           metav1.Time
+}
+
+// applyTo records the outcome on next's takeover.
+func (o pfTakeoverOutcome) applyTo(next *v1alpha1.PlannedFailoverStatus) {
+	d := plannedDragonflyBlock(next)
+	t := &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: o.at}
+	if d.Takeover != nil {
+		t = d.Takeover.DeepCopy()
+	}
+	at := o.at
+	t.CompletionTime = &at
+	if o.succeeded {
+		t.State = v1alpha1.DragonflyTakeoverSucceeded
+		t.Method = v1alpha1.DragonflyTakeoverMethodReplTakeover
+		t.TargetOffset = o.targetOffset
+		d.Takeover = t
+		if d.Sessions == "" {
+			d.Sessions = v1alpha1.DragonflySessionsPreserved
+		}
+		d.Message = fmt.Sprintf("REPLTAKEOVER succeeded on %q (sessions %s)", next.TargetSite, d.Sessions)
+		return
+	}
+	t.State = v1alpha1.DragonflyTakeoverFailed
+	d.Takeover = t
+	d.Sessions = v1alpha1.DragonflySessionsLost
+	d.Reason = v1alpha1.DragonflyPlannedReasonPromotionFailed
+	d.Message = "REPLTAKEOVER failed: " + o.why
+}
+
+// applyPendingTakeoverOutcome records, on a record built from a block whose
+// takeover is still Intended (a terminal record, a rollback intent), the
+// takeover outcome this process established but never saw commit, so the
+// record and its warnings say what Dragonfly did.
+func (e *PlannedFailoverEngine) applyPendingTakeoverOutcome(next *v1alpha1.PlannedFailoverStatus) {
+	if next.Dragonfly == nil || next.Dragonfly.Takeover == nil || next.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverIntended {
+		return
+	}
+	if o := e.runMemo(next.RunID).dragonfly.outcome; o != nil {
+		o.applyTo(next)
+	}
 }
 
 // plannedDragonflyOps runs the Dragonfly side of a planned failover for
@@ -126,8 +241,16 @@ type plannedDragonflyOps interface {
 	// plannedTakeoverFinishOnly mode it strips nothing and sends no
 	// REPLTAKEOVER: it only finishes a takeover an earlier attempt already
 	// made (the target holds role:master), and otherwise reports failure.
+	//
+	// A target that reports role:master counts as taken over only with
+	// evidence that the run's takeover made it so (takeoverEvidence; prior
+	// is what this process already sent for the run): a target that
+	// restarted mid-run comes back as an empty standalone master.
 	Takeover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, mode plannedTakeoverMode,
-		guard func() error) (plannedTakeoverResult, error)
+		prior plannedTakeoverAttempt, guard func() error) (plannedTakeoverResult, error)
+	// ObserveRole reads a site's Dragonfly role (INFO replication) without
+	// the gate and without changing anything.
+	ObserveRole(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string) (string, error)
 }
 
 // plannedTakeoverMode selects what a Takeover call may send.
@@ -329,19 +452,34 @@ func (e *PlannedFailoverEngine) dragonflySyncTimeout(ctx context.Context, fg *v1
 	return e.afterAdvance(ctx, fg, pf, out, werr)
 }
 
-// dragonflyTakeoverStep runs the recorded takeover intent, then writes the
-// MySQL Promoting intent with the takeover's result.
+// dragonflyTakeoverStep runs the recorded takeover intent and records its
+// result in its own write; the next pass then writes the MySQL Promoting
+// intent. Recording the result before enterPromoting keeps a completed
+// takeover from being re-run (and the source re-demoted and deleted) while
+// the target's MySQL is unreadable.
 func (e *PlannedFailoverEngine) dragonflyTakeoverStep(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	ref PlannedRunRef) (time.Duration, error) {
+	m := e.runMemo(pf.RunID)
+	tk := (*v1alpha1.DragonflyTakeoverRecord)(nil)
+	if pf.Dragonfly != nil {
+		tk = pf.Dragonfly.Takeover
+	}
+	if tk != nil && tk.State != v1alpha1.DragonflyTakeoverIntended {
+		m.dragonfly.outcome = nil
+	}
+	if tk != nil && tk.State == v1alpha1.DragonflyTakeoverIntended && m.dragonfly.outcome != nil {
+		// This process established the takeover's result but its write did
+		// not commit. Record it before anything else: a loss-window rollback
+		// or a stall marker taken now would leave a completed takeover
+		// Intended (and the run would drop its sessions-lost warning and
+		// the target's Dragonfly authority).
+		return e.recordTakeoverOutcome(ctx, fg, pf, *m.dragonfly.outcome)
+	}
 	if d, err, done := e.dragonflyLossCheck(ctx, fg, pf, ref); done {
 		return d, err
 	}
 	if e.dragonfly == nil || plannedSettings(pf).Dragonfly == nil || !dragonflyEnabled(fg) {
 		return e.skipDragonfly(ctx, fg, pf, ref)
-	}
-	tk := (*v1alpha1.DragonflyTakeoverRecord)(nil)
-	if pf.Dragonfly != nil {
-		tk = pf.Dragonfly.Takeover
 	}
 	if tk == nil {
 		now := metav1.NewTime(e.clk.Now())
@@ -365,7 +503,8 @@ func (e *PlannedFailoverEngine) dragonflyTakeoverStep(ctx context.Context, fg *v
 		return plannedRequeueBackoff, nil
 	}
 	mode := plannedTakeoverFull
-	pastDeadline := !e.clk.Now().Before(tk.IntentTime.Add(plannedDragonflyTakeoverDeadline(pf)))
+	deadline := tk.IntentTime.Add(plannedDragonflyTakeoverDeadline(pf))
+	pastDeadline := !e.clk.Now().Before(deadline)
 	if pastDeadline {
 		// §6.2: the takeover (gate waits included) did not finish within its
 		// budget from the intent. No new role change starts with the source
@@ -374,11 +513,31 @@ func (e *PlannedFailoverEngine) dragonflyTakeoverStep(ctx context.Context, fg *v
 		mode = plannedTakeoverFinishOnly
 	}
 	guard := func() error { return e.topo.CheckRunClaim(ref) }
-	res, err := e.dragonfly.Takeover(ctx, fg, pf, mode, guard)
+	res, err := e.dragonfly.Takeover(ctx, fg, pf, mode, m.dragonfly.attempt, guard)
+	if res.Sent > m.dragonfly.attempt {
+		m.dragonfly.attempt = res.Sent
+	}
 	switch {
 	case errors.Is(err, errDragonflyGateBusy) && !pastDeadline:
 		return e.noteDragonflyGateWait(ctx, fg, pf)
 	case errors.Is(err, errDragonflyGateBusy):
+		// Past the deadline the gate is still busy, so nothing can be
+		// finished or restored now. A takeover an earlier attempt may have
+		// made (this process sent one, or the target reports role:master) is
+		// not declared failed while the gate keeps it from being checked: a
+		// failed takeover under onSyncTimeout=Fail would roll MySQL back
+		// beside a Dragonfly target that already holds the master. That
+		// wait is bounded by one more gate allowance.
+		if e.clk.Now().Before(deadline.Add(plannedDragonflyGateAllowance)) {
+			maybe := m.dragonfly.attempt != plannedTakeoverNone
+			if !maybe {
+				role, rerr := e.dragonfly.ObserveRole(ctx, fg, pf.TargetSite)
+				maybe = rerr == nil && role == "master"
+			}
+			if maybe {
+				return dragonflyGateRetry, nil
+			}
+		}
 		res, err = plannedTakeoverResult{}, nil
 	case errors.Is(err, errPlannedBlockMoved):
 		return plannedRequeuePoll, nil
@@ -386,57 +545,53 @@ func (e *PlannedFailoverEngine) dragonflyTakeoverStep(ctx context.Context, fg *v
 	if d, ferr, handled := e.facadeErr(ctx, fg, pf, err); handled {
 		return d, ferr
 	}
+	if err == nil && res.Unresolved {
+		log.FromContext(ctx).Info("planned failover: dragonfly takeover outcome unknown; observing the target again",
+			"fg", ref.Group.String(), "runId", pf.RunID, "site", pf.TargetSite, "detail", res.Why)
+		return plannedRequeuePoll, nil
+	}
 	if pastDeadline && err == nil && !res.Succeeded && res.Why == "" {
 		res.Why = fmt.Sprintf("the takeover did not finish within %s of its intent", plannedDragonflyTakeoverDeadline(pf))
 	}
-	now := metav1.NewTime(e.clk.Now())
-	if err == nil && res.Succeeded {
-		return e.enterPromoting(ctx, fg, pf, ref, func(next *v1alpha1.PlannedFailoverStatus) {
-			d := plannedDragonflyBlock(next)
-			t := d.Takeover.DeepCopy()
-			t.State = v1alpha1.DragonflyTakeoverSucceeded
-			t.CompletionTime = &now
-			t.Method = v1alpha1.DragonflyTakeoverMethodReplTakeover
-			t.TargetOffset = res.TargetOffset
-			d.Takeover = t
-			if d.Sessions == "" {
-				d.Sessions = v1alpha1.DragonflySessionsPreserved
-			}
-			d.Message = fmt.Sprintf("REPLTAKEOVER succeeded on %q (sessions %s)", pf.TargetSite, d.Sessions)
-			next.Message = fmt.Sprintf("Dragonfly promoted; promoting %q", pf.TargetSite)
-		})
-	}
-	why := res.Why
+	outcome := pfTakeoverOutcome{succeeded: err == nil && res.Succeeded, targetOffset: res.TargetOffset, why: res.Why,
+		at: metav1.NewTime(e.clk.Now())}
 	if err != nil {
-		why = err.Error()
+		outcome.why = err.Error()
 	}
-	failed := func(next *v1alpha1.PlannedFailoverStatus) {
-		d := plannedDragonflyBlock(next)
-		t := d.Takeover.DeepCopy()
-		t.State = v1alpha1.DragonflyTakeoverFailed
-		t.CompletionTime = &now
-		d.Takeover = t
-		d.Sessions = v1alpha1.DragonflySessionsLost
-		d.Reason = v1alpha1.DragonflyPlannedReasonPromotionFailed
-		d.Message = "REPLTAKEOVER failed: " + why
-	}
-	if plannedSettings(pf).Dragonfly.OnSyncTimeout == v1alpha1.DragonflySyncTimeoutFail {
-		out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-			failed(next)
+	m.dragonfly.outcome = &outcome
+	return e.recordTakeoverOutcome(ctx, fg, pf, outcome)
+}
+
+// recordTakeoverOutcome writes an established takeover result, staying in
+// PromotingDragonfly (the next pass writes the Promoting intent), or, for a
+// failed takeover under onSyncTimeout=Fail, the rollback intent.
+func (e *PlannedFailoverEngine) recordTakeoverOutcome(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+	o pfTakeoverOutcome) (time.Duration, error) {
+	m := e.runMemo(pf.RunID)
+	rollBack := !o.succeeded && plannedSettings(pf).Dragonfly != nil &&
+		plannedSettings(pf).Dragonfly.OnSyncTimeout == v1alpha1.DragonflySyncTimeoutFail
+	out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
+		o.applyTo(next)
+		switch {
+		case o.succeeded:
+			next.Message = fmt.Sprintf("Dragonfly promoted; promoting %q", pf.TargetSite)
+		case rollBack:
 			next.Phase = v1alpha1.PlannedFailoverPhaseRollingBack
-			next.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonDragonflyPromotionFailed, IntentTime: now}
+			next.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonDragonflyPromotionFailed, IntentTime: o.at}
 			next.Message = fmt.Sprintf("rolling back (%s)", v1alpha1.PlannedFailoverReasonDragonflyPromotionFailed)
-		})
-		if out == WriteCommitted {
+		default:
+			next.Dragonfly.Message = "REPLTAKEOVER failed; continuing best-effort: " + o.why
+			next.Message = fmt.Sprintf("Dragonfly takeover failed; promoting %q best-effort", pf.TargetSite)
+		}
+	})
+	if out == WriteCommitted {
+		m.dragonfly.outcome = nil
+		if rollBack {
 			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRollbackStarted,
 				fmt.Sprintf("planned failover to %q rolling back (%s)", pf.TargetSite, v1alpha1.PlannedFailoverReasonDragonflyPromotionFailed))
 		}
-		return e.afterAdvance(ctx, fg, pf, out, werr)
 	}
-	return e.enterPromoting(ctx, fg, pf, ref, func(next *v1alpha1.PlannedFailoverStatus) {
-		failed(next)
-		next.Dragonfly.Message = "REPLTAKEOVER failed; continuing best-effort: " + why
-	})
+	return e.afterAdvance(ctx, fg, pf, out, werr)
 }
 
 // noteDragonflyGateWait makes a gate wait visible: writes stay paused on
@@ -515,9 +670,15 @@ func (o reconcilerDragonflyOps) TargetSyncReady(ctx context.Context, fg *v1alpha
 //  4. Best-effort CLIENT KILL TYPE NORMAL on the demoted source, and
 //     recreate its pod.
 //
-// On failure the source's traffic label is restored before returning.
+// On failure the source's traffic label is restored before returning. A
+// REPLTAKEOVER whose reply is lost (not a server error) is resolved by
+// observing the target's role afterwards: master is a completed takeover,
+// replica a failed one; when the target cannot be read the result is
+// Unresolved and the source stays shed (if the target did take over, the
+// source process has exited, and putting it back in the active Service
+// would route clients to it once it restarts).
 func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	mode plannedTakeoverMode, guard func() error) (plannedTakeoverResult, error) {
+	mode plannedTakeoverMode, prior plannedTakeoverAttempt, guard func() error) (plannedTakeoverResult, error) {
 	if guard == nil {
 		guard = func() error { return nil }
 	}
@@ -541,13 +702,24 @@ func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.Mysql
 		return plannedTakeoverResult{}, errPlannedBlockMoved
 	}
 	fg = fresh
-	timeout := effectiveDragonflyMaxSyncWait(fg)
-	if d := plannedSettings(pf).Dragonfly; d != nil {
-		timeout = d.MaxSyncWait.Duration
+	timeout := plannedDragonflyMaxSyncWait(pf)
+
+	// The takeover moves the Dragonfly master from the run's source to its
+	// target. When Dragonfly is served from a third site (a Dragonfly-only
+	// promotion moved it independently of MySQL), stripping and demoting
+	// the MySQL source would leave the real master in the active Service
+	// beside the promoted target: refuse, and leave Dragonfly as it is.
+	if master := effectiveDragonflyMasterSite(fg); master != "" && master != pf.SourceSite && master != pf.TargetSite {
+		why := fmt.Sprintf("the Dragonfly master is %q, not the run's source %q; not taking over", master, pf.SourceSite)
+		metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, pf.TargetSite, "failed").Inc()
+		if r.Recorder != nil {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed, "%s", why)
+		}
+		return plannedTakeoverResult{Why: why}, nil
 	}
 
 	if mode == plannedTakeoverFinishOnly {
-		return o.finishEarlierTakeover(ctx, fg, pf, guard)
+		return o.finishEarlierTakeover(ctx, fg, pf, prior, guard)
 	}
 	if r.Recorder != nil {
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
@@ -576,10 +748,15 @@ func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.Mysql
 		return plannedTakeoverResult{Why: why}, nil
 	}
 	// A re-run after a lost record: a target that already holds the master
-	// role took over; never send a second REPLTAKEOVER.
+	// role took over, if the evidence says this run made it master; never
+	// send a second REPLTAKEOVER.
 	info, infoErr := conn.InfoReplication(ctx)
 	if infoErr == nil && info.Role == "master" {
 		_ = conn.Close()
+		if why := o.takeoverEvidence(ctx, fg, pf, info, prior); why != "" {
+			o.fail(ctx, fg, pf, why)
+			return plannedTakeoverResult{Why: why}, nil
+		}
 		o.finishPromotion(ctx, fg, pf)
 		return plannedTakeoverResult{Succeeded: true}, nil
 	}
@@ -599,14 +776,19 @@ func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.Mysql
 	}
 	if err := conn.ReplTakeover(ctx, timeout); err != nil {
 		_ = conn.Close()
-		why := fmt.Sprintf("REPLTAKEOVER: %v", err)
-		o.fail(ctx, fg, pf, why)
-		return plannedTakeoverResult{Why: why}, nil
+		if dragonfly.IsServerError(err, "") {
+			// The target answered: it refused or could not complete the
+			// takeover and is still a replica.
+			why := fmt.Sprintf("REPLTAKEOVER: %v", err)
+			o.fail(ctx, fg, pf, why)
+			return plannedTakeoverResult{Why: why}, nil
+		}
+		return o.resolveLostTakeoverReply(ctx, fg, pf, err), nil
 	}
 	postInfo, _ := conn.InfoReplication(ctx)
 	_ = conn.Close()
 	o.finishPromotion(ctx, fg, pf)
-	res := plannedTakeoverResult{Succeeded: true}
+	res := plannedTakeoverResult{Succeeded: true, Sent: plannedTakeoverDone}
 	offset := postInfo.MasterReplOffset
 	if offset == 0 {
 		offset = postInfo.SlaveReplOffset
@@ -617,26 +799,107 @@ func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.Mysql
 	return res, nil
 }
 
+// resolveLostTakeoverReply settles a REPLTAKEOVER whose reply was lost (a
+// transport error or a deadline, not a server error): the server may have
+// promoted the target. The client read deadline covers the server's whole
+// takeover budget, so the target's role on a fresh connection (on a
+// detached, bounded context: the pass's may be spent) is the outcome.
+func (o reconcilerDragonflyOps) resolveLostTakeoverReply(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
+	pf *v1alpha1.PlannedFailoverStatus, sendErr error) plannedTakeoverResult {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plannedDragonflyCleanupBudget)
+	defer cancel()
+	role, err := o.ObserveRole(cctx, fg, pf.TargetSite)
+	switch {
+	case err != nil:
+		return plannedTakeoverResult{Unresolved: true, Sent: plannedTakeoverMaybe,
+			Why: fmt.Sprintf("REPLTAKEOVER reply lost (%v) and the target's role is unreadable (%v)", sendErr, err)}
+	case role == "master":
+		o.finishPromotion(cctx, fg, pf)
+		return plannedTakeoverResult{Succeeded: true, Sent: plannedTakeoverMaybe}
+	}
+	why := fmt.Sprintf("REPLTAKEOVER: %v; the target is still a replica", sendErr)
+	o.fail(ctx, fg, pf, why)
+	return plannedTakeoverResult{Why: why}
+}
+
+// takeoverEvidence returns "" when a target reporting role:master is the
+// Dragonfly master because of this run's takeover, or why it is not. A
+// Dragonfly pod restarts with no --replicaof and empty data, so a target
+// that restarted mid-run reports role:master too; promoting it would discard
+// the whole cache the source still serves. Any one of these is evidence:
+//
+//   - this process sent the run a REPLTAKEOVER that may have promoted it
+//     (prior);
+//   - a promotion of the target was stamped at or after the takeover
+//     intent (finishPromotion stamps it before the result is recorded);
+//   - the target's master_repl_offset reached the source offset captured
+//     before the sync (a non-zero offset an empty restart cannot have);
+//   - the source is no longer a master (it reports role:slave).
+func (o reconcilerDragonflyOps) takeoverEvidence(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+	target dragonfly.ReplicationInfo, prior plannedTakeoverAttempt) string {
+	if prior != plannedTakeoverNone {
+		return ""
+	}
+	var tk *v1alpha1.DragonflyTakeoverRecord
+	if pf.Dragonfly != nil {
+		tk = pf.Dragonfly.Takeover
+	}
+	if df := fg.Status.Dragonfly; df != nil && tk != nil && df.LastPromotionTarget == pf.TargetSite && df.ActiveSite == pf.TargetSite &&
+		df.LastPromotionTime != nil && !df.LastPromotionTime.Time.Before(tk.IntentTime.Time.Truncate(time.Second)) {
+		return ""
+	}
+	if d := pf.Dragonfly; d != nil && d.SourceOffsetState == v1alpha1.DragonflyOffsetCaptured && d.SourceOffset != nil &&
+		*d.SourceOffset > 0 && target.MasterReplOffset >= *d.SourceOffset {
+		return ""
+	}
+	if pf.SourceSite != "" {
+		if role, err := o.ObserveRole(ctx, fg, pf.SourceSite); err == nil && role == "slave" {
+			return ""
+		}
+	}
+	return fmt.Sprintf("target %q reports role master, but nothing shows this run's REPLTAKEOVER made it master "+
+		"(it may have restarted as an empty standalone master); keeping %q as the Dragonfly master", pf.TargetSite, pf.SourceSite)
+}
+
+// ObserveRole reads site's Dragonfly role on its own connection.
+func (o reconcilerDragonflyOps) ObserveRole(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string) (string, error) {
+	conn, err := o.r.dragonflyDial(ctx, fg, site)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = conn.Close() }()
+	info, err := conn.InfoReplication(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.Role, nil
+}
+
 // finishEarlierTakeover is Takeover past the deadline (under the gate): a
 // target that already holds the master role took over on an earlier
-// attempt and is finished (relabel, demote the source); otherwise nothing is
-// sent and the takeover is reported failed, with the source's traffic label
-// put back in case an earlier attempt left it stripped.
+// attempt, when the evidence says so, and is finished (relabel, demote the
+// source); otherwise nothing is sent and the takeover is reported failed,
+// with the source's traffic label put back in case an earlier attempt left
+// it stripped. The source is never demoted or deleted without evidence.
 func (o reconcilerDragonflyOps) finishEarlierTakeover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
-	pf *v1alpha1.PlannedFailoverStatus, guard func() error) (plannedTakeoverResult, error) {
+	pf *v1alpha1.PlannedFailoverStatus, prior plannedTakeoverAttempt, guard func() error) (plannedTakeoverResult, error) {
+	why := fmt.Sprintf("the takeover did not finish within %s of its intent", plannedDragonflyTakeoverDeadline(pf))
 	conn, err := o.r.dragonflyDial(ctx, fg, pf.TargetSite)
 	if err == nil {
 		info, infoErr := conn.InfoReplication(ctx)
 		_ = conn.Close()
 		if infoErr == nil && info.Role == "master" {
-			if err := guard(); err != nil {
-				return plannedTakeoverResult{}, err
+			if ewhy := o.takeoverEvidence(ctx, fg, pf, info, prior); ewhy != "" {
+				why = ewhy
+			} else {
+				if err := guard(); err != nil {
+					return plannedTakeoverResult{}, err
+				}
+				o.finishPromotion(ctx, fg, pf)
+				return plannedTakeoverResult{Succeeded: true}, nil
 			}
-			o.finishPromotion(ctx, fg, pf)
-			return plannedTakeoverResult{Succeeded: true}, nil
 		}
 	}
-	why := fmt.Sprintf("the takeover did not finish within %s of its intent", plannedDragonflyTakeoverDeadline(pf))
 	o.fail(ctx, fg, pf, why)
 	return plannedTakeoverResult{Why: why}, nil
 }

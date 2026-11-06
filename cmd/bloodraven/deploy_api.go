@@ -347,10 +347,7 @@ func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.De
 	if len(fg.Status.Sites) < len(fg.Spec.Sites) {
 		replicating = false
 	}
-	planned := map[string]string{"phase": "", "reason": ""}
-	if p := fg.Status.PlannedFailover; p != nil {
-		planned["phase"], planned["reason"] = string(p.Phase), plannedFailoverOperationReason(p)
-	}
+	planned := plannedFailoverOperation(fg)
 	restore, dragonfly := "", ""
 	if s := fg.Status.RestoreInPlace; s != nil {
 		restore = string(s.Phase)
@@ -361,16 +358,43 @@ func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.De
 	return map[string]any{"group": fg.Name, "namespace": fg.Namespace, "activeSite": fg.Status.ActiveSite, "topologyGeneration": fg.Status.TopologyGeneration, "health": map[string]any{"ready": ready, "degradedReason": degraded, "replicationRunning": replicating, "replicationLagSeconds": lag, "recoveryPending": recovery}, "operations": map[string]any{"plannedFailover": planned, "updatePhase": fg.Status.UpdatePhase, "restoreInPlace": restore, "dragonflyUpgrade": dragonfly}, "stable": reason == "", "unstableReason": reason, "leases": leases}
 }
 
-// plannedFailoverOperationReason is operations.plannedFailover.reason: the
-// run's result reason, else its admission wait or defer reason.
-func plannedFailoverOperationReason(p *v1alpha1.PlannedFailoverStatus) string {
-	switch {
-	case p.Result != nil && p.Result.Reason != "":
-		return string(p.Result.Reason)
-	case p.Admission != nil && p.Admission.WaitReason != "":
-		return string(p.Admission.WaitReason)
-	case p.Admission != nil && p.Admission.DeferReason != "":
-		return string(p.Admission.DeferReason)
+// plannedFailoverOperation is operations.plannedFailover: the latest run's
+// phase, its outcome once terminal, and a reason that belongs to that phase.
+//
+// A terminal marker naming the run ends it while status writes fail, so a
+// matching marker wins over the block's (stale, live-looking) phase: the
+// projection is the marker's terminal phase, outcome and reason. Otherwise
+// a terminal run reports its result reason (empty when it has none, never an
+// earlier admission reason), Admitting its latest wait reason, Deferred its
+// defer reason, and any other live phase no reason.
+func plannedFailoverOperation(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
+	out := map[string]string{"phase": "", "outcome": "", "reason": ""}
+	p := fg.Status.PlannedFailover
+	if p == nil {
+		return out
 	}
-	return ""
+	if m, ok := controller.ParseTerminalMarker(fg.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]); ok && p.RunID != "" && m.RunID == p.RunID {
+		out["phase"] = string(v1alpha1.PlannedFailoverPhaseFailed)
+		if m.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
+			out["phase"] = string(v1alpha1.PlannedFailoverPhaseSucceeded)
+		}
+		out["outcome"], out["reason"] = string(m.Outcome), string(m.Reason)
+		return out
+	}
+	out["phase"] = string(p.Phase)
+	switch p.Phase {
+	case v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverPhaseFailed:
+		if p.Result != nil {
+			out["outcome"], out["reason"] = string(p.Result.Outcome), string(p.Result.Reason)
+		}
+	case v1alpha1.PlannedFailoverPhaseAdmitting:
+		if p.Admission != nil {
+			out["reason"] = string(p.Admission.WaitReason)
+		}
+	case v1alpha1.PlannedFailoverPhaseDeferred:
+		if p.Admission != nil {
+			out["reason"] = string(p.Admission.DeferReason)
+		}
+	}
+	return out
 }

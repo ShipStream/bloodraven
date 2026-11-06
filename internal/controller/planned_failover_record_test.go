@@ -25,6 +25,8 @@ func TestFailoverStateRecorder_ConditionedNoOverwrite(t *testing.T) {
 	rec := NewAnnotationFailoverStateRecorder(c, c, nn)
 	t1 := time.Date(2030, 1, 1, 0, 0, 10, 0, time.UTC)
 	t0 := t1.Add(-time.Minute)
+	// The writer's clock is at t1: neither record is future-dated (K023).
+	rec.(*annotationFailoverStateRecorder).now = func() time.Time { return t1 }
 	read := func() FailoverRecord {
 		t.Helper()
 		var got v1alpha1.MysqlFailoverGroup
@@ -97,6 +99,7 @@ func TestRestore_WatermarkFromNewerOOBRecord(t *testing.T) {
 			fg.Annotations = map[string]string{LastFailoverAnnotation: failoverStampFormat(newer), LastFailoverTargetAnnotation: "dc2"}
 			if tc.oobWater != "" {
 				fg.Annotations[PromotionGtidExecutedAnnotation] = tc.oobWater
+				fg.Annotations[PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(newer, "dc2")
 			}
 			tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
 			c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg).Build()

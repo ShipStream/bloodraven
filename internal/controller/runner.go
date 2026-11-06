@@ -41,6 +41,16 @@ type managedTopology struct {
 	// that inject a manager without starting Run.
 	done chan struct{}
 	cfg  TopologyConfig
+	// uid is the UID of the CR the manager was started for ("" in tests
+	// that inject a manager). A CR deleted and recreated under the same
+	// name is another incarnation: it inherits neither the group's claim
+	// slot nor a retired manager's failover record (K002).
+	uid types.UID
+	// viewSlot and viewSlotGen stamp the group's claim slot just before
+	// startManager's uncached read: registration hydrates nothing from
+	// that read when the slot has released a claim since (K004).
+	viewSlot    *PlannedClaimSlot
+	viewSlotGen uint64
 
 	// archiver polls each sidecar's /archiver/status endpoint and caches
 	// the latest snapshot for updateCRStatus to copy into status.pitr.
@@ -122,11 +132,15 @@ type TopologyManagerRunner struct {
 	// current or retiring, remains.
 	plannedClaims map[types.NamespacedName]*PlannedClaimSlot
 	// retiredFailover is the newest failover record a retired manager of
-	// each group held when it last stopped (DST-1). A replacement registered
-	// after the retired manager left retiring still receives it; the
-	// timestamp-monotonic carry makes a stale entry harmless. Guarded by mu;
-	// removed with the group's claim slot.
-	retiredFailover map[types.NamespacedName]FailoverRecord
+	// each group held when it last stopped (DST-1), with the UID of the CR
+	// incarnation it belongs to. A replacement of the same incarnation
+	// registered after the retired manager left retiring still receives
+	// it; the timestamp-monotonic carry makes a stale entry harmless.
+	// Guarded by mu; removed with the group's claim slot.
+	retiredFailover map[types.NamespacedName]retiredFailoverRecord
+	// incarnations is the CR UID each group's claim slot and retired record
+	// belong to. Guarded by mu; removed with the group's claim slot.
+	incarnations map[types.NamespacedName]types.UID
 	// planned is the process's planned-failover topology facade, built on
 	// first use (see PlannedTopology). Guarded by mu.
 	planned *runnerPlannedTopology
@@ -183,6 +197,30 @@ func (r *TopologyManagerRunner) SetDragonflyUpgradePaused(nn types.NamespacedNam
 	return true
 }
 
+// syncDragonflyUpgradePause reconciles df's upgrade pause with the cached
+// upgrade state, but never writes the cached value itself (K121): the
+// snapshot-upgrade reconcile sets the pause from the state it reads under
+// the Dragonfly gate, and a lagging cache would undo that (pausing again
+// after an abandonment, so a queued follow-up is dropped). Only when the
+// cache disagrees with the pause is the group re-read uncached and the
+// pause set from that read, which still repairs a pause left behind by a
+// status edited by hand.
+func (r *TopologyManagerRunner) syncDragonflyUpgradePause(ctx context.Context, nn types.NamespacedName, df *DragonflyManager, cachedPaused bool) {
+	if df == nil || df.upgradePaused.Load() == cachedPaused {
+		return
+	}
+	paused := cachedPaused
+	if r.apiReader != nil {
+		var fresh v1alpha1.MysqlFailoverGroup
+		if err := r.apiReader.Get(ctx, nn, &fresh); err != nil {
+			r.logger.Debug("could not read the group uncached to check the Dragonfly upgrade pause; keeping it", "fg", nn, "error", err)
+			return
+		}
+		paused = dragonflyUpgradeInFlight(dragonflyUpgradeStatus(&fresh))
+	}
+	df.SetUpgradePaused(paused)
+}
+
 // ActiveSite is the registered manager's effective active site, which
 // reflects a promotion at once; ok=false when no manager is registered.
 func (r *TopologyManagerRunner) ActiveSite(nn types.NamespacedName) (site string, ok bool) {
@@ -231,7 +269,10 @@ func (r *TopologyManagerRunner) plannedFacade() *runnerPlannedTopology {
 
 var _ ManagerRegistry = (*TopologyManagerRunner)(nil)
 
-// Snapshot implements ManagerRegistry: one r.mu.RLock, copies only.
+// Snapshot implements ManagerRegistry: the group's claim slot (created
+// under r.mu.Lock on first use, see Slot), then the current and retiring
+// managers under one r.mu.RLock. It returns pointers; the caller inspects
+// them with no registry lock held.
 func (r *TopologyManagerRunner) Snapshot(nn types.NamespacedName) RegistrySnapshot {
 	slot := r.Slot(nn)
 	r.mu.RLock()
@@ -265,6 +306,19 @@ func (r *TopologyManagerRunner) slotLocked(nn types.NamespacedName) *PlannedClai
 		r.plannedClaims[nn] = slot
 	}
 	return slot
+}
+
+// retiredFailoverRecord is a stashed retired-manager failover record and
+// the CR incarnation it belongs to.
+type retiredFailoverRecord struct {
+	uid types.UID
+	rec FailoverRecord
+}
+
+// sameIncarnation reports whether two CR UIDs may be the same incarnation
+// (an unknown UID, from a test-injected manager, matches anything).
+func sameIncarnation(a, b types.UID) bool {
+	return a == "" || b == "" || a == b
 }
 
 // LeaderContext implements ManagerRegistry: the context Start received,
@@ -518,15 +572,14 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		// the cache, and only the owning run releases its claim.
 		upgradePaused := dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg))
 
-		if live && existing.cfg.Equal(cfg) {
+		recreated := live && !sameIncarnation(existing.uid, fg.UID)
+		if live && existing.cfg.Equal(cfg) && !recreated {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			_ = r.applyRestoreProtection(ctx, existing.tm, fg, false)
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
-			if existing.dragonfly != nil {
-				existing.dragonfly.SetUpgradePaused(upgradePaused)
-			}
+			r.syncDragonflyUpgradePause(ctx, nn, existing.dragonfly, upgradePaused)
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
@@ -534,9 +587,13 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		}
 
 		if ok {
-			if live {
+			switch {
+			case recreated:
+				r.logger.Info("group recreated, restarting topology manager", "fg", nn,
+					"previousUid", string(existing.uid), "uid", string(fg.UID))
+			case live:
 				r.logger.Info("config changed, restarting topology manager", "fg", nn)
-			} else {
+			default:
 				r.logger.Warn("topology manager exited; restarting", "fg", nn)
 			}
 			// Unregister before stopping, as for a deleted CR: if the
@@ -579,9 +636,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
 			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			_ = r.applyRestoreProtection(ctx, mt.tm, fg, false)
-			if mt.dragonfly != nil {
-				mt.dragonfly.SetUpgradePaused(upgradePaused)
-			}
+			r.syncDragonflyUpgradePause(ctx, nn, mt.dragonfly, upgradePaused)
 			r.handleRecloneAnnotation(ctx, fg, nn, mt.tm)
 		}
 	}
@@ -607,6 +662,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		if _, ok := seen[nn]; !ok && r.managers[nn] == nil && len(r.retiring[nn]) == 0 {
 			delete(r.plannedClaims, nn)
 			delete(r.retiredFailover, nn)
+			delete(r.incarnations, nn)
 		}
 	}
 	r.mu.Unlock()
@@ -889,6 +945,8 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// restored below would otherwise let the first Poll drain or recover
 	// sites a planned failover that survived the restart is using. A read
 	// error fails the start, as initRestoreProtection's does.
+	viewSlot := r.Slot(nn)
+	viewSlotGen := viewSlot.generation()
 	plannedView, err := r.plannedFailoverView(ctx, fg, prev)
 	if err != nil {
 		for _, c := range siteMySQL {
@@ -908,6 +966,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	r.restoreFailoverState(tm, fg, nn)
 	r.restorePlannedFailoverState(tm, plannedView, nn)
+	if plannedView == nil && prev != nil {
+		// The uncached read failed, so nothing re-derived the planned
+		// naming; the predecessor's live naming (a source a run left
+		// fenced, not yet re-asserted) carries over instead (K024).
+		tm.carryNamedActiveSite(prev.tm)
+	}
 	for _, site := range fg.Status.Sites {
 		if site.SourceConvergenceState != "" || site.SourceHost != "" {
 			tm.SetSourceConvergence(site.Name, site.SourceHost, SourceConvergenceState(site.SourceConvergenceState), site.SourceConvergenceReason)
@@ -1004,6 +1068,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		cancel:       cancel,
 		done:         done,
 		cfg:          cfg,
+		uid:          fg.UID,
+		viewSlot:     viewSlot,
+		viewSlotGen:  viewSlotGen,
 		archiver:     archiver,
 		archiverDone: archiverDone,
 		dragonfly:    dfMgr,
@@ -1279,7 +1346,7 @@ func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt 
 		r.retiring = make(map[types.NamespacedName][]*managedTopology)
 	}
 	r.retiring[nn] = append(r.retiring[nn], mt)
-	r.stashRetiredFailoverLocked(nn, mt.tm)
+	r.stashRetiredFailoverLocked(nn, mt)
 	// A retired manager adds no update worker, so the first wait ends when
 	// the last one exits, whether or not its Run has returned; that
 	// releases the replacement's predecessor guard. The entry itself stays
@@ -1292,9 +1359,11 @@ func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt 
 	go func() {
 		mt.tm.waitUpdateWorkers()
 		r.mu.Lock()
-		r.stashRetiredFailoverLocked(nn, mt.tm)
+		r.stashRetiredFailoverLocked(nn, mt)
 		if cur := r.managers[nn]; cur != nil {
-			CarryRetiredFailoverRecord(cur.tm, mt.tm)
+			if sameIncarnation(cur.uid, mt.uid) {
+				CarryRetiredFailoverRecord(cur.tm, mt.tm)
+			}
 			if !r.retiringUpdateInFlightLocked(nn) {
 				cur.tm.setPredecessorUpdateInFlight(false)
 			}
@@ -1305,8 +1374,8 @@ func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt 
 		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		r.stashRetiredFailoverLocked(nn, mt.tm)
-		if cur := r.managers[nn]; cur != nil {
+		r.stashRetiredFailoverLocked(nn, mt)
+		if cur := r.managers[nn]; cur != nil && sameIncarnation(cur.uid, mt.uid) {
 			CarryRetiredFailoverRecord(cur.tm, mt.tm)
 		}
 		r.retiring[nn] = slices.DeleteFunc(r.retiring[nn], func(m *managedTopology) bool { return m == mt })
@@ -1332,12 +1401,21 @@ func (r *TopologyManagerRunner) registerManager(nn types.NamespacedName, mt *man
 // leaves the sites to it), and the group's planned-failover claim slot,
 // shared with the predecessor and hydrated from view, an uncached read
 // (nil: nothing to hydrate).
+//
+// A manager for a new incarnation of the CR (another UID under the same
+// name) gets a fresh claim slot and no retired record or predecessor
+// record: the old incarnation's hold or run, and its failover history,
+// are not the new object's. The predecessors' mutation barriers still
+// apply until their workers exit, as for any replacement. A view read
+// before the slot released a claim hydrates nothing: the release (an
+// acknowledgement, a terminal record) happened after the read.
 func (r *TopologyManagerRunner) registerManagerWith(nn types.NamespacedName, view *v1alpha1.MysqlFailoverGroup, mt *managedTopology) {
 	r.reservationMu.Lock()
 	defer r.reservationMu.Unlock()
 	pending := r.pendingKeyringRotationReservations(nn)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.adoptIncarnationLocked(nn, mt.uid)
 	w := ManagerWiring{
 		Slot:                   r.slotLocked(nn),
 		PendingRotations:       pending,
@@ -1347,14 +1425,25 @@ func (r *TopologyManagerRunner) registerManagerWith(nn types.NamespacedName, vie
 		w.RetiringBusy = func() bool { return r.retiringChangingSites(nn) }
 	}
 	for _, old := range r.retiring[nn] {
-		w.Predecessors = append(w.Predecessors, old.tm)
+		if sameIncarnation(old.uid, mt.uid) {
+			w.Predecessors = append(w.Predecessors, old.tm)
+		}
 	}
-	if rec, ok := r.retiredFailover[nn]; ok {
+	if st, ok := r.retiredFailover[nn]; ok && sameIncarnation(st.uid, mt.uid) {
+		rec := st.rec
 		w.RetiredFailover = &rec
 	}
 	if view != nil {
-		w.HoldFrom = PlannedHoldFrom(view)
-		if PlannedRunNeedsClaim(view, mt.tm.clock.Now()) {
+		// A claim the slot released after the view was read (an
+		// acknowledged hold, a run's terminal release) is not hydrated
+		// back from it; anything else hydrates, failing closed.
+		stale := func(runID string) bool {
+			return mt.viewSlot == w.Slot && w.Slot.releasedSince(mt.viewSlotGen, runID)
+		}
+		if h := PlannedHoldFrom(view); h != nil && !stale(h.RunID) {
+			w.HoldFrom = h
+		}
+		if PlannedRunNeedsClaim(view, mt.tm.clock.Now()) && !stale(view.Status.PlannedFailover.RunID) {
 			w.HydrateFrom = view.Status.PlannedFailover
 		}
 	}
@@ -1363,19 +1452,50 @@ func (r *TopologyManagerRunner) registerManagerWith(nn types.NamespacedName, vie
 }
 
 // stashRetiredFailoverLocked keeps the newer of nn's stashed record and
-// tm's in-memory failover record. Caller holds r.mu.
-func (r *TopologyManagerRunner) stashRetiredFailoverLocked(nn types.NamespacedName, tm *TopologyManager) {
-	rec, ok := tm.failoverRecordSnapshot()
+// mt's in-memory failover record. A manager of an earlier incarnation of
+// the CR stashes nothing, and its record replaces nothing. Caller holds
+// r.mu.
+func (r *TopologyManagerRunner) stashRetiredFailoverLocked(nn types.NamespacedName, mt *managedTopology) {
+	if !sameIncarnation(mt.uid, r.incarnations[nn]) {
+		return
+	}
+	rec, ok := mt.tm.failoverRecordSnapshot()
 	if !ok {
 		return
 	}
 	if r.retiredFailover == nil {
-		r.retiredFailover = make(map[types.NamespacedName]FailoverRecord)
+		r.retiredFailover = make(map[types.NamespacedName]retiredFailoverRecord)
 	}
-	if cur, ok := r.retiredFailover[nn]; ok && !rec.LastFailover.After(cur.LastFailover) {
+	if cur, ok := r.retiredFailover[nn]; ok && sameIncarnation(cur.uid, mt.uid) && !rec.LastFailover.After(cur.rec.LastFailover) {
 		return
 	}
-	r.retiredFailover[nn] = rec
+	r.retiredFailover[nn] = retiredFailoverRecord{uid: mt.uid, rec: rec}
+}
+
+// adoptIncarnationLocked records uid as nn's CR incarnation. When it
+// replaces another, the group's claim slot is replaced by an empty one (the
+// old slot stays with the old incarnation's retiring managers) and the
+// retired record is dropped. Caller holds r.mu.
+func (r *TopologyManagerRunner) adoptIncarnationLocked(nn types.NamespacedName, uid types.UID) {
+	if uid == "" {
+		return
+	}
+	if r.incarnations == nil {
+		r.incarnations = make(map[types.NamespacedName]types.UID)
+	}
+	prev, known := r.incarnations[nn]
+	r.incarnations[nn] = uid
+	if !known || prev == uid {
+		return
+	}
+	if r.plannedClaims != nil {
+		if old, ok := r.plannedClaims[nn]; ok && old.Held() {
+			r.logger.Warn("planned failover: the group was recreated; its claim slot starts empty",
+				"fg", nn.String(), "previousUid", string(prev), "uid", string(uid))
+		}
+		delete(r.plannedClaims, nn)
+	}
+	delete(r.retiredFailover, nn)
 }
 
 // retiringChangingSites reports whether a retiring manager of nn is still
@@ -1862,7 +1982,15 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				liveDivergentPromotion = &cp
 			}
 		}
+		// The failover triple is re-merged over the live one (K058): a
+		// newer record committed since freshFG was read (the planned
+		// engine's terminal write, at the same topology generation) must
+		// not be replaced by freshFG's pre-merged copy.
+		live := fresh.Status
 		fresh.Status = *freshFG.Status.DeepCopy()
+		fresh.Status.LastFailover, fresh.Status.LastFailoverTarget, fresh.Status.PromotionGtidExecuted =
+			live.LastFailover, live.LastFailoverTarget, live.PromotionGtidExecuted
+		mergeFailoverTriple(&fresh.Status, snap)
 		if !newDivergentPromotion {
 			if liveDivergentPromotion != nil {
 				setCondition(&fresh.Status.Conditions, *liveDivergentPromotion)
@@ -1953,25 +2081,7 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 		st.Sites[i] = siteStatusFromSnapshot(s)
 	}
 
-	// The failover record {lastFailover, lastFailoverTarget,
-	// promotionGtidExecuted} only moves forward: a snapshot whose
-	// lastFailover is strictly older (second precision) than the stored
-	// one leaves the triple alone, and an equal one may change only the
-	// target (a planned failover naming an unconfirmed target).
-	snapAt := snap.LastFailover.UTC().Truncate(time.Second)
-	var storedAt time.Time
-	if st.LastFailover != nil {
-		storedAt = st.LastFailover.UTC().Truncate(time.Second)
-	}
-	switch {
-	case snapAt.After(storedAt):
-		t := metav1.NewTime(snap.LastFailover)
-		st.LastFailover = &t
-		st.LastFailoverTarget = snap.LastFailoverTarget
-		st.PromotionGtidExecuted = snap.PromotionGtidExecuted
-	case snapAt.Equal(storedAt):
-		st.LastFailoverTarget = snap.LastFailoverTarget
-	}
+	mergeFailoverTriple(st, snap)
 
 	// Write per-site recovery fields. Every site carries its own recovery
 	// state and divergence report — multiple sites can be in recovery at
@@ -1995,6 +2105,35 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 
 	st.UpdatePhase = snap.UpdatePhase
 	return true
+}
+
+// mergeFailoverTriple moves the failover record {lastFailover,
+// lastFailoverTarget, promotionGtidExecuted} of st forward to snap's: a
+// snapshot whose lastFailover is strictly older (second precision) than
+// the stored one leaves the triple alone, and an equal one may change only
+// the target (a planned failover naming an unconfirmed target). The status
+// write's conflict retry applies it again over the live triple, so a newer
+// record committed in between (the planned engine's) is not overwritten.
+func mergeFailoverTriple(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
+	snapAt := snap.LastFailover.UTC().Truncate(time.Second)
+	var storedAt time.Time
+	if st.LastFailover != nil {
+		storedAt = st.LastFailover.UTC().Truncate(time.Second)
+	}
+	if !snapAt.IsZero() && failoverStampFutureDated(storedAt, snap.ObservedAt) {
+		// A stored record implausibly ahead of the writer's clock is no
+		// record (K023): restore ignores it, so it must not block this one.
+		storedAt = time.Time{}
+	}
+	switch {
+	case snapAt.After(storedAt):
+		t := metav1.NewTime(snap.LastFailover)
+		st.LastFailover = &t
+		st.LastFailoverTarget = snap.LastFailoverTarget
+		st.PromotionGtidExecuted = snap.PromotionGtidExecuted
+	case snapAt.Equal(storedAt):
+		st.LastFailoverTarget = snap.LastFailoverTarget
+	}
 }
 
 // MergePlannedAuthority merges a manager's authority into st with

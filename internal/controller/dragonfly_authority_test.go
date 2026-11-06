@@ -495,12 +495,15 @@ func TestDragonflySnapshotUpgrade_WaitsForAndYieldsToEmergencyPromotion(t *testi
 		return nil, errors.New("old source not ready")
 	}
 
+	// The in-flight upgrade paused the manager when it was accepted (the
+	// pause follows only the upgrade state read under the gate).
+	mgr.SetUpgradePaused(true)
 	requeue, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), live)
 	if err != nil || requeue != dragonflyGateRetry {
 		t.Fatalf("upgrade while the emergency held the gate = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
 	}
 	if !mgr.paused() {
-		t.Error("fixture: snapshot upgrade did not pause the registered manager")
+		t.Error("the in-flight upgrade's pause was lifted while it waited for the gate")
 	}
 	if n := upgradeDials.Load(); n != 0 {
 		t.Fatalf("upgrade dialled Dragonfly %d times while the emergency held the gate", n)

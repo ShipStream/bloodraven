@@ -34,4 +34,8 @@ const (
 	// emergency promotion that already sent its role change) and waits
 	// for it while the MySQL source stays fenced.
 	ReasonDragonflyPromotionWaiting = "DragonflyPromotionWaiting"
+	// ReasonDragonflyUpgradeDeferred fires when a snapshot-upgrade request
+	// is kept but not yet accepted because the Dragonfly master differs
+	// from the MySQL active site.
+	ReasonDragonflyUpgradeDeferred = "DragonflyUpgradeDeferred"
 )

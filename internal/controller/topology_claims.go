@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -191,13 +192,28 @@ func (tm *TopologyManager) bootstrapClaimRefusedLocked() string {
 	case tm.topologyFrozen:
 		return "an in-place restore is in progress"
 	case tm.plannedClaimHeldLocked():
-		return "a planned failover is in progress"
+		return tm.plannedClaimBlockerLocked()
 	case tm.deploymentUpdateRunning || tm.predecessorUpdateInFlight:
 		return "an ordered update is in progress"
 	case tm.deploymentChanging > 0:
 		return "a promotion is in flight"
 	}
 	return ""
+}
+
+// plannedClaimBlockerLocked says why the held planned-failover claim
+// refuses an action: a run in progress, or a standing automation hold that
+// waiting does not clear (it needs the acknowledgement). Must hold tm.mu.
+func (tm *TopologyManager) plannedClaimBlockerLocked() string {
+	held, ok := tm.plannedSlot.snapshot()
+	if ok && held.mode == claimModeHold {
+		if held.runID == "" {
+			return "automatic failover is held by a True AutomaticFailoverHeld condition that names no run; resolve the split brain, then remove the condition"
+		}
+		return fmt.Sprintf("automatic failover is held after planned failover %s; resolve the split brain, then annotate %s=%s",
+			held.runID, AcknowledgePlannedFailoverHoldAnnotation, held.runID)
+	}
+	return "a planned failover is in progress"
 }
 
 // bootstrapRefusedRestoreHold is claimBootstrap's reason when an in-place

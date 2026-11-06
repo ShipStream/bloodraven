@@ -54,14 +54,17 @@ func (f *pfEnvTopology) EnsureClaim(_ context.Context, ref controller.PlannedRun
 func (f *pfEnvTopology) ReleasePlannedFailoverClaim(_ types.NamespacedName, runID string, why controller.ClaimReleaseReason) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.held != runID || (f.hold && why != controller.ReleaseAck) {
+	if f.held != runID || f.hold != (why == controller.ReleaseAck || why == controller.ReleaseOrphanHold) {
 		return false
 	}
 	f.held, f.hold = "", false
 	f.releases = append(f.releases, string(why))
 	return true
 }
-func (f *pfEnvTopology) ConvertToHold(_ types.NamespacedName, runID string) bool {
+func (f *pfEnvTopology) ConvertToHold(_ types.NamespacedName, runID string, _ ...string) bool {
+	if runID == "" {
+		return false
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.held, f.hold = runID, true
@@ -74,6 +77,11 @@ func (f *pfEnvTopology) HeldRunClaim(types.NamespacedName) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.held, f.held != "" && !f.hold
+}
+func (f *pfEnvTopology) HeldHoldClaim(types.NamespacedName) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.held, f.held != "" && f.hold
 }
 func (f *pfEnvTopology) PlannedClaimHeld(types.NamespacedName) bool {
 	f.mu.Lock()

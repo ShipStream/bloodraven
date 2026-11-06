@@ -155,7 +155,7 @@ func (f *pfFakeTopology) ReleasePlannedFailoverClaim(_ types.NamespacedName, run
 	if f.heldRun != runID || runID == "" {
 		return false
 	}
-	if f.holdMode && why != ReleaseAck {
+	if f.holdMode != (why == ReleaseAck || why == ReleaseOrphanHold) {
 		return false
 	}
 	f.heldRun, f.holdMode = "", false
@@ -163,9 +163,12 @@ func (f *pfFakeTopology) ReleasePlannedFailoverClaim(_ types.NamespacedName, run
 	return true
 }
 
-func (f *pfFakeTopology) ConvertToHold(_ types.NamespacedName, runID string) bool {
+func (f *pfFakeTopology) ConvertToHold(_ types.NamespacedName, runID string, _ ...string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if runID == "" {
+		return false // the fake cannot hold a run-less hold
+	}
 	if f.heldRun == "" {
 		f.heldRun = runID
 	}
@@ -192,6 +195,12 @@ func (f *pfFakeTopology) HeldRunClaim(types.NamespacedName) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.heldRun, f.heldRun != "" && !f.holdMode
+}
+
+func (f *pfFakeTopology) HeldHoldClaim(types.NamespacedName) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.heldRun, f.heldRun != "" && f.holdMode
 }
 
 func (f *pfFakeTopology) PlannedClaimHeld(types.NamespacedName) bool {
@@ -635,7 +644,7 @@ func pfRunAt(phase v1alpha1.PlannedFailoverPhase, now time.Time) *v1alpha1.Plann
 	if idx >= 0 {
 		pf.SourceSite = "iad"
 		pf.ClaimTime = &t
-		pf.ClaimBaseline = &v1alpha1.FailoverRecord{}
+		pf.ClaimBaseline = &v1alpha1.FailoverRecordRef{}
 		pf.Fence = &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, IntentTime: t, SourceServerUUID: "uuid-iad"}
 	}
 	if idx >= 1 {

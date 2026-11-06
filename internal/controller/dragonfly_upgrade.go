@@ -22,6 +22,9 @@ const (
 	DragonflySnapshotUpgradeAnnotation = "bloodraven.shipstream.io/dragonfly-snapshot-upgrade"
 	dragonflyUpgradePollInterval       = 2 * time.Second
 	dragonflySaveTimeout               = 5 * time.Minute
+	// dragonflyUpgradeDeferRetry is how often a deferred snapshot-upgrade
+	// request is re-checked.
+	dragonflyUpgradeDeferRetry = 10 * time.Second
 )
 
 func dragonflyUpgradeInFlight(s *v1alpha1.DragonflyUpgradeStatus) bool {
@@ -33,13 +36,6 @@ func dragonflyUpgradeInFlight(s *v1alpha1.DragonflyUpgradeStatus) bool {
 
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	// The upgrade pauses only the Dragonfly manager, through its own
-	// pause source; it never touches the planned-failover claim or MySQL
-	// topology decisions.
-	if r.Runner != nil {
-		r.Runner.SetDragonflyUpgradePaused(nn, dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg)))
-	}
-
 	_, hasAnnotation := fg.GetAnnotations()[DragonflySnapshotUpgradeAnnotation]
 	if !hasAnnotation && !dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg)) {
 		return 0, nil
@@ -65,6 +61,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 
 	raw, hasAnnotation := fg.GetAnnotations()[DragonflySnapshotUpgradeAnnotation]
 	cur := dragonflyUpgradeStatus(fg)
+	// The upgrade pauses only the Dragonfly manager, through its own pause
+	// source; it never touches the planned-failover claim or MySQL topology
+	// decisions. The pause follows the upgrade state read under the gate,
+	// never the informer cache: a cached in-flight upgrade that has since
+	// ended (abandoned, failed, succeeded) must not pause the manager again,
+	// and every return below, the terminal ones included, leaves the pause
+	// matching the uncached state.
+	r.setDragonflyUpgradePause(nn, dragonflyUpgradeInFlight(cur))
 	if hasAnnotation && !dragonflyUpgradeInFlight(cur) {
 		return r.acceptDragonflySnapshotUpgrade(ctx, fg, nn, raw)
 	}
@@ -99,6 +103,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 		return r.dragonflyUpgradeReattachReplicas(ctx, fg, cur)
 	default:
 		return r.failDragonflyUpgrade(ctx, fg, cur, "UnknownPhase", fmt.Sprintf("unknown phase %q", cur.Phase))
+	}
+}
+
+// setDragonflyUpgradePause sets the Dragonfly manager's upgrade pause
+// source, when a runner is wired.
+func (r *MysqlFailoverGroupReconciler) setDragonflyUpgradePause(nn types.NamespacedName, paused bool) {
+	if r.Runner != nil {
+		r.Runner.SetDragonflyUpgradePaused(nn, paused)
 	}
 }
 
@@ -151,6 +163,21 @@ func (r *MysqlFailoverGroupReconciler) acceptDragonflySnapshotUpgrade(ctx contex
 		_ = r.removeDragonflySnapshotUpgradeAnnotation(ctx, nn)
 		return 0, nil
 	}
+	if master := effectiveDragonflyMasterSite(fg); master != "" && master != fg.Status.ActiveSite {
+		// The upgrade saves and restarts status.activeSite as the Dragonfly
+		// master and re-attaches every other site to it. While Dragonfly
+		// serves from another site (a planned takeover that failed after
+		// MySQL moved, before drift repair re-aligns Dragonfly, or a
+		// Dragonfly-only promotion), that would restart a replica and
+		// re-point the real master at it. The request is kept and retried
+		// once Dragonfly follows MySQL again.
+		log.FromContext(ctx).Info("dragonfly snapshot-upgrade deferred: the Dragonfly master differs from the MySQL active site",
+			"fg", nn.String(), "dragonflyMaster", master, "activeSite", fg.Status.ActiveSite)
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyUpgradeDeferred,
+			"dragonfly snapshot-upgrade deferred: Dragonfly master %q differs from the MySQL active site %q; retrying once they match",
+			master, fg.Status.ActiveSite)
+		return dragonflyUpgradeDeferRetry, nil
+	}
 
 	if err := r.removeDragonflySnapshotUpgradeAnnotation(ctx, nn); err != nil {
 		return 0, err
@@ -169,6 +196,7 @@ func (r *MysqlFailoverGroupReconciler) acceptDragonflySnapshotUpgrade(ctx contex
 	if err := r.setDragonflyUpgradeStatus(ctx, fg, st); err != nil {
 		return 0, err
 	}
+	r.setDragonflyUpgradePause(nn, true)
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyUpgradeStarted,
 		"dragonfly snapshot-restore upgrade accepted: %s -> %s", st.SourceImage, st.TargetImage)
 	return 1 * time.Second, nil

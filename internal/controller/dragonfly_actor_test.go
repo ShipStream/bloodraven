@@ -1056,7 +1056,10 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
 		plannedDials.Add(1)
 		if addr == emergencySourceAddr {
-			return &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 200}}, nil
+			// The recreated dc1 has rejoined as dc2's replica. (A dc1 that
+			// came back as a standalone master would not be taken over: the
+			// run has no evidence it made it master.)
+			return &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", SlaveReplOffset: 200}}, nil
 		}
 		return &fakeDragonflyConn{}, nil
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,9 +37,64 @@ const (
 // topology manager generation before its Run. The zero value is an empty
 // slot.
 type PlannedClaimSlot struct {
-	mu       sync.Mutex // leaf: tm.mu → slot.mu, never the reverse
-	held     *plannedClaim
-	releases []ClaimReleaseNote // instrumentation (tests and DST): runId, why
+	mu   sync.Mutex // leaf: tm.mu → slot.mu, never the reverse
+	held *plannedClaim
+	// releaseGen counts releases, and recent keeps the newest few with
+	// the generation each made. startManager stamps the generation before
+	// its uncached read, so a registration whose read predates a run's
+	// release does not hydrate that run's claim back (K004).
+	releaseGen uint64
+	recent     [8]releasedRun
+	// releases is instrumentation (tests and DST): runId, why. It keeps
+	// the newest maxClaimReleaseNotes; the simulator drains it each step.
+	releases []ClaimReleaseNote
+}
+
+// releasedRun is one release: the run and the generation it made.
+type releasedRun struct {
+	gen   uint64
+	runID string
+}
+
+// releasedSince reports whether runID's claim (either mode) was released
+// after generation gen. A release too old to be in recent is not
+// reported: hydrating then fails closed, and the engine's zombie and
+// orphan-hold releases clear a stale claim on its next pass.
+func (s *PlannedClaimSlot) releasedSince(gen uint64, runID string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.recent {
+		if r.gen > gen && r.runID == runID {
+			return true
+		}
+	}
+	return false
+}
+
+// maxClaimReleaseNotes bounds PlannedClaimSlot.releases on a long-lived
+// leader.
+const maxClaimReleaseNotes = 32
+
+// noteLocked records one release note, keeping the newest
+// maxClaimReleaseNotes. Must hold s.mu.
+func (s *PlannedClaimSlot) noteLocked(n ClaimReleaseNote) {
+	if len(s.releases) >= maxClaimReleaseNotes {
+		s.releases = slices.Delete(s.releases, 0, len(s.releases)-maxClaimReleaseNotes+1)
+	}
+	s.releases = append(s.releases, n)
+}
+
+// generation returns how many releases the slot has seen.
+func (s *PlannedClaimSlot) generation() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.releaseGen
 }
 
 // ClaimReleaseNote records one release (or conversion to a hold).
@@ -64,8 +120,7 @@ func (m plannedClaimMode) String() string {
 type plannedClaim struct {
 	mode                  plannedClaimMode
 	runID, source, target string
-	sourceUUID            string // the grant probe's source @@server_uuid
-	grantedAt             time.Time
+	sourceUUID            string             // the grant probe's source @@server_uuid
 	baseline              FailoverRecordRef  // second precision, compared with sameFailoverRecord
 	needsReprove          bool               // hydrated: re-prove before the next side effect
 	provisional           bool               // Fencing write not yet Committed
@@ -169,19 +224,22 @@ func (s *PlannedClaimSlot) update(runID string, fn func(*plannedClaim)) bool {
 }
 
 // release empties the slot if it holds runID, and records why. A Hold
-// claim is released only by an acknowledgement, and a Run claim never by
-// one; a zombie release applies to a Run claim only.
+// claim is released only by an acknowledgement or as an orphan (no durable
+// hold record is left), and a Run claim by neither; a zombie release
+// applies to a Run claim only.
 func (s *PlannedClaimSlot) release(runID string, why ClaimReleaseReason) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.held == nil || s.held.runID != runID {
 		return false
 	}
-	if (s.held.mode == claimModeHold) != (why == ReleaseAck) {
+	if (s.held.mode == claimModeHold) != (why == ReleaseAck || why == ReleaseOrphanHold) {
 		return false
 	}
 	s.held = nil
-	s.releases = append(s.releases, ClaimReleaseNote{RunID: runID, Why: why})
+	s.releaseGen++
+	s.recent[s.releaseGen%uint64(len(s.recent))] = releasedRun{gen: s.releaseGen, runID: runID}
+	s.noteLocked(ClaimReleaseNote{RunID: runID, Why: why})
 	return true
 }
 
@@ -205,7 +263,7 @@ func (s *PlannedClaimSlot) toHold(runID string) bool {
 		s.held.mode = claimModeHold
 		s.held.provisional, s.held.needsReprove = false, false
 	}
-	s.releases = append(s.releases, ClaimReleaseNote{RunID: runID, Why: ReleaseToHold})
+	s.noteLocked(ClaimReleaseNote{RunID: runID, Why: ReleaseToHold})
 	return true
 }
 
@@ -366,7 +424,7 @@ func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req Planned
 	}
 	hooks.yield(YieldAfterPublishForSim)
 	if out.Kind == ClaimGranted {
-		tm.logger.Info("planned failover: claim granted", "fg", tm.cfg.Name, "runId", req.RunID, "source", out.Source, "target", req.Target)
+		tm.logger.Info("planned failover: claim granted", "runId", req.RunID, "source", out.Source, "target", req.Target)
 	}
 	return out, nil
 }
@@ -391,7 +449,7 @@ func (tm *TopologyManager) publishPlannedClaim(req PlannedClaimRequest, epoch ui
 	}
 	c := plannedClaim{
 		mode: claimModeRun, runID: req.RunID, source: polled, target: req.Target,
-		sourceUUID: sourceUUID, grantedAt: tm.clock.Now(), baseline: inMemory, provisional: true,
+		sourceUUID: sourceUUID, baseline: inMemory, provisional: true,
 	}
 	if !tm.plannedSlot.hydrate(c) {
 		return claimDecisionWait(v1alpha1.PlannedFailoverWaitClaimHeld, "another run took the claim")
@@ -437,21 +495,17 @@ func (tm *TopologyManager) requireRunClaim(leader context.Context, ref PlannedRu
 // hydratedRunClaim builds the Run claim an owns-sites block hydrates to,
 // or ok=false when pf cannot be hydrated (no runId, no source, or a
 // phase that owns nothing).
-func hydratedRunClaim(pf *v1alpha1.PlannedFailoverStatus, now time.Time) (plannedClaim, bool) {
+func hydratedRunClaim(pf *v1alpha1.PlannedFailoverStatus) (plannedClaim, bool) {
 	if pf == nil || pf.RunID == "" || pf.SourceSite == "" || pf.TargetSite == "" {
 		return plannedClaim{}, false
 	}
 	if !plannedFailoverOwnsSites(&v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{PlannedFailover: pf}}) {
 		return plannedClaim{}, false
 	}
-	c := plannedClaim{
+	return plannedClaim{
 		mode: claimModeRun, runID: pf.RunID, source: pf.SourceSite, target: pf.TargetSite,
-		grantedAt: now, baseline: failoverRecordRefFromAPI(pf.ClaimBaseline), needsReprove: true,
-	}
-	if pf.ClaimTime != nil {
-		c.grantedAt = pf.ClaimTime.Time
-	}
-	return c, true
+		baseline: failoverRecordRefFromAPI(pf.ClaimBaseline), needsReprove: true,
+	}, true
 }
 
 // fillWireRegisteredManager is WireRegisteredManager's body.
@@ -481,12 +535,12 @@ func fillWireRegisteredManager(tm *TopologyManager, w ManagerWiring) {
 	tm.plannedSlot = w.Slot
 	switch {
 	case w.HoldFrom != nil:
-		if w.Slot.hydrate(plannedClaim{mode: claimModeHold, runID: w.HoldFrom.RunID, grantedAt: tm.clock.Now()}) {
+		if w.Slot.hydrate(plannedClaim{mode: claimModeHold, runID: w.HoldFrom.RunID}) {
 			tm.logger.Warn("planned failover: automation held pending acknowledgement",
-				"fg", tm.cfg.Name, "runId", w.HoldFrom.RunID, "sites", []string(nil))
+				"runId", w.HoldFrom.RunID, "sites", strings.Join(w.HoldFrom.Sites, ","))
 		}
 	case w.HydrateFrom != nil:
-		if c, ok := hydratedRunClaim(w.HydrateFrom, tm.clock.Now()); ok {
+		if c, ok := hydratedRunClaim(w.HydrateFrom); ok {
 			w.Slot.hydrate(c)
 		}
 	}
@@ -545,6 +599,14 @@ func (tm *TopologyManager) carryFailoverRecord(rec FailoverRecord) bool {
 	if rec.LastFailover.IsZero() || rec.LastFailoverTarget == "" {
 		return false
 	}
+	if tm.getSite(rec.LastFailoverTarget) == nil {
+		// A site the replacement's configuration no longer has (removed
+		// or renamed): startup rejects such a durable record, and a
+		// carried one would name a site nothing can reach (K076).
+		tm.logger.Info("not carrying a retired topology manager's failover record: its target is no longer a site",
+			"target", rec.LastFailoverTarget, "lastFailover", rec.LastFailover)
+		return false
+	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	at := rec.LastFailover.UTC().Truncate(time.Second)
@@ -573,7 +635,7 @@ func (tm *TopologyManager) carryFailoverRecord(rec FailoverRecord) bool {
 			tm.lastFailover, tm.lastFailoverTarget, tm.promotionGtidExecuted
 		tm.statusRetrySnapshot = &snap
 	}
-	tm.logger.Info("carried a retired topology manager's failover record", "fg", tm.cfg.Name,
+	tm.logger.Info("carried a retired topology manager's failover record",
 		"target", rec.LastFailoverTarget, "lastFailover", rec.LastFailover)
 	return true
 }
@@ -669,7 +731,8 @@ func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.
 		reason = pf.Result.Reason
 	case marked:
 		m, _ := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
-		if m.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+		if m.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced ||
+			slices.Contains(m.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
 			return nil, false
 		}
 		reason = m.Reason
@@ -718,6 +781,31 @@ func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager,
 	}
 	tm.lastActiveSite, tm.lastActiveSiteNamed = src.SourceSite, true
 	tm.logger.Info("planned failover: named fenced source for re-assert", "fg", nn.String(), "runId", src.RunID, "site", src.SourceSite)
+}
+
+// carryNamedActiveSite brings old's named lastActiveSite into tm when
+// tm's own restore named nothing and the site is still one of tm's: the
+// replacement is the same process, and old's naming (a source a run left
+// fenced, a promotion, a seed) is the newest this process holds. It takes
+// old's lock, then tm's, never both.
+func (tm *TopologyManager) carryNamedActiveSite(old *TopologyManager) bool {
+	if tm == nil || old == nil || tm == old {
+		return false
+	}
+	old.mu.RLock()
+	site, named := old.lastActiveSite, old.lastActiveSiteNamed
+	old.mu.RUnlock()
+	if !named || site == "" {
+		return false
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.lastActiveSiteNamed || tm.getSite(site) == nil {
+		return false
+	}
+	tm.lastActiveSite, tm.lastActiveSiteNamed = site, true
+	tm.logger.Info("carried the replaced topology manager's named active site", "site", site)
+	return true
 }
 
 // plannedFailoverView is the start's uncached read of the group, for the

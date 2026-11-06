@@ -106,6 +106,9 @@ func (tm *TopologyManager) ReserveKeyringRotation(site string) (bool, string) {
 		// A planned failover holds its claim (or a hold stands):
 		// admitting a rotation of the target now could roll back a
 		// failover that already fenced the source.
+		if held, ok := tm.plannedSlot.snapshot(); ok && held.mode == claimModeHold {
+			return false, tm.plannedClaimBlockerLocked() + "; retrying after the acknowledgement"
+		}
 		return false, rotationRefusedPlannedFailover
 	case tm.deploymentChanging > 0 || tm.promotedSite != "" || tm.deploymentAwaitingObservation:
 		return false, rotationRefusedPromotionInFlight

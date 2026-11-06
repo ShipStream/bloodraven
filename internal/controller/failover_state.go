@@ -96,15 +96,27 @@ func (r FailoverRecord) encodableWatermark() string {
 	return r.PromotionGtidExecuted
 }
 
+// failoverStampFutureDated reports whether a stored lastFailover is more
+// than FailoverClockSkewGrace ahead of the writer's clock now (zero: no
+// clock, never). EffectiveFailoverRecord ignores such a copy on restore, so
+// a promotion it no longer blocks must not then be refused by the writers:
+// they treat it as absent and write over it (K023).
+func failoverStampFutureDated(stored, now time.Time) bool {
+	return !now.IsZero() && !stored.IsZero() && stored.After(now.Add(FailoverClockSkewGrace))
+}
+
 // supersedes reports whether writing r over stored moves the out-of-band
 // record forward: stored is older (second precision), or as old with a
 // different target, or as old and the same but without a watermark r can
-// supply. An older or equal record is never written over a newer one.
-func (r FailoverRecord) supersedes(stored FailoverRecord) bool {
+// supply, or implausibly future-dated against now. An older or equal
+// record is never written over a newer one.
+func (r FailoverRecord) supersedes(stored FailoverRecord, now time.Time) bool {
 	at := r.LastFailover.UTC().Truncate(time.Second)
 	st := stored.LastFailover.UTC().Truncate(time.Second)
 	switch {
 	case stored.IsZero():
+		return true
+	case failoverStampFutureDated(st, now):
 		return true
 	case st.After(at):
 		return false
@@ -131,6 +143,7 @@ type annotationFailoverStateRecorder struct {
 	client client.Client
 	reader client.Reader
 	nn     types.NamespacedName
+	now    func() time.Time // the writer's clock for the future-dated check
 }
 
 // failoverStateConflictRetries bounds the conditioned write's retries on a
@@ -145,7 +158,7 @@ func NewAnnotationFailoverStateRecorder(c client.Client, reader client.Reader, n
 	if reader == nil {
 		reader = c
 	}
-	return &annotationFailoverStateRecorder{client: c, reader: reader, nn: nn}
+	return &annotationFailoverStateRecorder{client: c, reader: reader, nn: nn, now: time.Now}
 }
 
 // RecordFailoverState writes the record's annotations as a read-compare-
@@ -179,7 +192,7 @@ func (s *annotationFailoverStateRecorder) RecordFailoverState(ctx context.Contex
 		}
 		if encoded != nil {
 			// A corrupt stored record is overwritten: it is no record.
-			if stored, err := FailoverRecordFromAnnotations(cur.GetAnnotations()); err == nil && !rec.supersedes(stored) {
+			if stored, err := FailoverRecordFromAnnotations(cur.GetAnnotations()); err == nil && !rec.supersedes(stored, s.now()) {
 				return nil
 			}
 		}
@@ -191,6 +204,7 @@ func (s *annotationFailoverStateRecorder) RecordFailoverState(ctx context.Contex
 		delete(ann, LastFailoverAnnotation)
 		delete(ann, LastFailoverTargetAnnotation)
 		delete(ann, PromotionGtidExecutedAnnotation)
+		delete(ann, PromotionGtidExecutedForAnnotation)
 		for k, v := range encoded {
 			ann[k] = v
 		}
@@ -220,6 +234,7 @@ func FailoverRecordAnnotations(rec FailoverRecord) (map[string]string, error) {
 	}
 	if w := rec.encodableWatermark(); w != "" {
 		out[PromotionGtidExecutedAnnotation] = w
+		out[PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(rec.LastFailover, rec.LastFailoverTarget)
 	}
 	return out, nil
 }
@@ -251,7 +266,6 @@ func FailoverRecordFromAnnotations(annotations map[string]string) (FailoverRecor
 		return rec, nil
 	}
 	rec.LastFailoverTarget = annotations[LastFailoverTargetAnnotation]
-	rec.PromotionGtidExecuted = annotations[PromotionGtidExecutedAnnotation]
 	raw := annotations[LastFailoverAnnotation]
 	if raw == "" {
 		if rec.LastFailoverTarget != "" {
@@ -267,7 +281,19 @@ func FailoverRecordFromAnnotations(annotations map[string]string) (FailoverRecor
 		return FailoverRecord{}, fmt.Errorf("parse %s annotation %q: %w", LastFailoverAnnotation, raw, err)
 	}
 	rec.LastFailover = t.UTC().Truncate(time.Second)
+	// The watermark counts only when its binding names this event (K095):
+	// a writer that knows only the two failover keys can advance them
+	// beside an older event's watermark.
+	if annotations[PromotionGtidExecutedForAnnotation] == failoverWatermarkBinding(rec.LastFailover, rec.LastFailoverTarget) {
+		rec.PromotionGtidExecuted = annotations[PromotionGtidExecutedAnnotation]
+	}
 	return rec, nil
+}
+
+// failoverWatermarkBinding is the PromotionGtidExecutedForAnnotation value
+// for the event {at, target}.
+func failoverWatermarkBinding(at time.Time, target string) string {
+	return failoverStampFormat(at) + " " + target
 }
 
 // FailoverRecordFromStatus reads the status-subresource copy of the durable

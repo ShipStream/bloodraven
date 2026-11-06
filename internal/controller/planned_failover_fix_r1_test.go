@@ -142,8 +142,9 @@ func TestFixR1_ConfirmedStallMarksOnlyDurableRecord(t *testing.T) {
 	h.setAnnotation(LastFailoverAnnotation, failoverStampFormat(confirmedAt))
 	h.setAnnotation(LastFailoverTargetAnnotation, "pdx")
 	h.setAnnotation(PromotionGtidExecutedAnnotation, "uuid-iad:1-10")
+	h.setAnnotation(PromotionGtidExecutedForAnnotation, failoverWatermarkBinding(confirmedAt, "pdx"))
 	h.step()
-	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"}` {
+	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded","warnings":["StatusStalled"]}` {
 		t.Fatalf("marker = %q, want run-1/Succeeded/ once the record is durable", m)
 	}
 	// A new process recovers the run from the marker and applies its record.
@@ -271,7 +272,7 @@ func TestFixR1_FencingStallWithNoSETRollsBack(t *testing.T) {
 		h.step()
 		h.clk.Advance(time.Second)
 	}
-	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"RolledBack","reason":"StatusStalled"}` {
+	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"RolledBack","reason":"StatusStalled","warnings":["StatusStalled","UnreachablePeers"]}` {
 		t.Fatalf("marker = %q, want run-1/RolledBack/StatusStalled (nothing was sent)", m)
 	}
 }
@@ -403,6 +404,7 @@ func TestFixR1_ReplacedTargetRollsBackOnlyWhenUnrecorded(t *testing.T) {
 	h.setAnnotation(LastFailoverAnnotation, failoverStampFormat(h.clk.Now()))
 	h.setAnnotation(LastFailoverTargetAnnotation, "pdx")
 	h.setAnnotation(PromotionGtidExecutedAnnotation, "uuid-iad:1-10")
+	h.setAnnotation(PromotionGtidExecutedForAnnotation, failoverWatermarkBinding(h.clk.Now(), "pdx"))
 	h.step()
 	if r := h.pf().Result; r == nil || r.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
 		t.Fatalf("result = %+v, want ManualRecoveryRequired once the run's own record is durable", r)
@@ -443,7 +445,7 @@ func TestFixR1_DragonflyTakeoverDeadline(t *testing.T) {
 			target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", SlaveReplOffset: 100}}}
 			installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target,
 				pfDFIad: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}})
-			pfDFPass(t, r, fgNN(fg))
+			pfDFTakeoverPasses(t, r, fgNN(fg))
 			pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
 			if pf.Phase != tc.want || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed {
 				t.Fatalf("block = %s %+v, want %s with the takeover Failed", pf.Phase, pf.Dragonfly.Takeover, tc.want)
@@ -464,7 +466,7 @@ func TestFixR1_DragonflyTakeoverDeadline(t *testing.T) {
 		target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}}
 		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target,
 			pfDFIad: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}})
-		pfDFPass(t, r, fgNN(fg))
+		pfDFTakeoverPasses(t, r, fgNN(fg))
 		pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
 		if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
 			t.Fatalf("block = %s %+v, want Promoting with the earlier takeover Succeeded", pf.Phase, pf.Dragonfly.Takeover)
@@ -783,22 +785,6 @@ func TestFixR1_WireSkipsPromotionWithoutWatermark(t *testing.T) {
 	}
 }
 
-// DST minor: a hydrated claim is stamped with the manager's clock.
-func TestFixR1_HydrationUsesManagerClock(t *testing.T) {
-	f := newOpsFixture(t, "")
-	f.fenced()
-	pf := opsRun(v1alpha1.PlannedFailoverPhaseWaitingForLag)
-	pf.ClaimTime = nil
-	d, err := f.topo.EnsureClaim(context.Background(), f.ref, opsGroup(pf))
-	if err != nil || d.Kind != ClaimGranted {
-		t.Fatalf("EnsureClaim = %+v, %v", d, err)
-	}
-	held, _ := f.reg.slot.snapshot()
-	if !held.grantedAt.Equal(f.clk.Now()) {
-		t.Fatalf("grantedAt = %s, want the manager clock %s", held.grantedAt, f.clk.Now())
-	}
-}
-
 // O-M2: with no manager registered, EnsureClaim waits ManagerAbsent
 // whether or not the slot holds the run (and hydrates an empty slot).
 func TestFixR1_EnsureClaimWithoutManagerWaits(t *testing.T) {
@@ -829,13 +815,14 @@ func TestFixR1_OwnRecordUsesSelectedWatermark(t *testing.T) {
 	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
 	t0 := pf.Promotion.IntentTime.Add(-time.Hour).UTC().Truncate(time.Second)
 	t0m := metav1.NewTime(t0)
-	pf.ClaimBaseline = &v1alpha1.FailoverRecord{Time: &t0m, Target: "dc1"}
+	pf.ClaimBaseline = &v1alpha1.FailoverRecordRef{Time: &t0m, Target: "dc1"}
 	fg := opsReproveGroup(f, pf, pf.Promotion.IntentTime.Add(2*time.Second), "dc2")
 	fg.Status.PromotionGtidExecuted = opsF
 	fg.Annotations = map[string]string{
-		LastFailoverAnnotation:          failoverStampFormat(t0),
-		LastFailoverTargetAnnotation:    "dc1",
-		PromotionGtidExecutedAnnotation: opsUUIDA + ":1-5",
+		LastFailoverAnnotation:             failoverStampFormat(t0),
+		LastFailoverTargetAnnotation:       "dc1",
+		PromotionGtidExecutedAnnotation:    opsUUIDA + ":1-5",
+		PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(t0, "dc1"),
 	}
 	res, err := f.topo.Reprove(context.Background(), f.ref, fg)
 	if err != nil || !res.OK {

@@ -102,6 +102,20 @@ func pfDFPass(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.Namespaced
 	}
 }
 
+// pfDFTakeoverPasses runs the PromotingDragonfly passes of a takeover: the
+// pass that takes over and records the result, then, when it stayed in
+// PromotingDragonfly with the result recorded, the pass that writes the
+// Promoting intent.
+func pfDFTakeoverPasses(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) {
+	t.Helper()
+	pfDFPass(t, r, nn)
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase == v1alpha1.PlannedFailoverPhasePromotingDragonfly && pf.Dragonfly != nil && pf.Dragonfly.Takeover != nil &&
+		pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverIntended {
+		pfDFPass(t, r, nn)
+	}
+}
+
 func TestPlannedFailoverDragonflySync_DisabledSkips(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Spec.Dragonfly = nil
@@ -141,6 +155,11 @@ func TestPlannedFailoverDragonfly_HappyPath(t *testing.T) {
 		t.Error("strip predicate false while the takeover is Intended")
 	}
 	pfDFPass(t, r, nn)
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly ||
+		pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
+		t.Fatalf("the takeover's result is not recorded in its own write: %s %+v", pf.Phase, pf.Dragonfly.Takeover)
+	}
+	pfDFPass(t, r, nn)
 	got := fetchFG(t, r, nn)
 	pf = got.Status.PlannedFailover
 	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded ||
@@ -167,17 +186,19 @@ func TestPlannedFailoverDragonfly_HappyPath(t *testing.T) {
 }
 
 // A re-run whose takeover intent is durable but whose result was lost
-// finds the target master and never sends a second REPLTAKEOVER.
+// finds the target master and never sends a second REPLTAKEOVER: the
+// earlier attempt's promotion stamp shows the run made it master.
 func TestPlannedFailoverDragonfly_RerunNeverRepeatsTakeover(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Proceed")
 	now := metav1.Now()
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
 	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: now}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "pdx", LastPromotionTarget: "pdx", LastPromotionTime: &now}
 	r, _, _ := pfDFReconciler(t, fg)
 	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}}
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: &fakeDragonflyConn{}})
-	pfDFPass(t, r, fgNN(fg))
+	pfDFTakeoverPasses(t, r, fgNN(fg))
 	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
 	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
 		t.Fatalf("block = %+v %+v", pf.Phase, pf.Dragonfly)
@@ -264,7 +285,7 @@ func TestPlannedFailoverDragonfly_StripFailsProceeds(t *testing.T) {
 		dials++
 		return nil, errors.New("must not dial")
 	}
-	pfDFPass(t, r, fgNN(fg))
+	pfDFTakeoverPasses(t, r, fgNN(fg))
 	if dials != 0 {
 		t.Errorf("dialled %d times after a failed strip", dials)
 	}

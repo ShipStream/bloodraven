@@ -96,9 +96,14 @@ func TestPlannedFailoverOldFieldsGone(t *testing.T) {
 					t.Errorf("%s: phase enum still has %q", path, p)
 				}
 			}
-			for _, req := range []string{"runID", "revision", "phase", "targetSite", "settings", "startTime"} {
-				if !slices.Contains(pf.Required, req) {
-					t.Errorf("%s: status.plannedFailover.%s is not required", path, req)
+			// Present in the schema but not required: an operator rolled back
+			// across this release writes the block back without them (K008).
+			for _, f := range []string{"runID", "revision", "phase", "targetSite", "settings", "startTime"} {
+				if _, ok := pf.Properties[f]; !ok {
+					t.Errorf("%s: status.plannedFailover.%s is not in the schema", path, f)
+				}
+				if slices.Contains(pf.Required, f) {
+					t.Errorf("%s: status.plannedFailover.%s is required; an older operator's status write-back would be rejected", path, f)
 				}
 			}
 		}

@@ -104,12 +104,6 @@ func SetSimHooksForSim(topo PlannedFailoverTopology, hooks SimHooks) {
 	}
 }
 
-// PlannedClaimViewForSim returns tm's claim slot view (ok=false: empty or
-// not wired).
-func (tm *TopologyManager) PlannedClaimViewForSim() (PlannedClaimView, bool) {
-	return tm.plannedClaimSlot().View()
-}
-
 // SetReadyForSim marks tm as having completed a poll, as the first Poll
 // does. Simulation and component harnesses only.
 func (tm *TopologyManager) SetReadyForSim() {
@@ -202,30 +196,9 @@ func (s *PlannedClaimSlot) ReleasesForSim() []ClaimReleaseNote {
 	return out
 }
 
-// SetArmCrossSiteRetryHookForSim installs fn, run with no lock held each
-// time tm arms a deferred cross-site decision for retry. Call before Run.
-func (tm *TopologyManager) SetArmCrossSiteRetryHookForSim(fn func()) {
-	tm.mu.Lock()
-	tm.armCrossSiteRetryHook = fn
-	tm.mu.Unlock()
-}
-
-// SetBeforePromotionClaimForTest installs fn, run between an emergency
-// failover's (or primary re-assert's) eligibility checks and its claim.
-// Call before Run.
-func (tm *TopologyManager) SetBeforePromotionClaimForTest(fn func(target string)) {
-	tm.mu.Lock()
-	tm.beforePromotionClaim = fn
-	tm.mu.Unlock()
-}
-
 // SetTickIntervalForTest sets how often the ordered update polls replica
 // and pod readiness. Call before the update starts.
 func (u *UpdateController) SetTickIntervalForTest(d time.Duration) { u.tickInterval = d }
-
-// UpdaterForTest returns tm's ordered-update controller (nil when none), for
-// harnesses that shrink its tick.
-func (tm *TopologyManager) UpdaterForTest() *UpdateController { return tm.updater }
 
 // SetRunIDSourceForSim makes e mint run IDs with fn instead of random UUIDs,
 // so a simulated trial replays byte for byte. Call before the first Step.

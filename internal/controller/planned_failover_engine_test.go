@@ -383,7 +383,10 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 		{name: "publishing/never moves the failover record back", phase: v1alpha1.PlannedFailoverPhasePublishing, steps: 1,
 			setup: func(h *pfEngineHarness) {
 				fg := h.fg()
-				later := metav1.NewTime(h.clk.Now().Add(time.Hour))
+				// Newer, but within FailoverClockSkewGrace of the clock: a
+				// plausible later record (K023 lets only an implausibly
+				// future-dated one be written over).
+				later := metav1.NewTime(h.clk.Now().Add(2 * time.Minute))
 				fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted = &later, "iad", "newer"
 				if err := h.c.Status().Update(t.Context(), fg); err != nil {
 					t.Fatal(err)

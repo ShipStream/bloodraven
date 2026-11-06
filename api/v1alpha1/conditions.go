@@ -16,7 +16,9 @@ const ConditionAutomaticFailoverHeld = "AutomaticFailoverHeld"
 const (
 	// ReasonPlannedFailoverManualRecoveryRequired is the reason of a True
 	// AutomaticFailoverHeld condition. It is the same token as the
-	// PlannedFailoverManualRecoveryRequired Event and the run's outcome.
+	// PlannedFailoverManualRecoveryRequired Event (EventPlannedFailoverManualRecoveryRequired).
+	// The run's result outcome is the shorter ManualRecoveryRequired
+	// (PlannedFailoverOutcomeManualRecoveryRequired).
 	ReasonPlannedFailoverManualRecoveryRequired = "PlannedFailoverManualRecoveryRequired"
 
 	// ReasonPlannedFailoverHoldAcknowledged is the reason of a False

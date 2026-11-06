@@ -51,6 +51,12 @@ const (
 	// promotion watermark, beside LastFailoverAnnotation and
 	// LastFailoverTargetAnnotation. Operator-owned read-only.
 	PromotionGtidExecutedAnnotation = "bloodraven.shipstream.io/promotion-gtid-executed"
+	// PromotionGtidExecutedForAnnotation binds the watermark to its
+	// failover event: "<last-failover> <last-failover-target>", written in
+	// the same patch. A watermark whose binding does not name the event the
+	// other two keys record (a writer that knows only those two advanced
+	// them) is no watermark. Operator-owned read-only.
+	PromotionGtidExecutedForAnnotation = "bloodraven.shipstream.io/promotion-gtid-executed-for"
 
 	// PlannedFailoverStallSinceAnnotation is the durable start of the
 	// status-stall deadline: "<runID>:since=<YYYYMMDDThhmmssZ>"
@@ -96,7 +102,7 @@ func sameFailoverRecord(a, b FailoverRecordRef) bool {
 }
 
 // failoverRecordRefFromAPI converts the persisted copy; nil is no history.
-func failoverRecordRefFromAPI(r *v1alpha1.FailoverRecord) FailoverRecordRef {
+func failoverRecordRefFromAPI(r *v1alpha1.FailoverRecordRef) FailoverRecordRef {
 	if r == nil {
 		return FailoverRecordRef{}
 	}
@@ -109,8 +115,8 @@ func failoverRecordRefFromAPI(r *v1alpha1.FailoverRecord) FailoverRecordRef {
 
 // toAPI converts to the persisted copy, at second precision. A zero time is
 // omitted.
-func (r FailoverRecordRef) toAPI() *v1alpha1.FailoverRecord {
-	out := &v1alpha1.FailoverRecord{Target: r.LastFailoverTarget}
+func (r FailoverRecordRef) toAPI() *v1alpha1.FailoverRecordRef {
+	out := &v1alpha1.FailoverRecordRef{Target: r.LastFailoverTarget}
 	if !r.LastFailover.IsZero() {
 		t := metav1.NewTime(r.LastFailover.UTC().Truncate(time.Second))
 		out.Time = &t
@@ -134,20 +140,25 @@ type TerminalMarker struct {
 	RunID   string
 	Outcome v1alpha1.PlannedFailoverOutcome
 	Reason  v1alpha1.PlannedFailoverReason
+	// Warnings are the run's terminal warnings. A restart reads them back
+	// where the terminal status record has not landed: FenceNotAttributable
+	// keeps a SourceLeftFenced source from being named for re-assert.
+	Warnings []v1alpha1.PlannedFailoverWarning
 }
 
 // terminalMarkerPayload is the annotation's JSON form.
 type terminalMarkerPayload struct {
-	SchemaVersion int                             `json:"schemaVersion"`
-	RunID         string                          `json:"runID"`
-	Outcome       v1alpha1.PlannedFailoverOutcome `json:"outcome"`
-	Reason        v1alpha1.PlannedFailoverReason  `json:"reason,omitempty"`
+	SchemaVersion int                               `json:"schemaVersion"`
+	RunID         string                            `json:"runID"`
+	Outcome       v1alpha1.PlannedFailoverOutcome   `json:"outcome"`
+	Reason        v1alpha1.PlannedFailoverReason    `json:"reason,omitempty"`
+	Warnings      []v1alpha1.PlannedFailoverWarning `json:"warnings,omitempty"`
 }
 
 // String renders the versioned JSON payload; the reason may be empty.
 func (m TerminalMarker) String() string {
 	b, err := json.Marshal(terminalMarkerPayload{SchemaVersion: TerminalMarkerSchemaVersion, RunID: m.RunID,
-		Outcome: m.Outcome, Reason: m.Reason})
+		Outcome: m.Outcome, Reason: m.Reason, Warnings: m.Warnings})
 	if err != nil {
 		// Unreachable: every member is a string or an int.
 		panic(err)
@@ -157,7 +168,7 @@ func (m TerminalMarker) String() string {
 
 // ParseTerminalMarker parses a TerminalMarker. false means malformed: not
 // the JSON payload, an unknown schemaVersion, an empty runID, or an unknown
-// outcome or reason. A malformed marker never proves anything: callers
+// outcome, reason or warning. A malformed marker never proves anything: callers
 // treat it as absent and log it.
 func ParseTerminalMarker(v string) (TerminalMarker, bool) {
 	var p terminalMarkerPayload
@@ -172,14 +183,53 @@ func ParseTerminalMarker(v string) (TerminalMarker, bool) {
 	if err := dec.Decode(&rest); !errors.Is(err, io.EOF) {
 		return TerminalMarker{}, false
 	}
-	m := TerminalMarker{RunID: p.RunID, Outcome: p.Outcome, Reason: p.Reason}
+	m := TerminalMarker{RunID: p.RunID, Outcome: p.Outcome, Reason: p.Reason, Warnings: p.Warnings}
 	if !slices.Contains(plannedFailoverOutcomes, m.Outcome) {
 		return TerminalMarker{}, false
 	}
 	if m.Reason != "" && !slices.Contains(plannedFailoverReasons, m.Reason) {
 		return TerminalMarker{}, false
 	}
+	for _, w := range m.Warnings {
+		if !slices.Contains(plannedFailoverWarnings, w) {
+			return TerminalMarker{}, false
+		}
+	}
 	return m, true
+}
+
+// parseHoldMarker reads a terminal marker for hold detection only. A hold
+// fails closed: a marker the strict parse rejects (an unknown field or
+// schemaVersion, an unfamiliar reason, a newer or edited writer) still
+// holds automation when it is a JSON object naming a run with outcome
+// ManualRecoveryRequired. Its reason is kept only when it is a known one.
+// Nothing else may read a marker this leniently: it proves no terminal
+// outcome, only that automation must stay held.
+func parseHoldMarker(v string) (TerminalMarker, bool) {
+	if m, ok := ParseTerminalMarker(v); ok {
+		return m, m.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
+	}
+	var p terminalMarkerPayload
+	if err := json.Unmarshal([]byte(v), &p); err != nil || strings.TrimSpace(p.RunID) == "" ||
+		p.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+		return TerminalMarker{}, false
+	}
+	m := TerminalMarker{RunID: p.RunID, Outcome: p.Outcome}
+	if slices.Contains(plannedFailoverReasons, p.Reason) {
+		m.Reason = p.Reason
+	}
+	return m, true
+}
+
+// TerminalMarkerNames reports whether the terminal marker value v names
+// runID: strictly parsed, or a hold marker parseHoldMarker accepts (so an
+// acknowledgement can delete the marker that holds automation).
+func TerminalMarkerNames(v, runID string) bool {
+	if m, ok := ParseTerminalMarker(v); ok {
+		return m.RunID == runID
+	}
+	m, ok := parseHoldMarker(v)
+	return ok && m.RunID == runID
 }
 
 // plannedFailoverOutcomes and plannedFailoverReasons are every value of the
@@ -192,6 +242,15 @@ var (
 		v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
 		v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed,
 		v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
+	}
+	plannedFailoverWarnings = []v1alpha1.PlannedFailoverWarning{
+		v1alpha1.PlannedFailoverWarningDNSUpdateFailed,
+		v1alpha1.PlannedFailoverWarningDragonflySessionsLost,
+		v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored,
+		v1alpha1.PlannedFailoverWarningUnreachablePeers,
+		v1alpha1.PlannedFailoverWarningFenceNotAttributable,
+		v1alpha1.PlannedFailoverWarningStatusStalled,
+		v1alpha1.PlannedFailoverWarningSourceReplaced,
 	}
 	plannedFailoverReasons = []v1alpha1.PlannedFailoverReason{
 		v1alpha1.PlannedFailoverReasonInvalidAnnotation,
@@ -234,8 +293,9 @@ var (
 type PlannedHold struct {
 	RunID      string
 	Reason     v1alpha1.PlannedFailoverReason
-	FromStatus bool // status.plannedFailoverHold names RunID (or a True AutomaticFailoverHeld condition stands without it)
-	FromMarker bool // a terminal marker with outcome ManualRecoveryRequired names RunID
+	Sites      []string // status.plannedFailoverHold.ambiguousSites (nil from a marker or a bare condition)
+	FromStatus bool     // status.plannedFailoverHold names RunID (or a True AutomaticFailoverHeld condition stands without it)
+	FromMarker bool     // a terminal marker with outcome ManualRecoveryRequired names RunID
 }
 
 // plannedHoldConditionMessage is the human-readable message of a True
@@ -437,12 +497,12 @@ func PlannedHoldFrom(fg *v1alpha1.MysqlFailoverGroup) *PlannedHold {
 	}
 	var hold *PlannedHold
 	if h := fg.Status.PlannedFailoverHold; h != nil {
-		hold = &PlannedHold{RunID: h.RunID, Reason: h.Reason, FromStatus: true}
+		hold = &PlannedHold{RunID: h.RunID, Reason: h.Reason, Sites: h.AmbiguousSites, FromStatus: true}
 	} else if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil && c.Status == metav1.ConditionTrue {
 		hold = &PlannedHold{FromStatus: true}
 	}
-	m, ok := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
-	if !ok || m.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+	m, ok := parseHoldMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	if !ok {
 		return hold
 	}
 	switch {
@@ -548,8 +608,10 @@ type PlannedFailoverStore interface {
 		now time.Time) (time.Time, WriteOutcome, error)
 	ClearDeadlineStart(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, kind DeadlineKind, runID string) (WriteOutcome, error)
 	// ClearHold commits, in one conditioned status write, the terminal record
-	// final (when base does not carry it yet; nil otherwise) and the removal
-	// of the AutomaticFailoverHeld condition naming runID.
+	// final (when base does not carry it yet; nil otherwise), the removal of
+	// status.plannedFailoverHold naming runID, and the AutomaticFailoverHeld
+	// condition set False/PlannedFailoverHoldAcknowledged (it is never
+	// removed; see ClearPlannedHold).
 	ClearHold(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string,
 		final *v1alpha1.PlannedFailoverStatus) (WriteOutcome, error)
 	DeleteHoldAck(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) (WriteOutcome, error)
@@ -598,6 +660,13 @@ const (
 	ReleaseZombie           ClaimReleaseReason = "zombie"
 	ReleaseManagerAbsent    ClaimReleaseReason = "managerAbsent"
 	ReleaseStatusStalled    ClaimReleaseReason = "statusStalled"
+	// ReleaseOrphanHold releases a Hold-mode claim that no durable hold
+	// record (status.plannedFailoverHold, a True AutomaticFailoverHeld
+	// condition, a ManualRecoveryRequired terminal marker) backs any
+	// more: a hold hydrated from a read that an acknowledgement then
+	// cleared, one inherited by a recreated group, or a condition-only
+	// hold whose condition was removed by hand.
+	ReleaseOrphanHold ClaimReleaseReason = "orphanHold"
 )
 
 // FenceAttribution says how a super_read_only=ON on the source was
@@ -606,7 +675,7 @@ type FenceAttribution int
 
 const (
 	FenceUnattributed    FenceAttribution = iota
-	FenceByMemo                           // same process: fenceMemo[runId].sent
+	FenceByMemo                           // same process: fenceMemo[runId] names this server
 	FenceByIntentAndUUID                  // cross process: durable intent + matching server_uuid
 )
 
@@ -639,12 +708,14 @@ type FenceProof struct {
 }
 
 // LagProbe is one observation of the target catching up with the fenced set.
+// It is GTID containment only: the applier's state and the target's
+// identity are proven later, on the pinned promotion session (§7.1), whose
+// STOP REPLICA and GTID proofs re-check F before anything is written.
 type LagProbe struct {
 	SourceReachable bool
-	TargetReachable bool
-	CaughtUp        bool // target GTID ⊇ F and the applier is idle
+	TargetReachable bool // the target's GTID set was read and parsed
+	CaughtUp        bool // target GTID_EXECUTED ⊇ F
 	Divergent       bool // target holds GTIDs outside F (DivergentTarget)
-	TargetGtid      string
 }
 
 // PromotionStage is the target's promotion stage classified from its live
@@ -723,12 +794,19 @@ type PlannedFailoverTopology interface {
 	ClaimPlannedFailover(ctx context.Context, nn types.NamespacedName, req PlannedClaimRequest) (PlannedClaimDecision, error)
 	EnsureClaim(ctx context.Context, ref PlannedRunRef, fg *v1alpha1.MysqlFailoverGroup) (PlannedClaimDecision, error)
 	ReleasePlannedFailoverClaim(nn types.NamespacedName, runID string, why ClaimReleaseReason) bool
-	ConvertToHold(nn types.NamespacedName, runID string) bool // why=toHold
+	// ConvertToHold is why=toHold; sites, when known, are the hold's
+	// ambiguous sites (for the log only).
+	ConvertToHold(nn types.NamespacedName, runID string, sites ...string) bool
 	PlannedClaimHeld(nn types.NamespacedName) bool
 	// HeldRunClaim returns the run whose Run-mode claim the slot holds
 	// (ok=false: empty, or a hold). The engine's zombie clear (§3.4) uses
 	// it to release a claim hydrated for a run this process never saw live.
 	HeldRunClaim(nn types.NamespacedName) (runID string, ok bool)
+	// HeldHoldClaim returns the run whose Hold-mode claim the slot holds
+	// (ok=false: empty, or a Run claim). The engine releases such a hold
+	// as an orphan when its uncached read finds no durable hold record
+	// left and no acknowledgement pending.
+	HeldHoldClaim(nn types.NamespacedName) (runID string, ok bool)
 	// ManagerAuthority is the current manager's view of authority, which
 	// the terminal Succeeded write merges into status beside the failover
 	// record (§5.3); ok=false when no manager is registered.
@@ -768,7 +846,8 @@ type PlannedAuthority struct {
 // ManagerRegistry is what the facade needs from the runner. Implemented by
 // TopologyManagerRunner and simRegistry.
 type ManagerRegistry interface {
-	// Snapshot is one r.mu.RLock; the caller inspects the managers with no
+	// Snapshot returns the group's claim slot (created on first use) and
+	// its current and retiring managers; the caller inspects them with no
 	// registry lock held.
 	Snapshot(nn types.NamespacedName) RegistrySnapshot
 	// Slot is created on first use and never nil.
@@ -805,7 +884,7 @@ type SimHooks struct {
 // PlannedFailoverEngine, NewPlannedFailoverEngine and Step live in
 // planned_failover_engine.go; their signatures are part of this contract.
 
-// ---------- manager wiring (no-op until the claim lands) ----------
+// ---------- manager wiring ----------
 
 // ManagerWiring is everything a manager must see before Run.
 type ManagerWiring struct {
