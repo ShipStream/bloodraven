@@ -347,8 +347,10 @@ type pfFakeSink struct {
 	mu        sync.Mutex
 	events    []string // "<type> <reason>: <message>"
 	terminals []v1alpha1.PlannedFailoverResult
-	deferred  []v1alpha1.PlannedFailoverDeferReason
-	lagWaits  int
+	// terminalTargets is the target_site label of each RunTerminal.
+	terminalTargets []string
+	deferred        []v1alpha1.PlannedFailoverDeferReason
+	lagWaits        int
 }
 
 func (s *pfFakeSink) Event(_ *v1alpha1.MysqlFailoverGroup, eventType, reason, message string) {
@@ -362,6 +364,7 @@ func (s *pfFakeSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.PlannedFai
 	defer s.mu.Unlock()
 	if pf != nil && pf.Result != nil {
 		s.terminals = append(s.terminals, *pf.Result)
+		s.terminalTargets = append(s.terminalTargets, pf.TargetSite)
 	}
 }
 

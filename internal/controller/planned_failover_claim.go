@@ -707,6 +707,13 @@ func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager,
 		(pf.Result != nil && pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded)
 	if confirmed && pf.Promotion != nil && pf.Promotion.ConfirmationTime != nil && pf.Fence != nil && pf.Fence.GtidSet != nil {
 		tm.applyPlannedPromotionLocked(pf.Promotion.ConfirmationTime.Time, pf.TargetSite, *pf.Fence.GtidSet)
+	} else if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && pf.Promotion != nil && pf.Fence != nil && pf.Fence.GtidSet != nil {
+		// A confirmed tail that released its claim before Publishing
+		// committed left its confirmation in the planned-failover-confirmed
+		// annotation (K014): the run's record may not be durable yet.
+		if at, ok := parseDeadlineStart(view.GetAnnotations()[PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
+			tm.applyPlannedPromotionLocked(at, pf.TargetSite, *pf.Fence.GtidSet)
+		}
 	}
 	src, ok := plannedFenceAttributableEnd(view)
 	if !ok {

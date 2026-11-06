@@ -84,7 +84,7 @@ func TestReconcilePlannedFailover_NoopTerminalStatusWithoutAnnotation(t *testing
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
 		TargetSite: "pdx", StartTime: now, Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: now}}
 	r, _ := pfReconciler(t, fg)
-	if !plannedFailoverPassDue(fg) == false {
+	if plannedFailoverPassDue(fg) {
 		t.Fatal("a terminal block with no annotation needs no pass")
 	}
 	if d, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil || d != 0 {
@@ -178,7 +178,7 @@ func TestReconcilePlannedFailover_CooldownRejectDefault(t *testing.T) {
 // A request that arrives while a run owns the sites is refused with a
 // Warning and removed.
 func TestReconcilePlannedFailover_StaleAnnotationDuringRunCleared(t *testing.T) {
-	fg := plannedFailoverFG("pdx")
+	fg := plannedFailoverFG("iad")
 	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, time.Now())
 	r, topo := pfReconciler(t, fg)
 	topo.setHeld("run-1", false)

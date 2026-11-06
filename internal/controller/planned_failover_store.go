@@ -87,8 +87,7 @@ func (s *apiPlannedFailoverStore) Write(ctx context.Context, base *v1alpha1.Mysq
 	log.FromContext(ctx).Info("planned failover: status write ambiguous; settling",
 		"fg", nn.String(), "runId", next.RunID, "revision", next.Revision, "error", err.Error())
 	settled, serr := s.settle(ctx, nn, base.ResourceVersion, func(cur *v1alpha1.MysqlFailoverGroup) bool {
-		pf := cur.Status.PlannedFailover
-		return pf != nil && pf.RunID == next.RunID && pf.Revision >= next.Revision
+		return plannedWriteLanded(cur.Status.PlannedFailover, &next)
 	})
 	if settled == WriteCommitted {
 		return WriteCommitted, nil
@@ -97,6 +96,27 @@ func (s *apiPlannedFailoverStore) Write(ctx context.Context, base *v1alpha1.Mysq
 		serr = err
 	}
 	return settled, serr
+}
+
+// plannedWriteLanded is the settlement's commit test for next: the block
+// is next's run at a later revision (it moved on from next), or at next's
+// revision with next's phase and outcome. A different transition another
+// pass computed from the same base reaches the same (runID, revision), so
+// the pair alone proves nothing about which write landed (K017).
+func plannedWriteLanded(cur, next *v1alpha1.PlannedFailoverStatus) bool {
+	if cur == nil || next == nil || cur.RunID != next.RunID {
+		return false
+	}
+	if cur.Revision != next.Revision {
+		return cur.Revision > next.Revision
+	}
+	if cur.Phase != next.Phase {
+		return false
+	}
+	if (cur.Result == nil) != (next.Result == nil) {
+		return false
+	}
+	return cur.Result == nil || (cur.Result.Outcome == next.Result.Outcome && cur.Result.Reason == next.Result.Reason)
 }
 
 // Settle decides an ambiguous write of (runID, revision) made against baseRV.
@@ -206,8 +226,18 @@ func (s *apiPlannedFailoverStore) patchAnnotations(ctx context.Context, base *v1
 	return classifyPlannedMetaWrite(err), err
 }
 
+// errTerminalMarkerHeld refuses a terminal marker that would replace
+// another run's ManualRecoveryRequired marker.
+var errTerminalMarkerHeld = errors.New("planned failover: the terminal marker holds another run's ManualRecoveryRequired hold")
+
 // WriteTerminalMarker records m in the planned-failover-terminal annotation.
+// It never replaces another run's ManualRecoveryRequired marker, which may
+// be that hold's only durable evidence (K166): NotCommitted.
 func (s *apiPlannedFailoverStore) WriteTerminalMarker(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, m TerminalMarker) (WriteOutcome, error) {
+	if cur, ok := ParseTerminalMarker(base.GetAnnotations()[PlannedFailoverTerminalAnnotation]); ok && cur.RunID != m.RunID &&
+		cur.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+		return WriteNotCommitted, errTerminalMarkerHeld
+	}
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
 		if a[PlannedFailoverTerminalAnnotation] == m.String() {
 			return false

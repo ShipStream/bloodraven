@@ -4,11 +4,14 @@
 // via an annotation on the MysqlFailoverGroup. Unlike emergency
 // failover, the source is still writable — we fence it, wait for the
 // target to catch up on the source's fenced GTID, and only then
-// promote. The machinery reuses FailoverController.Execute for the
-// destructive steps so planned and emergency paths converge.
+// promote, through the topology facade's staged promotion on a pinned
+// session (planned_failover_ops.go), under the group's planned-failover
+// claim.
 //
 // This file owns the annotation grammar and the up-front validation.
-// The state-machine driver lives in planned_failover_reconciler.go.
+// The state-machine driver is PlannedFailoverEngine
+// (planned_failover_engine.go); planned_failover_reconciler.go only
+// decides when a pass is due.
 package controller
 
 import (
@@ -24,8 +27,11 @@ import (
 
 const (
 	// PlannedFailoverAnnotation triggers a graceful, cooldown-respecting
-	// switchover to the named primary-candidate site. Consumed and
-	// cleared on the next reconcile, like RecloneAnnotation. The
+	// switchover to the named primary-candidate site. The engine removes
+	// it once the request is decided: accepted (Admitting), rejected, or
+	// skipped. A request that is deferred (onCooldown=Defer, a deployment
+	// hold), or that waits in Admitting before its validation, keeps it
+	// until then; removing it cancels a deferred run. The
 	// annotation value is either a bare site name or a site followed by
 	// key=value overrides separated by ':'.
 	//
@@ -85,7 +91,14 @@ func parsePlannedFailoverAnnotation(raw string) (PlannedFailoverRequest, error) 
 
 	parts := strings.Split(v, ":")
 	req := PlannedFailoverRequest{Site: parts[0]}
-	if req.Site != "" && !annotationValueRE.MatchString(req.Site) {
+	if req.Site == "" {
+		// ":maxLagWait=5s": overrides with no target. Rejected here, so
+		// every caller's parse-error path consumes it; a run must never
+		// be built with an empty targetSite.
+		return PlannedFailoverRequest{}, fmt.Errorf(
+			"planned-failover annotation %q names no site; expected <site>[:maxLagWait=<duration>]", v)
+	}
+	if !annotationValueRE.MatchString(req.Site) {
 		return PlannedFailoverRequest{}, fmt.Errorf(
 			"planned-failover annotation: site %q contains characters outside [A-Za-z0-9._/+-]", req.Site)
 	}
@@ -138,14 +151,14 @@ const (
 
 	// PlannedFailoverSkip — the request is valid but trivially a no-op
 	// (target is already the active site). No state machine is run;
-	// callers should emit PlannedFailoverSkipped and clear the
-	// annotation.
+	// callers emit PlannedFailoverSkipped and consume the annotation.
 	PlannedFailoverSkip
 
 	// PlannedFailoverReject — the request is invalid or the cluster is
-	// in an inappropriate state. Callers should emit
-	// PlannedFailoverRejected with the error's message and clear the
-	// annotation.
+	// in an inappropriate state. Callers emit PlannedFailoverRejected
+	// with the error's message and consume the annotation, except for
+	// CooldownActive with onCooldown=Defer, which defers the run and
+	// keeps the annotation for the retry.
 	PlannedFailoverReject
 )
 
@@ -160,7 +173,10 @@ const (
 // AlreadyActive, nil) when the target already matches status.activeSite, or
 // (PlannedFailoverReject, reason, err) with an error message suitable for an
 // event when something is wrong. allowCurrentRun lets the request's own
-// non-terminal run pass the concurrent-run check.
+// non-terminal run pass the concurrent-run check. No current caller
+// reaches that check with a live run of another request (admitNew runs
+// only with no live block, the run's own passes set it): it is a
+// defensive refusal for a future caller, kept with its own test.
 func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, now time.Time, allowCurrentRun bool) (PlannedFailoverValidationResult, v1alpha1.PlannedFailoverReason, error) {
 	if req.Site == "" {
 		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonInvalidAnnotation, fmt.Errorf(

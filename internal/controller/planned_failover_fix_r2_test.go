@@ -109,12 +109,17 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 		h.setStatus(midEmergencyFailover(h.clk.Now()))
 		h.step()
 		assertWaiting(t, h, "")
-		if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; ok {
-			t.Error("request annotation kept after Admitting committed")
+		// The request stays until the Admitting run's validation decides
+		// it, so a cooldown deferral can still retain it (ultra K050).
+		if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; !ok {
+			t.Error("request annotation consumed before the Admitting run validated it")
 		}
 		h.setStatus(publishedPDX)
 		h.step()
 		assertAlreadyActive(t, h)
+		if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; ok {
+			t.Error("request annotation kept after the run ended")
+		}
 	})
 
 	// The record is published but activeSite still names the old primary.

@@ -30,32 +30,28 @@ import (
 
 // holdPass keeps a standing hold in force: the slot in hold mode, new
 // requests refused, and the PlannedFailoverHoldPersisted Warning every 10
-// minutes. done=false: the block is a pending run of another run, which
-// the caller still drives.
+// minutes. It returns the next requeue. A pending (Admitting or Deferred)
+// run of another request beside the hold is ended NotStarted here; a run
+// of another request that owns sites (not produced by this engine) is
+// driven through claimPass, whose facade calls the hold refuses.
 func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	hold *PlannedHold) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if hold.RunID != "" {
-		if !e.topo.PlannedClaimHeld(nn) {
-			ref := PlannedRunRef{Group: nn, RunID: hold.RunID}
-			if pf != nil && pf.RunID == hold.RunID {
-				ref = plannedRunRef(nn, pf)
-			}
-			// Hydrates the hold from the uncached records when the slot is
-			// empty; a wait or refusal changes nothing here.
-			_, _ = e.topo.EnsureClaim(ctx, ref, fg)
-		}
+		// Hydrates the hold into an empty slot, or converts the run's own
+		// claim (K154: EnsureClaim first added nothing ConvertToHold does
+		// not do on its own).
 		e.topo.ConvertToHold(nn, hold.RunID)
 	}
 
-	msg := fmt.Sprintf("planned failover refused: automation is held by planned failover %s (%s); resolve it, then annotate %s=%s",
-		hold.RunID, hold.Reason, AcknowledgePlannedFailoverHoldAnnotation, hold.RunID)
+	msg := plannedHoldRefusal(hold)
 	if pf != nil && pf.RunID != hold.RunID && plannedFailoverPendingPhase(pf.Phase) && !plannedFailoverTerminal(pf) {
 		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonManualRecoveryPending, msg, ReleaseTerminal,
 			pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred)
 	}
 	if raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]; ok {
-		if pf == nil || (plannedFailoverTerminal(pf) && pf.RunID != hold.RunID) {
+		_, keepBlock := plannedFencedSourceAwaitingHeal(fg, e.clk.Now())
+		if pf == nil || (plannedFailoverTerminal(pf) && pf.RunID != hold.RunID && !keepBlock) {
 			req, perr := parsePlannedFailoverAnnotation(raw)
 			if perr == nil && req.Site != "" {
 				next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseFailed, msg)
@@ -66,16 +62,13 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 					return requeueFor(out), nil
 				}
 				e.reportTerminal(nn, fg, next, v1alpha1.EventPlannedFailoverRejected)
-				e.consumeRequest(ctx, e.reload(ctx, fg), "held")
+				e.consumeRequest(ctx, fg, "held")
 				return plannedRequeueNext, nil
 			}
 		}
 		// The hold run's own record stays visible; the request is refused
 		// with an Event only.
-		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, msg)
-		e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{Result: &v1alpha1.PlannedFailoverResult{
-			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonManualRecoveryPending}})
-		e.consumeRequest(ctx, fg, "held")
+		e.refuseHeldRequest(ctx, fg, hold)
 	}
 	if pf != nil && pf.RunID != hold.RunID && !plannedFailoverTerminal(pf) {
 		// A run that owns sites beside a hold of another run (not produced by
@@ -97,6 +90,30 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 	return max(time.Second, plannedFailoverHoldPendingInterval-now.Sub(g.holdPendingAt)), nil
 }
 
+// plannedHoldRefusal is the message a request gets while hold stands.
+func plannedHoldRefusal(hold *PlannedHold) string {
+	return fmt.Sprintf("planned failover refused: automation is held by planned failover %s (%s); resolve it, then annotate %s=%s",
+		hold.RunID, hold.Reason, AcknowledgePlannedFailoverHoldAnnotation, hold.RunID)
+}
+
+// refuseHeldRequest refuses the request annotation with an Event only,
+// keeping the hold run's record, and consumes it.
+func (e *PlannedFailoverEngine) refuseHeldRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, hold *PlannedHold) {
+	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
+	if !ok {
+		return
+	}
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	target := ""
+	if req, err := parsePlannedFailoverAnnotation(raw); err == nil {
+		target = req.Site
+	}
+	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, plannedHoldRefusal(hold))
+	e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{TargetSite: target, Result: &v1alpha1.PlannedFailoverResult{
+		Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonManualRecoveryPending}})
+	e.consumeRequest(ctx, fg, "held")
+}
+
 // plannedFailoverPendingPhase: Admitting or Deferred.
 func plannedFailoverPendingPhase(p v1alpha1.PlannedFailoverPhase) bool {
 	return p == v1alpha1.PlannedFailoverPhaseAdmitting || p == v1alpha1.PlannedFailoverPhaseDeferred
@@ -108,12 +125,30 @@ func (e *PlannedFailoverEngine) ackPass(ctx context.Context, fg *v1alpha1.MysqlF
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if hold == nil {
 		// Steps 4-6: both durable hold records are gone. Release the slot,
-		// then delete the acknowledgement.
-		e.release(ctx, nn, ack, ReleaseAck, "")
+		// then delete the acknowledgement. Success is reported only when
+		// this acknowledgement released the slot, or this process cleared
+		// the hold's durable records for it (steps 2-3): an acknowledgement
+		// of nothing, or one beside a slot held for another run, resumes
+		// nothing (K035).
+		released := e.topo.ReleasePlannedFailoverClaim(nn, ack, ReleaseAck)
+		if released {
+			log.FromContext(ctx).Info("planned failover: claim released", "fg", nn.String(), "runId", ack, "outcome", "", "why", string(ReleaseAck))
+		}
+		acked := released || (e.runMemo(ack).holdAcked && !e.topo.PlannedClaimHeld(nn))
 		if out, err := e.store.DeleteHoldAck(ctx, fg, ack); out != WriteCommitted {
 			log.FromContext(ctx).Info("planned failover: could not delete the hold acknowledgement; retrying",
 				"fg", nn.String(), "runId", ack, "error", errString(err))
 			return plannedRequeueBackoff, true
+		}
+		if !acked {
+			msg := fmt.Sprintf("%s=%s ignored: no automation hold is standing for planned failover %q; nothing was resumed",
+				AcknowledgePlannedFailoverHoldAnnotation, ack, ack)
+			if e.topo.PlannedClaimHeld(nn) {
+				msg = fmt.Sprintf("%s=%s ignored: the planned-failover claim is held for another run, which this acknowledgement does not release",
+					AcknowledgePlannedFailoverHoldAnnotation, ack)
+			}
+			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverHoldAcknowledgementIgnored, msg)
+			return plannedRequeueNext, true
 		}
 		e.groupMemo(nn).holdPendingAt = time.Time{}
 		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverHoldAcknowledged,

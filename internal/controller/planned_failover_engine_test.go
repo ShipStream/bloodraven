@@ -137,8 +137,10 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			want:  pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: v1alpha1.PlannedFailoverReasonAdmissionTimeout}},
 		{name: "admitting/manager absent waits", phase: adm, steps: 1,
 			setup: func(h *pfEngineHarness) {
+				// As the production claim answers with no manager (ultra
+				// K123: the engine no longer maps errManagerAbsent here).
 				h.topo.claim = func(PlannedClaimRequest) (PlannedClaimDecision, error) {
-					return PlannedClaimDecision{}, errManagerAbsent
+					return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerAbsent, "no topology manager is registered"), nil
 				}
 			},
 			want: pfExpect{phase: adm, check: func(t *testing.T, h *pfEngineHarness) {
@@ -524,7 +526,10 @@ func TestPlannedFailoverEngine_LegacyRefused(t *testing.T) {
 		{plannedLegacyPhaseValidating, v1alpha1.PlannedFailoverOutcomeNotStarted},
 		{v1alpha1.PlannedFailoverPhaseDeferred, v1alpha1.PlannedFailoverOutcomeNotStarted},
 		{v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{plannedLegacyPhaseResuming, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		// The ultra review's K096: an older operator's promotion phases may
+		// have made the target writable.
+		{plannedLegacyPhaseResuming, v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed},
+		{v1alpha1.PlannedFailoverPhasePromoting, v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed},
 	} {
 		t.Run(string(tc.phase), func(t *testing.T) {
 			h := newPFEngineHarness(t, plannedFailoverFG(""))

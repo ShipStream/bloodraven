@@ -1043,11 +1043,8 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	// Check 1: the durable record is the baseline, or the run's own.
 	var failed *v1alpha1.PlannedFailoverReason
 	recordChanged := false
-	cur, _, recErr := EffectiveFailoverRecord(fg, tm.clock.Now())
-	if recErr != nil || !sameFailoverRecord(newFailoverRecordRef(cur.LastFailover, cur.LastFailoverTarget), failoverRecordRefFromAPI(pf.ClaimBaseline)) {
-		if recErr != nil || !ownFailoverRecord(fg, cur, pf) {
-			failed, recordChanged = reasonPtr(v1alpha1.PlannedFailoverReasonAuthorityChanged), true
-		}
+	if !plannedRecordUnchanged(fg, pf, tm.clock.Now()) {
+		failed, recordChanged = reasonPtr(v1alpha1.PlannedFailoverReasonAuthorityChanged), true
 	}
 	// Check 2: the run's fence is intact.
 	lackOfEvidence := false
@@ -1626,7 +1623,7 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 	refuse := func(kind PromoteOutcomeKind, reason v1alpha1.PlannedFailoverReason, terminal v1alpha1.PlannedFailoverOutcome, sites []string) error {
 		tm.logger.Warn("planned failover: pre-write gate refused", "fg", tm.cfg.Name, "runId", ref.RunID, "reason", string(reason), "sites", sites)
 		return &plannedGateRefusal{out: PromoteOutcome{Kind: kind, Reason: reason, Terminal: terminal, TargetServerUUID: U,
-			TargetReachable: true, MayHaveWritten: wasWritable}}
+			TargetReachable: true, MayHaveWritten: wasWritable, Sites: slices.Clone(sites)}}
 	}
 	// 2. The target, on the session that will be written.
 	live, err := readPromotionLive(ctx, sess)

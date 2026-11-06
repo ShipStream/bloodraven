@@ -61,6 +61,15 @@ const (
 	// the manager-absence deadline, in the same form as
 	// PlannedFailoverStallSinceAnnotation. Internal.
 	PlannedFailoverManagerAbsentSinceAnnotation = "bloodraven.shipstream.io/planned-failover-manager-absent-since"
+
+	// PlannedFailoverConfirmedAnnotation records, before the confirmed
+	// tail releases the claim, that the run's promotion was confirmed,
+	// recorded and published: "<runID>:since=<confirmedAt>", in the same
+	// form as PlannedFailoverStallSinceAnnotation. It is the run's own
+	// durable evidence, so a restart before the Publishing write commits
+	// does not hydrate the released claim back even after a later
+	// failover replaced the run's failover record. Internal.
+	PlannedFailoverConfirmedAnnotation = "bloodraven.shipstream.io/planned-failover-confirmed"
 )
 
 // ---------- identity, records, markers ----------
@@ -503,6 +512,9 @@ type DeadlineKind string
 const (
 	DeadlineStatusStall   DeadlineKind = "stall"          // planned-failover-stall-since
 	DeadlineManagerAbsent DeadlineKind = "manager-absent" // planned-failover-manager-absent-since
+	// DeadlinePromotionConfirmed is no deadline: the run's confirmation
+	// time, kept in the same (runID, time) form.
+	DeadlinePromotionConfirmed DeadlineKind = "promotion-confirmed" // planned-failover-confirmed
 )
 
 // Annotation is the annotation that holds the deadline start; "" for an
@@ -513,6 +525,8 @@ func (k DeadlineKind) Annotation() string {
 		return PlannedFailoverStallSinceAnnotation
 	case DeadlineManagerAbsent:
 		return PlannedFailoverManagerAbsentSinceAnnotation
+	case DeadlinePromotionConfirmed:
+		return PlannedFailoverConfirmedAnnotation
 	}
 	return ""
 }
@@ -690,6 +704,10 @@ type PromoteOutcome struct {
 	// target, and anything only the replaced pod could hold was written
 	// after the fence (the async-DR RPO).
 	RollbackIfUnrecorded bool
+	// Sites are the sites the refusal classified (a writable or unreadable
+	// peer, the target, the source): the hold of a ManualRecoveryRequired
+	// end lists them as ambiguous beside the run's own source and target.
+	Sites []string
 }
 
 // ReproveResult: OK, or exactly one of RollBack, Hold, HandOff.
