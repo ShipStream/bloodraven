@@ -104,8 +104,7 @@ func requireRuleRefusal(t *testing.T, err error) {
 
 // TestPITRBindingCELInstalled proves every CRD installed (the root rule fits
 // the CEL cost budget on this API server version) and that the rule is on the
-// MysqlFailoverGroup kind root, not on the shared spec (so MSC templates are
-// exempt).
+// MysqlFailoverGroup kind root.
 func TestPITRBindingCELInstalled(t *testing.T) {
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
@@ -159,9 +158,6 @@ func TestPITRBindingCELInstalled(t *testing.T) {
 	}
 	if !rootRule("mysqlfailovergroups.shipstream.io") {
 		t.Error("the PITR encryption transition rule is not on the MysqlFailoverGroup root")
-	}
-	if rootRule("mysqlstandbyclusters.shipstream.io") {
-		t.Error("the PITR encryption transition rule is on the MysqlStandbyCluster root; templates must be exempt")
 	}
 }
 
@@ -700,29 +696,6 @@ func TestPITRBindingCELBounds(t *testing.T) {
 			}
 		}
 	})
-}
-
-// TestPITRBindingCELStandbyTemplateExempt: the rule sits on the MFG kind
-// root, so an MSC template's backup spec can change freely (the template is
-// not a running group).
-func TestPITRBindingCELStandbyTemplateExempt(t *testing.T) {
-	ns := createNamespace(t, "pitr-cel-msc")
-	msc := minimalEnvtestStandby("tmpl", ns)
-	msc.Spec.Template.Spec.Backup = &v1alpha1.BackupSpec{
-		Profiles: []v1alpha1.BackupProfile{pitrS3Profile("a", "p1", "pitr-key")},
-		PITR:     &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"},
-	}
-	if err := k8sClient.Create(ctx, msc); err != nil {
-		t.Fatalf("create MSC: %v", err)
-	}
-	cur := &v1alpha1.MysqlStandbyCluster{}
-	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(msc), cur); err != nil {
-		t.Fatal(err)
-	}
-	cur.Spec.Template.Spec.Backup.Profiles[0].Encryption = nil
-	if err := k8sClient.Update(ctx, cur); err != nil {
-		t.Fatalf("MSC template encryption edit refused: %v", err)
-	}
 }
 
 // TestPITRBindingCELVerificationArchiveProfileName: the MBV's new

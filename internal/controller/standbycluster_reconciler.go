@@ -33,13 +33,10 @@ import (
 
 // MysqlStandbyClusterReconciler reconciles MysqlStandbyCluster CRs.
 //
-// Phase 1 (this file): discovers source backup artifacts (dumps + PITR binlog
-// manifests) by scanning the configured object-store prefix. Populates
-// status.discovered and stamps BucketReadable / SourceConfigKnown conditions.
-// No MySQL contact, no activation, no verification Job creation.
-//
-// Future phases: Phase 2 adds continuous restore verification (Restorable
-// condition); Phase 3 adds the one-shot dr-activate promotion path.
+// It discovers source backup artifacts (dumps and the PITR binlog archive) by
+// scanning the configured object-store prefix, publishes status.discovered and
+// stamps the BucketReadable and SourceConfigKnown conditions. It never contacts
+// MySQL and creates no Jobs.
 type MysqlStandbyClusterReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -135,7 +132,7 @@ const standbyMinDiscoveryInterval = 30 * time.Second
 
 // Reconcile is the main reconciliation loop.
 //
-// Phase 1 reconcile order:
+// Reconcile order:
 //  1. Validate spec.
 //  2. Resolve storage backend → ArchiveStore.
 //  3. Scan the bucket prefix.
@@ -154,7 +151,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// Deletion: no finalizer logic needed in Phase 1.
+	// Deletion: the standby owns nothing, so it has no finalizer.
 	if !sc.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
@@ -174,9 +171,8 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	// Step 1: Validate spec
 	// ---------------------------------------------------------------
 	if sc.Spec.Transport != v1alpha1.StandbyTransportObjectStore {
-		// The CRD XValidation already enforces this at admission; defend
-		// in-depth for objects that pre-date the webhook or were created
-		// by older clients.
+		// The CRD admits only ObjectStore (and defaults to it); this guards
+		// an object stored under an older schema.
 		msg := fmt.Sprintf("transport %q is not supported; only ObjectStore is implemented", sc.Spec.Transport)
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 			bucketReadable: metav1.ConditionFalse,
@@ -255,10 +251,10 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 			logger.Info("standby discovery scan incomplete: List did not complete before deadline",
 				"prefix", storePrefix, "err", scanErr.Error())
 			bucketMsg := fmt.Sprintf("bucket list did not complete before the scan deadline: %v", scanErr)
-			if sc.Status.Discovered != nil && sc.Status.Discovered.LastScanAt != nil {
+			if sc.Status.Discovered != nil && sc.Status.Discovered.LastScanTime != nil {
 				bucketMsg = fmt.Sprintf("bucket list incomplete (deadline) since %s; last successful scan at %s: %v",
 					metav1.Now().UTC().Format(time.RFC3339),
-					sc.Status.Discovered.LastScanAt.UTC().Format(time.RFC3339),
+					sc.Status.Discovered.LastScanTime.UTC().Format(time.RFC3339),
 					scanErr)
 			}
 			return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
@@ -279,10 +275,10 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		// R-2: surface staleness on the BucketReadable=False condition; preserve
 		// status.discovered so kubectl get continues to show last-known-good values.
 		bucketMsg := fmt.Sprintf("list prefix %q: %v", storePrefix, scanErr)
-		if sc.Status.Discovered != nil && sc.Status.Discovered.LastScanAt != nil {
+		if sc.Status.Discovered != nil && sc.Status.Discovered.LastScanTime != nil {
 			bucketMsg = fmt.Sprintf("bucket unreadable since %s; last successful scan at %s; reason=ListFailed: %v",
 				metav1.Now().UTC().Format(time.RFC3339),
-				sc.Status.Discovered.LastScanAt.UTC().Format(time.RFC3339),
+				sc.Status.Discovered.LastScanTime.UTC().Format(time.RFC3339),
 				scanErr)
 		}
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
@@ -339,14 +335,14 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	// scanBucket may return a MetadataUnreadable error (R-6) embedded in
 	// discovered.MetadataErr. Handle that here before stamping conditions.
 	if discovered.MetadataErr != nil {
-		logger.Error(discovered.MetadataErr, "dump @.json unreadable", "dump", discovered.DumpName)
+		logger.Error(discovered.MetadataErr, "dump @.json unreadable", "dump", discovered.dumpName())
 		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, v1alpha1.EventMetadataParseFailed,
-			"failed to parse @.json for dump %q: %v", discovered.DumpName, discovered.MetadataErr)
+			"failed to parse @.json for dump %q: %v", discovered.dumpName(), discovered.MetadataErr)
 		// Log a partial-scan line so operators can correlate.
 		logger.Info("partial scan completed",
 			"prefix", storePrefix,
-			"dumpName", discovered.DumpName,
-			"manifestCount", discovered.ManifestCount)
+			"dumpName", discovered.dumpName(),
+			"manifestCount", discovered.manifestCount())
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 			bucketReadable: metav1.ConditionTrue,
 			bucketReason:   v1alpha1.ReasonListSucceeded,
@@ -354,7 +350,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 			sourceKnown:    metav1.ConditionFalse,
 			sourceReason:   v1alpha1.ReasonMetadataUnreadable,
 			sourceMsg: fmt.Sprintf("dump %q found but @.json is unreadable: %v",
-				discovered.DumpName, discovered.MetadataErr),
+				discovered.dumpName(), discovered.MetadataErr),
 		}, interval, nil)
 	}
 
@@ -372,11 +368,11 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		if prev := standbyFindStatusCondition(&sc, v1alpha1.StandbyConditionSourceConfigKnown); prev == nil || prev.Reason != refusal.reason {
 			r.Recorder.Eventf(&sc, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveRefused, "%s", refusal.message)
 		}
-	} else if discovered.DumpName == "" {
+	} else if discovered.LatestDump == nil {
 		sourceKnown = metav1.ConditionFalse
 		sourceReason = v1alpha1.ReasonNoDumpFound
 		sourceMsg = fmt.Sprintf("no dump found under prefix %q (no @.json objects)", storePrefix)
-	} else if discovered.ManifestCount == 0 {
+	} else if discovered.manifestCount() == 0 {
 		sourceKnown = metav1.ConditionFalse
 		sourceReason = v1alpha1.ReasonNoBinlogManifests
 		// Not a misconfiguration: the dump was found, but no PITR binlog
@@ -385,7 +381,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		// dump with no point-in-time window.
 		sourceMsg = fmt.Sprintf("dump %q found but no PITR binlog manifests under %q/%s/ yet; "+
 			"recovery is limited to the dump (no point-in-time window)",
-			discovered.DumpName, storePrefix, pitrarchive.BinlogSubprefix)
+			discovered.dumpName(), storePrefix, pitrarchive.BinlogSubprefix)
 	}
 
 	return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
@@ -417,75 +413,59 @@ func (r *MysqlStandbyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error
 // Storage backend resolution
 // ----------------------------------------------------------------------
 
-// buildStoreCfg converts a MysqlStandbyCluster's source.storage into a
-// PITRConfig (which NewArchiveStore consumes) and returns:
+// buildStoreCfg converts a MysqlStandbyCluster's source.s3 into a PITRConfig
+// (which NewArchiveStore consumes) and returns:
 //   - PITRConfig for constructing the store
 //   - the logical prefix to scan (the dumps' prefix, beside <prefix>/binlogs)
 //   - the archive the standby expects there (destination and encryption)
 //   - the path to a temporary credentials directory (empty when not needed)
 //   - any configuration error
 //
-// For S3 it reads AWS credentials from the referenced Kubernetes Secret and
-// writes them to a temporary directory that the sidecar SDK reads at store
+// It reads AWS credentials from the referenced Kubernetes Secret and writes
+// them to a temporary directory that the sidecar SDK reads at store
 // construction time. The caller must os.RemoveAll the returned dir after the
 // store has been constructed.
-//
-// For PVC it returns a ConfigError: the operator pod does not mount the source
-// cluster's backup PVC, which is a cross-cluster constraint. Use S3-compatible
-// storage for production DR.
 func (r *MysqlStandbyClusterReconciler) buildStoreCfg(ctx context.Context, sc *v1alpha1.MysqlStandbyCluster) (*sidecar.PITRConfig, string, standbyArchiveExpectation, string, error) {
-	storage := sc.Spec.Source.Storage
-	switch storage.Type {
-	case v1alpha1.BackupStorageS3:
-		if storage.S3 == nil {
-			return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("source.storage.type=S3 but source.storage.s3 is not set")
-		}
-		// The archive destination is normalized exactly as the source
-		// group's sidecars normalize it (§3.1), so the standby reads the
-		// same <prefix>/binlogs the descriptor was created at; the dumps
-		// live beside it.
-		dest, err := pitrarchive.NewS3Destination(storage.S3.Bucket, storage.S3.Prefix, storage.S3.EndpointURL)
-		if err != nil {
-			return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("source.storage.s3: %w", err)
-		}
-		prefix := path.Dir(dest.KeyPrefix)
-		if prefix == "." {
-			prefix = ""
-		}
-		archive := standbyArchiveExpectation{
-			dest:       dest,
-			encryption: pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone},
-		}
-		s3Cfg, credsDir, err := r.buildS3PitrCfg(ctx, sc.Namespace, storage.S3)
-		if err != nil {
-			return nil, "", archive, credsDir, err
-		}
-		cfg := &sidecar.PITRConfig{
-			StorageType: "S3",
-			S3:          s3Cfg,
-		}
-		if sc.Spec.Source.Decryption != nil && sc.Spec.Source.Decryption.PassphraseSecret.Name != "" {
-			passphraseFile, dir, err := r.resolvePassphraseToFile(ctx, sc.Namespace, sc.Spec.Source.Decryption.PassphraseSecret, credsDir)
-			if err != nil {
-				return nil, "", archive, dir, err
-			}
-			credsDir = dir
-			cfg.PassphraseFile = passphraseFile
-			// The archive's descriptor must record the passphrase mode
-			// with the only algorithm there is; its keyCheck is verified
-			// by the encrypting store's passphrase.
-			archive.encryption = pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: pitrarchive.AlgorithmAES256GCM}
-		}
-		return cfg, prefix, archive, credsDir, nil
-
-	case v1alpha1.BackupStoragePVC:
-		return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("PVC storage is not supported by the standby reconciler: " +
-			"the operator pod does not mount the source cluster backup PVC; " +
-			"use S3-compatible object storage for cross-cluster DR")
-
-	default:
-		return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("unknown storage type %q", storage.Type)
+	s3 := &sc.Spec.Source.S3
+	// The archive destination is normalized exactly as the source group's
+	// sidecars normalize it (§3.1), so the standby reads the same
+	// <prefix>/binlogs the descriptor was created at; the dumps live beside
+	// it.
+	dest, err := pitrarchive.NewS3Destination(s3.Bucket, s3.Prefix, s3.EndpointURL)
+	if err != nil {
+		return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("source.s3: %w", err)
 	}
+	prefix := path.Dir(dest.KeyPrefix)
+	if prefix == "." || prefix == "" {
+		// The CRD requires a prefix with at least one segment; this guards
+		// an object stored under an older schema from scanning a bucket root.
+		return nil, "", standbyArchiveExpectation{}, "", fmt.Errorf("source.s3.prefix %q names no prefix; the standby does not scan a bucket root", s3.Prefix)
+	}
+	archive := standbyArchiveExpectation{
+		dest:       dest,
+		encryption: pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone},
+	}
+	s3Cfg, credsDir, err := r.buildS3PitrCfg(ctx, sc.Namespace, s3)
+	if err != nil {
+		return nil, "", archive, credsDir, err
+	}
+	cfg := &sidecar.PITRConfig{
+		StorageType: "S3",
+		S3:          s3Cfg,
+	}
+	if sc.Spec.Source.Decryption != nil && sc.Spec.Source.Decryption.PassphraseSecret.Name != "" {
+		passphraseFile, dir, err := r.resolvePassphraseToFile(ctx, sc.Namespace, sc.Spec.Source.Decryption.PassphraseSecret, credsDir)
+		if err != nil {
+			return nil, "", archive, dir, err
+		}
+		credsDir = dir
+		cfg.PassphraseFile = passphraseFile
+		// The archive's descriptor must record the passphrase mode with the
+		// only algorithm there is; its keyCheck is verified by the
+		// encrypting store's passphrase.
+		archive.encryption = pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: pitrarchive.AlgorithmAES256GCM}
+	}
+	return cfg, prefix, archive, credsDir, nil
 }
 
 // standbyArchiveExpectation is what the standby expects of the source
@@ -549,7 +529,7 @@ func standbyFindStatusCondition(sc *v1alpha1.MysqlStandbyCluster, condType strin
 // Secret and returns (PITRS3Config, tempCredsDir, error). tempCredsDir is
 // non-empty when credentials were written to disk; the caller must remove
 // it after the store is constructed.
-func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, namespace string, s3 *v1alpha1.S3Storage) (*sidecar.PITRS3Config, string, error) {
+func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, namespace string, s3 *v1alpha1.StandbyS3Source) (*sidecar.PITRS3Config, string, error) {
 	cfg := &sidecar.PITRS3Config{
 		Bucket:      s3.Bucket,
 		Region:      s3.Region,
@@ -671,23 +651,15 @@ func standbyCreds(accessKey, secretKey, sessionToken, region string) (string, er
 
 // standbyScanResult holds the parsed output of a single bucket scan.
 // MetadataErr is non-nil when readDumpAtJSON failed (R-6); in that case
-// DumpName is set (we found the directory) but the metadata fields are empty.
+// LatestDump holds only the name and location (we found the directory).
 type standbyScanResult struct {
-	DumpName                 string
-	DumpLocation             string
-	DumpCompletionTime       *metav1.Time
-	DumpGtidExecuted         string
-	DumpSizeBytes            int64
-	OldestArchivedBinlogTime *metav1.Time
-	NewestArchivedBinlogTime *metav1.Time
-	ManifestCount            int32
-	ArchivedBinlogCount      int32
-	ArchivedBinlogBytes      int64
-	// Archive is the verified source archive identity; nil when there is no
-	// archive or it was refused.
-	Archive *v1alpha1.PITRArchiveIdentity
-	// ArchiveRefusal is set when the source archive was refused. The dump
-	// fields are still published; the archive fields stay zero.
+	// LatestDump is the newest dump; nil when the prefix holds none.
+	LatestDump *v1alpha1.StandbyDump
+	// BinlogArchive is the verified source archive identity and its window;
+	// nil when there is no archive or it was refused.
+	BinlogArchive *v1alpha1.StandbyBinlogArchive
+	// ArchiveRefusal is set when the source archive was refused. LatestDump
+	// is still published; BinlogArchive stays nil.
 	ArchiveRefusal *standbyArchiveRefusal
 	// MetadataErr is set when the chosen dump's @.json could not be parsed.
 	// The caller stamps SourceConfigKnown=False / MetadataUnreadable in that case.
@@ -715,6 +687,30 @@ type standbyScanResult struct {
 	// (where every dump @.json had already been read).
 	CandidatesRead  int
 	CandidatesTotal int
+}
+
+// dumpName is the latest dump's name, or "" when there is none.
+func (s *standbyScanResult) dumpName() string {
+	if s.LatestDump == nil {
+		return ""
+	}
+	return s.LatestDump.Name
+}
+
+// manifestCount is the verified archive's manifest count, 0 without one.
+func (s *standbyScanResult) manifestCount() int32 {
+	if s.BinlogArchive == nil {
+		return 0
+	}
+	return s.BinlogArchive.ManifestCount
+}
+
+// fileCount is the verified archive's binlog file count, 0 without one.
+func (s *standbyScanResult) fileCount() int32 {
+	if s.BinlogArchive == nil {
+		return 0
+	}
+	return s.BinlogArchive.FileCount
 }
 
 // scanBucket lists the bucket under prefix, finds the newest dump and reads
@@ -896,8 +892,10 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 			bestMetaErr = fmt.Errorf("all %d candidates had unreadable @.json", len(dumpDirs))
 		}
 
-		result.DumpName = path.Base(bestDir)
-		result.DumpLocation = bestDir + "/"
+		result.LatestDump = &v1alpha1.StandbyDump{
+			Name:     path.Base(bestDir),
+			Location: bestDir + "/",
+		}
 
 		if bestMetaErr != nil {
 			// R-6: propagate parse error so caller can stamp MetadataUnreadable.
@@ -906,13 +904,16 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 			// Log if the timestamp-best differs from the lex-newest candidate.
 			if bestDir != lexNewest {
 				logger.Info("dump selection: timestamp-newest differs from lex-newest",
-					"selectedDump", result.DumpName,
+					"selectedDump", result.LatestDump.Name,
 					"lexNewest", path.Base(lexNewest),
 					"selectedEndTime", bestEnd)
 			}
-			result.DumpCompletionTime = bestMeta.DumpCompletionTime
-			result.DumpGtidExecuted = bestMeta.DumpGtidExecuted
-			result.DumpSizeBytes = bestMeta.DumpSizeBytes
+			result.LatestDump.CompletionTime = bestMeta.DumpCompletionTime
+			result.LatestDump.GtidExecuted = bestMeta.DumpGtidExecuted
+			if bestMeta.DumpSizeBytes > 0 {
+				size := bestMeta.DumpSizeBytes
+				result.LatestDump.SizeBytes = &size
+			}
 		}
 	}
 
@@ -952,7 +953,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	// Every manifest must be version 2 and name the descriptor's archive;
 	// one that does not refuses the whole archive.
 	// -------------------------------------------------------------------
-	window := &standbyScanResult{}
+	window := v1alpha1.StandbyBinlogArchive{}
 	var markedSites []string
 	for _, key := range keys {
 		if !strings.HasPrefix(key, manifestPrefix) || !strings.HasSuffix(key, ".json") {
@@ -1027,20 +1028,20 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		}
 
 		for _, f := range m.Files {
-			window.ArchivedBinlogCount++
-			window.ArchivedBinlogBytes += f.Size
+			window.FileCount++
+			window.SizeBytes += f.Size
 			if !f.FirstEventTime.IsZero() {
 				t := metav1.NewTime(f.FirstEventTime)
-				if window.OldestArchivedBinlogTime == nil ||
-					f.FirstEventTime.Before(window.OldestArchivedBinlogTime.Time) {
-					window.OldestArchivedBinlogTime = &t
+				if window.OldestEventTime == nil ||
+					f.FirstEventTime.Before(window.OldestEventTime.Time) {
+					window.OldestEventTime = &t
 				}
 			}
 			if !f.LastEventTime.IsZero() {
 				t := metav1.NewTime(f.LastEventTime)
-				if window.NewestArchivedBinlogTime == nil ||
-					f.LastEventTime.After(window.NewestArchivedBinlogTime.Time) {
-					window.NewestArchivedBinlogTime = &t
+				if window.NewestEventTime == nil ||
+					f.LastEventTime.After(window.NewestEventTime.Time) {
+					window.NewestEventTime = &t
 				}
 			}
 		}
@@ -1054,12 +1055,8 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		})
 		return result, nil
 	}
-	result.ManifestCount = window.ManifestCount
-	result.ArchivedBinlogCount = window.ArchivedBinlogCount
-	result.ArchivedBinlogBytes = window.ArchivedBinlogBytes
-	result.OldestArchivedBinlogTime = window.OldestArchivedBinlogTime
-	result.NewestArchivedBinlogTime = window.NewestArchivedBinlogTime
-	result.Archive = &v1alpha1.PITRArchiveIdentity{
+	// The identity and the window are published together or not at all.
+	window.Identity = v1alpha1.PITRArchiveIdentity{
 		ArchiveID:   desc.ArchiveID,
 		Destination: archive.dest.String(),
 		Source: v1alpha1.PITRArchiveSource{
@@ -1070,6 +1067,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(desc.Encryption.Mode),
 		Algorithm:      v1alpha1.EncryptionAlgorithm(desc.Encryption.Algorithm),
 	}
+	result.BinlogArchive = &window
 	return result, nil
 }
 
@@ -1265,7 +1263,7 @@ func (r *MysqlStandbyClusterReconciler) pruneDumpMetaCache(scopePrefix string, s
 // Status patching
 // ----------------------------------------------------------------------
 
-// standbyConditionPair bundles the two conditions Phase 1 manages.
+// standbyConditionPair bundles the two conditions the standby manages.
 type standbyConditionPair struct {
 	bucketReadable metav1.ConditionStatus
 	bucketReason   string
@@ -1315,49 +1313,38 @@ func (r *MysqlStandbyClusterReconciler) stampConditionsAndRequeue(
 	sc.Status.ObservedGeneration = sc.Generation
 
 	if discovered != nil {
-		// R-5: LastScanAt is the wall-clock time of the most recent successful
-		// bucket scan. BucketScanned events remain suppressed unless substantive
-		// discovered content changes.
+		// R-5: LastScanTime is the wall-clock time of the most recent
+		// successful bucket scan. BucketScanned events remain suppressed
+		// unless substantive discovered content changes.
 		//
 		// Algorithm:
-		//   1. Build newDiscovered WITHOUT LastScanAt.
-		//   2. Build a copy of the existing Discovered WITHOUT its LastScanAt.
+		//   1. Build newDiscovered WITHOUT LastScanTime.
+		//   2. Build a copy of the existing Discovered WITHOUT its LastScanTime.
 		//   3. Deep-equal compare the two copies.
-		//   4. Always set LastScanAt = now and replace sc.Status.Discovered.
+		//   4. Always set LastScanTime = now and replace sc.Status.Discovered.
 		//   5. Only if they differ: emit the BucketScanned event.
 		newDiscovered := &v1alpha1.StandbyDiscovered{
-			DumpName:                 discovered.DumpName,
-			DumpLocation:             discovered.DumpLocation,
-			DumpCompletionTime:       discovered.DumpCompletionTime,
-			DumpGtidExecuted:         discovered.DumpGtidExecuted,
-			DumpSizeBytes:            discovered.DumpSizeBytes,
-			OldestArchivedBinlogTime: discovered.OldestArchivedBinlogTime,
-			NewestArchivedBinlogTime: discovered.NewestArchivedBinlogTime,
-			ManifestCount:            discovered.ManifestCount,
-			ArchivedBinlogCount:      discovered.ArchivedBinlogCount,
-			ArchivedBinlogBytes:      discovered.ArchivedBinlogBytes,
-			Archive:                  discovered.Archive,
-			// LastScanAt intentionally left nil for comparison purposes.
+			LatestDump:    discovered.LatestDump,
+			BinlogArchive: discovered.BinlogArchive,
+			// LastScanTime intentionally left nil for comparison purposes.
 		}
 
 		// Determine whether the substantive fields changed.
 		changed := true
 		if sc.Status.Discovered != nil {
 			prevNoScan := sc.Status.Discovered.DeepCopy()
-			prevNoScan.LastScanAt = nil
-			prevNoScan.Message = ""
+			prevNoScan.LastScanTime = nil
 			changed = !equality.Semantic.DeepEqual(prevNoScan, newDiscovered)
 		}
 
-		newDiscovered.LastScanAt = &now
+		newDiscovered.LastScanTime = &now
 		sc.Status.Discovered = newDiscovered
 		if changed {
 			// R-5 (BucketScanned event): emit only on a state transition
-			// (DumpName changed, ArchivedBinlogCount changed, or BucketReadable
-			// changed from False to True).
+			// (the dump, the archive identity or its window changed).
 			r.Recorder.Eventf(sc, corev1.EventTypeNormal, v1alpha1.EventBucketScanned,
 				"scanned prefix: dump=%q manifests=%d binlogs=%d",
-				discovered.DumpName, discovered.ManifestCount, discovered.ArchivedBinlogCount)
+				discovered.dumpName(), discovered.manifestCount(), discovered.fileCount())
 		}
 	}
 

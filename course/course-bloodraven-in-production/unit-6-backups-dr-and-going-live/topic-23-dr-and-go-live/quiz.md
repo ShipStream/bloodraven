@@ -40,14 +40,14 @@ The source cluster is fenced and you are standing up a fresh `MysqlFailoverGroup
 
 - `spec.restoreInPlace`, with an RFC 3339 confirm token naming the dump
 - `spec.initFromBackup`, pointed at the source bucket prefix
-- `spec.template` on the `MysqlStandbyCluster`, by requesting activation
+- A `MysqlStandbyCluster` pointed at the prefix, activated once the source is fenced
 - `spec.backup.pitr.enabled`, which replays the archived binlogs into the new group
 
 **Correct option index:** 1
 
 **Explanation:**
 
-`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: `spec.template` does hold the shape of the group that a future activation would materialise, but activation is not implemented, so nothing consumes it. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)
+`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: a `MysqlStandbyCluster` only observes the bucket, activation is not implemented, and the CRD has no field that describes a group to create. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)
 
 ## Question 4
 

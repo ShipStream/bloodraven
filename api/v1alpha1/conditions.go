@@ -74,10 +74,7 @@ const (
 	ConditionVerified           = "Verified"
 )
 
-// Condition type constants for MysqlStandbyCluster.
-// Phase 1 uses BucketReadable and SourceConfigKnown.
-// Phase 2+ adds Restorable.
-// Phase 3+ adds ActivationInProgress and Active.
+// MysqlStandbyCluster condition types.
 const (
 	// StandbyConditionBucketReadable is True when the source
 	// bucket+prefix was successfully listed within the last discovery
@@ -118,8 +115,9 @@ const (
 	//     good) and no BucketScanned event is emitted. Distinct from
 	//     MetadataUnreadable (which is genuine corruption) and ListFailed.
 	//   - ConfigError (False): propagated from a storage-backend error.
-	//   - Archive* (False): the source PITR archive was refused, while the
-	//     dump is still published without an archive window. The reason
+	//   - Archive* (False): the source PITR archive was refused:
+	//     status.discovered.latestDump is still published, binlogArchive
+	//     (identity and window) is not. The reason
 	//     is the refusal token without its "PITR" prefix:
 	//     ArchiveListFailed, ArchiveDescriptorMissing, ArchiveLegacy,
 	//     ArchiveVersionUnsupported, ArchiveObjectInvalid,
@@ -130,21 +128,6 @@ const (
 	//     marker), or ArchiveUnreadable (no other token). A marked site among
 	//     unmarked ones is left out of the window instead.
 	StandbyConditionSourceConfigKnown = "SourceConfigKnown"
-
-	// StandbyConditionRestorable is True when the most recent owned
-	// MysqlBackupVerification is Succeeded and within a future staleness
-	// threshold (Phase 2). Populated by Phase 2+.
-	// Reason=NoVerification, Stale, or VerificationFailed on False.
-	StandbyConditionRestorable = "Restorable"
-
-	// StandbyConditionActivationInProgress is True while the activation
-	// phase is non-terminal (Validating through Provisioning).
-	// Populated by Phase 3+.
-	StandbyConditionActivationInProgress = "ActivationInProgress"
-
-	// StandbyConditionActive is True iff status.activation.phase=Activated.
-	// Populated by Phase 3+.
-	StandbyConditionActive = "Active"
 )
 
 // MysqlFailoverGroup AutomaticFailoverHeld reasons.

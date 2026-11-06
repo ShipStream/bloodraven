@@ -813,95 +813,55 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 - Scope: Namespaced; plural `mysqlstandbyclusters`; shortNames: `msc`, `mscs`; categories: bloodraven, mysql, dr
 - Versions: v1alpha1 (storage); subresources: status
-- Printer columns: Bucket (`.status.discovered.dumpLocation`), BucketReadable (`.status.conditions[?(@.type=="BucketReadable")].status`), SourceKnown (`.status.conditions[?(@.type=="SourceConfigKnown")].status`), Age (`.metadata.creationTimestamp`), Phase (`.status.activation.phase`)
-- `spec` CEL: `self.transport != 'ObjectStore' || self.source.storage.type != 'S3' || (has(self.source.storage.s3.prefix) && size(self.source.storage.s3.prefix) > 0)`
-- `spec` CEL: `self.transport != 'ObjectStore' || self.source.storage.type == 'S3'`
+- Printer columns: Dump (`.status.discovered.latestDump.name`), NewestBinlog (`.status.discovered.binlogArchive.newestEventTime`), BucketReadable (`.status.conditions[?(@.type=="BucketReadable")].status`), SourceKnown (`.status.conditions[?(@.type=="SourceConfigKnown")].status`), Age (`.metadata.creationTimestamp`)
 
-### MysqlStandbyCluster `spec` (29 fields)
+### MysqlStandbyCluster `spec` (14 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
 | `spec.freshness` | object |  |  |  |
 | `spec.freshness.discoveryInterval` | string |  | `"5m"` | CEL: `duration(self) >= duration('30s')` |
 | `spec.source` | object | yes |  |  |
-| `spec.source.cluster` | string |  |  |  |
 | `spec.source.decryption` | object |  |  |  |
 | `spec.source.decryption.passphraseSecret` | object | yes |  |  |
 | `spec.source.decryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1; maxLength=253 |
 | `spec.source.decryption.passphraseSecret.name` | string | yes |  | minLength=1; maxLength=253 |
-| `spec.source.failoverGroupName` | string | yes |  | minLength=1 |
-| `spec.source.namespace` | string |  |  |  |
-| `spec.source.profileName` | string | yes |  | minLength=1 |
-| `spec.source.storage` | object | yes |  | CEL: `(self.type == 'S3' && has(self.s3) && !has(self.pvc)) \|\| (self.type == 'PVC' && has(self.pvc) && !has(self.s3))` |
-| `spec.source.storage.pvc` | object |  |  |  |
-| `spec.source.storage.pvc.claimName` | string |  |  | maxLength=253; CEL: `bytes(self).size() <= 253` |
-| `spec.source.storage.pvc.size` | int-or-string |  |  | pattern=`^(\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$` |
-| `spec.source.storage.pvc.storageClassName` | string |  |  |  |
-| `spec.source.storage.pvc.subPath` | string |  |  | maxLength=512; pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$`; CEL: `bytes(self).size() <= 512` |
-| `spec.source.storage.s3` | object |  |  |  |
-| `spec.source.storage.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
-| `spec.source.storage.s3.credentialsSecret` | string | yes |  | minLength=1 |
-| `spec.source.storage.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
-| `spec.source.storage.s3.prefix` | string |  |  | maxLength=512; pattern=`^/?(([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*)?/?$`; CEL: `bytes(self).size() <= 512` |
-| `spec.source.storage.s3.region` | string |  |  |  |
-| `spec.source.storage.s3.storageClass` | string |  |  |  |
-| `spec.source.storage.type` | string | yes |  | enum: `S3`, `PVC` |
-| `spec.template` | object | yes |  |  |
-| `spec.template.name` | string | yes |  | minLength=1 |
-| `spec.template.spec` | MysqlFailoverGroupSpec (see MysqlFailoverGroup spec) | yes |  | CEL: `(has(self.secretName) && self.secretName != "" && !has(self.credentials)) \|\| ((!has(self.secretName) \|\| self.secretName == "") && has(self.credentials))`; CEL: `self.sites.all(x, self.sites.filter(y, y.name == x.name).size() == 1)`; CEL: `self.sites.filter(s, s.role == 'primary-candidate').size() >= 2`; CEL: `!has(self.splitBrainPolicy) \|\| !has(self.splitBrainPolicy.sitePriorities) \|\| self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))`; CEL: `!has(self.serviceTemplate) \|\| !has(self.serviceTemplate.externalTrafficPolicy) \|\| (has(self.serviceTemplate.type) && self.serviceTemplate.type in ['NodePort', 'LoadBalancer'])`; CEL: `self.sites.all(s, !has(s.serviceTemplate) \|\| !has(s.serviceTemplate.externalTrafficPolicy) \|\| ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`; CEL: `self.sites.all(s, !has(s.serviceTemplate) \|\| !has(s.serviceTemplate.nodePort) \|\| ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`; CEL: `self.sites.all(s, !has(self.serviceTemplate) \|\| !has(self.serviceTemplate.externalTrafficPolicy) \|\| ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`; CEL: `!has(self.encryptionAtRest) \|\| !self.encryptionAtRest.enabled \|\| has(self.tls)`; CEL: `!has(self.encryptionAtRest) \|\| !self.encryptionAtRest.enabled \|\| !has(self.encryptionAtRest.keyring) \|\| !has(self.encryptionAtRest.keyring.dataFileDir) \|\| (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))` |
-| `spec.transport` | string |  | `"ObjectStore"` | enum: `ObjectStore`, `Network` |
+| `spec.source.s3` | object | yes |  |  |
+| `spec.source.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
+| `spec.source.s3.credentialsSecret` | string | yes |  | minLength=1 |
+| `spec.source.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
+| `spec.source.s3.prefix` | string | yes |  | minLength=1; maxLength=512; pattern=`^/?([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*/?$`; CEL: `bytes(self).size() <= 512` |
+| `spec.source.s3.region` | string |  |  |  |
+| `spec.transport` | string |  | `"ObjectStore"` | enum: `ObjectStore` |
 
 
-### MysqlStandbyCluster `status` (48 fields)
+### MysqlStandbyCluster `status` (25 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
-| `status.activation` | object |  |  |  |
-| `status.activation.activeSite` | string |  |  |  |
-| `status.activation.completionTime` | string (date-time) |  |  |  |
-| `status.activation.confirmTokenUsed` | string |  |  |  |
-| `status.activation.durationSeconds` | integer (int64) |  |  |  |
-| `status.activation.message` | string |  |  |  |
-| `status.activation.phase` | string |  |  | enum: ``, `Validating`, `Restoring`, `Replaying`, `Provisioning`, `Activated`, `Failed` |
-| `status.activation.reason` | string |  |  |  |
-| `status.activation.sourceDumpLocation` | string |  |  |  |
-| `status.activation.sourceDumpName` | string |  |  |  |
-| `status.activation.sourceGtidExecuted` | string |  |  |  |
-| `status.activation.startTime` | string (date-time) |  |  |  |
-| `status.activation.targetGtidExecuted` | string |  |  |  |
 | `status.conditions` | []metav1.Condition |  |  |  |
 | `status.discovered` | object |  |  |  |
-| `status.discovered.archive` | object |  |  |  |
-| `status.discovered.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
-| `status.discovered.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
-| `status.discovered.archive.destination` | string |  |  | maxLength=4096 |
-| `status.discovered.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
-| `status.discovered.archive.source` | object | yes |  |  |
-| `status.discovered.archive.source.name` | string | yes |  | maxLength=253 |
-| `status.discovered.archive.source.namespace` | string | yes |  | maxLength=63 |
-| `status.discovered.archive.source.uid` | string | yes |  |  |
-| `status.discovered.archivedBinlogBytes` | integer (int64) |  |  |  |
-| `status.discovered.archivedBinlogCount` | integer (int32) |  |  |  |
-| `status.discovered.dumpCompletionTime` | string (date-time) |  |  |  |
-| `status.discovered.dumpGtidExecuted` | string |  |  |  |
-| `status.discovered.dumpLocation` | string |  |  |  |
-| `status.discovered.dumpName` | string |  |  |  |
-| `status.discovered.dumpSizeBytes` | integer (int64) |  |  |  |
-| `status.discovered.lastScanAt` | string (date-time) |  |  |  |
-| `status.discovered.manifestCount` | integer (int32) |  |  |  |
-| `status.discovered.message` | string |  |  |  |
-| `status.discovered.newestArchivedBinlogTime` | string (date-time) |  |  |  |
-| `status.discovered.oldestArchivedBinlogTime` | string (date-time) |  |  |  |
-| `status.lastVerified` | object |  |  |  |
-| `status.lastVerified.backupName` | string |  |  |  |
-| `status.lastVerified.completionTime` | string (date-time) |  |  |  |
-| `status.lastVerified.durationSeconds` | integer (int64) |  |  |  |
-| `status.lastVerified.replayedThroughBinlog` | object |  |  |  |
-| `status.lastVerified.replayedThroughBinlog.file` | string |  |  |  |
-| `status.lastVerified.replayedThroughBinlog.position` | integer (int64) |  |  |  |
-| `status.lastVerified.replayedThroughBinlog.timestamp` | string (date-time) |  |  |  |
-| `status.lastVerified.startTime` | string (date-time) |  |  |  |
-| `status.lastVerified.verificationName` | string |  |  |  |
-| `status.materializedFailoverGroup` | string |  |  |  |
+| `status.discovered.binlogArchive` | object |  |  |  |
+| `status.discovered.binlogArchive.fileCount` | integer (int32) | yes |  |  |
+| `status.discovered.binlogArchive.identity` | object | yes |  |  |
+| `status.discovered.binlogArchive.identity.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.discovered.binlogArchive.identity.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
+| `status.discovered.binlogArchive.identity.destination` | string |  |  | maxLength=4096 |
+| `status.discovered.binlogArchive.identity.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
+| `status.discovered.binlogArchive.identity.source` | object | yes |  |  |
+| `status.discovered.binlogArchive.identity.source.name` | string | yes |  | maxLength=253 |
+| `status.discovered.binlogArchive.identity.source.namespace` | string | yes |  | maxLength=63 |
+| `status.discovered.binlogArchive.identity.source.uid` | string | yes |  |  |
+| `status.discovered.binlogArchive.manifestCount` | integer (int32) | yes |  |  |
+| `status.discovered.binlogArchive.newestEventTime` | string (date-time) |  |  |  |
+| `status.discovered.binlogArchive.oldestEventTime` | string (date-time) |  |  |  |
+| `status.discovered.binlogArchive.sizeBytes` | integer (int64) | yes |  |  |
+| `status.discovered.lastScanTime` | string (date-time) |  |  |  |
+| `status.discovered.latestDump` | object |  |  |  |
+| `status.discovered.latestDump.completionTime` | string (date-time) |  |  |  |
+| `status.discovered.latestDump.gtidExecuted` | string |  |  |  |
+| `status.discovered.latestDump.location` | string | yes |  |  |
+| `status.discovered.latestDump.name` | string | yes |  |  |
+| `status.discovered.latestDump.sizeBytes` | integer (int64) |  |  |  |
 | `status.observedGeneration` | integer (int64) |  |  |  |
 

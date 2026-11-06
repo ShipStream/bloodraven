@@ -434,8 +434,8 @@ func TestPointInTimeResultShape(t *testing.T) {
 	}
 	assertPointInTimeRoundTrip(t, "verification status", gotV.Status.PointInTime)
 
-	// C6: status.activation carries no pointInTime (no activation writes
-	// one, and A-61 deletes status.activation); the apiserver prunes it.
+	// C6: a MysqlStandbyCluster has no status.activation (activation is not
+	// implemented); the apiserver prunes the whole block.
 	msc := minimalEnvtestStandby("standby", ns)
 	if err := k8sClient.Create(ctx, msc); err != nil {
 		t.Fatal(err)
@@ -454,8 +454,8 @@ func TestPointInTimeResultShape(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "standby"}, u); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "activation", "pointInTime"); found {
-		t.Fatal("status.activation.pointInTime survived")
+	if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "activation"); found {
+		t.Fatal("status.activation survived")
 	}
 }
 

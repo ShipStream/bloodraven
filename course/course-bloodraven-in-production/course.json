@@ -5325,11 +5325,11 @@
                 "options": [
                   "`spec.restoreInPlace`, with an RFC 3339 confirm token naming the dump",
                   "`spec.initFromBackup`, pointed at the source bucket prefix",
-                  "`spec.template` on the `MysqlStandbyCluster`, by requesting activation",
+                  "A `MysqlStandbyCluster` pointed at the prefix, activated once the source is fenced",
                   "`spec.backup.pitr.enabled`, which replays the archived binlogs into the new group"
                 ],
                 "correctOptionIndex": 1,
-                "explanation": "`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: `spec.template` does hold the shape of the group that a future activation would materialise, but activation is not implemented, so nothing consumes it. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)"
+                "explanation": "`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: a `MysqlStandbyCluster` only observes the bucket, activation is not implemented, and the CRD has no field that describes a group to create. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)"
               },
               {
                 "question": "You are writing the on-call runbook for `playground` and want every step to be a `kubectl bloodraven` invocation. Which of these is not a subcommand the plugin has?",

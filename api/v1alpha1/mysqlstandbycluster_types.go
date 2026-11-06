@@ -7,33 +7,23 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=msc;mscs,categories=bloodraven;mysql;dr
-// +kubebuilder:printcolumn:name="Bucket",type=string,JSONPath=`.status.discovered.dumpLocation`
+// +kubebuilder:printcolumn:name="Dump",type=string,JSONPath=`.status.discovered.latestDump.name`
+// +kubebuilder:printcolumn:name="NewestBinlog",type=date,JSONPath=`.status.discovered.binlogArchive.newestEventTime`
 // +kubebuilder:printcolumn:name="BucketReadable",type=string,JSONPath=`.status.conditions[?(@.type=="BucketReadable")].status`
 // +kubebuilder:printcolumn:name="SourceKnown",type=string,JSONPath=`.status.conditions[?(@.type=="SourceConfigKnown")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.activation.phase`,priority=1
 
 // MysqlStandbyCluster is a passive observability descriptor for a DR
-// relationship from this cluster to a source MysqlFailoverGroup's
-// backup+PITR archive in a shared object store. The controller scans
-// the source bucket on spec.freshness.discoveryInterval and publishes
-// two conditions — BucketReadable and SourceConfigKnown — along with
-// status.discovered (dump name, location, GTID set, binlog window).
-// No MySQL contact, no restore jobs, no activation in Phase 1.
+// relationship from this cluster to a source MysqlFailoverGroup's dumps and
+// PITR archive in a shared object store. The controller scans the source
+// prefix every spec.freshness.discoveryInterval and publishes the
+// BucketReadable and SourceConfigKnown conditions with status.discovered
+// (the newest dump and the verified binlog archive window). It never
+// contacts MySQL, runs no restore Jobs and writes nothing to the bucket.
 //
-// Future phases (not yet implemented):
-// Phase 2 adds continuous restore verification: a scheduled
-// MysqlBackupVerification proves the latest dump+PITR window is
-// restorable and gates a Restorable condition.
-// Phase 3 adds one-command activation: a future admin-confirmed activate
-// request materialises a new MysqlFailoverGroup in this namespace loaded
-// from the source archive. The spec fields that drive Phase 2/3 are not
-// part of v1alpha1 yet; they will be added (backward-compatibly) when
-// that code lands.
-//
-// One MysqlStandbyCluster per DR relationship per namespace. Designed
-// to be symmetric: failback uses a second MysqlStandbyCluster on the
-// original-source cluster pointing at the new primary's prefix.
+// One MysqlStandbyCluster per DR relationship per namespace. Failback uses a
+// second MysqlStandbyCluster on the original source cluster pointing at the
+// new primary's prefix.
 type MysqlStandbyCluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -52,122 +42,93 @@ type MysqlStandbyClusterList struct {
 }
 
 // MysqlStandbyClusterSpec defines the desired state of MysqlStandbyCluster.
-// +kubebuilder:validation:XValidation:rule="self.transport != 'ObjectStore' || self.source.storage.type != 'S3' || (has(self.source.storage.s3.prefix) && size(self.source.storage.s3.prefix) > 0)",message="source.storage.s3.prefix must be non-empty when transport=ObjectStore and storage type=S3"
-// +kubebuilder:validation:XValidation:rule="self.transport != 'ObjectStore' || self.source.storage.type == 'S3'",message="source.storage.type must be S3 when transport=ObjectStore; PVC-backed sources are not supported for cross-cluster DR (the operator pod does not mount the source cluster's backup PVC)"
 type MysqlStandbyClusterSpec struct {
-	// Transport selects the DR data path. Only ObjectStore is honoured in
-	// v1alpha1; the Enum also lists Network, which is reserved for a future
-	// cross-cluster MySQL replication mode and is NOT implemented — setting
-	// it will produce a reconciler error (defense-in-depth check in
-	// internal/controller). When unset, defaults to ObjectStore.
+	// Transport selects the DR data path. ObjectStore, the only transport,
+	// reads the source group's dumps and PITR archive from its object store.
 	// +kubebuilder:default="ObjectStore"
-	// +kubebuilder:validation:Enum=ObjectStore;Network
+	// +optional
 	Transport StandbyTransport `json:"transport,omitempty"`
 
-	// Source identifies the source MysqlFailoverGroup whose archive
-	// this standby consumes. Cluster + Namespace are informational
-	// (used in events + status); only the storage backend is load-bearing.
+	// Source is the source group's object store and, for an encrypted
+	// source, the passphrase that decrypts it.
+	// +required
 	Source StandbySource `json:"source"`
 
-	// Template is the MysqlFailoverGroupSpec that the controller
-	// materialises into a new MysqlFailoverGroup on Activate (Phase 3).
-	// Required so the user declares the full activated shape at
-	// standby-CR-creation time, not during an incident.
-	Template StandbyFailoverGroupTemplate `json:"template"`
-
-	// Freshness configures the Phase 1 bucket-discovery cadence via
-	// discoveryInterval. The Phase 2 verification cadence and staleness
-	// knobs are not part of v1alpha1 yet; they will be added
-	// (backward-compatibly) when that code lands.
+	// Freshness configures the bucket-discovery cadence.
 	// +optional
 	Freshness *StandbyFreshnessSpec `json:"freshness,omitempty"`
 }
 
 // StandbyTransport selects the DR data path.
-// +kubebuilder:validation:Enum=ObjectStore;Network
+// +kubebuilder:validation:Enum=ObjectStore
 type StandbyTransport string
 
 const (
-	// StandbyTransportObjectStore is the only transport honoured in v1alpha1.
+	// StandbyTransportObjectStore reads the source's dumps and PITR archive
+	// from its object store.
 	StandbyTransportObjectStore StandbyTransport = "ObjectStore"
-	// StandbyTransportNetwork is reserved for a future cross-cluster
-	// MySQL replication mode and is not implemented.
-	StandbyTransportNetwork StandbyTransport = "Network"
 )
 
-// StandbySource names the source archive the standby cluster consumes.
+// StandbySource names the object store the source group writes its dumps
+// and PITR archive to. The standby only reads it.
 type StandbySource struct {
-	// FailoverGroupName is the source MysqlFailoverGroup name.
-	// Informational; used in events + status. Required so dashboards
-	// can correlate a standby to its source.
-	// +kubebuilder:validation:MinLength=1
-	FailoverGroupName string `json:"failoverGroupName"`
+	// S3 is the S3-compatible object store and prefix the source group's
+	// backup profile writes to.
+	// +required
+	S3 StandbyS3Source `json:"s3"`
 
-	// Namespace of the source MysqlFailoverGroup in its own cluster.
-	// Informational only; not used to make cross-cluster API calls.
-	// +optional
-	Namespace string `json:"namespace,omitempty"`
-
-	// Cluster is a free-form identifier for the source Kubernetes
-	// cluster (e.g. "iad-prod"). Informational. Recommended convention
-	// is the kubeconfig context name.
-	// +optional
-	Cluster string `json:"cluster,omitempty"`
-
-	// Storage is the object-store backend the source operator writes
-	// to. Reuses BackupStorage (api/v1alpha1/backup_types.go:388-444)
-	// for consistency; the controller refuses to write to it
-	// (except the dr-cursors/ subkey in Phase 2).
-	// Only S3-compatible storage is usable: the standby reconciler
-	// rejects PVC-backed sources with a ConfigError because the operator
-	// pod does not mount the source cluster's backup PVC (see buildStoreCfg
-	// in internal/controller/standbycluster_reconciler.go).
-	Storage BackupStorage `json:"storage"`
-
-	// ProfileName is the source backup profile under which dumps and
-	// PITR binlogs are stored. The bucket prefix layout follows
-	// <storage.prefix>/<mysqlbackup-name>/ for dumps and
-	// <storage.prefix>/binlogs/ for the PITR archive
-	// (https://bloodraven.dev/docs/backup-and-restore/backup-restore).
-	// +kubebuilder:validation:MinLength=1
-	ProfileName string `json:"profileName"`
-
-	// Decryption, when set, provides the passphrase needed to decrypt
-	// the source archive. Required when the source profile had
-	// encryption enabled. Reuses BackupDecryptionSpec
-	// (api/v1alpha1/backup_types.go:343-349). The Secret it references
-	// must exist in this (DR) cluster's namespace — see
-	// https://bloodraven.dev/docs/architecture/multi-cluster-dr for the cross-cluster passphrase
-	// distribution runbook.
+	// Decryption provides the passphrase that decrypts the source archive.
+	// Required when the source profile encrypts. The Secret must exist in
+	// this (DR) cluster's namespace; see
+	// https://bloodraven.dev/docs/architecture/multi-cluster-dr for
+	// distributing the passphrase across clusters.
 	// +optional
 	Decryption *BackupDecryptionSpec `json:"decryption,omitempty"`
 }
 
-// StandbyFailoverGroupTemplate is a thin wrapper that lets the user
-// declare the activated MysqlFailoverGroup's shape in advance.
-// Behaves like a deferred MysqlFailoverGroupSpec: it is just YAML in
-// the standby CR until activation (Phase 3), then it becomes the
-// actual spec on the materialised group.
-type StandbyFailoverGroupTemplate struct {
-	// Name is the name of the MysqlFailoverGroup to create on
-	// activate. Must be unique in this namespace and must not collide
-	// with an existing MysqlFailoverGroup unless its ownerReferences
-	// point back at this standby CR.
+// StandbyS3Source is the source group's S3 backup destination, read-only.
+// The fields mean what they mean on the source profile's S3Storage, except
+// that the prefix is required: the standby scans "<prefix>/<dump>/" for
+// dumps and "<prefix>/binlogs/" for the PITR archive, never a bucket root.
+type StandbyS3Source struct {
+	// Bucket is the S3 bucket name.
 	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 63",message="bucket must be at most 63 bytes (UTF-8)"
+	Bucket string `json:"bucket"`
 
-	// Spec is the embedded MysqlFailoverGroupSpec. Validated at
-	// standby-CR-create-time but not actuated until activation (Phase 3).
-	Spec MysqlFailoverGroupSpec `json:"spec"`
+	// Prefix is the source profile's object-name prefix inside the bucket.
+	// A leading or trailing "/" is ignored; at least one segment is
+	// required. Empty segments ("a//b") and "." or ".." segments are
+	// refused, as on S3Storage.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="prefix must be at most 512 bytes (UTF-8)"
+	// +kubebuilder:validation:Pattern=`^/?([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*/?$`
+	Prefix string `json:"prefix"`
+
+	// Region is the AWS region. Optional for non-AWS S3 stores.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
+	// Must be an absolute http:// or https:// URL without credentials, a
+	// query or a fragment.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="endpointURL must be at most 512 bytes (UTF-8)"
+	// +kubebuilder:validation:Pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`
+	// +optional
+	EndpointURL string `json:"endpointURL,omitempty"`
+
+	// CredentialsSecret names a Secret in this namespace with read access
+	// to the bucket. Expected keys: AWS_ACCESS_KEY_ID and
+	// AWS_SECRET_ACCESS_KEY (required), AWS_SESSION_TOKEN and AWS_REGION
+	// (optional; AWS_REGION overrides region).
+	// +kubebuilder:validation:MinLength=1
+	CredentialsSecret string `json:"credentialsSecret"`
 }
 
-// StandbyFreshnessSpec configures the Phase 1 bucket-discovery cadence.
-// Only discoveryInterval exists in v1alpha1. The Phase 2 verification
-// cadence and staleness knobs (verifySchedule, verifyTimeZone,
-// maxStaleness, suspend, retentionFloorRefresh) are not shipped yet; they
-// will be added back (backward-compatibly) when the Phase 2 verification
-// code that consumes them lands, rather than shipping inert fields that
-// enforce nothing today.
+// StandbyFreshnessSpec configures the bucket-discovery cadence.
 type StandbyFreshnessSpec struct {
 	// DiscoveryInterval controls how often the controller re-scans
 	// the source bucket to refresh status.discovered.
@@ -184,224 +145,95 @@ type MysqlStandbyClusterStatus struct {
 	// computed against.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Discovered is the most recent successful bucket scan result.
-	// Populated by the Phase 1 discovery loop.
+	// Discovered is the result of the most recent complete bucket scan. A
+	// scan that fails or is cut short leaves it unchanged; the conditions
+	// say why.
 	// +optional
 	Discovered *StandbyDiscovered `json:"discovered,omitempty"`
 
-	// LastVerified is the most recent terminal Succeeded
-	// MysqlBackupVerification CR owned by this standby.
-	// Populated by Phase 2+.
-	// +optional
-	LastVerified *StandbyLastVerified `json:"lastVerified,omitempty"`
-
-	// Activation tracks the one-shot promote operation.
-	// Populated by the Phase 3 activation state machine.
-	// +optional
-	Activation *StandbyActivationStatus `json:"activation,omitempty"`
-
-	// MaterializedFailoverGroup is the name of the MysqlFailoverGroup
-	// the controller created during activation. Empty until Activated.
-	// +optional
-	MaterializedFailoverGroup string `json:"materializedFailoverGroup,omitempty"`
-
-	// Conditions represent the latest available observations of this
-	// standby's state. Phase 1 conditions: BucketReadable,
-	// SourceConfigKnown. Phase 2+: Restorable. Phase 3+:
-	// ActivationInProgress, Active.
+	// Conditions are BucketReadable and SourceConfigKnown.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// StandbyDiscovered is the output of the Phase 1 bucket scan.
+// StandbyDiscovered is the result of a complete bucket scan.
 type StandbyDiscovered struct {
-	// DumpLocation is the resolved location of the most recent
-	// successful full dump (e.g.
-	// "s3://bucket/prefix/orders-nightly-20260520/").
+	// LastScanTime is when the most recent complete scan finished.
 	// +optional
-	DumpLocation string `json:"dumpLocation,omitempty"`
+	LastScanTime *metav1.Time `json:"lastScanTime,omitempty"`
 
-	// DumpName is the basename of the most recent successful dump.
+	// LatestDump is the newest dump under the prefix. Absent when the
+	// prefix holds no dump (SourceConfigKnown=False/NoDumpFound).
 	// +optional
-	DumpName string `json:"dumpName,omitempty"`
+	LatestDump *StandbyDump `json:"latestDump,omitempty"`
 
-	// DumpCompletionTime is the source-side completion time read from
-	// the @.json metadata.
+	// BinlogArchive is the source PITR archive's verified identity and the
+	// window its manifests cover, published together. Absent when the
+	// prefix holds no archive, or while the archive's descriptor is missing
+	// or refused (SourceConfigKnown says why); LatestDump is still
+	// published then.
 	// +optional
-	DumpCompletionTime *metav1.Time `json:"dumpCompletionTime,omitempty"`
-
-	// DumpGtidExecuted is the GTID set recorded in the dump metadata.
-	// Required for activation PITR alignment (Phase 3).
-	// +optional
-	DumpGtidExecuted string `json:"dumpGtidExecuted,omitempty"`
-
-	// DumpSizeBytes is the dump's reported size in bytes. 0 when unknown.
-	// +optional
-	DumpSizeBytes int64 `json:"dumpSizeBytes,omitempty"`
-
-	// NOTE: Encrypted and EncryptionAlgorithm fields were intentionally
-	// omitted here. BRV1 header detection (reading 32 bytes of each dump
-	// to determine encryption status and algorithm) is a Phase 2 feature
-	// that lands alongside the MysqlBackupVerification integration that
-	// actually needs it. Adding unpopulated bool/string fields to the CRD
-	// before that code exists creates dead-on-arrival schema.
-
-	// Archive is the identity read from the source archive's descriptor
-	// (<prefix>/binlogs/archive.json). Unset while the descriptor is
-	// missing or refused; the SourceConfigKnown condition says why.
-	// +optional
-	Archive *PITRArchiveIdentity `json:"archive,omitempty"`
-
-	// OldestArchivedBinlogTime is the earliest first-event timestamp
-	// across all manifest-<site>.json files in <prefix>/binlogs/.
-	// +optional
-	OldestArchivedBinlogTime *metav1.Time `json:"oldestArchivedBinlogTime,omitempty"`
-
-	// NewestArchivedBinlogTime is the latest last-event timestamp
-	// across all manifest-<site>.json files. Together with the newest
-	// dump this defines the recoverable PITR window.
-	// +optional
-	NewestArchivedBinlogTime *metav1.Time `json:"newestArchivedBinlogTime,omitempty"`
-
-	// ManifestCount is the number of per-site manifest files discovered
-	// under <prefix>/binlogs/.
-	// +optional
-	ManifestCount int32 `json:"manifestCount,omitempty"`
-
-	// ArchivedBinlogCount is the total count of archived binlog files
-	// across all discovered manifests.
-	// +optional
-	ArchivedBinlogCount int32 `json:"archivedBinlogCount,omitempty"`
-
-	// ArchivedBinlogBytes is the total size of archived binlog files
-	// across all discovered manifests.
-	// +optional
-	ArchivedBinlogBytes int64 `json:"archivedBinlogBytes,omitempty"`
-
-	// LastScanAt is the wall-clock time of the most recent successful
-	// bucket scan.
-	// +optional
-	LastScanAt *metav1.Time `json:"lastScanAt,omitempty"`
-
-	// Message is a human-readable status string from the discovery
-	// loop. Empty on the happy path.
-	// +optional
-	Message string `json:"message,omitempty"`
+	BinlogArchive *StandbyBinlogArchive `json:"binlogArchive,omitempty"`
 }
 
-// StandbyLastVerified summarises the most recent successful
-// MysqlBackupVerification owned by this standby. Populated by Phase 2+.
-type StandbyLastVerified struct {
-	// VerificationName is the name of the MysqlBackupVerification CR.
-	// +optional
-	VerificationName string `json:"verificationName,omitempty"`
+// StandbyDump is a dump found under the source prefix.
+type StandbyDump struct {
+	// Name is the dump directory's basename (the source MysqlBackup name).
+	// +required
+	Name string `json:"name"`
 
-	// BackupName is the synthetic MysqlBackup that backed the
-	// verification.
-	// +optional
-	BackupName string `json:"backupName,omitempty"`
+	// Location is the dump directory's object key under the bucket, with
+	// a trailing "/" (e.g. "orders/west/orders-nightly-20260520/").
+	// +required
+	Location string `json:"location"`
 
-	// StartTime is the verification's StartTime.
-	// +optional
-	StartTime *metav1.Time `json:"startTime,omitempty"`
-
-	// CompletionTime is the verification's CompletionTime.
+	// CompletionTime is the source-side completion time recorded in the
+	// dump's @.json metadata. Absent when the metadata does not record one.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// DurationSeconds is the wall-clock duration of the verification.
+	// GtidExecuted is the GTID set recorded in the dump's @.json metadata.
 	// +optional
-	DurationSeconds int64 `json:"durationSeconds,omitempty"`
+	GtidExecuted string `json:"gtidExecuted,omitempty"`
 
-	// ReplayedThroughBinlog is the PITR coordinate the verification
-	// replayed up to (mirrors BinlogReplayMark,
-	// api/v1alpha1/mysqlbackupverification_types.go:294-309).
+	// SizeBytes is the dump's size from its @.json metadata. Absent when the
+	// metadata does not record one.
 	// +optional
-	ReplayedThroughBinlog *BinlogReplayMark `json:"replayedThroughBinlog,omitempty"`
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
 }
 
-// StandbyActivationStatus tracks the one-shot promote operation (Phase 3).
-type StandbyActivationStatus struct {
-	// Phase is one of the values in StandbyActivationPhase.
-	Phase StandbyActivationPhase `json:"phase,omitempty"`
+// StandbyBinlogArchive is the verified source PITR archive under
+// "<prefix>/binlogs/" and the window its per-site manifests cover. Sites
+// whose manifest carries a history-integrity marker are counted in
+// ManifestCount but contribute no files to the window.
+type StandbyBinlogArchive struct {
+	// Identity is the identity read from the archive's descriptor and
+	// verified against every manifest.
+	// +required
+	Identity PITRArchiveIdentity `json:"identity"`
 
-	// ConfirmTokenUsed records the RFC3339 confirm token of the most
-	// recent executed (or attempted) activation. A future activate
-	// request (Phase 3) re-arms by supplying a strictly greater token;
-	// subsequent reconciles ignore any token <= this value. (The spec
-	// field that carries the request token is not part of v1alpha1 yet.)
-	ConfirmTokenUsed string `json:"confirmTokenUsed,omitempty"`
+	// ManifestCount is the number of per-site manifests.
+	// +required
+	ManifestCount int32 `json:"manifestCount"`
 
-	// StartTime is when the controller entered Validating.
+	// FileCount is the number of archived binlog files in the window.
+	// +required
+	FileCount int32 `json:"fileCount"`
+
+	// SizeBytes is the total size of the archived binlog files in the
+	// window.
+	// +required
+	SizeBytes int64 `json:"sizeBytes"`
+
+	// OldestEventTime is the earliest first-event time of an archived file.
 	// +optional
-	StartTime *metav1.Time `json:"startTime,omitempty"`
+	OldestEventTime *metav1.Time `json:"oldestEventTime,omitempty"`
 
-	// CompletionTime is when the controller reached a terminal phase.
+	// NewestEventTime is the latest last-event time of an archived file.
+	// Together with LatestDump it bounds the recoverable point-in-time
+	// window.
 	// +optional
-	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
-
-	// DurationSeconds is CompletionTime - StartTime, rounded.
-	// +optional
-	DurationSeconds *int64 `json:"durationSeconds,omitempty"`
-
-	// SourceDumpName is the dump that drove the activation (snapshot
-	// of status.discovered.dumpName at Validating).
-	// +optional
-	SourceDumpName string `json:"sourceDumpName,omitempty"`
-
-	// SourceDumpLocation is the resolved location of that dump.
-	// +optional
-	SourceDumpLocation string `json:"sourceDumpLocation,omitempty"`
-
-	// SourceGtidExecuted is the dump-time GTID set.
-	// +optional
-	SourceGtidExecuted string `json:"sourceGtidExecuted,omitempty"`
-
-	// TargetGtidExecuted is the GTID set on the materialised group
-	// after restore + optional PITR replay. Populated on Activated.
-	// +optional
-	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
-
-	// ActiveSite is the materialised group's status.activeSite once
-	// it becomes writable.
-	// +optional
-	ActiveSite string `json:"activeSite,omitempty"`
-
-	// Reason is a machine-readable tag on Failed outcomes:
-	// RestorableStale, RestoreFailed, ReplicationCatchupFailed,
-	// TemplateInvalid, MaterializedGroupCollision, BucketUnreadable.
-	// +optional
-	Reason string `json:"reason,omitempty"`
-
-	// Message is a human-readable line for kubectl describe.
-	// +optional
-	Message string `json:"message,omitempty"`
+	NewestEventTime *metav1.Time `json:"newestEventTime,omitempty"`
 }
-
-// StandbyActivationPhase is the discrete state machine for Phase 3
-// activation.
-// +kubebuilder:validation:Enum="";Validating;Restoring;Replaying;Provisioning;Activated;Failed
-type StandbyActivationPhase string
-
-const (
-	// StandbyActivationPhaseNone is the zero value (no activation in progress).
-	StandbyActivationPhaseNone StandbyActivationPhase = ""
-	// StandbyActivationPhaseValidating means the controller is checking
-	// preconditions and snapshotting the source dump reference.
-	StandbyActivationPhaseValidating StandbyActivationPhase = "Validating"
-	// StandbyActivationPhaseRestoring means the materialised
-	// MysqlFailoverGroup has been created and initFromBackup is running.
-	StandbyActivationPhaseRestoring StandbyActivationPhase = "Restoring"
-	// StandbyActivationPhaseReplaying means the restore completed and the
-	// controller is validating GTID coverage from PITR replay.
-	StandbyActivationPhaseReplaying StandbyActivationPhase = "Replaying"
-	// StandbyActivationPhaseProvisioning means GTID validation passed and
-	// the controller is waiting for the materialised group to become Ready.
-	StandbyActivationPhaseProvisioning StandbyActivationPhase = "Provisioning"
-	// StandbyActivationPhaseActivated is the terminal success phase.
-	StandbyActivationPhaseActivated StandbyActivationPhase = "Activated"
-	// StandbyActivationPhaseFailed is the terminal failure phase.
-	StandbyActivationPhaseFailed StandbyActivationPhase = "Failed"
-)
 
 func init() {
 	SchemeBuilder.Register(&MysqlStandbyCluster{}, &MysqlStandbyClusterList{})

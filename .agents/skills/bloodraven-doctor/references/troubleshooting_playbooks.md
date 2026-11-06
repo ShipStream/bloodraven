@@ -1225,8 +1225,8 @@ A standby only reads the source archive; there is no `MysqlFailoverGroup`, sidec
    kubectl get mysqlstandbycluster <name> -n <ns> -o jsonpath='{range .status.conditions[?(@.type=="SourceConfigKnown")]}{.status} {.reason}: {.message}{"\n"}{end}'
    kubectl get mysqlstandbycluster <name> -n <ns> -o jsonpath='{.spec.source}{"\n"}{.status.discovered}{"\n"}'
    ```
-   While the archive is refused, `status.discovered` still names the dump but has no `archive` block: recovery is limited to the dump.
-2. Read the descriptor at the source prefix (`aws s3 cp s3://<bucket>/<prefix>/binlogs/archive.json - | jq .`) with the standby's credentials, and compare its encryption mode with `spec.source.decryption` (set: `Passphrase`/`AES-256-GCM` expected; unset: `None`).
+   While the archive is refused, `status.discovered.latestDump` still names the dump but there is no `status.discovered.binlogArchive` (identity and window are published together or not at all): recovery is limited to the dump.
+2. Read the descriptor at the source prefix (`aws s3 cp s3://<bucket>/<prefix>/binlogs/archive.json - | jq .`, with `spec.source.s3.bucket` and `prefix`) with the standby's credentials, and compare its encryption mode with `spec.source.decryption` (set: `Passphrase`/`AES-256-GCM` expected; unset: `None`).
 3. By reason (the `SourceConfigKnown` reason is the token without `PITR`):
    - `ArchiveDescriptorMissing` on a replicated bucket: usually replication lag; wait, or copy `archive.json` from the source.
    - `ArchiveEncryptionMismatch` / `ArchiveKeyMismatch`: fix `spec.source.decryption` (Secret name and key) to match what the source archive was written with.
