@@ -435,7 +435,7 @@ func TestEnvtest_PITRBindingDefersPre203Deployment(t *testing.T) {
 	dest := h.dest(fg, "a")
 	line := controller.FormatPITRArchiveCheckLine(controller.PITRArchiveCheckResult{
 		State: controller.PITRArchiveCheckStateVerified, ArchiveID: pitrarchive.CreateArchiveID(fg.UID, dest),
-		Source: v1alpha1.PITRArchiveSource{Namespace: ns, Name: "lion", UID: fg.UID}, Destination: dest.String(),
+		Source: v1alpha1.PITRArchiveSource{Namespace: ns, Name: "lion", UID: fg.UID}, DestinationDigest: controller.PITRArchiveCheckDestinationDigest(dest.String()),
 	})
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: job.Name + "-pod", Labels: map[string]string{"job-name": job.Name},

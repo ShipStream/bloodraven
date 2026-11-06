@@ -194,6 +194,14 @@ type MysqlFailoverGroupReconciler struct {
 	pitrRenderLogMu sync.Mutex
 	pitrRenderLog   map[string]pitrRenderLogState
 
+	// pitrRenderLocks serializes, per group, the ordered updater's
+	// Deployment render (applySiteDeployment) with a PITR binding
+	// release (G1): a release must not delete a key snapshot between
+	// its in-use check and a render that starts mounting it. Guarded by
+	// pitrRenderLocksMu; entries are reference counted.
+	pitrRenderLocksMu sync.Mutex
+	pitrRenderLocks   map[types.NamespacedName]*pitrRenderLock
+
 	// scheduleRefused is the read-only reason a BackupScheduleRefused
 	// Event was last emitted with, per group schedule.
 	scheduleRefusedMu sync.Mutex
@@ -343,6 +351,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// render below reads status.pitrArchiveBindings, which this pass fills
 	// in memory (and persists).
 	bindingRequeue, err := r.reconcilePITRArchiveBindings(ctx, &fg)
+	if stderrors.Is(err, errPITRBindingStatusMoved) {
+		// The pass read a cached status older than the stored one: its
+		// bindings were not written and must not drive a render.
+		logger.V(1).Info("pitr archive binding status moved under this reconcile; requeueing before rendering")
+		return ctrl.Result{RequeueAfter: pitrBindingMovedRequeue}, nil
+	}
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile pitr archive bindings: %w", err)
 	}
@@ -2665,6 +2679,25 @@ func taintNodeSelectorString(selector map[string]string) string {
 // order; without the rollout wait, both sites' pods end up rolling in parallel
 // and the cluster briefly has no reachable MySQL.
 func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Context, fgName types.NamespacedName, siteName string) error {
+	if err := r.applySiteDeployment(ctx, fgName, siteName); err != nil {
+		return err
+	}
+	deployName := types.NamespacedName{Namespace: fgName.Namespace, Name: resourceName(fgName.Name, siteName)}
+	if err := r.waitForDeploymentRollout(ctx, deployName, 5*time.Minute); err != nil {
+		return &RolloutIncompleteError{Site: siteName, Err: err}
+	}
+	return nil
+}
+
+// applySiteDeployment renders and applies one site's ConfigMap and
+// Deployment from a fresh read of the group. It holds the group's PITR
+// render lock from that read until the Deployment is written, so a PITR
+// binding release (which takes the same lock for its in-use check, its
+// status write and its snapshot deletions) either sees this render or is
+// seen by it (G1).
+func (r *MysqlFailoverGroupReconciler) applySiteDeployment(ctx context.Context, fgName types.NamespacedName, siteName string) error {
+	unlock := r.lockPITRRender(fgName)
+	defer unlock()
 	// Uncached: the render depends on status.pitrArchiveBindings, which
 	// the group reconciler may have just written.
 	reader := client.Reader(r.Client)
@@ -2702,11 +2735,40 @@ func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Conte
 	if !siteFound {
 		return fmt.Errorf("site %q not found in CR %s", siteName, fgName)
 	}
-	deployName := types.NamespacedName{Namespace: fgName.Namespace, Name: resourceName(fgName.Name, siteName)}
-	if err := r.waitForDeploymentRollout(ctx, deployName, 5*time.Minute); err != nil {
-		return &RolloutIncompleteError{Site: siteName, Err: err}
-	}
 	return nil
+}
+
+// pitrRenderLock is one group's PITR render lock (pitrRenderLocks).
+type pitrRenderLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockPITRRender takes fg's PITR render lock and returns its release.
+// Never nest it: the holders (applySiteDeployment and a binding release)
+// call nothing that takes it again.
+func (r *MysqlFailoverGroupReconciler) lockPITRRender(key types.NamespacedName) func() {
+	r.pitrRenderLocksMu.Lock()
+	if r.pitrRenderLocks == nil {
+		r.pitrRenderLocks = map[types.NamespacedName]*pitrRenderLock{}
+	}
+	l := r.pitrRenderLocks[key]
+	if l == nil {
+		l = &pitrRenderLock{}
+		r.pitrRenderLocks[key] = l
+	}
+	l.refs++
+	r.pitrRenderLocksMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		r.pitrRenderLocksMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(r.pitrRenderLocks, key)
+		}
+		r.pitrRenderLocksMu.Unlock()
+	}
 }
 
 // waitForDeploymentRollout polls a Deployment until its rollout is complete or

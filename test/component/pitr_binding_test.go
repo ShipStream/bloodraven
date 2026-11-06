@@ -326,7 +326,7 @@ func (e *bindingEnv) runCheck(p v1alpha1.BackupProfile) controller.PITRArchiveCh
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	res := controller.PITRArchiveCheckResult{Destination: dest.String()}
+	res := controller.PITRArchiveCheckResult{DestinationDigest: controller.PITRArchiveCheckDestinationDigest(dest.String())}
 	switch probe.State {
 	case sidecar.ArchiveProbeAbsent:
 		res.State = controller.PITRArchiveCheckStateAbsent

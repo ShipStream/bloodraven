@@ -142,7 +142,7 @@ func pitrArchiveCheck(ctx context.Context, getenv func(string) string, newStore 
 		logger.Warn("write termination log", "error", err)
 	}
 	_, _ = fmt.Fprintln(out, line)
-	logger.Info(controller.PITRArchiveCheckLogMsg, "destination", res.Destination, "role", req.role,
+	logger.Info(controller.PITRArchiveCheckLogMsg, "destination", req.expect.Destination.String(), "role", req.role,
 		"state", res.State, "reason", string(res.Reason), "archiveID", res.ArchiveID)
 	return pitrCheckExitOK
 }
@@ -170,7 +170,7 @@ func probePITRArchive(ctx context.Context, store sidecar.ArchiveStore, req pitrA
 // state, the refusal token, and the archive ID and source of any descriptor
 // that was read (a foreign archive names its owner).
 func pitrArchiveCheckResult(p sidecar.ArchiveProbe, dest pitrarchive.Destination) controller.PITRArchiveCheckResult {
-	res := controller.PITRArchiveCheckResult{Destination: dest.String()}
+	res := controller.PITRArchiveCheckResult{DestinationDigest: controller.PITRArchiveCheckDestinationDigest(dest.String())}
 	switch p.State {
 	case sidecar.ArchiveProbeAbsent:
 		res.State = controller.PITRArchiveCheckStateAbsent

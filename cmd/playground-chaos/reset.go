@@ -400,7 +400,9 @@ func staleKeySnapshots(secrets []corev1.Secret, liveBackups map[types.UID]bool) 
 }
 
 // deleteKeySnapshots is the wipe pass's key snapshot hygiene (IMPL-203
-// Δ20). It runs with the operator down, before the bindings are cleared.
+// Δ20). It runs with the operator down, right after clearMFGStatus has
+// removed the bindings that named them; the order does not matter, since
+// no operator runs to act on either half.
 func (r *resetter) deleteKeySnapshots(ctx context.Context, _ []v1alpha1.SiteSpec) error {
 	secrets, err := r.k.Kubernetes.CoreV1().Secrets(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: keySnapshotSelector})
 	if err != nil {

@@ -380,9 +380,11 @@ const pitrArchivePrefixKind = "archivePrefix"
 // dropping the marker schema, restoring spec.backup, the 6-minute
 // healthy-baseline wait, deleting the archive prefixes, and the executor's
 // reconverge wait (F071). pitrCleanupBudget adds a scenario's own extra
-// cleanup steps. The release of the run's archive bindings (#203) waits
-// at most pitrReleaseBindingWaitTime per binding; a run makes one or two.
-const pitrCleanupBaseBudget = 29 * time.Minute
+// cleanup steps. The release of the run's archive bindings (#203) first
+// waits at most pitrSnapshotUnmountWaitTime for pods still mounting their
+// snapshots to terminate, then at most pitrReleaseBindingWaitTime per
+// binding; a run makes one or two.
+const pitrCleanupBaseBudget = 32 * time.Minute
 
 func pitrCleanupBudget(extra time.Duration) time.Duration {
 	return pitrCleanupBaseBudget + extra

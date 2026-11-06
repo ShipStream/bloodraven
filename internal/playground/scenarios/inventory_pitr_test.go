@@ -62,8 +62,8 @@ func TestScenarioPITR203RegisteredAndProfiled(t *testing.T) {
 	if !strings.HasSuffix(s.DocLink, "#"+s.ID) {
 		t.Errorf("scenario %s DocLink %q must anchor at #%s", s.ID, s.DocLink, s.ID)
 	}
-	if s.Timeout != 50*time.Minute {
-		t.Errorf("scenario %s Timeout=%s, want the 50m the e2e pitr job budgets", s.ID, s.Timeout)
+	if s.Timeout != 60*time.Minute {
+		t.Errorf("scenario %s Timeout=%s, want the 60m the e2e pitr job budgets", s.ID, s.Timeout)
 	}
 	if s.CleanupTimeout < pitrCleanupBaseBudget {
 		t.Errorf("scenario %s CleanupTimeout=%s is below the PITR base %s", s.ID, s.CleanupTimeout, pitrCleanupBaseBudget)

@@ -56,16 +56,28 @@ const (
 	s69NoRollWindow      = 2 * pitrOperatorArchiverPollInterval
 	s69ShortNoRollWindow = 30 * time.Second
 	s69BindingWait       = 5 * time.Minute
-	s69RolloutWait       = 12 * time.Minute
+	// s69Timeout is unmeasured: 4 rolls, 3 pod restarts, 2 backups, 3
+	// verifications, 3 check Jobs, an operator restart and about 4
+	// minutes of no-roll windows add up to roughly 35-40 minutes on the CI
+	// runner (s31's backup and verification took 3 minutes on #206).
+	s69Timeout     = 60 * time.Minute
+	s69RolloutWait = 12 * time.Minute
+	// s69VerificationHoldPrefix mirrors the operator's
+	// annotationVerificationHoldPrefix (the key is it plus the
+	// verification's UID, the value its name).
+	s69VerificationHoldPrefix = "hold.verification.shipstream.io/"
 	// s69SecretKind is the pitrTrackCR kind of the extra passphrase
 	// Secrets this run creates ("<name>/<uid>").
 	s69SecretKind = "s69Secret"
-	// Marker ids, in history order.
+	// Marker ids, in history order. M2b is the witness after M2's fence:
+	// a timestamp target is covered only once a transaction at or after it
+	// is archived.
 	s69IDBaseline = 1
 	s69IDM1       = 2
 	s69IDM2       = 3
-	s69IDM3       = 4
-	s69IDM4       = 5
+	s69IDM2b      = 4
+	s69IDM3       = 5
+	s69IDM4       = 6
 	// The baseline note of a Bound write binding with no stamped backup
 	// (IMPL-203 §4.5).
 	s69BaselineNote = "no full backup is stamped with archive"
@@ -91,7 +103,7 @@ func scenario69PITREncryptionBindingRefusal() runner.Scenario {
 			"rejected, refused while in use, then completes.",
 		Risk:              "high",
 		DocLink:           "playground/chaos-scenarios.md#69-pitr-encryption-binding-refusal",
-		Timeout:           50 * time.Minute,
+		Timeout:           s69Timeout,
 		CleanupTimeout:    pitrCleanupBudget(4 * time.Minute),
 		ResetBeforeRunAll: true,
 		Precheck:          assertReplicationRunningPrecheck,
@@ -292,7 +304,7 @@ func s69RotateInPlace() runner.Step {
 func s69RestartedWriters() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "restart the replica's then the primary's pod; M2 is archived by a restarted pod with the accepted key",
+		Name:  "restart the replica's then the primary's pod; M2 is archived by a restarted pod with the accepted key; witness M2b, flush",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			rotation, err := s69FetchSnapshot(env, "rotation")
 			if err != nil {
@@ -325,9 +337,32 @@ func s69RestartedWriters() runner.Step {
 					return fmt.Errorf("site %s still runs pod %s from before the rotation", site, now.Pods[site])
 				}
 			}
-			return s69MarkerArchivedByNewPod(ctx, env, "m2", s69IDM2, "M2", rotation)
+			if err := s69MarkerArchivedByNewPod(ctx, env, "m2", s69IDM2, "M2", rotation); err != nil {
+				return err
+			}
+			// The fence's flush archived exactly the history before T; the
+			// verifications at T (steps 6, 10 and 13) need a transaction at
+			// or after T in the archive to prove T covered.
+			return s69ArchiveWitness(ctx, env, s69IDM2b, "M2b")
 		},
 	}
+}
+
+// s69ArchiveWitness commits marker phase (id) on the current primary after
+// a fence, waits until the replica applied it, and seals and archives it.
+// It is after the fence's T, so no expectation at T includes it.
+func s69ArchiveWitness(ctx context.Context, env *runner.Env, id int, phase string) error {
+	a, b, err := activeAndReplica(ctx, env)
+	if err != nil {
+		return err
+	}
+	if err := pitrInsertMarker(ctx, env, a, s69DBName, id, phase); err != nil {
+		return err
+	}
+	if err := waitForReplicaGTID(ctx, env, a, b); err != nil {
+		return err
+	}
+	return pitrFlush(ctx, env, a, true)
 }
 
 // Step 6.
@@ -793,14 +828,10 @@ func s69Release() runner.Step {
 			if err != nil {
 				return err
 			}
-			name, err := pitrStartVerify(ctx, env, s69ID, s69DBName, "retained", e)
-			if err != nil {
-				return err
-			}
-			if err := s69WaitVerificationStarted(ctx, env, name); err != nil {
-				return err
-			}
 
+			// The rejection needs no reader; it runs first so the refusal
+			// below is tried as soon as the verification holds P1's
+			// snapshot, well before it can finish.
 			rejectedAt := time.Now()
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, brcontroller.ReleasePITRArchiveBindingAnnotation, pitrReleaseValue(idP1, "not-"+env.FG)); err != nil {
 				return err
@@ -815,6 +846,15 @@ func s69Release() runner.Step {
 				return fmt.Errorf("after a rejected release: %w", err)
 			}
 
+			name, err := pitrStartVerify(ctx, env, s69ID, s69DBName, "retained", e)
+			if err != nil {
+				return err
+			}
+			// Phase alone does not say the verification reads P1 yet: a
+			// release before its hold is stamped would win (K9).
+			if err := s69WaitVerificationHold(ctx, env, name, keyP1); err != nil {
+				return err
+			}
 			refusedAt := time.Now()
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, brcontroller.ReleasePITRArchiveBindingAnnotation, pitrReleaseValue(idP1, env.FG)); err != nil {
 				return err
@@ -1398,8 +1438,14 @@ func s69WaitSettled(ctx context.Context, env *runner.Env, prefix string) error {
 // s69QuiesceForRestart readies the primary a for a pod restart that may
 // fail over to b: b has applied everything a executed, and a's binlog is
 // sealed and archived, so the failover loses nothing and leaves no
-// unarchived tail on a (FU-1).
+// unarchived tail on a (FU-1). b must also be a failover target the
+// operator accepts.
 func s69QuiesceForRestart(ctx context.Context, env *runner.Env, a, b string) error {
+	// A failover needs a target the operator accepts: replicating and not
+	// RecoveryBlocked.
+	if err := pitrWaitSiteReplicating(ctx, env, b); err != nil {
+		return err
+	}
 	if err := waitForReplicaGTID(ctx, env, a, b); err != nil {
 		return err
 	}
@@ -1749,20 +1795,34 @@ func s69WaitRecoveryLog(ctx context.Context, env *runner.Env, want map[string]st
 	}
 }
 
-func s69WaitVerificationStarted(ctx context.Context, env *runner.Env, name string) error {
-	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+// s69WaitVerificationHold waits until the key snapshot carries the
+// running verification's hold (hold.verification.shipstream.io/<uid> =
+// name), which the operator's release in-use scan honours.
+func s69WaitVerificationHold(ctx context.Context, env *runner.Env, name, snapshot string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
+	var last string
 	for {
 		v, err := getMysqlBackupVerification(waitCtx, env, name)
-		if err == nil && v.Status.Phase != "" {
-			if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded || v.Status.Phase == v1alpha1.VerificationPhaseFailed {
-				return fmt.Errorf("verification %s finished before the release was tried: %s", name, verificationStatusSummary(v))
+		switch {
+		case err != nil:
+			last = err.Error()
+		case v.Status.Phase == v1alpha1.VerificationPhaseSucceeded || v.Status.Phase == v1alpha1.VerificationPhaseFailed:
+			return fmt.Errorf("verification %s finished before the release was tried: %s", name, verificationStatusSummary(v))
+		default:
+			s, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Get(waitCtx, snapshot, metav1.GetOptions{})
+			if err != nil {
+				last = err.Error()
+			} else if s.Annotations[s69VerificationHoldPrefix+string(v.UID)] == name {
+				env.Capture.Note(fmt.Sprintf("verification %s holds key snapshot %s", name, snapshot))
+				return nil
+			} else {
+				last = fmt.Sprintf("snapshot %s carries no hold of %s; verification %s", snapshot, name, verificationStatusSummary(v))
 			}
-			return nil
 		}
 		select {
 		case <-waitCtx.Done():
-			return fmt.Errorf("verification %s not observed: %w", name, waitCtx.Err())
+			return fmt.Errorf("verification %s hold on %s: %w (last: %s)", name, snapshot, waitCtx.Err(), last)
 		case <-time.After(time.Second):
 		}
 	}

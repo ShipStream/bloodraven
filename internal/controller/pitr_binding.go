@@ -35,7 +35,7 @@ import (
 )
 
 // pitrBindingProcedure is the way out of a refused encryption or key change.
-const pitrBindingProcedure = "archiving continues under the accepted identity; to change it, create a new profile with a new storage prefix and its own passphrase, take a full backup, then switch spec.backup.pitr.profileName (see Backup encryption > Rotation)"
+const pitrBindingProcedure = "archiving continues under the accepted identity; to change it, create a new profile with a new storage prefix and its own passphrase, switch spec.backup.pitr.profileName to it, wait until its archive binding is Bound, then take a full backup (see Backup encryption > Rotation)"
 
 // Requeue hints of the pass.
 const (
@@ -336,12 +336,15 @@ func (r *MysqlFailoverGroupReconciler) reconcilePITRArchiveBindings(ctx context.
 	}
 	p.entries = kept
 
-	// 5. Release.
-	release, err := r.processPITRBindingRelease(ctx, fg, p.entries, p.targets, p.deploys)
+	// 5. Release (G1: serialized with the ordered updater's render; it
+	// writes the entry's removal itself, so the base moves with it).
+	base := beforeEntries
+	release, err := r.processPITRBindingRelease(ctx, fg, base, mbvs, p.targets)
 	if err != nil {
 		return 0, err
 	}
-	if release != nil && release.rejected == "" && release.refused == "" && !release.conflict {
+	if release != nil && release.removed {
+		base = release.base
 		kept := p.entries[:0]
 		for _, e := range p.entries {
 			if e.ID != release.id {
@@ -364,8 +367,11 @@ func (r *MysqlFailoverGroupReconciler) reconcilePITRArchiveBindings(ctx context.
 			log.FromContext(ctx).Error(err, "accept pitr key snapshot; the binding stays as it was", "fg", fg.Name, "bindingID", e.ID)
 			if prev := findBindingIn(beforeEntries, e.ID); prev != nil {
 				*e = *prev.DeepCopy()
+				delete(p.causes, e.ID)
 			} else {
-				p.setState(e, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "accepting the key snapshot failed: "+err.Error(), "")
+				// A new entry whose binding could not be recorded: net, the
+				// pass only added it.
+				p.setState(e, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "accepting the key snapshot failed: "+err.Error(), pitrBindingCauseInput)
 				e.ArchiveID, e.Source = "", nil
 			}
 			delete(p.newlyBound, e.ID)
@@ -376,7 +382,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePITRArchiveBindings(ctx context.
 	// 7. Condition and status.
 	sort.SliceStable(p.entries, func(i, j int) bool { return p.entries[i].ID < p.entries[j].ID })
 	cond := p.condition(ctx)
-	if err := r.writePITRArchiveBindings(ctx, fg, p.entries, cond); err != nil {
+	if err := r.writePITRArchiveBindings(ctx, fg, base, beforeCond, p.entries, cond); err != nil {
 		return 0, err
 	}
 
@@ -735,7 +741,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 		}
 		p.entries = append(p.entries, v1alpha1.PITRArchiveBinding{ID: pitrBindingID(t.dest), Destination: dest, Encryption: enc})
 		entry = &p.entries[len(p.entries)-1]
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "", "")
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "", pitrBindingCauseInput)
 	}
 
 	// Consumer proof (write targets) wins over everything, also over a
@@ -748,6 +754,28 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 			p.bind(entry, id, p.ownSource(), pitrBindingCauseProof)
 			return nil
 		}
+	}
+
+	// A candidate under check, or one the writer is establishing, that
+	// the identity profile no longer offers (its mode or algorithm
+	// changed, or its snapshot is gone) is superseded (G3): its verdict
+	// would describe an identity the group no longer renders, so the
+	// check is dropped and the entry starts over with the current
+	// candidate. The renderer holds the previous writer render meanwhile.
+	if entry.State == v1alpha1.PITRArchiveBindingPending && (entry.Check != nil || entry.Reason == pitrBindingEstablishing) &&
+		!pitrCandidateOffered(entry.Encryption, ident, cands) {
+		old := pitrCandidateLabel(entry.Encryption)
+		if entry.Check != nil {
+			p.consumeCheck(ctx, entry.Check)
+			entry.Check = nil
+		}
+		entry.Encryption = ident
+		if preferred != nil {
+			entry.Encryption = preferred.enc
+		}
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating,
+			fmt.Sprintf("%s was superseded by a change of profile %s's encryption; authenticating %s", old, t.profile.Name, pitrCandidateLabel(entry.Encryption)),
+			pitrBindingCauseInput)
 	}
 
 	// A check in flight: read its verdict.
@@ -773,7 +801,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 		entry.Encryption = enc
 		entry.Source = nil
 		entry.ArchiveID = ""
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "retrying after an input change", pitrBindingCauseCheck)
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "retrying after an input change", pitrBindingCauseInput)
 	}
 
 	// Correlated sidecar refusal (write targets, non-Bound only).
@@ -796,7 +824,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 
 	if preferred == nil {
 		entry.Encryption = ident
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, missing, "")
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, missing, pitrBindingCauseInput)
 		return nil
 	}
 
@@ -806,7 +834,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 	if t.write && (!p.writerRuns() || p.holdRenders(t.dest, preferred.enc)) {
 		if !sameIdentity(entry.Encryption, preferred.enc) {
 			entry.Encryption = preferred.enc
-			p.causes[entry.ID] = pitrBindingCauseProof
+			p.causes[entry.ID] = pitrBindingCauseInput
 		}
 		if entry.Message != "" && entry.Reason == pitrBindingAuthenticating && entry.State == v1alpha1.PITRArchiveBindingPending {
 			entry.Message = ""
@@ -843,6 +871,21 @@ const pitrCheckReplacingMessage = "waiting for the previous check Job of this ca
 // reported (as opposed to a check Job); such entries are re-evaluated
 // against the current report every pass (Δ21).
 const pitrSidecarRefusalMarker = " reported by the group's sidecars"
+
+// pitrCandidateOffered reports whether enc is still one of the identity
+// profile's candidates: the profile's mode and algorithm, and for
+// Passphrase a listed or live snapshot of the destination.
+func pitrCandidateOffered(enc, ident v1alpha1.PITRArchiveBindingEncryption, cands []pitrCandidate) bool {
+	if enc.Mode != ident.Mode || enc.Algorithm != ident.Algorithm {
+		return false
+	}
+	for _, c := range cands {
+		if sameIdentity(c.enc, enc) {
+			return true
+		}
+	}
+	return false
+}
 
 // startCheck launches (or adopts) the check Job for cand.
 func (p *pitrBindingPass) startCheck(ctx context.Context, t *pitrBindingTarget, entry *v1alpha1.PITRArchiveBinding, cand pitrCandidate) error {
@@ -895,10 +938,20 @@ func (p *pitrBindingPass) observeCheck(ctx context.Context, t *pitrBindingTarget
 		return nil
 	}
 	res := out.result
-	if res.Destination != entry.Destination {
+	// The verdict names its destination by digest (G5); the destination
+	// itself comes from the Job's immutable environment, which must be
+	// the entry's.
+	jobDest, derr := pitrCheckJobDestination(out.job)
+	if derr != nil || jobDest != entry.Destination || res.DestinationDigest != PITRArchiveCheckDestinationDigest(jobDest) {
+		detail := fmt.Sprintf("check Job probed %s, not %s", jobDest, entry.Destination)
+		switch {
+		case derr != nil:
+			detail = "check Job's destination is unreadable: " + derr.Error()
+		case jobDest == entry.Destination:
+			detail = "check Job's verdict names another destination than the one it was given"
+		}
 		pitrCheckRetryGate.Store(pitrCheckRetryKey(p.fg, entry.ID), p.now.Add(pitrCheckRetryAfter))
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating,
-			fmt.Sprintf("check Job reported destination %s, not %s; retrying", res.Destination, entry.Destination), pitrBindingCauseCheck)
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, detail+"; retrying", pitrBindingCauseCheck)
 		p.requeueAfter(pitrCheckRetryAfter)
 		return nil
 	}
@@ -1225,11 +1278,34 @@ func (p *pitrBindingPass) boundMessage(ctx context.Context) string {
 	return msg
 }
 
+// errPITRBindingStatusMoved means the stored bindings (or their condition)
+// are not the ones the binding pass started from: the pass read a cache
+// older than a write of a previous pass (F-A). Its decisions are stale, so
+// nothing is written and nothing renders; Reconcile requeues at once
+// (pitrBindingMovedRequeue) and the next pass starts from the stored state.
+var errPITRBindingStatusMoved = errors.New("pitr archive binding status changed since this reconcile read it")
+
+// pitrBindingMovedRequeue is how soon a pass whose base moved retries.
+const pitrBindingMovedRequeue = time.Second
+
+// pitrBindingCondEqual compares the fields of the binding condition a pass
+// writes.
+func pitrBindingCondEqual(a, b *metav1.Condition) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Status == b.Status && a.Reason == b.Reason && a.Message == b.Message && a.ObservedGeneration == b.ObservedGeneration
+}
+
 // writePITRArchiveBindings writes status.pitrArchiveBindings and the
-// condition on a fresh copy (RetryOnConflict), and nothing else; it skips
-// the write when neither changed. fg's in-memory status is updated for the
-// rendering that follows.
-func (r *MysqlFailoverGroupReconciler) writePITRArchiveBindings(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entries []v1alpha1.PITRArchiveBinding, cond *metav1.Condition) error {
+// condition on a fresh copy (RetryOnConflict), and nothing else. The fresh
+// copy must still hold base and baseCond, what the pass started from (the
+// cached group, or the status a release wrote this pass); otherwise it
+// returns errPITRBindingStatusMoved without writing (F-A: a pass computed
+// from a cache that predates a previous pass's write must not replace a
+// fresher Bound entry). It skips the write when nothing changed. fg's
+// in-memory status is updated for the rendering that follows.
+func (r *MysqlFailoverGroupReconciler) writePITRArchiveBindings(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, base []v1alpha1.PITRArchiveBinding, baseCond *metav1.Condition, entries []v1alpha1.PITRArchiveBinding, cond *metav1.Condition) error {
 	apply := func(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 		changed := false
 		if len(entries) == 0 && len(st.PITRArchiveBindings) != 0 || len(entries) != 0 && !equality.Semantic.DeepEqual(st.PITRArchiveBindings, entries) {
@@ -1254,10 +1330,8 @@ func (r *MysqlFailoverGroupReconciler) writePITRArchiveBindings(ctx context.Cont
 		}
 		return changed
 	}
-	probe := fg.Status.DeepCopy()
-	if !apply(probe) {
-		return nil
-	}
+	// The base is checked even when nothing changes: rendering from a
+	// stale in-memory status is as wrong as writing it.
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.bindingReader().Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil {
@@ -1265,6 +1339,10 @@ func (r *MysqlFailoverGroupReconciler) writePITRArchiveBindings(ctx context.Cont
 		}
 		if fresh.UID != fg.UID {
 			return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("mysqlfailovergroups").GroupResource(), fg.Name)
+		}
+		if !pitrBindingsEqual(fresh.Status.PITRArchiveBindings, base) ||
+			!pitrBindingCondEqual(meta.FindStatusCondition(fresh.Status.Conditions, conditionPITRArchiveBindingReady), baseCond) {
+			return errPITRBindingStatusMoved
 		}
 		if !apply(&fresh.Status) {
 			return nil
@@ -1274,6 +1352,9 @@ func (r *MysqlFailoverGroupReconciler) writePITRArchiveBindings(ctx context.Cont
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
+		}
+		if errors.Is(err, errPITRBindingStatusMoved) {
+			return err
 		}
 		return fmt.Errorf("write pitr archive bindings: %w", err)
 	}
@@ -1321,9 +1402,11 @@ func (p *pitrBindingPass) emit(ctx context.Context, before []v1alpha1.PITRArchiv
 			prev.Encryption == e.Encryption && reflect.DeepEqual(prev.Check, e.Check) && p.causes[e.ID] == "" {
 			continue
 		}
+		// Every transition records its cause; an unrecorded one can
+		// only be an input change (never a check that did not run).
 		cause := p.causes[e.ID]
 		if cause == "" {
-			cause = pitrBindingCauseCheck
+			cause = pitrBindingCauseInput
 		}
 		if prev == nil || prev.State != e.State || prev.Reason != e.Reason || prev.ArchiveID != e.ArchiveID || prev.Encryption.KeySecretName != e.Encryption.KeySecretName {
 			logger.Info(logMsgPITRBindingChanged, "fg", fg.Name, "bindingID", e.ID, "destination", e.Destination,

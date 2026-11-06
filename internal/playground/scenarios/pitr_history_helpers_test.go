@@ -260,10 +260,11 @@ func TestPITRScenariosInPITRE2EJob(t *testing.T) {
 			t.Errorf("the e2e pitr job does not run %s (list %q)", id, list)
 		}
 	}
-	// Δ19: 69 runs second, after the single-site baseline 31, and the job
-	// takes the hosted runner's full 360-minute cap.
-	if len(got) < 2 || got[0].ID != "31-pitr-verification-rustfs" || got[1].ID != scenarioPITR203 {
-		t.Errorf("the e2e pitr job must run 31 then %s first (list %q)", scenarioPITR203, list)
+	// The single-site baseline 31 runs first and 69 last: run-all stops at
+	// the first failure, so a red 69 must not hide the #206 scenarios
+	// (F-J). The job takes the hosted runner's full 360-minute cap (Δ19).
+	if len(got) < 2 || got[0].ID != "31-pitr-verification-rustfs" || got[len(got)-1].ID != scenarioPITR203 {
+		t.Errorf("the e2e pitr job must run 31 first and %s last (list %q)", scenarioPITR203, list)
 	}
 	jobBody, _, _ := strings.Cut(job, "\n  # ")
 	if !strings.Contains(jobBody, "timeout-minutes: 360") {
@@ -552,9 +553,10 @@ func TestPITRScenarioCleanupBudgets(t *testing.T) {
 		t.Errorf("%s is not registered", id)
 	}
 	// The base must cover at least the healthy-baseline wait plus one group
-	// deletion, one backup deletion with its artifact check, and the
-	// release of two archive bindings (#203).
-	if pitrCleanupBaseBudget < 6*time.Minute+runner.DefaultCleanupTimeout+5*time.Minute+2*pitrReleaseBindingWaitTime {
+	// deletion, one backup deletion with its artifact check, the wait for
+	// pods still mounting the run's key snapshots, and the release of two
+	// archive bindings (#203).
+	if pitrCleanupBaseBudget < 6*time.Minute+runner.DefaultCleanupTimeout+5*time.Minute+pitrSnapshotUnmountWaitTime+2*pitrReleaseBindingWaitTime {
 		t.Errorf("pitrCleanupBaseBudget=%s is below its composed parts", pitrCleanupBaseBudget)
 	}
 }
@@ -868,5 +870,40 @@ func TestPITRDecryptArchiveObjectUsesStashedBytes(t *testing.T) {
 	}
 	if string(pitrArchivePassphrases(env)[0]) != "run-passphrase-0123456789abcdef" {
 		t.Error("the run passphrase must stay first")
+	}
+}
+
+// TestPITRPodsMountingSecrets pins F-K: the cleanup waits for the same pods
+// the operator's release in-use scan counts, terminating ones included.
+func TestPITRPodsMountingSecrets(t *testing.T) {
+	vol := func(secret string) corev1.Volume {
+		return corev1.Volume{Name: "v", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: secret}}}
+	}
+	pod := func(name string, phase corev1.PodPhase, terminating bool, vols ...corev1.Volume) corev1.Pod {
+		p := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: corev1.PodSpec{Volumes: vols}, Status: corev1.PodStatus{Phase: phase}}
+		if terminating {
+			now := metav1.Now()
+			p.DeletionTimestamp = &now
+		}
+		return p
+	}
+	names := map[string]bool{"snap-1": true}
+	cases := []struct {
+		name string
+		pods []corev1.Pod
+		want int
+	}{
+		{"none", nil, 0},
+		{"other secret", []corev1.Pod{pod("a", corev1.PodRunning, false, vol("user"))}, 0},
+		{"running mount", []corev1.Pod{pod("a", corev1.PodRunning, false, vol("user"), vol("snap-1"))}, 1},
+		{"terminating mount counts", []corev1.Pod{pod("a", corev1.PodRunning, true, vol("snap-1"))}, 1},
+		{"pending mount counts", []corev1.Pod{pod("a", corev1.PodPending, false, vol("snap-1"))}, 1},
+		{"terminal pods do not", []corev1.Pod{pod("a", corev1.PodSucceeded, false, vol("snap-1")), pod("b", corev1.PodFailed, false, vol("snap-1"))}, 0},
+		{"one entry per pod", []corev1.Pod{pod("a", corev1.PodRunning, false, vol("snap-1"), vol("snap-1"))}, 1},
+	}
+	for _, c := range cases {
+		if got := pitrPodsMountingSecrets(c.pods, names); len(got) != c.want {
+			t.Errorf("%s: %v, want %d entries", c.name, got, c.want)
+		}
 	}
 }

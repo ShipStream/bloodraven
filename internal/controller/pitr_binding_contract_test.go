@@ -139,7 +139,7 @@ func TestPITRBindingContractStrings(t *testing.T) {
 		pitrBindingCauseRecovery:                      "recovery",
 		pitrBindingCauseIntegrity:                     "integrity",
 		pitrBindingCauseC3:                            "c3",
-		PITRArchiveCheckLinePrefix:                    "BLOODRAVEN_PITR_ARCHIVE_CHECK v=1",
+		PITRArchiveCheckLinePrefix:                    "BLOODRAVEN_PITR_ARCHIVE_CHECK v=2",
 		PITRArchiveCheckLogMsg:                        "pitr archive check",
 		PITRArchiveCheckStateAbsent:                   "Absent",
 		PITRArchiveCheckStateVerified:                 "Verified",

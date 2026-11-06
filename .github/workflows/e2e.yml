@@ -79,16 +79,20 @@ jobs:
     needs: images
     uses: ./.github/workflows/_e2e.yml
     with:
-      # 31 first (single-site baseline); 69 second (key snapshots,
-      # refused key and encryption changes, status-loss recovery,
-      # release); 37 and 68 are planned failbacks (68 with reclones); 70
-      # loses data on purpose and restarts the archive.
-      scenario: 31-pitr-verification-rustfs,69-pitr-encryption-binding-refusal,37-pitr-planned-failback-no-reclone,68-pitr-failback-with-reclone,70-pitr-lossy-failover
-      # 24m + 50m + 60m + 75m + 75m = 284m of scenario budgets on one
-      # cluster, plus the reset run-all does before each of 69, 37, 68 and
-      # 70 (ResetBeforeRunAll, ~5m each) and setup: about 50m of slack
-      # under the 360m hard cap of a GitHub-hosted runner job. This is the
-      # cap, not a target: the next PITR scenario must go into a second
-      # job rather than into this list.
+      # 31 first (single-site baseline); 37 and 68 are planned failbacks
+      # (68 with reclones); 70 loses data on purpose and restarts the
+      # archive; 69 last (key snapshots, refused key and encryption
+      # changes, status-loss recovery, release). run-all stops at the first
+      # failure, so 69, the newest and longest, runs after the #206
+      # scenarios: a red 69 never hides them.
+      scenario: 31-pitr-verification-rustfs,37-pitr-planned-failback-no-reclone,68-pitr-failback-with-reclone,70-pitr-lossy-failover,69-pitr-encryption-binding-refusal
+      # Scenario budgets: 24m + 60m + 75m + 75m + 60m = 294m, plus the
+      # reset run-all does before each of 37, 68, 70 and 69
+      # (ResetBeforeRunAll, ~5m each) and setup, under the 360m hard cap of
+      # a GitHub-hosted runner job. Measured on #206, 31/37/68/70 passed in
+      # 3/6/6/11 minutes, so a run that passes them leaves 69 its whole
+      # budget plus its cleanup even if it times out. This is the cap, not
+      # a target: the next PITR scenario goes into a second job rather than
+      # into this list.
       timeout-minutes: 360
       images-artifact: e2e-images

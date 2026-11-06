@@ -1816,6 +1816,11 @@ const (
 	pitrSnapshotPassphraseKey  = "passphrase"
 	pitrKeyRevisionPlaintext   = "plaintext"
 	pitrReleaseBindingWaitTime = 2 * time.Minute
+	// pitrSnapshotUnmountWaitTime bounds the wait, before the cleanup's
+	// releases, for the pods that still mount the run's key snapshots
+	// (old ReplicaSets, deleted verification and restore pods) to finish
+	// terminating.
+	pitrSnapshotUnmountWaitTime = 3 * time.Minute
 )
 
 // pitrKeySnapshotSelector lists a group's archive key snapshots. They have
@@ -1972,6 +1977,18 @@ func pitrReleaseBindings(ctx context.Context, env *runner.Env, prefixes []string
 		env.Capture.Note("cleanup warning: " + err.Error())
 		return
 	}
+	// The operator refuses to release a snapshot a non-terminal pod still
+	// mounts, and the healthy baseline does not wait for the pods of an
+	// old ReplicaSet or a deleted verification to finish terminating.
+	names := map[string]bool{}
+	for i := range snaps {
+		if pitrDestinationUnderPrefixes(snaps[i].Annotations[pitrDestinationAnnotation], prefixes) {
+			names[snaps[i].Name] = true
+		}
+	}
+	if err := pitrWaitSnapshotsUnmounted(ctx, env, names); err != nil {
+		env.Capture.Note("cleanup warning: " + err.Error())
+	}
 	for _, id := range pitrBindingIDsUnderPrefixes(mfg, snaps, prefixes) {
 		if err := pitrReleaseBinding(ctx, env, id); err != nil {
 			env.Capture.Note("cleanup warning: " + err.Error())
@@ -1993,6 +2010,53 @@ func pitrReleaseBindings(ctx context.Context, env *runner.Env, prefixes []string
 		}
 		if err := pitrDeleteSecretExact(ctx, env, s); err != nil {
 			env.Capture.Note("cleanup warning: " + err.Error())
+		}
+	}
+}
+
+// pitrPodsMountingSecrets names the pods that mount one of the Secrets
+// through a secret volume and are not terminal, which is what the
+// operator's release in-use scan counts (a terminating pod is still
+// Running).
+func pitrPodsMountingSecrets(pods []corev1.Pod, names map[string]bool) []string {
+	var out []string
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		for _, v := range p.Spec.Volumes {
+			if v.Secret != nil && names[v.Secret.SecretName] {
+				out = append(out, p.Name+" mounts "+v.Secret.SecretName)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// pitrWaitSnapshotsUnmounted waits up to pitrSnapshotUnmountWaitTime until
+// no non-terminal pod in the namespace mounts one of the named snapshots.
+func pitrWaitSnapshotsUnmounted(ctx context.Context, env *runner.Env, names map[string]bool) error {
+	if len(names) == 0 {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, pitrSnapshotUnmountWaitTime)
+	defer cancel()
+	var last string
+	for {
+		pods, err := env.Kube.Kubernetes.CoreV1().Pods(env.Namespace).List(waitCtx, metav1.ListOptions{})
+		if err != nil {
+			last = err.Error()
+		} else if users := pitrPodsMountingSecrets(pods.Items, names); len(users) == 0 {
+			return nil
+		} else {
+			last = strings.Join(users, "; ")
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("key snapshots still mounted after %s: %s", pitrSnapshotUnmountWaitTime, last)
+		case <-time.After(2 * time.Second):
 		}
 	}
 }

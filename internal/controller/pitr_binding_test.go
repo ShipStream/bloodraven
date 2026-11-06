@@ -337,8 +337,8 @@ func (e *pbtEnv) finishCheck(job *batchv1.Job, code int32, message string) {
 // verdict plays a check Job that reports res.
 func (e *pbtEnv) verdict(entry *v1alpha1.PITRArchiveBinding, res PITRArchiveCheckResult) {
 	e.t.Helper()
-	if res.Destination == "" {
-		res.Destination = entry.Destination
+	if res.DestinationDigest == "" {
+		res.DestinationDigest = PITRArchiveCheckDestinationDigest(entry.Destination)
 	}
 	e.finishCheck(e.checkJob(entry), 0, FormatPITRArchiveCheckLine(res))
 }

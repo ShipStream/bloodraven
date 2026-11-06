@@ -423,8 +423,10 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 }
 
 // Row 28a: a verification stamps its hold between the release's in-use
-// read and the delete: the resourceVersion precondition fails, nothing is
-// deleted, and the next pass refuses.
+// read and the delete: the resourceVersion precondition fails and the
+// snapshot is kept, and the next pass refuses. The entry already left the
+// stored status (G1: it goes before any snapshot); the kept snapshot's
+// acceptance rebuilds it if the release is withdrawn.
 func TestPITRBindingReleaseRacesHold(t *testing.T) {
 	raced := false
 	funcs := interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
@@ -446,14 +448,17 @@ func TestPITRBindingReleaseRacesHold(t *testing.T) {
 		}
 		return c.Delete(ctx, obj, opts...)
 	}}
-	e, a, entry := pbtReleaseEnv(t, funcs)
+	e, _, entry := pbtReleaseEnv(t, funcs)
 	e.release(entry.ID + ":confirm=" + pbtName)
 	e.pass()
 	if !raced {
 		t.Fatal("the delete never ran")
 	}
-	if _, ok := e.secret(entry.Encryption.KeySecretName); !ok || e.entry(a) == nil {
+	if _, ok := e.secret(entry.Encryption.KeySecretName); !ok {
 		t.Fatal("the release deleted a snapshot whose hold landed after the in-use read")
+	}
+	if _, ok := e.fg().Annotations[ReleasePITRArchiveBindingAnnotation]; !ok {
+		t.Fatal("the release annotation was removed although the release did not finish")
 	}
 	e.events()
 	e.pass()
@@ -463,9 +468,10 @@ func TestPITRBindingReleaseRacesHold(t *testing.T) {
 	}
 }
 
-// Row 28b: a crash after the snapshot deletion and before the status write
-// leaves the entry and the annotation; the next pass finishes the release
-// and never reports the missing snapshot as lost key material.
+// Row 28b: the snapshot of a binding under release is gone while its entry
+// and the annotation remain (deleted by hand, or by a release of an older
+// operator that deleted before writing status); the next pass finishes the
+// release and never reports the missing snapshot as lost key material.
 func TestPITRBindingReleaseCrashFinishes(t *testing.T) {
 	e, a, entry := pbtReleaseEnv(t, interceptor.Funcs{})
 	e.release(entry.ID + ":confirm=" + pbtName)

@@ -243,16 +243,26 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return r.failBackup(ctx, &backup, backupReasonProfileReadOnly, why)
 		}
 
-		// The stamp names the archive the group's writers render (K5):
-		// while the site Deployments disagree (a roll in progress) the
-		// backup waits rather than pin an archive nobody writes.
+		// The stamp names the archive the group's writers render (K5),
+		// never one nobody writes. While the site Deployments do not
+		// agree on one, only a backup of the active PITR profile during
+		// a roll waits (it becomes that archive's baseline once the roll
+		// ends); every other backup runs without an archive stamp (F-B):
+		// a dump-only profile's schedule must never stall on PITR, and a
+		// group whose Deployments carry no render yet (the pre-#203
+		// deferral) stays that way until the user acts.
 		deploys, err := listPITRSiteDeployments(ctx, r.apiReader(), &fg)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		archiveID, agree, why := renderedWriterArchiveID(&fg, deploys)
 		if !agree {
-			return r.pendBackup(ctx, &backup, backupReasonPITRArchiveRolloutPending, why)
+			if pitrBackupWaitsForRollout(&fg, profile.Name, deploys) {
+				return r.pendBackup(ctx, &backup, backupReasonPITRArchiveRolloutPending, why)
+			}
+			archiveID = ""
+			r.Recorder.Eventf(&backup, corev1.EventTypeNormal, eventReasonPITRArchiveNotStamped,
+				"the backup is not stamped with a PITR archive and is no PITR baseline: %s", why)
 		}
 
 		// An encrypted backup gets its own immutable dump-key snapshot
@@ -688,14 +698,20 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 				if wait, err := r.stopAbandonedProducer(ctx, backup, nil); err != nil || wait > 0 {
 					return false, wait, err
 				}
-				// With no Job ever recorded no artifact can exist, so the
-				// dump-key snapshot made before the Job goes too (Δ24).
-				// A Job that ran and is gone keeps it: its artifacts may
-				// still be somewhere.
-				if backup.Status.JobName == "" {
-					if err := r.deleteDumpKeySnapshot(ctx, backup); err != nil {
-						return false, 0, err
-					}
+				// No recorded Job is no proof that none ran: a crash
+				// between the Job's create and the status patch leaves
+				// status empty, and that Job may have uploaded encrypted
+				// artifacts before it went (foreground deletion removes
+				// it). Without attribution nothing confirms the artifacts
+				// are gone, so the dump-key snapshot, possibly their only
+				// key, is kept and named (G2, Δ24).
+				kept, err := r.dumpKeySnapshotKept(ctx, backup)
+				if err != nil {
+					return false, 0, err
+				}
+				if kept != "" {
+					r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
+						"no producing Job or artifact destination is recorded, so nothing is cleaned up; the dump-key snapshot Secret %q is kept because encrypted artifacts of this backup may exist (delete it once you have confirmed none remain)", kept)
 				}
 				return true, 0, nil
 			}
@@ -2001,6 +2017,26 @@ func (r *MysqlBackupReconciler) deleteDumpKeySnapshot(ctx context.Context, backu
 		return fmt.Errorf("delete dump-key snapshot %s: %w", snap.Name, err)
 	}
 	return nil
+}
+
+// dumpKeySnapshotKept returns the name of backup's dump-key snapshot when
+// it exists (labelled with this backup's UID), else "".
+func (r *MysqlBackupReconciler) dumpKeySnapshotKept(ctx context.Context, backup *v1alpha1.MysqlBackup) (string, error) {
+	if backup.UID == "" {
+		return "", nil
+	}
+	var snap corev1.Secret
+	err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: dumpKeySnapshotName(backup)}, &snap)
+	switch {
+	case apierrors.IsNotFound(err):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("get dump-key snapshot: %w", err)
+	}
+	if snap.Labels[labelMysqlBackupUID] != string(backup.UID) || snap.Labels[labelAppName] != appNameDumpKeySnapshot {
+		return "", nil
+	}
+	return snap.Name, nil
 }
 
 // dumpKeyKeptNote is the clause a skipped cleanup's Event adds when the

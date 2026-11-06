@@ -50,19 +50,42 @@ type PITRArchiveCheckResult struct {
 	// Source is the descriptor's source, when a descriptor was read (also
 	// on ArchiveForeign, so the binding can name the owner).
 	Source v1alpha1.PITRArchiveSource
-	// Destination is the normalized destination probed.
-	Destination string
+	// DestinationDigest is PITRArchiveCheckDestinationDigest of the
+	// normalized destination probed. The controller compares it with the
+	// destination in the Job's own environment, which is immutable.
+	DestinationDigest string
 }
 
 // pitrCheckLineKeys are the termination line's keys, in order.
-var pitrCheckLineKeys = []string{"state", "reason", "archiveID", "sourceUID", "sourceNamespace", "sourceName", "destination"}
+var pitrCheckLineKeys = []string{"state", "reason", "archiveID", "sourceUID", "sourceNamespace", "sourceName", "destinationDigest"}
+
+// PITRArchiveCheckDestinationDigest is the check line's fixed-size stand-in
+// for a normalized destination: the lowercase hex SHA-256 of a domain tag
+// and the destination.
+func PITRArchiveCheckDestinationDigest(destination string) string {
+	sum := sha256.Sum256([]byte("bloodraven-pitr-check-destination-v1\x00" + destination))
+	return hex.EncodeToString(sum[:])
+}
+
+// pitrCheckDigestValid reports whether s is a destination digest's form.
+func pitrCheckDigestValid(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // FormatPITRArchiveCheckLine renders r as the check Job's termination line:
 // PITRArchiveCheckLinePrefix, then key=value pairs separated by single
 // spaces with every value percent-escaped (url.PathEscape), so a value
 // never contains a space and the line parses back exactly.
 func FormatPITRArchiveCheckLine(r PITRArchiveCheckResult) string {
-	values := []string{r.State, string(r.Reason), r.ArchiveID, string(r.Source.UID), r.Source.Namespace, r.Source.Name, r.Destination}
+	values := []string{r.State, string(r.Reason), r.ArchiveID, string(r.Source.UID), r.Source.Namespace, r.Source.Name, r.DestinationDigest}
 	var b strings.Builder
 	b.WriteString(PITRArchiveCheckLinePrefix)
 	for i, k := range pitrCheckLineKeys {
@@ -80,7 +103,8 @@ var errPITRCheckNoLine = errors.New("no " + PITRArchiveCheckLinePrefix + " line"
 // parsePITRArchiveCheckLine parses a check Job's termination message. The
 // first line starting with PITRArchiveCheckLinePrefix is the verdict; it
 // must carry exactly the documented keys in order, a known state, a
-// catalog token iff Refused, and a well-formed archive ID and destination.
+// catalog token iff Refused, a well-formed archive ID and a destination
+// digest.
 func parsePITRArchiveCheckLine(msg string) (PITRArchiveCheckResult, error) {
 	var line string
 	for _, l := range strings.Split(msg, "\n") {
@@ -111,8 +135,8 @@ func parsePITRArchiveCheckLine(msg string) (PITRArchiveCheckResult, error) {
 	}
 	r := PITRArchiveCheckResult{
 		State: values[0], Reason: pitrarchive.Token(values[1]), ArchiveID: values[2],
-		Source:      v1alpha1.PITRArchiveSource{UID: types.UID(values[3]), Namespace: values[4], Name: values[5]},
-		Destination: values[6],
+		Source:            v1alpha1.PITRArchiveSource{UID: types.UID(values[3]), Namespace: values[4], Name: values[5]},
+		DestinationDigest: values[6],
 	}
 	switch r.State {
 	case PITRArchiveCheckStateAbsent, PITRArchiveCheckStateVerified:
@@ -133,10 +157,37 @@ func parsePITRArchiveCheckLine(msg string) (PITRArchiveCheckResult, error) {
 		(r.ArchiveID == "" || r.Source.UID == "" || r.Source.Namespace == "" || r.Source.Name == "") {
 		return PITRArchiveCheckResult{}, errors.New("a Verified check line needs the archive ID and source")
 	}
-	if _, err := pitrarchive.ParseDestination(r.Destination); err != nil {
-		return PITRArchiveCheckResult{}, fmt.Errorf("check line destination: %w", err)
+	if !pitrCheckDigestValid(r.DestinationDigest) {
+		return PITRArchiveCheckResult{}, fmt.Errorf("check line destinationDigest %q is not a SHA-256 hex digest", r.DestinationDigest)
 	}
 	return r, nil
+}
+
+// pitrCheckJobDestination is the destination a check Job probes, read from
+// its own BLOODRAVEN_PITR_DESTINATION (as the kubelet expands it): the
+// immutable input the verdict's digest is checked against.
+func pitrCheckJobDestination(job *batchv1.Job) (string, error) {
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.Name != pitrCheckContainerName {
+			continue
+		}
+		previous := map[string]backupEnvironmentValue{}
+		for _, e := range c.Env {
+			v := backupEnvironmentValue{}
+			if e.ValueFrom == nil {
+				v = expandBackupEnvironment(e.Value, previous)
+			}
+			previous[e.Name] = v
+			if e.Name == "BLOODRAVEN_PITR_DESTINATION" {
+				if !v.known {
+					return "", errors.New("BLOODRAVEN_PITR_DESTINATION is not a literal value")
+				}
+				return v.value, nil
+			}
+		}
+		return "", errors.New("BLOODRAVEN_PITR_DESTINATION is not set")
+	}
+	return "", fmt.Errorf("no %s container", pitrCheckContainerName)
 }
 
 // pitrCheckJobName is the deterministic name of the check Job for binding

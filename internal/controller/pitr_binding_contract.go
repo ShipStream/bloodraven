@@ -166,6 +166,11 @@ const (
 	eventReasonPITRArchiveBindingReleaseRejected  = "PITRArchiveBindingReleaseRejected"
 	eventReasonPITRArchiveBindingLimitReached     = "PITRArchiveBindingLimitReached"
 	eventReasonBackupScheduleRefused              = "BackupScheduleRefused"
+	// eventReasonPITRArchiveNotStamped (Normal, on a MysqlBackup): the
+	// backup runs without a PITR archive stamp (not a PITR baseline)
+	// because the site Deployments do not agree on a rendered archive and
+	// waiting would not make it one (F-B).
+	eventReasonPITRArchiveNotStamped = "PITRArchiveNotStamped"
 )
 
 // MysqlBackup pend/fail reasons the backup reconciler adds (§4.7, §4.8).
@@ -184,9 +189,9 @@ const (
 	logMsgPITRBindingChanged = "pitr archive binding changed"
 	// logMsgPITRBindingReleased: INFO {fg, bindingID, destination}.
 	logMsgPITRBindingReleased = "pitr archive binding released"
-	// logMsgPITRRenderIgnored: WARN {fg, site, error}.
+	// logMsgPITRRenderIgnored: WARN {fg, namespace, site, error}.
 	logMsgPITRRenderIgnored = "pitr render annotation ignored"
-	// logMsgPITRRenderDeferred: INFO {fg, sites}.
+	// logMsgPITRRenderDeferred: INFO {fg, namespace, sites}.
 	logMsgPITRRenderDeferred = "pitr render deferred"
 
 	pitrBindingCauseProof     = "proof"
@@ -194,16 +199,24 @@ const (
 	pitrBindingCauseRecovery  = "recovery"
 	pitrBindingCauseIntegrity = "integrity"
 	pitrBindingCauseC3        = "c3"
+	// pitrBindingCauseInput: a spec, Secret or snapshot input changed the
+	// entry (a new target, a missing live key, a retry after an input
+	// change, a candidate superseded by an identity change), not a check
+	// Job or a sidecar report.
+	pitrBindingCauseInput = "input"
 )
 
 // The `bloodraven pitr-archive-check` contract (§4.4). Exported because
 // cmd/bloodraven formats what pitr_binding_check.go parses.
 const (
 	// PITRArchiveCheckLinePrefix starts the check Job's termination message:
-	// "BLOODRAVEN_PITR_ARCHIVE_CHECK v=1 state=<state> reason=<token or
+	// "BLOODRAVEN_PITR_ARCHIVE_CHECK v=2 state=<state> reason=<token or
 	// empty> archiveID=<id> sourceUID=<uid> sourceNamespace=<ns>
-	// sourceName=<name> destination=<dest>".
-	PITRArchiveCheckLinePrefix = "BLOODRAVEN_PITR_ARCHIVE_CHECK v=1"
+	// sourceName=<name> destinationDigest=<hex>". The destination is
+	// carried as a fixed-size digest (PITRArchiveCheckDestinationDigest),
+	// never verbatim: Kubernetes truncates a termination message beyond
+	// 4096 bytes, and a long prefix or endpoint, escaped, would not fit.
+	PITRArchiveCheckLinePrefix = "BLOODRAVEN_PITR_ARCHIVE_CHECK v=2"
 	// PITRArchiveCheckLogMsg is the command's INFO log {destination, role,
 	// state, reason, archiveID}.
 	PITRArchiveCheckLogMsg = "pitr archive check"

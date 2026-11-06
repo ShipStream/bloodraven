@@ -20,6 +20,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -487,8 +488,8 @@ func (r *MysqlFailoverGroupReconciler) pitrKeySnapshotInUse(ctx context.Context,
 
 // pitrReleaseOutcome is what processPITRBindingRelease did.
 type pitrReleaseOutcome struct {
-	// id is the released binding (its entry is removed from status by the
-	// caller's status write; the annotation is removed after it).
+	// id is the released binding (the annotation is removed after the
+	// pass's status write).
 	id string
 	// destination is the released binding's destination, when known.
 	destination string
@@ -498,17 +499,31 @@ type pitrReleaseOutcome struct {
 	// refused explains why the binding is still in use: the annotation is
 	// kept and the release retried.
 	refused string
-	// conflict is set when a snapshot changed between the in-use check and
-	// its deletion: re-evaluated next pass.
+	// conflict is set when the group, its status or a snapshot changed
+	// under the release: re-evaluated next pass.
 	conflict bool
+	// removed is set once the stored status no longer holds the entry:
+	// the pass drops it too, and base is the stored list the pass's own
+	// status write must find.
+	removed bool
+	base    []v1alpha1.PITRArchiveBinding
 }
 
 // processPITRBindingRelease handles the release annotation (§4.3 Release,
-// K9): parse; refuse while the destination is a current target or any of
-// the id's snapshots is in use; delete each snapshot with a resourceVersion
-// precondition from the in-use read. The caller writes status without the
-// entry, then removes the annotation and emits PITRArchiveBindingReleased.
-func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entries []v1alpha1.PITRArchiveBinding, targets []pitrBindingTarget, deploys []appsv1.Deployment) (*pitrReleaseOutcome, error) {
+// K9, G1). It runs under the group's PITR render lock, the lock the
+// ordered updater holds from its fresh read of the group until it has
+// written a site Deployment, so no render can start mounting a snapshot
+// between the in-use check and its deletion. Under the lock it re-reads
+// the group (whose stored bindings must still be base, the list this pass
+// started from, else errPITRBindingStatusMoved), refuses while the
+// binding's destination is a target of the pass or of the stored spec, or
+// any of its snapshots is in use (Deployments, pods, Jobs and holds read
+// uncached), then removes the entry from the stored status (a
+// resourceVersion-conditioned write) and deletes each snapshot with a
+// resourceVersion precondition from the in-use read. Removing the entry
+// first means a render after the lock no longer finds the binding to
+// mount. The caller removes the annotation after its own status write.
+func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, base []v1alpha1.PITRArchiveBinding, mbvs []v1alpha1.MysqlBackupVerification, targets []pitrBindingTarget) (*pitrReleaseOutcome, error) {
 	value, ok := fg.Annotations[ReleasePITRArchiveBindingAnnotation]
 	if !ok {
 		return nil, nil
@@ -518,13 +533,44 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 		return &pitrReleaseOutcome{rejected: err.Error()}, nil
 	}
 	out := &pitrReleaseOutcome{id: id}
-	for i := range entries {
-		if entries[i].ID == id {
-			out.destination = entries[i].Destination
+	for i := range base {
+		if base[i].ID == id {
+			out.destination = base[i].Destination
+		}
+	}
+	for i := range targets {
+		if pitrBindingID(targets[i].dest) == id {
+			out.refused = fmt.Sprintf("binding %s (%s) is %s", id, targets[i].dest, targets[i].useDescription())
+			return out, nil
+		}
+	}
+
+	unlock := r.lockPITRRender(client.ObjectKeyFromObject(fg))
+	defer unlock()
+	reader := r.bindingReader()
+	var fresh v1alpha1.MysqlFailoverGroup
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			out.conflict = true
+			return out, nil
+		}
+		return nil, fmt.Errorf("get group for release: %w", err)
+	}
+	if fresh.UID != fg.UID || pitrReleasePending(&fresh) != id {
+		out.conflict = true
+		return out, nil
+	}
+	if !pitrBindingsEqual(fresh.Status.PITRArchiveBindings, base) {
+		return nil, errPITRBindingStatusMoved
+	}
+	for _, t := range pitrBindingTargets(&fresh, mbvs) {
+		if pitrBindingID(t.dest) == id {
+			out.refused = fmt.Sprintf("binding %s (%s) is %s", id, t.dest, t.useDescription())
+			return out, nil
 		}
 	}
 	var list corev1.SecretList
-	if err := r.bindingReader().List(ctx, &list, client.InNamespace(fg.Namespace), client.MatchingLabels{
+	if err := reader.List(ctx, &list, client.InNamespace(fg.Namespace), client.MatchingLabels{
 		labelAppName: appNamePITRKeySnapshot, labelFailoverGroupUID: string(fg.UID), labelPITRBindingID: id,
 	}); err != nil {
 		return nil, fmt.Errorf("list pitr key snapshots of %s: %w", id, err)
@@ -537,13 +583,11 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 			}
 		}
 	}
-	for i := range targets {
-		if pitrBindingID(targets[i].dest) == id {
-			out.refused = fmt.Sprintf("binding %s (%s) is %s", id, targets[i].dest, targets[i].useDescription())
-			return out, nil
-		}
+	deploys, err := listPITRSiteDeployments(ctx, reader, &fresh)
+	if err != nil {
+		return nil, err
 	}
-	why, err := r.pitrKeySnapshotInUse(ctx, fg, list.Items, deploys)
+	why, err := r.pitrKeySnapshotInUse(ctx, &fresh, list.Items, deploys)
 	if err != nil {
 		return nil, err
 	}
@@ -551,6 +595,30 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 		out.refused = fmt.Sprintf("binding %s is in use: %s", id, why)
 		return out, nil
 	}
+
+	// The entry leaves the stored status before any snapshot goes.
+	kept := make([]v1alpha1.PITRArchiveBinding, 0, len(fresh.Status.PITRArchiveBindings))
+	for _, e := range fresh.Status.PITRArchiveBindings {
+		if e.ID != id {
+			kept = append(kept, e)
+		}
+	}
+	if len(kept) != len(fresh.Status.PITRArchiveBindings) {
+		if len(kept) == 0 {
+			kept = nil
+		}
+		fresh.Status.PITRArchiveBindings = kept
+		if err := r.Status().Update(ctx, &fresh); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				out.conflict = true
+				return out, nil
+			}
+			return nil, fmt.Errorf("remove released binding %s from status: %w", id, err)
+		}
+	}
+	out.removed = true
+	out.base = append([]v1alpha1.PITRArchiveBinding(nil), kept...)
+
 	for i := range list.Items {
 		s := &list.Items[i]
 		uid, rv := s.UID, s.ResourceVersion
@@ -558,6 +626,9 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 		switch {
 		case err == nil, apierrors.IsNotFound(err):
 		case apierrors.IsConflict(err):
+			// A verification hold landed after the in-use read: the
+			// snapshot stays, and the release is retried (and refused
+			// while the verification reads it).
 			out.conflict = true
 			return out, nil
 		default:
@@ -567,10 +638,19 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 	return out, nil
 }
 
+// pitrBindingsEqual compares two binding lists (nil equals empty).
+func pitrBindingsEqual(a, b []v1alpha1.PITRArchiveBinding) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return equality.Semantic.DeepEqual(a, b)
+}
+
 // pitrReleasePending returns the binding id a valid release annotation
 // names, or "". While it names an id, C3 and KeyMaterialLost transitions
 // are suppressed for it and recovery does not rebuild it (a crash between
-// the snapshot deletion and the status write finishes the release).
+// the release's status write and its snapshot deletions, or a snapshot
+// deleted by hand, finishes the release on the next pass).
 func pitrReleasePending(fg *v1alpha1.MysqlFailoverGroup) string {
 	value, ok := fg.Annotations[ReleasePITRArchiveBindingAnnotation]
 	if !ok {

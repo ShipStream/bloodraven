@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -310,5 +311,98 @@ func TestAbandonedCleanupRecordedKeyMissing(t *testing.T) {
 	vol, missing, err = r.abandonedCleanupPassphrase(context.Background(), mb, &profile, nil, nil)
 	if err != nil || missing != "" || vol == nil || vol.SecretName != profile.Encryption.PassphraseSecret.Name {
 		t.Fatalf("no-attribution fallback: %v %q %v", vol, missing, err)
+	}
+}
+
+// G2: an operator crash between the backup Job's create and the status
+// patch leaves status with no Job and no artifact destination; the Job
+// may have uploaded encrypted artifacts and then gone (foreground
+// deletion). Finalization has no proof the artifacts are gone, so it keeps
+// the dump-key snapshot (possibly their only key) and names it, instead of
+// deleting it as if no Job had ever run.
+func TestDumpKeySnapshotKeptWithoutProducerAttribution(t *testing.T) {
+	ctx := context.Background()
+	r, c, _, mb := encryptedBackupFixture(t)
+	rec := record.NewFakeRecorder(20)
+	r.Recorder = rec
+	reconcileUntilStable(t, r, mb.Name)
+	name := dumpKeySnapshotName(mb)
+	var job batchv1.Job
+	if err := c.Get(ctx, types.NamespacedName{Namespace: mb.Namespace, Name: backupJobName(mb.Name)}, &job); err != nil {
+		t.Fatalf("the backup Job was not created: %v", err)
+	}
+
+	// The status patch after the create is lost (crash), and the Job,
+	// having uploaded, is gone.
+	got := getBackup(t, c, mb)
+	got.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhasePending}
+	if err := c.Status().Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(rec)
+
+	got = getBackup(t, c, mb)
+	done, _, err := r.finalize(ctx, got)
+	if err != nil || !done {
+		t.Fatalf("finalize = %v, %v; want released", done, err)
+	}
+	var snap corev1.Secret
+	if err := c.Get(ctx, types.NamespacedName{Namespace: mb.Namespace, Name: name}, &snap); err != nil {
+		t.Fatalf("the dump-key snapshot was deleted without proof that its artifacts are gone: %v", err)
+	}
+	if countEvents(rec, name) != 1 {
+		t.Fatal("no Event names the kept dump-key snapshot")
+	}
+}
+
+// F-B: backups never pend on a disagreement that only the user can end,
+// and a dump-only profile never pends on PITR at all. Each case runs the
+// backup Job without an archive stamp and says so (PITRArchiveNotStamped);
+// only a PITR-profile backup during a roll waits (TestBackupWaitsForPITRRollout).
+func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile string
+		// renders are the site Deployments' pitr-render annotations ("" for
+		// a pre-#203 Deployment); nil means the default roll in progress.
+		renders func(fg *v1alpha1.MysqlFailoverGroup) []any
+	}{
+		{name: "pre-#203 deferral, PITR profile", profile: "nightly-s3", renders: func(*v1alpha1.MysqlFailoverGroup) []any { return []any{nil, nil} }},
+		{name: "pre-#203 deferral, dump-only profile", profile: "daily-local", renders: func(*v1alpha1.MysqlFailoverGroup) []any { return []any{nil, nil} }},
+		{name: "roll in progress, dump-only profile", profile: "daily-local", renders: func(fg *v1alpha1.MysqlFailoverGroup) []any {
+			return []any{testPITRRender(fg), pitrRenderDisabled()}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := fgWithBackup()
+			fg.UID = "lion-uid"
+			fg.Status.ActiveSite = "iad"
+			fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			mb := backupCR("unstamped", fg.Name, tc.profile)
+			mb.UID = "unstamped-uid"
+			objs := []client.Object{fg, mb, dsnSecret()}
+			for i, render := range tc.renders(fg) {
+				d := siteDeploy(fg, fg.Spec.Sites[i].Name, render)
+				objs = append(objs, &d)
+			}
+			r, c := newBackupReconciler(t, objs...)
+			rec := record.NewFakeRecorder(20)
+			r.Recorder = rec
+			reconcileUntilStable(t, r, mb.Name)
+			got := getBackup(t, c, mb)
+			if got.Status.Phase == v1alpha1.BackupPhasePending || got.Status.JobName == "" {
+				t.Fatalf("phase %s conditions %v: the backup waits on PITR", got.Status.Phase, got.Status.Conditions)
+			}
+			if got.Status.PITRArchiveID != "" {
+				t.Fatalf("stamped archive %q, want none", got.Status.PITRArchiveID)
+			}
+			if countEvents(rec, eventReasonPITRArchiveNotStamped) != 1 {
+				t.Fatal("no PITRArchiveNotStamped Event")
+			}
+		})
 	}
 }

@@ -160,7 +160,7 @@ func TestPITRArchiveCheck(t *testing.T) {
 			if err != nil {
 				t.Fatalf("line %q: %v", line, err)
 			}
-			if res.State != tt.wantState || res.Reason != tt.wantToken || res.Destination != dest.String() {
+			if res.State != tt.wantState || res.Reason != tt.wantToken || res.DestinationDigest != controller.PITRArchiveCheckDestinationDigest(dest.String()) {
 				t.Fatalf("verdict = %+v, want %s/%s", res, tt.wantState, tt.wantToken)
 			}
 			if res.Source.UID != tt.wantSrc.UID || res.Source.Namespace != tt.wantSrc.Namespace || res.Source.Name != tt.wantSrc.Name {

@@ -140,6 +140,14 @@ func pitrRenderCandidate(profile *v1alpha1.BackupProfile, entry *v1alpha1.PITRAr
 	return v1alpha1.PITRArchiveBindingEncryption{}, false
 }
 
+// pitrEstablishingRenderable reports whether an Establishing entry's
+// candidate is complete and still matches profile's mode and algorithm.
+func pitrEstablishingRenderable(profile *v1alpha1.BackupProfile, entry *v1alpha1.PITRArchiveBinding) bool {
+	ident := pitrprofile.EncryptionIdentityFor(profile)
+	return pitrKeyRevision(entry.Encryption) != "" &&
+		string(entry.Encryption.Mode) == string(ident.Mode) && string(entry.Encryption.Algorithm) == ident.Algorithm
+}
+
 // resolvePITRRender is the group's PITR render (§4.6), evaluated once per
 // group pass from fg's bindings and the hold H its site Deployments carry
 // (deploys: the group's Deployments, listed through the APIReader by the
@@ -196,7 +204,12 @@ func resolvePITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deploym
 		}
 		return pitrRenderDisabled(), pitrRenderApply
 	}
-	if entry != nil && entry.State == v1alpha1.PITRArchiveBindingPending && entry.Reason == pitrBindingEstablishing {
+	// An Establishing candidate renders only while it is still the
+	// profile's identity (G3): once the profile's mode or algorithm
+	// changed, the binding pass supersedes it, and until then the rows
+	// below hold the previous writer render instead of disabling PITR.
+	if entry != nil && entry.State == v1alpha1.PITRArchiveBindingPending && entry.Reason == pitrBindingEstablishing &&
+		pitrEstablishingRenderable(profile, entry) {
 		return candidateRender(), pitrRenderApply
 	}
 	switch {
@@ -276,6 +289,20 @@ func renderedWriterArchiveID(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.D
 		return id, true, ""
 	}
 	return "", true, ""
+}
+
+// pitrBackupWaitsForRollout reports whether a backup of profileName waits
+// for the site Deployments to agree on the rendered archive (F-B): only a
+// backup of the active PITR profile, and only while a roll is in progress
+// (at least one site Deployment carries a decodable render). With none (the
+// pre-#203 deferral) nothing ends the disagreement without the user, so
+// the backup runs unstamped instead of pending indefinitely.
+func pitrBackupWaitsForRollout(fg *v1alpha1.MysqlFailoverGroup, profileName string, deploys []appsv1.Deployment) bool {
+	if !pitrEnabled(fg) || fg.Spec.Backup.PITR.ProfileName != profileName {
+		return false
+	}
+	_, kind := groupPITRHold(fg, deploys)
+	return kind == pitrHeld
 }
 
 // pitrReadBinding returns the binding a restore or verification reading
@@ -486,11 +513,11 @@ func (r *MysqlFailoverGroupReconciler) logPITRRender(fg *v1alpha1.MysqlFailoverG
 	prev := r.pitrRenderLog[key]
 	for site, msg := range next.ignored {
 		if prev.ignored[site] != msg {
-			logger.Warn(logMsgPITRRenderIgnored, "fg", fg.Name, "site", site, "error", msg)
+			logger.Warn(logMsgPITRRenderIgnored, "fg", fg.Name, "namespace", fg.Namespace, "site", site, "error", msg)
 		}
 	}
 	if next.deferred != "" && next.deferred != prev.deferred {
-		logger.Info(logMsgPITRRenderDeferred, "fg", fg.Name, "sites", next.deferred)
+		logger.Info(logMsgPITRRenderDeferred, "fg", fg.Name, "namespace", fg.Namespace, "sites", next.deferred)
 	}
 	r.pitrRenderLog[key] = next
 }

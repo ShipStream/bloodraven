@@ -365,6 +365,26 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 			},
 		},
 		{
+			// F-E: CEL compares the raw strings, so a spelling-only storage
+			// edit (the same normalized destination) admits an encryption
+			// change; reconcile refuses it (EncryptionChangeRefused /
+			// KeyChangeRefused, controller TestPITRBindingSpellingOnlyStorageEditRefused).
+			name: "spelling-only-prefix-with-selector-change",
+			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+				a := pitrProfile(fg, "a")
+				a.Storage.S3.Prefix += "/"
+				a.Encryption.PassphraseSecret.Name = "other-key"
+			},
+		},
+		{
+			name: "spelling-only-endpoint-with-encryption-removed",
+			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+				a := pitrProfile(fg, "a")
+				a.Storage.S3.EndpointURL = strings.Replace(a.Storage.S3.EndpointURL, "rustfs", "RustFS", 1) + "/"
+				a.Encryption = nil
+			},
+		},
+		{
 			name: "algorithm-explicit-and-key-explicit",
 			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
 				e := pitrProfile(fg, "a").Encryption
