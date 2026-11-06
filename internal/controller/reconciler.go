@@ -447,8 +447,11 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Drive the one-shot restore Job when spec.initFromBackup is set.
-	// If a restore is still in flight we requeue early and skip pod
-	// label sync. A parallel safety gate lives in the topology runner:
+	// If a restore is still in flight we requeue early after the pod
+	// label sync, which keeps applications off the group until the
+	// restore succeeds (as do the per-site Services above and the
+	// topology manager's DNS gate). A parallel safety gate lives in the
+	// topology runner:
 	// TopologyManagerRunner.sync() calls
 	// TopologyManager.SetAutoBootstrapSuppressed(restoreInFlight) every
 	// 30s, which prevents the fresh-deploy auto-clone path in
@@ -461,7 +464,19 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile restore job: %w", err)
 	}
+	// The restore phase feeds the Ready condition, which the topology
+	// manager writes only on topology changes: have it rewrite status now
+	// if the phase moved (the runner's sync also catches it).
+	if r.Runner != nil {
+		r.Runner.RefreshInitRestoreReadiness(req.NamespacedName, &fg)
+	}
 	if restoreRequeue > 0 {
+		// Still sweep the labels: while the restore has not succeeded
+		// syncPodLabels takes every pod out of the application Services,
+		// and that must hold for pods recreated mid-restore too.
+		if err := r.syncPodLabels(ctx, &fg); err != nil {
+			return ctrl.Result{}, fmt.Errorf("sync pod labels during initFromBackup restore: %w", err)
+		}
 		return ctrl.Result{RequeueAfter: restoreRequeue}, nil
 	}
 
@@ -1808,7 +1823,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 			labelInstance: fg.Name,
 			labelSite:     site.Name,
 		}
-		if site.IsReadOnlyReader() {
+		// A reader serves only while healthy. So does every site while an
+		// initFromBackup restore has not succeeded: syncPodLabels marks
+		// every pod unhealthy until then, so this application-facing
+		// Service (often a LoadBalancer the group's DNS record points at)
+		// has no endpoints while the seed is being loaded or holds a
+		// failed load. The restore Job uses the internal Service instead.
+		if site.IsReadOnlyReader() || restoreInFlight(fg) {
 			selector[labelHealthy] = "yes"
 		}
 		serviceType := effectiveSiteServiceType(fg.Spec.ServiceTemplate, site.ServiceTemplate)
@@ -2116,8 +2137,16 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 			writableSites++
 		}
 	}
+	// While an initFromBackup restore has not succeeded the seed is
+	// writable and published active so the restore Job can load into it,
+	// but it is not the application's database yet (a load in progress,
+	// or a failed load's partial data): no site is labelled primary or
+	// healthy, which leaves the -primary, -replicas and per-site Services
+	// without endpoints. The restore Job reaches the seed through its
+	// internal Service, which selects on the site alone.
+	restoreWithheld := restoreInFlight(fg)
 	authorityValid := false
-	if statusComplete && fg.Status.ActiveSite != "" && writableSites == 1 {
+	if !restoreWithheld && statusComplete && fg.Status.ActiveSite != "" && writableSites == 1 {
 		for _, site := range fg.Spec.Sites {
 			if site.Name == fg.Status.ActiveSite && site.IsPromotable() && statusByName[site.Name].State == "writable" {
 				authorityValid = true
@@ -2228,6 +2257,9 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 			}
 		} else if si.status.State == "writable" || si.status.State == "read-only" {
 			healthy = "yes"
+		}
+		if restoreWithheld {
+			healthy = "no"
 		}
 		// A peer the in-place restore has not recloned yet still serves
 		// pre-restore data: keep it out of the reader Services.

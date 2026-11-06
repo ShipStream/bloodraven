@@ -497,6 +497,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		if live && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
+			existing.tm.SetInitRestoreSeed(initRestoreSeedSite(fg))
+			if initRestoreReadyStale(fg) {
+				existing.tm.RequestStatusRefresh()
+			}
 			existing.tm.SetPlannedFailoverActive(plannedActive)
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			_ = r.applyRestoreProtection(ctx, existing.tm, fg, false)
@@ -555,6 +559,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 		if started {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
+			mt.tm.SetInitRestoreSeed(initRestoreSeedSite(fg))
 			mt.tm.SetPlannedFailoverActive(plannedActive)
 			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			_ = r.applyRestoreProtection(ctx, mt.tm, fg, false)
@@ -590,6 +595,44 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	r.pruneStartFailures(seen)
 
 	return nil
+}
+
+// RefreshInitRestoreReadiness asks the group's topology manager for a
+// status write when the Ready condition no longer matches the group's
+// initFromBackup restore phase. The restore reconcile writes only
+// status.restore, and the topology manager writes status only when the
+// topology changes, so without this a load that fails or succeeds after
+// the topology settled would leave Ready on the old verdict. sync() does
+// the same on every pass; this lets the restore path act at once.
+func (r *TopologyManagerRunner) RefreshInitRestoreReadiness(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup) {
+	if !initRestoreReadyStale(fg) {
+		return
+	}
+	r.mu.RLock()
+	mt := r.managers[nn]
+	r.mu.RUnlock()
+	if mt != nil {
+		mt.tm.RequestStatusRefresh()
+	}
+}
+
+// initRestoreReadyStale reports whether fg's Ready condition disagrees
+// with the verdict updateCRStatus derives from its initFromBackup restore
+// (initRestoreReadyCondition): it shows another restore reason or message,
+// or still shows a restore reason after the restore succeeded or was
+// removed from the spec. A group with no Ready condition yet, or one still
+// Initializing (which keeps its Unknown), gets its first verdict from the
+// topology manager's own first write and is not stale.
+func initRestoreReadyStale(fg *v1alpha1.MysqlFailoverGroup) bool {
+	ready := apimeta.FindStatusCondition(fg.Status.Conditions, "Ready")
+	if ready == nil || ready.Reason == "Initializing" {
+		return false
+	}
+	reason, message := initRestoreReadyCondition(fg)
+	if reason == "" {
+		return ready.Reason == readyReasonInitRestoreInProgress || ready.Reason == readyReasonInitRestoreFailed
+	}
+	return ready.Status != metav1.ConditionFalse || ready.Reason != reason || ready.Message != message
 }
 
 // handleRecloneAnnotation validates and queues the durable reclone annotation
@@ -861,6 +904,13 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// restored below would otherwise let the first Poll drain or recover
 	// sites a planned failover that survived the restart is using.
 	tm.SetPlannedFailoverActive(plannedFailoverInFlight(fg.Status.PlannedFailover))
+	// An unfinished initFromBackup restore must hold from the first poll
+	// too: that poll may otherwise clone the restore seed's partial load
+	// to an empty peer or publish DNS for it. The seed recorded in status
+	// is the authority that lifts a fence its mysqld or sidecar put back
+	// while this operator was away (checkPrimaryReassert).
+	tm.SetAutoBootstrapSuppressed(restoreInFlight(fg))
+	tm.SetInitRestoreSeed(initRestoreSeedSite(fg))
 	// Must land before Run, like the set above: a held peer's stopped
 	// receiver must not be restarted, nor a held site cloned into, by the
 	// first poll. Read uncached: the cached list may predate the queue.
@@ -1501,6 +1551,15 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// consumers from reading every operator start as an outage.
 		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, reason, initializingMessage(snap)
 		degradedStatus, degradedMessage = metav1.ConditionUnknown, readyMessage
+	}
+	// A group whose initFromBackup restore has not succeeded is not ready
+	// for applications whatever its topology: the operator keeps them off
+	// it (no DNS record, no Service endpoints). Ready says why and, after a
+	// failed load, how to recover. Initializing keeps its Unknown.
+	if reason != "Initializing" {
+		if restoreReason, restoreMessage := initRestoreReadyCondition(&freshFG); restoreReason != "" {
+			readyStatus, readyReason, readyMessage = metav1.ConditionFalse, restoreReason, restoreMessage
+		}
 	}
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
 		Type:               "Ready",

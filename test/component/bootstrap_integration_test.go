@@ -522,10 +522,18 @@ func TestFreshDeploy_InitFromBackupSeedsThenClonesAfterRestore(t *testing.T) {
 	if seedFenced(dc1) {
 		t.Fatal("seed dc1 fenced during the restore")
 	}
+	// The seed is writable and active, but not the application's database
+	// until the restore succeeds: the group hostname must not point at it.
+	if n := h.dns.getCalls(); n != 0 {
+		t.Fatalf("DNS written %d times (last %q) while the restore was in flight", n, h.dns.getLastIP())
+	}
 
 	h.tm.SetAutoBootstrapSuppressed(false)
 	h.pollN(2)
 	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+	if ip := h.dns.getLastIP(); ip != "1.1.1.1" {
+		t.Fatalf("DNS = %q after the restore succeeded, want the seed dc1 (1.1.1.1)", ip)
+	}
 	dc2.mu.Lock()
 	cloned, replStarted, host := dc2.cloneInstanceCalled, dc2.replicaStarted, dc2.changeReplicationOpts.Host
 	dc2.mu.Unlock()
@@ -569,6 +577,90 @@ func TestFreshDeploy_InitFromBackupSeedRequiresFreshDeploy(t *testing.T) {
 			}
 			if got := h.tm.Status().ActiveSite; got != "" {
 				t.Errorf("active site = %q, want none", got)
+			}
+		})
+	}
+}
+
+// TestInitFromBackup_OperatorRestartAfterPartialLoad: the operator seeds
+// dc1 and the restore Job loads part of the dump into it. The operator then
+// restarts, and while it is away dc1's sidecar restarts and fences it
+// (super_read_only=ON). The new operator rehydrates the seed from the
+// persisted status (runner: initRestoreSeedSite) and must lift that fence:
+// dc1 already holds loaded schemas, so the fresh-deploy seeding no longer
+// applies, and dc2 holds first-boot transactions under its own server_uuid
+// that dc1 lacks, which the ordinary re-assert would refuse. Nothing is
+// cloned and DNS stays unpublished until the restore succeeds. Without the
+// rehydrated seed the group stays wedged with no writable site.
+func TestInitFromBackup_OperatorRestartAfterPartialLoad(t *testing.T) {
+	const loaded = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-40"
+	const dc2Setup = "dddddddd-dddd-dddd-dddd-dddddddddddd:1-3"
+	for _, rehydrated := range []bool{true, false} {
+		name := "seed rehydrated from status"
+		if !rehydrated {
+			name = "no seed authority (wedged)"
+		}
+		t.Run(name, func(t *testing.T) {
+			noSchemas := false
+			dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+			dc2 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: dc2Setup, hasUserSchemas: &noSchemas}
+
+			first := newBootstrapHarness(t, dc1, dc2)
+			first.tm.SetAutoBootstrapSuppressed(true)
+			first.pollN(6)
+			if seedFenced(dc1) || first.tm.Status().ActiveSite != "dc1" {
+				t.Fatal("first operator did not seed dc1")
+			}
+			// Part of the load lands, then the seed's sidecar restarts
+			// while the operator is away and fences it.
+			dc1.setGtidExecuted(loaded)
+			dc1.mu.Lock()
+			dc1.readOnly, dc1.superReadOnly = true, true
+			dc1.mu.Unlock()
+
+			second := newBootstrapHarness(t, dc1, dc2)
+			second.tm.SetAutoBootstrapSuppressed(true)
+			if rehydrated {
+				second.tm.SetInitRestoreSeed("dc1")
+			}
+			second.pollN(8)
+
+			if seedFenced(dc1) != !rehydrated {
+				t.Fatalf("seed dc1 fenced = %v after the restart, want %v", seedFenced(dc1), !rehydrated)
+			}
+			if !seedFenced(dc2) {
+				t.Fatal("dc2 made writable")
+			}
+			dc2.mu.Lock()
+			cloned := dc2.cloneInstanceCalled
+			dc2.mu.Unlock()
+			if cloned || second.tm.BootstrapPhase() != controller.BootstrapPhaseNone {
+				t.Fatalf("partial load cloned to dc2 (phase %q)", second.tm.BootstrapPhase())
+			}
+			if n := second.dns.getCalls(); n != 0 {
+				t.Fatalf("DNS written %d times during the unfinished restore", n)
+			}
+			if !rehydrated {
+				return
+			}
+			if got := second.tm.Status().ActiveSite; got != "dc1" {
+				t.Fatalf("active site = %q, want dc1 so the restore Job can resume", got)
+			}
+
+			// The restore succeeds: dc2 is cloned from the seed and DNS
+			// published for it.
+			dc2.onClone = func() { dc2.setGtidExecuted(loaded) }
+			second.tm.SetAutoBootstrapSuppressed(false)
+			second.pollN(2)
+			waitForPhase(t, second.tm, controller.BootstrapPhaseDone, 2*time.Second)
+			dc2.mu.Lock()
+			cloned, host := dc2.cloneInstanceCalled, dc2.changeReplicationOpts.Host
+			dc2.mu.Unlock()
+			if !cloned || host != "mysql-lion-dc1.default.svc.cluster.local" {
+				t.Fatalf("dc2 not cloned from the seed: cloned=%v source=%q", cloned, host)
+			}
+			if ip := second.dns.getLastIP(); ip != "1.1.1.1" {
+				t.Fatalf("DNS = %q after the restore, want 1.1.1.1", ip)
 			}
 		})
 	}

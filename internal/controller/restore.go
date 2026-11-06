@@ -115,9 +115,12 @@ func splitS3Location(loc string) (bucket, key string) {
 }
 
 // restoreInFlight reports whether spec.initFromBackup is set and the
-// one-shot restore has not yet reached Succeeded. Callers use it to gate
-// side effects that would race the restore Job (notably the topology
-// manager's fresh-deploy auto-clone).
+// one-shot restore has not yet reached Succeeded (pending, running, or
+// failed). Callers use it to gate side effects that would race the restore
+// Job (notably the topology manager's fresh-deploy auto-clone) or copy a
+// failed load's partial data, and to keep applications off the group: no
+// DNS record, no primary/healthy pod labels and no endpoints in the
+// application Services until the restore succeeds.
 func restoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 	if fg.Spec.InitFromBackup == nil {
 		return false
@@ -126,6 +129,67 @@ func restoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 		return true
 	}
 	return fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded
+}
+
+// initRestoreSeedSite returns the site an initFromBackup restore that has
+// not succeeded loads into, as the persisted status records it: the
+// restore Job's target once the Job exists (the operator only creates it
+// against the seed it published and observed writable), else the published
+// active site. "" when no restore is unfinished or no seed is recorded.
+//
+// The Job's target is preferred because it outlives status.activeSite,
+// which reads "" as soon as a status write observes the seed fenced. It is
+// the authority the topology manager uses to lift such a fence after an
+// operator restart, when the seed already holds part of the load and is
+// no longer a fresh-deploy seed.
+func initRestoreSeedSite(fg *v1alpha1.MysqlFailoverGroup) string {
+	if !restoreInFlight(fg) {
+		return ""
+	}
+	if rs := fg.Status.Restore; rs != nil && rs.JobName != "" && rs.TargetSite != "" {
+		return rs.TargetSite
+	}
+	return fg.Status.ActiveSite
+}
+
+// Ready condition reasons while spec.initFromBackup has not succeeded.
+const (
+	readyReasonInitRestoreInProgress = "InitFromBackupInProgress"
+	readyReasonInitRestoreFailed     = "InitFromBackupFailed"
+)
+
+// initRestoreRecovery is the recovery procedure for a failed
+// initFromBackup restore, shared by the RestoreFailed Event and the Ready
+// condition so both say the same thing.
+const initRestoreRecovery = "The group stays out of service (no DNS record, no Service endpoints) and no site is cloned. " +
+	"To retry: if the load had started (BLOODRAVEN_LOAD_START in the Job log), empty the target first by deleting and recreating the group, " +
+	"or by deleting the group's MySQL PVCs; then delete the restore Job and the operator rebuilds it"
+
+// initRestoreReadyCondition returns the Ready=False reason and message for
+// a group whose initFromBackup restore has not succeeded, or "" when the
+// restore succeeded or none is configured.
+func initRestoreReadyCondition(fg *v1alpha1.MysqlFailoverGroup) (reason, message string) {
+	if !restoreInFlight(fg) {
+		return "", ""
+	}
+	rs := fg.Status.Restore
+	if rs != nil && rs.Phase == v1alpha1.BackupPhaseFailed {
+		detail := rs.Message
+		if rs.Reason != "" {
+			detail = rs.Reason + ": " + detail
+		}
+		if rs.JobName == "" {
+			return readyReasonInitRestoreFailed, fmt.Sprintf(
+				"initFromBackup restore failed before its Job was created: %s. The group stays out of service (no DNS record, no Service endpoints); the operator retries building the Job on each reconcile once the cause is fixed.", detail)
+		}
+		return readyReasonInitRestoreFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery)
+	}
+	phase := "Pending"
+	if rs != nil && rs.Phase != "" {
+		phase = string(rs.Phase)
+	}
+	return readyReasonInitRestoreInProgress, fmt.Sprintf(
+		"initFromBackup restore has not succeeded (phase %s); applications are kept off the group (no DNS record, no Service endpoints) until it does", phase)
 }
 
 type restoreCompletionMetadata struct {
@@ -566,7 +630,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		return 15 * time.Second, nil
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreFailed",
-		"restore Job %s failed: %s", job.Name, rs.Message)
+		"restore Job %s failed: %s. %s", job.Name, rs.Message, initRestoreRecovery)
 	// No automatic retry. Operator must delete the Job to re-trigger.
 	return 0, nil
 }
