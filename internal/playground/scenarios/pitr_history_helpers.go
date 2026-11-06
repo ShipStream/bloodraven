@@ -159,7 +159,7 @@ func pitrConfigureArchive(ctx context.Context, env *runner.Env, scenarioID, shor
 	defer rolloutCancel()
 	mfg, err := env.Wait.UntilCR(rolloutCtx, env.Namespace, "PITR rollout and archive verified", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		ready := conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
-		archiveID := pitrObservedArchiveID(mfg)
+		archiveID := pitrObservedArchiveID(mfg, prefix)
 		return ready && mfg.Status.UpdatePhase == "" && mfg.Status.ActiveSite != "" && archiveID != "",
 			fmt.Sprintf("ready=%v updatePhase=%q active=%q archive=%s", ready, mfg.Status.UpdatePhase, mfg.Status.ActiveSite, pitrArchiveSummary(mfg)), nil
 	})
@@ -170,15 +170,27 @@ func pitrConfigureArchive(ctx context.Context, env *runner.Env, scenarioID, shor
 	if err != nil {
 		return err
 	}
-	env.Capture.Note(fmt.Sprintf("PITR archive %s verified at prefix %s (encrypted=%v); active archiver: %s", pitrObservedArchiveID(mfg), prefix, encrypted, archiverSummary(st)))
-	return ctxStash(ctx, env, "archiveID", pitrObservedArchiveID(mfg))
+	archiveID := pitrObservedArchiveID(mfg, prefix)
+	env.Capture.Note(fmt.Sprintf("PITR archive %s verified at prefix %s (encrypted=%v); active archiver: %s", archiveID, prefix, encrypted, archiverSummary(st)))
+	return ctxStash(ctx, env, "archiveID", archiveID)
 }
 
-func pitrObservedArchiveID(mfg *v1alpha1.MysqlFailoverGroup) string {
+// pitrObservedArchiveID is the verified archive ID status.pitr.archive
+// reports for the profile prefix (whose archive lives under
+// <prefix>/binlogs, pitrarchive.NormalizeKeyPrefix), or "". The observation names its
+// destination: right after a prefix switch (s70's remedy) it can still
+// describe the previous prefix, whose ID must not be taken for the new
+// archive's.
+func pitrObservedArchiveID(mfg *v1alpha1.MysqlFailoverGroup, prefix string) string {
 	if mfg.Status.PITR == nil || mfg.Status.PITR.Archive == nil || mfg.Status.PITR.Archive.State != v1alpha1.PITRArchiveVerified {
 		return ""
 	}
-	return mfg.Status.PITR.Archive.ArchiveID
+	a := mfg.Status.PITR.Archive
+	dest, err := pitrarchive.ParseDestination(a.Destination)
+	if err != nil || dest.KeyPrefix != pitrarchive.NormalizeKeyPrefix(prefix) {
+		return ""
+	}
+	return a.ArchiveID
 }
 
 func pitrArchiveSummary(mfg *v1alpha1.MysqlFailoverGroup) string {
@@ -186,7 +198,7 @@ func pitrArchiveSummary(mfg *v1alpha1.MysqlFailoverGroup) string {
 		return "<none>"
 	}
 	a := mfg.Status.PITR.Archive
-	return fmt.Sprintf("{id=%q state=%s reason=%s mode=%s}", a.ArchiveID, a.State, a.Reason, a.EncryptionMode)
+	return fmt.Sprintf("{dest=%s id=%q state=%s reason=%s mode=%s}", a.Destination, a.ArchiveID, a.State, a.Reason, a.EncryptionMode)
 }
 
 // pitrCreateMarkerTable creates <db>.marker and the background writer's
@@ -604,6 +616,31 @@ func gtidSubtract(a, b string) (string, error) {
 	return as.Subtract(bs).String(), nil
 }
 
+// gtidOverlap returns a ∩ b, canonical ("" when they share nothing).
+func gtidOverlap(a, b string) (string, error) {
+	as, err := brmysql.ParseGTIDSet(a)
+	if err != nil {
+		return "", fmt.Errorf("parse %q: %w", a, err)
+	}
+	bs, err := brmysql.ParseGTIDSet(b)
+	if err != nil {
+		return "", fmt.Errorf("parse %q: %w", b, err)
+	}
+	return as.Subtract(as.Subtract(bs)).String(), nil
+}
+
+// pitrReaderSites returns the group's read-only (reader) sites, in spec
+// order. They replicate straight from the active site.
+func pitrReaderSites(mfg *v1alpha1.MysqlFailoverGroup) []string {
+	var out []string
+	for _, s := range mfg.Spec.Sites {
+		if s.IsReadOnlyReader() {
+			out = append(out, s.Name)
+		}
+	}
+	return out
+}
+
 func gtidCount(s string) (int64, error) {
 	set, err := brmysql.ParseGTIDSet(s)
 	if err != nil {
@@ -978,8 +1015,8 @@ func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, to
 }
 
 // pitrWaitSiteReplicating waits until status reports site as a read-only
-// replica that is replicating, which a planned failover requires of its
-// target.
+// replica that is replicating and not RecoveryBlocked, which a planned
+// failover requires of its target (TargetUnhealthy, DivergentTarget).
 func pitrWaitSiteReplicating(ctx context.Context, env *runner.Env, site string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -990,14 +1027,17 @@ func pitrWaitSiteReplicating(ctx context.Context, env *runner.Env, site string) 
 }
 
 // pitrSiteReplicating reports whether status shows site replicating as a
-// read-only replica.
+// read-only replica with no divergence block. A recloned former primary
+// (s70) replicates before the operator's replica GTID audit clears its
+// RecoveryBlocked report, and validatePlannedFailoverRequest refuses a
+// blocked target (DivergentTarget) whatever its threads say.
 func pitrSiteReplicating(mfg *v1alpha1.MysqlFailoverGroup, site string) (bool, string, error) {
 	for _, st := range mfg.Status.Sites {
 		if st.Name != site {
 			continue
 		}
-		msg := fmt.Sprintf("state=%s replicating=%t lastSeen=%v", st.State, st.Replicating, st.LastSeen)
-		return st.State == "read-only" && st.Replicating, msg, nil
+		msg := fmt.Sprintf("state=%s replicating=%t recovery=%q lastSeen=%v", st.State, st.Replicating, st.RecoveryState, st.LastSeen)
+		return st.State == "read-only" && st.Replicating && st.RecoveryState != "RecoveryBlocked", msg, nil
 	}
 	return false, "site not in status", nil
 }

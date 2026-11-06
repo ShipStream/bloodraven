@@ -651,10 +651,98 @@ func TestPITRSiteReplicating(t *testing.T) {
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
 		t.Fatal("a replicating read-only site was not accepted")
 	}
+	mfg.Status.Sites[1].RecoveryState = "RecoveryBlocked"
+	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
+		t.Fatal("a RecoveryBlocked replica counted as a planned-failover target")
+	}
+	mfg.Status.Sites[1].RecoveryState = "RecoveryInProgress"
+	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
+		t.Fatal("a replica in RecoveryInProgress (not refused by validation) was not accepted")
+	}
 	if ok, _, _ := pitrSiteReplicating(mfg, "iad"); ok {
 		t.Fatal("the writable site counted as a replicating target")
 	}
 	if ok, _, _ := pitrSiteReplicating(mfg, "sfo"); ok {
 		t.Fatal("a site missing from status counted as replicating")
+	}
+}
+
+// TestPITRObservedArchiveIDMatchesPrefix pins that only a Verified
+// observation of the configured prefix's destination yields an archive ID:
+// after s70's prefix switch the status may still describe the old archive.
+func TestPITRObservedArchiveIDMatchesPrefix(t *testing.T) {
+	dest := func(prefix string) string {
+		d, err := pitrarchive.NewS3Destination(backupE2EBucket, prefix, backupE2EEndpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.String()
+	}
+	const (
+		oldPrefix = "e2e/70-pitr-lossy-failover/s70-run"
+		newPrefix = "e2e/70-pitr-lossy-failover/s70-run-fresh"
+		id        = "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	cases := []struct {
+		name   string
+		obs    *v1alpha1.PITRArchiveObservation
+		prefix string
+		want   string
+	}{
+		{"no observation", nil, newPrefix, ""},
+		{"verified at the prefix", &v1alpha1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1alpha1.PITRArchiveVerified}, newPrefix, id},
+		{"slash-trimmed prefix", &v1alpha1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1alpha1.PITRArchiveVerified}, "/" + newPrefix + "/", id},
+		{"stale observation of the previous prefix", &v1alpha1.PITRArchiveObservation{Destination: dest(oldPrefix), ArchiveID: id, State: v1alpha1.PITRArchiveVerified}, newPrefix, ""},
+		{"awaiting descriptor", &v1alpha1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1alpha1.PITRArchiveAwaitingDescriptor}, newPrefix, ""},
+		{"unparseable destination", &v1alpha1.PITRArchiveObservation{Destination: "bogus", ArchiveID: id, State: v1alpha1.PITRArchiveVerified}, newPrefix, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mfg := &v1alpha1.MysqlFailoverGroup{}
+			if c.obs != nil {
+				mfg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, Archive: c.obs}
+			}
+			if got := pitrObservedArchiveID(mfg, c.prefix); got != c.want {
+				t.Errorf("pitrObservedArchiveID=%q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestGTIDOverlap(t *testing.T) {
+	const a = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	const b = "4e11fa47-71ca-11e1-9e33-c80aa9429562"
+	cases := []struct{ x, y, want string }{
+		{a + ":1-10", a + ":5-20", a + ":5-10"},
+		{a + ":1-4", a + ":5-20", ""},
+		{a + ":3-4", a + ":1-9," + b + ":1-2", a + ":3-4"},
+		{a + ":3-4", b + ":1-9", ""},
+	}
+	for _, c := range cases {
+		got, err := gtidOverlap(c.x, c.y)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.want == "" {
+			if got != "" {
+				t.Errorf("gtidOverlap(%s, %s)=%q, want none", c.x, c.y, got)
+			}
+			continue
+		}
+		if eq, err := gtidSetsEqual(got, c.want); err != nil || !eq {
+			t.Errorf("gtidOverlap(%s, %s)=%q, want %q", c.x, c.y, got, c.want)
+		}
+	}
+}
+
+func TestPITRReaderSites(t *testing.T) {
+	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg.Spec.Sites = []v1alpha1.SiteSpec{
+		{Name: "iad", Role: v1alpha1.SiteRolePrimaryCandidate},
+		{Name: "pdx", Role: v1alpha1.SiteRolePrimaryCandidate},
+		{Name: "reader", Role: v1alpha1.SiteRoleReadOnly},
+	}
+	if got := pitrReaderSites(mfg); len(got) != 1 || got[0] != "reader" {
+		t.Fatalf("pitrReaderSites=%v, want [reader]", got)
 	}
 }

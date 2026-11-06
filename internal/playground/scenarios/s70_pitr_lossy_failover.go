@@ -33,6 +33,15 @@ const (
 	// whatever the delay, and promotion resets b's channel, so a longer
 	// delay does not slow the failover.
 	s70SourceDelay = 5 * time.Minute
+	// Marker ids, in history order (pitrMarkerQuery lists phases by id):
+	// baseline 1, P (kept by b) 2, L1/L2 (lost) 3-4, S/Sb 5-6, S2/S2b
+	// 7-8, R 9, F/Fb 10-11.
+	s70IDPreLoss = 2
+	s70IDLost    = 3
+	s70IDS       = 5
+	s70IDS2      = 7
+	s70IDReissue = 9
+	s70IDFresh   = 10
 	// s70RepairTimeout bounds cleanup's reclone of a RecoveryBlocked site.
 	s70RepairTimeout = 12 * time.Minute
 	// pitrOperatorArchiverPollInterval mirrors the operator's
@@ -121,9 +130,29 @@ func s70Backup() runner.Step {
 func s70LossyFailover() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "delay b's applier, archive lost markers L on a, scale a to 0, b promoted without L",
+		Name:  "era P reaches b; delay b's applier, archive lost markers L on a, scale a to 0, b promoted without L; reclone readers holding L",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			a, b := ctxFetch(env, "siteA"), ctxFetch(env, "siteB")
+			// The emergency failover below must not wait out an anti-flap
+			// cooldown (s70Configure's rollout may hand the primary off):
+			// L's first commit to b's promotion has to stay well inside
+			// s70SourceDelay.
+			if err := pitrWaitCooldown(ctx, env); err != nil {
+				return err
+			}
+			// P is history b keeps: written on a and applied by b before
+			// the delay. Without it a's archive holds nothing beyond β1
+			// but L, so latest with excludeGtids=L has nothing to replay
+			// and refuses PITRNoArchivedReplay (planner latest(): Replay
+			// = Λ ∖ B ∖ X = ∅).
+			if err := pitrWithWriter(ctx, env, a, s70DBName, func() error {
+				return pitrInsertMarker(ctx, env, a, s70DBName, s70IDPreLoss, "P")
+			}); err != nil {
+				return err
+			}
+			if err := waitForReplicaGTID(ctx, env, a, b); err != nil {
+				return err
+			}
 			replica, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, b, env.Creds)
 			if err != nil {
 				return err
@@ -145,10 +174,10 @@ func s70LossyFailover() runner.Step {
 			// file holds all of it and nothing of a's commits is left
 			// unarchived when a goes down.
 			if err := pitrWithWriter(ctx, env, a, s70DBName, func() error {
-				if err := pitrInsertMarker(ctx, env, a, s70DBName, 2, "L1"); err != nil {
+				if err := pitrInsertMarker(ctx, env, a, s70DBName, s70IDLost, "L1"); err != nil {
 					return err
 				}
-				return pitrInsertMarker(ctx, env, a, s70DBName, 3, "L2")
+				return pitrInsertMarker(ctx, env, a, s70DBName, s70IDLost+1, "L2")
 			}); err != nil {
 				return err
 			}
@@ -193,9 +222,50 @@ func s70LossyFailover() runner.Step {
 				return fmt.Errorf("the failover lost nothing (b has %s ⊇ a's archived %s); the delay did not hold L back", bSet, flushed.GTID)
 			}
 			env.Capture.Note(fmt.Sprintf("lossy failover to %s: lost archived set L=%s", b, lost))
-			return ctxStash(ctx, env, "lost", lost)
+			if err := ctxStash(ctx, env, "lost", lost); err != nil {
+				return err
+			}
+			return s70RecloneReadersHolding(ctx, env, lost)
 		},
 	}
+}
+
+// s70RecloneReadersHolding reclones every reader (read-only role) site that
+// executed any of L. A reader replicates straight from a with no delay, so
+// it applied L before a went down and now holds transactions b lacks: the
+// operator refuses to repoint it (SourceConvergenceBlocked) and its replica
+// GTID audit reports it RecoveryBlocked with L. Left so, the PITR prefix
+// switch of s70Remedy never rolls it (the ordered update retains an unsafe
+// follower's drift), its sidecar never reports the new destination, and the
+// new archive never reaches Verified, which needs every site. Worse, once a
+// is recloned and fails back, a's reissued GTIDs can make the reader's set
+// look contained in a's, and convergence would restart it on a history it
+// does not share. Recloning it from b now is the documented remedy for a
+// replica that holds a lost tail.
+func s70RecloneReadersHolding(ctx context.Context, env *runner.Env, lost string) error {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return err
+	}
+	for _, r := range pitrReaderSites(mfg) {
+		set, err := pitrSiteGTID(ctx, env, r)
+		if err != nil {
+			return fmt.Errorf("read reader %s: %w", r, err)
+		}
+		held, err := gtidOverlap(lost, set)
+		if err != nil {
+			return err
+		}
+		if held == "" {
+			env.Capture.Note(fmt.Sprintf("reader %s holds none of L (%s); left in place", r, set))
+			continue
+		}
+		env.Capture.Note(fmt.Sprintf("reader %s holds %s of the lost set; recloning it from the new primary", r, held))
+		if err := pitrRecloneSite(ctx, env, r, true); err != nil {
+			return fmt.Errorf("reclone reader %s, which holds the lost %s: %w", r, held, err)
+		}
+	}
+	return nil
 }
 
 func s70VerifyLatestLoss() runner.Step {
@@ -209,16 +279,17 @@ func s70VerifyLatestLoss() runner.Step {
 			}
 			lost := ctxFetch(env, "lost")
 			if err := s70VerifyRefusedNamingL(ctx, env, "latest-lost", pitrExpectation{
-				Backup: "b1", Mode: "latest", Fence: flushed, Markers: []string{"baseline"},
+				Backup: "b1", Mode: "latest", Fence: flushed, Markers: []string{"baseline", "P"},
 			}, lost); err != nil {
 				return err
 			}
 			// excludedDivergentTransactionCount is |D|, the timestamp-mode
 			// D window; latest mode's loss evidence is not counted there, so
-			// latest-x asserts L through gtidExecuted = A-flush ∖ L exactly.
+			// latest-x asserts L through gtidExecuted = A-flush ∖ L exactly,
+			// which replays era P.
 			return pitrVerify(ctx, env, s70ID, s70DBName, "latest-x", pitrExpectation{
 				Backup: "b1", Mode: "latest", Fence: flushed, Exclude: lost, Outcome: v1alpha1.PointInTimeArchiveHead,
-				Markers: []string{"baseline"},
+				Markers: []string{"baseline", "P"},
 			})
 		},
 	}
@@ -230,7 +301,7 @@ func s70VerifyTimestampAfterLoss() runner.Step {
 		Name:  "b writes S; β1 after S refuses DivergentHistory, and verifies with excludeGtids=L",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			b := ctxFetch(env, "siteB")
-			f, err := s70Era(ctx, env, b, 4, "S")
+			f, err := s70Era(ctx, env, b, s70IDS, "S")
 			if err != nil {
 				return err
 			}
@@ -241,7 +312,7 @@ func s70VerifyTimestampAfterLoss() runner.Step {
 				return err
 			}
 			lost := ctxFetch(env, "lost")
-			e := pitrExpectation{Backup: "b1", Mode: "timestamp", Fence: f, Markers: []string{"baseline", "S"}}
+			e := pitrExpectation{Backup: "b1", Mode: "timestamp", Fence: f, Markers: []string{"baseline", "P", "S"}}
 			if err := s70VerifyRefusedNamingL(ctx, env, "ts-lost", e, lost); err != nil {
 				return err
 			}
@@ -317,7 +388,7 @@ func s70VerifyBackupAfterLoss() runner.Step {
 			if err := pitrBackup(ctx, env, s70ID, "b2"); err != nil {
 				return err
 			}
-			f, err := s70Era(ctx, env, b, 6, "S2")
+			f, err := s70Era(ctx, env, b, s70IDS2, "S2")
 			if err != nil {
 				return err
 			}
@@ -326,7 +397,7 @@ func s70VerifyBackupAfterLoss() runner.Step {
 			}
 			return pitrVerify(ctx, env, s70ID, s70DBName, "b2", pitrExpectation{
 				Backup: "b2", Mode: "timestamp", Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
-				Markers: []string{"baseline", "S", "Sb", "S2"},
+				Markers: []string{"baseline", "P", "S", "Sb", "S2"},
 			})
 		},
 	}
@@ -454,7 +525,7 @@ func s70VerifyHistoryReset() runner.Step {
 		Name:  "a's new writes reissue L's GTIDs: every verification refuses PITRArchiveHistoryReset",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			a := ctxFetch(env, "siteA")
-			if err := pitrInsertMarker(ctx, env, a, s70DBName, 8, "R"); err != nil {
+			if err := pitrInsertMarker(ctx, env, a, s70DBName, s70IDReissue, "R"); err != nil {
 				return err
 			}
 			// The upload is what records the reuse (DESIGN O2-5). The
@@ -492,7 +563,7 @@ func s70Remedy() runner.Step {
 			if err := pitrBackup(ctx, env, s70ID, "b3"); err != nil {
 				return err
 			}
-			f, err := s70Era(ctx, env, a, 9, "F")
+			f, err := s70Era(ctx, env, a, s70IDFresh, "F")
 			if err != nil {
 				return err
 			}
@@ -501,7 +572,7 @@ func s70Remedy() runner.Step {
 			}
 			return pitrVerify(ctx, env, s70ID, s70DBName, "fresh", pitrExpectation{
 				Backup: "b3", Mode: "timestamp", Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
-				Markers: []string{"baseline", "S", "Sb", "S2", "S2b", "R", "F"},
+				Markers: []string{"baseline", "P", "S", "Sb", "S2", "S2b", "R", "F"},
 			})
 		},
 	}
