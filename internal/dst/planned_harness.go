@@ -344,7 +344,7 @@ func (pl *plannedHarness) restoreManager(tm *controller.TopologyManager, rec con
 func (pl *plannedHarness) wiring() controller.ManagerWiring {
 	obj := pl.store.Object()
 	var w controller.ManagerWiring
-	if ownsSites(obj) {
+	if controller.PlannedRunNeedsClaim(obj, pl.r.clk.Now()) {
 		w.HydrateFrom = obj.Status.PlannedFailover.DeepCopy()
 	}
 	w.HoldFrom = plannedHoldOf(obj)

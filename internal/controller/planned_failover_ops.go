@@ -174,6 +174,15 @@ func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunR
 		return PlannedClaimDecision{}, errClaimLost
 	}
 	snap := p.reg.Snapshot(ref.Group)
+	now := time.Now()
+	if snap.Current != nil {
+		now = snap.Current.clock.Now()
+	}
+	if held, ok := snap.Slot.snapshot(); (!ok || held.runID != ref.RunID) && !PlannedRunNeedsClaim(fg, now) {
+		// A recorded promotion released its claim; it is never hydrated
+		// back (O-m1). The engine publishes it without a claim.
+		return PlannedClaimDecision{}, errClaimLost
+	}
 	slot := snap.Slot
 	tm := snap.Current
 	if tm == nil {

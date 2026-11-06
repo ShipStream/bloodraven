@@ -18,7 +18,7 @@ The runner stamps an in-progress marker (`chaos.playground.bloodraven.io/in-prog
 - `--force` — delete any prior marker before preflight (banner printed).
 - `--auto-reset` — on Precheck failure, shell out to `./playground/reset-mysql.sh && ./playground/setup.sh`, then retry the scenario once. Wipes data; 3-second confirmation pause unless `CI=1`.
 
-`chaos-check` runs the same structural baseline scenarios use (stuck scale-to-0 deployments, bogus `lastFailoverTarget`, anti-flap cooldown still ticking, all-sites-read-only `NoPrimary` symptom, replication off on a non-active candidate) and prints `inProgress: yes/no + summary`. Each error includes the exact remediation command, so `chaos-check` is the fastest way to decide whether to re-run, `--force`, or reset.
+`chaos-check` runs the same structural baseline scenarios use (stuck scale-to-0 deployments, bogus `lastFailoverTarget`, anti-flap cooldown still ticking, all-sites-read-only `NoPrimary` symptom, replication off on a non-active candidate, a standing planned-failover automation hold) and prints `inProgress: yes/no + summary`. Each error includes the exact remediation command, so `chaos-check` is the fastest way to decide whether to re-run, `--force`, or reset.
 
 After each scenario, standard cleanup waits for the MFG `Ready=True` condition, stable MySQL site states, and, when `spec.dragonfly.enabled=true`, `status.dragonfly.phase=Ready` with exactly one master and healthy replicas. This keeps `run-all` from starting the next scenario while Dragonfly is still recovering from an expected REPLTAKEOVER or pod restart.
 

@@ -74,6 +74,24 @@ func (r *MysqlFailoverGroupReconciler) plannedClaimHeld(nn types.NamespacedName)
 	return r.Runner != nil && r.Runner.PlannedClaimHeld(nn)
 }
 
+// plannedOwnsDragonfly reports whether a planned failover owns fg's
+// Dragonfly for a reconcile-side decision. Once the group's topology
+// manager is registered its claim slot is hydrated from an uncached read,
+// so the slot alone decides (a run that released its claim after recording
+// its promotion owns nothing, whatever status says); before that, or with
+// no runner, the status form (plannedFailoverOwnsDragonfly) decides.
+func (r *MysqlFailoverGroupReconciler) plannedOwnsDragonfly(fg *v1alpha1.MysqlFailoverGroup) bool {
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	if r.Runner == nil {
+		return plannedFailoverOwnsDragonfly(fg, false)
+	}
+	held := r.Runner.PlannedClaimHeld(nn)
+	if r.Runner.Snapshot(nn).Current != nil {
+		return held
+	}
+	return plannedFailoverOwnsDragonfly(fg, held)
+}
+
 // plannedRunClaimHeld reports whether the group's slot holds a Run-mode
 // claim (a run or its provisional grant); a hold does not count.
 func (r *MysqlFailoverGroupReconciler) plannedRunClaimHeld(nn types.NamespacedName) bool {

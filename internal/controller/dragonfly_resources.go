@@ -639,7 +639,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 		// A planned-failover run that owns the sites, or a held claim (a
 		// provisional grant or a hold), owns the active Dragonfly too. A
 		// request that is only waiting owns nothing.
-		if plannedFailoverOwnsSites(fg) || r.plannedClaimHeld(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}) {
+		if r.plannedOwnsDragonfly(fg) {
 			return requeueAfter, nil
 		}
 		promotionTarget := ""
@@ -743,7 +743,7 @@ func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Co
 		logger.Info("dragonfly rollout: re-read failover group failed", "fg", nn, "error", err)
 		return false, true
 	}
-	if why := rolloutPromotionBlocked(fresh, target, oldSource); why != "" {
+	if why := rolloutPromotionBlocked(fresh, target, oldSource, r.plannedOwnsDragonfly(fresh)); why != "" {
 		logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target, "reason", why, "fg", nn)
 		return false, true
 	}

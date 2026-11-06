@@ -391,7 +391,9 @@ func (h *pfHarness) newManager() *controller.TopologyManager {
 func (h *pfHarness) wiring(slot *controller.PlannedClaimSlot) controller.ManagerWiring {
 	obj := h.store.Object()
 	w := controller.ManagerWiring{Slot: slot}
-	if pf := obj.Status.PlannedFailover; pf != nil && pfOwnsSites(obj) {
+	// As registerManagerWith: a Promoting block whose own record is durable
+	// released its claim and is not hydrated (O-m1).
+	if pf := obj.Status.PlannedFailover; pf != nil && pfOwnsSites(obj) && controller.PlannedRunNeedsClaim(obj, h.clk.Now()) {
 		w.HydrateFrom = pf.DeepCopy()
 	}
 	return w

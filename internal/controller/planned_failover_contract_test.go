@@ -189,6 +189,11 @@ func TestTerminalMarker_RoundTrip(t *testing.T) {
 		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded","extra":true}`,
 		`{"schemaVersion":1,"runID":"","outcome":"Succeeded"}`,
 		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"} {}`,
+		// Decoder.More reports false before a closing delimiter, so these
+		// need the explicit EOF check (G-m4).
+		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"}}`,
+		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"}]`,
+		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"} x`,
 	} {
 		if m, ok := ParseTerminalMarker(bad); ok {
 			t.Errorf("ParseTerminalMarker(%q) = %+v, accepted", bad, m)

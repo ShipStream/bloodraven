@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"time"
@@ -162,7 +163,13 @@ func ParseTerminalMarker(v string) (TerminalMarker, bool) {
 	var p terminalMarkerPayload
 	dec := json.NewDecoder(strings.NewReader(v))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&p); err != nil || dec.More() || p.SchemaVersion != TerminalMarkerSchemaVersion || p.RunID == "" {
+	if err := dec.Decode(&p); err != nil || p.SchemaVersion != TerminalMarkerSchemaVersion || p.RunID == "" {
+		return TerminalMarker{}, false
+	}
+	// Anything after the object but whitespace is malformed. Decoder.More
+	// is not enough: it reports false before a stray '}' or ']'.
+	var rest json.RawMessage
+	if err := dec.Decode(&rest); !errors.Is(err, io.EOF) {
 		return TerminalMarker{}, false
 	}
 	m := TerminalMarker{RunID: p.RunID, Outcome: p.Outcome, Reason: p.Reason}
@@ -372,6 +379,28 @@ func plannedFailoverOwnsSites(fg *v1alpha1.MysqlFailoverGroup) bool {
 		return true
 	}
 	return false
+}
+
+// PlannedRunNeedsClaim reports whether fg's run must hold the claim, which
+// hydration (manager registration, EnsureClaim) re-establishes from the
+// durable block: it owns the sites (plannedFailoverOwnsSites) and is not a
+// Promoting block whose own failover record is already durable. Such a run
+// released its claim once the promotion was recorded and published (the
+// DST-4 ruling) and has only its Publishing write left: hydrating it back
+// would defer automation again, and a re-proof after a later emergency
+// failover would hold the group (O-m1). The engine drives it to Publishing
+// without a claim.
+func PlannedRunNeedsClaim(fg *v1alpha1.MysqlFailoverGroup, now time.Time) bool {
+	if !plannedFailoverOwnsSites(fg) {
+		return false
+	}
+	return !plannedPromotionRecorded(fg, fg.Status.PlannedFailover, now)
+}
+
+// plannedPromotionRecorded reports whether pf is a Promoting block whose
+// own failover record (recognised by content) is the durable record of fg.
+func plannedPromotionRecorded(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) bool {
+	return pf != nil && pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && plannedOwnRecordDurable(fg, pf, now)
 }
 
 // plannedFailoverActive: the run is not terminal (pending, owning sites, or

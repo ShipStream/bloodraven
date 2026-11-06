@@ -362,8 +362,13 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec
 // live, converged cluster: its encryptionAtRest records the escrow Secret
 // each site's keyring is projected from, and dropping it would make the
 // restarted operator treat encrypted sites as a fresh bootstrap.
+// plannedFailoverHold must go with plannedFailover: a hold left behind is
+// hydrated by the restarted operator and keeps emergency failover,
+// bootstrap and DNS reconcile held on the fresh cluster.
+// TestMFGStatusFieldsToClear classifies every status field, so a new one
+// must be added here or to its kept list.
 func mfgStatusFieldsToClear(keepEncryption bool) []string {
-	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "updatePhase", "recovery", "dragonfly"}
+	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"}
 	if !keepEncryption {
 		fields = append(fields, "encryptionAtRest")
 	}

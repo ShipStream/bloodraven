@@ -54,10 +54,10 @@ func runVerifyBackup(args []string, stdout, stderr *os.File) error {
 	fs.BoolVar(&wait, "wait", false, "block until the verification reaches Succeeded or Failed")
 	fs.DurationVar(&timeout, "timeout", 30*time.Minute, "timeout for --wait")
 	fs.Usage = func() { fmt.Fprint(stderr, verifyUsage) }
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlagsAndArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	positional := fs.Args()
 	if len(positional) != 1 {
 		fmt.Fprint(stderr, verifyUsage)
 		return fmt.Errorf("verify-backup requires exactly one positional argument (group name)")

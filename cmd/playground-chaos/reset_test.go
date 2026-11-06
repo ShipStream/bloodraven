@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -166,6 +167,48 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 	}
 	if len(wipe) != len(normalize)+1 {
 		t.Fatalf("normalization fields %v must be the wipe fields %v minus encryptionAtRest", normalize, wipe)
+	}
+
+	// Every top-level status field the failover and planned-failover
+	// engines write must be cleared by both passes: a leftover
+	// plannedFailoverHold is hydrated as an automation hold on the fresh
+	// cluster (O-m2).
+	for _, f := range []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget",
+		"promotionGtidExecuted", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"} {
+		if !slices.Contains(wipe, f) || !slices.Contains(normalize, f) {
+			t.Errorf("status field %q must be cleared by both passes (wipe %v, normalize %v)", f, wipe, normalize)
+		}
+	}
+
+	// Every status field is classified: cleared, or kept for a stated
+	// reason. A new status field fails here until someone decides.
+	kept := map[string]string{
+		"topologyGeneration":  "fences deployment leases across restarts; it must only grow",
+		"restore":             "backup/restore history, not failover state",
+		"restoreInPlace":      "backup/restore history, not failover state",
+		"restoreReclones":     "backup/restore history, not failover state",
+		"restoreOfflineFence": "backup/restore history, not failover state",
+		"backupSchedules":     "backup scheduling state",
+		"lastBackupTime":      "backup scheduling state",
+		"pitr":                "backup/PITR state",
+		"encryptionAtRest":    "cleared by the wipe pass only (asserted above)",
+	}
+	statusType := reflect.TypeOf(v1alpha1.MysqlFailoverGroupStatus{})
+	all := map[string]bool{}
+	for i := 0; i < statusType.NumField(); i++ {
+		name, _, _ := strings.Cut(statusType.Field(i).Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		all[name] = true
+		if _, ok := kept[name]; !ok && !slices.Contains(wipe, name) {
+			t.Errorf("status field %q is neither cleared by the reset nor listed as kept", name)
+		}
+	}
+	for _, f := range wipe {
+		if !all[f] {
+			t.Errorf("reset clears %q, which is not a MysqlFailoverGroup status field", f)
+		}
 	}
 }
 

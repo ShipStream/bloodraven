@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -30,7 +32,13 @@ func waitClient(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) *fake.ClientBuild
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	return fake.NewClientBuilder().WithScheme(s).WithObjects(fg)
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	return fake.NewClientBuilder().WithScheme(s).WithObjects(fg).WithStatusSubresource(fg).
+		WithIndex(&corev1.Event{}, "involvedObject.name", func(o client.Object) []string {
+			return []string{o.(*corev1.Event).InvolvedObject.Name}
+		})
 }
 
 // G-m7: a run the terminal marker ended while status still reads Promoting
@@ -50,7 +58,7 @@ func TestWaitForPlannedFailover_HonoursTerminalMarker(t *testing.T) {
 			cl := waitClient(t, waitFixture(tc.marker, v1alpha1.PlannedFailoverPhasePromoting)).Build()
 			var out, errOut bytes.Buffer
 			start := time.Now()
-			err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second)
+			err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second, plannedWaitBaseline{})
 			if time.Since(start) > 3*time.Second {
 				t.Fatalf("waited %s for a marker-ended run", time.Since(start))
 			}
@@ -81,7 +89,7 @@ func TestPlannedFailoverOutput_WarningsAndMarker(t *testing.T) {
 		CompletionTime: metav1.Now(), Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningDNSUpdateFailed}}
 	cl := waitClient(t, fg).Build()
 	var out, errOut bytes.Buffer
-	if err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second); err != nil {
+	if err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second, plannedWaitBaseline{}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "warnings: DNSUpdateFailed") {

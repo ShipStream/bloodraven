@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -68,7 +69,19 @@ func plannedDragonflyTakeoverSucceeded(fg *v1alpha1.MysqlFailoverGroup) bool {
 // effectiveDragonflyOnSyncTimeout returns the configured policy, or the
 // default (Proceed) when none is set. Only Fail rolls back.
 func effectiveDragonflyOnSyncTimeout(fg *v1alpha1.MysqlFailoverGroup) v1alpha1.DragonflySyncTimeoutPolicy {
-	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil && d.PlannedFailover.OnSyncTimeout == v1alpha1.DragonflySyncTimeoutFail {
+	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil {
+		return normalizeDragonflySyncTimeout(d.PlannedFailover.OnSyncTimeout)
+	}
+	return v1alpha1.DragonflySyncTimeoutProceed
+}
+
+// normalizeDragonflySyncTimeout maps a stored policy to its canonical
+// value. The comparison ignores case: releases before v1beta1 wrote the
+// lower-case `fail`/`proceed`, and CRD ratcheting keeps such a value on
+// an object that is updated without touching the field, so a stored
+// `fail` must keep rolling back. Anything else is Proceed.
+func normalizeDragonflySyncTimeout(p v1alpha1.DragonflySyncTimeoutPolicy) v1alpha1.DragonflySyncTimeoutPolicy {
+	if strings.EqualFold(string(p), string(v1alpha1.DragonflySyncTimeoutFail)) {
 		return v1alpha1.DragonflySyncTimeoutFail
 	}
 	return v1alpha1.DragonflySyncTimeoutProceed

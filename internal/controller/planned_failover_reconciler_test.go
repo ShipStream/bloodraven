@@ -257,12 +257,45 @@ func TestEffectiveOnCooldown(t *testing.T) {
 	if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownDefer {
 		t.Errorf("Defer: got %q, want Defer", got)
 	}
-	// Malformed values, including the v1alpha1 lower-case spelling, fall
-	// back to Reject (defence against typos).
-	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"skip", "defer"} {
+	// The released lower-case spelling, which CRD ratcheting keeps on a
+	// stored object, keeps its meaning (G-M1).
+	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"defer", "DEFER"} {
+		fg.Spec.PlannedFailover.OnCooldown = v
+		if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownDefer {
+			t.Errorf("%q: got %q, want Defer", v, got)
+		}
+	}
+	// Malformed values fall back to Reject (defence against typos).
+	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"skip", "reject", "Reject", ""} {
 		fg.Spec.PlannedFailover.OnCooldown = v
 		if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownReject {
 			t.Errorf("%q: got %q, want Reject fallback", v, got)
+		}
+	}
+}
+
+// The released lower-case onSyncTimeout values keep their meaning, both in
+// the spec and in a run's frozen settings (G-M1).
+func TestDragonflyOnSyncTimeoutIgnoresCase(t *testing.T) {
+	for _, tc := range []struct {
+		in   v1alpha1.DragonflySyncTimeoutPolicy
+		want v1alpha1.DragonflySyncTimeoutPolicy
+	}{
+		{"Fail", v1alpha1.DragonflySyncTimeoutFail},
+		{"fail", v1alpha1.DragonflySyncTimeoutFail},
+		{"FAIL", v1alpha1.DragonflySyncTimeoutFail},
+		{"Proceed", v1alpha1.DragonflySyncTimeoutProceed},
+		{"proceed", v1alpha1.DragonflySyncTimeoutProceed},
+		{"", v1alpha1.DragonflySyncTimeoutProceed},
+		{"bogus", v1alpha1.DragonflySyncTimeoutProceed},
+	} {
+		if got := effectiveDragonflyOnSyncTimeout(plannedFailoverFGWithDragonfly(string(tc.in))); got != tc.want {
+			t.Errorf("spec %q: got %q, want %q", tc.in, got, tc.want)
+		}
+		pf := &v1alpha1.PlannedFailoverStatus{Settings: v1alpha1.PlannedFailoverSettings{
+			Dragonfly: &v1alpha1.PlannedFailoverDragonflySettings{OnSyncTimeout: tc.in}}}
+		if got := plannedSettings(pf).Dragonfly.OnSyncTimeout; got != tc.want {
+			t.Errorf("settings %q: got %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

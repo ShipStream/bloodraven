@@ -48,10 +48,10 @@ func runStatus(args []string, stdout, stderr *os.File) error {
 	fs.BoolVar(&allNamespaces, "all-namespaces", false, "list groups in every namespace")
 	fs.BoolVar(&allNamespaces, "A", false, "list groups in every namespace (short)")
 	fs.Usage = func() { fmt.Fprint(stderr, statusUsage) }
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlagsAndArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	positional := fs.Args()
 	if len(positional) > 1 {
 		return fmt.Errorf("status takes at most one positional argument (group name); got %d", len(positional))
 	}

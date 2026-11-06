@@ -338,9 +338,11 @@ func effectiveDrainTimeout(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
 // effectiveOnCooldown returns the spec.plannedFailover.onCooldown
 // policy, defaulting to Reject. An empty value or any unknown value
 // falls back to Reject so a malformed spec does not accidentally
-// enable the defer path.
+// enable the defer path. The comparison ignores case: releases before
+// v1beta1 wrote the lower-case `defer`, which CRD ratcheting keeps on an
+// object updated without touching the field.
 func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) v1alpha1.PlannedFailoverCooldownPolicy {
-	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.OnCooldown == v1alpha1.PlannedFailoverCooldownDefer {
+	if fg.Spec.PlannedFailover != nil && strings.EqualFold(string(fg.Spec.PlannedFailover.OnCooldown), string(v1alpha1.PlannedFailoverCooldownDefer)) {
 		return v1alpha1.PlannedFailoverCooldownDefer
 	}
 	return v1alpha1.PlannedFailoverCooldownReject
@@ -396,9 +398,7 @@ func plannedSettings(pf *v1alpha1.PlannedFailoverStatus) v1alpha1.PlannedFailove
 		if dd.MaxSyncWait.Duration <= 0 {
 			dd.MaxSyncWait.Duration = defaultDragonflySyncWait
 		}
-		if dd.OnSyncTimeout == "" {
-			dd.OnSyncTimeout = v1alpha1.DragonflySyncTimeoutProceed
-		}
+		dd.OnSyncTimeout = normalizeDragonflySyncTimeout(dd.OnSyncTimeout)
 		s.Dragonfly = &dd
 	}
 	return s

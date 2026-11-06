@@ -47,6 +47,10 @@ const (
 	// in a row, from the durable stall-since time, before the run ends with
 	// a terminal marker.
 	plannedFailoverStatusStallDeadline = 2 * time.Minute
+	// plannedReleasedStallDeadline replaces it for a run that already
+	// released its claim after its promotion was confirmed, recorded and
+	// published: only the Publishing write is left.
+	plannedReleasedStallDeadline = 10 * time.Second
 	// plannedFailoverManagerAbsentDeadline is how long a run holding the
 	// claim waits for a topology manager, from the durable absent-since
 	// time, before it ends without MySQL access.
@@ -657,6 +661,24 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 			next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseDeferred, "")
 			return e.writeDeferredCooldown(ctx, fg, nil, next, verr.Error(), true)
 		}
+		if unsettled, why := plannedAuthorityUnsettled(fg, nil, now); unsettled && !plannedStaticRejection(reason) {
+			// The refusal was read from mid-failover status: admit into a
+			// bounded wait instead, as a Deferred or Admitting run does.
+			next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseAdmitting,
+				fmt.Sprintf("waiting for admission (%s): %s", v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why))
+			deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
+			next.Admission = &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline,
+				WaitReason: v1alpha1.PlannedFailoverWaitAuthorityUnsettled}
+			out, _, _ := e.commit(ctx, fg, false, freshRunBuild(next))
+			if out != WriteCommitted {
+				return requeueFor(out), nil
+			}
+			e.groupMemo(nn).lastRunID = next.RunID
+			e.consumeRequest(ctx, e.reload(ctx, fg), "accepted")
+			e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverAdmissionDelayed,
+				fmt.Sprintf("planned failover to %q waiting: %s %s", req.Site, v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why))
+			return plannedRequeuePoll, nil
+		}
 		next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseFailed, verr.Error())
 		next.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: reason,
 			CompletionTime: metav1.NewTime(now)}
@@ -838,6 +860,45 @@ func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.
 	return d, err
 }
 
+// plannedAuthorityUnsettled reports whether a failover is in flight, so the
+// status that validation reads (status.activeSite, status.sites[]) is not
+// yet meaningful: status.activeSite is empty, or the durable failover
+// record is newer than the run's start and names a site other than
+// status.activeSite (published record, unpublished topology). A target
+// being promoted by emergency failover has stopped replicating, so
+// validating it then would end the run TargetUnhealthy a few seconds
+// before it becomes the primary (scenario 64). A pending request owns
+// nothing, so waiting costs only the admission deadline. pf may be nil
+// for a request with no run yet; then only an empty activeSite counts,
+// because a record older than the request proves nothing about it.
+func plannedAuthorityUnsettled(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) (bool, string) {
+	if fg.Status.ActiveSite == "" {
+		return true, "status.activeSite is empty; a failover is in flight"
+	}
+	if pf == nil {
+		return false, ""
+	}
+	rec, _ := durableFailoverRecord(fg, now)
+	if !rec.LastFailover.IsZero() && rec.LastFailover.After(pf.StartTime.Time) &&
+		rec.LastFailoverTarget != "" && rec.LastFailoverTarget != fg.Status.ActiveSite {
+		return true, fmt.Sprintf("a failover to %q recorded at %s is not yet published (status.activeSite=%q)",
+			rec.LastFailoverTarget, rec.LastFailover.UTC().Format(time.RFC3339), fg.Status.ActiveSite)
+	}
+	return false, ""
+}
+
+// plannedStaticRejection reports whether a validation refusal depends on
+// the spec and the request alone, so unsettled authority cannot change it.
+func plannedStaticRejection(reason v1alpha1.PlannedFailoverReason) bool {
+	switch reason {
+	case v1alpha1.PlannedFailoverReasonInvalidAnnotation,
+		v1alpha1.PlannedFailoverReasonUnknownSite,
+		v1alpha1.PlannedFailoverReasonTargetNotPromotable:
+		return true
+	}
+	return false
+}
+
 // deferredPass re-validates a Deferred run.
 func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
 	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
@@ -859,6 +920,28 @@ func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.M
 		return e.writeDeferredHold(ctx, fg, pf, nil, hold)
 	}
 	now := e.clk.Now()
+	if unsettled, why := plannedAuthorityUnsettled(fg, pf, now); unsettled {
+		// Wait in Admitting, which bounds the wait by the admission
+		// deadline (a Deferred run has none); Admitting re-validates once
+		// authority settles.
+		settings := plannedFailoverSettingsFor(fg, req)
+		out, _ := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
+			next.Phase = v1alpha1.PlannedFailoverPhaseAdmitting
+			next.TargetSite = req.Site
+			next.Settings = settings
+			deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
+			next.Admission = &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline,
+				WaitReason: v1alpha1.PlannedFailoverWaitAuthorityUnsettled}
+			next.Message = fmt.Sprintf("waiting for admission (%s): %s", v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why)
+		})
+		if out != WriteCommitted {
+			return requeueFor(out), nil
+		}
+		e.consumeRequest(ctx, e.reload(ctx, fg), "resumed")
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverAdmissionDelayed,
+			fmt.Sprintf("planned failover to %q waiting: %s %s", req.Site, v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why))
+		return plannedRequeuePoll, nil
+	}
 	result, reason, verr := validatePlannedFailoverRequest(fg, req, now, true)
 	switch result {
 	case PlannedFailoverAccept:
@@ -921,6 +1004,11 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonConcurrentOperation,
 			fmt.Sprintf("planned-failover held by operation %s instance %s until %s; re-annotate once it is released",
 				hold.OperationID, hold.Instance, hold.ExpiresAt.UTC().Format(time.RFC3339)), ReleaseTerminal, false)
+	}
+	if unsettled, why := plannedAuthorityUnsettled(fg, pf, now); unsettled {
+		// Validation would judge the target from mid-failover status;
+		// wait (bounded by the deadline) and validate once it settles.
+		return e.noteWait(ctx, fg, pf, v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why)
 	}
 	req := PlannedFailoverRequest{Site: pf.TargetSite}
 	result, reason, verr := validatePlannedFailoverRequest(fg, req, now, true)
@@ -1051,6 +1139,11 @@ func (e *PlannedFailoverEngine) claimPass(ctx context.Context, fg *v1alpha1.Mysq
 		// before Publishing committed: re-prove and record the promotion
 		// into it, then release again.
 		m.promote.released, m.promote.recorded = false, false
+	}
+	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting {
+		if held, ok := e.topo.HeldRunClaim(nn); (!ok || held != pf.RunID) && plannedPromotionRecorded(fg, pf, e.clk.Now()) {
+			return e.publishRecorded(ctx, fg, pf)
+		}
 	}
 	dec, err := e.topo.EnsureClaim(ctx, ref, fg)
 	switch {
@@ -1633,6 +1726,25 @@ func (e *PlannedFailoverEngine) confirmedTail(ctx context.Context, fg *v1alpha1.
 	return e.writePublishing(ctx, fg, pf)
 }
 
+// publishRecorded drives a Promoting block whose own failover record is
+// already durable, and whose claim this process does not hold (a restart
+// or manager replacement after the confirmed tail released it), to
+// Publishing without a claim (O-m1). The durable record proves the
+// promotion was confirmed and recorded; hydrating the claim back would
+// defer automation again, and a re-proof after a later emergency failover
+// would hold the group. DNS is left to the topology manager's reconcile,
+// which no claim defers any more.
+func (e *PlannedFailoverEngine) publishRecorded(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+	m := e.runMemo(pf.RunID)
+	if !m.promote.released {
+		m.promote.confirmed, m.promote.confirmedAt = true, plannedOwnRecordTime(fg, pf, e.clk.Now())
+		m.promote.recorded, m.promote.released = true, true
+		log.FromContext(ctx).Info("planned failover: promotion already recorded; publishing without the claim",
+			"fg", fg.Namespace+"/"+fg.Name, "runId", pf.RunID, "target", pf.TargetSite)
+	}
+	return e.writePublishing(ctx, fg, pf)
+}
+
 // writePublishing writes the Publishing record of a confirmed, recorded
 // and released run. It holds no claim; a non-commit is retried, and the
 // status stall (§6.4) may end the run once its failover record is durable.
@@ -2145,7 +2257,16 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 			m.stallSince = start
 		}
 	}
-	if m.stallSince.IsZero() || e.clk.Now().Sub(m.stallSince) < plannedFailoverStatusStallDeadline || fresh == nil {
+	deadline := plannedFailoverStatusStallDeadline
+	if m.promote.released {
+		// A released run's record is durable and only its Publishing write
+		// is left: end it by the marker soon, so a restart before
+		// Publishing lands, after a later failover replaced the run's
+		// record, finds a marked run instead of hydrating a claim it can
+		// no longer re-prove (O-m1).
+		deadline = plannedReleasedStallDeadline
+	}
+	if m.stallSince.IsZero() || e.clk.Now().Sub(m.stallSince) < deadline || fresh == nil {
 		return 0, false
 	}
 	if len(plannedFenceSet(pf)) > plannedFailoverWatermarkAnnotationLimit {
@@ -2219,7 +2340,7 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 		"fg", nn.String(), "runId", cur.RunID, "outcome", string(final.Result.Outcome), "reason", string(final.Result.Reason))
 	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverStatusStalled,
 		fmt.Sprintf("status writes for planned failover %s failed for %s; the run ended %s (%s) with the %s annotation",
-			cur.RunID, plannedFailoverStatusStallDeadline, final.Result.Outcome, final.Result.Reason, PlannedFailoverTerminalAnnotation))
+			cur.RunID, deadline, final.Result.Outcome, final.Result.Reason, PlannedFailoverTerminalAnnotation))
 	why := ReleaseStatusStalled
 	e.afterTerminal(ctx, nn, fg, final, why, "")
 	return plannedFailoverMarkerRetryInterval, true
@@ -2243,7 +2364,10 @@ func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.Names
 				m.promote.recorded = true
 			}
 		}
-		if m.promote.dns == nil {
+		if m.promote.dns == nil && !m.promote.released {
+			// A released run published DNS before it released, or (a
+			// recorded run published without the claim) leaves DNS to the
+			// topology manager.
 			state, err := e.topo.ApplyDNS(ctx, ref)
 			if err != nil || state == v1alpha1.PlannedFailoverDNSFailed {
 				stalled = addPlannedWarnings(stalled, v1alpha1.PlannedFailoverWarningDNSUpdateFailed)

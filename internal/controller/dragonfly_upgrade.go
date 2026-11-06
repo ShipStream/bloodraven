@@ -146,7 +146,7 @@ func (r *MysqlFailoverGroupReconciler) acceptDragonflySnapshotUpgrade(ctx contex
 		_ = r.removeDragonflySnapshotUpgradeAnnotation(ctx, nn)
 		return 0, nil
 	}
-	if plannedFailoverOwnsDragonfly(fg, r.Runner != nil && r.Runner.PlannedClaimHeld(nn)) {
+	if r.plannedOwnsDragonfly(fg) {
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyUpgradeRejected, "dragonfly snapshot-upgrade rejected: planned failover is running")
 		_ = r.removeDragonflySnapshotUpgradeAnnotation(ctx, nn)
 		return 0, nil

@@ -148,7 +148,7 @@ The only surviving copy of a sealed site's keys is the keyring file in its runni
 
 ## 5. Planned Failover Preflight Checklist
 
-Before executing a planned failover with `kubectl bloodraven promote <group> -n <ns> --to=<target-site>`:
+Before executing a planned failover with `kubectl bloodraven promote <group> <target-site> -n <ns>`:
 
 - [ ] Target site is reachable and `status.sites[target].reachable == true`.
 - [ ] Replication lag on target site is 0 seconds (`SecondsBehindSource == 0`).

@@ -179,12 +179,27 @@ func (m *DragonflyManager) paused() bool {
 	return m.upgradePaused.Load() || m.plannedOwned()
 }
 
-// plannedFailoverOwnsDragonfly reports whether a planned failover owns the
-// group's Dragonfly: its run owns the sites (fg, read under the gate), or
-// the claim slot holds a run or a hold (claimHeld). A request that is only
-// waiting (Admitting, Deferred) owns nothing.
+// plannedFailoverOwnsDragonfly is the status form of Dragonfly ownership,
+// for a caller with no hydrated claim slot to ask: the claim slot holds a
+// run or a hold (claimHeld), or fg's run (read under the gate) still needs
+// the claim (PlannedRunNeedsClaim). A request that is only waiting
+// (Admitting, Deferred) owns nothing, and neither does a run that released
+// its claim once its promotion was recorded (DST-4, O-m1).
 func plannedFailoverOwnsDragonfly(fg *v1alpha1.MysqlFailoverGroup, claimHeld bool) bool {
-	return claimHeld || plannedFailoverOwnsSites(fg)
+	return claimHeld || PlannedRunNeedsClaim(fg, time.Now())
+}
+
+// plannedOwnsDragonfly reports whether a planned failover owns the group's
+// Dragonfly. With a planned owner wired (the runner's claim slot, hydrated
+// from an uncached read before this manager starts) the slot alone
+// decides: status still reads Promoting after the confirmed tail released
+// the claim, and an emergency follow-up in that window must run. Without
+// one, fg decides.
+func (m *DragonflyManager) plannedOwnsDragonfly(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if f := m.plannedOwner.Load(); f != nil {
+		return (*f)()
+	}
+	return plannedFailoverOwnsDragonfly(fg, false)
 }
 
 // SetConnector overrides the default connector. Tests use this to inject
@@ -392,13 +407,21 @@ func (m *DragonflyManager) mysqlActivePromotionCandidate(fg *v1alpha1.MysqlFailo
 	// While a run is taking over Dragonfly, promoting MySQL or publishing,
 	// or rolling back after a takeover, Dragonfly and MySQL disagree on
 	// purpose: the run decides, and Dragonfly follows MySQL after release.
+	// A Promoting or Publishing run whose claim the slot no longer holds
+	// released it after recording its promotion (DST-4): Dragonfly follows
+	// MySQL again, unless status.activeSite still names the run's source,
+	// which is the pre-promotion authority a stalled status write left.
 	if pf, marked := plannedFailoverRun(fg); pf != nil && !marked {
+		owner := m.plannedOwner.Load()
 		switch pf.Phase {
 		case v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-			v1alpha1.PlannedFailoverPhasePromoting,
-			v1alpha1.PlannedFailoverPhasePublishing,
 			v1alpha1.PlannedFailoverPhaseRollingBack:
 			return "", "", false
+		case v1alpha1.PlannedFailoverPhasePromoting,
+			v1alpha1.PlannedFailoverPhasePublishing:
+			if owner == nil || (*owner)() || mysqlActive == pf.SourceSite {
+				return "", "", false
+			}
 		}
 	}
 	if df := fg.Status.Dragonfly; df != nil &&
@@ -1108,7 +1131,7 @@ func (m *DragonflyManager) executeRequest(ctx context.Context, req *dragonflyPro
 	if !dragonflyEnabled(&fg) {
 		return false
 	}
-	if m.paused() || plannedFailoverOwnsDragonfly(&fg, false) || dragonflyUpgradeInFlight(dragonflyUpgradeStatus(&fg)) {
+	if m.paused() || m.plannedOwnsDragonfly(&fg) || dragonflyUpgradeInFlight(dragonflyUpgradeStatus(&fg)) {
 		// A planned failover or snapshot upgrade owns Dragonfly. During an
 		// upgrade nothing is stored for later: the upgrade reconcile
 		// re-derives the follow-up from MySQL authority (§8.3).
@@ -1166,10 +1189,7 @@ func (m *DragonflyManager) rolloutPromoteLocked(work context.Context, target, ol
 		m.logger.Error("dragonfly rollout: get fg", "error", err)
 		return false
 	}
-	why := rolloutPromotionBlocked(&fg, target, oldSource)
-	if why == "" && m.plannedOwned() {
-		why = "planned failover holds the claim"
-	}
+	why := rolloutPromotionBlocked(&fg, target, oldSource, m.plannedOwnsDragonfly(&fg))
 	if why != "" {
 		m.logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target, "reason", why, "fg", m.fgKey.String())
 		return false
@@ -1188,11 +1208,11 @@ func (m *DragonflyManager) rolloutPromoteFG(work context.Context, fg *v1alpha1.M
 // over from oldSource, must not run against fg (read under the gate), or ""
 // if it may. The rollout chose target and oldSource from an earlier read; by
 // the time it holds the gate another owner may have moved Dragonfly.
-func rolloutPromotionBlocked(fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) string {
+func rolloutPromotionBlocked(fg *v1alpha1.MysqlFailoverGroup, target, oldSource string, plannedOwns bool) string {
 	switch {
 	case !dragonflyEnabled(fg):
 		return "dragonfly disabled"
-	case plannedFailoverOwnsDragonfly(fg, false):
+	case plannedOwns:
 		return "planned failover in flight"
 	case dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg)):
 		return "snapshot upgrade in flight"

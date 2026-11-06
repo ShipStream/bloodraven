@@ -835,7 +835,10 @@ func (m *plannedMonitor) endPoll(p int, managerReady bool) {
 				r.tailReleased, r.tailReleasedGen = true, m.procGen
 			}
 		}
-		if managerReady && ownsSites(m.cur) {
+		// A Promoting block whose own failover record is durable released
+		// its claim for good (O-m1): it is never hydrated back.
+		farFuture := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+		if managerReady && ownsSites(m.cur) && controller.PlannedRunNeedsClaim(m.cur, farFuture) {
 			id := m.cur.Status.PlannedFailover.RunID
 			tail := m.cur.Status.PlannedFailover.Phase == v1alpha1.PlannedFailoverPhasePromoting && m.runs[id] != nil && m.runs[id].tailReleased &&
 				m.runs[id].tailReleasedGen == m.procGen

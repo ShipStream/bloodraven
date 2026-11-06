@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -41,9 +43,12 @@ consults spec.plannedFailover.drainTimeout. Set it on the CR if you
 need a non-default value.
 
 Flags:
-  --wait               block until terminal (Succeeded / Failed); Deferred
-                       (cooldown still pending) returns non-zero because
-                       the operator has not performed the promotion
+  --wait               block until this request's run is terminal
+                       (Succeeded / Failed); Deferred (cooldown still
+                       pending) returns non-zero because the operator has
+                       not performed the promotion. The run already in
+                       status is ignored; a refusal without a run is
+                       reported from its PlannedFailoverRejected Event
   --timeout DURATION   timeout for --wait (default: 10m)
   --kubeconfig string  path to kubeconfig
   --context string     kubeconfig context
@@ -64,10 +69,10 @@ func runPromote(args []string, stdout, stderr *os.File) error {
 	fs.BoolVar(&wait, "wait", false, "block until the planned failover reaches a terminal phase")
 	fs.DurationVar(&timeout, "timeout", 10*time.Minute, "timeout for --wait")
 	fs.Usage = func() { fmt.Fprint(stderr, promoteUsage) }
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlagsAndArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	positional := fs.Args()
 	if len(positional) != 2 {
 		fmt.Fprint(stderr, promoteUsage)
 		return fmt.Errorf("promote requires exactly two positional arguments (group and site)")
@@ -101,6 +106,13 @@ func runPromote(args []string, stdout, stderr *os.File) error {
 		return fmt.Errorf("site %q is not defined in spec.sites of %s/%s", site, ns, group)
 	}
 
+	// Recorded before the patch, so --wait never reports the previous
+	// run's outcome as this request's result.
+	var baseline plannedWaitBaseline
+	if wait {
+		baseline = newPlannedWaitBaseline(ctx, cl, &fg, site)
+	}
+
 	patched := fg.DeepCopy()
 	if patched.Annotations == nil {
 		patched.Annotations = map[string]string{}
@@ -115,8 +127,109 @@ func runPromote(args []string, stdout, stderr *os.File) error {
 		fmt.Fprintln(stdout, "Watch progress with: kubectl bloodraven status", group, "-n", ns)
 		return nil
 	}
-	return waitForPlannedFailover(stdout, stderr, cl, ns, group, timeout)
+	return waitForPlannedFailover(stdout, stderr, cl, ns, group, timeout, baseline)
 }
+
+// plannedWaitBaseline is what --wait knew before it wrote the request: the
+// run already in status.plannedFailover, and the planned-failover refusal
+// Events already recorded for the group.
+type plannedWaitBaseline struct {
+	// runID is the run in status before the patch ("" for none). Its
+	// block and its terminal marker are not this request's result.
+	runID string
+	// follow is set when the request joins that run instead: a pending
+	// (Admitting or Deferred) run to the same site absorbs the request.
+	follow bool
+	// events maps each refusal Event's UID to its count; nil when the
+	// Events could not be listed.
+	events map[types.UID]int32
+}
+
+func newPlannedWaitBaseline(ctx context.Context, cl client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) plannedWaitBaseline {
+	var b plannedWaitBaseline
+	if pf := fg.Status.PlannedFailover; pf != nil {
+		b.runID = pf.RunID
+		_, _, marked := plannedTerminalMarker(fg)
+		pending := pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting || pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred
+		b.follow = pf.RunID != "" && pf.TargetSite == site && pending && !marked
+	}
+	if evs, err := plannedRefusalEvents(ctx, cl, fg.Namespace, fg.Name); err == nil {
+		b.events = make(map[types.UID]int32, len(evs))
+		for _, ev := range evs {
+			b.events[ev.UID] = ev.Count
+		}
+	}
+	return b
+}
+
+// ours reports whether pf is the block of the run this request started
+// (or joined).
+func (b plannedWaitBaseline) ours(pf *v1alpha1.PlannedFailoverStatus) bool {
+	return pf != nil && pf.RunID != "" && (b.follow || pf.RunID != b.runID)
+}
+
+// plannedRefusalEvents lists the group's PlannedFailoverRejected and
+// PlannedFailoverSkipped Events: the only trace of a request the operator
+// refused without writing a run (an invalid value, a target that is
+// already active, a standing hold, or a request beside a running run).
+func plannedRefusalEvents(ctx context.Context, cl client.Client, ns, group string) ([]corev1.Event, error) {
+	var list corev1.EventList
+	if err := cl.List(ctx, &list, client.InNamespace(ns), client.MatchingFields{"involvedObject.name": group}); err != nil {
+		return nil, err
+	}
+	var out []corev1.Event
+	for _, ev := range list.Items {
+		if ev.InvolvedObject.Kind != "MysqlFailoverGroup" || ev.InvolvedObject.Name != group {
+			continue
+		}
+		if ev.Reason == v1alpha1.EventPlannedFailoverRejected || ev.Reason == v1alpha1.EventPlannedFailoverSkipped {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
+// newRefusalEvent returns the newest refusal Event recorded after the
+// baseline: a new Event, or an aggregated one whose count grew.
+func (b plannedWaitBaseline) newRefusalEvent(ctx context.Context, cl client.Client, ns, group string) (*corev1.Event, bool) {
+	if b.events == nil {
+		return nil, false
+	}
+	evs, err := plannedRefusalEvents(ctx, cl, ns, group)
+	if err != nil {
+		return nil, false
+	}
+	var newest *corev1.Event
+	for i := range evs {
+		ev := &evs[i]
+		if seen, ok := b.events[ev.UID]; ok && ev.Count <= seen {
+			continue
+		}
+		if newest == nil || eventTime(ev).After(eventTime(newest)) {
+			newest = ev
+		}
+	}
+	return newest, newest != nil
+}
+
+func eventTime(ev *corev1.Event) time.Time {
+	switch {
+	case !ev.LastTimestamp.IsZero():
+		return ev.LastTimestamp.Time
+	case !ev.EventTime.IsZero():
+		return ev.EventTime.Time
+	}
+	return ev.FirstTimestamp.Time
+}
+
+// refusalEventWait bounds how long --wait looks for the Event of a
+// request the operator consumed without a run: Events are recorded
+// asynchronously, after the annotation is removed. plannedWaitPoll is the
+// wait's poll interval. Both are variables for the tests.
+var (
+	refusalEventWait = 10 * time.Second
+	plannedWaitPoll  = 2 * time.Second
+)
 
 // buildPlannedFailoverValue assembles the annotation value the operator
 // parses. Mirrors the controller's grammar exactly: "<site>" or
@@ -167,15 +280,25 @@ func groupHasSite(fg *v1alpha1.MysqlFailoverGroup, site string) bool {
 // "timed out after X waiting" message wins over a less-helpful
 // "context deadline exceeded" when the parent timeout trips inside a
 // Get.
-func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, group string, timeout time.Duration) error {
+//
+// The run in status before the request (baseline.runID) is ignored until a
+// new run appears, unless the request joined it (baseline.follow). A
+// request the operator consumes without writing a run was refused with an
+// Event only; the wait reports that Event, or says it could not find it.
+func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, group string, timeout time.Duration, baseline plannedWaitBaseline) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	lastPhase := v1alpha1.PlannedFailoverPhase("")
-	tick := time.NewTicker(2 * time.Second)
+	tick := time.NewTicker(plannedWaitPoll)
 	defer tick.Stop()
 	startedAt := time.Now()
 	consecutiveErrors := 0
+	var consumedAt time.Time
+	admitted := false
+	if baseline.follow {
+		fmt.Fprintf(stdout, "The request joins pending planned failover %s.\n", baseline.runID)
+	}
 
 	for {
 		var fg v1alpha1.MysqlFailoverGroup
@@ -203,6 +326,30 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 		}
 		consecutiveErrors = 0
 		pf := fg.Status.PlannedFailover
+		if !baseline.ours(pf) {
+			// Not admitted yet, or refused without a run.
+			if _, pending := fg.Annotations[PlannedFailoverAnnotation]; !pending {
+				if consumedAt.IsZero() {
+					consumedAt = time.Now()
+				}
+				if done, err := reportPlannedRefusal(ctx, stdout, stderr, cl, ns, group, baseline, time.Since(consumedAt) >= refusalEventWait); done {
+					return err
+				}
+			}
+			select {
+			case <-ctx.Done():
+				if consumedAt.IsZero() {
+					return fmt.Errorf("timed out after %s: the operator has not admitted the request (no new planned-failover run; the annotation is still set: is the operator running?)", timeout)
+				}
+				return fmt.Errorf("timed out after %s: the operator removed the request without starting a run; see kubectl describe mysqlfailovergroup %s -n %s", timeout, group, ns)
+			case <-tick.C:
+				continue
+			}
+		}
+		if !admitted && !baseline.follow {
+			admitted = true
+			fmt.Fprintf(stdout, "Request admitted as planned failover %s.\n", pf.RunID)
+		}
 		phase := v1alpha1.PlannedFailoverPhase("")
 		if pf != nil {
 			phase = pf.Phase
@@ -262,6 +409,28 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 		case <-tick.C:
 		}
 	}
+}
+
+// reportPlannedRefusal reports a request the operator consumed without
+// writing a run, from its refusal Event. done is false while the Event has not
+// arrived and giveUp is false; the caller then polls again.
+func reportPlannedRefusal(ctx context.Context, stdout, stderr io.Writer, cl client.Client, ns, group string,
+	baseline plannedWaitBaseline, giveUp bool) (bool, error) {
+	getCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ev, ok := baseline.newRefusalEvent(getCtx, cl, ns, group)
+	cancel()
+	switch {
+	case ok && ev.Reason == v1alpha1.EventPlannedFailoverSkipped:
+		fmt.Fprintf(stdout, "Planned failover skipped: %s\n", ev.Message)
+		return true, nil
+	case ok:
+		fmt.Fprintf(stderr, "Planned failover refused: %s\n", ev.Message)
+		return true, fmt.Errorf("planned failover refused: %s", ev.Message)
+	case giveUp:
+		return true, fmt.Errorf("the operator removed the request without starting a run, and no %s Event was found; see kubectl describe mysqlfailovergroup %s -n %s",
+			v1alpha1.EventPlannedFailoverRejected, group, ns)
+	}
+	return false, nil
 }
 
 // maxWaitGetFailures bounds how many consecutive cl.Get failures a

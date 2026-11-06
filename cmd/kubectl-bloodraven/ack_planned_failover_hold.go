@@ -45,10 +45,10 @@ func runAckPlannedFailoverHold(args []string, stdout, stderr *os.File) error {
 	registerCommonFlags(fs, &cf)
 	fs.StringVar(&runID, "run-id", "", "the held run's id; defaults to status.plannedFailoverHold.runID")
 	fs.Usage = func() { fmt.Fprint(stderr, ackPlannedFailoverHoldUsage) }
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlagsAndArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	positional := fs.Args()
 	if len(positional) != 1 || positional[0] == "" {
 		fmt.Fprint(stderr, ackPlannedFailoverHoldUsage)
 		return fmt.Errorf("ack-planned-failover-hold requires exactly one positional argument (group)")

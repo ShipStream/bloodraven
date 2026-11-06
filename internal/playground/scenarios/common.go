@@ -62,6 +62,17 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		return fmt.Errorf("baseline unhealthy: durable anti-flap state is invalid (%v) — run ./playground/reset-mysql.sh", failoverErr)
 	}
 
+	// A standing planned-failover automation hold keeps emergency
+	// failover, bootstrap and DNS reconcile held, so every scenario that
+	// needs them would time out with no hint of the cause.
+	if hold := brcontroller.PlannedHoldFrom(mfg); hold != nil {
+		if hold.RunID == "" {
+			return fmt.Errorf("baseline unhealthy: AutomaticFailoverHeld=True names no planned-failover run (status.plannedFailoverHold is absent) — resolve the split brain, then remove the condition by hand (see the hold runbook) or run ./playground/reset-mysql.sh")
+		}
+		return fmt.Errorf("baseline unhealthy: planned-failover automation hold stands (run %s, reason %s) — resolve the split brain, then kubectl bloodraven ack-planned-failover-hold %s -n %s, or run ./playground/reset-mysql.sh",
+			hold.RunID, emptyAsNone(string(hold.Reason)), fg, namespace)
+	}
+
 	// Stuck scale-to-0 from a prior chaos run that did not clean up.
 	// We check Deployment.spec.replicas rather than running pods because
 	// "scaled to 0" is the sticky state — a deployment held at 0 replicas
@@ -356,4 +367,11 @@ func metricCounter(ctx context.Context, env *runner.Env, name string, labels map
 	}
 	v, _ := snap.Counter(name, labels)
 	return v, nil
+}
+
+func emptyAsNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }

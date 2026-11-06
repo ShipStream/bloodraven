@@ -1354,7 +1354,7 @@ func (r *TopologyManagerRunner) registerManagerWith(nn types.NamespacedName, vie
 	}
 	if view != nil {
 		w.HoldFrom = PlannedHoldFrom(view)
-		if plannedFailoverOwnsSites(view) {
+		if PlannedRunNeedsClaim(view, mt.tm.clock.Now()) {
 			w.HydrateFrom = view.Status.PlannedFailover
 		}
 	}

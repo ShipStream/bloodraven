@@ -66,10 +66,10 @@ func runReclone(args []string, stdout, stderr *os.File) error {
 	fs.StringVar(&gtidPrefix, "gtid-prefix", "", "GTID prefix to embed; defaults to status.sites[site].divergentGtid")
 	fs.BoolVar(&cold, "cold", false, "confirm a cold reclone (no divergent GTID); embeds confirm=<group>")
 	fs.Usage = func() { fmt.Fprint(stderr, recloneUsage) }
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlagsAndArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	positional := fs.Args()
 	if len(positional) != 2 {
 		fmt.Fprint(stderr, recloneUsage)
 		return fmt.Errorf("reclone requires exactly two positional arguments (group and site)")
