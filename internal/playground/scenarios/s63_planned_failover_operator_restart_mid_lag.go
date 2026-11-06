@@ -287,8 +287,39 @@ func s63HoldInWaitingForLag() runner.Step {
 				return fmt.Errorf("stop target SQL thread: %w", err)
 			}
 			env.Capture.Note(fmt.Sprintf("run %s held in WaitingForLag; SQL thread stopped on %s", pf.RunID, target))
-			return nil
+			// Events are recorded asynchronously by the operator's broadcaster,
+			// so a kill right after the grant can drop the claim Event. Wait
+			// until it is visible before the operator is killed, so the
+			// exactly-one check after the restart tests re-granting, not the
+			// dying process's event buffer.
+			return s63WaitClaimEventVisible(ctx, env)
 		},
+	}
+}
+
+// s63WaitClaimEventVisible waits up to 30s for the run's claim Event.
+func s63WaitClaimEventVisible(ctx context.Context, env *runner.Env) error {
+	since, err := time.Parse(time.RFC3339Nano, ctxFetch(env, s63KeyAnnotatedAt))
+	if err != nil {
+		return fmt.Errorf("parse stash %s: %w", s63KeyAnnotatedAt, err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		events, err := env.Kube.RecentEvents(ctx, env.Namespace, 0)
+		if err == nil && countMFGEvents(events, env.FG, since, plannedClaimedEventReason) >= 1 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("list Events while waiting for %s: %w", plannedClaimedEventReason, err)
+			}
+			return fmt.Errorf("no %s Event within 30s of the claim", plannedClaimedEventReason)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
 	}
 }
 
