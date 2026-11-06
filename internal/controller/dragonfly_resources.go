@@ -920,27 +920,42 @@ func dragonflyStatefulSetRolloutComplete(sts *appsv1.StatefulSet) bool {
 		sts.Status.CurrentReplicas == desired
 }
 
-// teardownDragonflyResources deletes Dragonfly StatefulSets, per-site
-// Services, and the active Service for the given FG, identified by the
-// Bloodraven app=dragonfly + instance=<fg> label pair. Deletes are
-// label-scoped so only resources Bloodraven created are removed.
+// teardownDragonflyResources deletes Dragonfly StatefulSets,
+// PodDisruptionBudgets, per-site Services, and the active Service for the
+// given FG, identified by the Bloodraven app=dragonfly + instance=<fg>
+// label pair. Deletes are label-scoped so only resources Bloodraven
+// created are removed.
+//
+// It lists and deletes rather than calling DeleteAllOf: DeleteAllOf needs
+// the deletecollection verb, which the operator's RBAC does not grant, so
+// every reconcile of a group with Dragonfly disabled used to fail here.
 //
 // Idempotent: an FG that never had Dragonfly enabled has no matching
-// resources, and DeleteAllOf returns no error in that case.
+// resources, and the lists come back empty.
 func (r *MysqlFailoverGroupReconciler) teardownDragonflyResources(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	selector := client.MatchingLabels{
 		labelAppName:  dragonflyAppName,
 		labelInstance: fg.Name,
 	}
 	inNs := client.InNamespace(fg.Namespace)
-	if err := r.DeleteAllOf(ctx, &appsv1.StatefulSet{}, inNs, selector); err != nil {
-		return fmt.Errorf("teardown dragonfly statefulsets: %w", err)
+	var stss appsv1.StatefulSetList
+	if err := r.List(ctx, &stss, inNs, selector); err != nil {
+		return fmt.Errorf("teardown: list dragonfly statefulsets: %w", err)
 	}
-	if err := r.DeleteAllOf(ctx, &policyv1.PodDisruptionBudget{}, inNs, selector); err != nil {
-		return fmt.Errorf("teardown dragonfly pdbs: %w", err)
+	for i := range stss.Items {
+		if err := r.Delete(ctx, &stss.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("teardown: delete statefulset %s: %w", stss.Items[i].Name, err)
+		}
 	}
-	// Service has no DeleteAllOf support in client-go for typed
-	// resources; list-and-delete instead.
+	var pdbs policyv1.PodDisruptionBudgetList
+	if err := r.List(ctx, &pdbs, inNs, selector); err != nil {
+		return fmt.Errorf("teardown: list dragonfly pdbs: %w", err)
+	}
+	for i := range pdbs.Items {
+		if err := r.Delete(ctx, &pdbs.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("teardown: delete pdb %s: %w", pdbs.Items[i].Name, err)
+		}
+	}
 	var svcs corev1.ServiceList
 	if err := r.List(ctx, &svcs, inNs, selector); err != nil {
 		return fmt.Errorf("teardown: list dragonfly services: %w", err)
