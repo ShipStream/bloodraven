@@ -159,3 +159,93 @@ func TestPVCStoreListReportsWalkErrors(t *testing.T) {
 		t.Fatalf("unrelated unreadable subtree affected listing: %v, %v", got, err)
 	}
 }
+
+// TestPVCStore_PublishSyncsDirectory proves that every PVC publish
+// (Put's rename, PutIfAbsent's link, Delete's unlink) fsyncs the
+// containing directory before it reports success, and that a directory
+// it creates has its own entry synced in the parent (G3). Without the
+// directory sync a node crash can undo a confirmed manifest save.
+func TestPVCStore_PublishSyncsDirectory(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, p *pvcStore)
+		op      func(p *pvcStore) error
+		// want lists the directories (relative to root) that must be synced.
+		want []string
+	}{
+		{
+			name: "put into existing directory",
+			prepare: func(t *testing.T, p *pvcStore) {
+				if err := os.MkdirAll(filepath.Join(p.root, "binlogs/manifests"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			op: func(p *pvcStore) error {
+				return p.Put(ctx, "binlogs/manifests/iad.json", strings.NewReader("{}"), 2)
+			},
+			want: []string{"binlogs/manifests"},
+		},
+		{
+			name: "put creating directories",
+			op: func(p *pvcStore) error {
+				return p.Put(ctx, "binlogs/manifests/iad.json", strings.NewReader("{}"), 2)
+			},
+			want: []string{".", "binlogs", "binlogs/manifests"},
+		},
+		{
+			name: "put-if-absent creating directories",
+			op: func(p *pvcStore) error {
+				return p.PutIfAbsent(ctx, "binlogs/archive.json", strings.NewReader("{}"), 2)
+			},
+			want: []string{".", "binlogs"},
+		},
+		{
+			name: "delete",
+			prepare: func(t *testing.T, p *pvcStore) {
+				if err := os.MkdirAll(filepath.Join(p.root, "binlogs"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(p.root, "binlogs/old"), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			op:   func(p *pvcStore) error { return p.Delete(ctx, "binlogs/old") },
+			want: []string{"binlogs"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			var synced []string
+			p := &pvcStore{root: root, dirSync: func(dir string) error {
+				rel, err := filepath.Rel(root, dir)
+				if err != nil {
+					return err
+				}
+				synced = append(synced, filepath.ToSlash(rel))
+				return syncDir(dir)
+			}}
+			if tc.prepare != nil {
+				tc.prepare(t, p)
+			}
+			if err := tc.op(p); err != nil {
+				t.Fatal(err)
+			}
+			for _, dir := range tc.want {
+				if !slices.Contains(synced, dir) {
+					t.Errorf("directory %q not synced; synced %v", dir, synced)
+				}
+			}
+		})
+	}
+
+	t.Run("sync failure fails the save", func(t *testing.T) {
+		root := t.TempDir()
+		boom := errors.New("sync failed")
+		p := &pvcStore{root: root, dirSync: func(string) error { return boom }}
+		if err := p.Put(ctx, "m.json", strings.NewReader("{}"), 2); !errors.Is(err, boom) {
+			t.Fatalf("Put returned %v, want the directory sync error", err)
+		}
+	})
+}

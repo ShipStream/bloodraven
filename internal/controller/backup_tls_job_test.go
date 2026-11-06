@@ -53,9 +53,12 @@ func TestBuildBackupJob_TLSLayout(t *testing.T) {
 
 			mysqlsh := &job.Spec.Template.Spec.Containers[0]
 			if tc.encrypted {
-				mysqlsh = &job.Spec.Template.Spec.InitContainers[0]
+				mysqlsh = &job.Spec.Template.Spec.InitContainers[1]
 			}
 			assertTLSJobContainer(t, mysqlsh, tc.tls)
+			// backup-stamp reads the server clock over the same session
+			// settings as the dump.
+			assertTLSJobContainer(t, &job.Spec.Template.Spec.InitContainers[0], tc.tls)
 			assertTLSJobVolume(t, job.Spec.Template.Spec.Volumes, tc.tls)
 		})
 	}

@@ -359,40 +359,69 @@ func TestReconcileBackupSchedules_UserOverrideTimeZone(t *testing.T) {
 
 // --- restoreTargetSite ------------------------------------------------------
 
-func TestRestoreTargetSite_UsesActiveSiteWhenWritable(t *testing.T) {
-	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
-		ActiveSite: "pdx",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: "read-only"},
-			{Name: "pdx", State: "writable"},
+// TestRestoreTargetSite covers the gate on creating the initFromBackup
+// restore Job: every site boots fenced, so the load may start only once the
+// operator has seeded the target and it is observed writable.
+func TestRestoreTargetSite(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     v1alpha1.MysqlFailoverGroupStatus
+		wantSite   string
+		wantReady  bool
+		wantRefuse bool
+	}{
+		{
+			name:     "fresh deploy waits for the seed, which is spec.sites[0]",
+			status:   v1alpha1.MysqlFailoverGroupStatus{},
+			wantSite: "iad",
+		},
+		{
+			name: "fresh deploy waits even when the seed is observed",
+			status: v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{
+				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "read-only"},
+			}},
+			wantSite: "iad",
+		},
+		{
+			name: "writable active site is ready",
+			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
+				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "writable"},
+			}},
+			wantSite: "pdx", wantReady: true,
+		},
+		{
+			name: "seed published but not yet observed writable waits",
+			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
+				{Name: "iad", State: "writable"}, {Name: "pdx", State: "read-only"},
+			}},
+			wantSite: "pdx",
+		},
+		{
+			name:     "active site without a status entry waits",
+			status:   v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx"},
+			wantSite: "pdx",
+		},
+		{
+			name: "unreachable active site refuses",
+			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
+				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "unreachable"},
+			}},
+			wantSite: "pdx", wantRefuse: true,
 		},
 	}
-	if got := restoreTargetSite(fg); got != "pdx" {
-		t.Errorf("want pdx, got %q", got)
-	}
-}
-
-func TestRestoreTargetSite_RefusesReadOnlyActiveSite(t *testing.T) {
-	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
-		ActiveSite: "pdx",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: "writable"},
-			{Name: "pdx", State: "read-only"},
-		},
-	}
-	if got := restoreTargetSite(fg); got != "" {
-		t.Errorf("want empty (refuse), got %q", got)
-	}
-}
-
-func TestRestoreTargetSite_FallsBackToSitesZeroOnFreshDeploy(t *testing.T) {
-	fg := fgWithBackup()
-	// No active site, no observed site status.
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{}
-	if got := restoreTargetSite(fg); got != "iad" {
-		t.Errorf("want iad (spec.sites[0]), got %q", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := fgWithBackup()
+			fg.Status = tc.status
+			site, ready, wait, refuse := restoreTargetSite(fg)
+			if site != tc.wantSite || ready != tc.wantReady || refuse != tc.wantRefuse {
+				t.Fatalf("got (%q, ready=%v, refuse=%v), want (%q, ready=%v, refuse=%v)",
+					site, ready, refuse, tc.wantSite, tc.wantReady, tc.wantRefuse)
+			}
+			if ready != (wait == "") {
+				t.Fatalf("ready=%v with wait message %q", ready, wait)
+			}
+		})
 	}
 }
 

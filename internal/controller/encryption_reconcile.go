@@ -959,14 +959,17 @@ func alignSiteEncryptionStatus(existing []v1alpha1.SiteEncryptionStatus, names [
 }
 
 // encryptionNow is the time stamped on encryption status (the coverage
-// check time): encryptionClock when a test sets one, else the wall clock.
+// check time): encryptionClock when a test sets one, else the reconciler's
+// clock (r.now: Now when a test pins it, else the wall clock).
 func (r *MysqlFailoverGroupReconciler) encryptionNow() metav1.Time {
 	if r.encryptionClock != nil {
 		return metav1.NewTime(r.encryptionClock.Now())
 	}
-	return metav1.Now()
+	return metav1.NewTime(r.now())
 }
 
+// applyCoverage records the live coverage sample on site, stamping
+// LastCheckTime with now (encryptionNow, so tests can pin it).
 func applyCoverage(site *v1alpha1.SiteEncryptionStatus, live *mysql.KeyringStatus, now metav1.Time) {
 	if live == nil || (live.Component == nil && live.Coverage == nil) {
 		return

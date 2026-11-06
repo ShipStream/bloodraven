@@ -22,10 +22,11 @@ rules:
   # `BLOODRAVEN_DUMP_COMPLETE` sentinel line printed by the embedded
   # backup_script.py at the end of a successful mysqlsh dumpInstance run,
   # and by the MysqlBackupVerification reconciler to tail the trailing
-  # `BLOODRAVEN_VERIFY_REPLAY_COMPLETE` / `BLOODRAVEN_VERIFY_SANITY_COMPLETE`
-  # sentinels emitted by verify.sh. Those sentinels carry the resolved
-  # location, size, GTID, binlog coordinates, and sanity-query results
-  # that get written back to status.
+  # `BLOODRAVEN_VERIFY_SANITY_COMPLETE` sentinel emitted by verify.sh. The
+  # dump sentinel carries the resolved location, size and GTID; the
+  # verification log carries sanity-check detail only (replay coordinates
+  # come from the PITR verdict in the container's termination message).
+  # Both are written back to status.
   #
   # Reconcilers discover the relevant terminal pod via `pods list` using
   # label selectors (the pods/jobs verbs above already cover that), then

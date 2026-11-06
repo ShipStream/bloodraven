@@ -24,8 +24,9 @@
 #   BLOODRAVEN_VERIFY_PITR_MODE           none|latest|timestamp
 #   BLOODRAVEN_PITR_LOCAL_DIR             where pitr-download init
 #                                         container dropped binlogs
-#   BLOODRAVEN_PITR_STOP_DATETIME         replay stop instant (RFC3339)
-#                                         for mode=timestamp
+#   BLOODRAVEN_PITR_MODE, BLOODRAVEN_PITR_STOP_DATETIME, ...
+#                                         the replay request restore.py
+#                                         reads (see restore_script.py)
 #   BLOODRAVEN_VERIFY_SANITY_QUERY        scalar SELECT to run post-load
 #   BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS  sanity client-side timeout (s)
 #   BLOODRAVEN_VERIFY_SANITY_MIN_ROWS     fail if scalar < this value
@@ -175,19 +176,17 @@ log "starting ephemeral mysqld"
 #
 # --gtid-mode=ON --enforce-gtid-consistency=ON make this ephemeral verify
 # mysqld mirror the production restore target (#101). The PITR replay
-# downloads EVERY site's archived binlogs and relies on server-side GTID
-# dedup to skip transactions already in the dump (loadDump restores the
-# dump's gtid_purged via updateGtidSet:"replace") AND to dedup the same
-# GTID re-logged across multiple sites. A gtid_mode=OFF server cannot do
-# this: it rejects the per-transaction SET @@SESSION.GTID_NEXT statements
-# mysqlbinlog emits, so raw `mysqlbinlog | mysql` replay fails outright;
-# and stripping those GTID statements (the only way to feed an OFF server)
-# discards the identity needed to dedup, double-applying in-dump and
-# cross-site duplicate transactions. MySQL 8.0 starts gtid_mode=ON with
-# binary logging disabled, so --skip-log-bin is retained alongside the
-# GTID flags. partial_revokes matches the group's servers: the replayed
-# binlogs carry the app role's partial revoke on the mysql schema, which a
-# server with it OFF rejects.
+# stages only the plan's segment files and applies each segment with
+# `mysqlbinlog --include-gtids=<segment>`; the plan replays every GTID
+# exactly once (restore.py's R1/R4 rules), so nothing relies on the server
+# skipping duplicates. GTID mode is required because mysqlbinlog's output
+# sets SET @@SESSION.GTID_NEXT for every transaction, which a gtid_mode=OFF
+# server rejects, and because restore.py proves the loaded baseline (R2)
+# and the replayed result (R6) from @@global.gtid_executed. MySQL 8.0
+# starts gtid_mode=ON with binary logging disabled, so --skip-log-bin is
+# retained alongside the GTID flags. partial_revokes matches the group's
+# servers: the replayed binlogs carry the app role's partial revoke on the
+# mysql schema, which a server with it OFF rejects.
 "${MYSQLD[@]}" \
     --datadir="$DATA_DIR" \
     --bind-address=127.0.0.1 \
@@ -266,34 +265,15 @@ if [[ $LOAD_RC -ne 0 ]]; then
 fi
 
 # ---- PITR replay -----------------------------------------------------
-# restore.py owns PITR replay for both restore and verification jobs.
-# Bridge its BLOODRAVEN_RESTORE_COMPLETE metadata into the verification
-# sentinel consumed by the reconciler, including the newest verified event in
-# the prefix passed through replay (never the requested stop time).
+# restore.py owns PITR replay for both restore and verification jobs, and
+# writes its verdict (the only certificate the controller accepts) to
+# $PITR_VERDICT once the replay is proven. A replaying run without one
+# fails.
 PITR_MODE="${BLOODRAVEN_VERIFY_PITR_MODE:-none}"
 if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
-    RESTORE_COMPLETE="$(grep 'BLOODRAVEN_RESTORE_COMPLETE' "$RESTORE_LOG" | tail -n 1 || true)"
-    LAST_FILE=""
-    REPLAY_COUNT=""
-    NEWEST_EVENT=""
-    COVERAGE_VERSION=""
-    TARGET_COVERED="false"
-    PARTIAL="false"
-    for f in $RESTORE_COMPLETE; do
-        case "$f" in
-            pitrReplayedBinlogFile=*) LAST_FILE="${f#pitrReplayedBinlogFile=}" ;;
-            pitrCoverageVersion=*) COVERAGE_VERSION="${f#pitrCoverageVersion=}" ;;
-            pitrTargetCovered=*) TARGET_COVERED="${f#pitrTargetCovered=}" ;;
-            pitrPartial=*) PARTIAL="${f#pitrPartial=}" ;;
-            pitrNewestEventTime=*) NEWEST_EVENT="${f#pitrNewestEventTime=}" ;;
-            pitrReplayedBinlogCount=*) REPLAY_COUNT="${f#pitrReplayedBinlogCount=}" ;;
-        esac
-    done
     if [[ ! -s "$PITR_VERDICT" ]]; then
         fail 1 "PITRCoverageInvalid: PITR mode=$PITR_MODE but restore.py wrote no verdict"
     fi
-    printf 'BLOODRAVEN_VERIFY_REPLAY_COMPLETE coverage=%s mode=%s targetCovered=%s partial=%s files=%s file=%s position=%s timestamp=%s\n' \
-        "$COVERAGE_VERSION" "$PITR_MODE" "$TARGET_COVERED" "$PARTIAL" "$REPLAY_COUNT" "$LAST_FILE" "0" "$NEWEST_EVENT"
 fi
 
 # ---- Sanity check ----------------------------------------------------
@@ -353,8 +333,19 @@ if [[ -n "$SANITY_Q" ]]; then
     fi
 fi
 
-# Publishing the verdict is the last action.
+# Publishing the verdict is the last action. restore.py builds it within
+# this container's share of the kubelet's termination messages (the same
+# BLOODRAVEN_TERMINATION_MESSAGE_LIMIT the controller renders, default
+# 3072); a longer one would
+# be cut, and a cut verdict must never reach the controller.
 if [[ -s "$PITR_VERDICT" ]]; then
+    verdict_limit="${BLOODRAVEN_TERMINATION_MESSAGE_LIMIT:-3072}"
+    [[ "$verdict_limit" =~ ^[0-9]+$ && "$verdict_limit" -gt 0 ]] || verdict_limit=3072
+    (( verdict_limit > 4096 )) && verdict_limit=4096
+    verdict_bytes="$(wc -c <"$PITR_VERDICT")"
+    if (( verdict_bytes > verdict_limit )); then
+        fail 1 "PITRCoverageInvalid: restore.py's verdict is $verdict_bytes bytes, over the $verdict_limit-byte termination message"
+    fi
     cat "$PITR_VERDICT" >"$TERMINATION_LOG"
 fi
 log "verification succeeded"

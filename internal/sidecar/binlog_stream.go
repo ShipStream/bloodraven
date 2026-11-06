@@ -120,6 +120,7 @@ func inspectBinlog(r io.Reader, stop time.Time, observe func(*replication.Binlog
 	coverage := newBinlogCoverageCollector()
 	first := false
 	previous := false
+	checksum := false
 	anonymous := false
 	beforeStop := newBinlogCoverageCollector()
 	currentGTID := "unknown"
@@ -287,9 +288,16 @@ func inspectBinlog(r io.Reader, stop time.Time, observe func(*replication.Binlog
 				}
 			}
 		}
-		if pg, ok := event.Event.(*replication.PreviousGTIDsEvent); ok {
+		if format, ok := event.Event.(*replication.FormatDescriptionEvent); ok {
+			checksum = format.ChecksumAlgorithm == replication.BINLOG_CHECKSUM_ALG_CRC32
+		}
+		if _, ok := event.Event.(*replication.PreviousGTIDsEvent); ok {
+			text, err := previousGTIDsOf(event, checksum)
+			if err != nil {
+				return err
+			}
 			previous = true
-			result.Metadata.PreviousGTIDs = pg.GTIDSets
+			result.Metadata.PreviousGTIDs = text
 		}
 		if event.Header.EventType != replication.FORMAT_DESCRIPTION_EVENT && event.Header.EventType != replication.PREVIOUS_GTIDS_EVENT && event.Header.Timestamp > 0 {
 			if !first {

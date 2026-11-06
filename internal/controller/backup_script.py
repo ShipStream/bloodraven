@@ -28,6 +28,7 @@
 import json
 import os
 import ssl
+import subprocess
 import sys
 import urllib.parse
 
@@ -220,6 +221,91 @@ def _capture_gtid_metadata(session):
     return meta
 
 
+# The dumped server's UTC clock in the stamp's wire layout (µs, "Z"),
+# independent of the session time zone. The backup-stamp init container
+# reads serverClock.start with the same expression.
+_SERVER_CLOCK_SQL = (
+    "SELECT DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%fZ')"
+)
+
+
+def _server_clock(session):
+    """Read the dumped server's clock for the backup stamp's
+    serverClock.end. Unlike the GTID capture this is not best effort: a
+    stamp without an end refuses PITR (PITRBackupIncomplete), so a failure
+    here fails the backup."""
+    r = session.run_sql(_SERVER_CLOCK_SQL).fetch_one()
+    if not r or not r[0]:
+        raise RuntimeError("UTC_TIMESTAMP(6) returned no value")
+    return str(r[0])
+
+
+def _server_uuid(session):
+    r = session.run_sql("SELECT @@global.server_uuid").fetch_one()
+    if not r or not r[0]:
+        raise RuntimeError("@@server_uuid returned no value")
+    return str(r[0]).lower()
+
+
+def _server_clock_after_dump(conn, server_uuid):
+    """serverClock.end through a fresh connection. The session opened
+    before the dump sits idle while dump_instance works on its own
+    connections, and the server drops it once the dump outlasts
+    wait_timeout (MySQL error 4031, reproduced with mysqlsh against
+    mysql:9.7, F027), which would fail a completed dump. The fresh session
+    must reach the server that was dumped."""
+    fresh = mysqlsh.globals.shell.open_session(conn)
+    try:
+        got = _server_uuid(fresh)
+        if got != server_uuid:
+            raise RuntimeError(
+                "{} now reaches server {}, not the dumped server {}".format(
+                    conn.get("host"), got, server_uuid))
+        return _server_clock(fresh)
+    finally:
+        try:
+            fresh.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _check_stamp():
+    """Before mysqlsh writes anything, require the dump location to still
+    hold this backup's unfinished stamp (review F016). On a store without
+    atomic create, a same-name backup of another namespace sharing the
+    prefix may have replaced the stamp since the backup-stamp init container
+    wrote it; dumping then would interleave the two backups' objects. Runs
+    the bloodraven binary the init container installed
+    (BLOODRAVEN_STAMP_TOOL), so only plaintext Jobs check here; an encrypted
+    Job's uploader checks before it uploads."""
+    tool = os.environ.get("BLOODRAVEN_STAMP_TOOL")
+    if not tool:
+        return
+    res = subprocess.run([tool, "backup-stamp", "--check"])
+    if res.returncode != 0:
+        raise RuntimeError(
+            "backup-stamp --check exited {}".format(res.returncode))
+
+
+def _finish_stamp(output, end):
+    """Add serverClock.end to the backup stamp. A plaintext Job runs the
+    bloodraven binary the backup-stamp init container installed
+    (BLOODRAVEN_STAMP_TOOL); an encrypted Job's uploader finishes the stamp
+    after the upload, so the end travels in BLOODRAVEN_DUMP_META.json."""
+    tool = os.environ.get("BLOODRAVEN_STAMP_TOOL")
+    if tool:
+        res = subprocess.run([tool, "backup-stamp", "--end", end])
+        if res.returncode != 0:
+            raise RuntimeError(
+                "backup-stamp --end exited {}".format(res.returncode))
+        return False
+    if output.startswith("s3://") or not os.path.isdir(output):
+        raise RuntimeError(
+            "BLOODRAVEN_STAMP_TOOL is unset and the dump is not staged "
+            "locally; nothing can finish the backup stamp")
+    return True
+
+
 def _dump_size_bytes(output, opts):
     """Return the total size in bytes of a local dump output directory.
     Remote (S3) outputs return 0 — we don't walk the bucket. The mysqlsh
@@ -315,12 +401,36 @@ def main():
     session = mysqlsh.globals.session
 
     meta = _capture_gtid_metadata(session)
+    try:
+        server_uuid = _server_uuid(session)
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_DUMP_FAILED: read server_uuid: {}".format(e),
+              file=sys.stderr, flush=True)
+        sys.exit(2)
+
+    try:
+        _check_stamp()
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_DUMP_FAILED: backup stamp: {}".format(e),
+              file=sys.stderr, flush=True)
+        sys.exit(2)
 
     try:
         mysqlsh.globals.util.dump_instance(output, opts)
     except Exception as e:  # noqa: BLE001
         print("BLOODRAVEN_DUMP_FAILED: {}".format(e), file=sys.stderr,
               flush=True)
+        sys.exit(2)
+
+    # serverClock.end is read on the dumped server once the dump has
+    # succeeded (D-52). A failure leaves the stamp without an end, which
+    # every later PITR refuses, so it fails the backup too.
+    try:
+        server_clock_end = _server_clock_after_dump(conn, server_uuid)
+        end_in_meta = _finish_stamp(output, server_clock_end)
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_DUMP_FAILED: backup stamp: {}".format(e),
+              file=sys.stderr, flush=True)
         sys.exit(2)
 
     size_bytes = _dump_size_bytes(output, opts)
@@ -334,13 +444,21 @@ def main():
         try:
             meta_path = os.path.join(output, "BLOODRAVEN_DUMP_META.json")
             with open(meta_path, "w") as f:
-                json.dump({
+                doc = {
                     "gtidExecuted": meta.get("gtidExecuted", ""),
                     "binlogFile": meta.get("binlogFile", ""),
                     "binlogPos": int(meta.get("binlogPos", 0) or 0),
-                }, f)
+                }
+                if end_in_meta:
+                    doc["serverClockEnd"] = server_clock_end
+                json.dump(doc, f)
             os.chmod(meta_path, 0o600)
         except OSError as e:  # noqa: BLE001
+            if end_in_meta:
+                # The uploader cannot finish the stamp without it.
+                print("BLOODRAVEN_DUMP_FAILED: could not write dump meta: {}".format(e),
+                      file=sys.stderr, flush=True)
+                sys.exit(2)
             print("BLOODRAVEN_DUMP_WARN: could not write dump meta: {}".format(e),
                   file=sys.stderr, flush=True)
 

@@ -95,7 +95,7 @@ func TestArchiverPreservesReusedBinlogNames(t *testing.T) {
 					t.Fatal(err)
 				}
 				newArchiver := func() *BinlogArchiver {
-					return NewBinlogArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
+					return newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
 				}
 				a := newArchiver()
 				if legacy {
@@ -196,7 +196,7 @@ func TestManifestPrunesOnlySelectedBinlogIdentity(t *testing.T) {
 	if err != nil || len(m.Files) != 3 {
 		t.Fatalf("identity upsert: %+v, %v", m, err)
 	}
-	removed, err := pruneManifest(ctx, store, "binlogs", "iad", map[binlogIdentity]string{first.identity(): first.ID})
+	removed, err := testPrune(ctx, store, "binlogs", "iad", map[binlogIdentity]string{first.identity(): first.ID})
 	if err != nil || len(removed) != 1 || removed[0] != "binlogs/iad/"+first.Name+"."+first.ID {
 		t.Fatalf("confined delete keys: %v, %v", removed, err)
 	}
@@ -213,7 +213,7 @@ func TestManifestPrunesOnlySelectedBinlogIdentity(t *testing.T) {
 	if err := appendManifestEntry(ctx, store, "binlogs", "iad", bad); err != nil {
 		t.Fatal(err)
 	}
-	removed, err = pruneManifest(ctx, store, "binlogs", "iad", map[binlogIdentity]string{bad.identity(): ""})
+	removed, err = testPrune(ctx, store, "binlogs", "iad", map[binlogIdentity]string{bad.identity(): ""})
 	if err != nil || len(removed) != 0 {
 		t.Fatalf("invalid identity generated delete keys: %v, %v", removed, err)
 	}

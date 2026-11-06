@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -136,4 +138,54 @@ func ids(scens []Scenario) []string {
 		out[i] = s.ID
 	}
 	return out
+}
+
+func TestSelectByIDs(t *testing.T) {
+	all := []Scenario{
+		{ID: "31-pitr", ResetBeforeRunAll: false},
+		{ID: "37-pitr", ResetBeforeRunAll: true},
+		{ID: "68-pitr", ResetBeforeRunAll: true},
+		{ID: "99-flaky", Quarantine: "issue #1"},
+	}
+	cases := []struct {
+		name    string
+		ids     string
+		want    []string
+		wantErr string
+	}{
+		{name: "listed order, not registry order", ids: "68-pitr, 31-pitr,37-pitr", want: []string{"68-pitr", "31-pitr", "37-pitr"}},
+		{name: "blank entries skipped", ids: ",37-pitr,,", want: []string{"37-pitr"}},
+		{name: "explicit quarantined scenario runs", ids: "99-flaky", want: []string{"99-flaky"}},
+		{name: "unknown id", ids: "37-pitr,38-typo", wantErr: `unknown scenario "38-typo"`},
+		{name: "duplicate id", ids: "37-pitr,37-pitr", wantErr: "listed twice"},
+		{name: "empty list", ids: " , ", wantErr: "no scenarios listed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SelectByIDs(all, tc.ids)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("SelectByIDs(%q) err=%v, want %q", tc.ids, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, s := range got {
+				ids = append(ids, s.ID)
+			}
+			if !slices.Equal(ids, tc.want) {
+				t.Fatalf("SelectByIDs(%q)=%v, want %v", tc.ids, ids, tc.want)
+			}
+			// The scenario value is carried whole: run-all's reset loop
+			// reads ResetBeforeRunAll from it.
+			for _, s := range got {
+				if s.ID == "37-pitr" && !s.ResetBeforeRunAll {
+					t.Error("37-pitr lost ResetBeforeRunAll")
+				}
+			}
+		})
+	}
 }

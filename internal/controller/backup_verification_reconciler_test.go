@@ -8,6 +8,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -92,8 +93,9 @@ func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
 			ProfileName:      profile,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Phase:        v1alpha1.BackupPhaseSucceeded,
-			GtidExecuted: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
+			Phase:            v1alpha1.BackupPhaseSucceeded,
+			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
+			FailoverGroupUID: "lion-uid",
 			// Completed before the fixed PITR targets the tests request.
 			CompletionTime: &metav1.Time{Time: time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC)},
 			Location:       "lion/nightly/name/",
@@ -523,36 +525,41 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 
 // --- Phase 2: PITR, sanity, and sentinel parsing ------------------------
 
-func TestVerificationPITRSpec_ModeNoneIsNil(t *testing.T) {
-	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "none"})
-	if err != nil || out != nil {
-		t.Errorf("mode=none should yield (nil, nil), got (%+v, %v)", out, err)
-	}
-	out, err = verificationPITRSpec(nil)
-	if err != nil || out != nil {
-		t.Errorf("nil spec should yield (nil, nil), got (%+v, %v)", out, err)
-	}
-}
-
-func TestVerificationPITRSpec_Latest_UsesFarFutureStop(t *testing.T) {
-	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "latest"})
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if out == nil || !strings.HasPrefix(out.StopDatetime, "9999-") {
-		t.Errorf("mode=latest should sentinel-stop far-future, got %+v", out)
-	}
-}
-
-func TestVerificationPITRSpec_Timestamp_RequiresValue(t *testing.T) {
-	if _, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp"}); err == nil {
-		t.Error("mode=timestamp without Timestamp should error")
-	}
-	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{
-		Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
-	})
-	if err != nil || out == nil || out.StopDatetime != "2026-04-20T01:00:00Z" {
-		t.Errorf("timestamp plumb: out=%+v err=%v", out, err)
+func TestVerificationPITRRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      *v1alpha1.PointInTimeVerificationSpec
+		want    *pitrReplayRequest
+		wantErr string
+	}{
+		{name: "nil", in: nil},
+		{name: "none", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "none"}},
+		{name: "empty mode", in: &v1alpha1.PointInTimeVerificationSpec{}},
+		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:1 "},
+			want: &pitrReplayRequest{Mode: "latest", ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1", Verification: true}},
+		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20 03:00:00+02:00"},
+			want: &pitrReplayRequest{Mode: "timestamp", Stop: "2026-04-20T01:00:00.000000Z", Verification: true}},
+		// C2 / A-39: whole seconds only.
+		{name: "fraction refused", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20T01:00:00.5Z"}, wantErr: "PITRTargetInvalid"},
+		{name: "timestamp required", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp"}, wantErr: "PITRTargetInvalid"},
+		{name: "seven digits", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20T01:00:00.1234567Z"}, wantErr: "PITRTargetInvalid"},
+		{name: "unknown mode", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "head"}, wantErr: "not one of"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := verificationPITRRequest(tc.in)
+			if tc.wantErr != "" {
+				if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) && !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got == nil) != (tc.want == nil) || got != nil && *got != *tc.want {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -581,28 +588,39 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
 	}
-	// The only init container is the PITR download container.
+	// dump-meta runs first, then pitr-download (§6.3 init order).
 	initCs := job.Spec.Template.Spec.InitContainers
-	if len(initCs) != 1 {
-		t.Fatalf("want 1 init container (pitr-download), got %d", len(initCs))
-	}
-	if initCs[0].Name != restorePITRInitContainerName {
-		t.Errorf("want init container %q, got %q",
-			restorePITRInitContainerName, initCs[0].Name)
-	}
-	var haveMode, haveLocalDir, haveStop bool
-	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
-		switch e.Name {
-		case "BLOODRAVEN_VERIFY_PITR_MODE":
-			haveMode = e.Value == "timestamp"
-		case "BLOODRAVEN_PITR_LOCAL_DIR":
-			haveLocalDir = e.Value != ""
-		case "BLOODRAVEN_PITR_STOP_DATETIME":
-			haveStop = e.Value == "2026-04-20T01:00:00Z"
+	if len(initCs) != 2 || initCs[0].Name != restorePITRDumpMetaContainerName || initCs[1].Name != restorePITRInitContainerName {
+		names := []string{}
+		for _, c := range initCs {
+			names = append(names, c.Name)
 		}
+		t.Fatalf("init containers = %v, want [dump-meta pitr-download]", names)
 	}
-	if !haveMode || !haveLocalDir || !haveStop {
-		t.Errorf("missing PITR env vars: mode=%v localDir=%v stop=%v", haveMode, haveLocalDir, haveStop)
+	dumpEnv := containerEnv(initCs[:1], restorePITRDumpMetaContainerName)
+	if dumpEnv["BLOODRAVEN_DUMP_EXPECTED_BACKUP_UID"] != string(backup.UID) || dumpEnv["BLOODRAVEN_DUMP_EXPECTED_GTID_EXECUTED"] != backup.Status.GtidExecuted ||
+		dumpEnv["BLOODRAVEN_DUMP_META_OUTPUT_DIR"] != restorePITRDumpMetaDir || dumpEnv["BLOODRAVEN_SOURCE_PREFIX"] == "" {
+		t.Errorf("dump-meta env: %v", dumpEnv)
+	}
+	initEnv := containerEnv(initCs[1:], restorePITRInitContainerName)
+	if _, ok := initEnv["BLOODRAVEN_PITR_START_GTIDS"]; ok {
+		t.Error("pitr-download must not receive START_GTIDS; B comes from dump.json")
+	}
+	if initEnv["BLOODRAVEN_PITR_DUMP_META"] != restorePITRDumpMetaDir+"/dump.json" || initEnv["BLOODRAVEN_PITR_MODE"] != "timestamp" {
+		t.Errorf("pitr-download env: %v", initEnv)
+	}
+	main := containerEnv(job.Spec.Template.Spec.Containers, job.Spec.Template.Spec.Containers[0].Name)
+	if main["BLOODRAVEN_VERIFY_PITR_MODE"] != "timestamp" || main["BLOODRAVEN_PITR_LOCAL_DIR"] == "" ||
+		main["BLOODRAVEN_PITR_STOP_DATETIME"] != "2026-04-20T01:00:00.000000Z" || main["BLOODRAVEN_PITR_ALLOW_PARTIAL"] != "false" {
+		t.Errorf("main PITR env: %v", main)
+	}
+	if _, ok := main["BLOODRAVEN_SOURCE_GTID_EXECUTED"]; ok {
+		t.Error("a verification Job must not render BLOODRAVEN_SOURCE_GTID_EXECUTED: its PITR baseline comes from dump.json (dump-meta), not the backup's status.gtidExecuted")
+	}
+	// F040: three containers share the kubelet's 12 KiB of termination
+	// messages, capped at 4 KiB each.
+	if got := main[terminationMessageLimitEnv]; got != "4096" {
+		t.Errorf("%s = %q, want 4096 (12288/3 capped at 4096)", terminationMessageLimitEnv, got)
 	}
 }
 
@@ -737,23 +755,15 @@ func TestBuildVerificationJob_SanityCheck_RejectsMultiStatement(t *testing.T) {
 	}
 }
 
-func TestParseReplaySentinel_HappyPath(t *testing.T) {
-	mark, ok := parseReplaySentinel(
-		"BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=mysql-bin.000412 position=9183001 timestamp=2026-04-20T01:59:57Z")
-	if !ok {
-		t.Fatal("want ok")
+// B8: verify.sh no longer prints the replay-complete sentinel (replay
+// detail comes from the PITR termination verdict); the log-schema lists it
+// under breaking changes, and the reconciler no longer parses it.
+func TestVerifyReplaySentinelRemoved(t *testing.T) {
+	if strings.Contains(verifyScript, "BLOODRAVEN_VERIFY_REPLAY_COMPLETE") {
+		t.Fatal("verify.sh still prints the removed BLOODRAVEN_VERIFY_REPLAY_COMPLETE sentinel")
 	}
-	if mark.File != "mysql-bin.000412" || mark.Position != 9183001 {
-		t.Errorf("file/pos mismatch: %+v", mark)
-	}
-	if mark.Timestamp == nil || mark.Timestamp.Format(time.RFC3339) != "2026-04-20T01:59:57Z" {
-		t.Errorf("timestamp not parsed: %+v", mark.Timestamp)
-	}
-}
-
-func TestParseReplaySentinel_PrefixMismatch(t *testing.T) {
-	if mark, ok := parseReplaySentinel("hello world"); ok || mark != nil {
-		t.Errorf("non-sentinel line accepted: %+v", mark)
+	if _, ok := parseSanitySentinel("BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=mysql-bin.000412 position=1"); ok {
+		t.Fatal("the replay line parsed as a sanity sentinel")
 	}
 }
 
@@ -784,5 +794,78 @@ func TestParseSanitySentinel_WhitespaceEscape(t *testing.T) {
 	}
 	if !strings.Contains(res.Error, "Table 'x.y' doesn't exist") {
 		t.Errorf("error did not round-trip: %q", res.Error)
+	}
+}
+
+// B4 (§7.1): a PITR verification of a backup without dump identity is
+// refused at build time with PITRBackupIdentityUnknown, before dump-meta.
+func TestBuildVerificationJob_PITRRefusesBackupWithoutIdentity(t *testing.T) {
+	fg := verifyFG()
+	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	backup := successfulBackup("old", "lion", "nightly-s3")
+	backup.Status.FailoverGroupUID = ""
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			ProfileName:      "nightly-s3",
+			PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"},
+		},
+	}
+	_, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup,
+		CredsSecretName: "c", ScriptsConfigMapName: "s",
+	})
+	if err == nil || pitrFailureReason(err.Error()) != "PITRBackupIdentityUnknown" {
+		t.Fatalf("err = %v, want PITRBackupIdentityUnknown", err)
+	}
+}
+
+// F028: a PITR refusal from the reconcile-time build is recorded by its
+// catalog token, token first, not as BuildJobFailed.
+func TestVerificationReconciler_PITRBuildRefusalKeepsToken(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(fg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.MysqlBackup, v *v1alpha1.MysqlBackupVerification)
+		want   string
+	}{
+		{name: "backup without source identity", mutate: func(_ *v1alpha1.MysqlFailoverGroup, b *v1alpha1.MysqlBackup, _ *v1alpha1.MysqlBackupVerification) {
+			b.Status.FailoverGroupUID = ""
+		}, want: "PITRBackupIdentityUnknown"},
+		{name: "PITR disabled on the group", mutate: func(fg *v1alpha1.MysqlFailoverGroup, _ *v1alpha1.MysqlBackup, _ *v1alpha1.MysqlBackupVerification) {
+			fg.Spec.Backup.PITR.Enabled = false
+		}, want: "PITRTargetInvalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := verifyFG()
+			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			backup := successfulBackup("nightly-pitr", "lion", "nightly-s3")
+			v := verifyCR("verify-pitr", "lion", "nightly-s3")
+			v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
+			tc.mutate(fg, backup, v)
+			r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+			reconcileVerifUntilStable(t, r, "verify-pitr")
+			var got v1alpha1.MysqlBackupVerification
+			if err := c.Get(context.Background(), types.NamespacedName{Name: "verify-pitr", Namespace: "ns"}, &got); err != nil {
+				t.Fatal(err)
+			}
+			cond := apimeta.FindStatusCondition(got.Status.Conditions, ConditionVerified)
+			if got.Status.Phase != v1alpha1.VerificationPhaseFailed || cond == nil || cond.Reason != tc.want ||
+				!strings.HasPrefix(cond.Message, tc.want+": ") {
+				t.Fatalf("phase %s condition %+v, want Verified=False/%s token first", got.Status.Phase, cond, tc.want)
+			}
+		})
+	}
+}
+
+func TestTokenFirstMessage(t *testing.T) {
+	for in, want := range map[string]string{
+		"PITRTargetInvalid: x":                       "PITRTargetInvalid: x",
+		"verification job: PITRTargetInvalid: x":     "PITRTargetInvalid: verification job: x",
+		"a: b: PITRTargetInvalid: detail; procedure": "PITRTargetInvalid: a: b: detail; procedure",
+	} {
+		if got := tokenFirstMessage("PITRTargetInvalid", in); got != want {
+			t.Errorf("tokenFirstMessage(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -190,61 +190,68 @@ type PITRStatus struct {
 	// manifest read error, or an unreachable sidecar, in which case the
 	// coverage fields are last-known). Empty on the happy path.
 	Message string `json:"message,omitempty"`
+
+	// Archive is the archive identity the sidecars observed at the active
+	// PITR destination: the descriptor's archive ID and encryption mode,
+	// and whether every reporting sidecar verified it.
+	// +optional
+	Archive *PITRArchiveObservation `json:"archive,omitempty"`
 }
 
 // PointInTimeSpec configures a restore that replays archived binlogs on
 // top of a loaded full dump. It lives under InitFromBackupSpec; leaving
-// it unset yields a plain dump-only restore. PITR requires the target
-// failover group's spec.backup.pitr block to have been enabled at the
-// time of the full dump, otherwise no binlog archive exists to replay.
+// it unset yields a plain dump-only restore. The binlogs come from the
+// source archive that ArchiveProfileName names: the group that took the
+// dump must have archived its binlogs there continuously from before the
+// dump to the target (its spec.backup.pitr enabled with that profile's
+// destination). The restored group's own spec.backup.pitr is not
+// involved; it may be disabled.
 type PointInTimeSpec struct {
-	// Sites are the archive site names to replay. Defaults to this group's sites.
-	// Set when the source archive's sites differ, or to include a removed site.
-	// +optional
-	// +listType=set
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=253
-	// +kubebuilder:validation:items:Pattern=`^[a-z0-9-]+$`
-	Sites []string `json:"sites,omitempty"`
-
 	// ArchiveProfileName names the spec.backup.profiles entry whose binlog
-	// archive the restore reads. Defaults to spec.backup.pitr.profileName.
-	// Set it when restoring another group's archive, for example into renamed
-	// sites, so this group keeps archiving into its own prefix instead of
-	// adding foreign manifests to the source's prefix.
+	// archive the restore reads. Required under initFromBackup: the restore
+	// reads the source group's archive through it, and it may not resolve
+	// to this group's own active PITR destination, so the new group never
+	// writes into the archive it restores from. Replay considers every
+	// site manifest under that archive.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	ArchiveProfileName string `json:"archiveProfileName,omitempty"`
 
-	// AllowPartial permits restoring to the newest archived point when the target
-	// is not covered, and admits a backup with an unknown GTID bound, which the
-	// restore then checks against the loaded dump. It never bypasses archive
-	// safety, site omission, lower-edge or lineage checks.
+	// AllowPartial accepts an archive with no transaction at or after
+	// StopDatetime: the restore then replays to the archive head (outcome
+	// Partial). It relaxes nothing else; archive identity, lineage and
+	// continuity checks still apply.
 	// +optional
 	// +kubebuilder:default=false
 	AllowPartial bool `json:"allowPartial,omitempty"`
 
-	// AllowUnverifiedCrossSite replays archives from more than one site in site
-	// name order, one mysqlbinlog run, without proving cross-site completeness.
-	// mysqlbinlog stops at the first event at or after the target in any site,
-	// so later sites' earlier transactions can be skipped. This never bypasses
-	// archive, payload, lower-edge or stop-proof checks.
-	// +optional
-	// +kubebuilder:default=false
-	AllowUnverifiedCrossSite bool `json:"allowUnverifiedCrossSite,omitempty"`
-
-	// StopDatetime is the MySQL-style datetime at which to stop
-	// replaying binlog events (forwarded to mysqlbinlog
-	// --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
-	// the MySQL native form ("2026-04-15 09:30:00"). Required.
-	// +kubebuilder:validation:MinLength=1
+	// StopDatetime is the target instant, a whole second: RFC 3339
+	// ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00") or
+	// "YYYY-MM-DD HH:MM:SS", which is read as UTC. Fractional seconds are
+	// refused. Replay restores the history of the first archived
+	// transaction committed at or after it (commit times are compared to
+	// the microsecond), cut just before that transaction. Required.
+	// An object stored with a fractional target before this rule existed
+	// fails every update (finalizer removal included) on clusters without
+	// CRD validation ratcheting until an update also corrects the target;
+	// correct such targets before applying the CRD.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
+	// +kubebuilder:validation:MaxLength=40
 	StopDatetime string `json:"stopDatetime"`
 
-	// ExcludeGtids is an optional GTID set passed verbatim to
-	// mysqlbinlog --exclude-gtids. Useful for surgically skipping a
-	// known-bad transaction (e.g. an accidental DROP TABLE) while
-	// replaying everything else.
+	// ExcludeGtids are never replayed and must not intersect the backup.
+	// Every archived transaction committed between the backup's newest
+	// transaction and the target that is outside the target history (lost
+	// at a failover, errant, or on another branch) must be listed; the
+	// PITRArchiveDivergentHistory refusal prints that set. Excluding a
+	// transaction on the target history (for example an accidental DROP
+	// TABLE) skips its GTID, but later row images may still carry its
+	// effects; such exclusions are reported as onHistoryExclusions.
 	// +optional
+	// +kubebuilder:validation:MaxLength=131072
 	ExcludeGtids string `json:"excludeGtids,omitempty"`
 }
 
@@ -273,8 +280,11 @@ type BackupRetrySpec struct {
 
 // BackupProfile is a named, reusable backup configuration.
 type BackupProfile struct {
-	// Name is the unique profile identifier within this failover group.
+	// Name is the unique profile identifier within this failover group, a
+	// DNS label of at most 63 characters (the bound every reference to a
+	// profile, such as pointInTime.archiveProfileName, carries).
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
@@ -458,7 +468,14 @@ type S3Storage struct {
 	Bucket string `json:"bucket"`
 
 	// Prefix is the object-name prefix inside the bucket. Each backup
-	// lands under "<prefix>/<mysqlbackup-name>/".
+	// lands under "<prefix>/<mysqlbackup-name>/" and the PITR archive under
+	// "<prefix>/binlogs/". A leading or trailing "/" is ignored. Empty
+	// segments ("a//b") and "." or ".." segments are refused: the dump
+	// writer keeps a prefix as written, while the archive and every reader
+	// (standby discovery, dump-meta) resolve it as a path, so such a
+	// prefix would name different keys for each.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$`
 	Prefix string `json:"prefix,omitempty"`
 
 	// Region is the AWS region. Optional for non-AWS S3 stores.
@@ -598,6 +615,7 @@ type BackupSchedule struct {
 // brand-new failover group from an existing backup. Once the restore has
 // completed successfully (fg.status.restore.phase == Succeeded), subsequent
 // reconciles skip the restore even if this field is still set.
+// +kubebuilder:validation:XValidation:rule="!has(self.pointInTime) || has(self.pointInTime.archiveProfileName)",message="pointInTime.archiveProfileName is required: name the backup profile whose PITR archive the restore reads"
 type InitFromBackupSpec struct {
 	// Source is a tagged reference to the artifact to restore.
 	// +kubebuilder:validation:XValidation:rule="(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of mysqlBackupRef, s3, or pvc must be set"
@@ -1114,14 +1132,10 @@ type RestoreInPlaceStatus struct {
 	// TargetBinlogPos is the target binary log position after load and optional PITR.
 	TargetBinlogPos int64 `json:"targetBinlogPos,omitempty"`
 
-	// PitrStopDatetime is the normalized mysqlbinlog --stop-datetime used for PITR.
-	PitrStopDatetime string `json:"pitrStopDatetime,omitempty"`
-
-	// PitrReplayedBinlogFile is the final archived binlog passed to mysqlbinlog.
-	PitrReplayedBinlogFile string `json:"pitrReplayedBinlogFile,omitempty"`
-
-	// PitrReplayedBinlogCount is the number of archived binlogs passed to mysqlbinlog.
-	PitrReplayedBinlogCount int32 `json:"pitrReplayedBinlogCount,omitempty"`
+	// PointInTime is the certified outcome of the point-in-time replay,
+	// read from the replay's verdict. Unset without pointInTime.
+	// +optional
+	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
 
 	// Message is a human-readable status line.
 	Message string `json:"message,omitempty"`
@@ -1132,22 +1146,11 @@ type RestoreStatus struct {
 	// JobUID identifies the producing Job across retries using the same name.
 	// +optional
 	JobUID string `json:"jobUID,omitempty"`
-	// PitrCrossSiteUnverified reports explicit replay without cross-site proof.
-	// +optional
-	PitrCrossSiteUnverified bool `json:"pitrCrossSiteUnverified,omitempty"`
-	// PitrReplaySites names the staged sites in replay order.
-	// +optional
-	PitrReplaySites []string `json:"pitrReplaySites,omitempty"`
-	// Reason distinguishes partial and unverified PITR outcomes and failures.
+	// Reason is the failure token (the first word of the failing step's
+	// termination message, for example PITRArchiveDivergentHistory), or
+	// PointInTimePartial on a partial point-in-time success.
 	// +optional
 	Reason string `json:"reason,omitempty"`
-	// PitrNewestEventTime is the newest verified event in the replayed prefix.
-	// Empty means no archived event was replayed; never the requested stop time.
-	// +optional
-	PitrNewestEventTime string `json:"pitrNewestEventTime,omitempty"`
-	// PitrPartial reports that allowPartial relaxed target coverage.
-	// +optional
-	PitrPartial bool `json:"pitrPartial,omitempty"`
 
 	// Phase of the restore Job.
 	Phase BackupPhase `json:"phase,omitempty"`
@@ -1186,14 +1189,10 @@ type RestoreStatus struct {
 	// TargetBinlogPos is the target binary log position after load and optional PITR.
 	TargetBinlogPos int64 `json:"targetBinlogPos,omitempty"`
 
-	// PitrStopDatetime is the normalized mysqlbinlog --stop-datetime used for PITR.
-	PitrStopDatetime string `json:"pitrStopDatetime,omitempty"`
-
-	// PitrReplayedBinlogFile is the final archived binlog passed to mysqlbinlog.
-	PitrReplayedBinlogFile string `json:"pitrReplayedBinlogFile,omitempty"`
-
-	// PitrReplayedBinlogCount is the number of archived binlogs passed to mysqlbinlog.
-	PitrReplayedBinlogCount int32 `json:"pitrReplayedBinlogCount,omitempty"`
+	// PointInTime is the certified outcome of the point-in-time replay,
+	// read from the replay's verdict. Unset without pointInTime.
+	// +optional
+	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
 
 	// Message is a human-readable status message.
 	Message string `json:"message,omitempty"`

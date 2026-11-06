@@ -2414,17 +2414,31 @@ func schemaExists(ctx context.Context, db *sql.DB, database string) (bool, error
 }
 
 // groupFenced reports whether the group's primary is currently fenced by an
-// in-place restore or a planned failover, in which case a MysqlDatabase backs
-// off to Pending instead of erroring.
+// initFromBackup restore that has not succeeded, an in-place restore or a
+// planned failover, in which case a MysqlDatabase backs off to Pending
+// instead of erroring.
 //
-// It delegates to inPlaceRestoreInFlight and plannedFailoverOwnsSites — the
-// canonical classifiers — rather than keeping a private copy of which phases
-// count as active. A private copy would drift the first time a phase is
-// added, and its disagreement with the canonical helpers would be exactly
-// the window where a tenant runs DDL against a primary the operator
-// considers fenced. A planned-failover request that is only waiting (or a
-// provisional grant) leaves the source writable, so it does not fence.
+// It delegates to restoreInFlight, inPlaceRestoreInFlight and
+// plannedFailoverOwnsSites — the canonical classifiers, the first two the
+// same ones the topology manager freezes on — rather than keeping a private
+// copy of which phases count as active. A private copy would drift the
+// first time a phase is added, and its disagreement with the canonical
+// helpers would be exactly the window where a tenant runs DDL against a
+// primary the operator considers fenced. A planned-failover request that is
+// only waiting (or a provisional grant) leaves the source writable, so it
+// does not fence.
 func groupFenced(fg *v1alpha1.MysqlFailoverGroup) (reason, message string, fenced bool) {
+	// An initFromBackup restore (a point-in-time one proves the target's
+	// exact gtid_executed, review F004) must not see tenant DDL in the
+	// middle of its load or replay.
+	if restoreInFlight(fg) {
+		phase := "requested"
+		if fg.Status.Restore != nil && fg.Status.Restore.Phase != "" {
+			phase = string(fg.Status.Restore.Phase)
+		}
+		return "RestoreInProgress",
+			fmt.Sprintf("group %q has not finished its initFromBackup restore (phase %s)", fg.Name, phase), true
+	}
 	if inPlaceRestoreInFlight(fg) {
 		phase := "requested" // spec set, status not yet observed
 		if fg.Status.RestoreInPlace != nil {

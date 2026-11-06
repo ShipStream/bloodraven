@@ -145,6 +145,12 @@ type PlannedFailoverEngine struct {
 	dragonfly plannedDragonflyOps
 	// admission wraps admission passes; nil means no deployment leases.
 	admission plannedAdmissionGuard
+	// activeSitePersisted is called after a status write of the run
+	// commits, with the committed object and from = status.activeSite on
+	// the object the conditioned write replaced; nil in tests and the DST.
+	// Production: the D-46 PITR archive reissue warning
+	// (emitPITRArchiveReissueRisk), which fires only when the two differ.
+	activeSitePersisted func(committed *v1alpha1.MysqlFailoverGroup, from string)
 
 	// runIDSource mints run IDs; nil is uuid.NewUUID. The simulator sets
 	// a deterministic one (SetRunIDSourceForSim).
@@ -555,13 +561,30 @@ func (e *PlannedFailoverEngine) commit(ctx context.Context, fg *v1alpha1.MysqlFa
 			e.dropPendingTerminal(next.RunID)
 		}
 		last = next
+		// written captures the status this write commits, so a committed
+		// move of status.activeSite (the Succeeded terminal write's
+		// MergePlannedAuthority) is reported against base, the object the
+		// conditioned write replaced, settled writes included.
+		var written *v1alpha1.MysqlFailoverGroupStatus
+		capture := mutate
+		if mutate != nil && e.activeSitePersisted != nil {
+			capture = func(st *v1alpha1.MysqlFailoverGroupStatus) {
+				mutate(st)
+				written = st.DeepCopy()
+			}
+		}
 		wctx, cancel := persistCtx(ctx)
-		out, err := e.store.Write(wctx, base, *next, mutate)
+		out, err := e.store.Write(wctx, base, *next, capture)
 		cancel()
 		e.yield(plannedYieldAfterWrite)
 		switch out {
 		case WriteCommitted:
 			e.afterCommit(ctx, nn, base, next)
+			if written != nil {
+				committed := base.DeepCopy()
+				committed.Status = *written
+				e.activeSitePersisted(committed, base.Status.ActiveSite)
+			}
 			return WriteCommitted, next, nil
 		case WriteConflict:
 			lastErr = err

@@ -9,8 +9,10 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 )
 
 const (
@@ -47,6 +49,24 @@ const (
 	// when encryption is enabled. When encryption is off, the main
 	// container keeps the legacy "mysqlsh" name.
 	backupEncryptUploadContainerName = "backup-encrypt-upload"
+
+	// backupStampInitContainerName writes the dump's identity stamp before
+	// the dump starts (design D-8). It is the first init container of
+	// every backup Job.
+	backupStampInitContainerName = "backup-stamp"
+	// backupStampToolMountPath is the emptyDir where the backup-stamp init
+	// container installs the bloodraven binary on plaintext Jobs, so the
+	// mysqlsh container can add serverClock.end after the dump.
+	backupStampToolMountPath = "/run/bloodraven/tools"
+
+	// BackupJobFailoverGroupUIDAnnotation pins the source group's UID on
+	// the backup Job; the reconciler recovers status.failoverGroupUID
+	// from it (F21: the Job is created before the status patch).
+	BackupJobFailoverGroupUIDAnnotation = "bloodraven.shipstream.io/failover-group-uid"
+	// BackupJobPITRArchiveIDAnnotation pins the source group's active
+	// PITR archive ID ("" when PITR is disabled), recovered into
+	// status.pitrArchiveID.
+	BackupJobPITRArchiveIDAnnotation = "bloodraven.shipstream.io/pitr-archive-id"
 )
 
 // BackupJobInputs bundles the resolved inputs for BuildBackupJob. Keeping
@@ -255,6 +275,61 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	podSC, containerSC := mergeSecurityContexts(bspec.PodSecurityContext, bspec.ContainerSecurityContext)
 
+	// --- Backup stamp (D-8) --------------------------------------------
+	//
+	// The stamp's identity is pinned here, when the Job is built: the
+	// backup, the source group, the source group's active PITR archive,
+	// the dumped site and its server_id, and the dump's schema filters.
+	// The Job's annotations carry the same UID and archive ID, so status
+	// is recovered from the Job even when the status patch after create
+	// is lost.
+	stamp, err := backupStampTemplate(fg, backup, in.Profile, in.SourceSite)
+	if err != nil {
+		return nil, err
+	}
+	stampJSON, err := json.Marshal(stamp)
+	if err != nil {
+		return nil, fmt.Errorf("backup job: marshal stamp template: %w", err)
+	}
+	stampEnv := corev1.EnvVar{Name: "BLOODRAVEN_BACKUP_STAMP", Value: string(stampJSON)}
+	toolVolume := corev1.Volume{
+		Name:         "bloodraven-tools",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	stampImage := operatorImageFromEnv
+	if stampImage == "" {
+		stampImage = "bloodraven:latest"
+	}
+	stampContainer := corev1.Container{
+		Name:  backupStampInitContainerName,
+		Image: stampImage,
+		// The init container's own stdout carries the error; the
+		// termination message names the refusal.
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		Command:                  operatorCommand("backup-stamp"),
+		Resources:                effectiveBackupResources(&backupResourcesSource{Resources: bspec.Resources}, defaultInitContainerResources()),
+		SecurityContext:          containerSC,
+	}
+	stampContainer.Env = append(append([]corev1.EnvVar{}, baseEnv...),
+		corev1.EnvVar{Name: "TZ", Value: "UTC"},
+		corev1.EnvVar{Name: "BLOODRAVEN_OUTPUT_URL", Value: outputURL},
+		stampEnv,
+	)
+	stampContainer.Env = append(stampContainer.Env, storageEnv...)
+	if awsCredsMount != nil {
+		stampContainer.Env = append(stampContainer.Env, corev1.EnvVar{Name: "BLOODRAVEN_AWS_CREDS_DIR", Value: backupAWSCredsMountPath})
+	}
+	stampContainer.VolumeMounts = []corev1.VolumeMount{mysqlCredsMount, {Name: "tmp", MountPath: tmpMountPath}}
+	if awsCredsMount != nil {
+		stampContainer.VolumeMounts = append(stampContainer.VolumeMounts, *awsCredsMount)
+	}
+	stampContainer.VolumeMounts = append(stampContainer.VolumeMounts, storageMounts...)
+	if fg.Spec.TLS != nil {
+		stampContainer.VolumeMounts = append(stampContainer.VolumeMounts, corev1.VolumeMount{
+			Name: "tls", MountPath: "/etc/mysql/tls", ReadOnly: true,
+		})
+	}
+
 	// --- Plain / encrypted split ---------------------------------------
 
 	var initContainers []corev1.Container
@@ -275,6 +350,17 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 				Name: "BLOODRAVEN_AWS_CREDS_DIR", Value: backupAWSCredsMountPath,
 			})
 		}
+		// mysqlsh writes @.done.json's end in the container's time zone;
+		// UTC keeps it comparable with a target. The stamp's end step runs
+		// the binary the backup-stamp init container installed.
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "TZ", Value: "UTC"},
+			stampEnv,
+			corev1.EnvVar{Name: "BLOODRAVEN_STAMP_TOOL", Value: backupStampToolMountPath + "/bloodraven"},
+		)
+		stampContainer.Env = append(stampContainer.Env, corev1.EnvVar{Name: "BLOODRAVEN_STAMP_TOOL_DIR", Value: backupStampToolMountPath})
+		stampContainer.VolumeMounts = append(stampContainer.VolumeMounts, corev1.VolumeMount{Name: "bloodraven-tools", MountPath: backupStampToolMountPath})
+		initContainers = append(initContainers, stampContainer)
 
 		mounts := []corev1.VolumeMount{mysqlCredsMount}
 		if awsCredsMount != nil {
@@ -285,6 +371,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 			corev1.VolumeMount{Name: "tmp", MountPath: tmpMountPath},
 		)
 		mounts = append(mounts, storageMounts...)
+		mounts = append(mounts, corev1.VolumeMount{Name: "bloodraven-tools", MountPath: backupStampToolMountPath, ReadOnly: true})
 
 		volumes = append(volumes, mysqlCredsVolume)
 		if awsCredsVolume != nil {
@@ -292,6 +379,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		}
 		volumes = append(volumes, scriptsVolume, mysqlshHomeVolume, tmpVolume)
 		volumes = append(volumes, storageVolumes...)
+		volumes = append(volumes, toolVolume)
 
 		if fg.Spec.TLS != nil {
 			volumes = append(volumes, corev1.Volume{
@@ -343,6 +431,8 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 			// from here and does the actual storage write.
 			corev1.EnvVar{Name: "BLOODRAVEN_STORAGE_TYPE", Value: "PVC"},
 			corev1.EnvVar{Name: "BLOODRAVEN_OUTPUT_URL", Value: backupStagingMountPath + "/" + backup.Name},
+			// @.done.json's end is written in the container's time zone.
+			corev1.EnvVar{Name: "TZ", Value: "UTC"},
 		)
 
 		dumpMounts := []corev1.VolumeMount{
@@ -358,6 +448,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 			})
 		}
 
+		initContainers = append(initContainers, corev1.Container{}) // backup-stamp, filled in below
 		initContainers = append(initContainers, corev1.Container{
 			Name:            backupDumpInitContainerName,
 			Image:           mysqlshImage,
@@ -410,6 +501,19 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 				Name: "BLOODRAVEN_AWS_CREDS_DIR", Value: backupAWSCredsMountPath,
 			})
 		}
+		// The uploader is the encrypted Job's final step: it adds
+		// serverClock.end to the stamp once the upload succeeded.
+		uploadEnv = append(uploadEnv, stampEnv)
+
+		// The stamp is BRV1-encrypted with the dump's passphrase, so the
+		// stamp init container mounts it too; mysqlsh still never sees it.
+		passphraseEnv := corev1.EnvVar{
+			Name:  "BLOODRAVEN_BACKUP_PASSPHRASE_FILE",
+			Value: backupPassphraseMountPath + "/" + backupPassphraseFileName,
+		}
+		stampContainer.Env = append(stampContainer.Env, passphraseEnv)
+		stampContainer.VolumeMounts = append(stampContainer.VolumeMounts, passphraseMount)
+		initContainers[0] = stampContainer
 
 		uploadMounts := []corev1.VolumeMount{
 			{Name: "staging", MountPath: backupStagingMountPath, ReadOnly: true},
@@ -447,17 +551,22 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		}
 	}
 
+	annotations := map[string]string{
+		BackupJobFailoverGroupUIDAnnotation: string(stamp.Source.UID),
+		BackupJobPITRArchiveIDAnnotation:    stamp.PITRArchiveID,
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: fg.Namespace,
-			Labels:    labels,
+			Name:        jobName,
+			Namespace:   fg.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: batchv1.JobSpec{
 			ActiveDeadlineSeconds: &activeDeadline,
 			BackoffLimit:          &backoffLimit,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: bspec.ImagePullSecrets,
@@ -481,6 +590,51 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	}
 
 	return job, nil
+}
+
+// backupStampTemplate is the stamp identity a backup Job pins: everything
+// but serverClock and createdAt, which the Job adds. ServerID is the
+// source site's server-id (101 + its index in spec.sites, F26), which the
+// backup-stamp init container checks against the server it reaches.
+func backupStampTemplate(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile v1alpha1.BackupProfile, sourceSite string) (backupmeta.Stamp, error) {
+	serverID := uint32(0)
+	for i, site := range fg.Spec.Sites {
+		if site.Name == sourceSite {
+			serverID = uint32(101 + i)
+			break
+		}
+	}
+	if serverID == 0 {
+		return backupmeta.Stamp{}, fmt.Errorf("backup job: source site %q is not in spec.sites", sourceSite)
+	}
+	archiveID := ""
+	if ident, ok := activePITRArchiveIdentity(fg); ok {
+		archiveID = ident.ArchiveID
+	}
+	var filters backupmeta.DumpFilters
+	if d := profile.Dump; d != nil {
+		filters.IncludeSchemas = append([]string(nil), d.IncludeSchemas...)
+		filters.ExcludeSchemas = append([]string(nil), d.ExcludeSchemas...)
+	}
+	return backupmeta.Stamp{
+		Kind:          backupmeta.StampKind,
+		Version:       backupmeta.StampVersion,
+		Backup:        backupmeta.ObjectRef{Namespace: backup.Namespace, Name: backup.Name, UID: backup.UID},
+		Source:        backupmeta.ObjectRef{Namespace: fg.Namespace, Name: fg.Name, UID: fg.UID},
+		PITRArchiveID: archiveID,
+		Site:          sourceSite,
+		ServerID:      serverID,
+		DumpFilters:   filters,
+	}, nil
+}
+
+// backupJobIdentity reads the source group UID and PITR archive ID pinned
+// on a backup Job.
+func backupJobIdentity(job *batchv1.Job) (types.UID, string) {
+	if job == nil {
+		return "", ""
+	}
+	return types.UID(job.Annotations[BackupJobFailoverGroupUIDAnnotation]), job.Annotations[BackupJobPITRArchiveIDAnnotation]
 }
 
 // mergeSecurityContexts returns the hardened pod- and container-level
@@ -624,7 +778,13 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 		if s3 == nil {
 			return "", nil, nil, nil, fmt.Errorf("profile %q storage.type=S3 but storage.s3 is nil", profile.Name)
 		}
-		prefix := strings.TrimRight(s3.Prefix, "/")
+		// The prefix is normalized once, here, so the dump, its backup
+		// stamp, status.location, dump-meta and artifact cleanup all
+		// spell the same bucket-relative key: "/prod" and "prod" are the
+		// same prefix, as they are for the PITR archive. A leading "/"
+		// would make the stamp writer's key differ from the key dump-meta
+		// reads.
+		prefix := strings.Trim(s3.Prefix, "/")
 		if prefix != "" {
 			prefix += "/"
 		}

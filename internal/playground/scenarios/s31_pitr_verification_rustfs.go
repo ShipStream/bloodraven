@@ -294,11 +294,20 @@ func s31InsertPITRMarkers() runner.Step {
 				return ctx.Err()
 			case <-time.After(2 * time.Second):
 			}
-			target, err := primary.ScalarString(ctx, "SELECT DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%fZ')")
+			// The verification timestamp admits no fraction (A-39): the
+			// target is the next whole second on the server clock, and the
+			// after-target row is written only once the clock has passed
+			// it (F068).
+			now, err := pitrServerNow(ctx, primary.DB)
 			if err != nil {
 				return fmt.Errorf("capture PITR target timestamp: %w", err)
 			}
+			targetTime := pitrFenceTarget(now)
+			target := targetTime.Format(pitrTargetLayout)
 			if err := ctxStash(ctx, env, "pitrTargetTimestamp", target); err != nil {
+				return err
+			}
+			if err := pitrWaitClockPast(ctx, primary.DB, active, targetTime); err != nil {
 				return err
 			}
 			select {

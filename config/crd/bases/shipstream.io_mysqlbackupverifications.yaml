@@ -122,11 +122,21 @@ spec:
                 description: |-
                   PointInTime configures whether the verification replays archived
                   binlogs on top of the restored dump. Leave nil or set mode=none to
-                  skip replay (Phase 1 behavior). mode=latest replays every archived
-                  event at or after the backup's binlog coordinates; mode=timestamp
-                  stops the replay at a caller-supplied RFC3339 instant. Requires
+                  skip replay. mode=latest replays to the unique archive head;
+                  mode=timestamp restores the history of the first archived
+                  transaction at or after a caller-supplied instant, cut just before
+                  it. Either way the replay may span every site's archive. Requires
                   spec.backup.pitr.enabled=true on the referenced failover group.
                 properties:
+                  excludeGtids:
+                    description: |-
+                      ExcludeGtids are never replayed and must not intersect the backup,
+                      with the same meaning as PointInTimeSpec.ExcludeGtids: every archived
+                      transaction committed between the backup's newest transaction and the
+                      target (or the archive head in latest mode) that is outside the
+                      target history must be listed.
+                    maxLength: 131072
+                    type: string
                   mode:
                     default: none
                     description: Mode selects the replay behavior.
@@ -135,22 +145,16 @@ spec:
                     - latest
                     - timestamp
                     type: string
-                  sites:
-                    description: |-
-                      Sites are the archive site names to replay. Defaults to this group's sites.
-                      Set when the source archive's sites differ, or to include a removed site.
-                    items:
-                      maxLength: 253
-                      minLength: 1
-                      pattern: ^[a-z0-9-]+$
-                      type: string
-                    type: array
-                    x-kubernetes-list-type: set
                   timestamp:
                     description: |-
-                      Timestamp is an RFC3339 instant; replay stops just before the
-                      first binlog event at or after this time. Required when Mode=timestamp;
-                      ignored otherwise.
+                      Timestamp is the target instant, a whole second in the same forms as
+                      PointInTimeSpec.StopDatetime (fractional seconds are refused; a
+                      stored fractional value must be corrected in the same update, as for
+                      StopDatetime). Replay restores the history of the first archived
+                      transaction committed at or after it, cut just before that
+                      transaction. Required when Mode=timestamp; ignored otherwise.
+                    maxLength: 40
+                    pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
                     type: string
                 type: object
               profileName:
@@ -433,6 +437,175 @@ spec:
               podName:
                 description: PodName is the name of the ephemeral MySQL Pod.
                 type: string
+              pointInTime:
+                description: |-
+                  PointInTime is the certified outcome of the point-in-time replay,
+                  read from the replay's verdict. Set on Succeeded verifications whose
+                  spec.pointInTime.mode is not none.
+                properties:
+                  archive:
+                    description: Archive identifies the archive the replay read.
+                    properties:
+                      algorithm:
+                        description: Algorithm is the encryption algorithm; empty
+                          for None.
+                        enum:
+                        - AES-256-GCM
+                        type: string
+                      archiveID:
+                        description: |-
+                          ArchiveID is the descriptor's archive ID, derived from the source
+                          group's UID and the normalized destination.
+                        pattern: ^ar1-[a-z2-7]{26}$
+                        type: string
+                      destination:
+                        description: |-
+                          Destination is the normalized archive destination the descriptor
+                          was read from (s3://… or pvc://…).
+                        maxLength: 4096
+                        type: string
+                      encryptionMode:
+                        description: EncryptionMode is the archive's encryption mode.
+                        enum:
+                        - None
+                        - Passphrase
+                        type: string
+                      source:
+                        description: Source is the group that created the archive.
+                        properties:
+                          name:
+                            description: Name is the source group's name.
+                            maxLength: 253
+                            type: string
+                          namespace:
+                            description: Namespace is the source group's namespace.
+                            maxLength: 63
+                            type: string
+                          uid:
+                            description: UID is the source group's metadata.uid.
+                            type: string
+                        required:
+                        - name
+                        - namespace
+                        - uid
+                        type: object
+                    required:
+                    - archiveID
+                    - encryptionMode
+                    - source
+                    type: object
+                  excludedDivergentTransactionCount:
+                    description: |-
+                      ExcludedDivergentTransactionCount is |D|: transactions committed between the backup's newest transaction and
+                      the target, outside the target history, excluded by excludeGtids.
+                    format: int64
+                    type: integer
+                  gtidExecuted:
+                    description: |-
+                      GtidExecuted is the target's @@global.gtid_executed after replay,
+                      which the replay proved equal to the target history minus
+                      excludeGtids. Empty when longer than 2048 characters; see
+                      GtidExecutedSHA256.
+                    maxLength: 2048
+                    type: string
+                  gtidExecutedSHA256:
+                    description: |-
+                      GtidExecutedSHA256 is the hex SHA-256 of GtidExecuted as the server
+                      printed it (newlines removed).
+                    pattern: ^([0-9a-f]{64})?$
+                    type: string
+                  lastReplayedBinlog:
+                    description: LastReplayedBinlog is the file of the last segment.
+                    properties:
+                      name:
+                        description: Name is the binlog file name, for example mysql-bin.000042.
+                        maxLength: 255
+                        type: string
+                      site:
+                        description: Site is the site whose archive holds the file.
+                        maxLength: 63
+                        pattern: ^[a-z0-9-]+$
+                        type: string
+                    required:
+                    - name
+                    - site
+                    type: object
+                  mode:
+                    description: Mode is the replay mode.
+                    enum:
+                    - Timestamp
+                    - Latest
+                    type: string
+                  newestReplayedCommitTime:
+                    description: |-
+                      NewestReplayedCommitTime is the newest original commit time among
+                      the replayed transactions.
+                    format: date-time
+                    type: string
+                  onHistoryExclusionCount:
+                    description: OnHistoryExclusionCount is the number of GTIDs in
+                      OnHistoryExclusions.
+                    format: int64
+                    type: integer
+                  onHistoryExclusions:
+                    description: |-
+                      OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
+                      Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
+                      Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
+                    maxLength: 2048
+                    type: string
+                  outcome:
+                    description: Outcome is how the end point was reached.
+                    enum:
+                    - TargetCovered
+                    - Partial
+                    - ArchiveHead
+                    type: string
+                  replaySites:
+                    description: |-
+                      ReplaySites are the sites whose archived binlogs were staged, sorted;
+                      see ReplaySitesOmitted for the ones the verdict left out.
+                    items:
+                      maxLength: 63
+                      pattern: ^[a-z0-9-]+$
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  replaySitesOmitted:
+                    description: |-
+                      ReplaySitesOmitted counts further staged sites the verdict did not
+                      name: its site list is bounded, so ReplaySites is complete only when
+                      this is zero.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  replayedBinlogCount:
+                    description: |-
+                      ReplayedBinlogCount is the number of distinct archived binlogs the
+                      segments read.
+                    format: int32
+                    type: integer
+                  replayedTransactionCount:
+                    description: |-
+                      ReplayedTransactionCount is the number of transactions replayed on
+                      top of the backup.
+                    format: int64
+                    type: integer
+                  segmentCount:
+                    description: SegmentCount is the number of replay segments.
+                    format: int32
+                    type: integer
+                  stopTime:
+                    description: |-
+                      StopTime is the requested target (a whole second; commit times are
+                      compared against it to the microsecond). Unset in Latest mode.
+                    format: date-time
+                    type: string
+                required:
+                - mode
+                - outcome
+                type: object
               pvcName:
                 description: PVCName is the name of the ephemeral MySQL PVC.
                 type: string
@@ -444,18 +617,20 @@ spec:
                   verified coverage window against their RPO target.
                 properties:
                   file:
-                    description: File is the last binlog file applied, e.g. "mysql-bin.000412".
+                    description: |-
+                      File is the last binlog file the replay applied, e.g.
+                      "mysql-bin.000412".
                     type: string
                   position:
-                    description: |-
-                      Position is the byte offset within File of the last applied
-                      event.
+                    description: Position is not reported by current releases and
+                      stays unset.
                     format: int64
                     type: integer
                   timestamp:
                     description: |-
-                      Timestamp is the wall-clock time of the last applied event, in
-                      RFC3339. Used to compute bloodraven_backup_verification_replay_lag_seconds.
+                      Timestamp is the newest original commit time among the replayed
+                      transactions. Used to compute
+                      bloodraven_backup_verification_replay_lag_seconds.
                     format: date-time
                     type: string
                 type: object

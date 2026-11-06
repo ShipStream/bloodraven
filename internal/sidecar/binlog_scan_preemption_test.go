@@ -97,7 +97,7 @@ func TestRotationPreemptsColdHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifest.Files = append(manifest.Files, ManifestEntry{Name: "mysql-bin.000017", ID: oldID, PreviousGTIDs: coverageTestSID + ":1-20", Size: int64(len(old))})
-	if err := saveManifest(ctx, base, "binlogs", manifest); err != nil {
+	if err := seedManifest(ctx, base, "binlogs", manifest); err != nil {
 		t.Fatal(err)
 	}
 	writeIndex := func(extra string) error {
@@ -127,7 +127,7 @@ func TestRotationPreemptsColdHistory(t *testing.T) {
 		}
 		cancel()
 	}
-	a := NewBinlogArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
+	a := newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
 	done := make(chan struct{})
 	go func() { defer close(done); a.Run(ctx) }()
 	select {
@@ -224,11 +224,11 @@ func historyBudgetFixture(t *testing.T, count int) (*BinlogArchiver, *historyBud
 	if err := os.WriteFile(filepath.Join(dir, "mysql-bin.index"), []byte(strings.Join(index, "\n")+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveManifest(context.Background(), base, "binlogs", m); err != nil {
+	if err := seedManifest(context.Background(), base, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
 	store := &historyBudgetStore{ArchiveStore: base}
-	return NewBinlogArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default()), store, data
+	return newTestArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default()), store, data
 }
 func TestRotationPreemptsOneOversizedHistoricalRead(t *testing.T) {
 	a, store, data := historyBudgetFixture(t, 1)
@@ -266,6 +266,12 @@ func TestLegacyIdentitiesBatchAndRetryManifestSave(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprint(fail), func(t *testing.T) {
 			a, store, _ := historyBudgetFixture(t, 3)
+			// The episode's promotion record is a manifest write of its own.
+			if err := a.openSession(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			a.roleTick(context.Background())
+			store.manifestWrites = 0
 			store.failSave = fail
 			a.scanAndArchive(context.Background())
 			if store.manifestWrites != 1 {

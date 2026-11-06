@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,23 @@ func fgInitFromMysqlBackup() *v1alpha1.MysqlFailoverGroup {
 	return fg
 }
 
+// addSourceArchiveProfile adds a "source-archive" profile, a copy of the
+// group's first profile under its own prefix, for a PITR restore to read
+// from: initFromBackup must name its archive profile, and it may not be the
+// group's own active PITR destination (D-10).
+func addSourceArchiveProfile(fg *v1alpha1.MysqlFailoverGroup) string {
+	source := *fg.Spec.Backup.Profiles[0].DeepCopy()
+	source.Name = "source-archive"
+	switch {
+	case source.Storage.S3 != nil:
+		source.Storage.S3.Prefix = "source-group"
+	case source.Storage.PVC != nil:
+		source.Storage.PVC.SubPath = "source-group"
+	}
+	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
+	return source.Name
+}
+
 // succeededSeedBackup is a previously-completed MysqlBackup the restore
 // can use as its source.
 func succeededSeedBackup() *v1alpha1.MysqlBackup {
@@ -46,12 +64,23 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Phase:          v1alpha1.BackupPhaseSucceeded,
-			GtidExecuted:   "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
-			CompletionTime: &now,
-			Location:       "lion/seed/",
+			Phase:            v1alpha1.BackupPhaseSucceeded,
+			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
+			CompletionTime:   &now,
+			Location:         "lion/seed/",
+			FailoverGroupUID: "lion-uid",
 		},
 	}
+}
+
+// seedPublished marks fg's default seed site as the published, writable
+// active site: the state the topology manager's fresh-deploy seeding
+// leaves a new initFromBackup group in, and the only one in which
+// reconcileRestoreJob starts the restore Job.
+func seedPublished(fg *v1alpha1.MysqlFailoverGroup) {
+	seed := fg.Spec.DefaultSeedSite().Name
+	fg.Status.ActiveSite = seed
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: seed, State: "writable"}}
 }
 
 // primaryReadyDeployment returns a Deployment matching the first site with
@@ -96,6 +125,7 @@ func TestReconcileRestoreJob_WaitsForPrimaryReady(t *testing.T) {
 
 func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
 
@@ -298,6 +328,7 @@ func TestIsS3Location(t *testing.T) {
 
 func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
 
@@ -334,6 +365,105 @@ func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 
 	if fresh.Status.Restore == nil || fresh.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded {
 		t.Errorf("want Succeeded, got %+v", fresh.Status.Restore)
+	}
+}
+
+// TestReconcileRestoreJob_WaitsForSeededWritableTarget: every site of a new
+// group boots fenced (read_only=ON, and the sidecar adds super_read_only
+// until the operator names the site active), so a load started before the
+// operator seeded the target fails with ERROR 1290, and a failed restore
+// Job is final. The Job must wait for the seed to be published and
+// observed writable, however ready its Deployment is.
+func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
+	ctx := context.Background()
+	fg := fgInitFromMysqlBackup()
+	seed := succeededSeedBackup()
+	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
+	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	jobKey := types.NamespacedName{Name: restoreJobName("lion", "iad"), Namespace: "ns"}
+
+	steps := []struct {
+		name   string
+		status v1alpha1.MysqlFailoverGroupStatus
+		wait   string
+	}{
+		{"not seeded", v1alpha1.MysqlFailoverGroupStatus{}, `waiting for the operator to seed site "iad"`},
+		{"seeded, still observed read-only", v1alpha1.MysqlFailoverGroupStatus{
+			ActiveSite: "iad",
+			Sites:      []v1alpha1.SiteStatus{{Name: "iad", State: "read-only"}, {Name: "pdx", State: "read-only"}},
+		}, `waiting for active site "iad" to be observed writable`},
+	}
+	for _, step := range steps {
+		fg.Status = step.status
+		d, err := r.reconcileRestoreJob(ctx, fg)
+		if err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		if d == 0 {
+			t.Fatalf("%s: no requeue", step.name)
+		}
+		if err := c.Get(ctx, jobKey, &batchv1.Job{}); err == nil {
+			t.Fatalf("%s: restore Job created before the target was writable", step.name)
+		}
+		rs := fg.Status.Restore
+		if rs == nil || rs.Phase != v1alpha1.BackupPhasePending || rs.TargetSite != "iad" || !strings.HasPrefix(rs.Message, step.wait) {
+			t.Fatalf("%s: status.restore = %+v, want Pending on iad %q", step.name, rs, step.wait)
+		}
+	}
+
+	seedPublished(fg)
+	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, jobKey, &batchv1.Job{}); err != nil {
+		t.Fatalf("restore Job not created once the seed is writable: %v", err)
+	}
+	if rs := fg.Status.Restore; rs == nil || rs.Phase != v1alpha1.BackupPhaseRunning {
+		t.Fatalf("status.restore = %+v, want Running", rs)
+	}
+}
+
+// TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced: once the Job
+// exists, a target that reads non-writable (fenced mid-load, unreachable)
+// must not reset the running restore to Pending: the Job's outcome is still
+// recorded against the site it was created for.
+func TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced(t *testing.T) {
+	ctx := context.Background()
+	fg := fgInitFromMysqlBackup()
+	seedPublished(fg)
+	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), dsnSecret())
+	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if rs := fg.Status.Restore; rs == nil || rs.Phase != v1alpha1.BackupPhaseRunning {
+		t.Fatalf("status.restore = %+v, want Running", rs)
+	}
+
+	for _, st := range []string{"read-only", "unreachable"} {
+		fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: st}}
+		if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
+			t.Fatal(err)
+		}
+		if rs := fg.Status.Restore; rs.Phase != v1alpha1.BackupPhaseRunning || rs.JobName == "" {
+			t.Fatalf("target %s: running restore reset to %+v", st, rs)
+		}
+	}
+
+	var job batchv1.Job
+	if err := c.Get(ctx, types.NamespacedName{Name: restoreJobName("lion", "iad"), Namespace: "ns"}, &job); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.Now()
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now}}
+	job.Status.Succeeded = 1
+	if err := c.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if rs := fg.Status.Restore; rs.Phase != v1alpha1.BackupPhaseSucceeded || rs.TargetSite != "iad" {
+		t.Fatalf("status.restore = %+v, want Succeeded on iad", rs)
 	}
 }
 
@@ -480,7 +610,7 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 	f, tr := false, true
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source-archive"}
 
 	for _, tc := range []struct {
 		name        string
@@ -501,6 +631,7 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInitFromMysqlBackup()
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			addSourceArchiveProfile(fg)
 			fg.Spec.InitFromBackup.PointInTime = tc.pit
 			fg.Spec.InitFromBackup.LoadOptions = tc.loadOptions
 			r, _ := newReconciler(fg, succeededSeedBackup())
@@ -525,7 +656,28 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 			if got := opts["threads"]; got != tc.wantThreads {
 				t.Errorf("threads = %v, want %v", got, tc.wantThreads)
 			}
+			// F040: the main container's share of the kubelet's 12 KiB of
+			// termination messages, capped at 4 KiB.
+			spec := job.Spec.Template.Spec
+			want := strconv.Itoa(min(4096, 12288/(len(spec.InitContainers)+len(spec.Containers))))
+			if got := containerEnv(spec.Containers, backupJobContainerName)[terminationMessageLimitEnv]; got != want {
+				t.Errorf("%s = %q, want %s for %d containers", terminationMessageLimitEnv, got, want, len(spec.InitContainers)+len(spec.Containers))
+			}
 		})
+	}
+}
+
+// F040: the limit follows the pod's container count.
+func TestSetTerminationMessageLimit(t *testing.T) {
+	for _, tc := range []struct {
+		init int
+		want string
+	}{{0, "4096"}, {2, "4096"}, {3, "3072"}, {4, "2457"}} {
+		spec := corev1.PodSpec{InitContainers: make([]corev1.Container, tc.init), Containers: []corev1.Container{{Name: backupJobContainerName}}}
+		setTerminationMessageLimit(&spec)
+		if got := containerEnv(spec.Containers, backupJobContainerName)[terminationMessageLimitEnv]; got != tc.want {
+			t.Errorf("%d init containers: limit %q, want %s", tc.init, got, tc.want)
+		}
 	}
 }
 
@@ -537,11 +689,12 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source-archive"}
 
 	newFG := func() *v1alpha1.MysqlFailoverGroup {
 		fg := fgInPlaceRestore("")
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		addSourceArchiveProfile(fg)
 		return fg
 	}
 
@@ -602,4 +755,62 @@ func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) 
 			t.Fatalf("want the fresh-target/in-place-preflight guard error, got %v", err)
 		}
 	})
+}
+
+// F036, F037: a direct S3 or PVC restore source with PITR. The S3 prefix
+// is spelled one way (the writer's, exterior "/" trimmed) for loading,
+// decryption and dump-meta; a source at the root of its store is refused
+// PITRBackupIdentityUnknown, token first, with the remedy.
+func TestBuildRestoreJob_DirectSourcePITR(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+	direct := func(src v1alpha1.InitFromBackupSource, decrypt bool) *v1alpha1.MysqlFailoverGroup {
+		fg := fgWithBackup()
+		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src}
+		fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
+		if decrypt {
+			fg.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pp"}}
+		}
+		return fg
+	}
+	s3 := func(prefix string) v1alpha1.InitFromBackupSource {
+		return v1alpha1.InitFromBackupSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: prefix, CredentialsSecret: "aws"}}
+	}
+
+	for _, decrypt := range []bool{false, true} {
+		fg := direct(s3("/prod/nightly/"), decrypt)
+		r, _ := newReconciler(fg)
+		job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+		if err != nil {
+			t.Fatalf("decrypt=%v: %v", decrypt, err)
+		}
+		for _, c := range job.Spec.Template.Spec.InitContainers {
+			env := envMap(c.Env)
+			if p, ok := env["BLOODRAVEN_SOURCE_PREFIX"]; ok && p != "prod/nightly" {
+				t.Fatalf("decrypt=%v: %s reads prefix %q, want prod/nightly", decrypt, c.Name, p)
+			}
+		}
+		if !decrypt {
+			if got := envMap(job.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_INPUT_URL"]; got != "prod/nightly" {
+				t.Fatalf("load input %q, want prod/nightly", got)
+			}
+		}
+	}
+
+	for name, src := range map[string]v1alpha1.InitFromBackupSource{
+		"S3 without prefix":   s3(""),
+		"S3 prefix of '/'":    s3("/"),
+		"PVC without subPath": {PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dumps"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fg := direct(src, false)
+			r, _ := newReconciler(fg)
+			_, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+			if err == nil || !strings.HasPrefix(err.Error(), "PITRBackupIdentityUnknown: ") ||
+				!strings.Contains(err.Error(), "root of its store") || !strings.Contains(err.Error(), "mysqlBackupRef") {
+				t.Fatalf("err = %v, want a token-first PITRBackupIdentityUnknown refusal", err)
+			}
+		})
+	}
 }

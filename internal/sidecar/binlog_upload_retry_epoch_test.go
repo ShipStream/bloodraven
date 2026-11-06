@@ -10,7 +10,7 @@ func TestOlderUploadRetryIsNotReset(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	state := &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-12"}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	// The older upload failed transiently; its successor was archived successfully.
 	for _, f := range []struct{ path, name string }{
 		{"testdata/review-order-b.bin", "mysql-bin.000002"},

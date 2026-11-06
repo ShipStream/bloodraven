@@ -30,14 +30,24 @@
 # Exit status: 0 every follower CLEAN; 2 at least one DIVERGENT; 3 none
 # divergent but at least one UNKNOWN; 1 usage or discovery error.
 #
+# With --manifest <file> (repeatable), it also prints the PITR evidence in
+# plaintext archive manifests (manifest-<site>.json, fetched by you from the
+# archive prefix): each site's Divergent rows and promotion records, and the
+# candidate excludeGtids set for a restore or verification whose window holds
+# those transactions. Encrypted archives' manifests are BRV1 ciphertext and
+# are reported as unreadable. Requires jq.
+#
 set -uo pipefail
 
 NAMESPACE=""
 MFG_NAME=""
+MANIFESTS=()
 
 usage() {
     echo "Usage: $0 [-n <namespace>] [<mysql-failover-group>]"
     echo "Follower-first audit: does any follower hold transactions the primary lacks?"
+    echo "  --manifest <file>  also print Divergent rows and promotion records from a plaintext"
+    echo "                     PITR manifest-<site>.json (repeatable; needs jq)"
     echo "Exit: 0 all CLEAN, 2 a follower is DIVERGENT, 3 a follower is UNKNOWN, 1 usage/discovery error."
     exit "${1:-0}"
 }
@@ -47,6 +57,11 @@ while [[ $# -gt 0 ]]; do
         -n|--namespace)
             [[ $# -ge 2 ]] || usage 1
             NAMESPACE="$2"
+            shift 2
+            ;;
+        --manifest)
+            [[ $# -ge 2 ]] || usage 1
+            MANIFESTS+=("$2")
             shift 2
             ;;
         -h|--help)
@@ -246,6 +261,75 @@ elif [[ "$GENERATION_BEFORE" != "$GENERATION_AFTER" ]]; then
     UNKNOWN=$((UNKNOWN + CLEAN + DIVERGENT))
     CLEAN=0
     DIVERGENT=0
+fi
+
+# Operator-side failover evidence: the set the last promoted candidate had
+# when it began accepting writes. Archived transactions outside it that were
+# committed before that promotion were lost at it.
+LAST_TARGET=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailoverTarget}' 2>/dev/null || true)
+PROMOTION_GTID=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.promotionGtidExecuted}' 2>/dev/null || true)
+if [[ -n "$LAST_TARGET" ]]; then
+    echo ""
+    echo "Last promotion: $LAST_TARGET at $(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover}' 2>/dev/null || true) with gtid_executed=${PROMOTION_GTID:-unknown}"
+fi
+
+if [[ ${#MANIFESTS[@]} -gt 0 ]]; then
+    echo ""
+    echo "======================================================================="
+    echo "PITR manifest evidence"
+    echo "======================================================================="
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "jq is required for --manifest."
+    else
+        CANDIDATES=()
+        for m in "${MANIFESTS[@]}"; do
+            echo ""
+            if ! jq -e 'type == "object"' "$m" >/dev/null 2>&1; then
+                echo "📄 $m: not readable JSON (an encrypted archive's manifest is BRV1 ciphertext)"
+                continue
+            fi
+            jq -r '"📄 site=\(.site // "?") version=\(.version // "?") archiveId=\(.archiveId // "")" +
+                (if .historyIntegrity then "\n   historyIntegrity: \(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at); this site cannot certify history (playbook 40)" else "" end) +
+                (if (.epoch.resetReason // "") != "" then "\n   epoch.resetReason: \(.epoch.resetReason); every restore refuses PITRArchiveHistoryReset" else "" end)' "$m"
+            echo "   Records (kind serverUuid serverId observedAt probeInterval gtidExecuted [readOnlyGtidExecuted]):"
+            jq -r '(.promotions // [])[] | "     \(.kind // "Promotion") \(.serverUuid) \(.serverId) \(.observedAt) \(.probeInterval // "unknown") \(.gtidExecuted)" + (if (.readOnlyGtidExecuted // "") != "" then " [read-only before: \(.readOnlyGtidExecuted)]" else "" end)' "$m"
+            echo "   Divergent rows (name id missingGtids):"
+            jq -r '(.divergent // [])[] | "     \(.name) \(.id // "legacy") \(.missingGtids)"' "$m"
+            echo "   Quarantined rows (name id at reason [missingGtids]):"
+            jq -r '(.quarantined // [])[] | "     \(.entry.name) \(.entry.id // "legacy") \(.at) \(.reason)" + (if .divergent then " [divergent: \(.divergent.missingGtids)]" else "" end)' "$m"
+            # Candidates come from active and quarantined Divergent rows: a
+            # quarantined lost tail still needs excluding. Each set is
+            # checked before it reaches the printed SQL (the manifest is
+            # archive content, not trusted input).
+            while IFS=$'\t' read -r where set; do
+                [[ -z "$where" ]] && continue
+                if [[ -z "$set" ]]; then
+                    continue
+                elif valid_gtid_set "$set" && [[ "$set" == *:* ]]; then
+                    CANDIDATES+=("$set")
+                else
+                    echo "   ⚠️  $where: missingGtids is not a GTID set, not used: $(printf '%q' "$set")"
+                fi
+            done < <(jq -r '((.divergent // [])[] | ["divergent row \(.name)", (.missingGtids | if type == "string" then . else tojson end)]),
+                            ((.quarantined // [])[] | select(.divergent) | ["quarantined row \(.entry.name)", (.divergent.missingGtids | if type == "string" then . else tojson end)])
+                            | @tsv' "$m")
+        done
+        if [[ ${#CANDIDATES[@]} -gt 0 ]]; then
+            JOINED=$(IFS=,; printf '%s' "${CANDIDATES[*]}")
+            echo ""
+            echo "Candidate excludeGtids (union of the active and quarantined Divergent rows' missingGtids):"
+            echo "   $JOINED"
+            echo "   Prefer the exact set the refusal printed: PITRArchiveDivergentHistory (and a"
+            echo "   latest-mode loss refusal) prints it as BLOODRAVEN_PITR_DIVERGENT_SET gtids= in"
+            echo "   the restore Job's log and coverage.json. This union is wider: use only the part"
+            echo "   inside the restore window. excludeGtids must not intersect the dump's own GTID"
+            echo "   set B (gtidExecuted in the dump's @.json; decrypt it first for an encrypted"
+            echo "   backup), which can hold more than MysqlBackup status.gtidExecuted. Drop what the"
+            echo "   dump holds with, on any server:"
+            echo "     SELECT GTID_SUBTRACT('$JOINED', '<gtidExecuted from the dump's @.json>');"
+            echo "   A backup taken after the loss needs no exclusion. See playbook 42."
+        fi
+    fi
 fi
 
 echo ""

@@ -59,9 +59,10 @@ func EnsureBucket(ctx context.Context, endpoint, bucket string, creds Credential
 
 // GetObject fetches an object from the RustFS bucket. Returns found=false
 // (with nil error) when the key does not exist so callers can distinguish a
-// missing manifest from a read error. Signed with AWS SigV4 like EnsureBucket
-// so no aws-cli sidecar image is needed. Used by the PITR archive-handoff
-// scenario to read per-site binlog manifests directly from storage.
+// missing object from a read error. Signed with AWS SigV4 like EnsureBucket
+// so no aws-cli sidecar image is needed. The PITR scenarios use it to read a
+// dump's @.json and @.done.json (its gtidExecuted baseline and end time)
+// and the per-site binlog manifests straight from storage.
 func GetObject(ctx context.Context, endpoint, bucket, key string, creds Credentials) (data []byte, found bool, err error) {
 	if bucket == "" || key == "" {
 		return nil, false, fmt.Errorf("bucket and key are required")
@@ -120,6 +121,32 @@ func ListKeys(ctx context.Context, endpoint, bucket, prefix string, creds Creden
 		}
 	}
 	return keys, nil
+}
+
+// DeletePrefix deletes every object under prefix, one DeleteObject per key,
+// and returns how many it deleted. prefix must be non-empty and end in "/",
+// so a scenario cannot delete a whole bucket or a sibling prefix sharing a
+// name stem.
+func DeletePrefix(ctx context.Context, endpoint, bucket, prefix string, creds Credentials) (int, error) {
+	if bucket == "" || prefix == "" || !strings.HasSuffix(prefix, "/") || strings.Trim(prefix, "/") == "" {
+		return 0, fmt.Errorf("bucket and a non-root prefix ending in / are required (got %q)", prefix)
+	}
+	keys, err := ListKeys(ctx, endpoint, bucket, prefix, creds)
+	if err != nil {
+		return 0, err
+	}
+	client, err := newS3Client(endpoint, creds)
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, k := range keys {
+		if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(k)}); err != nil {
+			return deleted, fmt.Errorf("delete %q/%q: %w", bucket, k, err)
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 // listPageSize keeps ListKeys pages small enough that a backup's objects

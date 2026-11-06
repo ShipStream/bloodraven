@@ -151,7 +151,7 @@ func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
 	after, _ := json.Marshal(divergent)
 	if string(before) != string(after) {
 		m.Divergent = divergent
-		if err := saveManifest(ctx, a.store, a.cfg.ManifestPrefix, m); err != nil {
+		if err := a.saveManifest(ctx, m); err != nil {
 			return fmt.Errorf("save divergence evidence: %w", err)
 		}
 	}
@@ -160,14 +160,16 @@ func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
 
 // QuarantineArchive moves metadata only. Objects remain available for recovery.
 // resumeGTIDs is the operator-chosen trusted full-backup bound for future replay.
-func QuarantineArchive(ctx context.Context, store ArchiveStore, prefix, site, name, id, reason, resumeGTIDs string, undo bool) error {
+// It writes through session, a verified writer session for the archive
+// (the site's own sidecar writer must be stopped first).
+func QuarantineArchive(ctx context.Context, session *ArchiveSession, site, name, id, reason, resumeGTIDs string, undo bool) error {
 	if !isPlainFileName(name) || !isPlainFileName(site) {
 		return fmt.Errorf("invalid site or file name")
 	}
-	if _, err := ArchiveEntryKey(prefix, site, ManifestEntry{Name: name, ID: id}); err != nil {
+	if _, err := ArchiveEntryKey(session.Prefix(), site, ManifestEntry{Name: name, ID: id}); err != nil {
 		return err
 	}
-	m, err := loadManifest(ctx, store, prefix, site)
+	m, err := session.LoadManifest(ctx, site)
 	if err != nil {
 		return err
 	}
@@ -264,13 +266,14 @@ func QuarantineArchive(ctx context.Context, store ArchiveStore, prefix, site, na
 		m.Epoch.ResetReason = "verified GTID namespace reuse; a new manifest prefix and full backup are required"
 	}
 
-	return saveManifest(ctx, store, prefix, m)
+	return session.SaveManifest(ctx, m)
 }
 
 // AcknowledgeArchiveHistory supersedes an obsolete guard only behind a verified
 // canonical backup covering every active archived byte stream. Older backups
 // remain governed by row-scoped quarantine bounds and verified issuance.
-func AcknowledgeArchiveHistory(ctx context.Context, store ArchiveStore, prefix, site, reason, resumeGTIDs string) error {
+func AcknowledgeArchiveHistory(ctx context.Context, session *ArchiveSession, site, reason, resumeGTIDs string) error {
+	store, prefix := session.Store(), session.Prefix()
 	if !isPlainFileName(site) {
 		return fmt.Errorf("invalid site")
 	}
@@ -278,7 +281,7 @@ func AcknowledgeArchiveHistory(ctx context.Context, store ArchiveStore, prefix, 
 	if err != nil || bound.IsEmpty() || strings.TrimSpace(reason) == "" {
 		return fmt.Errorf("reason and valid nonempty canonical backup GTIDs are required")
 	}
-	m, err := loadManifest(ctx, store, prefix, site)
+	m, err := session.LoadManifest(ctx, site)
 	if err != nil {
 		return err
 	}
@@ -359,5 +362,5 @@ func AcknowledgeArchiveHistory(ctx context.Context, store ArchiveStore, prefix, 
 	}
 	m.Acknowledged = append(m.Acknowledged, ack)
 	m.Divergent = nil
-	return saveManifest(ctx, store, prefix, m)
+	return session.SaveManifest(ctx, m)
 }

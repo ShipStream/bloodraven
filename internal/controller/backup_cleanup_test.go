@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -73,7 +74,8 @@ func TestArtifactStorageFromJob(t *testing.T) {
 		{name: "plain S3 with endpoint and region", job: func(t *testing.T) *batchv1.Job { return build(t, withEndpoint, 0) },
 			want: v1alpha1.BackupArtifactStorage{Location: "lion/snap", Bucket: "bloodraven-backups", EndpointURL: "https://minio.example:9000", Region: "us-west-2"}},
 		{name: "encrypted S3 reads the uploader", job: func(t *testing.T) *batchv1.Job { return build(t, fgWithEncryptedBackup(), 0) },
-			want: v1alpha1.BackupArtifactStorage{Location: "s3://bloodraven-backups/lion/snap/", Bucket: "bloodraven-backups", EndpointURL: "https://minio.local", Region: "us-east-1"}},
+			want: v1alpha1.BackupArtifactStorage{Location: "s3://bloodraven-backups/lion/snap/", Bucket: "bloodraven-backups", EndpointURL: "https://minio.local", Region: "us-east-1",
+				PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "backup-passphrase", Key: "passphrase"}}},
 		{name: "PVC claim", job: func(t *testing.T) *batchv1.Job { return build(t, fgWithBackup(), 1) },
 			want: v1alpha1.BackupArtifactStorage{Location: "/backups/snap", ClaimName: ownedBackupPVCName("lion", "daily-local")}},
 		{name: "bucket from a runtime-only source", job: func(t *testing.T) *batchv1.Job {
@@ -100,7 +102,7 @@ func TestArtifactStorageFromJob(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || *got != tc.want {
+			if err != nil || !reflect.DeepEqual(*got, tc.want) {
 				t.Fatalf("got %+v, %v; want %+v", got, err, tc.want)
 			}
 		})
@@ -233,7 +235,7 @@ func TestArtifactIdentityProblem(t *testing.T) {
 			b := mb.DeepCopy()
 			b.Status.Location, b.Status.StorageType = tc.location, tc.storageType
 			storage := &v1alpha1.BackupArtifactStorage{Location: tc.recorded, Bucket: "bloodraven-backups", ClaimName: "claim"}
-			got := artifactIdentityProblem(b, storage, tc.producer)
+			got := artifactIdentityProblem(b, b.Status.Location, storage, tc.producer)
 			if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
@@ -745,8 +747,9 @@ func TestFinalize_RestoresBlankedLocationFromSnapshot(t *testing.T) {
 		t.Fatalf("ArtifactLocationRestored events = %d", n)
 	}
 
-	// A failed backup has no artifact even if its Job's destination was
-	// recorded at creation: still released.
+	// A failed backup's location is never restored: its leftovers (the
+	// backup stamp, part of a dump) are cleaned up in abandoned mode at
+	// the planned destination instead (TestFinalize_AbandonedBackupCleanup).
 	failed := newCleanupFixture(t)
 	if err := failed.c.Get(ctx, client.ObjectKeyFromObject(failed.mb), failed.mb); err != nil {
 		t.Fatal(err)
@@ -755,8 +758,14 @@ func TestFinalize_RestoresBlankedLocationFromSnapshot(t *testing.T) {
 	if err := failed.c.Status().Update(ctx, failed.mb); err != nil {
 		t.Fatal(err)
 	}
-	if done, _ := failed.finalize(t); !done {
-		t.Fatal("a failed backup without an artifact was not released")
+	if done, _ := failed.finalize(t); done {
+		t.Fatal("a failed backup was released before its leftovers were cleaned up")
+	}
+	if failed.mb.Status.Location != "" {
+		t.Fatalf("a failed backup acquired status.location %q", failed.mb.Status.Location)
+	}
+	if job, ok := failed.cleanupJob(t); !ok || envMap(job.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_CLEANUP_MODE"] != "abandoned" {
+		t.Fatal("no abandoned-mode cleanup Job for the failed backup")
 	}
 }
 
@@ -1001,5 +1010,43 @@ func TestReconcile_DoesNotAdoptAnotherBackupsJob(t *testing.T) {
 	}
 	if mb.Status.Phase != v1alpha1.BackupPhaseFailed {
 		t.Fatalf("phase %s, want Failed after the pending deadline", mb.Status.Phase)
+	}
+}
+
+// F147: a succeeded backup whose status lost its source identity gets it
+// back from the Job that pinned it, as the PITRBackupIdentityUnknown
+// refusal promises.
+func TestRepairTerminalAttribution_RestoresLostIdentity(t *testing.T) {
+	ctx := context.Background()
+	f := newCleanupFixture(t)
+	producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
+		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerutil.SetControllerReference(f.mb, producer, f.r.Scheme); err != nil {
+		t.Fatal(err)
+	}
+	producer.Annotations[BackupJobFailoverGroupUIDAnnotation] = "fg-uid"
+	producer.Annotations[BackupJobPITRArchiveIDAnnotation] = "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	producer.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := f.c.Create(ctx, producer); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	f.mb.Status.FailoverGroupUID, f.mb.Status.PITRArchiveID = "", ""
+	if err := f.c.Status().Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.r.repairTerminalAttribution(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if f.mb.Status.FailoverGroupUID != "fg-uid" || f.mb.Status.PITRArchiveID != "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("identity not restored: uid=%q archive=%q", f.mb.Status.FailoverGroupUID, f.mb.Status.PITRArchiveID)
 	}
 }

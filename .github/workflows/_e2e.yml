@@ -159,35 +159,29 @@ jobs:
         if: inputs.scenario != ''
         env:
           E2E_SCENARIOS: ${{ inputs.scenario }}
+          E2E_JUNIT_OUT: playground/chaos-results/e2e-scenarios-junit.xml
         run: |
           set -euo pipefail
           # Sequential on purpose: these share one cluster and the list is
           # ordered least- to most-destructive. A failure stops the run so
           # forensics are captured against the state that produced it.
+          # run-all (not one `chaos-run` per ID) so a listed scenario that
+          # sets ResetBeforeRunAll gets its reset, as in a profile run.
           #
           # setup.sh returns before the operator's first reconcile settles,
-          # so the first scenario waits for a healthy baseline (what run-all
-          # does by default) instead of failing its instant precheck on a
-          # still-converging cluster. A timeout is not fatal: the precheck
-          # decides and captures forensics.
-          IFS=',' read -ra ids <<< "$E2E_SCENARIOS"
-          wait_args=(--baseline-wait=5m)
-          for id in "${ids[@]}"; do
-            id="$(echo "$id" | xargs)"
-            [ -n "$id" ] || continue
-            echo "::group::chaos-run $id"
-            ./bin/playground-chaos run "$id" "${wait_args[@]}"
-            wait_args=()
-            echo "::endgroup::"
-          done
+          # so run-all first waits for a healthy baseline (--baseline-wait,
+          # default 5m) instead of failing the first scenario's instant
+          # precheck on a still-converging cluster. A timeout is not fatal:
+          # the precheck decides and captures forensics.
+          ./bin/playground-chaos run-all --scenarios="$E2E_SCENARIOS" --junit-out="$E2E_JUNIT_OUT"
         timeout-minutes: ${{ inputs.timeout-minutes }}
 
       - name: Upload JUnit results
-        if: always() && inputs.scenario == ''
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ inputs.profile }}-junit
-          path: playground/chaos-results/e2e-${{ inputs.profile }}-junit.xml
+          name: e2e-${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || inputs.profile) }}-junit
+          path: playground/chaos-results/e2e-${{ inputs.scenario != '' && 'scenarios' || inputs.profile }}-junit.xml
           retention-days: 30
           overwrite: true
 

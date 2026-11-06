@@ -19,7 +19,7 @@ func TestLostHistoryIsDivergenceWithoutReissuance(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	state := &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-21"}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	source := "testdata/incarnation-b.bin"
 	id, err := a.localBinlogID(source)
 	if err != nil {
@@ -56,10 +56,10 @@ func TestLostHistoryIsDivergenceWithoutReissuance(t *testing.T) {
 		t.Fatal("lost tail was not re-evaluated")
 	}
 
-	if err := QuarantineArchive(ctx, store, "binlogs", "iad", "mysql-bin.000002", id, "canonical branch selected", coverageTestSID+":1-21", false); err != nil {
+	if err := testQuarantine(ctx, store, "binlogs", "iad", "mysql-bin.000002", id, "canonical branch selected", coverageTestSID+":1-21", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := QuarantineArchive(ctx, store, "binlogs", "iad", "mysql-bin.000002", id, "", "", true); err != nil {
+	if err := testQuarantine(ctx, store, "binlogs", "iad", "mysql-bin.000002", id, "", "", true); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := loadManifest(ctx, store, "binlogs", "iad")
@@ -77,7 +77,7 @@ func TestDivergenceVisibleBeforeRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &historyStateStub{stubRoleChecker: stubRoleChecker{readOnly: true}, uuid: "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee", executed: coverageTestSID + ":1-10"}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	a.scanAndArchive(context.Background())
 	status := a.Snapshot(context.Background())
 	if !strings.Contains(status.LastError, "divergent") || status.UploadFailures == 0 {
@@ -91,7 +91,7 @@ func TestLostUnindexedLegacyVisibleOnReplica(t *testing.T) {
 	if err := appendManifestEntry(context.Background(), store, "binlogs", "iad", row); err != nil {
 		t.Fatal(err)
 	}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{readOnly: true}, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{readOnly: true}, store, slog.Default())
 	a.scanAndArchive(context.Background())
 	status := a.Snapshot(context.Background())
 	if !strings.Contains(status.LastError, "digest unknown") || status.UploadFailures == 0 {
@@ -112,7 +112,7 @@ func TestQuarantinePreservesObjectsAndCanBeUndone(t *testing.T) {
 	if err := appendManifestEntry(ctx, store, "binlogs", "iad", row); err != nil {
 		t.Fatal(err)
 	}
-	if err := QuarantineArchive(ctx, store, "binlogs", "iad", row.Name, row.ID, "acknowledged abandoned tail", coverageTestSID+":1-20", false); err != nil {
+	if err := testQuarantine(ctx, store, "binlogs", "iad", row.Name, row.ID, "acknowledged abandoned tail", coverageTestSID+":1-20", false); err != nil {
 		t.Fatal(err)
 	}
 	m, err := loadManifest(ctx, store, "binlogs", "iad")
@@ -122,7 +122,7 @@ func TestQuarantinePreservesObjectsAndCanBeUndone(t *testing.T) {
 	if _, exists, err := store.Get(ctx, key); err != nil || !exists {
 		t.Fatal("quarantine deleted the object")
 	}
-	if err := QuarantineArchive(ctx, store, "binlogs", "iad", row.Name, row.ID, "", "", true); err != nil {
+	if err := testQuarantine(ctx, store, "binlogs", "iad", row.Name, row.ID, "", "", true); err != nil {
 		t.Fatal(err)
 	}
 	m, err = loadManifest(ctx, store, "binlogs", "iad")

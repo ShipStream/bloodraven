@@ -142,6 +142,26 @@ spec:
                       form of MysqlBackupStatus.Location. Cleanup refuses to run unless the
                       two are identical.
                     type: string
+                  passphraseSecret:
+                    description: |-
+                      PassphraseSecret is the passphrase Secret and key the producing Job
+                      mounted, for an encrypted backup. Cleanup of a backup that never
+                      succeeded reads its backup stamp with it after the Job is gone, so a
+                      profile edited since the launch does not decide which passphrase is
+                      used.
+                    properties:
+                      key:
+                        description: Key is the data key within the Secret.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name is the Secret name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
                   region:
                     description: Region is the S3 region in effect for the producing
                       Job.
@@ -244,6 +264,12 @@ spec:
                   second algorithm can dispatch on this rather than re-reading the
                   header from storage.
                 type: string
+              failoverGroupUID:
+                description: |-
+                  FailoverGroupUID is the metadata.uid of the source failover group,
+                  pinned in the backup Job's template when the Job is created and
+                  recovered from the Job. The backup's stamp records the same UID.
+                type: string
               gtidExecuted:
                 description: |-
                   GtidExecuted is the value of @@global.gtid_executed captured at
@@ -285,6 +311,13 @@ spec:
                 - Succeeded
                 - Failed
                 type: string
+              pitrArchiveID:
+                description: |-
+                  PITRArchiveID is the archive ID of the source group's active PITR
+                  archive when the Job was created, pinned in the Job's template and
+                  recovered from it. Empty when PITR was disabled.
+                pattern: ^(ar1-[a-z2-7]{26})?$
+                type: string
               size:
                 description: |-
                   Size is the reported backup size as a human-readable string, best
@@ -319,6 +352,10 @@ spec:
             type: object
         type: object
         x-kubernetes-validations:
+        - message: 'metadata.name must not end in .bloodraven-backup.json: that is
+            the backup stamp''s key suffix, and the dump location ends in the backup''s
+            name'
+          rule: '!self.metadata.name.endsWith(''.bloodraven-backup.json'')'
         - message: status.artifactStorage cannot be changed or removed once its location
             is recorded
           rule: '!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location)

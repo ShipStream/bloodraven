@@ -52,7 +52,7 @@ func TestTransientUploadFailureDoesNotSetResetGuard(t *testing.T) {
 	}
 	store := &failOnceStore{ArchiveStore: newMemStore(), failPrefix: "binlogs/iad/mysql-bin.000010."}
 	state := &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-12"}
-	a := NewBinlogArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	a.scanAndArchive(ctx) // 000010 fails, 000011 succeeds
 	a.scanAndArchive(ctx) // 000010 retried
 	m, err := loadManifest(ctx, store, "binlogs", "iad")
@@ -87,7 +87,7 @@ func TestLegacyRepairDoesNotSetResetGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-12"}
-	a := NewBinlogArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	// Legacy row for 000010 with a recorded content ID whose object is gone.
 	if err := appendManifestEntry(ctx, store, "binlogs", "iad", ManifestEntry{Name: "mysql-bin.000010", ContentID: idA, Size: metaA.Size, PreviousGTIDs: metaA.PreviousGTIDs, FirstEventTime: metaA.FirstEventTime, LastEventTime: metaA.LastEventTime}); err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestRecloneThenPromotionDoesNotSetResetGuard(t *testing.T) {
 		}
 	}
 	state := &historyStateStub{uuid: a, executed: a + ":1-110," + d + ":1-60"}
-	arch := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	arch := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	donor := a + ":1-100," + d + ":1-10" // gtid_purged after CLONE (donor had a:1-100)
 	// New incarnation: 000001 (replica, d:11-30), 000002 (replica, d:31-60),
 	// 000003 (promoted, a:101-110). 000003 is a new name -> foreground first.
@@ -198,7 +198,7 @@ func TestLegacyVerificationTransientGetDoesNotSetResetGuard(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a := NewBinlogArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	for i := 0; i < 4; i++ {
 		a.scanAndArchive(ctx)
 	}

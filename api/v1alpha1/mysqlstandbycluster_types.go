@@ -245,6 +245,12 @@ type StandbyDiscovered struct {
 	// actually needs it. Adding unpopulated bool/string fields to the CRD
 	// before that code exists creates dead-on-arrival schema.
 
+	// Archive is the identity read from the source archive's descriptor
+	// (<prefix>/binlogs/archive.json). Unset while the descriptor is
+	// missing or refused; the SourceConfigKnown condition says why.
+	// +optional
+	Archive *PITRArchiveIdentity `json:"archive,omitempty"`
+
 	// OldestArchivedBinlogTime is the earliest first-event timestamp
 	// across all manifest-<site>.json files in <prefix>/binlogs/.
 	// +optional
@@ -355,17 +361,6 @@ type StandbyActivationStatus struct {
 	// +optional
 	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
 
-	// PitrStopDatetime is the normalised mysqlbinlog --stop-datetime
-	// used for PITR replay (mirrors RestoreStatus.PitrStopDatetime,
-	// api/v1alpha1/backup_types.go:915-916).
-	// +optional
-	PitrStopDatetime string `json:"pitrStopDatetime,omitempty"`
-
-	// PitrReplayedBinlogCount is the number of archived binlogs
-	// applied during activation.
-	// +optional
-	PitrReplayedBinlogCount int32 `json:"pitrReplayedBinlogCount,omitempty"`
-
 	// ActiveSite is the materialised group's status.activeSite once
 	// it becomes writable.
 	// +optional
@@ -429,11 +424,13 @@ const (
 
 	// StandbyConditionSourceConfigKnown is True when the controller has
 	// resolved at least one full dump AND at least one binlog manifest
-	// under the configured prefix. The default `kubectl get` printcolumn
+	// under the configured prefix, and verified the source PITR archive's
+	// identity (descriptor and every manifest). The default `kubectl get` printcolumn
 	// surfaces this as the neutral `SourceKnown`.
 	//
 	// Reasons:
-	//   - DumpFound (True): a dump and at least one binlog manifest exist.
+	//   - DumpFound (True): a dump and at least one binlog manifest exist,
+	//     and the source archive's descriptor and manifests verified.
 	//   - NoDumpFound (False): no dump @.json under the prefix.
 	//   - NoBinlogManifests (False): a dump WAS found, but no PITR binlog
 	//     manifests exist under <prefix>/binlogs/ yet. This is NOT a
@@ -450,6 +447,17 @@ const (
 	//     good) and no BucketScanned event is emitted. Distinct from
 	//     MetadataUnreadable (which is genuine corruption) and ListFailed.
 	//   - ConfigError (False): propagated from a storage-backend error.
+	//   - Archive* (False): the source PITR archive was refused, while the
+	//     dump is still published without an archive window. The reason
+	//     is the refusal token without its "PITR" prefix:
+	//     ArchiveDescriptorMissing, ArchiveLegacy, ArchiveVersionUnsupported,
+	//     ArchiveObjectInvalid, ArchiveEncryptionMismatch,
+	//     ArchiveKeyMismatch, ArchiveIdentityMismatch (a manifest names
+	//     another archive), ArchiveHistoryReset (a site's manifest records a
+	//     reset epoch), ArchiveUnsafeHistory (every site carries a
+	//     history-integrity marker), or ArchiveUnreadable (no token). A
+	//     marked site among unmarked ones is left out of the window
+	//     instead.
 	StandbyConditionSourceConfigKnown = "SourceConfigKnown"
 
 	// StandbyConditionRestorable is True when the most recent owned

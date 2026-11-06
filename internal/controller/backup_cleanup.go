@@ -32,6 +32,7 @@ const (
 	cleanupReasonForegroundDeletion    = "ForegroundDeletion"
 	cleanupReasonOrphanDeletion        = "OrphanDeletion"
 	cleanupReasonJobInvalid            = "CleanupJobInvalid"
+	cleanupReasonProducerStopStuck     = "ProducerStopStuck"
 )
 
 const (
@@ -64,6 +65,13 @@ type cleanupJobInputs struct {
 	// Backup.Status.ArtifactStorage. The live profile only supplies
 	// credentials.
 	Storage *v1alpha1.BackupArtifactStorage
+	// Abandoned cleans up after a backup that never succeeded: the
+	// location is the planned one (Storage.Location), and the Job deletes
+	// only when the backup stamp there names Backup.UID.
+	Abandoned bool
+	// Passphrase mounts the encrypted backup's passphrase so an abandoned
+	// cleanup can read the BRV1 stamp. An empty SecretName refuses.
+	Passphrase *corev1.SecretVolumeSource
 }
 
 // buildCleanupJob renders the one-shot Job that runs `bloodraven
@@ -75,12 +83,28 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 	backup := in.Backup
 	profile := in.Profile
 
-	if backup == nil || backup.Status.Location == "" {
-		return nil, fmt.Errorf("cleanup job: backup has no status.location")
+	if backup == nil {
+		return nil, fmt.Errorf("cleanup job: no backup")
 	}
 	storage := in.Storage
 	if storage == nil {
 		storage = backup.Status.ArtifactStorage
+	}
+	location := backup.Status.Location
+	if in.Abandoned {
+		if storage == nil || storage.Location == "" {
+			return nil, fmt.Errorf("cleanup job: %w: no planned location", errCleanupDestinationNotStored)
+		}
+		if backup.UID == "" {
+			return nil, fmt.Errorf("cleanup job: backup %s has no UID", backup.Name)
+		}
+		if in.Passphrase != nil && in.Passphrase.SecretName == "" {
+			return nil, fmt.Errorf("cleanup job: encrypted backup %s has no passphrase Secret to read its backup stamp", backup.Name)
+		}
+		location = storage.Location
+	}
+	if location == "" {
+		return nil, fmt.Errorf("cleanup job: backup has no status.location")
 	}
 	if storage == nil {
 		return nil, fmt.Errorf("cleanup job: %w", errCleanupDestinationNotStored)
@@ -114,12 +138,23 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 	envVars := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_BACKUP_NAME", Value: backup.Name},
 		{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(storageType)},
-		{Name: "BLOODRAVEN_OUTPUT_URL", Value: literalArtifactEnvValue(backup.Status.Location)},
+		{Name: "BLOODRAVEN_OUTPUT_URL", Value: literalArtifactEnvValue(location)},
 	}
 	var (
 		volumes      []corev1.Volume
 		volumeMounts []corev1.VolumeMount
 	)
+	if in.Abandoned {
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "BLOODRAVEN_CLEANUP_MODE", Value: "abandoned"},
+			corev1.EnvVar{Name: "BLOODRAVEN_BACKUP_UID", Value: literalArtifactEnvValue(string(backup.UID))},
+		)
+		if in.Passphrase != nil {
+			envVars = append(envVars, corev1.EnvVar{Name: "BLOODRAVEN_BACKUP_PASSPHRASE_FILE", Value: backupPassphraseMountPath + "/" + backupPassphraseFileName})
+			volumes = append(volumes, corev1.Volume{Name: "backup-passphrase", VolumeSource: corev1.VolumeSource{Secret: in.Passphrase.DeepCopy()}})
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "backup-passphrase", MountPath: backupPassphraseMountPath, ReadOnly: true})
+		}
+	}
 
 	switch storageType {
 	case v1alpha1.BackupStorageS3:
@@ -327,15 +362,32 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 	default:
 		return nil, fmt.Errorf("backup Job has unknown storage type %q", env["BLOODRAVEN_STORAGE_TYPE"].value)
 	}
+	storage.PassphraseSecret = backupJobPassphrase(job)
 	return storage, nil
 }
 
-// artifactIdentityProblem returns a non-empty reason when status.location is
-// not exactly the location the producing Job wrote, as recorded in
+// backupJobPassphrase returns the passphrase Secret key a backup Job
+// mounts, or nil for a plaintext Job.
+func backupJobPassphrase(job *batchv1.Job) *v1alpha1.BackupArtifactPassphrase {
+	for _, vol := range job.Spec.Template.Spec.Volumes {
+		if vol.Name != "backup-passphrase" || vol.Secret == nil || vol.Secret.SecretName == "" {
+			continue
+		}
+		for _, item := range vol.Secret.Items {
+			if item.Path == backupPassphraseFileName && item.Key != "" {
+				return &v1alpha1.BackupArtifactPassphrase{Name: vol.Secret.SecretName, Key: item.Key}
+			}
+		}
+	}
+	return nil
+}
+
+// artifactIdentityProblem returns a non-empty reason when location (the
+// backup's status.location, or for an abandoned cleanup its planned
+// location) is not exactly the location the producing Job wrote, as recorded in
 // status.artifactStorage. Name, bucket and mount checks are kept as a second
 // line of defence. producer is the backup's own Job, or nil when it is gone.
-func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) string {
-	location := backup.Status.Location
+func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, location string, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) string {
 	if storage.Location == "" {
 		return "no recorded artifact location"
 	}

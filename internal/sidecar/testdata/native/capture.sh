@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Requires Docker and the mysql:8.4 image. No ports, credentials or data leave this container.
+# Requires Docker and the mysql:8.4 image (mysql:9.7 for failback). No ports, credentials or data leave the containers.
 mode=${1:-all}
-[[ "$mode" == all || "$mode" == compression ]] || { echo "usage: $0 [all|compression]" >&2; exit 2; }
+[[ "$mode" == all || "$mode" == compression || "$mode" == failback ]] || { echo "usage: $0 [all|compression|failback]" >&2; exit 2; }
 output=$(cd "$(dirname "$0")" && pwd)
+if [[ "$mode" == failback ]]; then
+ # Two MySQL 9.7 servers in one network-less container (loopback only):
+ # a planned failover A→B and failback B→A without reclone, no rotation at
+ # either role change, binlog_transaction_compression=ON and tagged GTIDs.
+ # See the "Mixed-file failback" section of README.md.
+ docker run --rm -i --network none -v "$output/failback:/fixtures" --entrypoint bash mysql:9.7 -s < "$output/failback/capture-inner.sh"
+ exit
+fi
 docker build -t bloodraven-pitr-mysqlbinlog:8.4 "$output"
 docker run --rm -i --network none -e CAPTURE_MODE="$mode" -v "$output:/fixtures" --entrypoint bash mysql:8.4 -s <<'INNER'
 set -euo pipefail

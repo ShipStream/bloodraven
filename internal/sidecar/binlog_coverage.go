@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"sort"
+	"strings"
 
 	"github.com/go-mysql-org/go-mysql/replication"
 
@@ -20,6 +21,20 @@ type BinlogGTIDCoverage struct {
 	GTIDs    string `json:"gtids,omitempty"`
 	// ContentID binds this proof to bytes inspected by an identity-aware writer.
 	ContentID string `json:"contentId,omitempty"`
+	// Manifest v2 content-bound hints, computed in the same inspection
+	// pass as GTIDs (D-4). A downloaded row whose verified values differ
+	// refuses PITRArchiveObjectInvalid.
+	//
+	// OriginalCommitMin and OriginalCommitMax are the smallest and largest
+	// original commit timestamps (µs since the Unix epoch) of the file's
+	// transactions; both 0 when the file has no transactions, or when any
+	// transaction carries no original commit timestamp.
+	OriginalCommitMin int64 `json:"originalCommitMin,omitempty"`
+	OriginalCommitMax int64 `json:"originalCommitMax,omitempty"`
+	// EmptyGTIDs are the file's transactions with no data or query events
+	// (a filtered replica's placeholders, or injected empty transactions);
+	// see binlogDataEvent for what counts.
+	EmptyGTIDs string `json:"emptyGtids,omitempty"`
 }
 
 type binlogCoverageCollector struct {
@@ -29,10 +44,60 @@ type binlogCoverageCollector struct {
 	sawGTID        bool
 	payloadAllowed bool
 	gtids          internalmysql.GTIDSet
+
+	// Hints (D-4). current is the open transaction's GTID, currentData
+	// whether it has carried a data or statement event yet.
+	current        internalmysql.GTIDSet
+	currentData    bool
+	empty          internalmysql.GTIDSet
+	commitMin      int64
+	commitMax      int64
+	commitUnknown  bool
+	transactionsIn int64
 }
 
 func newBinlogCoverageCollector() *binlogCoverageCollector {
-	return &binlogCoverageCollector{bytes: 4, valid: true, gtids: make(internalmysql.GTIDSet)}
+	return &binlogCoverageCollector{bytes: 4, valid: true, gtids: make(internalmysql.GTIDSet), empty: make(internalmysql.GTIDSet)}
+}
+
+// binlogDataEvent reports whether e carries row data or statement content,
+// as opposed to transaction framing. A transaction with none of these is
+// empty (emptyGtids): a filtered replica's placeholder or an injected empty
+// transaction, which MySQL writes as GTID, BEGIN, COMMIT. The planner's
+// emptiness classification must use the same rule.
+func binlogDataEvent(e *replication.BinlogEvent) bool {
+	switch e.Header.EventType {
+	case replication.QUERY_EVENT:
+		q, ok := e.Event.(*replication.QueryEvent)
+		if !ok {
+			return true
+		}
+		switch strings.ToUpper(strings.TrimSpace(string(q.Query))) {
+		case "BEGIN", "COMMIT", "ROLLBACK":
+			return false
+		}
+		return true
+	case replication.TABLE_MAP_EVENT,
+		replication.WRITE_ROWS_EVENTv0, replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2,
+		replication.UPDATE_ROWS_EVENTv0, replication.UPDATE_ROWS_EVENTv1, replication.UPDATE_ROWS_EVENTv2,
+		replication.DELETE_ROWS_EVENTv0, replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2,
+		replication.PARTIAL_UPDATE_ROWS_EVENT, replication.ROWS_QUERY_EVENT,
+		replication.INTVAR_EVENT, replication.RAND_EVENT, replication.USER_VAR_EVENT,
+		replication.BEGIN_LOAD_QUERY_EVENT, replication.EXECUTE_LOAD_QUERY_EVENT:
+		return true
+	}
+	return false
+}
+
+// closeTransaction records the open transaction as empty if it carried no
+// data event.
+func (c *binlogCoverageCollector) closeTransaction() {
+	if c.current != nil && !c.currentData {
+		for sid, intervals := range c.current {
+			c.empty[sid] = append(c.empty[sid], intervals...)
+		}
+	}
+	c.current, c.currentData = nil, false
 }
 
 func (c *binlogCoverageCollector) observe(e *replication.BinlogEvent) {
@@ -69,6 +134,9 @@ func (c *binlogCoverageCollector) observe(e *replication.BinlogEvent) {
 			break
 		}
 		for _, inner := range payload.Events {
+			if binlogDataEvent(inner) {
+				c.currentData = true
+			}
 			switch inner.Header.EventType {
 			case replication.QUERY_EVENT, replication.XID_EVENT, replication.TABLE_MAP_EVENT,
 				replication.WRITE_ROWS_EVENTv0, replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2,
@@ -91,6 +159,9 @@ func (c *binlogCoverageCollector) observe(e *replication.BinlogEvent) {
 		if !c.sawGTID {
 			c.valid = false
 		}
+		if binlogDataEvent(e) {
+			c.currentData = true
+		}
 	default:
 		// Anonymous transactions and future encodings are retained.
 		c.valid = false
@@ -98,6 +169,7 @@ func (c *binlogCoverageCollector) observe(e *replication.BinlogEvent) {
 	if e.Header.EventType != replication.GTID_EVENT && e.Header.EventType != replication.GTID_TAGGED_LOG_EVENT {
 		return
 	}
+	c.closeTransaction()
 	if gtid == nil || gtid.GNO <= 0 {
 		c.valid = false
 		return
@@ -117,13 +189,23 @@ func (c *binlogCoverageCollector) observe(e *replication.BinlogEvent) {
 	for sid, intervals := range parsed {
 		c.gtids[sid] = append(c.gtids[sid], intervals...)
 	}
+	c.current = parsed
+	c.transactionsIn++
+	if gtid.OriginalCommitTimestamp == 0 {
+		c.commitUnknown = true
+	} else {
+		oct := int64(gtid.OriginalCommitTimestamp)
+		if c.commitMin == 0 || oct < c.commitMin {
+			c.commitMin = oct
+		}
+		if oct > c.commitMax {
+			c.commitMax = oct
+		}
+	}
 }
 
-func (c *binlogCoverageCollector) result(size int64, parseErr error) *BinlogGTIDCoverage {
-	if parseErr != nil || c.bytes != size || !c.valid || !c.format {
-		return &BinlogGTIDCoverage{}
-	}
-	for sid, intervals := range c.gtids {
+func mergeGTIDIntervals(set internalmysql.GTIDSet) {
+	for sid, intervals := range set {
 		sort.Slice(intervals, func(i, j int) bool { return intervals[i].Start < intervals[j].Start })
 		merged := intervals[:0]
 		for _, iv := range intervals {
@@ -135,7 +217,20 @@ func (c *binlogCoverageCollector) result(size int64, parseErr error) *BinlogGTID
 				merged = append(merged, iv)
 			}
 		}
-		c.gtids[sid] = merged
+		set[sid] = merged
 	}
-	return &BinlogGTIDCoverage{Complete: true, GTIDs: c.gtids.String()}
+}
+
+func (c *binlogCoverageCollector) result(size int64, parseErr error) *BinlogGTIDCoverage {
+	if parseErr != nil || c.bytes != size || !c.valid || !c.format {
+		return &BinlogGTIDCoverage{}
+	}
+	c.closeTransaction()
+	mergeGTIDIntervals(c.gtids)
+	mergeGTIDIntervals(c.empty)
+	coverage := &BinlogGTIDCoverage{Complete: true, GTIDs: c.gtids.String(), EmptyGTIDs: c.empty.String()}
+	if c.transactionsIn > 0 && !c.commitUnknown {
+		coverage.OriginalCommitMin, coverage.OriginalCommitMax = c.commitMin, c.commitMax
+	}
+	return coverage
 }

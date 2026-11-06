@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 const (
@@ -140,25 +141,47 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// + main-container env/mounts). buildRestorePITRFragmentsFor returns
 	// empty fragments when the translated spec is nil, so the append
 	// paths are unconditional below.
-	pitFromVerification, err := verificationPITRSpec(v.Spec.PointInTime)
+	pitrReq, err := verificationPITRRequest(v.Spec.PointInTime)
 	if err != nil {
 		return nil, err
 	}
-	if err := validatePITRBackupBefore(pitFromVerification, backup.Status); err != nil {
-		return nil, err
-	}
-	if err := validatePITRBackupBound(pitFromVerification, backup.Status.GtidExecuted, true); err != nil {
-		return nil, err
-	}
-	pitrFrags, err := buildRestorePITRFragmentsFor(fg, pitFromVerification)
+	// D-44 (a target before the dump ended) is enforced by dump-meta
+	// against the dump's own serverClock.end. status.completionTime is
+	// no bound: it includes the upload, which can end long after the
+	// dump did, so it would refuse valid targets in between (F034).
+	pitrFrags, err := buildRestorePITRFragmentsFor(fg, pitrReq)
 	if err != nil {
 		return nil, err
 	}
-
-	if pitrFrags.InitContainer != nil {
-		modeEnv := corev1.EnvVar{Name: "BLOODRAVEN_PITR_MODE", Value: v.Spec.PointInTime.Mode}
-		pitrFrags.InitContainer.Env = append(pitrFrags.InitContainer.Env, modeEnv)
-		pitrFrags.MainEnv = append(pitrFrags.MainEnv, modeEnv)
+	// dump-meta reads the verified backup's identity first (§4.2). It
+	// decrypts with the same key decrypt-download uses: the profile's.
+	var dumpMeta *corev1.Container
+	var dumpMetaVolumes []corev1.Volume
+	if pitrReq != nil {
+		var key *v1alpha1.PassphraseSecretRef
+		if backup.Status.Encrypted {
+			if !in.Profile.EncryptionEnabled() {
+				return nil, fmt.Errorf(
+					"verification job: backup %q is encrypted but profile %q has no encryption.passphraseSecret; "+
+						"restore the encryption field to verify this backup",
+					backup.Name, in.Profile.Name)
+			}
+			ref := in.Profile.Encryption.PassphraseSecret
+			key = &ref
+		}
+		profile := in.Profile
+		src, err := pitrDumpSourceForBackup(fg, backup, &profile, key)
+		if err != nil {
+			return nil, fmt.Errorf("verification job: %w", err)
+		}
+		container, volumes, err := buildDumpMetaInitContainer(fg, src)
+		if err != nil {
+			return nil, fmt.Errorf("verification job: %w", err)
+		}
+		dumpMeta, dumpMetaVolumes = &container, volumes
+		if src.ExpectedSourceUID != "" {
+			pitrFrags.MainEnv = append(pitrFrags.MainEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXPECTED_SOURCE_UID", Value: string(src.ExpectedSourceUID)})
+		}
 	}
 	env := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_DATA_DIR", Value: verificationDataMountPath},
@@ -174,12 +197,12 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		{Name: "HOME", Value: mysqlshHomeMountPath},
 	}
 
-	// PITR replay env: tell verify.sh whether to run replay at all, and
-	// forward the stop datetime + local dir picked up by mysqlbinlog.
-	// pitrFrags.MainEnv already carries BLOODRAVEN_PITR_LOCAL_DIR and
-	// BLOODRAVEN_PITR_STOP_DATETIME so we only need the mode toggle.
-	if v.Spec.PointInTime != nil && v.Spec.PointInTime.Mode != "" && v.Spec.PointInTime.Mode != "none" {
-		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_PITR_MODE", Value: v.Spec.PointInTime.Mode})
+	// PITR replay env: tell verify.sh that this run replays (and so must
+	// publish a verdict), and restore.py that it is a verification, which
+	// never accepts a Partial outcome. pitrFrags.MainEnv carries the
+	// replay request itself.
+	if pitrReq != nil {
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_PITR_MODE", Value: pitrReq.Mode})
 	}
 	env = append(env, pitrFrags.MainEnv...)
 
@@ -324,12 +347,15 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// Splice PITR fragments: shared emptyDir volume, pitr-aws-creds /
 	// pitr-archive volume, and the read-only main-container mount.
 	volumes = append(volumes, pitrFrags.PodVolumes...)
+	volumes = append(volumes, dumpMetaVolumes...)
 	mounts = append(mounts, pitrFrags.MainMounts...)
 
+	// Init order (§6.3): dump-meta → pitr-download → decrypt-download.
 	var initContainers []corev1.Container
+	if dumpMeta != nil {
+		initContainers = append(initContainers, *dumpMeta)
+	}
 	if pitrFrags.InitContainer != nil {
-		pitrFrags.InitContainer.Env = append(pitrFrags.InitContainer.Env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_START_GTIDS", Value: backup.Status.GtidExecuted})
-		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_GTID_EXECUTED", Value: backup.Status.GtidExecuted})
 		initContainers = append(initContainers, *pitrFrags.InitContainer)
 	}
 
@@ -572,6 +598,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			},
 		},
 	}
+	setTerminationMessageLimit(&job.Spec.Template.Spec)
 	return job, nil
 }
 
@@ -615,33 +642,39 @@ func validateSanityQuery(q string) (string, error) {
 
 var sanityQueryStartRE = regexp.MustCompile(`(?i)^(\(|(select|with)\b)`)
 
-// verificationPITRSpec translates a verification's
-// PointInTimeVerificationSpec into the PITR shape that the shared
-// restore-path init-container builder understands. Returns nil (no
-// replay) for empty / "none" input. "latest" is encoded as a
-// far-future stop datetime so the download + mysqlbinlog pipeline
-// includes every archived event; "timestamp" requires a caller-supplied
-// RFC3339 instant.
-func verificationPITRSpec(in *v1alpha1.PointInTimeVerificationSpec) (*v1alpha1.PointInTimeSpec, error) {
+// verificationPITRRequest normalizes a verification's
+// PointInTimeVerificationSpec into the replay request the shared PITR
+// builders render. It returns nil (no replay) for empty or "none" input.
+// Verifications read the group's own active PITR archive and never accept
+// a Partial outcome.
+func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrReplayRequest, error) {
 	if in == nil {
 		return nil, nil
 	}
+	req := &pitrReplayRequest{Verification: true}
 	switch in.Mode {
 	case "", "none":
 		return nil, nil
 	case "latest":
-		// The pipeline uses a far-future ceiling. The download init container
-		// also receives mode=latest and requires replay beyond the backup,
-		// rather than treating this sentinel as a target to cover.
-		return &v1alpha1.PointInTimeSpec{StopDatetime: "9999-12-31T23:59:59Z", Sites: append([]string(nil), in.Sites...)}, nil
+		req.Mode = "latest"
 	case "timestamp":
 		if in.Timestamp == "" {
-			return nil, fmt.Errorf("pointInTime.timestamp is required when mode=timestamp")
+			return nil, fmt.Errorf("%s: pointInTime.timestamp is required when mode=timestamp", pitrarchive.TokenTargetInvalid)
 		}
-		return &v1alpha1.PointInTimeSpec{StopDatetime: in.Timestamp, Sites: append([]string(nil), in.Sites...)}, nil
+		stop, err := parsePITRTarget(in.Timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("%s: pointInTime.timestamp: %v", pitrarchive.TokenTargetInvalid, err)
+		}
+		req.Mode, req.Stop = "timestamp", canonicalPITRTarget(stop)
 	default:
 		return nil, fmt.Errorf("pointInTime.mode %q is not one of none|latest|timestamp", in.Mode)
 	}
+	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", in.ExcludeGtids)
+	if err != nil {
+		return nil, err
+	}
+	req.ExcludeGtids = exclude
+	return req, nil
 }
 
 // verificationLoadOptions returns the util.loadDump() options used for

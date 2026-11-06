@@ -96,7 +96,7 @@ func TestInitialGTIDsAreNotCompletedBootstrap(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	state := &bootstrapAuditState{historyStateStub: historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-21"}, ready: true}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	id, err := a.localBinlogID("testdata/incarnation-b.bin")
 	if err != nil {
 		t.Fatal(err)

@@ -49,6 +49,9 @@ jobs:
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: ${{ github.event_name == 'pull_request' && 'smoke' || (github.event.inputs.profile || 'release') }}
+      # The release profile includes the #206 cross-site PITR scenarios
+      # (37, 68, 70), which budget 60-75m each.
+      timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 300 }}
       images-artifact: e2e-images
 
   # Label gating is intentionally PR-only: schedule and manual runs always
@@ -66,6 +69,24 @@ jobs:
       enable-encryption: true
       # Four scenarios on one cluster; 51 and 52 each budget 20m.
       timeout-minutes: 180
+      images-artifact: e2e-images
+
+  # Cross-site PITR (#206). Same trigger as encryption: schedule, dispatch,
+  # and PRs labelled e2e, so a label-gated PR run exercises every PITR
+  # scenario; smoke stays unchanged. All four are also in the release
+  # profile.
+  pitr:
+    needs: images
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      label: pitr
+      # 31 first (single-site baseline); 37 and 68 are planned failbacks
+      # (68 with reclones); 70 loses data on purpose and restarts the archive.
+      scenario: 31-pitr-verification-rustfs,37-pitr-planned-failback-no-reclone,68-pitr-failback-with-reclone,70-pitr-lossy-failover
+      # 24m + 60m + 75m + 75m of scenario budgets on one cluster, plus
+      # the reset run-all does before each of 37, 68 and 70
+      # (ResetBeforeRunAll, ~5m each).
+      timeout-minutes: 330
       images-artifact: e2e-images
 
   # Durable planned-failover claim (#235). The PR job above runs only the

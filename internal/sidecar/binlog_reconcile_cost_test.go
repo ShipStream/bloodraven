@@ -20,7 +20,7 @@ func TestReconciliationIndexCost(t *testing.T) {
 				id := fmt.Sprintf("%064x", gno)
 				m.Files = append(m.Files, ManifestEntry{Name: fmt.Sprintf("mysql-bin.%06d", gno), ID: id, GTIDCoverage: &BinlogGTIDCoverage{ContentID: id, GTIDs: fmt.Sprintf("%s:%d", coverageTestSID, gno)}})
 			}
-			a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, newMemStore(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, newMemStore(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 			at := time.Now()
 			w := a.chooseArchiveReuseWork(m, false)
 			t.Logf("rows=%d reverse=%v elapsed=%v work=%v", n, reverse, time.Since(at), w != nil)

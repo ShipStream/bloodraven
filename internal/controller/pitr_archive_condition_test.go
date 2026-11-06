@@ -22,6 +22,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -34,8 +35,14 @@ type pitrObs struct {
 
 func pitrBool(v bool) *bool { return &v }
 
+// pitrArchiveBlock is the archive identity block every current sidecar
+// with archiving enabled reports; without one the site is SidecarOutdated.
+func pitrArchiveBlock() *pitrarchive.ArchiveStatus {
+	return &pitrarchive.ArchiveStatus{Destination: "s3://b/p", EncryptionMode: pitrarchive.EncryptionNone, State: pitrarchive.StateVerified, ArchiveID: "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"}
+}
+
 func pitrClean() pitrObs {
-	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, StoreReady: pitrBool(true)}}
+	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, StoreReady: pitrBool(true), Archive: pitrArchiveBlock()}}
 }
 func pitrMiss() pitrObs { return pitrObs{err: errors.New("connection refused")} }
 func pitrInitFailed(msg string) pitrObs {
@@ -45,14 +52,17 @@ func pitrInitPending() pitrObs {
 	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, StoreReady: pitrBool(false)}}
 }
 func pitrRunError(msg string) pitrObs {
-	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, StoreReady: pitrBool(true), LastError: msg}}
+	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, StoreReady: pitrBool(true), LastError: msg, Archive: pitrArchiveBlock()}}
 }
 func pitrDisabled() pitrObs { return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: false}} }
 
-// pitrOld* are payloads from a sidecar that predates storeReady.
-func pitrOldClean() pitrObs { return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true}} }
+// pitrOld* are payloads without storeReady (the field is optional on the
+// wire), from a sidecar that otherwise reports its archive identity.
+func pitrOldClean() pitrObs {
+	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, Archive: pitrArchiveBlock()}}
+}
 func pitrOldError(msg string) pitrObs {
-	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, LastError: msg}}
+	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, LastError: msg, Archive: pitrArchiveBlock()}}
 }
 
 type pitrRound struct {
@@ -545,7 +555,7 @@ func testPITRArchiveInitFailureThroughPoller(t *testing.T, pitrCfg *sidecar.PITR
 
 	// The healthy site answers like a current sidecar with a ready store.
 	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, `{"enabled":true,"storeReady":true,"site":"pdx","storageType":"PVC","manifestPrefix":"pitr/orders"}`)
+		_, _ = fmt.Fprint(w, `{"enabled":true,"storeReady":true,"site":"pdx","storageType":"PVC","manifestPrefix":"pitr/orders","archive":{"destination":"s3://b/p","encryptionMode":"None","state":"Verified","archiveID":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
 	}))
 	defer healthy.Close()
 

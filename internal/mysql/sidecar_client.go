@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // ArchiverStatus mirrors the sidecar's /archiver/status JSON response.
@@ -15,10 +17,13 @@ import (
 // MysqlFailoverGroup.status.pitr.
 type ArchiverStatus struct {
 	Enabled bool `json:"enabled"`
-	// StoreReady is false while a configured archiver's store cannot be
-	// built (LastError says why). nil when the sidecar did not report it:
-	// PITR is not configured, or the sidecar predates the field. nil is
-	// not false.
+	// StoreReady is false while archival is configured but cannot reach a
+	// verified archive session: the store cannot be built, the configured
+	// archive identity is unusable, or establishing or opening the archive
+	// is failing on a transient store error (LastError says why). A
+	// refusal of a reachable archive keeps it true and is reported in
+	// Archive. nil when the sidecar did not report it: PITR is not
+	// configured, or the sidecar predates the field. nil is not false.
 	StoreReady     *bool     `json:"storeReady,omitempty"`
 	Primary        bool      `json:"primary"`
 	LastScanAt     time.Time `json:"lastScanAt"`
@@ -37,6 +42,24 @@ type ArchiverStatus struct {
 	ManifestBytes          int64     `json:"manifestBytes"`
 	OldestArchivedTime     time.Time `json:"oldestArchivedTime,omitempty"`
 	NewestArchivedTime     time.Time `json:"newestArchivedTime,omitempty"`
+	// Archive is the archive identity this sidecar observes (§3.7): its
+	// destination, verified descriptor ID, encryption mode, state, refusal
+	// reason and key revision. nil when PITR is not configured.
+	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
+	// DivergentRows and QuarantinedRows count the Divergent and
+	// Quarantined entries in this site's own manifest. The runner warns
+	// PITRArchiveReissueRiskDetected when a site with a non-zero sum is promoted.
+	DivergentRows   int64 `json:"divergentRows"`
+	QuarantinedRows int64 `json:"quarantinedRows"`
+	// PromotionRecordedAt is the ObservedAt of the promotion record that
+	// gates the current writable episode's uploads; zero while no record
+	// is confirmed (D-43).
+	PromotionRecordedAt time.Time `json:"promotionRecordedAt,omitzero"`
+	// HistoryIntegrity is the site's history-integrity marker (D-34):
+	// the one persisted in its manifest, or a pending one the sidecar
+	// detected before the manifest existed (held for the pod's lifetime
+	// only); nil when unmarked.
+	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
 }
 
 // KeyringComponentStatus mirrors the sidecar's view of

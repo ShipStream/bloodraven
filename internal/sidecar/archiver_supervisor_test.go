@@ -87,6 +87,7 @@ func storeInitPITRConfig(t *testing.T) *PITRConfig {
 		BinlogDir:      t.TempDir(),
 		BinlogIndex:    "mysql-bin.index",
 		PollInterval:   time.Minute,
+		Archive:        testArchiveIdentity(nil),
 	}
 }
 

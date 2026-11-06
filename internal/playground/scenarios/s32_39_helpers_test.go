@@ -1,14 +1,12 @@
 package scenarios
 
 import (
-	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	pgsidecar "github.com/shipstream/bloodraven/internal/sidecar"
 )
 
 func TestNewConfirmTokenIsRFC3339(t *testing.T) {
@@ -153,24 +151,6 @@ func TestRestoreInPlaceStatusChanged(t *testing.T) {
 	}
 }
 
-func TestManifestNewestLastEvent(t *testing.T) {
-	t0 := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
-	m := &pgsidecar.Manifest{Files: []pgsidecar.ManifestEntry{
-		{Name: "a", LastEventTime: t0},
-		{Name: "b", LastEventTime: t0.Add(2 * time.Minute)},
-		{Name: "c", LastEventTime: t0.Add(time.Minute)},
-	}}
-	if got := manifestNewestLastEvent(m); !got.Equal(t0.Add(2 * time.Minute)) {
-		t.Errorf("newest = %v, want %v", got, t0.Add(2*time.Minute))
-	}
-	if got := manifestNewestLastEvent(&pgsidecar.Manifest{}); !got.IsZero() {
-		t.Errorf("empty manifest newest = %v, want zero", got)
-	}
-	if got := manifestNewestLastEvent(nil); !got.IsZero() {
-		t.Errorf("nil manifest newest = %v, want zero", got)
-	}
-}
-
 // TestInPlaceRestoreJobNameMirror pins the scenario's mirror of the
 // controller's fixed in-place restore Job name. If the controller formula
 // (inPlaceRestoreJobName in internal/controller/restore_inplace.go) ever
@@ -187,13 +167,5 @@ func TestInPlaceRestoreJobNameMirror(t *testing.T) {
 		if got := inPlaceRestoreJobName(c.fg, c.site); got != c.want {
 			t.Errorf("inPlaceRestoreJobName(%q,%q) = %q, want %q", c.fg, c.site, got, c.want)
 		}
-	}
-}
-
-func TestPITRHandoffSanityQueryQuotesDatabaseIdentifier(t *testing.T) {
-	got := pitrHandoffSanityQuery("archive`copy", "run-1")
-	wantFragment := "FROM `archive``copy`.marker WHERE run_id='run-1'"
-	if !strings.Contains(got, wantFragment) {
-		t.Fatalf("query = %q, want fragment %q", got, wantFragment)
 	}
 }

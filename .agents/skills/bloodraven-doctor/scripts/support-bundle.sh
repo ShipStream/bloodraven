@@ -7,6 +7,9 @@
 #
 set -euo pipefail
 
+# shellcheck source=lib-sidecar-http.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib-sidecar-http.sh"
+
 NAMESPACE=""
 MFG_NAME=""
 BUNDLE_NAME="bloodraven-bundle-$(date +%Y%m%d-%H%M%S)"
@@ -91,7 +94,7 @@ kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o yam
 kubectl get pods,pvc,endpoints,services -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME" -o wide > "$OUTPUT_DIR/resources.txt" 2>/dev/null || true
 
 # Project backup status and original main-container destinations without Secrets.
-kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.location,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' > "$OUTPUT_DIR/backup-status.txt" 2>/dev/null || true
+kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.location,FG_UID:.status.failoverGroupUID,PITR_ARCHIVE_ID:.status.pitrArchiveID,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' > "$OUTPUT_DIR/backup-status.txt" 2>/dev/null || true
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup" -o 'custom-columns=NAME:.metadata.name,OWNER_UID:.metadata.ownerReferences[*].uid,SUCCEEDED:.status.succeeded,CONTAINERS:.spec.template.spec.containers[*].name,STORAGE:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_STORAGE_TYPE")].value,OUTPUT:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_OUTPUT_URL")].value,BUCKET:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_S3_BUCKET")].value' > "$OUTPUT_DIR/backup-jobs.txt" 2>/dev/null || true
 
 # Artifact cleanup of deleted backups: recorded destination, condition and pod verdicts.
@@ -109,7 +112,52 @@ kubectl get mysqlbackups.shipstream.io -n "$NAMESPACE" -o json 2>/dev/null | \
        deletionTimestamp: .metadata.deletionTimestamp,
        verificationHolds: (.metadata.annotations // {} | with_entries(select(.key | startswith("hold.verification.shipstream.io/")))),
        startTime: .status.startTime, completionTime: .status.completionTime,
-       gtidExecuted: .status.gtidExecuted}]' > "$OUTPUT_DIR/backups.json" 2> "$OUTPUT_DIR/backup-errors.txt" || true
+       gtidExecuted: .status.gtidExecuted,
+       failoverGroupUID: .status.failoverGroupUID, pitrArchiveID: .status.pitrArchiveID}]' > "$OUTPUT_DIR/backups.json" 2> "$OUTPUT_DIR/backup-errors.txt" || true
+
+# PITR archive identity, condition and point-in-time results. The descriptor
+# fields and GTID sets hold no secret.
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '{uid: .metadata.uid, archive: .status.pitr.archive,
+         pitrArchiveReady: [.status.conditions[]? | select(.type == "PITRArchiveReady")],
+         restore: (.status.restore // null | if . then {phase, reason, message, jobName, pointInTime} else null end),
+         restoreInPlacePointInTime: .status.restoreInPlace.pointInTime}' \
+    > "$OUTPUT_DIR/pitr-archive.json" 2> "$OUTPUT_DIR/pitr-archive-errors.txt" || true
+kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o json 2>/dev/null | \
+    jq '[.items[] | {name: .metadata.name, mode: .spec.pointInTime.mode, timestamp: .spec.pointInTime.timestamp,
+         excludeGtids: .spec.pointInTime.excludeGtids, phase: .status.phase,
+         verified: [.status.conditions[]? | select(.type == "Verified")], pointInTime: .status.pointInTime,
+         replayedThroughBinlog: .status.replayedThroughBinlog}]' \
+    > "$OUTPUT_DIR/verification-pitr.json" 2> "$OUTPUT_DIR/verification-pitr-errors.txt" || true
+
+# Per-site /archiver/status: archive block, promotionRecordedAt, historyIntegrity,
+# divergentRows and quarantinedRows. The endpoint returns no credentials.
+# When nothing could fetch it, the file holds an explicit error object
+# instead of being empty.
+for pod in $(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME,app.kubernetes.io/name=mysql" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
+    if sidecar_http_get "$NAMESPACE" "$pod" /archiver/status; then
+        printf '%s\n' "$SIDECAR_HTTP_BODY" > "$OUTPUT_DIR/${pod}-archiver-status.json"
+    else
+        printf '{"error":"/archiver/status unavailable","tried":"%s"}\n' "$SIDECAR_HTTP_TRIED" > "$OUTPUT_DIR/${pod}-archiver-status.json"
+    fi
+done
+
+# PITR restore and verification Job pods: termination messages (refusals and
+# verdicts) and the planner's records. Env and volumes are not captured.
+for pod in $(kubectl get pods -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource in (restore,backup-verification)" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
+    kubectl get pod "$pod" -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '{name: .metadata.name, phase: .status.phase,
+             containers: [(.status.initContainerStatuses // [])[], (.status.containerStatuses // [])[] |
+               {name, exitCode: (.state.terminated.exitCode // .lastState.terminated.exitCode),
+                message: (.state.terminated.message // .lastState.terminated.message)}]}' \
+        > "$OUTPUT_DIR/${pod}-termination.json" 2>/dev/null || true
+    for c in dump-meta pitr-download; do
+        kubectl logs -n "$NAMESPACE" "$pod" -c "$c" 2>/dev/null | \
+            grep -E '"msg":"(pitr plan|dump metadata|read dump metadata|download site binlogs)"|BLOODRAVEN_PITR_DIVERGENT_SET' > "$OUTPUT_DIR/${pod}-${c}-pitr.log" || true
+    done
+    kubectl logs -n "$NAMESPACE" "$pod" -c mysqlsh 2>/dev/null | \
+        grep -E 'BLOODRAVEN_PITR_(START|SEGMENT|COMPLETE|FAILED|PARTIAL|DIVERGENT|ON_HISTORY_EXCLUSIONS|RESULT)' > "$OUTPUT_DIR/${pod}-replay.log" || true
+done
 
 # 3. Capture Events
 kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp > "$OUTPUT_DIR/events.txt" 2>/dev/null || true
@@ -133,6 +181,13 @@ for pod in $PODS; do
     for c in $CONTAINERS; do
         kubectl logs -n "$NAMESPACE" "$pod" -c "$c" --tail=300 > "$OUTPUT_DIR/${pod}-${c}.log" 2>/dev/null || true
     done
+done
+
+# Promotion records and archive identity events from the sidecar logs.
+for pod in $PODS; do
+    kubectl logs -n "$NAMESPACE" "$pod" -c sidecar --tail=5000 2>/dev/null | \
+        grep -E '"msg":"(promotion recorded|uploads wait for the promotion record|archive descriptor created|archive descriptor changed|archive history unsafe|persist history integrity marker)"' \
+        > "$OUTPUT_DIR/${pod}-sidecar-pitr.log" || true
 done
 
 # Create tarball (staging directory is removed by the EXIT trap)

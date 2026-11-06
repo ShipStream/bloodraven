@@ -32,7 +32,7 @@ func retentionProofArchiver(t *testing.T, store ArchiveStore, logger *slog.Logge
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(response) }))
 	t.Cleanup(server.Close)
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, logger)
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, logger)
 	a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
 	return a
 }
@@ -123,7 +123,7 @@ func TestRetentionBackfillIsBoundedAndPersistent(t *testing.T) {
 		}
 		m.Files = append(m.Files, entry)
 	}
-	if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
 	create := func() *BinlogArchiver {
@@ -215,7 +215,7 @@ func TestEmptyAndCompressedBinlogsHaveCompleteCoverage(t *testing.T) {
 func TestRetentionRetriesThrottledLookupSoon(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTooManyRequests) }))
 	defer server.Close()
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, newMemStore(), slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, newMemStore(), slog.Default())
 	a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
 	a.maybeRunRetention(context.Background())
 	next := a.lastRetentionRun.Add(a.retentionCfg.Interval)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -198,6 +199,27 @@ func TestCleanupPVC(t *testing.T) {
 			t.Fatalf("deleted %d, err %v; want 0, nil", n, err)
 		}
 	})
+	// D-8: the backup stamp is a sibling of the dump directory and goes
+	// with it, also when the dump directory is already gone.
+	for _, withDump := range []bool{true, false} {
+		t.Run(fmt.Sprintf("deletes the backup stamp (dump present=%t)", withDump), func(t *testing.T) {
+			mount := t.TempDir()
+			if withDump {
+				mustWrite(t, filepath.Join(mount, "sub", "backup-1", "@.json"))
+			}
+			mustWrite(t, filepath.Join(mount, "sub", "backup-1"+backupmeta.StampSuffix))
+			mustWrite(t, filepath.Join(mount, "sub", "backup-10"+backupmeta.StampSuffix))
+			if _, err := cleanupPVC(mount, "sub/backup-1"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(mount, "sub", "backup-1"+backupmeta.StampSuffix)); !os.IsNotExist(err) {
+				t.Fatalf("stamp still present: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(mount, "sub", "backup-10"+backupmeta.StampSuffix)); err != nil {
+				t.Fatalf("another backup's stamp removed: %v", err)
+			}
+		})
+	}
 	t.Run("symlinked path component cannot escape the mount", func(t *testing.T) {
 		mount := t.TempDir()
 		outside := t.TempDir()
@@ -227,7 +249,8 @@ func mustWrite(t *testing.T, p string) {
 }
 
 func TestArtifactCleanup_VerdictAndExitCode(t *testing.T) {
-	store := &cleanupMemoryStore{keys: map[string]bool{"p/backup-1/a": true, "p/backup-1/b": true}}
+	store := &cleanupMemoryStore{keys: map[string]bool{"p/backup-1/a": true, "p/backup-1/b": true,
+		"p/backup-1" + backupmeta.StampSuffix: true, "p/backup-10" + backupmeta.StampSuffix: true}}
 	var gotCfg *sidecar.PITRConfig
 	newStore := func(_ context.Context, cfg *sidecar.PITRConfig) (cleanupStore, error) {
 		gotCfg = cfg
@@ -274,6 +297,10 @@ func TestArtifactCleanup_VerdictAndExitCode(t *testing.T) {
 			if code == 0 {
 				if n, ok := backupmeta.ParseCleanupComplete(string(msg)); !ok || n != 2 {
 					t.Fatalf("verdict does not parse: %q", msg)
+				}
+				// D-8: the stamp goes with the dump, another backup's stays.
+				if store.keys["p/backup-1"+backupmeta.StampSuffix] || !store.keys["p/backup-10"+backupmeta.StampSuffix] {
+					t.Fatalf("stamp cleanup wrong: %v", store.keys)
 				}
 				// Deleting by key never needs the backup passphrase.
 				if gotCfg == nil || gotCfg.PassphraseFile != "" || gotCfg.S3 == nil || gotCfg.S3.AWSCredsDir != "/creds" || gotCfg.S3.DefaultRegion != "us-east-1" {

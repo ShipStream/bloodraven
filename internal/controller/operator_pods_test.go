@@ -89,7 +89,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	addJob("cleanup", job, err)
 
 	src := v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: seed.Name}}
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, PointInTime: pit}
 	// In-place restores refuse pointInTime, so that variant has no PITR init container.
 	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "c1", Source: src}
@@ -127,9 +127,9 @@ func TestOperatorImageContainersUseAbsoluteBinaryPath(t *testing.T) {
 	_, pods := renderOperatorPods(t)
 
 	want := map[string][]string{
-		"backup/nightly-s3":      {backupEncryptUploadContainerName},
+		"backup/nightly-s3":      {backupStampInitContainerName, backupEncryptUploadContainerName},
 		"verification/encrypted": {"decrypt-download"},
-		"restore/bootstrap":      {restorePITRInitContainerName, "decrypt-download"},
+		"restore/bootstrap":      {restorePITRDumpMetaContainerName, restorePITRInitContainerName, "decrypt-download"},
 		"restore/in-place":       {"decrypt-download"},
 		"cleanup":                {cleanupContainerName},
 	}

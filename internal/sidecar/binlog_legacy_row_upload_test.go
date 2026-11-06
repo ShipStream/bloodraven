@@ -38,10 +38,10 @@ func TestMissingLegacyRowIsReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy := ManifestEntry{ContentID: digest, Name: name, RemotePath: "binlogs/iad/" + name, PreviousGTIDs: meta.PreviousGTIDs, FirstEventTime: meta.FirstEventTime}
-	if err := saveManifest(ctx, pvc, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{legacy}}); err != nil {
+	if err := seedManifest(ctx, pvc, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{legacy}}); err != nil {
 		t.Fatal(err)
 	}
-	NewBinlogArchiver(cfg, "iad", &stubRoleChecker{}, pvc, slog.Default()).scanAndArchive(ctx)
+	newTestArchiver(cfg, "iad", &stubRoleChecker{}, pvc, slog.Default()).scanAndArchive(ctx)
 	m, err := loadManifest(ctx, pvc, "binlogs", "iad")
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestUploadWorksWithoutWritableTmp(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "absent-read-only-root"))
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, pvc, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, pvc, slog.Default())
 	file := "testdata/incarnation-a.bin"
 	id, err := a.localBinlogID(file)
 	if err != nil {

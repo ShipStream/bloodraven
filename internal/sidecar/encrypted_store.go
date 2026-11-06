@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -107,6 +108,26 @@ func (e *encryptedStore) PutFile(ctx context.Context, key, path string) error {
 	return e.Put(ctx, key, file, -1)
 }
 
+// errObjectUndecryptable: the object's bytes, read in full from the store,
+// do not decrypt and authenticate with the mounted key (wrong key,
+// truncation, tampering). A read error from the store is never wrapped
+// with it.
+var errObjectUndecryptable = errors.New("sidecar: object does not decrypt with the mounted key")
+
+// readErrRecorder remembers the first non-EOF error its reader returned.
+type readErrRecorder struct {
+	r   io.Reader
+	err error
+}
+
+func (r *readErrRecorder) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && r.err == nil {
+		r.err = err
+	}
+	return n, err
+}
+
 type archiveReadCloser struct {
 	io.Reader
 	close func() error
@@ -121,8 +142,17 @@ func (e *encryptedStore) Open(ctx context.Context, key string) (io.ReadCloser, e
 	if err != nil {
 		return nil, err
 	}
-	buffered := bufio.NewReader(source)
-	prefix, _ := buffered.Peek(4)
+	// Transport failures (from source) and content failures (bytes that
+	// do not decrypt with this key) are told apart: only the second is
+	// errObjectUndecryptable, so a caller never classifies an outage as
+	// foreign or legacy content (F072).
+	recorded := &readErrRecorder{r: source}
+	buffered := bufio.NewReader(recorded)
+	prefix, peekErr := buffered.Peek(4)
+	if peekErr != nil && !errors.Is(peekErr, io.EOF) {
+		_ = source.Close()
+		return nil, fmt.Errorf("read %s: %w", key, peekErr)
+	}
 	if !backupcrypto.LooksEncrypted(prefix) {
 		if e.allowPlaintext {
 			return &archiveReadCloser{Reader: buffered, close: source.Close}, nil
@@ -133,6 +163,16 @@ func (e *encryptedStore) Open(ctx context.Context, key string) (io.ReadCloser, e
 	reader, writer := io.Pipe()
 	go func() {
 		_, err := backupcrypto.Decrypt(writer, buffered, e.passphrase)
+		switch {
+		case err == nil:
+		case recorded.err == nil:
+			err = fmt.Errorf("%w: key=%s: %w", errObjectUndecryptable, key, err)
+		default:
+			// The store cut the body: report its error (transient), with
+			// the decrypt symptom (ErrTruncated or a failed tag) as text
+			// only (review F082).
+			err = fmt.Errorf("read %s: %w (decrypt: %v)", key, recorded.err, err)
+		}
 		_ = source.Close()
 		_ = writer.CloseWithError(err)
 	}()
@@ -157,6 +197,26 @@ func (e *encryptedStore) GetFile(ctx context.Context, key, dst string) error {
 	}
 	defer reader.Close()
 	return writeArchiveFile(reader, dst)
+}
+
+// PutIfAbsent encrypts the object and creates it atomically on the inner
+// store. The ciphertext is buffered: atomic creates are small objects.
+func (e *encryptedStore) PutIfAbsent(ctx context.Context, key string, source io.Reader, _ int64) error {
+	plain, err := readAtomicBody(source)
+	if err != nil {
+		return err
+	}
+	var sealed bytes.Buffer
+	if _, err := backupcrypto.Encrypt(&sealed, bytes.NewReader(plain), e.passphrase); err != nil {
+		return err
+	}
+	return PutIfAbsent(ctx, e.inner, key, bytes.NewReader(sealed.Bytes()), int64(sealed.Len()))
+}
+
+// plaintextArchive exposes the backend and key for the archive descriptor,
+// which is plaintext by design (§3.2).
+func (e *encryptedStore) plaintextArchive() (ArchiveStore, []byte) {
+	return e.inner, e.passphrase
 }
 
 // Delete passes through; delete needs no plaintext.

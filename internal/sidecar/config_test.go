@@ -3,8 +3,11 @@ package sidecar
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 func TestConfigFromEnv_MYSQL_DSN(t *testing.T) {
@@ -129,6 +132,7 @@ func TestPITRConfigFromEnvPVCIsWritable(t *testing.T) {
 	t.Setenv("BLOODRAVEN_PITR_STORAGE_TYPE", "PVC")
 	t.Setenv("BLOODRAVEN_PITR_PVC_MOUNT_PATH", "/run/bloodraven/pitr-archive")
 	t.Setenv("BLOODRAVEN_PITR_MANIFEST_PREFIX", "orders/binlogs")
+	setPITRIdentityEnv(t, "pvc://ns/archive/orders/binlogs", "None")
 	cfg, err := pitrConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
@@ -141,5 +145,113 @@ func TestPITRConfigFromEnvPVCIsWritable(t *testing.T) {
 	}
 	if cfg.ManifestPrefix != "orders/binlogs" {
 		t.Fatalf("ManifestPrefix = %q", cfg.ManifestPrefix)
+	}
+}
+
+const pitrConfigTestUID = "00000000-0000-4000-8000-0000000000aa"
+
+func setPITRIdentityEnv(t *testing.T, destination, mode string) {
+	t.Helper()
+	t.Setenv("POD_NAMESPACE", "ns")
+	t.Setenv("FAILOVER_GROUP", "orders")
+	t.Setenv("BLOODRAVEN_FAILOVER_GROUP_UID", pitrConfigTestUID)
+	t.Setenv("BLOODRAVEN_PITR_DESTINATION", destination)
+	t.Setenv("BLOODRAVEN_PITR_ENCRYPTION_MODE", mode)
+	if d, err := pitrarchive.ParseDestination(destination); err == nil {
+		t.Setenv("BLOODRAVEN_PITR_ARCHIVE_ID", pitrarchive.CreateArchiveID(pitrConfigTestUID, d))
+	}
+}
+
+// The writer's identity env must agree with the store it configures, so a
+// sidecar can only ever write where its identity says it does (§3.7).
+func TestPITRConfigArchiveIdentityFromEnv(t *testing.T) {
+	s3Dest := "s3://bucket/orders/binlogs?endpoint=https%3A%2F%2Fminio.example"
+	tests := []struct {
+		name     string
+		env      map[string]string
+		wantErr  string
+		wantMode pitrarchive.EncryptionMode
+	}{
+		{name: "s3 none", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": s3Dest}, wantMode: pitrarchive.EncryptionNone},
+		{name: "s3 passphrase", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": s3Dest, "BLOODRAVEN_PITR_ENCRYPTION_MODE": "Passphrase", "BLOODRAVEN_PITR_PASSPHRASE_FILE": "/run/key"}, wantMode: pitrarchive.EncryptionPassphrase},
+		{name: "passphrase without file", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": s3Dest, "BLOODRAVEN_PITR_ENCRYPTION_MODE": "Passphrase"}, wantErr: "passphrase file"},
+		{name: "file without passphrase mode", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": s3Dest, "BLOODRAVEN_PITR_PASSPHRASE_FILE": "/run/key"}, wantErr: "passphrase file"},
+		{name: "unknown mode", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": s3Dest, "BLOODRAVEN_PITR_ENCRYPTION_MODE": "Maybe"}, wantErr: "BLOODRAVEN_PITR_ENCRYPTION_MODE"},
+		{name: "no destination", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": ""}, wantErr: "BLOODRAVEN_PITR_DESTINATION is required"},
+		{name: "non-canonical destination", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": "s3://bucket//orders/binlogs?endpoint=https%3A%2F%2Fminio.example"}, wantErr: "parse BLOODRAVEN_PITR_DESTINATION"},
+		{name: "other bucket", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": "s3://other/orders/binlogs?endpoint=https%3A%2F%2Fminio.example"}, wantErr: "S3 bucket"},
+		{name: "other endpoint", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": "s3://bucket/orders/binlogs?endpoint=aws"}, wantErr: "endpoint"},
+		{name: "other prefix", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": "s3://bucket/binlogs?endpoint=https%3A%2F%2Fminio.example"}, wantErr: "key prefix"},
+		{name: "pvc destination for s3", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": "pvc://ns/archive/orders/binlogs"}, wantErr: "S3 bucket"},
+		{name: "no uid", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": s3Dest, "BLOODRAVEN_FAILOVER_GROUP_UID": ""}, wantErr: "UID"},
+		{name: "archive id of another derivation", env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": s3Dest, "BLOODRAVEN_PITR_ARCHIVE_ID": "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"}, wantErr: "not derived"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BLOODRAVEN_PITR_ENABLED", "1")
+			t.Setenv("BLOODRAVEN_PITR_STORAGE_TYPE", "S3")
+			t.Setenv("BLOODRAVEN_PITR_S3_BUCKET", "bucket")
+			t.Setenv("BLOODRAVEN_PITR_S3_ENDPOINT_URL", "https://MINIO.example:443/")
+			t.Setenv("BLOODRAVEN_PITR_MANIFEST_PREFIX", "orders/binlogs")
+			t.Setenv("BLOODRAVEN_PITR_PASSPHRASE_FILE", "")
+			t.Setenv("BLOODRAVEN_PITR_KEY_REVISION", "mysql-orders-pitr-key-0123456789")
+			setPITRIdentityEnv(t, s3Dest, "None")
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			if _, ok := tt.env["BLOODRAVEN_PITR_ARCHIVE_ID"]; !ok && os.Getenv("BLOODRAVEN_PITR_DESTINATION") != s3Dest {
+				t.Setenv("BLOODRAVEN_PITR_ARCHIVE_ID", "")
+			}
+			cfg, err := pitrConfigFromEnv()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want it to mention %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := cfg.Archive
+			if id.Source != (pitrarchive.Source{Namespace: "ns", Name: "orders", UID: pitrConfigTestUID}) || id.Destination.String() != s3Dest ||
+				id.Encryption.Mode != tt.wantMode || id.KeyRevision != "mysql-orders-pitr-key-0123456789" {
+				t.Fatalf("identity = %+v", id)
+			}
+			if tt.wantMode == pitrarchive.EncryptionPassphrase && id.Encryption.Algorithm != pitrarchive.AlgorithmAES256GCM {
+				t.Fatalf("algorithm = %q", id.Encryption.Algorithm)
+			}
+		})
+	}
+}
+
+// F215: the PVC identity guards (destination kind and namespace) refuse.
+func TestPITRConfigArchiveIdentityPVCGuards(t *testing.T) {
+	tests := []struct {
+		name, destination, wantErr string
+	}{
+		{name: "pvc ok", destination: "pvc://ns/archive/orders/binlogs"},
+		{name: "s3 destination for pvc", destination: "s3://bucket/orders/binlogs?endpoint=aws", wantErr: "is not a PVC destination"},
+		{name: "pvc in another namespace", destination: "pvc://other/archive/orders/binlogs", wantErr: `is in namespace "other", not "ns"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BLOODRAVEN_PITR_ENABLED", "1")
+			t.Setenv("BLOODRAVEN_PITR_STORAGE_TYPE", "PVC")
+			t.Setenv("BLOODRAVEN_PITR_PVC_MOUNT_PATH", "/run/bloodraven/pitr-archive")
+			t.Setenv("BLOODRAVEN_PITR_MANIFEST_PREFIX", "orders/binlogs")
+			t.Setenv("BLOODRAVEN_PITR_PASSPHRASE_FILE", "")
+			setPITRIdentityEnv(t, tt.destination, "None")
+			cfg := &PITRConfig{StorageType: "PVC", ManifestPrefix: "orders/binlogs", PVC: &PITRPVCConfig{MountPath: "/run/bloodraven/pitr-archive"}}
+			id, err := ArchiveIdentityFromEnv(cfg)
+			if tt.wantErr == "" {
+				if err != nil || id.Destination.String() != tt.destination {
+					t.Fatalf("ArchiveIdentityFromEnv = %+v, %v", id, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
 	}
 }

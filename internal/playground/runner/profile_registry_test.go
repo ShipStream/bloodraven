@@ -26,10 +26,23 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 	// verify mysqld runs gtid_mode=ON and server-side dedup handles the PITR
 	// replay), and the issue #115 reader scenarios (40-44) are release-graded.
 	// The four chaos-round 2026-10-15 regressions bring it to 24, and the
-	// #235 planned-failover claim restart scenario (63) to 25.
+	// #235 planned-failover claim restart scenario (63) to 25, and the three
+	// #206 cross-site PITR histories (37, 68, 70) to 28.
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 25 {
-		t.Fatalf("release profile selected %d scenarios, want 25", len(release))
+	if len(release) != 28 {
+		t.Fatalf("release profile selected %d scenarios, want 28", len(release))
+	}
+	for _, id := range []string{
+		"37-pitr-planned-failback-no-reclone",
+		"68-pitr-failback-with-reclone",
+		"70-pitr-lossy-failover",
+	} {
+		if !containsScenarioID(release, id) {
+			t.Errorf("release profile must include %s (#206)", id)
+		}
+		if containsScenarioID(smoke, id) {
+			t.Errorf("%s must not be in the smoke profile", id)
+		}
 	}
 	for _, id := range []string{
 		"09-anti-flap-cooldown",

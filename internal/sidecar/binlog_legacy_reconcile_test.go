@@ -106,11 +106,11 @@ func TestLegacyVerificationPreemptsAndResumesWithoutRetention(t *testing.T) {
 		}
 		m.Files = append(m.Files, row)
 	}
-	if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), BinlogIndex: "mysql-bin.index"}
-	a := NewBinlogArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
+	a := newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
 	defer func() {
 		if a.reuseWork != nil {
 			a.reuseWork.close()
@@ -155,7 +155,7 @@ func TestLegacyVerificationPreemptsAndResumesWithoutRetention(t *testing.T) {
 	// Simulate a sidecar restart before the scan publishes the worker's result.
 	a.reuseWork.close()
 	a.reuseWork = nil
-	a = NewBinlogArchiver(cfg, "iad", &stubRoleChecker{readOnly: true}, store, slog.Default())
+	a = newTestArchiver(cfg, "iad", &stubRoleChecker{readOnly: true}, store, slog.Default())
 	for attempts := 0; attempts < 12; attempts++ {
 		m, err = loadManifest(ctx, store, "binlogs", "iad")
 		if err != nil {
@@ -188,10 +188,10 @@ func TestAcknowledgementChecksUnrecordedReuse(t *testing.T) {
 		}
 		m.Files = append(m.Files, row)
 	}
-	if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := AcknowledgeArchiveHistory(ctx, store, "binlogs", "iad", "validate legacy guard", coverageTestSID+":1-11"); err == nil || !strings.Contains(err.Error(), "reuse") {
+	if err := testAcknowledge(ctx, store, "binlogs", "iad", "validate legacy guard", coverageTestSID+":1-11"); err == nil || !strings.Contains(err.Error(), "reuse") {
 		t.Fatalf("unrecorded conflicting issuance acknowledged: %v", err)
 	}
 }
@@ -219,7 +219,7 @@ func TestRetentionWaitsForBackfilledIssuance(t *testing.T) {
 		}
 		m.Files = append(m.Files, row)
 	}
-	if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
 	a := retentionProofArchiver(t, store, slog.Default(), retentionCutoffProof())
@@ -259,7 +259,7 @@ func TestFailedIssuanceInspectionCoolsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := &Manifest{Site: "iad", Files: []ManifestEntry{row, peer}}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
 	if err := a.reconcileArchiveReuse(ctx, m); err == nil {
 		t.Fatal("invalid legacy identity was accepted")
 	}

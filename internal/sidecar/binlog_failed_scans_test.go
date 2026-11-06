@@ -19,7 +19,7 @@ func TestScanCountsConsecutiveFailedScans(t *testing.T) {
 		ManifestPrefix: "binlogs",
 		PollInterval:   time.Hour,
 	}
-	a := NewBinlogArchiver(cfg, "dc1", checker, newMemStore(), testLogger())
+	a := newTestArchiver(cfg, "dc1", checker, newMemStore(), testLogger())
 	ctx := context.Background()
 
 	for want := int64(1); want <= 2; want++ {

@@ -30,7 +30,7 @@ func TestUninspectableRowDoesNotHotLoop(t *testing.T) {
 	if err := store.Put(ctx, key, bytes.NewReader(payload), int64(len(payload))); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
 		t.Fatal(err)
 	}
 	a := retentionProofArchiver(t, store, slog.Default(), retentionCutoffProof())
@@ -84,7 +84,7 @@ func archiverWithInspectionFailures(t *testing.T, mode string, logger *slog.Logg
 	if mode == "permission" {
 		store.deny = key
 	}
-	if err := saveManifest(context.Background(), store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
+	if err := seedManifest(context.Background(), store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
 		t.Fatal(err)
 	}
 	return retentionProofArchiver(t, store, logger, retentionCutoffProof()), store, row, key
@@ -137,7 +137,7 @@ func TestFailedRowDoesNotRepeatDuringHealthyBackfill(t *testing.T) {
 		}
 		m.Files = append(m.Files, f)
 	}
-	if err := saveManifest(context.Background(), store, "binlogs", m); err != nil {
+	if err := seedManifest(context.Background(), store, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
@@ -176,7 +176,7 @@ func TestInspectionFailureStateFollowsManifestIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	row.ContentID = actual
-	if err := saveManifest(context.Background(), store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
+	if err := seedManifest(context.Background(), store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
 		t.Fatal(err)
 	}
 	a.lastRetentionRun = time.Time{}

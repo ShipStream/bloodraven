@@ -175,7 +175,8 @@ type MysqlFailoverGroupReconciler struct {
 	// license.ProductionKey.
 	LicenseKeys license.KeyLookup
 
-	// Now overrides time.Now for license verification tests.
+	// Now overrides time.Now for tests: license verification and the
+	// encryption coverage LastCheckTime stamp.
 	Now func() time.Time
 
 	licenseMu  sync.Mutex
@@ -474,19 +475,36 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Drive the one-shot restore Job when spec.initFromBackup is set.
-	// If a restore is still in flight we requeue early and skip pod
-	// label sync. A parallel safety gate lives in the topology runner:
+	// If a restore is still in flight we requeue early after the pod
+	// label sync, which keeps applications off the group until the
+	// restore succeeds (as do the per-site Services above and the
+	// topology manager's DNS gate). A parallel safety gate lives in the
+	// topology runner:
 	// TopologyManagerRunner.sync() calls
 	// TopologyManager.SetAutoBootstrapSuppressed(restoreInFlight) every
 	// 30s, which prevents the fresh-deploy auto-clone path in
 	// applyCrossSiteAction from racing the restore Job for the primary
-	// data directory. Together the two gates ensure the replica is only
-	// cloned after the primary has been loaded from the dump.
+	// data directory, while still letting it seed (fence the other sites,
+	// make the seed writable and publish it active), which the Job waits
+	// for. Together the two gates ensure the replica is only cloned after
+	// the primary has been loaded from the dump.
 	restoreRequeue, err := r.reconcileRestoreJob(ctx, &fg)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile restore job: %w", err)
 	}
+	// The restore phase feeds the Ready condition, which the topology
+	// manager writes only on topology changes: have it rewrite status now
+	// if the phase moved (the runner's sync also catches it).
+	if r.Runner != nil {
+		r.Runner.RefreshInitRestoreReadiness(req.NamespacedName, &fg)
+	}
 	if restoreRequeue > 0 {
+		// Still sweep the labels: while the restore has not succeeded
+		// syncPodLabels takes every pod out of the application Services,
+		// and that must hold for pods recreated mid-restore too.
+		if err := r.syncPodLabels(ctx, &fg); err != nil {
+			return ctrl.Result{}, fmt.Errorf("sync pod labels during initFromBackup restore: %w", err)
+		}
 		return ctrl.Result{RequeueAfter: restoreRequeue}, nil
 	}
 
@@ -582,6 +600,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// leave them stale.
 	if err := r.reconcileS3CredentialsCondition(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("check S3 credentials secrets: %w", err)
+	}
+	if err := r.reconcilePITRMySQLConfCondition(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("report refused PITR mysqlConf: %w", err)
 	}
 
 	if err := r.reconcileScheduleTriggerRBAC(ctx, &fg); err != nil {
@@ -988,9 +1009,45 @@ func normalizedMySQLSettings(raw map[string]string) map[string]string {
 		if unsafeMySQLSetting(key, raw[key]) {
 			continue
 		}
-		out[strings.ReplaceAll(key, "_", "-")] = raw[key]
+		out[canonicalMySQLOptionName(strings.ReplaceAll(key, "_", "-"))] = raw[key]
 	}
 	return out
+}
+
+// legacyMySQLOptionAliases maps the deprecated spellings MySQL 9.7 still
+// accepts for operator-owned options to the current names. MySQL applies
+// an alias exactly like the option itself and honours the last occurrence,
+// so in the sorted my.cnf "slave-preserve-commit-order=OFF" after
+// "replica-preserve-commit-order=ON" turns commit ordering off, and
+// "log-slave-updates=OFF" turns off log_replica_updates (verified against
+// mysql:9.7.4, F153).
+var legacyMySQLOptionAliases = map[string]string{
+	"log-slave-updates":           "log-replica-updates",
+	"skip-slave-start":            "skip-replica-start",
+	"slave-preserve-commit-order": "replica-preserve-commit-order",
+}
+
+// canonicalMySQLOptionName rewrites a hyphenated option name that is a
+// legacy alias, alone or behind option prefixes (loose-, skip-, ...), to
+// the current name with the same prefixes, so the owned-setting override
+// and shadowing checks see it.
+func canonicalMySQLOptionName(key string) string {
+	prefix, k := "", key
+	for {
+		if current, ok := legacyMySQLOptionAliases[k]; ok {
+			return prefix + current
+		}
+		stripped := false
+		for _, p := range mysqlOptionPrefixes {
+			if strings.HasPrefix(k, p) {
+				prefix, k, stripped = prefix+p, strings.TrimPrefix(k, p), true
+				break
+			}
+		}
+		if !stripped {
+			return key
+		}
+	}
 }
 
 // mysqlOptionPrefixes are the modifiers MySQL accepts in front of an option
@@ -1043,6 +1100,11 @@ func ownedMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
 		// Grant names treat `_` and `%` literally, and the app role's
 		// mysql schema revoke can replicate; see appSystemSchemaRevoke.
 		"partial-revokes": "ON",
+		// PITR replay certifies a history from its binlog order, so a
+		// multi-threaded applier must commit in source order (D-33).
+		// Overriding it is refused rather than left to the sidecar's
+		// history-integrity marker, which is permanent for the prefix.
+		"replica-preserve-commit-order": "ON",
 	}
 
 	// Encryption coverage is likewise operator-owned: the security claim
@@ -1123,10 +1185,20 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 	for k, v := range normalizedMySQLSettings(fg.Spec.MysqlConf) {
 		settings[k] = v
 	}
+	var site v1alpha1.SiteSpec
 	if len(sites) > 0 {
-		for k, v := range normalizedMySQLSettings(sites[0].MysqlConf) {
+		site = sites[0]
+		for k, v := range normalizedMySQLSettings(site.MysqlConf) {
 			settings[k] = v
 		}
+	}
+	// While PITR is enabled, an option that breaks replay certification
+	// is refused here rather than left to the sidecar's history-integrity
+	// marker, which is permanent for the prefix (N6). MySQL's defaults
+	// for the refused options (ROW, FULL, no filter) are the safe values.
+	// PITRMysqlConfAccepted and a PITRMysqlConfRefused Event report it.
+	for _, refused := range pitrRefusedMySQLConf(fg, site) {
+		delete(settings, refused.key)
 	}
 
 	owned := ownedMySQLSettings(fg)
@@ -1787,7 +1859,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 			labelInstance: fg.Name,
 			labelSite:     site.Name,
 		}
-		if site.IsReadOnlyReader() {
+		// A reader serves only while healthy. So does every site while an
+		// initFromBackup restore has not succeeded: syncPodLabels marks
+		// every pod unhealthy until then, so this application-facing
+		// Service (often a LoadBalancer the group's DNS record points at)
+		// has no endpoints while the seed is being loaded or holds a
+		// failed load. The restore Job uses the internal Service instead.
+		if site.IsReadOnlyReader() || restoreInFlight(fg) {
 			selector[labelHealthy] = "yes"
 		}
 		serviceType := effectiveSiteServiceType(fg.Spec.ServiceTemplate, site.ServiceTemplate)
@@ -2095,8 +2173,16 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 			writableSites++
 		}
 	}
+	// While an initFromBackup restore has not succeeded the seed is
+	// writable and published active so the restore Job can load into it,
+	// but it is not the application's database yet (a load in progress,
+	// or a failed load's partial data): no site is labelled primary or
+	// healthy, which leaves the -primary, -replicas and per-site Services
+	// without endpoints. The restore Job reaches the seed through its
+	// internal Service, which selects on the site alone.
+	restoreWithheld := restoreInFlight(fg)
 	authorityValid := false
-	if statusComplete && fg.Status.ActiveSite != "" && writableSites == 1 {
+	if !restoreWithheld && statusComplete && fg.Status.ActiveSite != "" && writableSites == 1 {
 		for _, site := range fg.Spec.Sites {
 			if site.Name == fg.Status.ActiveSite && site.IsPromotable() && statusByName[site.Name].State == "writable" {
 				authorityValid = true
@@ -2206,6 +2292,9 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 			}
 		} else if si.status.State == "writable" || si.status.State == "read-only" {
 			healthy = "yes"
+		}
+		if restoreWithheld {
+			healthy = "no"
 		}
 		// A peer the in-place restore has not recloned yet still serves
 		// pre-restore data: keep it out of the reader Services.

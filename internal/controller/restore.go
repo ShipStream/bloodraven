@@ -23,9 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // filterOutVolumeByName returns a copy of vols with the entry whose
@@ -115,9 +115,12 @@ func splitS3Location(loc string) (bucket, key string) {
 }
 
 // restoreInFlight reports whether spec.initFromBackup is set and the
-// one-shot restore has not yet reached Succeeded. Callers use it to gate
-// side effects that would race the restore Job (notably the topology
-// manager's fresh-deploy auto-clone).
+// one-shot restore has not yet reached Succeeded (pending, running, or
+// failed). Callers use it to gate side effects that would race the restore
+// Job (notably the topology manager's fresh-deploy auto-clone) or copy a
+// failed load's partial data, and to keep applications off the group: no
+// DNS record, no primary/healthy pod labels and no endpoints in the
+// application Services until the restore succeeds.
 func restoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 	if fg.Spec.InitFromBackup == nil {
 		return false
@@ -128,23 +131,83 @@ func restoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 	return fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded
 }
 
+// initRestoreSeedSite returns the site an initFromBackup restore that has
+// not succeeded loads into, as the persisted status records it: the
+// restore Job's target once the Job exists (the operator only creates it
+// against the seed it published and observed writable), else the published
+// active site. "" when no restore is unfinished or no seed is recorded.
+//
+// The Job's target is preferred because it outlives status.activeSite,
+// which reads "" as soon as a status write observes the seed fenced. It is
+// the authority the topology manager uses to lift such a fence after an
+// operator restart, when the seed already holds part of the load and is
+// no longer a fresh-deploy seed.
+func initRestoreSeedSite(fg *v1alpha1.MysqlFailoverGroup) string {
+	if !restoreInFlight(fg) {
+		return ""
+	}
+	if rs := fg.Status.Restore; rs != nil && rs.JobName != "" && rs.TargetSite != "" {
+		return rs.TargetSite
+	}
+	return fg.Status.ActiveSite
+}
+
+// Ready condition reasons while spec.initFromBackup has not succeeded.
+const (
+	readyReasonInitRestoreInProgress = "InitFromBackupInProgress"
+	readyReasonInitRestoreFailed     = "InitFromBackupFailed"
+)
+
+// initRestoreRecovery is the recovery procedure for a failed
+// initFromBackup restore, shared by the RestoreFailed Event and the Ready
+// condition so both say the same thing.
+const initRestoreRecovery = "The group stays out of service (no DNS record, no Service endpoints) and no site is cloned. " +
+	"To retry: if the load had started (BLOODRAVEN_LOAD_START in the Job log), empty the target first by deleting and recreating the group, " +
+	"or by deleting the group's MySQL PVCs; then delete the restore Job and the operator rebuilds it"
+
+// initRestoreReadyCondition returns the Ready=False reason and message for
+// a group whose initFromBackup restore has not succeeded, or "" when the
+// restore succeeded or none is configured.
+func initRestoreReadyCondition(fg *v1alpha1.MysqlFailoverGroup) (reason, message string) {
+	if !restoreInFlight(fg) {
+		return "", ""
+	}
+	rs := fg.Status.Restore
+	if rs != nil && rs.Phase == v1alpha1.BackupPhaseFailed {
+		detail := rs.Message
+		if rs.Reason != "" {
+			detail = rs.Reason + ": " + detail
+		}
+		if rs.JobName == "" {
+			return readyReasonInitRestoreFailed, fmt.Sprintf(
+				"initFromBackup restore failed before its Job was created: %s. The group stays out of service (no DNS record, no Service endpoints); the operator retries building the Job on each reconcile once the cause is fixed.", detail)
+		}
+		return readyReasonInitRestoreFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery)
+	}
+	phase := "Pending"
+	if rs != nil && rs.Phase != "" {
+		phase = string(rs.Phase)
+	}
+	return readyReasonInitRestoreInProgress, fmt.Sprintf(
+		"initFromBackup restore has not succeeded (phase %s); applications are kept off the group (no DNS record, no Service endpoints) until it does", phase)
+}
+
 type restoreCompletionMetadata struct {
-	SourceSizeBytes         int64
-	SourceGtidExecuted      string
-	SourceBinlogFile        string
-	SourceBinlogPos         int64
-	TargetGtidExecuted      string
-	TargetBinlogFile        string
-	TargetBinlogPos         int64
-	PitrNewestEventTime     string
-	PitrPartial             bool
-	PitrCrossSiteUnverified bool
-	PitrReplaySites         []string
-	PitrCoverageVersion     int
-	PitrTargetCovered       bool
-	PitrStopDatetime        string
-	PitrReplayedBinlogFile  string
-	PitrReplayedBinlogCount int32
+	SourceSizeBytes    int64
+	SourceGtidExecuted string
+	SourceBinlogFile   string
+	SourceBinlogPos    int64
+	TargetGtidExecuted string
+	TargetBinlogFile   string
+	TargetBinlogPos    int64
+	// PointInTime is the certified replay result, only ever set from a
+	// PITR Job's verdict (pitrJobVerdict), never from the log.
+	PointInTime *v1alpha1.PointInTimeResult
+}
+
+// pitrPartial reports whether meta certifies a Partial point-in-time outcome.
+func (m restoreCompletionMetadata) pitrPartial() bool {
+	return m.PointInTime != nil && m.PointInTime.Outcome == v1alpha1.PointInTimePartial
 }
 
 // Keep restoreCompletionMetadata, the status copy helpers below, and the
@@ -177,18 +240,9 @@ func applyRestoreMetadataToStatus(rs *v1alpha1.RestoreStatus, meta restoreComple
 	rs.TargetGtidExecuted = meta.TargetGtidExecuted
 	rs.TargetBinlogFile = meta.TargetBinlogFile
 	rs.TargetBinlogPos = meta.TargetBinlogPos
-	rs.PitrStopDatetime = meta.PitrStopDatetime
-	rs.PitrReplayedBinlogFile = meta.PitrReplayedBinlogFile
-	rs.PitrReplayedBinlogCount = meta.PitrReplayedBinlogCount
-	rs.PitrNewestEventTime = meta.PitrNewestEventTime
-	rs.PitrPartial = meta.PitrPartial
-	rs.PitrCrossSiteUnverified = meta.PitrCrossSiteUnverified
-	rs.PitrReplaySites = meta.PitrReplaySites
-	if meta.PitrPartial {
+	rs.PointInTime = meta.PointInTime
+	if meta.pitrPartial() {
 		rs.Reason = "PointInTimePartial"
-	}
-	if meta.PitrCrossSiteUnverified {
-		rs.Reason = "PointInTimeCrossSiteUnverified"
 	}
 }
 
@@ -200,9 +254,7 @@ func applyRestoreMetadataToInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus, meta
 	rs.TargetGtidExecuted = meta.TargetGtidExecuted
 	rs.TargetBinlogFile = meta.TargetBinlogFile
 	rs.TargetBinlogPos = meta.TargetBinlogPos
-	rs.PitrStopDatetime = meta.PitrStopDatetime
-	rs.PitrReplayedBinlogFile = meta.PitrReplayedBinlogFile
-	rs.PitrReplayedBinlogCount = meta.PitrReplayedBinlogCount
+	rs.PointInTime = meta.PointInTime
 }
 
 func restoreMetadataFromInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus) restoreCompletionMetadata {
@@ -210,16 +262,14 @@ func restoreMetadataFromInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus) restore
 		return restoreCompletionMetadata{}
 	}
 	return restoreCompletionMetadata{
-		SourceSizeBytes:         rs.SourceSizeBytes,
-		SourceGtidExecuted:      rs.SourceGtidExecuted,
-		SourceBinlogFile:        rs.SourceBinlogFile,
-		SourceBinlogPos:         rs.SourceBinlogPos,
-		TargetGtidExecuted:      rs.TargetGtidExecuted,
-		TargetBinlogFile:        rs.TargetBinlogFile,
-		TargetBinlogPos:         rs.TargetBinlogPos,
-		PitrStopDatetime:        rs.PitrStopDatetime,
-		PitrReplayedBinlogFile:  rs.PitrReplayedBinlogFile,
-		PitrReplayedBinlogCount: rs.PitrReplayedBinlogCount,
+		SourceSizeBytes:    rs.SourceSizeBytes,
+		SourceGtidExecuted: rs.SourceGtidExecuted,
+		SourceBinlogFile:   rs.SourceBinlogFile,
+		SourceBinlogPos:    rs.SourceBinlogPos,
+		TargetGtidExecuted: rs.TargetGtidExecuted,
+		TargetBinlogFile:   rs.TargetBinlogFile,
+		TargetBinlogPos:    rs.TargetBinlogPos,
+		PointInTime:        rs.PointInTime,
 	}
 }
 
@@ -265,32 +315,6 @@ func parseRestoreCompleteLine(line string) (restoreCompletionMetadata, bool) {
 			if n, err := strconv.ParseInt(rawVal, 10, 64); err == nil {
 				meta.TargetBinlogPos = n
 			}
-		case "pitrCrossSiteUnverified":
-			meta.PitrCrossSiteUnverified = rawVal == "true"
-		case "pitrReplaySites":
-			if sites, ok := decodeRestoreToken(rawVal); ok && sites != "" {
-				meta.PitrReplaySites = strings.Split(sites, ",")
-			}
-		case "pitrTargetCovered":
-			meta.PitrTargetCovered = rawVal == "true"
-		case "pitrCoverageVersion":
-			meta.PitrCoverageVersion, _ = strconv.Atoi(rawVal)
-		case "pitrNewestEventTime":
-			meta.PitrNewestEventTime, _ = decodeRestoreToken(rawVal)
-		case "pitrPartial":
-			meta.PitrPartial = rawVal == "true"
-		case "pitrStopDatetime":
-			if val, ok := decodeRestoreToken(rawVal); ok {
-				meta.PitrStopDatetime = val
-			}
-		case "pitrReplayedBinlogFile":
-			if val, ok := decodeRestoreToken(rawVal); ok {
-				meta.PitrReplayedBinlogFile = val
-			}
-		case "pitrReplayedBinlogCount":
-			if n, err := strconv.ParseInt(rawVal, 10, 32); err == nil {
-				meta.PitrReplayedBinlogCount = int32(n)
-			}
 		}
 	}
 	return meta, true
@@ -335,39 +359,6 @@ func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context
 		}
 	}
 	return restoreCompletionMetadata{}, false
-}
-
-// pitrForeignReplaySites lists replay sites outside spec.sites that are read
-// from the group's own archive profile.
-func pitrForeignReplaySites(fg *v1alpha1.MysqlFailoverGroup) []string {
-	pit := fg.Spec.InitFromBackup.PointInTime
-	if pit == nil || pit.ArchiveProfileName != "" {
-		return nil
-	}
-	own := make(map[string]bool, len(fg.Spec.Sites))
-	for _, site := range fg.Spec.Sites {
-		own[site.Name] = true
-	}
-	var foreign []string
-	for _, site := range pit.Sites {
-		if !own[site] {
-			foreign = append(foreign, site)
-		}
-	}
-	return foreign
-}
-
-// applyPITRVerdict replaces log-derived PITR fields with the verdict's.
-func applyPITRVerdict(meta *restoreCompletionMetadata, verdict pitrVerdict) {
-	meta.PitrCoverageVersion = 1
-	meta.PitrStopDatetime = verdict.Stop
-	meta.PitrReplayedBinlogFile = verdict.LastFile
-	meta.PitrReplayedBinlogCount = verdict.Files
-	meta.PitrNewestEventTime = verdict.NewestEventTime
-	meta.PitrPartial = verdict.Partial
-	meta.PitrCrossSiteUnverified = verdict.CrossSiteUnverified
-	meta.PitrReplaySites = verdict.Sites
-	meta.PitrTargetCovered = verdict.TargetCovered
 }
 
 func restoreJobPods(ctx context.Context, c client.Client, job *batchv1.Job) ([]corev1.Pod, error) {
@@ -457,55 +448,53 @@ func emitRestoreSuccessMetrics(fg *v1alpha1.MysqlFailoverGroup, restoreKind, tar
 }
 
 // restoreTargetSite chooses the site that will receive a bootstrap
-// restore load. Resolution order:
+// restore load: status.activeSite once the operator has published one, or,
+// before that, the site the fresh-deploy bootstrap will seed (the default
+// seed site: the highest-priority primary-candidate according to
+// spec.splitBrainPolicy.sitePriorities, or the first primary-candidate in
+// declared order, falling back to spec.sites[0]).
 //
-//  1. If status.ActiveSite is set AND that site is observed to be
-//     writable (or has no observed state / empty state yet), use it.
-//  2. If status.ActiveSite is set but that site is observed in any
-//     other state (read-only, unreachable, etc.), refuse — return "".
-//  3. Otherwise (fresh deploy) fall back to the default seed site —
-//     the highest-priority primary-candidate according to
-//     spec.splitBrainPolicy.sitePriorities, or the first primary-
-//     candidate in declared order.
+// ready reports whether the restore Job may start now. The load needs a
+// writable server, and every site boots fenced (read_only=ON, plus the
+// sidecar's super_read_only until the operator names it active), so the
+// Job waits until the operator has seeded the target (topology manager
+// maybeStartFreshDeployBootstrap, which only seeds while the restore is in
+// flight) and the target is observed writable. Starting earlier fails the
+// load with ERROR 1290, and a failed restore Job is never retried.
 //
-// The caller fails fast with a clear error when this returns empty so
-// the operator can't accidentally overwrite a recovering replica with
-// a stale dump.
-func restoreTargetSite(fg *v1alpha1.MysqlFailoverGroup) string {
+// When ready is false, wait is the Pending message, and refuse is true
+// when the published active site is in a state no seeding will fix
+// (unreachable, unknown): the operator can't accidentally overwrite a
+// recovering site with a stale dump, and the user should look.
+func restoreTargetSite(fg *v1alpha1.MysqlFailoverGroup) (site string, ready bool, wait string, refuse bool) {
 	if fg == nil || len(fg.Spec.Sites) == 0 {
-		return ""
+		return "", false, "no sites configured", true
 	}
 
 	active := fg.Status.ActiveSite
-	if active != "" {
-		for i := range fg.Status.Sites {
-			s := &fg.Status.Sites[i]
-			if s.Name != active {
-				continue
-			}
-			// Allow writable AND allow not-yet-observed (empty state)
-			// because during a fresh deploy the status may lag briefly
-			// behind the first Deployment becoming Ready.
-			if s.State == "" || s.State == "writable" {
-				return active
-			}
-			// Any other observed state (read-only, unreachable,
-			// unknown) means something else has already started up
-			// on that site — refuse to load into it.
-			return ""
+	if active == "" {
+		seed := fg.Spec.Sites[0].Name
+		if s := fg.Spec.DefaultSeedSite(); s != nil {
+			seed = s.Name
 		}
-		// ActiveSite is set but the matching status entry is missing.
-		// Treat as "fresh" for compatibility.
-		return active
+		return seed, false, fmt.Sprintf("waiting for the operator to seed site %q (make it writable and publish it as the active site)", seed), false
 	}
-
-	// Fresh deploy: no observed sites yet, no active site — target the
-	// default seed site. Falls back to spec.sites[0] when the spec has
-	// no primary-candidate (an invalid-but-handled configuration).
-	if seed := fg.Spec.DefaultSeedSite(); seed != nil {
-		return seed.Name
+	for i := range fg.Status.Sites {
+		s := &fg.Status.Sites[i]
+		if s.Name != active {
+			continue
+		}
+		switch s.State {
+		case state.StateWritable.String():
+			return active, true, "", false
+		case "", state.StateReadOnly.String():
+			// The seed is published before the poll that observes it
+			// writable, so read-only here is normally that window.
+			return active, false, fmt.Sprintf("waiting for active site %q to be observed writable", active), false
+		}
+		return active, false, fmt.Sprintf("waiting for a writable target site (activeSite=%q is %s)", active, s.State), true
 	}
-	return fg.Spec.Sites[0].Name
+	return active, false, fmt.Sprintf("waiting for active site %q to be observed writable", active), false
 }
 
 // reconcileRestoreJob creates and observes the one-shot restore Job when
@@ -530,93 +519,24 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		return 0, fmt.Errorf("initFromBackup set but no sites configured")
 	}
 
-	targetSite := restoreTargetSite(fg)
-	if targetSite == "" {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreTargetUnavailable",
-			"refusing to run restore: active site %q is not writable / not ready",
-			fg.Status.ActiveSite)
-		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
-			Phase:   v1alpha1.BackupPhasePending,
-			Message: fmt.Sprintf("waiting for a writable target site (activeSite=%q)", fg.Status.ActiveSite),
-		})
-		return 30 * time.Second, nil
-	}
+	target, ready, wait, refuse := restoreTargetSite(fg)
 
-	// Wait for the target site's Deployment to be fully rolled out
-	// before creating the restore Job; mysqlsh util.loadDump() needs a
-	// live server. We accept Generation<=1 (fresh deploy where the
-	// ObservedGeneration may still lag), OR the standard rolled-out
-	// check (ObservedGeneration>=Generation && UpdatedReplicas>=1 &&
-	// ReadyReplicas>=1). This guards against firing a load against a
-	// Deployment in the middle of a rolling update.
-	deployName := resourceName(fg.Name, targetSite)
-	var deploy appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: deployName}, &deploy); err != nil {
-		if apierrors.IsNotFound(err) {
-			return 10 * time.Second, nil
-		}
-		return 0, fmt.Errorf("get target deployment: %w", err)
-	}
-	if !deploymentRolledOut(&deploy) {
-		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
-			Phase:      v1alpha1.BackupPhasePending,
-			TargetSite: targetSite,
-			Message:    "waiting for target MySQL Deployment to become ready",
-		})
-		return 10 * time.Second, nil
-	}
-
-	// Ensure derived creds Secret for the restore Job.
-	credsName := restoreCredsSecretName(fg.Name)
-	if err := r.ensureRestoreCredsSecret(ctx, fg, credsName); err != nil {
-		return 0, fmt.Errorf("ensure restore creds secret: %w", err)
-	}
-
-	// Ensure the restore Job.
+	// A Job already created is observed whatever its target's state is
+	// now, against the site it was created for: a primary fenced or
+	// failed over mid-load must not turn a running restore back into a
+	// Pending one that loses its outcome.
 	var job batchv1.Job
-	jobName := restoreJobName(fg.Name, targetSite)
-	jobKey := types.NamespacedName{Namespace: fg.Namespace, Name: jobName}
+	targetSite := target
+	jobKey := types.NamespacedName{Namespace: fg.Namespace, Name: restoreJobName(fg.Name, target)}
+	if prev := fg.Status.Restore; prev != nil && prev.JobName != "" && prev.TargetSite != "" {
+		targetSite = prev.TargetSite
+		jobKey.Name = prev.JobName
+	}
 	if err := r.Get(ctx, jobKey, &job); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return 0, fmt.Errorf("get restore job: %w", err)
 		}
-
-		sourceMeta := r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
-		built, err := r.buildRestoreJob(ctx, fg, targetSite, credsName)
-		if err != nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreBuildFailed", "%s", err.Error())
-			r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
-				Phase:      v1alpha1.BackupPhaseFailed,
-				Reason:     pitrFailureReason(err.Error()),
-				TargetSite: targetSite,
-				Message:    err.Error(),
-			})
-			return 0, nil
-		}
-		if err := controllerutil.SetControllerReference(fg, built, r.Scheme); err != nil {
-			return 0, fmt.Errorf("set restore job owner ref: %w", err)
-		}
-		if err := r.Create(ctx, built); err != nil {
-			return 0, fmt.Errorf("create restore job: %w", err)
-		}
-		now := metav1.Now()
-		running := &v1alpha1.RestoreStatus{
-			Phase:      v1alpha1.BackupPhaseRunning,
-			JobName:    built.Name,
-			JobUID:     string(built.UID),
-			TargetSite: targetSite,
-			StartTime:  &now,
-			Message:    "restore Job created",
-		}
-		applyRestoreMetadataToStatus(running, sourceMeta)
-		r.setRestoreStatus(ctx, fg, running)
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreStarted",
-			"created restore Job %s targeting site %s", built.Name, targetSite)
-		if foreign := pitrForeignReplaySites(fg); len(foreign) > 0 {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PITRSharedArchivePrefix",
-				"pointInTime.sites %v are not in spec.sites but are read from this group's own archive prefix; if they belong to another group, this group's archiver will add its manifests to that prefix and both groups' default replay sets will fail PITRArchiveSiteOmitted; set pointInTime.archiveProfileName to read the source archive from its own profile", foreign)
-		}
-		return 15 * time.Second, nil
+		return r.createRestoreJob(ctx, fg, target, ready, wait, refuse)
 	}
 
 	// Observe the Job.
@@ -653,13 +573,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 			meta = parsed
 		}
 		if pitr {
-			verdict, err := pitrJobVerdict(pod, &job)
+			result, err := pitrJobVerdict(pod, &job)
 			if err != nil {
 				phase = v1alpha1.BackupPhaseFailed
 				message = "PITRCoverageInvalid: " + err.Error()
 				meta = r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
 			} else {
-				applyPITRVerdict(&meta, verdict)
+				meta.PointInTime = result
 			}
 		}
 	}
@@ -677,21 +597,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	if phase == v1alpha1.BackupPhaseFailed {
 		rs.Reason = pitrFailureReason(message)
 	}
-	if meta.PitrPartial {
-		newest := meta.PitrNewestEventTime
-		if newest == "" {
-			newest = "none"
-		}
-		rs.Message = fmt.Sprintf("PointInTimePartial: requested %s; newest replayed event %s", meta.PitrStopDatetime, newest)
-	}
-
-	if meta.PitrCrossSiteUnverified {
-		warning := fmt.Sprintf("PointInTimeCrossSiteUnverified: staged sites in replay order [%s]; cross-site completeness was not verified", strings.Join(meta.PitrReplaySites, ", "))
-		if meta.PitrPartial {
-			rs.Message += "; " + warning
-		} else {
-			rs.Message = warning
-		}
+	if meta.pitrPartial() {
+		rs.Message = pointInTimePartialMessage(meta.PointInTime)
 	}
 	if rs.StartTime == nil {
 		if fg.Status.Restore != nil && fg.Status.Restore.StartTime != nil {
@@ -710,13 +617,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 			// The outcome Events describe a recorded status.
 			return 15 * time.Second, nil
 		}
-		if meta.PitrPartial {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PointInTimePartial", "%s", rs.Message)
-		}
-		if meta.PitrCrossSiteUnverified {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PointInTimeCrossSiteUnverified", "%s", rs.Message)
-		}
-		if meta.PitrPartial || meta.PitrCrossSiteUnverified {
+		emitPointInTimeEvents(r.Recorder, fg, meta.PointInTime)
+		if meta.pitrPartial() {
 			return 0, nil
 		}
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreSucceeded",
@@ -728,9 +630,100 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		return 15 * time.Second, nil
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreFailed",
-		"restore Job %s failed: %s", job.Name, rs.Message)
+		"restore Job %s failed: %s. %s", job.Name, rs.Message, initRestoreRecovery)
 	// No automatic retry. Operator must delete the Job to re-trigger.
 	return 0, nil
+}
+
+// createRestoreJob creates the restore Job against targetSite once
+// restoreTargetSite reports it ready and its Deployment is rolled out, and
+// records Pending with the reason it waits otherwise.
+func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite string, ready bool, wait string, refuse bool) (time.Duration, error) {
+	if !ready {
+		if refuse {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreTargetUnavailable",
+				"refusing to run restore: active site %q is not writable / not ready",
+				fg.Status.ActiveSite)
+		}
+		r.setRestorePending(ctx, fg, targetSite, wait)
+		if refuse {
+			return 30 * time.Second, nil
+		}
+		return 10 * time.Second, nil
+	}
+
+	// Wait for the target site's Deployment to be fully rolled out
+	// before creating the restore Job; mysqlsh util.loadDump() needs a
+	// live server. We accept Generation<=1 (fresh deploy where the
+	// ObservedGeneration may still lag), OR the standard rolled-out
+	// check (ObservedGeneration>=Generation && UpdatedReplicas>=1 &&
+	// ReadyReplicas>=1). This guards against firing a load against a
+	// Deployment in the middle of a rolling update.
+	deployName := resourceName(fg.Name, targetSite)
+	var deploy appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: deployName}, &deploy); err != nil {
+		if apierrors.IsNotFound(err) {
+			return 10 * time.Second, nil
+		}
+		return 0, fmt.Errorf("get target deployment: %w", err)
+	}
+	if !deploymentRolledOut(&deploy) {
+		r.setRestorePending(ctx, fg, targetSite, "waiting for target MySQL Deployment to become ready")
+		return 10 * time.Second, nil
+	}
+
+	// Ensure derived creds Secret for the restore Job.
+	credsName := restoreCredsSecretName(fg.Name)
+	if err := r.ensureRestoreCredsSecret(ctx, fg, credsName); err != nil {
+		return 0, fmt.Errorf("ensure restore creds secret: %w", err)
+	}
+
+	sourceMeta := r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
+	built, err := r.buildRestoreJob(ctx, fg, targetSite, credsName)
+	if err != nil {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreBuildFailed", "%s", err.Error())
+		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
+			Phase:      v1alpha1.BackupPhaseFailed,
+			Reason:     pitrFailureReason(err.Error()),
+			TargetSite: targetSite,
+			Message:    err.Error(),
+		})
+		return 0, nil
+	}
+	if err := controllerutil.SetControllerReference(fg, built, r.Scheme); err != nil {
+		return 0, fmt.Errorf("set restore job owner ref: %w", err)
+	}
+	if err := r.Create(ctx, built); err != nil {
+		return 0, fmt.Errorf("create restore job: %w", err)
+	}
+	now := metav1.Now()
+	running := &v1alpha1.RestoreStatus{
+		Phase:      v1alpha1.BackupPhaseRunning,
+		JobName:    built.Name,
+		JobUID:     string(built.UID),
+		TargetSite: targetSite,
+		StartTime:  &now,
+		Message:    "restore Job created",
+	}
+	applyRestoreMetadataToStatus(running, sourceMeta)
+	r.setRestoreStatus(ctx, fg, running)
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreStarted",
+		"created restore Job %s targeting site %s", built.Name, targetSite)
+	return 15 * time.Second, nil
+}
+
+// setRestorePending records a Pending restore with msg, skipping the
+// write when status.restore already says exactly that.
+func (r *MysqlFailoverGroupReconciler) setRestorePending(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite, msg string) {
+	if prev := fg.Status.Restore; prev != nil && prev.Phase == v1alpha1.BackupPhasePending &&
+		prev.TargetSite == targetSite && prev.Message == msg && prev.JobName == "" {
+		return
+	}
+	r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
+		Phase:      v1alpha1.BackupPhasePending,
+		TargetSite: targetSite,
+		Message:    msg,
+	})
 }
 
 // deploymentRolledOut returns true when a Deployment is fully rolled
@@ -993,7 +986,22 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		// come from in.Decryption or from the source profile itself).
 		passphraseRef *v1alpha1.PassphraseSecretRef
 		sourceMeta    restoreCompletionMetadata
+		// dumpSrc is where dump-meta reads the dump's identity; set only
+		// for a point-in-time restore.
+		dumpSrc *pitrDumpSource
 	)
+
+	// A point-in-time target that does not parse, or a schema-filtered
+	// load, refuses before anything is built (§7.1 reconcile tokens).
+	pitrReq, err := pitrRequestFromSpec(in.PointInTime)
+	if err != nil {
+		return nil, err
+	}
+	if pitrReq != nil {
+		if err := pitrLoadFilterRefusal(fp, in.LoadOptions); err != nil {
+			return nil, err
+		}
+	}
 
 	switch {
 	case src.MysqlBackupRef != nil:
@@ -1004,9 +1012,10 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded || ref.Status.Location == "" {
 			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded or has no location", ref.Name)
 		}
-		if err := validatePITRBackupBefore(in.PointInTime, ref.Status); err != nil {
-			return nil, err
-		}
+		// D-44 (a target before the dump ended) is enforced by dump-meta
+		// against the dump's own serverClock.end. status.completionTime is
+		// no bound: it includes the upload, which can end long after the
+		// dump did, so it would refuse valid targets in between (F034).
 		sourceMeta = restoreMetadataFromBackupStatus(ref.Status)
 
 		// Prefer the structured StorageType set by the backup
@@ -1084,6 +1093,13 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				decryptPVCPrefix = strings.TrimSuffix(strings.TrimPrefix(inputURL, backupPVCMountPath+"/"), "/")
 			}
 		}
+		if pitrReq != nil {
+			ds, err := pitrDumpSourceForBackup(fg, &ref, profile, passphraseRef)
+			if err != nil {
+				return nil, wrapTokenFirst(fp+".source.mysqlBackupRef", err)
+			}
+			dumpSrc = &ds
+		}
 		if profileS3 != nil {
 			extraEnv = append(extraEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profileS3.Bucket},
@@ -1116,7 +1132,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 
 	case src.S3 != nil:
-		inputURL = mysqlShellDumpInput(src.S3.Prefix, v1alpha1.BackupStorageS3)
+		// One spelling of the prefix for loading, decryption and
+		// dump-meta, the one the backup writer uses ("/prod" and "prod"
+		// name the same keys, F036).
+		s3Prefix := strings.Trim(src.S3.Prefix, "/")
+		inputURL = mysqlShellDumpInput(s3Prefix, v1alpha1.BackupStorageS3)
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: src.S3.Bucket},
 		)
@@ -1137,8 +1157,15 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			decryptS3Bucket = src.S3.Bucket
 			decryptS3EndpointOverride = src.S3.EndpointURL
 			decryptS3Region = src.S3.Region
-			decryptS3Prefix = strings.TrimSuffix(src.S3.Prefix, "/")
+			decryptS3Prefix = s3Prefix
 			decryptAWSCredsSecret = src.S3.CredentialsSecret
+		}
+		if pitrReq != nil {
+			dumpSrc = &pitrDumpSource{
+				StorageType: v1alpha1.BackupStorageS3, Prefix: s3Prefix,
+				S3Bucket: src.S3.Bucket, S3EndpointURL: src.S3.EndpointURL, S3Region: src.S3.Region,
+				AWSCredsSecret: src.S3.CredentialsSecret, Passphrase: passphraseRef,
+			}
 		}
 
 	case src.PVC != nil:
@@ -1177,6 +1204,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			decryptPVCClaim = claim
 			decryptPVCPrefix = strings.TrimPrefix(sub, "/")
 		}
+		if pitrReq != nil {
+			dumpSrc = &pitrDumpSource{StorageType: v1alpha1.BackupStoragePVC, Prefix: strings.Trim(sub, "/"), PVCClaim: claim, Passphrase: passphraseRef}
+		}
 
 	default:
 		return nil, fmt.Errorf("%s.source must set mysqlBackupRef, s3, or pvc", fp)
@@ -1187,17 +1217,30 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		return nil, err
 	}
 
-	// PITR replay. The download and replay phases are split across an
-	// init container (bloodraven pitr-download, downloads binlogs from
-	// S3/PVC into a shared emptyDir) and the main container
-	// (restore.py, runs mysqlbinlog | mysql on the downloaded files).
-	// See buildRestorePITRFragments for the shape.
-	if err := validatePITRBackupBound(in.PointInTime, sourceMeta.SourceGtidExecuted, false); err != nil {
+	// PITR replay: dump-meta identifies the dump, pitr-download opens the
+	// source archive, plans and stages the replay, and restore.py replays
+	// and proves it. See buildRestorePITRFragments for the shape.
+	if err := validateRestoreArchiveProfile(fg, in.PointInTime); err != nil {
 		return nil, err
 	}
-	pitrFrags, err := buildRestorePITRFragmentsFor(fg, in.PointInTime)
+	pitrFrags, err := buildRestorePITRFragmentsFor(fg, pitrReq)
 	if err != nil {
 		return nil, err
+	}
+	var dumpMeta *corev1.Container
+	if pitrReq != nil {
+		if dumpSrc == nil {
+			return nil, fmt.Errorf("internal error: %s.pointInTime: no dump source rendered", fp)
+		}
+		container, volumes, err := buildDumpMetaInitContainer(fg, *dumpSrc)
+		if err != nil {
+			return nil, wrapTokenFirst(fp+".pointInTime", err)
+		}
+		dumpMeta = &container
+		extraVolumes = append(extraVolumes, volumes...)
+		if dumpSrc.ExpectedSourceUID != "" {
+			extraEnv = append(extraEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXPECTED_SOURCE_UID", Value: string(dumpSrc.ExpectedSourceUID)})
+		}
 	}
 	extraEnv = append(extraEnv, pitrFrags.MainEnv...)
 	extraVolumes = append(extraVolumes, pitrFrags.PodVolumes...)
@@ -1329,9 +1372,12 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	}
 	podSC, containerSC := mergeSecurityContexts(podSCSrc, containerSCSrc)
 
+	// Init order (§6.3): dump-meta → pitr-download → decrypt-download.
 	var initContainers []corev1.Container
+	if dumpMeta != nil {
+		initContainers = append(initContainers, *dumpMeta)
+	}
 	if pitrFrags.InitContainer != nil {
-		pitrFrags.InitContainer.Env = append(pitrFrags.InitContainer.Env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_START_GTIDS", Value: sourceMeta.SourceGtidExecuted})
 		initContainers = append(initContainers, *pitrFrags.InitContainer)
 	}
 
@@ -1548,28 +1594,30 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			},
 		},
 	}
+	setTerminationMessageLimit(&job.Spec.Template.Spec)
 	return job, nil
 }
 
-// A dump cannot be un-applied. mysqlsh takes its snapshot after the Job
-// starts, so only the backup's completion time bounds what the dump holds:
-// a target before it could already be in the dump.
-func validatePITRBackupBefore(pit *v1alpha1.PointInTimeSpec, backup v1alpha1.MysqlBackupStatus) error {
-	if pit == nil {
-		return nil
+// terminationMessageLimitEnv tells restore.py and verify.sh how many bytes
+// of the main container's termination message the kubelet keeps, so the
+// PITR verdict is built to fit rather than cut (review F040).
+const terminationMessageLimitEnv = "BLOODRAVEN_TERMINATION_MESSAGE_LIMIT"
+
+// setTerminationMessageLimit renders terminationMessageLimitEnv on the
+// pod's main container: the kubelet divides 12 KiB of termination messages
+// evenly among a pod's containers, init containers included, and keeps at
+// most 4 KiB of each.
+func setTerminationMessageLimit(spec *corev1.PodSpec) {
+	n := len(spec.InitContainers) + len(spec.Containers)
+	if n == 0 {
+		return
 	}
-	stop, err := backupmeta.ParsePITRStopTime(pit.StopDatetime)
-	if err != nil {
-		return fmt.Errorf("invalid pointInTime.stopDatetime: %w", err)
+	limit := min(4096, 12288/n)
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == backupJobContainerName {
+			spec.Containers[i].Env = append(spec.Containers[i].Env, corev1.EnvVar{Name: terminationMessageLimitEnv, Value: strconv.Itoa(limit)})
+		}
 	}
-	completed := backup.CompletionTime
-	if completed == nil {
-		return fmt.Errorf("PITRTargetNotCovered: the backup has no completionTime, so it cannot be shown to precede pointInTime.stopDatetime %s", pit.StopDatetime)
-	}
-	if stop.Before(completed.Time) {
-		return fmt.Errorf("PITRTargetNotCovered: pointInTime.stopDatetime %s is earlier than the backup's completion %s, and the dump may already contain later changes; use a backup that completed before the target", pit.StopDatetime, completed.UTC().Format(time.RFC3339))
-	}
-	return nil
 }
 
 func sameRestoreJob(previous *v1alpha1.RestoreStatus, job *batchv1.Job) bool {
@@ -1580,15 +1628,4 @@ func sameRestoreJob(previous *v1alpha1.RestoreStatus, job *batchv1.Job) bool {
 		return previous.JobUID == string(job.UID)
 	}
 	return job.CreationTimestamp.IsZero() || (previous.CompletionTime != nil && !job.CreationTimestamp.After(previous.CompletionTime.Time))
-}
-
-func validatePITRBackupBound(pit *v1alpha1.PointInTimeSpec, bound string, verification bool) error {
-	if pit == nil || pit.AllowPartial || strings.TrimSpace(bound) != "" {
-		return nil
-	}
-	remedy := "use a mysqlBackupRef whose backup has status.gtidExecuted, or set pointInTime.allowPartial"
-	if verification {
-		remedy = "use a referenced backup with trustworthy status.gtidExecuted; verification does not allow partial recovery"
-	}
-	return fmt.Errorf("PITRBackupBoundUnknown: pointInTime requires a non-empty trusted source GTID bound; %s", remedy)
 }

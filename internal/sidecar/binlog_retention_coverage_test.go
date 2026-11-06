@@ -62,14 +62,14 @@ func TestRetentionRequiresGTIDCoverageInEveryBackup(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			data, err := json.Marshal(map[string]any{"version": 1, "site": "iad", "files": rows})
+			data, err := json.Marshal(map[string]any{"version": ManifestVersion, "archiveId": testArchiveID, "site": "iad", "files": rows})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := store.Put(ctx, ManifestKey("binlogs", "iad"), bytes.NewReader(data), int64(len(data))); err != nil {
 				t.Fatal(err)
 			}
-			a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
+			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
 			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
 			a.maybeRunRetention(ctx)
 			for i, row := range rows {
@@ -178,7 +178,7 @@ func TestRetentionBackfillsCoverageWithoutAliasingIncarnations(t *testing.T) {
 		}
 		rows = append(rows, entry)
 	}
-	if err := saveManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: rows}); err != nil {
+	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: rows}); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +188,7 @@ func TestRetentionBackfillsCoverageWithoutAliasingIncarnations(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"coverage": PITRGTIDCoverageProtocol, "cutoffTime": "2026-04-17T00:00:00Z", "retainedGTIDs": []string{coverageTestSID + ":1-11"}})
 	}))
 	defer srv.Close()
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
 	a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
 	a.maybeRunRetention(ctx)
 	m, err := loadManifest(ctx, store, "binlogs", "iad")
@@ -276,7 +276,7 @@ func TestRetentionKeepsUnverifiableArchivedCoverage(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(pitrCutoffResponse{Coverage: PITRGTIDCoverageProtocol, CutoffTime: "2026-04-17T00:00:00Z", RetainedGTIDs: []string{coverageTestSID + ":1-100"}})
 			}))
 			defer srv.Close()
-			a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
+			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
 			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
 			a.maybeRunRetention(ctx)
 			_, exists, err := store.Get(ctx, key)

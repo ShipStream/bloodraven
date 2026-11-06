@@ -575,6 +575,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		recreated := live && !sameIncarnation(existing.uid, fg.UID)
 		if live && existing.cfg.Equal(cfg) && !recreated {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
+			existing.tm.SetInitRestoreSeed(initRestoreSeedSite(fg))
+			if initRestoreReadyStale(fg) {
+				existing.tm.RequestStatusRefresh()
+			}
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			_ = r.applyRestoreProtection(ctx, existing.tm, fg, false)
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
@@ -634,6 +638,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 		if started {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
+			mt.tm.SetInitRestoreSeed(initRestoreSeedSite(fg))
 			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			_ = r.applyRestoreProtection(ctx, mt.tm, fg, false)
 			r.syncDragonflyUpgradePause(ctx, nn, mt.dragonfly, upgradePaused)
@@ -673,6 +678,44 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	r.pruneStartFailures(seen)
 
 	return nil
+}
+
+// RefreshInitRestoreReadiness asks the group's topology manager for a
+// status write when the Ready condition no longer matches the group's
+// initFromBackup restore phase. The restore reconcile writes only
+// status.restore, and the topology manager writes status only when the
+// topology changes, so without this a load that fails or succeeds after
+// the topology settled would leave Ready on the old verdict. sync() does
+// the same on every pass; this lets the restore path act at once.
+func (r *TopologyManagerRunner) RefreshInitRestoreReadiness(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup) {
+	if !initRestoreReadyStale(fg) {
+		return
+	}
+	r.mu.RLock()
+	mt := r.managers[nn]
+	r.mu.RUnlock()
+	if mt != nil {
+		mt.tm.RequestStatusRefresh()
+	}
+}
+
+// initRestoreReadyStale reports whether fg's Ready condition disagrees
+// with the verdict updateCRStatus derives from its initFromBackup restore
+// (initRestoreReadyCondition): it shows another restore reason or message,
+// or still shows a restore reason after the restore succeeded or was
+// removed from the spec. A group with no Ready condition yet, or one still
+// Initializing (which keeps its Unknown), gets its first verdict from the
+// topology manager's own first write and is not stale.
+func initRestoreReadyStale(fg *v1alpha1.MysqlFailoverGroup) bool {
+	ready := apimeta.FindStatusCondition(fg.Status.Conditions, "Ready")
+	if ready == nil || ready.Reason == "Initializing" {
+		return false
+	}
+	reason, message := initRestoreReadyCondition(fg)
+	if reason == "" {
+		return ready.Reason == readyReasonInitRestoreInProgress || ready.Reason == readyReasonInitRestoreFailed
+	}
+	return ready.Status != metav1.ConditionFalse || ready.Reason != reason || ready.Message != message
 }
 
 // handleRecloneAnnotation validates and queues the durable reclone annotation
@@ -954,6 +997,13 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		}
 		return err
 	}
+	// An unfinished initFromBackup restore must hold from the first poll
+	// too: that poll may otherwise clone the restore seed's partial load
+	// to an empty peer or publish DNS for it. The seed recorded in status
+	// is the authority that lifts a fence its mysqld or sidecar put back
+	// while this operator was away (checkPrimaryReassert).
+	tm.SetAutoBootstrapSuppressed(restoreInFlight(fg))
+	tm.SetInitRestoreSeed(initRestoreSeedSite(fg))
 	// Must land before Run, like the set above: a held peer's stopped
 	// receiver must not be restarted, nor a held site cloned into, by the
 	// first poll. Read uncached: the cached list may predate the queue.
@@ -1694,6 +1744,15 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, reason, initializingMessage(snap)
 		degradedStatus, degradedMessage = metav1.ConditionUnknown, readyMessage
 	}
+	// A group whose initFromBackup restore has not succeeded is not ready
+	// for applications whatever its topology: the operator keeps them off
+	// it (no DNS record, no Service endpoints). Ready says why and, after a
+	// failed load, how to recover. Initializing keeps its Unknown.
+	if reason != "Initializing" {
+		if restoreReason, restoreMessage := initRestoreReadyCondition(&freshFG); restoreReason != "" {
+			readyStatus, readyReason, readyMessage = metav1.ConditionFalse, restoreReason, restoreMessage
+		}
+	}
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             readyStatus,
@@ -1927,6 +1986,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	superseded := false
 	var pitrArchivePrev *metav1.Condition
+	// persistedActiveFrom is the active site on the object the successful
+	// Update replaced, so the reissue warning fires exactly for the
+	// transition this write persisted (not one another writer persisted).
+	var persistedActiveFrom string
 	if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		// Re-fetch the CR to get the latest resource version.
 		var fresh v1alpha1.MysqlFailoverGroup
@@ -1934,6 +1997,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			return err
 		}
 		pitrArchivePrev = pitrArchiveCondition(&fresh.Status)
+		persistedActiveFrom = fresh.Status.ActiveSite
 		if fresh.Status.TopologyGeneration > snap.TopologyGeneration {
 			superseded = true
 			r.hydrateDeploymentGeneration(&fresh)
@@ -2047,6 +2111,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		r.recorder.Eventf(&freshFG, corev1.EventTypeWarning, "DivergentSitePromoted", "%s", divergentPromotionMessage(*snap.DivergentPromotion))
 	}
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
+	r.emitPITRArchiveReissueRisk(&freshFG, persistedActiveFrom)
 	r.emitOrderedUpdateStallEvent(&freshFG, existingStatus)
 	r.emitPITRArchiveEvents(&freshFG, pitrArchivePrev)
 	r.emitKeyringPromotionEvents(&freshFG, snap)
@@ -2292,6 +2357,11 @@ func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *
 	// Join all per-site errors so nothing is silently dropped. Empty
 	// when every site is clean.
 	out.Message = strings.Join(errorMsgs, "; ")
+	var prevArchive *v1alpha1.PITRArchiveObservation
+	if fg.Status.PITR != nil {
+		prevArchive = fg.Status.PITR.Archive
+	}
+	out.Archive = pitrArchiveObservation(fg, sites, snaps, lastGood, prevArchive, time.Now())
 	fg.Status.PITR = out
 }
 
@@ -2377,6 +2447,67 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 			}
 		}
 	}
+}
+
+// eventReasonPITRArchiveReissueRisk warns that a promoted site may reissue
+// GTIDs the archive already holds (D-46).
+const eventReasonPITRArchiveReissueRisk = "PITRArchiveReissueRiskDetected"
+
+// emitPITRArchiveReissueRisk fires when a status write persisted an
+// active-site change (a failover, a planned failover or a re-promotion) to a
+// site whose last archiver status reports divergent or quarantined rows in
+// its own manifest. Rotating server_uuid on reclone is FU-4: until then a
+// site recloned after a lossy failover reissues the lost GTIDs once
+// promoted, and the archive can only be restarted (D-46).
+//
+// Two writers persist status.activeSite: the topology status writer and the
+// planned-failover engine's Succeeded terminal write, which takes the
+// manager's authority through MergePlannedAuthority (the engine's
+// activeSitePersisted hook, wired in plannedFailoverEngine). Each calls this
+// with from = the active site on the object its successful Update replaced,
+// so a promotion fires exactly once whichever writer persists it first: the
+// optimistic-concurrency resourceVersion makes the persisted transition the
+// promotion's identity, and the other writer then sees from == to.
+//
+// An empty from is a bootstrap only on a group that has never failed over:
+// a promotion deferred across a persisted NoPrimary interval (A -> "" -> B,
+// say during the anti-flap cooldown) persists B with from == "" and is a
+// promotion all the same (F041).
+func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFailoverGroup, from string) {
+	promoted := fg.Status.ActiveSite
+	if r == nil || r.recorder == nil || !pitrEnabled(fg) || promoted == "" || promoted == from {
+		return
+	}
+	if from == "" && fg.Status.LastFailover == nil && fg.Status.LastFailoverTarget == "" {
+		return
+	}
+	rows, ok := r.pitrArchiveSuspectRows(FailoverGroupNamespacedName(fg), promoted)
+	if !ok || rows == 0 {
+		return
+	}
+	r.recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveReissueRisk,
+		"site %s was promoted while its archive manifest holds %d divergent/quarantined rows. If %s was recloned after a lossy failover, it reissues the lost GTIDs, and every restore from this archive refuses PITRArchiveHistoryReset. Start a new archive prefix and take a full backup.",
+		promoted, rows, promoted)
+}
+
+// pitrArchiveSuspectRows is divergentRows+quarantinedRows from site's latest
+// (or last good) archiver status, or false when the poller has none.
+func (r *TopologyManagerRunner) pitrArchiveSuspectRows(nn types.NamespacedName, site string) (int64, bool) {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok || mt.archiver == nil {
+		return 0, false
+	}
+	snaps, lastGood, _ := mt.archiver.view()
+	s := snaps[site]
+	if s == nil {
+		s = lastGood[site]
+	}
+	if s == nil {
+		return 0, false
+	}
+	return s.DivergentRows + s.QuarantinedRows, true
 }
 
 // ReasonOrderedUpdateStalled is the Updating condition reason, and the
@@ -2772,7 +2903,7 @@ func conditionBool(v bool) metav1.ConditionStatus {
 // copy, which would undo a concurrent reconciler write.
 // AutomaticFailoverHeld is the planned-failover automation hold: a runner
 // status write must never drop it.
-var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady, v1alpha1.ConditionAutomaticFailoverHeld}
+var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady, conditionPITRMysqlConfAccepted, v1alpha1.ConditionAutomaticFailoverHeld}
 
 // setCondition sets or updates a condition in the slice, preserving LastTransitionTime
 // if the status has not changed.

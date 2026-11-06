@@ -104,9 +104,10 @@ type MysqlBackupVerificationSpec struct {
 
 	// PointInTime configures whether the verification replays archived
 	// binlogs on top of the restored dump. Leave nil or set mode=none to
-	// skip replay (Phase 1 behavior). mode=latest replays every archived
-	// event at or after the backup's binlog coordinates; mode=timestamp
-	// stops the replay at a caller-supplied RFC3339 instant. Requires
+	// skip replay. mode=latest replays to the unique archive head;
+	// mode=timestamp restores the history of the first archived
+	// transaction at or after a caller-supplied instant, cut just before
+	// it. Either way the replay may span every site's archive. Requires
 	// spec.backup.pitr.enabled=true on the referenced failover group.
 	// +optional
 	PointInTime *PointInTimeVerificationSpec `json:"pointInTime,omitempty"`
@@ -124,31 +125,36 @@ type MysqlBackupVerificationSpec struct {
 // PointInTimeVerificationSpec controls PITR binlog replay during a
 // verification. When Mode is "none" (or this field is nil), the
 // verification stops after util.loadDump() returns; no binlog replay
-// happens. "latest" replays up through the newest archived event; it
-// exercises the archiver+replay path end-to-end. "timestamp" replays
-// through a caller-supplied instant — useful for drilling at a specific
-// known-good point, or as a regression check that archives covering a
-// past incident still replay cleanly.
+// happens. "latest" replays to the unique archive head; it exercises the
+// archiver and replay path end to end. "timestamp" replays to a
+// caller-supplied instant, which drills a specific known-good point or
+// checks that archives covering a past incident still replay. A
+// verification never accepts a Partial outcome.
 type PointInTimeVerificationSpec struct {
-	// Sites are the archive site names to replay. Defaults to this group's sites.
-	// Set when the source archive's sites differ, or to include a removed site.
-	// +optional
-	// +listType=set
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=253
-	// +kubebuilder:validation:items:Pattern=`^[a-z0-9-]+$`
-	Sites []string `json:"sites,omitempty"`
-
 	// Mode selects the replay behavior.
 	// +kubebuilder:default=none
 	// +kubebuilder:validation:Enum=none;latest;timestamp
 	Mode string `json:"mode,omitempty"`
 
-	// Timestamp is an RFC3339 instant; replay stops just before the
-	// first binlog event at or after this time. Required when Mode=timestamp;
-	// ignored otherwise.
+	// Timestamp is the target instant, a whole second in the same forms as
+	// PointInTimeSpec.StopDatetime (fractional seconds are refused; a
+	// stored fractional value must be corrected in the same update, as for
+	// StopDatetime). Replay restores the history of the first archived
+	// transaction committed at or after it, cut just before that
+	// transaction. Required when Mode=timestamp; ignored otherwise.
 	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
+	// +kubebuilder:validation:MaxLength=40
 	Timestamp string `json:"timestamp,omitempty"`
+
+	// ExcludeGtids are never replayed and must not intersect the backup,
+	// with the same meaning as PointInTimeSpec.ExcludeGtids: every archived
+	// transaction committed between the backup's newest transaction and the
+	// target (or the archive head in latest mode) that is outside the
+	// target history must be listed.
+	// +optional
+	// +kubebuilder:validation:MaxLength=131072
+	ExcludeGtids string `json:"excludeGtids,omitempty"`
 }
 
 // SanityCheckSpec configures the post-load scalar sanity check. The
@@ -275,6 +281,12 @@ type MysqlBackupVerificationStatus struct {
 	// +optional
 	ReplayedThroughBinlog *BinlogReplayMark `json:"replayedThroughBinlog,omitempty"`
 
+	// PointInTime is the certified outcome of the point-in-time replay,
+	// read from the replay's verdict. Set on Succeeded verifications whose
+	// spec.pointInTime.mode is not none.
+	// +optional
+	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
+
 	// SanityCheck is populated when spec.sanityCheck is set. Records
 	// whether the query ran, its duration, and the scalar result so
 	// operators can look at `kubectl describe` and tell what the
@@ -295,22 +307,25 @@ type MysqlBackupVerificationStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// BinlogReplayMark records the final binlog coordinate and server-clock
-// timestamp a PITR replay caught up to. Reported by the verification
-// Job via a structured log sentinel so the reconciler can populate
-// status without shelling out to MySQL itself.
+// BinlogReplayMark summarizes how far a PITR replay reached. Its fields are
+// derived independently from the certified replay verdict, not read from
+// one final event: File is the last binlog file the replay applied,
+// Timestamp is the newest original commit time among the replayed
+// transactions (which need not be an event in File), and Position is not
+// reported.
 type BinlogReplayMark struct {
-	// File is the last binlog file applied, e.g. "mysql-bin.000412".
+	// File is the last binlog file the replay applied, e.g.
+	// "mysql-bin.000412".
 	// +optional
 	File string `json:"file,omitempty"`
 
-	// Position is the byte offset within File of the last applied
-	// event.
+	// Position is not reported by current releases and stays unset.
 	// +optional
 	Position int64 `json:"position,omitempty"`
 
-	// Timestamp is the wall-clock time of the last applied event, in
-	// RFC3339. Used to compute bloodraven_backup_verification_replay_lag_seconds.
+	// Timestamp is the newest original commit time among the replayed
+	// transactions. Used to compute
+	// bloodraven_backup_verification_replay_lag_seconds.
 	// +optional
 	Timestamp *metav1.Time `json:"timestamp,omitempty"`
 }

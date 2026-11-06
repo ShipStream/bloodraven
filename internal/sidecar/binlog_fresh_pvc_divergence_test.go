@@ -3,7 +3,6 @@ package sidecar
 import (
 	"context"
 	"log/slog"
-	"os"
 	"testing"
 )
 
@@ -13,22 +12,15 @@ import (
 // servers. After the clone the server again contains every archived
 // transaction (the donor had them), so nothing is divergent. Persisted
 // evidence must not outlive that transient pre-clone state.
-//
-// BLOODRAVEN_PITR_REBUILD_STORE=<dir> keeps the resulting PVC-layout archive
-// for the cmd/bloodraven half of this scenario
-// (TestPITRPreRebuildBackupRestoresAfterRebuild).
 func TestFreshPVCBeforeCloneLeavesNoPermanentDivergence(t *testing.T) {
 	ctx := context.Background()
-	dir := os.Getenv("BLOODRAVEN_PITR_REBUILD_STORE")
-	if dir == "" {
-		dir = t.TempDir()
-	}
+	dir := t.TempDir()
 	store, err := NewArchiveStore(ctx, &PITRConfig{StorageType: "PVC", PVC: testPVCConfig(dir)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	state := &historyStateStub{uuid: coverageTestSID, executed: coverageTestSID + ":1-21"}
-	a := NewBinlogArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
+	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
 	source := "testdata/incarnation-b.bin"
 	id, err := a.localBinlogID(source)
 	if err != nil {

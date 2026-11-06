@@ -91,6 +91,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 		return nil
 	}
 
+	// No writes on the target while spec.initFromBackup has not succeeded
+	// (review F004): a point-in-time restore proves the loaded baseline
+	// (R2) and the replay (R6) against the target's exact gtid_executed,
+	// so a credential write during the load or the replay (a Secret
+	// rotation) would fail it. The users the restore Job needs come from
+	// the first-boot init script, and the hash annotation is still stale
+	// after the restore, so the roles converge on the first reconcile
+	// after it succeeds.
+	if restoreInFlight(fg) {
+		logger.V(1).Info("initFromBackup restore in flight, deferring credential reconciliation")
+		return nil
+	}
+
 	// Compute hash of all credential secret data.
 	currentHash, err := r.computeCredentialHash(ctx, fg)
 	if err != nil {

@@ -2,7 +2,6 @@ package scenarios
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,7 +14,6 @@ import (
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
-	pgsidecar "github.com/shipstream/bloodraven/internal/sidecar"
 )
 
 // operatorServiceAccount is the operator's ServiceAccount name in the
@@ -369,53 +367,6 @@ func clearRetainedInPlaceRestoreJobs(ctx context.Context, env *runner.Env, captu
 	return nil
 }
 
-// --- PITR manifest helpers (scenario 37) -----------------------------------
-
-// readSiteBinlogManifest reads a per-site binlog manifest straight from RustFS
-// using the sidecar's own key convention (<prefix>/binlogs/manifest-<site>.json).
-// Returns found=false when the site has archived nothing yet.
-func readSiteBinlogManifest(ctx context.Context, env *runner.Env, bucket, binlogPrefix, site string) (*pgsidecar.Manifest, bool, error) {
-	key := pgsidecar.ManifestKey(binlogPrefix, site)
-	data, found, err := env.Chaos.ReadRustFSObject(ctx, bucket, key)
-	if err != nil {
-		return nil, false, fmt.Errorf("read manifest %s: %w", key, err)
-	}
-	if !found {
-		return nil, false, nil
-	}
-	var m pgsidecar.Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, true, fmt.Errorf("decode manifest %s: %w", key, err)
-	}
-	return &m, true, nil
-}
-
-// pitrHandoffSanityQuery builds the scalar sanity query for the PITR
-// archive-handoff verification: it returns 1 iff the marker table replayed to
-// the PITR target contains exactly the baseline row plus markers A and B (both
-// inserted before the target) and NOT marker C (inserted after the target),
-// scoped to this run's run_id. Kept separate so it can be unit-tested.
-func pitrHandoffSanityQuery(db, runStem string) string {
-	return "SELECT IF(" +
-		"SUM(phase='baseline') = 1 AND SUM(phase='A') = 1 AND SUM(phase='B') = 1 AND SUM(phase='C') = 0" +
-		", 1, 0) FROM " + quoteSQLIdentifier(db) + ".marker WHERE run_id=" + quoteSQLString(runStem)
-}
-
 func quoteSQLIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
-}
-
-// manifestNewestLastEvent returns the latest LastEventTime across a manifest's
-// files (zero time if empty).
-func manifestNewestLastEvent(m *pgsidecar.Manifest) time.Time {
-	var newest time.Time
-	if m == nil {
-		return newest
-	}
-	for _, f := range m.Files {
-		if f.LastEventTime.After(newest) {
-			newest = f.LastEventTime
-		}
-	}
-	return newest
 }

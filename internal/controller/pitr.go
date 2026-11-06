@@ -2,13 +2,18 @@ package controller
 
 import (
 	"fmt"
-	"path"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
+	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
+	"github.com/shipstream/bloodraven/internal/pitrplan"
 )
 
 // Defaults applied when the corresponding PITRSpec fields are unset.
@@ -23,7 +28,7 @@ const (
 	// field change. ComputeSpecHash includes this value so already-enabled
 	// PITR pods roll forward to pick up render-only fixes such as Secret
 	// volume modes.
-	pitrPodRenderVersion = "pitr-pod-render-v4-readable-passphrase"
+	pitrPodRenderVersion = "pitr-pod-render-v5-archive-identity"
 
 	// Official MySQL container images own /var/lib/mysql as uid/gid 999.
 	// PITR sidecars must read mysql-bin.index and sealed binlog files from
@@ -55,11 +60,12 @@ const (
 	pitrBinlogIndex      = "mysql-bin.index"
 	pitrPVCMountPath     = "/run/bloodraven/pitr-archive"
 	pitrAWSCredsMountDir = "/run/bloodraven/pitr-aws-creds"
-	// pitrBinlogSubprefix is the logical subtree under the backup
-	// profile's storage root that holds binlog objects and manifests.
-	// Giving it its own prefix keeps full dumps and binlog archives
-	// cleanly separated in the same bucket / PVC.
-	pitrBinlogSubprefix = "binlogs"
+	// pitrStateMountPath is the sidecar's pod-lifetime scratch emptyDir
+	// (BLOODRAVEN_PITR_STATE_DIR). The archiver keeps a pending
+	// history-integrity marker there until its first verified session
+	// persists it, so a sidecar container restart does not drop it (A3).
+	pitrStateMountPath  = "/run/bloodraven/pitr-state"
+	pitrStateVolumeName = "pitr-sidecar-state"
 )
 
 // pitrSidecarFragments is the bundle of additions the PITR feature
@@ -96,6 +102,16 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		return out, nil
 	}
 
+	// The archive identity the sidecar writes and verifies (§3.7): the
+	// group's UID, the archive ID derived from it and the normalized
+	// destination, and the profile's encryption mode. The manifest prefix
+	// is the destination's key prefix, so the sidecar, the readers and
+	// the descriptor agree on one spelling of it.
+	ident, err := pitrArchiveIdentityFor(fg, profile)
+	if err != nil {
+		return out, err
+	}
+
 	// Always mount the MySQL data PVC read-only into the sidecar. The
 	// read-only flag prevents a rogue archiver from accidentally
 	// corrupting the live binlog stream if a bug ever tried.
@@ -105,8 +121,20 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		ReadOnly:  true,
 	})
 
+	// Pod-lifetime state the archiver must keep across a sidecar
+	// container restart (the data PVC is mounted read-only).
+	out.PodVolumes = append(out.PodVolumes, corev1.Volume{
+		Name:         pitrStateVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	out.SidecarVolumeMounts = append(out.SidecarVolumeMounts, corev1.VolumeMount{
+		Name:      pitrStateVolumeName,
+		MountPath: pitrStateMountPath,
+	})
+
 	// Core archiver env vars shared by both storage backends.
 	out.SidecarEnv = append(out.SidecarEnv,
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STATE_DIR", Value: pitrStateMountPath},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENABLED", Value: "1"},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_BINLOG_DIR", Value: pitrBinlogDir},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_BINLOG_INDEX", Value: pitrBinlogIndex},
@@ -114,6 +142,14 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		// Profile name is echoed so the sidecar's retention client
 		// can query the operator for the per-profile cutoff.
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_PROFILE_NAME", Value: profile.Name},
+		corev1.EnvVar{Name: "BLOODRAVEN_FAILOVER_GROUP_UID", Value: string(fg.UID)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ARCHIVE_ID", Value: ident.ArchiveID},
+		// Literal: kubelet expands $(VAR) and $$ in EnvVar.Value, which
+		// would change the destination the sidecar parses while the
+		// archive ID above was derived from the unexpanded one (F029).
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: literalArtifactEnvValue(ident.Destination.String())},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(ident.Encryption.Mode)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: literalArtifactEnvValue(ident.Destination.KeyPrefix)},
 	)
 	if pitr.ArchivePollInterval != nil {
 		out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
@@ -128,25 +164,17 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 			return out, fmt.Errorf("profile %q type=S3 but storage.s3 nil", profile.Name)
 		}
 		s3 := profile.Storage.S3
-		// Manifest prefix = <profile prefix>/binlogs (or just
-		// "binlogs" if no profile prefix). Kept separate from dumps
-		// which live under <prefix>/<backupName>/.
-		manifestPrefix := pitrBinlogSubprefix
-		if s3.Prefix != "" {
-			manifestPrefix = path.Join(s3.Prefix, pitrBinlogSubprefix)
-		}
 		out.SidecarEnv = append(out.SidecarEnv,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: manifestPrefix},
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: s3.Bucket},
+			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: literalArtifactEnvValue(s3.Bucket)},
 		)
 		if s3.EndpointURL != "" {
 			out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: s3.EndpointURL,
+				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: literalArtifactEnvValue(s3.EndpointURL),
 			})
 		}
 		if s3.Region != "" {
 			out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_REGION", Value: s3.Region,
+				Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(s3.Region),
 			})
 		}
 		if s3.CredentialsSecret != "" {
@@ -178,18 +206,7 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		if profile.Storage.PVC == nil {
 			return out, fmt.Errorf("profile %q type=PVC but storage.pvc nil", profile.Name)
 		}
-		pvc := profile.Storage.PVC
-		claim := pvc.ClaimName
-		if claim == "" {
-			claim = ownedBackupPVCName(fg.Name, profile.Name)
-		}
-		// For PVC-backed archival the manifest prefix is a subdirectory
-		// inside the mount path. The restore flow and archiver both
-		// resolve paths relative to the mount point using this prefix.
-		manifestPrefix := pitrBinlogSubprefix
-		if pvc.SubPath != "" {
-			manifestPrefix = path.Join(pvc.SubPath, pitrBinlogSubprefix)
-		}
+		claim := ident.Destination.Claim
 
 		out.PodVolumes = append(out.PodVolumes, corev1.Volume{
 			Name: "pitr-archive",
@@ -204,7 +221,6 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 			MountPath: pitrPVCMountPath,
 		})
 		out.SidecarEnv = append(out.SidecarEnv,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: manifestPrefix},
 			corev1.EnvVar{Name: "BLOODRAVEN_PITR_PVC_MOUNT_PATH", Value: pitrPVCMountPath},
 		)
 
@@ -250,6 +266,47 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 	return out, nil
 }
 
+// pitrArchiveIdentity is the archive identity a group derives for one of
+// its backup profiles: where the archive lives, the ID a writer creates
+// there, and the encryption the descriptor must record.
+type pitrArchiveIdentity struct {
+	Destination pitrarchive.Destination
+	ArchiveID   string
+	Encryption  pitrarchive.EncryptionIdentity
+}
+
+// pitrArchiveIdentityFor derives profile's archive identity for fg. The
+// archive ID is the creating derivation (ArchiveIDDerivations[0]) of fg's
+// UID and the normalized destination.
+func pitrArchiveIdentityFor(fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.BackupProfile) (pitrArchiveIdentity, error) {
+	dest, err := pitrprofile.DestinationFor(fg, profile)
+	if err != nil {
+		return pitrArchiveIdentity{}, err
+	}
+	return pitrArchiveIdentity{
+		Destination: dest,
+		ArchiveID:   pitrarchive.CreateArchiveID(fg.UID, dest),
+		Encryption:  pitrprofile.EncryptionIdentityFor(profile),
+	}, nil
+}
+
+// activePITRArchiveIdentity is the identity of fg's active PITR archive,
+// or false when PITR is disabled or its profile is missing or invalid.
+func activePITRArchiveIdentity(fg *v1alpha1.MysqlFailoverGroup) (pitrArchiveIdentity, bool) {
+	if !pitrEnabled(fg) || fg.Spec.Backup.PITR.ProfileName == "" {
+		return pitrArchiveIdentity{}, false
+	}
+	profile := findProfile(fg, fg.Spec.Backup.PITR.ProfileName)
+	if profile == nil {
+		return pitrArchiveIdentity{}, false
+	}
+	ident, err := pitrArchiveIdentityFor(fg, profile)
+	if err != nil {
+		return pitrArchiveIdentity{}, false
+	}
+	return ident, true
+}
+
 // restorePITRPVCMountPath is the mount path inside the restore Job's
 // init container for the backup profile's PVC when replaying archived
 // binlogs. Separate from pitrPVCMountPath on the live MySQL pod so the
@@ -268,6 +325,184 @@ const restorePITRLocalDir = "/pitr-binlogs"
 // easy to spot in kubectl describe output when diagnosing restore
 // failures.
 const restorePITRInitContainerName = "pitr-download"
+
+// restorePITRDumpMetaDir is the shared emptyDir where the dump-meta init
+// container writes dump.json for pitr-download (§4.2).
+const restorePITRDumpMetaDir = "/pitr-dump-meta"
+
+// restorePITRDumpMetaContainerName is the dump-meta init container, which
+// runs first whenever a restore or verification replays archived binlogs.
+const restorePITRDumpMetaContainerName = "dump-meta"
+
+// restorePITRDumpSourceMountPath is where dump-meta mounts a PVC-hosted
+// dump's claim, read-only.
+const restorePITRDumpSourceMountPath = "/pitr-dump-src"
+
+// pitrReplayRequest is one point-in-time replay as the Job renders it: the
+// spec of a restore (PointInTimeSpec) or of a verification
+// (PointInTimeVerificationSpec), normalized.
+type pitrReplayRequest struct {
+	// Mode is "timestamp" or "latest" (pitrplan.Mode).
+	Mode string
+	// Stop is the target in backupmeta.MicroTimeLayout; "" in latest mode.
+	Stop         string
+	AllowPartial bool
+	ExcludeGtids string
+	// ArchiveProfileName is the profile whose archive is read; "" means the
+	// group's own active PITR profile (verifications).
+	ArchiveProfileName string
+	// Verification marks a verification Job, which never accepts Partial.
+	Verification bool
+}
+
+// pitrStopPattern is the stopDatetime/timestamp CRD pattern (§6.1). The
+// controller enforces it again because objects admitted before the pattern
+// existed, and every caller of the builders, must not reach a Job.
+var pitrStopPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`)
+
+// parsePITRTarget parses a point-in-time target, a whole second: RFC 3339
+// with an optional zone, or the MySQL form, neither with a fraction (A-39:
+// the v1beta1 field is a second-precision metav1.Time); no zone means UTC.
+// Callers refuse any other spelling with PITRTargetInvalid. The planner
+// still compares µs commit times against it (commit < T).
+func parsePITRTarget(value string) (time.Time, error) {
+	if len(value) > 40 || !pitrStopPattern.MatchString(value) {
+		return time.Time{}, fmt.Errorf("%q is not a target instant (YYYY-MM-DDTHH:MM:SS[Z|±HH:MM], whole seconds; fractional seconds are not accepted)", value)
+	}
+	normalized := strings.Replace(value, " ", "T", 1)
+	if !strings.HasSuffix(normalized, "Z") && !strings.ContainsAny(normalized[19:], "+-") {
+		normalized += "Z"
+	}
+	t, err := time.Parse(time.RFC3339Nano, normalized)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%q: %v", value, err)
+	}
+	return t.UTC(), nil
+}
+
+// canonicalPITRTarget renders a parsed target the one way every PITR
+// container reads it.
+func canonicalPITRTarget(t time.Time) string {
+	return backupmeta.NewMicroTime(t).String()
+}
+
+// pitrRequestFromSpec normalizes a restore's PointInTimeSpec.
+func pitrRequestFromSpec(pit *v1alpha1.PointInTimeSpec) (*pitrReplayRequest, error) {
+	if pit == nil {
+		return nil, nil
+	}
+	if pit.StopDatetime == "" {
+		return nil, fmt.Errorf("%s: pointInTime.stopDatetime is required", pitrarchive.TokenTargetInvalid)
+	}
+	stop, err := parsePITRTarget(pit.StopDatetime)
+	if err != nil {
+		return nil, fmt.Errorf("%s: pointInTime.stopDatetime: %v", pitrarchive.TokenTargetInvalid, err)
+	}
+	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", pit.ExcludeGtids)
+	if err != nil {
+		return nil, err
+	}
+	return &pitrReplayRequest{
+		Mode:               "timestamp",
+		Stop:               canonicalPITRTarget(stop),
+		AllowPartial:       pit.AllowPartial,
+		ExcludeGtids:       exclude,
+		ArchiveProfileName: pit.ArchiveProfileName,
+	}, nil
+}
+
+// canonicalExcludeGtids parses excludeGtids and renders it the one way every
+// PITR container reads it: the planner's canonical set (pitrplan.Set.String),
+// which is also what pitr-download writes to coverage.json "excluded" and
+// what restore.py compares BLOODRAVEN_PITR_EXCLUDE_GTIDS against. A user
+// spelling (MySQL's multi-line output, unmerged or unsorted intervals, tags
+// grouped under one UUID, uppercase UUIDs) would otherwise fail that
+// comparison. A set that does not parse is refused at reconcile.
+//
+// Two bounds keep one admitted string from hurting anything (F030, F031):
+// every source identifier must be a UUID before the parser expands tags
+// grouped under it (an arbitrary long "UUID" times thousands of tags would
+// otherwise allocate gigabytes in the operator), and the canonical set must
+// fit maxExcludeGtidsEnvBytes, since it travels as one container env
+// string and Linux refuses to exec with a string over 128 KiB (E2BIG),
+// which no PITR refusal would ever report.
+func canonicalExcludeGtids(field, raw string) (string, error) {
+	if err := checkUserGTIDSetUUIDs(raw); err != nil {
+		return "", fmt.Errorf("%s: %s: %v", pitrarchive.TokenTargetInvalid, field, err)
+	}
+	set, err := pitrplan.ParseUserSet(raw)
+	if err != nil {
+		return "", fmt.Errorf("%s: %s: %v", pitrarchive.TokenTargetInvalid, field, err)
+	}
+	canonical := set.String()
+	if len(canonical) > maxExcludeGtidsEnvBytes {
+		return "", fmt.Errorf("%s: %s is %d bytes in canonical form (tags grouped under one UUID are spelled out per tag), over the %d-byte limit for the replay containers; exclude fewer GTIDs",
+			pitrarchive.TokenTargetInvalid, field, len(canonical), maxExcludeGtidsEnvBytes)
+	}
+	return canonical, nil
+}
+
+// maxExcludeGtidsEnvBytes bounds the canonical excludeGtids rendered into
+// BLOODRAVEN_PITR_EXCLUDE_GTIDS: half of Linux's 128 KiB per-string exec
+// limit (MAX_ARG_STRLEN), the same 64 KiB the planner allows a segment's
+// GTID set.
+const maxExcludeGtidsEnvBytes = 64 << 10
+
+// gtidSourceUUID is a server UUID as MySQL prints it, either case.
+var gtidSourceUUID = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+
+// checkUserGTIDSetUUIDs requires every entry of a user GTID set, split the
+// way internalmysql.ParseGTIDSet splits it, to start with a UUID.
+func checkUserGTIDSetUUIDs(raw string) error {
+	for _, part := range strings.Split(strings.ReplaceAll(raw, "\n", ","), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		sid, _, _ := strings.Cut(part, ":")
+		if !gtidSourceUUID.MatchString(sid) {
+			if len(sid) > 64 {
+				sid = sid[:64] + "..."
+			}
+			return fmt.Errorf("GTID entry source %q is not a server UUID", sid)
+		}
+	}
+	return nil
+}
+
+// pitrDownloadBudgetEnv renders the limits pitr-download budgets against
+// (contracts.md "Round-1 env additions"): the pitr-binlogs emptyDir's
+// sizeLimit (spec.backup.stagingVolumeSizeLimit, the same quantity
+// stagingEmptyDirSource sets), and the container's own memory limit. Each
+// is rendered only when set; without them pitr-download falls back to
+// statfs and the cgroup limit. The memory limit is the literal value, not
+// a downward-API reference, because the downward API reports node
+// allocatable memory for a container with no limit.
+func pitrDownloadBudgetEnv(backup *v1alpha1.BackupSpec, res corev1.ResourceRequirements) []corev1.EnvVar {
+	var env []corev1.EnvVar
+	if backup != nil && backup.StagingVolumeSizeLimit != nil {
+		if v := backup.StagingVolumeSizeLimit.Value(); v > 0 {
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_STAGING_LIMIT_BYTES", Value: strconv.FormatInt(v, 10)})
+		}
+	}
+	if q, ok := res.Limits[corev1.ResourceMemory]; ok {
+		if v := q.Value(); v > 0 {
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES", Value: strconv.FormatInt(v, 10)})
+		}
+	}
+	return env
+}
+
+// pitrOperatorImage is the image of the PITR init containers (dump-meta,
+// pitr-download), which ship in the operator binary. operatorImageFromEnv
+// is wired from main.go; when it is empty (tests) the Job spec keeps a
+// stable shape with "bloodraven:latest".
+func pitrOperatorImage() string {
+	if operatorImageFromEnv == "" {
+		return "bloodraven:latest"
+	}
+	return operatorImageFromEnv
+}
 
 // restorePITRFragments is the bundle of additions PITR contributes to
 // a restore Job spec. Zero value means "PITR replay not requested";
@@ -289,66 +524,100 @@ type restorePITRFragments struct {
 	PodVolumes []corev1.Volume
 }
 
-// buildRestorePITRFragments wires up the restore-side PITR handoff:
+// buildRestorePITRFragments wires up the restore-side PITR handoff
+// (design WS-D §4.2, §4.13):
 //
+//	initContainer: bloodraven dump-meta     (built by the Job builder, which
+//	   └── writes /pitr-dump-meta/dump.json  knows where the dump lives)
 //	initContainer: bloodraven pitr-download
-//	   ├── downloads archived binlogs from S3 or PVC
-//	   └── writes to emptyDir /pitr-binlogs
-//	container: mysqlsh
-//	   ├── util.loadDump()  (existing restore.py behavior)
-//	   └── replays /pitr-binlogs/<site>/* via mysqlbinlog | mysql
+//	   ├── opens and verifies the source archive, plans the replay
+//	   └── stages the plan's files and coverage.json in /pitr-binlogs
+//	initContainer: bloodraven decrypt-download (encrypted dumps only)
+//	container: mysqlsh restore.py
+//	   ├── util.loadDump()
+//	   └── replays every segment into one mysql session and proves the result
 //
-// Splitting download + replay across two containers removes the aws
-// CLI runtime dependency from the MySQL image and reuses the sidecar
-// archiver's storage-backend abstraction.
-//
-// PITR replay is configured purely from the failover group's archive
-// settings: the backup profile named by fg.Spec.Backup.PITR tells the
-// init container where to fetch archived binlogs and manifests from.
-// The downloaded binlogs keep their original GTIDs and include
-// transactions the dump already contains. On a fresh bootstrap target the
-// load installs the dump's gtidExecuted into @@GLOBAL.gtid_purged
-// (updateGtidSet:"replace", see restoreLoadOptionsJSON), so MySQL skips
-// those transactions and any GTID archived by more than one site — no
-// per-MysqlBackup metadata plumbing needed here. That baseline cannot be
-// installed on a live primary, whose own gtid_executed already holds the
-// archived GTIDs, so in-place restores reject pointInTime
-// (errInPlacePointInTimeUnsupported).
-//
-// The verification path reuses this same builder (buildRestorePITRFragmentsFor)
-// against an EPHEMERAL verify mysqld, which is why that mysqld is started
-// gtid_mode=ON (verify_script.sh) and loads with the same baseline
-// (marshalVerificationLoadOptions), so raw replay of cross-site archived
-// binlogs does not double-apply in-dump or duplicated GTIDs (#101).
+// The bootstrap restore (spec.initFromBackup.pointInTime) and verification
+// share buildRestorePITRFragmentsFor. Both load the dump with its GTID set
+// installed (updateGtidSet "replace"), which restore.py proves equals the
+// plan's baseline before replaying. In-place restores reject pointInTime
+// (errInPlacePointInTimeUnsupported): a live primary's gtid_executed cannot
+// be the dump's.
 func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
 	if fg.Spec.InitFromBackup == nil {
 		return restorePITRFragments{}, nil
 	}
-	return buildRestorePITRFragmentsFor(fg, fg.Spec.InitFromBackup.PointInTime)
+	if err := validateRestoreArchiveProfile(fg, fg.Spec.InitFromBackup.PointInTime); err != nil {
+		return restorePITRFragments{}, err
+	}
+	req, err := pitrRequestFromSpec(fg.Spec.InitFromBackup.PointInTime)
+	if err != nil {
+		return restorePITRFragments{}, err
+	}
+	return buildRestorePITRFragmentsFor(fg, req)
 }
 
-// buildRestorePITRFragmentsFor is the parameterized variant that lets
-// the bootstrap restore (spec.initFromBackup.pointInTime) and backup
-// verification share the PITR init-container wiring. A nil pit is a no-op: callers get an empty
-// fragments struct and skip the init container entirely.
-func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1.PointInTimeSpec) (restorePITRFragments, error) {
+// validateRestoreArchiveProfile enforces D-10 for initFromBackup: the
+// restore names the profile whose archive it reads (CEL requires it at
+// admission; this also covers objects admitted before the rule), and that
+// profile may not resolve to the group's own active PITR destination, so
+// the restored group never writes into the archive it restores from.
+func validateRestoreArchiveProfile(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1.PointInTimeSpec) error {
+	if pit == nil {
+		return nil
+	}
+	if pit.ArchiveProfileName == "" {
+		return fmt.Errorf("%s: pointInTime.archiveProfileName is required: name the backup profile whose PITR archive the restore reads", pitrarchive.TokenTargetInvalid)
+	}
+	profile := findProfile(fg, pit.ArchiveProfileName)
+	if profile == nil {
+		return fmt.Errorf("%s: pointInTime.archiveProfileName %q not found in spec.backup.profiles", pitrarchive.TokenTargetInvalid, pit.ArchiveProfileName)
+	}
+	src, err := pitrprofile.DestinationFor(fg, profile)
+	if err != nil {
+		return err
+	}
+	if own, ok := activePITRArchiveIdentity(fg); ok && own.Destination == src {
+		return fmt.Errorf("%s: pointInTime.archiveProfileName %q resolves to %s, which is this group's own active PITR destination (spec.backup.pitr.profileName %q); the restored group would archive into the archive it restores from; archive into a different profile or prefix",
+			pitrarchive.TokenArchiveDestinationShared, pit.ArchiveProfileName, src.String(), fg.Spec.Backup.PITR.ProfileName)
+	}
+	return nil
+}
+
+// buildRestorePITRFragmentsFor renders req's pitr-download init container
+// and the main container's replay env. A nil req is a no-op: callers get an
+// empty fragments struct and skip the init containers entirely.
+func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrReplayRequest) (restorePITRFragments, error) {
 	var out restorePITRFragments
 
-	if pit == nil {
+	if req == nil {
 		return out, nil
 	}
-	if pit.StopDatetime == "" {
-		return out, fmt.Errorf("pointInTime.stopDatetime is required")
+	switch {
+	case req.Mode == "timestamp" && req.Stop == "":
+		return out, fmt.Errorf("%s: a timestamp replay needs a target", pitrarchive.TokenTargetInvalid)
+	case req.Mode == "latest" && req.Stop != "":
+		return out, fmt.Errorf("internal error: latest replay rendered with a target")
+	case req.Mode != "timestamp" && req.Mode != "latest":
+		return out, fmt.Errorf("internal error: unknown PITR mode %q", req.Mode)
+	case req.Verification && req.AllowPartial:
+		return out, fmt.Errorf("internal error: verification rendered with allowPartial")
 	}
 	// archiveProfileName reads a source archive that this group does not
 	// archive into, so a restored group never writes into the source prefix.
-	profileName := pit.ArchiveProfileName
+	profileName := req.ArchiveProfileName
 	if profileName == "" {
 		if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
-			return out, fmt.Errorf(
-				"pointInTime is set but spec.backup.pitr.enabled=false; " +
-					"PITR restore requires the failover group to have continuous binlog " +
-					"archival configured on the source, or pointInTime.archiveProfileName")
+			if req.Verification {
+				// A verification always replays its group's own archive;
+				// it has no archiveProfileName to point elsewhere (F032).
+				return out, fmt.Errorf("%s: pointInTime is set but spec.backup.pitr.enabled=false; "+
+					"a verification replays the group's own PITR archive, so enable spec.backup.pitr on group %q "+
+					"(or verify without pointInTime)", pitrarchive.TokenTargetInvalid, fg.Name)
+			}
+			return out, fmt.Errorf("%s: pointInTime is set but spec.backup.pitr.enabled=false; "+
+				"PITR replay reads the source group's binlog archive, so continuous archival "+
+				"must be configured, or pointInTime.archiveProfileName must name the archive's profile", pitrarchive.TokenTargetInvalid)
 		}
 		profileName = fg.Spec.Backup.PITR.ProfileName
 	}
@@ -368,23 +637,38 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	initMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir}
 	mainMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir, ReadOnly: true}
 
-	siteNames := append([]string(nil), pit.Sites...)
-	if len(siteNames) == 0 {
-		for _, s := range fg.Spec.Sites {
-			siteNames = append(siteNames, s.Name)
-		}
+	// The reader opens the archive at the normalized destination and
+	// checks the descriptor's encryption against the profile's. Replay
+	// considers every site manifest under the prefix (D-9).
+	ident, err := pitrArchiveIdentityFor(fg, profile)
+	if err != nil {
+		return out, err
 	}
-
-	initEnv := []corev1.EnvVar{
-		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
-		{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(pit.AllowPartial)},
-		{Name: "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", Value: strconv.FormatBool(pit.AllowUnverifiedCrossSite)},
-		{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
-		{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
-		{Name: "BLOODRAVEN_PITR_SITES", Value: joinComma(siteNames)},
+	// The replay request, rendered identically on pitr-download and the
+	// main container (contracts: "WP-B2 assumptions").
+	requestEnv := []corev1.EnvVar{{Name: "BLOODRAVEN_PITR_MODE", Value: req.Mode}}
+	if req.Mode == "timestamp" {
+		requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: req.Stop})
 	}
-	initMounts := []corev1.VolumeMount{initMount}
-	volumes := []corev1.Volume{emptyDirVol}
+	requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(req.AllowPartial)})
+	if req.ExcludeGtids != "" {
+		requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: req.ExcludeGtids})
+	}
+	initEnv := append(append([]corev1.EnvVar{}, requestEnv...),
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DUMP_META", Value: restorePITRDumpMetaDir + "/dump.json"},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: literalArtifactEnvValue(ident.Destination.String())},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(ident.Encryption.Mode)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: literalArtifactEnvValue(ident.Destination.KeyPrefix)},
+	)
+	// dump-meta writes dump.json here; pitr-download only reads it.
+	dumpMetaVol := corev1.Volume{
+		Name:         "pitr-dump-meta",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	initMounts := []corev1.VolumeMount{initMount, {Name: "pitr-dump-meta", MountPath: restorePITRDumpMetaDir, ReadOnly: true}}
+	volumes := []corev1.Volume{emptyDirVol, dumpMetaVol}
 
 	switch profile.Storage.Type {
 	case v1alpha1.BackupStorageS3:
@@ -392,22 +676,17 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 			return out, fmt.Errorf("pitr profile %q type=S3 but storage.s3 nil", profile.Name)
 		}
 		s3 := profile.Storage.S3
-		manifestPrefix := pitrBinlogSubprefix
-		if s3.Prefix != "" {
-			manifestPrefix = path.Join(s3.Prefix, pitrBinlogSubprefix)
-		}
 		initEnv = append(initEnv,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: manifestPrefix},
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: s3.Bucket},
+			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: literalArtifactEnvValue(s3.Bucket)},
 		)
 		if s3.EndpointURL != "" {
 			initEnv = append(initEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: s3.EndpointURL,
+				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: literalArtifactEnvValue(s3.EndpointURL),
 			})
 		}
 		if s3.Region != "" {
 			initEnv = append(initEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_REGION", Value: s3.Region,
+				Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(s3.Region),
 			})
 		}
 		if s3.CredentialsSecret != "" {
@@ -437,15 +716,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 		if profile.Storage.PVC == nil {
 			return out, fmt.Errorf("pitr profile %q type=PVC but storage.pvc nil", profile.Name)
 		}
-		pvc := profile.Storage.PVC
-		claim := pvc.ClaimName
-		if claim == "" {
-			claim = ownedBackupPVCName(fg.Name, profile.Name)
-		}
-		manifestPrefix := pitrBinlogSubprefix
-		if pvc.SubPath != "" {
-			manifestPrefix = path.Join(pvc.SubPath, pitrBinlogSubprefix)
-		}
+		claim := ident.Destination.Claim
 		volumes = append(volumes, corev1.Volume{
 			Name: "pitr-archive",
 			VolumeSource: corev1.VolumeSource{
@@ -459,7 +730,6 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 			Name: "pitr-archive", MountPath: restorePITRPVCMountPath, ReadOnly: true,
 		})
 		initEnv = append(initEnv,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: manifestPrefix},
 			corev1.EnvVar{Name: "BLOODRAVEN_PITR_PVC_MOUNT_PATH", Value: restorePITRPVCMountPath},
 		)
 
@@ -473,10 +743,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	// reconciler. operatorImageFromEnv is wired from main.go; if it's
 	// empty (tests) we fall back to "bloodraven:latest" to keep the
 	// Job spec shape stable.
-	image := operatorImageFromEnv
-	if image == "" {
-		image = "bloodraven:latest"
-	}
+	image := pitrOperatorImage()
 
 	// If the backup profile encrypts binlog archives too, mount the
 	// passphrase Secret onto the download init container and point
@@ -523,6 +790,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 		initBackupSrc = &backupResourcesSource{Resources: fg.Spec.Backup.Resources}
 	}
 	initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
+	initEnv = append(initEnv, pitrDownloadBudgetEnv(fg.Spec.Backup, initResources)...)
 	init := corev1.Container{
 		Name:                     restorePITRInitContainerName,
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
@@ -534,19 +802,10 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 		SecurityContext:          initSC,
 	}
 
-	mainEnv := []corev1.EnvVar{
+	mainEnv := append([]corev1.EnvVar{
 		{Name: "BLOODRAVEN_PITR_LOCAL_DIR", Value: restorePITRLocalDir},
 		{Name: "TZ", Value: "UTC"},
-		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
-		{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(pit.AllowPartial)},
-		{Name: "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", Value: strconv.FormatBool(pit.AllowUnverifiedCrossSite)},
-	}
-	if pit.ExcludeGtids != "" {
-		// The planner must exempt exactly what mysqlbinlog --exclude-gtids skips.
-		exclude := corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: pit.ExcludeGtids}
-		mainEnv = append(mainEnv, exclude)
-		init.Env = append(init.Env, exclude)
-	}
+	}, requestEnv...)
 
 	return restorePITRFragments{
 		MainEnv:       mainEnv,
@@ -554,23 +813,4 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 		InitContainer: &init,
 		PodVolumes:    volumes,
 	}, nil
-}
-
-// joinComma returns a comma-separated list of non-empty strings, used
-// for BLOODRAVEN_PITR_SITES. stdlib strings.Join would include empty
-// entries when the source slice has gaps; we filter them explicitly.
-func joinComma(parts []string) string {
-	out := make([]byte, 0, 32)
-	first := true
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		if !first {
-			out = append(out, ',')
-		}
-		out = append(out, p...)
-		first = false
-	}
-	return string(out)
 }

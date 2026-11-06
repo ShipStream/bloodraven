@@ -128,6 +128,28 @@ func runEncryptUpload(args []string) {
 	// init container runs with in the encrypted flow.
 	meta := readDumpMeta(filepath.Join(srcDir, dumpMetaFileName))
 
+	// The stamp is finished after the upload, but its end is known now:
+	// refuse before uploading a dump whose stamp could not be finished,
+	// which would leave a complete-looking artifact that every PITR
+	// refuses (review B1).
+	stamped := os.Getenv(backupStampTemplateEnv) != ""
+	if stamped {
+		if _, err := parseStampEnd(meta.ServerClockEnd); err != nil {
+			logger.Error("finish backup stamp", "error", err)
+			_ = os.WriteFile("/dev/termination-log", []byte(compactTerminationMessage("backup stamp: "+err.Error())), 0644)
+			os.Exit(2)
+		}
+		// The location must still hold this backup's stamp before any
+		// object is uploaded there: the end step's identity check comes
+		// too late to keep this upload from overwriting another backup's
+		// objects (review F016).
+		if err := checkBackupStampOwnerFromEnv(ctx); err != nil {
+			logger.Error("check backup stamp", "error", err)
+			_ = os.WriteFile("/dev/termination-log", []byte(compactTerminationMessage("backup stamp: "+err.Error())), 0644)
+			os.Exit(2)
+		}
+	}
+
 	printlnf("BLOODRAVEN_ENCRYPT_UPLOAD_START src=%s output=%s algorithm=%s",
 		srcDir, outputURL, algorithm)
 
@@ -163,6 +185,19 @@ func runEncryptUpload(args []string) {
 	if err := store.Put(ctx, manifestKey, newBytesReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		logger.Error("upload encryption manifest", "error", err)
 		os.Exit(2)
+	}
+
+	// The upload is the encrypted Job's final step: only now has the dump
+	// finished, so serverClock.end, which the dump captured on the source
+	// right after mysqlsh succeeded, goes into the stamp (D-8, D-52).
+	if stamped {
+		stamp, err := finishBackupStampFromEnv(ctx, meta.ServerClockEnd)
+		if err != nil {
+			logger.Error("finish backup stamp", "error", err)
+			_ = os.WriteFile("/dev/termination-log", []byte(compactTerminationMessage("backup stamp: "+err.Error())), 0644)
+			os.Exit(2)
+		}
+		logger.Info("backup stamp finished", "serverClockStart", stamp.ServerClock.Start.String(), "serverClockEnd", stamp.ServerClock.End.String())
 	}
 
 	printlnf("%s", backupmeta.FormatDumpComplete(backupmeta.DumpComplete{
@@ -716,6 +751,9 @@ type dumpMeta struct {
 	GTIDExecuted string `json:"gtidExecuted,omitempty"`
 	BinlogFile   string `json:"binlogFile,omitempty"`
 	BinlogPos    int64  `json:"binlogPos,omitempty"`
+	// ServerClockEnd is the dumped server's UTC clock read right after
+	// mysqlsh's dump succeeded (backupmeta.MicroTimeLayout).
+	ServerClockEnd string `json:"serverClockEnd,omitempty"`
 }
 
 // loadEncryptionManifest best-effort fetches the

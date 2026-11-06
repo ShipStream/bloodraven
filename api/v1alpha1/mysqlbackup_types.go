@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // +kubebuilder:object:root=true
@@ -14,6 +15,7 @@ import (
 // +kubebuilder:printcolumn:name="Location",type=string,JSONPath=`.status.location`,priority=1
 // +kubebuilder:printcolumn:name="Size",type=string,JSONPath=`.status.size`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="!self.metadata.name.endsWith('.bloodraven-backup.json')",message="metadata.name must not end in .bloodraven-backup.json: that is the backup stamp's key suffix, and the dump location ends in the backup's name"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location) || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage == oldSelf.status.artifactStorage)",message="status.artifactStorage cannot be changed or removed once its location is recorded"
 
 // MysqlBackup represents a single backup run against a MysqlFailoverGroup.
@@ -176,6 +178,19 @@ type MysqlBackupStatus struct {
 	// header from storage.
 	EncryptionAlgorithm string `json:"encryptionAlgorithm,omitempty"`
 
+	// FailoverGroupUID is the metadata.uid of the source failover group,
+	// pinned in the backup Job's template when the Job is created and
+	// recovered from the Job. The backup's stamp records the same UID.
+	// +optional
+	FailoverGroupUID types.UID `json:"failoverGroupUID,omitempty"`
+
+	// PITRArchiveID is the archive ID of the source group's active PITR
+	// archive when the Job was created, pinned in the Job's template and
+	// recovered from it. Empty when PITR was disabled.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^(ar1-[a-z2-7]{26})?$`
+	PITRArchiveID string `json:"pitrArchiveID,omitempty"`
+
 	// Message is a human-readable status message.
 	Message string `json:"message,omitempty"`
 
@@ -210,6 +225,24 @@ type BackupArtifactStorage struct {
 	// ClaimName is the PersistentVolumeClaim the artifact was written to.
 	// +optional
 	ClaimName string `json:"claimName,omitempty"`
+	// PassphraseSecret is the passphrase Secret and key the producing Job
+	// mounted, for an encrypted backup. Cleanup of a backup that never
+	// succeeded reads its backup stamp with it after the Job is gone, so a
+	// profile edited since the launch does not decide which passphrase is
+	// used.
+	// +optional
+	PassphraseSecret *BackupArtifactPassphrase `json:"passphraseSecret,omitempty"`
+}
+
+// BackupArtifactPassphrase names the Secret key a producing backup Job
+// encrypted its artifact with.
+type BackupArtifactPassphrase struct {
+	// Name is the Secret name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// Key is the data key within the Secret.
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
 }
 
 func init() {

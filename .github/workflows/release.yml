@@ -274,4 +274,7 @@ jobs:
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: release
+      # The release profile includes the #206 cross-site PITR scenarios
+      # (37, 68, 70), which budget 60-75m each.
+      timeout-minutes: 300
       images-artifact: e2e-images

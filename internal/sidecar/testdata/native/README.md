@@ -15,25 +15,18 @@ and destroys its disposable datadirs. Timestamps and server UUIDs vary, so
 recapture is an intentional fixture update. The utility Dockerfile supplies
 the official 8.4.11 mysqlbinlog client absent from the minimal server image.
 
-Then regenerate the native oracle from the repository root:
-
-```sh
-BLOODRAVEN_PITR_NATIVE_TEST=1 BLOODRAVEN_PITR_NATIVE_UPDATE=1 go test ./cmd/bloodraven -run '^TestPITRNativeMysqlbinlog$' -count=1 -v
-```
-
-Without UPDATE, that opt-in test checks the committed oracle using actual
-mysqlbinlog. It compares full versus selected input under UTC for ten stop
-and exclusion windows. Two windows deterministically advance one captured
-file's outer timestamps and recalculate CRCs, modeling a backward successor
-clock without changing transaction bodies or GTIDs. The full/selected SQL
-outputs and their hashes are committed, alongside each file's decoded SQL.
-
-Ordinary `go test ./cmd/bloodraven ./internal/sidecar` needs no Docker: it
-checks the captured goldens, exact causal downloader order, prefix length,
-identity/parse acceptance and conservative retention coverage. The native
-oracle proves mysqlbinlog output equivalence, not application restore health;
-playground scenario 37 exercises reclone/promote and safe cross-site replay
-refusal.
+The fixtures are consumed directly; there is no generated oracle to
+regenerate after a recapture. Ordinary `go test ./internal/sidecar` needs no
+Docker: `TestInspectTransactionsNativeFixtures`,
+`TestOrderingSupportsNativeXAAndChecksumOff`,
+`TestArchiveCapturesNativeClonePurgedBase`,
+`TestNativeCommitIdentityDistinguishesRelogging` and the replay-prefix tests
+parse these captured bytes (identity, parse acceptance, ordering and the
+clone's purged base). The mysqlbinlog stop/exclusion window oracle that the
+removed `TestPITRNativeMysqlbinlog` checked is gone with that test, and so
+are its goldens; mysqlbinlog equivalence is now exercised by the failback
+replay below. Playground scenario 37 exercises reclone/promote and safe
+cross-site replay refusal.
 
 
 ## Session-compressed captures
@@ -67,11 +60,8 @@ The official client at a 09:30 stop exits zero and prints COMMIT without the
 body. The regression keeps these native bytes unchanged, constructs only the
 idle successor, and refuses the cut under both restore flags. A separate
 native-shaped payload puts XID at the stop and demonstrates mysqlbinlog's
-added ROLLBACK. Run the official-client checks with:
-
-```sh
-BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run 'TestPITRNativeMysqlbinlog|TestPITRNativeMysqlbinlogPayloadCuts' -count=1 -v
-```
+added ROLLBACK. `TestNativeCutCapturesMatchCatalog` checks these bytes and
+their decoded SQL against `compressed-cut-catalog.tsv` without Docker.
 
 
 `compressed-excluded-cut.bin` is an untouched 772-byte native MySQL 8.4.11
@@ -98,3 +88,26 @@ for f in compressed-inner-cut compressed-excluded-cut; do
     --no-defaults --verify-binlog-checksum /fixtures/$f.bin > $f.sql
 done
 ```
+
+
+## Mixed-file failback (MySQL 9.7)
+
+`failback/` is a genuine MySQL 9.7 capture of two servers in one network-less
+container (`bash capture.sh failback`, script `failback/capture-inner.sh`):
+a planned failover A→B and a planned failback B→A without reclone, with no
+rotation at either role change, `binlog_transaction_compression=ON` and
+tagged GTIDs (`SET gtid_next='AUTOMATIC:fixture'`). a's
+`mysql-bin.000003` is the mixed file of design §4.15: a's era-1 tail, b's
+era 2 as replica copies, and a's era 3. b's own file is never archived.
+`mysql-bin.000001` is the backup's history. `targets.tsv` records, at each
+target, the primary's `gtid_executed`, a row checksum (and one without the
+excluded `skip` row, whose GTID is in `skip.tsv`) and `UTC_TIMESTAMP(6)`;
+`records.tsv` holds the promotion records a sidecar would write.
+
+`go test ./cmd/bloodraven -run TestPITRNativeFailbackPlans` checks every plan
+against those sets without Docker. With Docker,
+`BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run TestPITRNativeSegmentReplay`
+replays each plan's segments with the mysqlsh image's `mysqlbinlog
+--include-gtids` into one `mysql` session on a fresh `mysql:9.7` and compares
+the rows and `gtid_executed` with the captured source. Recapturing changes
+UUIDs and times; the tests read them from the TSV files.

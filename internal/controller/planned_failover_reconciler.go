@@ -243,6 +243,13 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverEngine() *PlannedFailoverE
 			reconcilerPlannedSink{r: r}, clk, SimHooks{})
 		e.dragonfly = reconcilerDragonflyOps{r: r}
 		e.admission = leaseAdmissionGuard{r: r}
+		if r.Runner != nil {
+			// D-46 on the planned path: when the run's Succeeded write is
+			// the one that moved status.activeSite, the topology status
+			// writer later sees no change, so the warning fires here (once:
+			// from is the persisted pre-write value).
+			e.activeSitePersisted = r.Runner.emitPITRArchiveReissueRisk
+		}
 		r.plannedEngine = e
 	})
 	return r.plannedEngine
