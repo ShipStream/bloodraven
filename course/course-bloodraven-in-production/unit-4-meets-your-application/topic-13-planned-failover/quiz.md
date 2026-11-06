@@ -18,7 +18,7 @@
 
 **Explanation:**
 
-The gate is a true GTID-set superset test: the reconciler polls the target's `GTID_EXECUTED` and advances only when it contains `status.plannedFailover.sourceGtidAtFence`. `maxLagSeconds` is not it — that field drives exactly one thing, the `ReplicationLagging` Degraded condition, and is never a promotion gate on either the planned or the emergency path. A streak of `Seconds_Behind_Source = 0` is not it either, and is a bad signal on its own merits: it compares last-executed against last-downloaded relay event, so it reads 0 when the IO thread has stalled. The relay-log drain belongs to the emergency sequence, not to planned failover's lag gate. (objective 8)
+The gate is a true GTID-set superset test: the reconciler polls the target's `GTID_EXECUTED` and advances only when it contains `status.plannedFailover.fence.gtidSet`. `maxLagSeconds` is not it — that field drives exactly one thing, the `ReplicationLagging` Degraded condition, and is never a promotion gate on either the planned or the emergency path. A streak of `Seconds_Behind_Source = 0` is not it either, and is a bad signal on its own merits: it compares last-executed against last-downloaded relay event, so it reads 0 when the IO thread has stalled. The relay-log drain belongs to the emergency sequence, not to planned failover's lag gate. (objective 8)
 
 ## Question 2
 
@@ -36,18 +36,18 @@ The reversal: the drain is a deadline, not a barrier. When the budget is exhaust
 
 **Type:** MULTIPLE_CHOICE
 
-Four planned failovers on `playground` failed in four different ways. Which one leaves the source primary fenced and requires a human to put the cluster right?
+Four planned failovers on `playground` failed in four different ways. Which one cannot be rolled back, leaving the source fenced for a human to put right?
 
-- `LagTimeout` while in `WaitingForLag`, after `maxLagWait` expired against a lagging target.
-- `InvalidGTID` while in `WaitingForLag`, when one of the two GTID sets would not parse.
-- `ExecuteFailed` while in `Promoting`, when promotion of the target site failed outright.
-- `CooldownActive` at `Validating`, when the anti-flap window had not yet elapsed.
+- `LagTimeout` in `WaitingForLag`, after `maxLagWait` expired against a lagging target.
+- `FenceFailed` in `Fencing`, when the fence could not be applied and proven within 30 seconds.
+- `PromotionUnconfirmed` in `Promoting`, after `super_read_only=OFF` may have reached the target and the promotion could not be confirmed.
+- `CooldownActive` in `Admitting`, when the anti-flap window had not yet elapsed.
 
 **Correct option index:** 2
 
 **Explanation:**
 
-Rollback — unfencing the source — exists only in `WaitingForLag`. Both failures reachable there, `LagTimeout` and `InvalidGTID`, unfence the source and leave it the active primary with nothing lost. `CooldownActive` fires at `Validating`, before the source was ever fenced, so there is nothing to undo. `ExecuteFailed` in `Promoting` is past that boundary: it stamps `Failed` without unfencing, with a message saying manual recovery is required. A failure in `Resuming` behaves the same way. (objective 9)
+Rollback reaches as far as the first possible write to the target. `LagTimeout` and `FenceFailed` both fail before anything was written to the target, so the run goes through `RollingBack` and, with no other site writable, unfences the source: outcome `RolledBack`, nothing lost. `CooldownActive` fires in admission, before the source was ever fenced: outcome `NotStarted`, nothing to undo. `PromotionUnconfirmed` is past the boundary: `super_read_only=OFF` may have reached the target, so unfencing the source could leave two writable primaries. The run ends `PromotedUnconfirmed` with the source fenced, and a human follows the runbook. A result the run cannot explain at all goes further, to `ManualRecoveryRequired` and an automation hold. (objective 9)
 
 ## Question 4
 
@@ -74,7 +74,7 @@ The lag gate that never closes is the failure mode you want, because it is the o
 Ninety seconds after an emergency failover promoted `pdx`, you annotate `playground` to plan a switchover back to `iad`. It lands in `Failed` with reason `CooldownActive`. What happened, and what is the correct response?
 
 - The annotation value was malformed; re-apply it as `iad:maxLagWait=5m` and it will be accepted.
-- The anti-flap cooldown gates planned admission too, and `onCooldown` defaults to `reject`.
+- The anti-flap cooldown gates planned admission too, and `onCooldown` defaults to `Reject`.
 - `iad` has not finished rejoining as a replica; the gate refuses targets that are not caught up.
 - One failover is allowed per cooldown window; the second is queued and will fire at expiry.
 
@@ -82,4 +82,4 @@ Ninety seconds after an emergency failover promoted `pdx`, you annotate `playgro
 
 **Explanation:**
 
-The same anti-flap cooldown that gates automatic promotion is evaluated at `Validating` for planned failover, against the same durable failover record. With the default `onCooldown: reject` the request is refused terminally and the annotation is cleared — so wait out the cooldown and re-annotate, or set `onCooldown: defer` to have it wait in `Deferred` and retry itself at expiry. The annotation was well-formed; a malformed one fails with `InvalidAnnotation`, not `CooldownActive`. A target that is unreachable, writable or not replicating is refused with `TargetUnhealthy`, a different reason. And nothing is queued by default — that is precisely what `defer` opts you into. (objective 7)
+The same anti-flap cooldown that gates automatic promotion is evaluated in admission for planned failover, against the same durable failover record. With the default `onCooldown: Reject` the run ends `Failed{NotStarted, CooldownActive}` and the annotation is cleared — so wait out the cooldown and re-annotate, or set `onCooldown: Defer` to have it wait in `Deferred` and retry itself at `admission.retryTime`. The annotation was well-formed; a malformed one is rejected with a `PlannedFailoverRejected` Event and never becomes a run. A target that is unreachable, writable or not replicating is refused with `TargetUnhealthy`, a different reason. And nothing is queued by default — that is precisely what `Defer` opts you into. (objective 7)

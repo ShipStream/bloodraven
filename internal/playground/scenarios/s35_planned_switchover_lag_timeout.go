@@ -35,7 +35,7 @@ func scenario35PlannedSwitchoverLagTimeout() runner.Scenario {
 		Title: "Planned switchover rolls back on lag timeout, source stays active",
 		Hypothesis: "With SOURCE_DELAY=60 on the target and maxLagWait=5s, a planned switchover fences the source, " +
 			"waits for the target GTID to cover the fenced GTID, times out, and rolls back: plannedFailover.phase=Failed " +
-			"reason=LagTimeout, planned_failovers_total{result=failed_timeout} increments, status.activeSite stays the " +
+			"outcome=RolledBack reason=LagTimeout, planned_failovers_total{result=failed_timeout} increments, status.activeSite stays the " +
 			"source, and the failover history does not advance to the target.",
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#35-planned-switchover-lag-timeout-rollback",
@@ -165,7 +165,7 @@ func s35ObserveLagTimeoutRollback() runner.Step {
 			if err != nil {
 				return err
 			}
-			env.Capture.Note(fmt.Sprintf("planned switchover rolled back on lag timeout (observed WaitingForLag=%v; Validating not asserted as it may not persist)", sawWaitingForLag))
+			env.Capture.Note(fmt.Sprintf("planned switchover rolled back on lag timeout (observed WaitingForLag=%v; Admitting and Fencing not asserted as they may not persist)", sawWaitingForLag))
 			return nil
 		},
 	}

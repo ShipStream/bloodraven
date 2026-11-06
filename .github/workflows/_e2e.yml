@@ -156,12 +156,20 @@ jobs:
           # Sequential on purpose: these share one cluster and the list is
           # ordered least- to most-destructive. A failure stops the run so
           # forensics are captured against the state that produced it.
+          #
+          # setup.sh returns before the operator's first reconcile settles,
+          # so the first scenario waits for a healthy baseline (what run-all
+          # does by default) instead of failing its instant precheck on a
+          # still-converging cluster. A timeout is not fatal: the precheck
+          # decides and captures forensics.
           IFS=',' read -ra ids <<< "$E2E_SCENARIOS"
+          wait_args=(--baseline-wait=5m)
           for id in "${ids[@]}"; do
             id="$(echo "$id" | xargs)"
             [ -n "$id" ] || continue
             echo "::group::chaos-run $id"
-            make chaos-run SCENARIO="$id"
+            ./bin/playground-chaos run "$id" "${wait_args[@]}"
+            wait_args=()
             echo "::endgroup::"
           done
         timeout-minutes: ${{ inputs.timeout-minutes }}

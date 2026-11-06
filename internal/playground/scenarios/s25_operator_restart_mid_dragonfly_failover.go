@@ -229,8 +229,8 @@ func restoreDragonflyTargetForOperatorRestart() runner.Step {
 // drive the in-flight planned failover to Succeeded with the
 // originally-requested target. A 4-minute deadline covers operator
 // restart (~10s in this environment), CR-status re-read, and the
-// remainder of the failover state machine (DrainingApps through
-// Resuming).
+// remainder of the failover state machine (Draining through
+// Publishing).
 //
 // Re-uses the stale-cutoff guard from observePlannedFailoverSucceeded
 // so a leftover pf block from a prior scenario can't satisfy the

@@ -41,7 +41,7 @@ const (
 
 	// plannedClaimedEventReason is the Event the run emits once, when the
 	// topology manager grants its claim (spec §11 Events).
-	plannedClaimedEventReason = "PlannedFailoverClaimGranted"
+	plannedClaimedEventReason = v1alpha1.EventPlannedFailoverClaimGranted
 	// plannedDeferredCrossSiteLog is the topology manager's line for a
 	// cross-site action deferred while a planned failover holds its claim.
 	plannedDeferredCrossSiteLog = "cross-site action deferred: planned failover in progress"

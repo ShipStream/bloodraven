@@ -544,6 +544,65 @@ func (f recorderFunc) RecordFailoverState(ctx context.Context, r controller.Fail
 // operator findings, and are pinned in internal/dst (TestReplacePod_* and
 // TestRegistry_*).
 
+// TestDSTPF_CrossProcessReplacedTargetRuling pins the DST-3 ruling (actors-on
+// DST seed 3217 at the time; K195) across a process restart and a target
+// pod replaced under a new server_uuid with regressed data:
+//
+//   - The process that wrote the Promoting intent dies before any promotion
+//     statement. The run's own failover record is not durable (it never
+//     reached RecordPlannedPromotion), the source still holds F under the
+//     run's fence and no site is writable, so the re-run rolls back:
+//     TargetChanged, the source writable again, nothing sent to the new pod
+//     and no hold.
+//   - The run confirmed and its own record is durable, only the Publishing
+//     write was left (status writes denied). The restarted process does not
+//     hydrate the claim for it (O-m1) and finishes it from the durable
+//     record: Succeeded. It never rolls back beside a target that was
+//     writable, so the source stays fenced and the replaced pod gets
+//     nothing; the manager's recovery owns the replacement from here.
+func TestDSTPF_CrossProcessReplacedTargetRuling(t *testing.T) {
+	regressed := pfUUIDA + ":1-60"
+	replaced := podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004", gtidExecuted: &regressed}
+	t.Run("recordNotDurableRollsBack", func(t *testing.T) {
+		h := newPFHarness(t, pfOpts{})
+		h.request("dc2")
+		h.runToPromotingIntent()
+		h.newProcess() // the cross-process re-run: no promotion memo
+		h.tgt.replacePod(replaced)
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetChanged)
+		if h.tgt.writableGrants() != 0 || h.src.isReadOnly() || h.holdCondition() {
+			t.Fatalf("target grants %d, source read-only %v, hold %v", h.tgt.writableGrants(), h.src.isReadOnly(), h.holdCondition())
+		}
+	})
+	t.Run("recordDurableFinishes", func(t *testing.T) {
+		h := newPFHarness(t, pfOpts{})
+		h.request("dc2")
+		h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePromoting))
+		h.store.DenyStatus(1 << 20) // the Publishing write cannot land
+		for range 4 {
+			h.pass()
+		}
+		if h.tgt.isReadOnly() || h.pf().Phase != v1alpha1.PlannedFailoverPhasePromoting {
+			t.Fatalf("setup: want dc2 promoted with only the Publishing write left (dc2 read-only %v, phase %s)",
+				h.tgt.isReadOnly(), h.pf().Phase)
+		}
+		if !controller.PlannedOwnRecordDurableForSim(h.store.Object(), h.pf(), h.clk.Now()) {
+			t.Fatal("setup: the run's own record is not durable")
+		}
+		h.newProcess()
+		h.tgt.replacePod(replaced)
+		grants := h.tgt.writableGrants()
+		h.store.ClearFaults()
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+		if h.tgt.writableGrants() != grants || !h.src.isReadOnly() {
+			t.Fatalf("after the restart: target grants %d -> %d, source read-only %v",
+				grants, h.tgt.writableGrants(), h.src.isReadOnly())
+		}
+	})
+}
+
 // TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld pins DST-2: with this
 // process's slot holding the run and no manager registered, EnsureClaim
 // returned Granted, so every pass cleared and re-marked the

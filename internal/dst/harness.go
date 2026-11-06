@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -87,12 +88,13 @@ type trialRunner struct {
 	promotionRestarts int
 	// replacedBeforeRecord latches when a manager replacement (trials with
 	// actors) lands after the last promotion and before any status write
-	// carried it: the replacement restores from a status that never saw
-	// the record (README, Known finding classes: DST-1).
+	// carried it. Before DST-1 was fixed the replacement restored from a
+	// status that never saw the record; the latch now only tags a
+	// regression of that fix (README, Known finding classes).
 	replacedBeforeRecord bool
 	// retiredRecordPolls are the polls at which an ordered update recorded
-	// its handoff on a retired manager, which its replacement never learns
-	// (README, Known finding classes: DST-1).
+	// its handoff on a retired manager; the record is carried into its
+	// replacement since DST-1 was fixed, and the tag marks a regression.
 	retiredRecordPolls map[int]bool
 
 	// sidecars are the per-site fencing actors (sidecar.go). Each wraps a
@@ -107,10 +109,13 @@ type trialRunner struct {
 	// promotionActors is the actor of each promotion in promotionPolls
 	// (trials with actors only).
 	promotionActors []Actor
-	restartPolls    []int
-	violations      []Violation
-	kindsSeen       map[string]struct{}
-	reasonsSeen     map[string]struct{}
+	// promotionRuns is the planned run of each pf promotion in
+	// promotionPolls ("" for the other actors).
+	promotionRuns []string
+	restartPolls  []int
+	violations    []Violation
+	kindsSeen     map[string]struct{}
+	reasonsSeen   map[string]struct{}
 
 	// currentTarget is the failover target the running operator process
 	// knows in memory; it reverts to the persisted value on restart.
@@ -289,18 +294,21 @@ func (r *trialRunner) setup(capture bool) {
 
 // buildManager constructs a fresh TopologyManager (initial start or an
 // operator restart) and rehydrates it from the simulated CR status, mirroring
-// runner.go's startup sequence.
-func (r *trialRunner) buildManager() {
-	tm := r.newManager()
-	r.tm = tm
+// runner.go's startup sequence. With actors the start can fail (its
+// uncached read of the group failed); it reports whether a manager started.
+func (r *trialRunner) buildManager() bool {
 	if r.pl != nil {
-		r.pl.registerManager(tm)
+		return r.pl.startManager()
 	}
+	r.tm = r.newManager(nil)
+	return true
 }
 
 // newManager constructs and rehydrates a TopologyManager without making it
-// the trial's current one.
-func (r *trialRunner) newManager() *controller.TopologyManager {
+// the trial's current one. view is the start's uncached read of the group
+// (trials with actors; nil when that read failed and the start proceeds
+// without it).
+func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.TopologyManager {
 	checkers := make([]mysql.Checker, len(r.trial.SiteNames))
 	for i, name := range r.trial.SiteNames {
 		checkers[i] = r.cluster.NewChecker(name)
@@ -325,7 +333,7 @@ func (r *trialRunner) newManager() *controller.TopologyManager {
 		// Trials with actors run the production restore (runner.go
 		// restoreFailoverState and restorePlannedFailoverState) from an
 		// uncached read of the simulated object.
-		r.rehydrated = r.pl.restoreManager(tm, &simFailoverStore{r: r})
+		r.rehydrated = r.pl.restoreManager(tm, &simFailoverStore{r: r}, view)
 		r.restoreSites(tm)
 		r.wireStatus(tm)
 		return tm
@@ -521,14 +529,20 @@ func (r *trialRunner) restartOperator(poll int) {
 	if r.pl != nil {
 		r.pl.restartProcess()
 	}
-	r.buildManager()
+	if !r.buildManager() {
+		// The start failed; the restart's rehydration is judged when a
+		// later start succeeds (plannedHarness.retryStart).
+		r.pl.restartCheckPending = true
+		return
+	}
 	r.checkRehydratedAntiFlap(poll)
 }
 
 // replacedBeforeRecordMarker tags an AntiFlapStateLost whose record was
 // lost to a manager replacement: made on a retired manager, or made before
 // the replacement and not yet carried by any status write
-// (fingerprint AntiFlapStateLost(replacement), README, Known finding classes: DST-1).
+// (fingerprint AntiFlapStateLost(replacement): the fixed DST-1, now a
+// regression; README, Known finding classes).
 const replacedBeforeRecordMarker = "(the record was made on, or not yet written to status by, a replaced manager)"
 
 // checkRehydratedAntiFlap compares what the new process rehydrated against

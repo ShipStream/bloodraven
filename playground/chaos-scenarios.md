@@ -28,7 +28,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 
 - `01-clean-primary-kill` (§1 below; uses `scale --replicas=0` for determinism, asserts failover only)
 - `02-operator-kill-restart` (§2; negative-assertion — verifies activeSite stable and no SELF-FENCING during operator restart)
-- `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Validating→Draining→WaitingForLag→Promoting→Resuming→Succeeded`, `transactionsLost==0`, and the `bloodraven_planned_failovers_total{result="success"}` increment)
+- `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Admitting→Fencing→Draining→WaitingForLag→Promoting→Publishing→Succeeded`, outcome `Succeeded` with `promotionGtidExecuted` equal to `fence.gtidSet`, and the `bloodraven_planned_failovers_total{result="success"}` increment)
 - `04-data-integrity-on-failover` (§4; seeds rows, blocks on `WAIT_FOR_EXECUTED_GTID_SET`, kills primary, asserts `GTID_SUBSET(pre, post)=1` and full row count on the new primary)
 - `05-operator-kill-during-failover` (§5; scales the active primary to 0, sleeps 1s, kills the operator pod, asserts the cluster reconverges to 1 writable + all followers read-only with `Ready=True` and no sidecar exhausts its operator-and-peer lease during the short gap; an immediate topology-mismatch self-fence is allowed because it safely closes a promotion/publication race)
 - `05-split-brain-auto-resolve` (§SBR; requires `spec.splitBrainPolicy.sitePriorities` set — clears `super_read_only` on the read-only site to force both writable, asserts the operator fences the non-preferred site, increments `bloodraven_split_brain_auto_resolve_total{prefer_site=...}`, and logs `split-brain auto-resolve`)
@@ -74,6 +74,8 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `54-deployment-hold-owner-kill` ([deployment coordination](#deployment-coordination); full profile, terminate a real renewing client Pod without releasing its hold; expiry unblocks planned failover)
 - `55-deployment-emergency-revocation` ([deployment coordination](#deployment-coordination); release profile, sustained primary outage bypasses live migration and hold leases, both renewals return `409`, and the MFG receives `DeploymentLeaseRevoked`)
 - `56-deployment-live-renewal-fenced` ([deployment coordination](#deployment-coordination); full profile, a migration client renewing every five seconds observes `409 revoked` after a planned topology change and stops)
+- `63-planned-failover-operator-restart-mid-lag` ([§63](#63-planned-failover-operator-restart-mid-lag); release profile; the planned-failover claim survives an operator kill while the run waits in `WaitingForLag`, then the same run succeeds with one claim grant and one `RESET REPLICA ALL`)
+- `64-emergency-failover-during-planned-admission` ([§64](#64-emergency-failover-during-planned-admission); full profile; a planned request `Deferred{DeploymentHold}` does not obstruct emergency failover, and ends `NotStarted{AlreadyActive}` once its target is promoted)
 - `62-full-restore-fails-after-drop-keeps-peers` ([§62](#62-full-instance-restore-failing-after-its-drop); full profile, `ResetBeforeRunAll`; a full-instance in-place restore whose RustFS storage is scaled to 0 while it fences drops the user schemas and fails; the reclone queue is `Held` and every peer keeps its replication receiver `OFF` and its marker rows for two minutes, issue #212)
 
 Scenarios `32`–`39` are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. As of 2026-07-11, all eight have passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). All eight remain full-profile-only while this new, high-risk coverage matures. Scenarios `36` and `37` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
@@ -912,11 +914,11 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 ### 35. Planned Switchover Lag-Timeout Rollback
 **Category**: Planned failover state machine | **Risk**: Medium | **Profile**: full-only
 
-**Hypothesis**: With `SOURCE_DELAY=60` on the target replica and a `maxLagWait=5s` annotation override, a planned switchover fences the source, waits for the target GTID to cover the fenced GTID, times out, and rolls back: `plannedFailover.phase=Failed` `reason=LagTimeout`, source stays active, and the failover history does not advance to the target.
+**Hypothesis**: With `SOURCE_DELAY=60` on the target replica and a `maxLagWait=5s` annotation override, a planned switchover fences the source, waits for the target GTID to cover the fenced GTID, times out, and rolls back: `plannedFailover.phase=Failed` with `result.outcome=RolledBack` and `result.reason=LagTimeout`, source stays active, and the failover history does not advance to the target.
 
 **Injection**: Set `SOURCE_DELAY=60` on the target (both threads still running, so the operator's replica-health check stays true); write a marker on the source **after** the delay is active (so the fenced GTID cannot be covered in time); annotate `bloodraven.shipstream.io/planned-failover=<target>:maxLagWait=5s`.
 
-**Verify**: `plannedFailover.phase` reaches terminal `Failed` with `reason=LagTimeout` (intermediate `Validating` is not asserted — it may not persist); `bloodraven_planned_failovers_total{result="failed_timeout"}` increments; `status.activeSite` stays the source; `lastFailoverTarget` does not advance to the target; the source becomes writable again (eventual — unfencing clears `super_read_only` first); the target stays read-only and replicating.
+**Verify**: `plannedFailover.phase` reaches terminal `Failed` with outcome `RolledBack` and reason `LagTimeout` (the intermediate `Admitting` and `Fencing` phases are not asserted — they may not persist long enough to observe); `bloodraven_planned_failovers_total{result="failed_timeout"}` increments; `status.activeSite` stays the source; `lastFailoverTarget` does not advance to the target; the source becomes writable again (eventual — unfencing clears `super_read_only` first); the target stays read-only and replicating.
 
 **Timing**: 8-minute timeout.
 
@@ -1028,14 +1030,14 @@ These two scenarios cover state-machine paths that don't fit the §1-§30 emerge
 ### S. Planned Switchover (`02-planned-switchover`) {#planned-switchover}
 **Category**: Planned-failover state machine | **Risk**: Low
 
-**Hypothesis**: Annotating the MFG with `bloodraven.shipstream.io/planned-failover=<peer>` walks `status.plannedFailover.phase` through `Validating → Draining → WaitingForLag → Promoting → Resuming → Succeeded` with `status.plannedFailover.transactionsLost == 0` (committed-and-replicated rows survive a planned switchover by construction).
+**Hypothesis**: Annotating the MFG with `bloodraven.shipstream.io/planned-failover=<peer>` walks `status.plannedFailover.phase` through `Admitting → Fencing → Draining → WaitingForLag → Promoting → Publishing → Succeeded`, and the promotion watermark `status.promotionGtidExecuted` equals the fenced set `status.plannedFailover.fence.gtidSet` (the target held every acknowledged transaction when it was promoted, by construction).
 
 **Injection**: `make chaos-run SCENARIO=02-planned-switchover`. The scenario picks the peer of the current active site as the target and patches the annotation.
 
 **Verify**:
 
-- `status.plannedFailover.phase` reaches `Succeeded` with `target=<peer>` (stale plannedFailover blocks left over from prior runs are ignored via the `StartTime` check, so this assertion is robust under rerun).
-- `status.plannedFailover.transactionsLost` is populated and equals 0.
+- `status.plannedFailover.phase` reaches `Succeeded` with `targetSite=<peer>` (stale plannedFailover blocks left over from prior runs are ignored via the `startTime` check, so this assertion is robust under rerun).
+- `result.outcome` is `Succeeded`; the `fence` record carries `gtidSet` and `sourceServerUUID`, the `promotion` record carries `confirmationTime` and `targetServerUUID`, and `status.promotionGtidExecuted` equals `fence.gtidSet`.
 - Direct `SHOW REPLICA STATUS` on every non-active follower reports both threads running and `Source_Host=mysql-playground-<new-active>-internal.bloodraven-playground.svc.cluster.local`; this explicitly covers the demoted old primary and the reader.
 - `bloodraven_planned_failovers_total{target_site=<peer>,result="success"}` increments.
 
@@ -1432,10 +1434,10 @@ make chaos-run SCENARIO=56-deployment-live-renewal-fenced
 
 | Scenario | Injection | Required evidence | Profile |
 | --- | --- | --- | --- |
-| 53 | Acquire migration then failover-hold, each with `ttlSeconds: 30`; request planned failover and deliberately do not renew | Current planned request has phase `Deferred`, reason `DeploymentHold`, `retryAfter` matching hold expiry, and a message naming operation and instance. The active site and deferred state stay unchanged before expiry; afterward the plan succeeds without a DELETE and loses zero transactions. | release, full |
-| 54 | Renew both leases every five seconds; request planned failover, observe `DeploymentHold`, then force-delete the client Pod without releasing leases | A successful renewal precedes the kill. The hold remains effective until its recorded expiry, then planned failover succeeds with zero transactions lost despite the absent owner. | full |
+| 53 | Acquire migration then failover-hold, each with `ttlSeconds: 30`; request planned failover and deliberately do not renew | Current planned request has phase `Deferred`, `admission.deferReason` `DeploymentHold`, `admission.retryTime` matching hold expiry, and a message naming operation and instance. The active site and deferred state stay unchanged before expiry; afterward the plan succeeds without a DELETE, with outcome `Succeeded` (the promotion watermark is the fenced set, so nothing acknowledged is lost). | release, full |
+| 54 | Renew both leases every five seconds; request planned failover, observe `DeploymentHold`, then force-delete the client Pod without releasing leases | A successful renewal precedes the kill. The hold remains effective until its recorded expiry, then planned failover succeeds (outcome `Succeeded`) despite the absent owner. | full |
 | 55 | Keep renewing migration and hold leases with `ttlSeconds: 120` every five seconds; scale the active primary to zero for a sustained outage | Emergency promotion proceeds and its metric increments. Both live leases return `409` with `error: revoked`, an allowed revocation reason, and a higher topology generation. A fresh `DeploymentLeaseRevoked` Event belongs to the MFG. | release, full |
-| 56 | Renew a migration lease every five seconds without a hold; request planned failover | At least one successful renewal precedes the topology change. The client receives `409 revoked` with a higher generation while its last renewal is still unexpired and stops renewing. Planned failover succeeds with zero transactions lost. | full |
+| 56 | Renew a migration lease every five seconds without a hold; request planned failover | At least one successful renewal precedes the topology change. The client receives `409 revoked` with a higher generation while its last renewal is still unexpired and stops renewing. Planned failover succeeds (outcome `Succeeded`). | full |
 
 Every scenario checks that the MFG's persisted `status.topologyGeneration` increased from the grant generation. A `404`, an unexpected HTTP status, an invalid revocation reason, or a generation mismatch on a successful renewal fails the client; none is accepted as successful fencing.
 
@@ -1504,6 +1506,40 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 **Cleanup**: removes the spec and Job, and removes `status.restoreReclones`, which resumes the peers' replication from the damaged primary; run-all resets before the next destructive scenario.
 
 **Status**: written and compiled, not yet run on a live cluster.
+
+### 63. Planned Failover Operator Restart Mid-Lag {#63-planned-failover-operator-restart-mid-lag}
+**Category**: Planned-failover claim durability | **Risk**: Medium | **Automated**: `63-planned-failover-operator-restart-mid-lag` (release profile)
+
+**Hypothesis**: A planned run that holds its claim survives an operator restart (#235). With the target's SQL thread stopped mid `WaitingForLag`, killing the operator leaves the run claimed: the replacement keeps the same `runID` in `WaitingForLag`, promotes nothing (no emergency promotion of the fenced group's only candidate), keeps the source fenced, and logs `cross-site action deferred: planned failover in progress`. Restarting the SQL thread ends the same run `Succeeded`, with exactly one `PlannedFailoverClaimGranted` Event, exactly one `RESET REPLICA ALL` on the target, and `fence.sourceServerUUID` and `promotion.targetServerUUID` matching the live servers.
+
+**Injection**: Turn the general log on at the target, set `SOURCE_DELAY=600` on its channel to build a backlog, write a marker on the source, and annotate the planned failover with `maxLagWait=8m`. Once the run reaches `WaitingForLag`, `STOP REPLICA SQL_THREAD` on the target, then kill the operator pod and wait for its replacement.
+
+**Verify**:
+
+- The replacement logs the cross-site deferral; for a 30s soak the same `runID` stays `WaitingForLag`, `status.activeSite` does not move and the source stays `super_read_only=ON`.
+- After `SOURCE_DELAY=0` and `START REPLICA SQL_THREAD`, the same run ends `Succeeded`.
+- `fence.sourceServerUUID` and `promotion.targetServerUUID` are present and match `@@server_uuid` on the source and the target.
+- Exactly one `PlannedFailoverClaimGranted` Event for the run: the replacement rehydrated the claim instead of re-granting it.
+- Exactly one `RESET REPLICA ALL` on the target in its general log: no recovery path re-pointed the stopped replica behind the claim's back.
+- Every follower replicates directly from the new primary.
+
+**Cleanup**: Clears `SOURCE_DELAY` where the target still has a channel (a promoted target has none), restores the target's `general_log` and `log_output`, and drops the marker schema. The runner's reconvergence gate then also waits for the planned block to be terminal and for no automation hold, the same conditions the next scenario's precheck refuses.
+
+### 64. Emergency Failover During Planned Admission {#64-emergency-failover-during-planned-admission}
+**Category**: Planned-failover admission vs emergency failover | **Risk**: High | **Automated**: `64-emergency-failover-during-planned-admission` (full profile; needs the deploy API, see [Deployment coordination](#deployment-coordination))
+
+**Hypothesis**: A planned request waiting in admission owns nothing, so it must not obstruct emergency failover (#235). A deployment client holds a renewing failover-hold lease (120s TTL, renewed every 5s), so the planned request to the peer is `Deferred` with `admission.deferReason: DeploymentHold`. Holding the primary down then promotes the peer within the emergency window (90s), revokes both deployment leases (`409 revoked` at a newer topology generation, and a `DeploymentLeaseRevoked` Event), which releases the hold. The same planned run then ends `Failed` with outcome `NotStarted` and reason `AlreadyActive`, because its target is now the primary; it never claims the dead source.
+
+**Injection**: Create the renewing failover-hold client, request a planned failover to the peer, wait for `Deferred{DeploymentHold}`, then scale the primary's Deployment to 0 (a sustained outage, not a pod kill the Deployment would undo).
+
+**Verify**:
+
+- While the request is pending, it never owns sites with the lost primary as its source.
+- `status.activeSite` moves to the planned target within 90s of the primary going down, and the failover metric increments. The playground has exactly one promotable peer, so the emergency successor is the planned target; the scenario fails if another site was promoted.
+- Both leases are revoked and the client stops; `DeploymentLeaseRevoked` is recorded on the MFG.
+- The same `runID` ends `NotStarted{AlreadyActive}` within 3 minutes, with `status.activeSite` still the new primary. Any other terminal result fails.
+
+**Cleanup**: The deployment-coordination cleanup (lease settle, `MysqlDatabase` finalizer, credentials), then the old primary rejoins.
 
 ### Recorded, not automated
 

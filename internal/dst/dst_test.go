@@ -144,6 +144,7 @@ func TestDST_Campaign(t *testing.T) {
 		MaxTrials:      envInt("DST_MAX_TRIALS", 500_000),
 		MaxWall:        time.Duration(envInt("DST_WALL_SECONDS", 1800)) * time.Second,
 		ShrinkFailures: true,
+		Planned:        os.Getenv("DST_PLANNED") == "1",
 	}
 	res := RunCampaign(cfg, func(msg string) { t.Log(msg) })
 	t.Log("\n" + res.Report())

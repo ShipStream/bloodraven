@@ -62,14 +62,14 @@ differs is what happens when it fails.
       "aspect": "What happens on failure?",
       "cells": [
         "Falls back to REPLICAOF NO ONE, promoting the target as an empty master",
-        "No fallback. onSyncTimeout decides: proceed flagged unpreserved, or fail and roll back the MySQL fence"
+        "No REPLICAOF NO ONE fallback. onSyncTimeout decides: Proceed (default) promotes MySQL anyway with sessions Lost, or Fail rolls back the MySQL fence"
       ]
     },
     {
       "aspect": "What happens to sessions?",
       "cells": [
         "Preserved on REPLTAKEOVER; lost on the fallback — logged as 'target promoted via REPLICAOF NO ONE (sessions lost)'",
-        "Preserved, or the move did not happen. Retry it"
+        "Preserved after a caught-up REPLTAKEOVER; Lost under Proceed; under Fail the move does not happen. Retry it"
       ]
     }
   ],
@@ -113,19 +113,20 @@ Operationally that is one sentence: **MySQL failover is never delayed by cache.*
 unreachable target, a takeover that hangs — none of it extends your measured 12.0 s emergency promotion.
 The attempt runs *after* MySQL has already succeeded, on a goroutine MySQL never waits for.
 
-## Reading `sessionsPreserved` — it is tri-state
+## Reading `dragonfly.sessions` — absent is not `Lost`
 
-`status.plannedFailover.dragonfly.sessionsPreserved` is a `*bool`, and the pointer is load-bearing:
+`status.plannedFailover.dragonfly.sessions` has three states, and the third is load-bearing:
 
 | Value | Meaning |
 | --- | --- |
-| `true` | Promotion completed cleanly, replica caught up. Sessions survived. |
-| `false` | Sessions were lost: sync timeout with `proceed`, `REPLTAKEOVER` failure, or empty-master fallback. |
-| absent (nil) | **Unknown.** Not false. |
+| `Preserved` | `REPLTAKEOVER` succeeded on a caught-up replica. Sessions survived. |
+| `Lost` | Sessions were lost: a sync timeout or a source offset that could not be captured under `Proceed`, or a failed `REPLTAKEOVER` (`dragonfly.reason` says which). |
+| absent | **Unknown.** Not `Lost`. |
 
-Nil is not failure. Read it as failure and you will chase incidents that did not happen; read it as
-success and you will miss ones that did. Nil is what you get when the field was never written — Dragonfly
-disabled for that attempt, for instance. Note too that it lives on the *planned*-failover status. An
+Absent is not failure. Read it as failure and you will chase incidents that did not happen; read it as
+success and you will miss ones that did. Absent is what you get when the field was never written —
+Dragonfly not enabled when the request was accepted, or a run that ended before its Dragonfly phases,
+for instance. Note too that it lives on the *planned*-failover status. An
 emergency promotion never writes it; that outcome lives in the log line and the event.
 
 Two settings shape which of the three you get:
@@ -134,9 +135,9 @@ Two settings shape which of the three you get:
   argument passed to `REPLTAKEOVER`, rounded up to whole seconds. The target lets its master run 10 s past
   that budget, and the client waits 2 s more for the reply so it cannot give up before the server has —
   30 s + 12 s = a 42 s client read deadline at the default.
-- `onSyncTimeout`, enum `proceed;fail`, default `proceed`. Spell `proceed` out: the promotion goes ahead
-  and the cache outcome is whatever it is. `fail` aborts before MySQL promotion and rolls the source
-  fence back.
+- `onSyncTimeout`, enum `Proceed;Fail` (CamelCase: the CRD rejects the lower-case spellings older
+  releases used), default `Proceed`. Spell `Proceed` out: the promotion goes ahead and the cache outcome
+  is whatever it is. `Fail` aborts before MySQL promotion and rolls the source fence back.
 
 `playground` pins both at their defaults:
 
@@ -148,12 +149,12 @@ Two settings shape which of the three you get:
     # … port, memory, resources elided …
     plannedFailover:
       maxSyncWait: 30s
-      onSyncTimeout: proceed
+      onSyncTimeout: Proceed
 ```
 
-A clean switchover leaves `promotionMethod: REPLTAKEOVER` and `sessionsPreserved: true`. The same move
-with a lagging replica under `proceed` leaves `sessionsPreserved: false` — and a MySQL promotion that
-still lands at RPO 0. The cache outcome does not touch the MySQL guarantee. That is the whole design.
+A clean switchover leaves `dragonfly.takeover.method: ReplTakeover` and `dragonfly.sessions: Preserved`.
+The same move with a lagging replica under `Proceed` leaves `dragonfly.sessions: Lost` with
+`dragonfly.reason: DragonflySyncTimeout` — and a MySQL promotion that still lands at RPO 0. The cache outcome does not touch the MySQL guarantee. That is the whole design.
 
 ## Where `REPLTAKEOVER` actually comes from
 
@@ -180,8 +181,8 @@ condition of a pin nobody is forced to update.
 ## Where this leaves you
 
 You can state the guarantee and its limits: best-effort cache continuity, never at the expense of MySQL,
-with a shed-then-promote label sequence that has no dual-master window. You can read `sessionsPreserved`
-without misreading nil, and say which path may trade sessions for availability. Services, DNS, taints,
+with a shed-then-promote label sequence that has no dual-master window. You can read `dragonfly.sessions`
+without misreading an absent value, and say which path may trade sessions for availability. Services, DNS, taints,
 pools, planned moves, cache: the operator's side of the application boundary is covered.
 
 One thing on your side of that boundary is still unaccounted for. The deploy pipeline changes the schema

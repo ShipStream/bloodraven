@@ -18,7 +18,8 @@ func init() {
 
 // scenario02PlannedSwitchover annotates the MFG with the planned-failover
 // trigger and waits for the state machine to reach Succeeded. Asserts
-// transactionsLost==0 (the planned-switchover invariant) and that
+// outcome Succeeded with the promotion watermark equal to the fenced set (the
+// planned-switchover invariant: nothing acknowledged is lost) and that
 // bloodraven_planned_failovers_total{result="success"} incremented.
 func scenario02PlannedSwitchover() runner.Scenario {
 	return runner.Scenario{

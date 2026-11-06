@@ -759,8 +759,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, perr.Error())
 		e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{Result: &v1alpha1.PlannedFailoverResult{
 			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonInvalidAnnotation}})
-		e.consumeRequest(ctx, fg, "invalid")
-		return 0, nil
+		return e.consumeRequest(ctx, fg, "invalid"), nil
 	}
 
 	if src, waiting := plannedFencedSourceAwaitingHeal(fg, e.clk.Now()); waiting {
@@ -768,8 +767,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 		// restarted manager name its fenced source for re-assert (§6.5); a
 		// new run's first record would replace it. Refuse with an Event
 		// only, as a standing hold does, until the fence has healed.
-		e.refuseKeepingBlock(ctx, fg, req, plannedFencedSourceRefusal(src))
-		return 0, nil
+		return e.refuseKeepingBlock(ctx, fg, req, plannedFencedSourceRefusal(src)), nil
 	}
 
 	hold, release, err := e.beginAdmission(ctx, fg)
@@ -793,8 +791,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 	case PlannedFailoverSkip:
 		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped,
 			fmt.Sprintf("planned-failover: site %q is already the active primary; nothing to do", req.Site))
-		e.consumeRequest(ctx, fg, "idempotent")
-		return 0, nil
+		return e.consumeRequest(ctx, fg, "idempotent"), nil
 	case PlannedFailoverReject:
 		if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1alpha1.PlannedFailoverCooldownDefer {
 			next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseDeferred, "")
@@ -855,12 +852,12 @@ func plannedFencedSourceRefusal(src *v1alpha1.PlannedFailoverStatus) string {
 
 // refuseKeepingBlock refuses a request with an Event only, leaving the
 // current block in place, and consumes the request.
-func (e *PlannedFailoverEngine) refuseKeepingBlock(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, msg string) {
+func (e *PlannedFailoverEngine) refuseKeepingBlock(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, msg string) time.Duration {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, msg)
 	e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{TargetSite: req.Site, Result: &v1alpha1.PlannedFailoverResult{
 		Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonConcurrentOperation}})
-	e.consumeRequest(ctx, fg, "fenced-source")
+	return e.consumeRequest(ctx, fg, "fenced-source")
 }
 
 // rejectNew ends a new request with a Failed{NotStarted, reason} record.
@@ -875,8 +872,7 @@ func (e *PlannedFailoverEngine) rejectNew(ctx context.Context, fg *v1alpha1.Mysq
 		return requeueFor(out), nil
 	}
 	e.reportTerminal(nn, fg, next, v1alpha1.EventPlannedFailoverRejected)
-	e.consumeRequest(ctx, fg, "rejected")
-	return 0, nil
+	return e.consumeRequest(ctx, fg, "rejected"), nil
 }
 
 // admitIntoWait admits a new request into Admitting with waitReason
@@ -915,8 +911,7 @@ func (e *PlannedFailoverEngine) admitDuringReservationRefusal(ctx context.Contex
 	case result == PlannedFailoverSkip:
 		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped,
 			fmt.Sprintf("planned-failover: site %q is already the active primary; nothing to do", req.Site))
-		e.consumeRequest(ctx, fg, "idempotent")
-		return 0, nil
+		return e.consumeRequest(ctx, fg, "idempotent"), nil
 	case result == PlannedFailoverReject && plannedStaticRejection(reason):
 		return e.rejectNew(ctx, fg, req, reason, verr.Error())
 	}
@@ -976,31 +971,41 @@ func (e *PlannedFailoverEngine) beginAdmission(ctx context.Context, fg *v1alpha1
 // written in the meantime is left for the next pass to evaluate (K074). A
 // failure is logged; a later pass retries (an unconsumed request of a live
 // run is recognised as the run's own).
-func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, why string) {
+//
+// It returns the requeue that later pass needs: zero once the pass's
+// annotation is gone, plannedRequeuePoll when it is still there (the
+// removal did not commit) or was replaced by a newer request. A caller that
+// would otherwise return no requeue must return it: nothing else re-runs
+// the engine for an annotation left behind, and a request that outlives
+// its rejection can start a switchover long after it was refused.
+func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, why string) time.Duration {
 	if fg == nil {
-		return
+		return plannedRequeuePoll
 	}
 	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
 	if !ok {
-		return
+		return 0
 	}
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
 	fresh := e.reload(ctx, fg)
 	if fresh == nil {
-		return
+		return plannedRequeuePoll
 	}
 	if cur, ok := fresh.GetAnnotations()[PlannedFailoverAnnotation]; !ok || cur != raw {
-		if ok {
-			log.FromContext(ctx).Info("planned failover: the request annotation changed since this pass read it; left for the next pass",
-				"fg", fg.Namespace+"/"+fg.Name, "why", why)
+		if !ok {
+			return 0
 		}
-		return
+		log.FromContext(ctx).Info("planned failover: the request annotation changed since this pass read it; left for the next pass",
+			"fg", fg.Namespace+"/"+fg.Name, "why", why)
+		return plannedRequeuePoll
 	}
 	if out, err := e.store.ConsumeRequest(ctx, fresh); out != WriteCommitted {
 		log.FromContext(ctx).Info("planned failover: could not remove the request annotation; a later pass retries",
 			"fg", fg.Namespace+"/"+fg.Name, "why", why, "outcome", out.String(), "error", errString(err))
+		return plannedRequeuePoll
 	}
+	return 0
 }
 
 // plannedRequestIsRuns reports whether req is the request pf was built
@@ -1124,7 +1129,7 @@ func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.
 	d, err := e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: reason, msg: msg,
 		why: why, eventReason: v1alpha1.EventPlannedFailoverRejected})
 	if consume && d == 0 && err == nil {
-		e.consumeRequest(ctx, fg, "rejected")
+		d = e.consumeRequest(ctx, fg, "rejected")
 	}
 	return d, err
 }

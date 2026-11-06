@@ -120,7 +120,7 @@ const (
 	YieldEngineWriteForSim   = "engine.write"         // after each store Write
 	YieldEngineSettleForSim  = "engine.settle"        // after each Settle
 	YieldPeerProbeForSim     = "facade.peerProbe"     // after a live peer probe (grant, fence, rollback)
-	YieldBeforePublishForSim = "facade.beforePublish" // before the grant's publish under tm.mu
+	YieldBeforePublishForSim = "facade.beforePublish" // before the grant's publish, which then takes tm.mu
 	YieldAfterPublishForSim  = "facade.afterPublish"  // after the grant's publish
 	YieldBeforeStmtForSim    = "facade.beforeStmt"    // before a facade statement
 	YieldAfterStmtForSim     = "facade.afterStmt"     // after a facade statement
@@ -230,4 +230,16 @@ func (tm *TopologyManager) RestorePlannedFailoverStateForSim(view *v1alpha1.Mysq
 // durable-record half), evaluated at now.
 func PlannedOwnRecordDurableForSim(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) bool {
 	return plannedOwnRecordDurable(fg, pf, now)
+}
+
+// FailoverRecordForSim is tm's in-memory failover record (ok=false: none),
+// as the runner's retired-record stash reads it (stashRetiredFailoverLocked).
+func (tm *TopologyManager) FailoverRecordForSim() (FailoverRecord, bool) {
+	return tm.failoverRecordSnapshot()
+}
+
+// PlannedFailoverOwnsSitesForSim is plannedFailoverOwnsSites: fg's unmarked
+// run is in a phase that owns the sites.
+func PlannedFailoverOwnsSitesForSim(fg *v1alpha1.MysqlFailoverGroup) bool {
+	return plannedFailoverOwnsSites(fg)
 }

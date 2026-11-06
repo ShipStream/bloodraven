@@ -16,6 +16,9 @@ make dst             # full saturation campaign; report → playground/chaos-res
 DST_SEED=61 make dst-repro              # replay one trial with events + operator logs
 DST_SEED=61 DST_SKIP=1,3 make dst-repro # replay with schedule ops 1 and 3 masked out
 DST_SEED=61 go test ./internal/dst -run PlannedRepro -v  # replay one seed with the planned-failover actors on
+DST_SEED=61 DST_SKIP=2 DST_ACTOR_SKIP=0,4 go test ./internal/dst -run PlannedRepro -v  # mask fault ops and actor ops
+DST_SEED=61 DST_LOG=1 go test ./internal/dst -run PlannedRepro -v  # with topology-manager and engine logs
+DST_PLANNED=1 make dst                  # saturation campaign over actors-on trials, shrunk over both schedules
 ```
 
 `make test` also runs `TestDST_PlannedQuick`: 300 seeds with the
@@ -88,7 +91,9 @@ drawn from a PRNG stream of its own (`rand.NewPCG(seed, 0x9f1a2b3c)`), so the
 fault schedule of every seed is byte-identical with or without the actors
 (`TestGenerateTrial_ScheduleUnchangedByActors` pins a hash of seeds
 1..2000). Only the settle window is longer (at least 150 polls), so a request
-made just before `HealAt` can wait out its admission deadline. The zero
+made just before `HealAt` can wait out its admission deadline, and it starts
+after the last long outage ends (`Trial.settleStart`) rather than at
+`HealAt`. The zero
 `Actors` (what `GenerateTrial` returns) disables the whole machinery, and
 those trials run exactly as before. With the actors on, a trial runs the
 production planned-failover path end to end:
@@ -113,18 +118,34 @@ production planned-failover path end to end:
   `storeClient`, a client serving only Get and a metadata merge Patch
   conditioned on the resourceVersion. Every writer contends on one
   `resourceVersion`; a no-op write does not move it.
-- **Restore.** A new manager is restored by the production
+  The snapshot write is the runner's two steps (`updateCRStatus`): read and
+  merge, a scheduler yield (`store.snapshotCommit`), then a re-read that
+  keeps only the planned block, the hold and `AutomaticFailoverHeld` from
+  the fresh object.
+- **Restore.** Every manager start reads the object uncached through the
+  store (`startView`), so a read outage or a dead process fails it, as the
+  runner's `plannedFailoverView` does: a fresh start with an empty slot
+  fails and the next reconcile retries it (the restart's anti-flap check
+  waits for the start that succeeds); a replacement, or a start whose slot
+  already holds a claim, proceeds with no view (no hydration, no planned
+  restore). The manager is then restored by the production
   `restoreFailoverState` / `restorePlannedFailoverState` logic
-  (`RestoreFailoverStateForSim`, `RestorePlannedFailoverStateForSim`) from an
-  uncached read of the object, and wired with `WireRegisteredManager`.
+  (`RestoreFailoverStateForSim` from the cached object,
+  `RestorePlannedFailoverStateForSim` from the view) and wired with
+  `WireRegisteredManager`.
 - **The registry and manager replacement.** `simRegistry`
   (`controller.ManagerRegistry`) is one operator process: the current
   manager, retiring managers and one slot. `replaceManager` retires the
   current manager (`RetireForSim`); it keeps polling for 0–3 polls (a Poll
   in flight), its successor sees it through `ManagerWiring.RetiringBusy`
   (`ChangingSitesForSim`) and `RetiringUpdateInFlight`, and the slot is
-  shared. `managerAbsent` unregisters the manager for N polls. A restart
-  builds a new registry (the slot is dropped).
+  shared. The registry keeps the runner's retired-record stash and passes it
+  as `ManagerWiring.RetiredFailover`. `managerAbsent` retires the current
+  manager and leaves the group without one for N polls (its replacement's
+  starts fail); the window's end starts a fresh manager, restored from the
+  object. While no manager is registered the operator's `/active-site`
+  answers 503. A restart builds a new registry (the slot and the stash are
+  dropped).
 - **Ordered updates.** `update_actor.go` is a step model of
   `ExecuteTargets`' handoff over the real claim API (`BeginOrderedUpdateForSim`,
   `ClaimOrderedUpdateForSim`, `RecordHandoffForSim`, `FinishOrderedUpdateForSim`):
@@ -135,11 +156,28 @@ production planned-failover path end to end:
 - **Status-write loss.** `pfWriteLost`, `pfWriteAmbiguous`, `pfWriteLate`,
   `pfReadOutage` and `pfStatusDenied` (with restarts inside the outage)
   script the store; the fault stream's status and out-of-band outages apply
-  to the same object.
+  to the same object. Half the `pfWriteLate` draws are a next-poll late
+  commit paired with a settlement read outage (`pfSettleOutage`) and a lost
+  metadata write, so the settlement ends Unknown and the late commit lands
+  while the engine is alive. `pfMetaFault` makes the engine's next metadata
+  writes (marker, request consumption, deadline annotations, ack cleanup)
+  time out, commit with the response lost, or be forbidden; a no-op write is
+  decided from its base and cannot meet one. A settlement fence always
+  moves the resourceVersion (a fence that changes nothing is Unknown).
+- **Long outages.** A quarter of the status denials and manager absences
+  are long (`pfStatusDeniedLong` 130-169 polls, `managerAbsentLong` 310-349
+  polls), start just after a planned request, and outlive `HealAt`, so the
+  2m status-stall marker and the 5m `ManagerUnavailable` end are generated.
+- **Hold acknowledgements.** `pfAckHold` acknowledges a standing hold K
+  polls after it appears (some values whitespace-padded), inside the fault
+  window only.
 - **Pinned sessions.** `simChecker.PinSession` returns a `simSession` pinned
   to the site's server incarnation; a crash, restart or pod replacement
-  moves the incarnation and every later call on the session fails. Pooled
-  calls reach whichever server runs now.
+  moves the incarnation and every later call on the session fails, and so
+  does every call after a transport failure on the session (a timed-out
+  statement, applied or not), as go-sql-driver discards the connection. A
+  MySQL error leaves it usable. Pooled calls reach whichever server runs
+  now.
 - **Actor attribution.** Every statement carries its actor (`WithActor`:
   `tm`, `pf`, `upd`, `sidecar`; untagged is `tm`), recorded on the event.
 - **Slow statements and the scheduler.** A statement the trial marks slow
@@ -150,23 +188,32 @@ production planned-failover path end to end:
   three deep, never re-entering an actor on the stack, and panics if a
   tracked mutex (`Cluster.mu`, the store's and registry's, and every
   manager's `tm.mu`, `failoverStateWriteMu`, `restoreProtectionMu`,
-  `restoreFenceMu`) is held. A manager polls once per tick: on a scheduler
+  `restoreFenceMu`) is held. The scheduler tracks the running actor, so a
+  claim release is attributed to the actor that made it. The production
+  yield points are aliases of the controller's `Yield*ForSim` constants. A
+  manager polls once per tick: on a scheduler
   draw the engine pass runs first and a yield inside it may pull the tick's
   Poll forward, but never adds a second one (that would advance debounce
   with no time passing). Only the planned and update actors' statements can
   be slow: the topology manager probes from per-site goroutines, so there
   are no TM-internal yields (F2).
 - **Ops.** `plannedFailover`, `orderedUpdate`, `replaceManager`,
-  `managerAbsent`, the five store faults, `oobLateWrite` (a late duplicate
-  of an older record through the production recorder, which must refuse
-  it), `restartPromotedTarget` and `replacePod` (optionally onto a regressed
-  data directory under a fresh `server_uuid`; never the writable site or the
-  last copy of a transaction).
+  `managerAbsent` (and its long form), the store faults above,
+  `oobLateWrite` (an older record replayed through the production recorder,
+  and its original patch delivered late with its resourceVersion
+  precondition; both must leave the newer record), `restartPromotedTarget`
+  (after the run's `read_only=OFF` an application write lands on the target
+  and it restarts, so it boots `read_only=ON` with its own transactions: the
+  §7.1 `WasWritable` stage), `replacePod` (optionally onto a regressed data
+  directory under a fresh `server_uuid`; never the writable site or the
+  last copy of a transaction) and `pfAckHold`.
 - **Invariants.** `plannedMonitor` checks the §15.1 planned invariants
   (`PlannedFenceWithoutAuthority`, `PlannedPromoteBesideWritable`,
-  `SucceededBesideWritable`, `UnfenceBesideWritable`, `UnfenceUnattributed`,
-  `ForeignMutationUnderClaim`, `ClaimRevoked`, `ZombieClaim`,
-  `OutcomeDishonest`, `RepeatedPromotion`, `WatermarkRegressed`,
+  `PlannedPromoteWithoutGate`, `SucceededBesideWritable`,
+  `UnfenceBesideWritable`, `UnfenceUnattributed`,
+  `ForeignMutationUnderClaim`, `PlannedMutationWithoutRun`, `ClaimRevoked`,
+  `ZombieClaim`, `OutcomeDishonest`, `RepeatedPromotion`,
+  `WatermarkRegressed`, `StatusRecordRegressed`, `OOBRecordRegressed`,
   `AutomationHeldByPendingRequest`, `HoldNotHonoured`, `MarkedRunResumed`,
   `UnconfirmedBlocksEmergency`, `HoldWithoutDataAtRisk`,
   `FencedSourceNeverHealed`, `PlannedRunStuck`) on the events, the landed
@@ -174,8 +221,16 @@ production planned-failover path end to end:
   (`HeldForSim`/`ReleasesForSim`). All of them count rogue writability, with
   the documented scope:
   - a rogue `read_only=0`, or a pod booting writable, landing after the
-    facade's last peer probe is the §18 R2 residual (`RogueRaceResidual`),
-    not a violation;
+    run's own last peer probe is the §18 R2 residual (`RogueRaceResidual`),
+    not a violation; a writable peer the operator cannot read does not
+    block a rollback's unfence (§9 step 1; `UnfenceBesideUnreadable`);
+  - a target unfence needs a pre-write gate probe in the same engine pass;
+    the gate window closes at the end of the pass and of the run;
+  - a run ended by its terminal marker is judged when the marker commits,
+    and a `ManualRecoveryRequired` marker is judged as a hold then;
+  - every landed planned mutation belongs to a live run; only the engine
+    releases the claim; an ordered update and another run are bound by a
+    standing hold like the topology manager;
   - outcomes are judged with what the run could know: `Succeeded` at its
     confirm probe (the claim is released at Publishing), `SourceLeftFenced`
     with an unreachable source by its reason (§6.2), and a cross-process
@@ -185,7 +240,14 @@ production planned-failover path end to end:
     the source's current incarnation, still set, never healed) under the
     re-assert's preconditions;
   - a standing automation hold is the documented manual-recovery state: the
-    end-state invariants and the dual-writable check do not judge it.
+    end-state convergence invariants and the dual-writable check do not
+    judge it, but every acknowledged transaction must still exist on some
+    site (`SilentDataLoss`);
+  - while a run holds the claim with its status writes stalled, the
+    manager's split-brain fence is deferred up to the 2m stall deadline
+    (§6.4), and `DualWritableUnresolved` counts only past it;
+  - a request annotation left unconsumed after the settle window is
+    `PlannedRunStuck`.
 
   The planned harness also adjusts three pre-existing invariants for the
   actors: promotions by the planned run and the update actor are detected
@@ -266,10 +328,11 @@ claim API: it exercises the claim protocol and predecessor tracking, not
 `ExecuteHandoff`'s internals, which the component tests cover with the
 production updater. There are no yields inside the topology manager, so
 interleavings inside one `Poll` are component-test territory (rows 1–3 and
-9 of the #235 interleaving table). The sidecars' view of the operator
-(`/active-site`) follows the trial's current manager even while
-`managerAbsent` has unregistered it, and an update actor keeps stepping on a
-manager inside a `managerAbsent` window.
+9 of the #235 interleaving table). An update actor keeps stepping on a
+manager retired by a `managerAbsent` window, as the runner's retired
+manager's update worker does. The topology manager's planned deferrals are
+observed through their log line (`deferralTap`): a deferral through another
+path without that line would go unseen.
 
 The simulator only contains failure modes we teach it. When the playground or
 production surfaces a new MySQL behavior, encode it here too — and keep the
@@ -287,23 +350,27 @@ playground E2E suite as the fidelity check for this model.
   `TestDST_PlannedQuick` allows exactly this fingerprint and nothing else. See
   `site/content/docs/3.get-started/1.known-limitations.md` → Operator availability.
 
-- **`…(replacement)`: `CooldownViolated(replacement)`,
-  `AntiFlapStateLost(replacement)`, `WedgedNoPrimary(replacement)`** (actors
-  on; open finding DST-1). An ordered update's handoff recorded on a manager
-  that is then replaced, or that finishes on a retired manager, never
-  reaches its replacement: the successor promotes inside the cooldown or
-  judges a wedge from the older record, and with the out-of-band store down
-  a restart loses it.
-- **`DualWritableUnresolved(confirmedClaim)`** (actors on; open finding
-  DST-4). A planned run's claim is held until its Publishing record commits
-  (§2.3); an external writer that makes the old source writable after the
-  confirm, while status writes stall, cannot be fenced by the manager until
-  then.
+Fixed findings, now regressions (`TestDST_PlannedQuick` fails on them):
 
-`TestDST_PlannedQuick` allows exactly these classes and
-`CooldownViolated(restart+stateLost)`; anything else fails it. When either
-finding is fixed, remove its class from `plannedAllowedClasses`
-(`planned_test.go`) and pin the shrunk trial in
+- **`…(replacement)`: `CooldownViolated(replacement)`,
+  `AntiFlapStateLost(replacement)`, `WedgedNoPrimary(replacement)`** (DST-1,
+  fixed). An ordered update's handoff recorded on a manager that is then
+  replaced, or that finishes on a retired manager, used to never reach its
+  replacement. The record is now carried into the successor
+  (`ManagerWiring.Predecessors`, `CarryRetiredFailoverRecord`, the runner's
+  retired-record stash). Pinned in `test/component/dst_regression_test.go`.
+  The `(replacement)` tags stay so a regression reports where the record
+  was lost; `CooldownViolated(restart+stateLost)` keeps precedence over the
+  tag.
+- **`DualWritableUnresolved(confirmedClaim)`** (DST-4, fixed). A confirmed
+  run's claim used to be held through a stalled Publishing write, blocking
+  the manager's split-brain fence. The confirmed tail now releases the claim
+  once the run's own record is durable. Pinned in
+  `test/component/dst_regression_test.go`.
+
+`TestDST_PlannedQuick` allows only `CooldownViolated(restart+stateLost)`
+(`plannedAllowedClasses` in `planned_test.go`); anything else fails it. When
+a finding is fixed, pin its shrunk trial in
 `test/component/dst_regression_test.go`.
 
 `CooldownViolated` splits three ways so the inherent class cannot absorb a

@@ -25,10 +25,12 @@ type claimView interface {
 	Releases() []claimRelease
 }
 
-// claimRelease is one slot release (the slot's claimReleaseNote).
+// claimRelease is one slot release (the slot's claimReleaseNote) and the
+// actor that was running when it happened ("" when not attributed).
 type claimRelease struct {
 	RunID string
 	Why   controller.ClaimReleaseReason
+	By    string
 }
 
 // engineReleaseReasons is every reason the engine may release with (§3.6).
@@ -59,7 +61,10 @@ type runObs struct {
 	// later incarnation means the fence is no longer the run's. healed is
 	// set once the source was writable again after the run ended.
 	fenceInc int
-	healed   bool
+	// fenceUUID is the source's server_uuid when the run's fence landed:
+	// the production memo attributes a fence only to that server (K078).
+	fenceUUID string
+	healed    bool
 	// intentUUID is the durable Fencing intent's sourceServerUUID; fenceSet
 	// is fence.gtidSet (F).
 	intentUUID string
@@ -73,10 +78,14 @@ type runObs struct {
 	promotionStmt  bool // any promotion statement was sent to the target
 	pfMutations    int  // every pf mutation attempt for the run
 
-	marked   bool
-	terminal bool
-	outcome  v1alpha1.PlannedFailoverOutcome
-	reason   v1alpha1.PlannedFailoverReason
+	marked bool
+	// holdJudged: HoldWithoutDataAtRisk was judged for the run's hold (at
+	// its condition flip or its ManualRecoveryRequired marker, whichever
+	// landed first).
+	holdJudged bool
+	terminal   bool
+	outcome    v1alpha1.PlannedFailoverOutcome
+	reason     v1alpha1.PlannedFailoverReason
 
 	// watermark tracking (WatermarkRegressed).
 	published      bool
@@ -85,10 +94,19 @@ type runObs struct {
 	watermarkFlags bool
 
 	// gateWritable is the truth-writable non-target set at the last
-	// pre-write gate probe, nil when no gate probe is open; gateOpen marks
-	// the open window (for RogueRaceResidual).
+	// pre-write gate probe of the current engine pass, nil when the pass
+	// has none (K180: a target unfence needs one); gateJudged marks that
+	// the gate's first unfence was judged against it (the SRO/RO pair
+	// shares one gate); gateOpen marks the gate-to-SET window (for
+	// RogueRaceResidual). All three close at the end of the pass and when
+	// the run ends (K179).
 	gateWritable []string
+	gateJudged   bool
 	gateOpen     bool
+	// probeSeq is the cluster sequence at the run's last facade peer probe
+	// (-1: none): only the run's own probe makes a later rogue the R2
+	// residual (K183).
+	probeSeq int
 	// confirmWritable and publishWritable are the truth-writable sites at
 	// the confirm probe and at the Publishing record.
 	confirmWritable []string
@@ -131,6 +149,9 @@ type plannedStats struct {
 	// SucceededTargetRestarted counts Succeeded runs whose target restarted
 	// (booting read-only) between the run's read_only=OFF and the record.
 	SucceededTargetRestarted int
+	// UnfenceBesideUnreadable counts rollback unfences beside a writable
+	// site the operator could not read (§9 step 1: allowed by rule).
+	UnfenceBesideUnreadable int
 }
 
 // plannedMonitor checks the planned-failover invariants of §15.1. The
@@ -156,11 +177,10 @@ type plannedMonitor struct {
 	stats      plannedStats
 
 	// rogueSeq is the event sequence of the last rogue read_only=0 per
-	// site, and probeSeq the cluster sequence at the last facade peer probe
-	// (fence, rollback). A foreign writable site whose rogue writability
-	// landed after the probe is the §18 R2 residual, not an operator fault.
+	// site. A foreign writable site whose rogue writability landed after
+	// the run's last facade peer probe (runObs.probeSeq) is the §18 R2
+	// residual, not an operator fault.
 	rogueSeq map[string]int
-	probeSeq int
 	// onRecorded is called when a run's Publishing record commits, with its
 	// target and confirmedAt: the durable point of a planned promotion.
 	onRecorded func(target string, confirmedAt time.Time)
@@ -203,23 +223,14 @@ func (m *plannedMonitor) activeRun() *runObs {
 	return r
 }
 
-// ownsSites mirrors the controller's plannedFailoverOwnsSites (unexported).
+// ownsSites is the controller's plannedFailoverOwnsSites (through its sim
+// seam, so the two cannot drift, K181), restricted to blocks that name a
+// run: a block without a runID is malformed, and no claim can name it.
 func ownsSites(obj *v1alpha1.MysqlFailoverGroup) bool {
-	if obj == nil || obj.Status.PlannedFailover == nil {
+	if obj == nil || obj.Status.PlannedFailover == nil || obj.Status.PlannedFailover.RunID == "" {
 		return false
 	}
-	pf := obj.Status.PlannedFailover
-	if pf.RunID == "" || markerRunID(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) == pf.RunID {
-		return false
-	}
-	switch pf.Phase {
-	case v1alpha1.PlannedFailoverPhaseFencing, v1alpha1.PlannedFailoverPhaseDraining,
-		v1alpha1.PlannedFailoverPhaseWaitingForLag, v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly, v1alpha1.PlannedFailoverPhasePromoting,
-		v1alpha1.PlannedFailoverPhaseRollingBack:
-		return true
-	}
-	return false
+	return controller.PlannedFailoverOwnsSitesForSim(obj)
 }
 
 // claimHeld reports whether a run holds the claim: the slot when a view
@@ -319,6 +330,13 @@ func (m *plannedMonitor) writableExceptLocked(site string) []string {
 	return out
 }
 
+// operatorReadableLocked reports whether the operator can read site now
+// (not crashed, operator link up). c.mu is held by the caller.
+func (m *plannedMonitor) operatorReadableLocked(site string) bool {
+	s := m.c.byName[site]
+	return s != nil && !s.crashed && !m.c.opLinkDown[site]
+}
+
 // externallyWritable reports whether a rogue or a writable boot made site
 // writable at or after event sequence since.
 func (m *plannedMonitor) externallyWritable(site string, since int) bool {
@@ -327,12 +345,15 @@ func (m *plannedMonitor) externallyWritable(site string, since int) bool {
 }
 
 // raceResidual splits foreign writable sites into those made writable by a
-// rogue after the facade's last peer probe (the R2 residual, counted) and
-// the rest.
-func (m *plannedMonitor) raceResidual(sites []string) []string {
+// rogue after run r's last peer probe (the R2 residual, counted) and the
+// rest. A run that never probed has no residual.
+func (m *plannedMonitor) raceResidual(r *runObs, sites []string) []string {
+	if r.probeSeq < 0 {
+		return sites
+	}
 	var rest []string
 	for _, w := range sites {
-		if m.externallyWritable(w, m.probeSeq) {
+		if m.externallyWritable(w, r.probeSeq) {
 			m.stats.RogueRaceResidual++
 			continue
 		}
@@ -352,41 +373,79 @@ func (m *plannedMonitor) onMutation(e Event, before, after SiteTruth) {
 			m.violate("ForeignMutationUnderClaim", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
 				"%s %s %s by %s landed while a planned run holds the claim", e.Site, e.Kind, e.Detail, actor))
 		}
-		if actor == ActorTM && m.autoMutation(e) && holdStands(m.cur) {
+		// An ordered update is automation too: admission must refuse it
+		// under a standing hold (K060).
+		if m.autoMutation(e) && holdStands(m.cur) {
 			m.violate("HoldNotHonoured", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
-				"%s %s %s by the topology manager while the automation hold stands", e.Site, e.Kind, e.Detail))
+				"%s %s %s by %s while the automation hold stands", e.Site, e.Kind, e.Detail, actor))
 		}
 	}
 }
 
-func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
-	r := m.activeRun()
-	if r == nil {
-		return
+// blockRun is the run the durable block names, terminal or not.
+func (m *plannedMonitor) blockRun() *runObs {
+	if m.cur == nil || m.cur.Status.PlannedFailover == nil {
+		return nil
 	}
-	if r.marked || markerRunID(m.cur.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) == r.id {
+	return m.runs[m.cur.Status.PlannedFailover.RunID]
+}
+
+func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
+	// Every landed pf mutation belongs to a live run (K040): a stale pass
+	// that unfences or resets after its run's end, or before any run is
+	// recorded, is the planned path acting without a run.
+	r := m.blockRun()
+	switch {
+	case r == nil:
+		m.violate("PlannedMutationWithoutRun", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
+			"the planned path sent %s %s to %s with no run recorded", e.Kind, e.Detail, e.Site))
+		return
+	case r.marked || markerRunID(m.cur.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) == r.id:
 		m.violate("MarkedRunResumed", r.id, fmt.Sprintf("run %s sent %s %s to %s after its terminal marker",
 			r.id, e.Kind, e.Detail, e.Site))
+		return
+	case r.terminal:
+		m.violate("PlannedMutationWithoutRun", r.id+"|terminal", fmt.Sprintf(
+			"run %s sent %s %s to %s after its terminal record (outcome %s)", r.id, e.Kind, e.Detail, e.Site, r.outcome))
+		return
+	}
+	// A run never acts under another run's standing hold: admission refuses
+	// new runs until the hold is acknowledged (K060).
+	if h := controller.PlannedHoldFrom(m.cur); h != nil && h.RunID != r.id {
+		m.violate("HoldNotHonoured", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
+			"run %s sent %s %s to %s while run %q's automation hold stands", r.id, e.Kind, e.Detail, e.Site, h.RunID))
 	}
 
 	// PlannedFenceWithoutAuthority: just before the fence, S must have been
 	// the unique writable site.
 	if e.Kind == EvSetSuperRO && e.Detail == "on=true" && e.Site == r.source {
-		others := m.raceResidual(m.writableExceptLocked(e.Site))
+		others := m.raceResidual(r, m.writableExceptLocked(e.Site))
 		if !before.Writable() || len(others) > 0 {
 			m.violate("PlannedFenceWithoutAuthority", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
 				"run %s fenced %s (writable before: %v; other writable sites: %v)", r.id, e.Site, before.Writable(), others))
 		}
 		r.fenceGen = m.procGen
 		r.fenceInc = after.Incarnation
+		r.fenceUUID = after.ServerUUID
 	}
 
 	if isUnfence(e) && e.Site == r.source {
-		if others := m.raceResidual(m.writableExceptLocked(e.Site)); len(others) > 0 {
+		// A writable peer the operator cannot read does not block the
+		// rollback's unfence (§9 step 1, #234's rule): that is the
+		// documented residual, counted, not a violation.
+		var readable []string
+		for _, w := range m.writableExceptLocked(e.Site) {
+			if m.operatorReadableLocked(w) {
+				readable = append(readable, w)
+			} else {
+				m.stats.UnfenceBesideUnreadable++
+			}
+		}
+		if others := m.raceResidual(r, readable); len(others) > 0 {
 			m.violate("UnfenceBesideWritable", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
 				"run %s unfenced source %s while %v writable", r.id, e.Site, others))
 		}
-		byMemo := r.fenceGen == m.procGen
+		byMemo := r.fenceGen == m.procGen && strings.EqualFold(r.fenceUUID, after.ServerUUID)
 		byIntent := r.intentUUID != "" && r.intentUUID == after.ServerUUID
 		if !byMemo && !byIntent {
 			m.violate("UnfenceUnattributed", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
@@ -398,13 +457,17 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 	if e.Site != r.target {
 		return
 	}
-	if isUnfence(e) && r.gateWritable != nil {
-		if len(r.gateWritable) > 0 {
+	if isUnfence(e) {
+		switch {
+		case r.gateWritable == nil:
+			m.violate("PlannedPromoteWithoutGate", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
+				"run %s sent %s %s to its target %s with no pre-write gate probe in the pass", r.id, e.Kind, e.Detail, e.Site))
+		case !r.gateJudged && len(r.gateWritable) > 0:
 			m.violate("PlannedPromoteBesideWritable", r.id, fmt.Sprintf(
 				"run %s cleared read-only on %s although %v were writable at the pre-write gate's probe",
 				r.id, e.Site, r.gateWritable))
 		}
-		r.gateWritable = nil
+		r.gateJudged = true
 		r.gateOpen = false
 	}
 	switch e.Kind {
@@ -430,7 +493,9 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 func (m *plannedMonitor) onYield(point string) {
 	class := yieldClass(point)
 	if class == YieldPeerProbe {
-		m.probeSeq = m.c.Seq()
+		if r := m.activeRun(); r != nil {
+			r.probeSeq = m.c.Seq()
+		}
 		return
 	}
 	if class != YieldGateProbe && class != YieldConfirmProbe {
@@ -451,6 +516,7 @@ func (m *plannedMonitor) onYield(point string) {
 	}
 	if class == YieldGateProbe {
 		r.gateWritable = others
+		r.gateJudged = false
 		r.gateOpen = true
 		return
 	}
@@ -459,8 +525,18 @@ func (m *plannedMonitor) onYield(point string) {
 }
 
 // onCommit observes every committed object change.
-func (m *plannedMonitor) onCommit(_ string, before, after *v1alpha1.MysqlFailoverGroup) {
+func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFailoverGroup) {
 	m.cur = after
+	m.onMarker(before, after)
+	// The status failover record is timestamp-monotonic: no writer moves it
+	// to an older failover, the runner's two-step snapshot write included
+	// (K042).
+	if b := before.Status.LastFailover; b != nil {
+		if a := after.Status.LastFailover; a == nil || a.Before(b) {
+			m.violate("StatusRecordRegressed", fmt.Sprintf("%s|%d", kind, m.c.Seq()), fmt.Sprintf(
+				"a %s write moved status.lastFailover from %s to %v", kind, b.UTC().Format(time.RFC3339), a))
+		}
+	}
 	pf := after.Status.PlannedFailover
 	if pf == nil || pf.RunID == "" {
 		m.checkWatermarks(after)
@@ -468,7 +544,7 @@ func (m *plannedMonitor) onCommit(_ string, before, after *v1alpha1.MysqlFailove
 	}
 	r := m.runs[pf.RunID]
 	if r == nil {
-		r = &runObs{id: pf.RunID, fenceGen: -1, unconfirmedSince: -1, startSeq: m.c.Seq(), promotingGen: -1}
+		r = &runObs{id: pf.RunID, fenceGen: -1, unconfirmedSince: -1, startSeq: m.c.Seq(), promotingGen: -1, probeSeq: -1}
 		m.runs[pf.RunID] = r
 		m.order = append(m.order, pf.RunID)
 	}
@@ -509,9 +585,49 @@ func (m *plannedMonitor) onCommit(_ string, before, after *v1alpha1.MysqlFailove
 		m.checkTerminal(r)
 	}
 	if !holdConditionTrue(before) && holdConditionTrue(after) {
-		m.checkHoldAtRisk(r)
+		m.judgeHold(r)
 	}
 	m.checkWatermarks(after)
+}
+
+// onMarker judges a run ended by its terminal marker when the marker
+// commits (K039): the marker is the run's end, and the status result that
+// copies it lands only after status writes heal, against later truth. A
+// ManualRecoveryRequired marker is a hold on its own (PlannedHoldFrom), so
+// its justification is judged then too (K077).
+func (m *plannedMonitor) onMarker(before, after *v1alpha1.MysqlFailoverGroup) {
+	key := controller.PlannedFailoverTerminalAnnotation
+	v := after.GetAnnotations()[key]
+	if v == "" || v == before.GetAnnotations()[key] {
+		return
+	}
+	mk, ok := controller.ParseTerminalMarker(v)
+	if !ok {
+		return
+	}
+	r := m.runs[mk.RunID]
+	if r == nil {
+		return
+	}
+	r.marked = true
+	if !r.terminal {
+		r.terminal = true
+		r.outcome = mk.Outcome
+		r.reason = mk.Reason
+		m.checkTerminal(r)
+	}
+	if mk.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+		m.judgeHold(r)
+	}
+}
+
+// judgeHold runs checkHoldAtRisk once per run.
+func (m *plannedMonitor) judgeHold(r *runObs) {
+	if r.holdJudged {
+		return
+	}
+	r.holdJudged = true
+	m.checkHoldAtRisk(r)
 }
 
 func holdConditionTrue(obj *v1alpha1.MysqlFailoverGroup) bool {
@@ -563,6 +679,7 @@ func containsSet(t SiteTruth, s string) bool {
 // checkTerminal is OutcomeDishonest and SucceededBesideWritable, judged
 // against truth at the terminal write.
 func (m *plannedMonitor) checkTerminal(r *runObs) {
+	r.closeGate()
 	truth := map[string]SiteTruth{}
 	var writable []string
 	for _, t := range m.c.Truth() {
@@ -604,7 +721,10 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 			dishonest("the source " + r.source + " is writable")
 		}
 	case v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed:
-		if !r.writeTried && !r.crossProcess(m.procGen) {
+		// ManagerUnavailable ends a Promoting run without MySQL access, as
+		// PromotedUnconfirmed by rule (§6.3): like SourceLeftFenced above, the
+		// run cannot read what reached the target, so no attempt is required.
+		if !r.writeTried && !r.crossProcess(m.procGen) && r.reason != v1alpha1.PlannedFailoverReasonManagerUnavailable {
 			dishonest("it never sent super_read_only=OFF or read_only=OFF")
 		}
 		if !tgt.Reachable() {
@@ -646,6 +766,18 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 			m.violate("SucceededBesideWritable", r.id, fmt.Sprintf("run %s Succeeded while %v were writable", r.id, others))
 		}
 	}
+}
+
+// closeGate ends the run's gate observation (pass end, run end).
+func (r *runObs) closeGate() {
+	r.gateWritable, r.gateJudged, r.gateOpen = nil, false, false
+}
+
+// runRecorded reports whether run id recorded its promotion: its
+// Publishing record committed, or it ended Succeeded.
+func (m *plannedMonitor) runRecorded(id string) bool {
+	r := m.runs[id]
+	return r != nil && (r.published || (r.terminal && r.outcome == v1alpha1.PlannedFailoverOutcomeSucceeded))
 }
 
 // crossProcess reports whether a process other than the one that wrote the
@@ -717,11 +849,17 @@ func (m *plannedMonitor) replacedTargetRollbackDue(r *runObs, truth []SiteTruth,
 		if t.Writable() {
 			return false
 		}
+		// Production rolls back only on positive evidence from every peer
+		// (K178): an unreachable site's writability is unknown, and the
+		// source must be reachable to be unfenced.
+		if !t.Reachable() {
+			return false
+		}
 		if t.Name != r.source {
 			continue
 		}
 		exec, err := mysql.ParseGTIDSet(t.Executed.String())
-		if t.Crashed || !t.SuperReadOnly || r.intentUUID == "" || !strings.EqualFold(t.ServerUUID, r.intentUUID) || err != nil || !exec.Contains(f) {
+		if !t.SuperReadOnly || r.intentUUID == "" || !strings.EqualFold(t.ServerUUID, r.intentUUID) || err != nil || !exec.Contains(f) {
 			return false
 		}
 	}
@@ -749,6 +887,11 @@ func (m *plannedMonitor) checkWatermarks(obj *v1alpha1.MysqlFailoverGroup) {
 		}
 		h, err := mysql.ParseGTIDSet(have)
 		contains := err == nil && w.Subtract(h).IsEmpty()
+		// The status record carrying the run's own promotion (lastFailover
+		// at its confirmation) must carry its watermark from the first
+		// write on (K038), not only keep one it once showed.
+		ownRecord := !r.confirmedAt.IsZero() && obj.Status.LastFailover != nil &&
+			obj.Status.LastFailover.UTC().Truncate(time.Second).Equal(r.confirmedAt)
 		switch {
 		case contains:
 			r.watermarkSeen = true
@@ -756,6 +899,11 @@ func (m *plannedMonitor) checkWatermarks(obj *v1alpha1.MysqlFailoverGroup) {
 			r.watermarkFlags = true
 			m.violate("WatermarkRegressed", r.id, fmt.Sprintf(
 				"status promotionGtidExecuted %q no longer contains run %s's watermark %s", have, r.id, r.fenceSet))
+		case ownRecord:
+			r.watermarkFlags = true
+			m.violate("WatermarkRegressed", r.id, fmt.Sprintf(
+				"status records run %s's promotion (lastFailover %s) with promotionGtidExecuted %q, which lacks its watermark %s",
+				r.id, r.confirmedAt.Format(time.RFC3339), have, r.fenceSet))
 		}
 	}
 }
@@ -795,8 +943,12 @@ func (m *plannedMonitor) noteFault() {
 	m.stats.FirstFaultPhase = phase
 }
 
-// noteEnginePass ages Run-mode claims whose run is over (ZombieClaim).
+// noteEnginePass closes the pass's gate windows and ages Run-mode claims
+// whose run is over (ZombieClaim).
 func (m *plannedMonitor) noteEnginePass() {
+	for _, id := range m.order {
+		m.runs[id].closeGate()
+	}
 	if m.claim == nil {
 		return
 	}
@@ -811,7 +963,7 @@ func (m *plannedMonitor) noteEnginePass() {
 		return
 	}
 	if r == nil {
-		r = &runObs{id: id, fenceGen: -1, unconfirmedSince: -1}
+		r = &runObs{id: id, fenceGen: -1, unconfirmedSince: -1, probeSeq: -1}
 		m.runs[id] = r
 		m.order = append(m.order, id)
 	}
@@ -830,6 +982,12 @@ func (m *plannedMonitor) endPoll(p int, managerReady bool) {
 			if !slices.Contains(engineReleaseReasons, rel.Why) {
 				m.violate("ClaimRevoked", rel.RunID+"|"+string(rel.Why), fmt.Sprintf(
 					"run %s's claim was released with %q, which is not an engine release", rel.RunID, rel.Why))
+			}
+			// Only the engine releases (K177): an approved reason from any
+			// other actor is a revocation all the same.
+			if rel.By != "" && rel.By != string(ActorPF) {
+				m.violate("ClaimRevoked", rel.RunID+"|by|"+rel.By, fmt.Sprintf(
+					"run %s's claim was released (%q) while %s was running, not the planned-failover engine", rel.RunID, rel.Why, rel.By))
 			}
 			if r := m.runs[rel.RunID]; r != nil && rel.Why == controller.ReleasePublishing {
 				r.tailReleased, r.tailReleasedGen = true, m.procGen
@@ -930,6 +1088,14 @@ func (m *plannedMonitor) checkEnd(endPoll int) []Violation {
 		}
 		if !r.terminal && !r.marked {
 			m.violate("PlannedRunStuck", id, fmt.Sprintf("run %s is not terminal after heal and settle", id))
+		}
+	}
+	// A request annotation nobody consumed after heal and settle never
+	// produced a run, so no run entry can report it (K182).
+	if m.cur != nil {
+		if v, ok := m.cur.GetAnnotations()[controller.PlannedFailoverAnnotation]; ok {
+			m.violate("PlannedRunStuck", "request", fmt.Sprintf(
+				"the planned-failover request %q is still unconsumed after heal and settle", v))
 		}
 	}
 	if m.claim != nil {

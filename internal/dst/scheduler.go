@@ -4,27 +4,38 @@ import (
 	"context"
 	"math/rand/v2"
 	"strings"
+
+	"github.com/shipstream/bloodraven/internal/controller"
 )
 
 // Yield points (§15.1). The planned-failover engine and its topology facade
 // call controller.SimHooks.Yield at these points; simChecker.mutate yields at
 // the two statement points. The string after the first ':' (site, statement)
-// is detail; the prefix is the yield class the fidelity tests count.
+// is detail; the prefix is the yield class the fidelity tests count. The
+// production points are aliases of the controller's constants, so the two
+// lists cannot drift (K187); the statement points are the simulator's own.
 const (
-	YieldEngineLoad   = "engine.load"   // after the uncached Load
-	YieldEngineWrite  = "engine.write"  // after each store Write
-	YieldEngineSettle = "engine.settle" // after each Settle
+	YieldEngineLoad   = controller.YieldEngineLoadForSim   // after the uncached Load
+	YieldEngineWrite  = controller.YieldEngineWriteForSim  // after each store Write
+	YieldEngineSettle = controller.YieldEngineSettleForSim // after each Settle
 
-	YieldPeerProbe     = "facade.peerProbe"     // after the grant's live peer probe
-	YieldBeforePublish = "facade.beforePublish" // before publish under tm.mu
-	YieldAfterPublish  = "facade.afterPublish"  // after publish
-	YieldBeforeStmt    = "facade.beforeStmt"    // + ":<site>:<statement>"
-	YieldAfterStmt     = "facade.afterStmt"     // + ":<site>:<statement>"
-	YieldGateProbe     = "facade.gateProbe"     // after the pre-write gate's probe
-	YieldConfirmProbe  = "facade.confirmProbe"  // after the confirm path's peer probe
+	YieldPeerProbe = controller.YieldPeerProbeForSim // after a live peer probe (grant, fence, rollback)
+	// YieldBeforePublish is before the grant's publish, outside tm.mu: the
+	// publish takes the lock after the yield, and a yield with tm.mu held
+	// would panic the scheduler's lock discipline.
+	YieldBeforePublish = controller.YieldBeforePublishForSim
+	YieldAfterPublish  = controller.YieldAfterPublishForSim // after the grant's publish
+	YieldBeforeStmt    = controller.YieldBeforeStmtForSim   // + ":<site>:<statement>"
+	YieldAfterStmt     = controller.YieldAfterStmtForSim    // + ":<site>:<statement>"
+	YieldGateProbe     = controller.YieldGateProbeForSim    // after the pre-write gate's probe
+	YieldConfirmProbe  = controller.YieldConfirmProbeForSim // after the confirm path's peer probe
 
 	YieldStmtIssued  = "stmt.issued"  // slow statement, between issue and apply
 	YieldStmtApplied = "stmt.applied" // slow statement, between apply and ack
+
+	// YieldSnapshotCommit is between a topology-manager status write's read
+	// and its conditioned commit (runner updateCRStatus, K042).
+	YieldSnapshotCommit = "store.snapshotCommit"
 )
 
 // yieldClass is the point without its detail.
@@ -76,6 +87,13 @@ type yieldScheduler struct {
 	// observers see every yield before any actor steps (invariants, the
 	// restart-promoted-target countdown).
 	observers []func(point string)
+	// onSwitch is called whenever control is about to leave the actor on
+	// top of the stack (owner, "" at top level): at a yield, and when an
+	// actor's step or run ends. The harness attributes what happened since
+	// the last switch (claim releases) to owner.
+	onSwitch func(owner string)
+	// stack is the actors currently running, innermost last.
+	stack []string
 
 	depth int
 
@@ -134,8 +152,31 @@ func (s *yieldScheduler) run(name string, fn func()) {
 		return
 	}
 	a.onStack = true
-	defer func() { a.onStack = false }()
+	s.push(name)
+	defer func() {
+		s.switchFrom()
+		s.pop()
+		a.onStack = false
+	}()
 	fn()
+}
+
+func (s *yieldScheduler) push(name string) { s.stack = append(s.stack, name) }
+func (s *yieldScheduler) pop()             { s.stack = s.stack[:len(s.stack)-1] }
+
+// top is the innermost running actor ("" at top level).
+func (s *yieldScheduler) top() string {
+	if len(s.stack) == 0 {
+		return ""
+	}
+	return s.stack[len(s.stack)-1]
+}
+
+// switchFrom reports that control leaves the innermost running actor.
+func (s *yieldScheduler) switchFrom() {
+	if s.onSwitch != nil {
+		s.onSwitch(s.top())
+	}
 }
 
 // assertNoLocks panics when a tracked mutex is held at a yield.
@@ -150,6 +191,7 @@ func (s *yieldScheduler) assertNoLocks(point string) {
 // Yield is controller.SimHooks.Yield and Cluster's slow-statement hook.
 func (s *yieldScheduler) Yield(point string) {
 	s.assertNoLocks(point)
+	s.switchFrom()
 	class := yieldClass(point)
 	s.yields[class]++
 	for _, fn := range s.observers {
@@ -169,7 +211,10 @@ func (s *yieldScheduler) Yield(point string) {
 			continue
 		}
 		a.onStack = true
+		s.push(a.name)
 		a.step(context.Background())
+		s.switchFrom()
+		s.pop()
 		a.onStack = false
 		s.stepsBy[a.name]++
 		stepped = true

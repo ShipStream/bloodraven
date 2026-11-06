@@ -53,7 +53,7 @@
 
 **Front:** A planned failover is requested while a `failover-hold` is live. What does status show?
 
-**Back:** `plannedFailover.phase: Deferred`, `reason: DeploymentHold`, `retryAfter` equal to the earliest hold expiry, and a message naming the blocking `operationId` and instance. The `retryAfter` moves with every hold renewal.
+**Back:** `plannedFailover.phase: Deferred`, `admission.deferReason: DeploymentHold`, `admission.retryTime` equal to the earliest hold expiry, and a message naming the blocking `operationId` and instance. The `retryTime` moves with every hold renewal.
 
 ---
 

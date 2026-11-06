@@ -18,7 +18,10 @@
       "value": "true",
       "effect": "NoExecute",
       "tolerationSeconds": 60
-    }
+    },
+    "operatorLog": [
+      "drain budget exhausted after 30s with 3 connection(s) remaining on \"pdx\"; proceeding"
+    ]
   },
   "status": {
     "activeSite": "iad",
@@ -26,14 +29,29 @@
     "lastFailoverTarget": "iad",
     "promotionGtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-191447",
     "plannedFailover": {
+      "runID": "8d4a1f6e-2c9b-4e07-a3f5-1b7c0d9e6a24",
       "phase": "Succeeded",
       "targetSite": "iad",
-      "transactionsLost": 0,
-      "sourceGtidAtFence": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-191447",
-      "drainTimeout": "30s",
-      "maxLagWait": "5m",
-      "connectionsRemainingAtDrainEnd": 3,
-      "drainLog": "drain budget exhausted after 30s with 3 connection(s) remaining on \"pdx\"; proceeding"
+      "sourceSite": "pdx",
+      "settings": {
+        "maxLagWait": "5m0s",
+        "drainTimeout": "30s"
+      },
+      "startTime": "2026-08-12T10:00:00Z",
+      "fence": {
+        "state": "Applied",
+        "gtidSet": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-191447"
+      },
+      "drain": {
+        "remainingConnections": 3
+      },
+      "promotion": {
+        "state": "Confirmed"
+      },
+      "result": {
+        "outcome": "Succeeded"
+      },
+      "message": "promoted \"iad\""
     },
     "sites": [
       {

@@ -77,8 +77,9 @@ func (a Actors) String() string {
 // actorFaultWeights is the actor stream's fault-kind distribution; like
 // faultWeights it must sum to 100.
 var actorFaultWeights = []faultWeight{
-	{OpPFWriteLost, 14},
-	{OpPFWriteAmbiguous, 14},
+	{OpPFWriteLost, 10},
+	{OpPFWriteAmbiguous, 10},
+	{OpPFMetaFault, 8},
 	{OpPFWriteLate, 12},
 	{OpPFReadOutage, 10},
 	{OpPFStatusDenied, 12},
@@ -151,6 +152,21 @@ func GenerateActors(t Trial) Actors {
 	for range rng.IntN(3) {
 		ops = append(ops, Op{At: at(), Kind: OpReplaceManager, N: rng.IntN(4)})
 	}
+	// longStart places a long outage just after a planned request, so it
+	// overlaps a run that holds the claim: a long outage nowhere near a run
+	// exercises no deadline.
+	var requests []int
+	for _, op := range ops {
+		if op.Kind == OpPlannedFailover && op.Site != unknownPlannedTarget && op.Site != names[0] {
+			requests = append(requests, op.At)
+		}
+	}
+	longStart := func(fallback int) int {
+		if len(requests) == 0 {
+			return fallback
+		}
+		return requests[rng.IntN(len(requests))] + 1 + rng.IntN(longOutageLead)
+	}
 	for range rng.IntN(5) {
 		kind := pickActorFaultKind(rng.IntN(100))
 		start := at()
@@ -158,16 +174,39 @@ func GenerateActors(t Trial) Actors {
 		case OpPFWriteLost, OpPFWriteAmbiguous:
 			ops = append(ops, Op{At: start, Kind: kind, N: 1 + rng.IntN(3)})
 		case OpPFWriteLate:
-			ops = append(ops, Op{At: start, Kind: kind, N: 1 + rng.IntN(2), K: 1 + rng.IntN(4)})
+			late := Op{At: start, Kind: kind, N: 1 + rng.IntN(2), K: 1 + rng.IntN(4)}
+			if rng.IntN(2) == 0 {
+				// The read outage starts with the write, so its settlement
+				// ends Unknown; the engine's stall-since mark, which would
+				// move the resourceVersion, times out too; and the late
+				// commit lands at the next poll, before the engine settles
+				// again (K041): a live engine holding an Unknown write that
+				// then commits.
+				late.N, late.K = 1, 1
+				ops = append(ops, late, Op{At: start, Kind: opPFSettleOutage, N: settleAttempts},
+					Op{At: start, Kind: OpPFMetaFault, N: 1, K: int(metaFaultLost)})
+			} else {
+				ops = append(ops, late)
+			}
 		case OpPFReadOutage:
 			ops = append(ops, Op{At: start, Kind: kind, N: 1 + rng.IntN(4)})
 		case OpPFStatusDenied:
 			// Repeated restarts inside the outage: the durable stall-since
-			// timestamp must survive them (§6.4, D36).
-			n := 5 + rng.IntN(40)
+			// timestamp must survive them (§6.4, D36). A long outage outlives
+			// the 2m stall deadline, so the run ends by the terminal marker
+			// (K036); it outlives HealAt too, and the settle window starts
+			// after it (settleStart).
+			n, end := 5+rng.IntN(40), t.HealAt
+			if rng.IntN(100) < longOutagePct {
+				kind = OpPFStatusDeniedLong
+				start = longStart(start)
+				n = longStatusDenialPolls + rng.IntN(longOutageSpread)
+				end = start + n
+			}
 			ops = append(ops, Op{At: start, Kind: kind, N: n})
 			for range rng.IntN(3) {
-				ops = append(ops, Op{At: start + 1 + rng.IntN(n), Kind: OpRestartOperator})
+				// Companion restarts stay inside the fault window (K105).
+				ops = append(ops, Op{At: min(start+1+rng.IntN(n), max(end-1, start)), Kind: OpRestartOperator})
 			}
 		case OpOOBLateWrite:
 			ops = append(ops, Op{At: start, Kind: kind})
@@ -179,11 +218,23 @@ func GenerateActors(t Trial) Actors {
 				back = 1 + rng.IntN(5)
 			}
 			ops = append(ops, Op{At: start, Kind: kind, Site: pickSite(), K: back})
+		case OpPFMetaFault:
+			ops = append(ops, Op{At: start, Kind: kind, N: 1 + rng.IntN(3), K: rng.IntN(metaFaultClasses)})
 		case OpManagerAbsent:
-			ops = append(ops, Op{At: start, Kind: kind, N: 1 + rng.IntN(30)})
+			n := 1 + rng.IntN(30)
+			if rng.IntN(100) < longOutagePct {
+				// Outlives the 5m manager-absent deadline (K036).
+				kind = OpManagerAbsentLong
+				start = longStart(start)
+				n = longManagerAbsentPolls + rng.IntN(longOutageSpread)
+			}
+			ops = append(ops, Op{At: start, Kind: kind, N: n})
 		default:
 			panic(fmt.Sprintf("dst: actorFaultWeights kind %q has no case in GenerateActors", kind))
 		}
+	}
+	if rng.IntN(100) < ackHoldPct {
+		ops = append(ops, Op{At: at(), Kind: OpPFAckHold, K: 1 + rng.IntN(10), N: rng.IntN(3) / 2})
 	}
 	sort.SliceStable(ops, func(i, j int) bool { return ops[i].At < ops[j].At })
 
@@ -205,6 +256,39 @@ func GenerateActors(t Trial) Actors {
 	}
 }
 
+// ackHoldPct is the share of trials whose actors acknowledge a hold.
+const ackHoldPct = 40
+
+// metaFaultClasses is the number of OpPFMetaFault classes (Op.K).
+const metaFaultClasses = 3
+
+// Long outages (K036): a status denial past the 2m stall deadline and a
+// manager absence past the 5m manager-absent deadline, in polls of 1s, so
+// the stall markers and the ManagerUnavailable end are generated, not only
+// pinned by component tests. They outlive HealAt: healAll leaves them, and
+// the settle window starts when the last one ends.
+const (
+	longOutagePct          = 25
+	longStatusDenialPolls  = 130
+	longManagerAbsentPolls = 310
+	longOutageSpread       = 40
+	// longOutageLead bounds how many polls after a request a long outage
+	// starts.
+	longOutageLead = 8
+)
+
+// settleStart is the first poll of t's fault-free settle window: HealAt, or
+// the end of a long outage that outlives it.
+func (t Trial) settleStart() int {
+	start := t.HealAt
+	for _, op := range t.Actors.ActiveOps() {
+		if op.Kind == OpPFStatusDeniedLong || op.Kind == OpManagerAbsentLong {
+			start = max(start, op.At+op.N)
+		}
+	}
+	return start
+}
+
 // GeneratePlannedTrial is GenerateTrial(seed) with the actors enabled: the
 // same fault schedule, plus the actor schedule.
 func GeneratePlannedTrial(seed uint64) Trial {
@@ -212,7 +296,7 @@ func GeneratePlannedTrial(seed uint64) Trial {
 	t.Actors = GenerateActors(t)
 	// A request made just before HealAt may wait out its admission
 	// deadline: the settle window must let every run end.
-	t.Polls = t.HealAt + max(t.Polls-t.HealAt, plannedSettlePolls)
+	t.Polls = t.settleStart() + max(t.Polls-t.HealAt, plannedSettlePolls)
 	return t
 }
 

@@ -24,7 +24,7 @@ Five criteria, integer weights summing to 100. Graded against the learner's `brd
 
 ### The verdict separates what the drill proved from what it did not — 20
 
-`verdict` claims RPO 0 only for a planned failover that reached `Succeeded` with `transactionsLost: 0`, and attributes it to the GTID superset gate rather than to the measured gap. A planned failover in any other phase, and every emergency failover, return a not-established string. Credit is lost if a write-gap is anywhere presented as an RPO, or if an emergency drill is allowed to claim zero loss.
+`verdict` claims RPO 0 only for a planned failover that reached `Succeeded` with `result.outcome: Succeeded`, and attributes it to the GTID superset gate rather than to the measured gap. A planned failover in any other phase or with any other outcome, and every emergency failover, return a not-established string. Credit is lost if a write-gap is anywhere presented as an RPO, or if an emergency drill is allowed to claim zero loss.
 
 ### The drill record is a usable operational artefact — 15
 

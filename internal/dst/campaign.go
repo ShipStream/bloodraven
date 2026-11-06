@@ -36,6 +36,9 @@ type CampaignConfig struct {
 	// ShrinkFailures minimizes the first failing trial of each distinct
 	// fingerprint down to a minimal fault schedule.
 	ShrinkFailures bool
+	// Planned runs the actors-on trials (GeneratePlannedTrial), and shrinks
+	// over both the fault ops and the actor ops (K090).
+	Planned bool
 }
 
 // Failure is one distinct failure fingerprint with a shrunk reproduction.
@@ -90,7 +93,10 @@ func fingerprint(violations []Violation) string {
 				key = "CooldownViolated(restart+stateLost)"
 			}
 		}
-		if strings.Contains(v.Detail, replacedBeforeRecordMarker) &&
+		// The inherent restart+stateLost class keeps precedence over the
+		// replacement tag (K171): both durable paths rejected the record
+		// across the restart, whichever manager made it.
+		if strings.Contains(v.Detail, replacedBeforeRecordMarker) && key != "CooldownViolated(restart+stateLost)" &&
 			(v.Invariant == "AntiFlapStateLost" || v.Invariant == "CooldownViolated" || v.Invariant == "WedgedNoPrimary") {
 			key = v.Invariant + "(replacement)"
 		}
@@ -145,7 +151,7 @@ func RunCampaign(cfg CampaignConfig, progress func(string)) CampaignResult {
 		if cfg.MaxTrials > 0 && res.Trials+batchSize > cfg.MaxTrials {
 			batchSize = cfg.MaxTrials - res.Trials // honor the cap exactly
 		}
-		batch := runBatch(seed, batchSize, cfg.Workers)
+		batch := runBatch(seed, batchSize, cfg.Workers, cfg.generate())
 		seed += uint64(batchSize)
 		res.Trials += batchSize
 		res.Batches++
@@ -198,9 +204,9 @@ func RunCampaign(cfg CampaignConfig, progress func(string)) CampaignResult {
 		f := failures[fp]
 		if cfg.ShrinkFailures {
 			progress("shrinking " + fp + " (seed " + fmt.Sprint(f.FirstSeed) + ")")
-			f.Repro, f.ReproViolations = Shrink(f.FirstSeed, fp)
+			f.Repro, f.ReproViolations = ShrinkTrial(cfg.generate()(f.FirstSeed), fp)
 		} else {
-			f.Repro = GenerateTrial(f.FirstSeed)
+			f.Repro = cfg.generate()(f.FirstSeed)
 			f.ReproViolations = f.Violations
 		}
 		res.Failures = append(res.Failures, *f)
@@ -209,7 +215,15 @@ func RunCampaign(cfg CampaignConfig, progress func(string)) CampaignResult {
 	return res
 }
 
-func runBatch(startSeed uint64, n, workers int) []TrialResult {
+// generate is the campaign's trial generator.
+func (cfg CampaignConfig) generate() func(uint64) Trial {
+	if cfg.Planned {
+		return GeneratePlannedTrial
+	}
+	return GenerateTrial
+}
+
+func runBatch(startSeed uint64, n, workers int, gen func(uint64) Trial) []TrialResult {
 	results := make([]TrialResult, n)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, workers)
@@ -219,7 +233,7 @@ func runBatch(startSeed uint64, n, workers int) []TrialResult {
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = RunTrial(GenerateTrial(startSeed+uint64(i)), false, nil)
+			results[i] = RunTrial(gen(startSeed+uint64(i)), false, nil)
 		}(i)
 	}
 	wg.Wait()
@@ -231,8 +245,16 @@ func runBatch(startSeed uint64, n, workers int) []TrialResult {
 // violations. Deterministic replay makes this exact: same seed + same mask =
 // same run.
 func Shrink(seed uint64, wantFingerprint string) (Trial, []Violation) {
-	trial := GenerateTrial(seed)
+	return ShrinkTrial(GenerateTrial(seed), wantFingerprint)
+}
+
+// ShrinkTrial is Shrink for any generated trial: with actors on it masks
+// the actor ops (Actors.Skip) as well as the fault ops (K090).
+func ShrinkTrial(trial Trial, wantFingerprint string) (Trial, []Violation) {
 	trial.Skip = make([]bool, len(trial.Ops))
+	if trial.Actors.Enabled {
+		trial.Actors.Skip = make([]bool, len(trial.Actors.Ops))
+	}
 
 	still := func(t Trial) ([]Violation, bool) {
 		r := RunTrial(t, false, nil)
@@ -246,19 +268,22 @@ func Shrink(seed uint64, wantFingerprint string) (Trial, []Violation) {
 		return trial, best
 	}
 
-	// Pass 1..k: try dropping each active op until a full pass removes none.
+	// Pass 1..k: try dropping each active op of either schedule until a full
+	// pass removes none.
 	for changed := true; changed; {
 		changed = false
-		for i := range trial.Ops {
-			if trial.Skip[i] {
-				continue
-			}
-			trial.Skip[i] = true
-			if v, ok := still(trial); ok {
-				best = v
-				changed = true
-			} else {
-				trial.Skip[i] = false
+		for _, mask := range [][]bool{trial.Skip, trial.Actors.Skip} {
+			for i := range mask {
+				if mask[i] {
+					continue
+				}
+				mask[i] = true
+				if v, ok := still(trial); ok {
+					best = v
+					changed = true
+				} else {
+					mask[i] = false
+				}
 			}
 		}
 	}

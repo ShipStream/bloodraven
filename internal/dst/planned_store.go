@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -64,10 +66,21 @@ type simPlannedStore struct {
 	script       []storeFault
 	late         []lateCommit
 	statusDenied int // polls left
-	readOutage   int // polls left
+	// statusDeniedLong is the part of statusDenied a long outage (K036)
+	// keeps past heal-all, in polls left.
+	statusDeniedLong int
+	readOutage       int // polls left
 	// settleOutage fails this many settlement reads (not the pass's Load):
 	// a read outage that starts between a write and its settlement.
 	settleOutage int
+	// fenceSeq counts settlement fences (their distinct nanoseconds).
+	fenceSeq int64
+	// yield is the scheduler's yield between a snapshot write's read and
+	// its commit (nil: none).
+	yield func(point string)
+	// metaScript scripts the outcome of the next engine metadata writes
+	// (MetaFaults).
+	metaScript []metaFault
 
 	// onCommit observes every committed change (kind names the writer)
 	// with the object before and after; invariants hang off it.
@@ -184,6 +197,33 @@ func (s *simPlannedStore) DenyStatus(n int) {
 	s.statusDenied = max(s.statusDenied, n)
 }
 
+// metaFault is a scripted outcome for the next engine metadata write.
+type metaFault int
+
+const (
+	metaFaultLost      metaFault = iota // timed out, never committed
+	metaFaultAmbiguous                  // committed, the response lost
+	metaFaultForbidden                  // 403, nothing committed
+)
+
+// MetaFaults makes the next n engine metadata writes fail with class k
+// (OpPFMetaFault's K).
+func (s *simPlannedStore) MetaFaults(n, k int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for range n {
+		s.metaScript = append(s.metaScript, metaFault(k))
+	}
+}
+
+// DenyStatusLong is DenyStatus for an outage that outlives heal-all.
+func (s *simPlannedStore) DenyStatusLong(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statusDenied = max(s.statusDenied, n)
+	s.statusDeniedLong = max(s.statusDeniedLong, n)
+}
+
 // ReadOutage fails uncached reads for n polls.
 func (s *simPlannedStore) ReadOutage(n int) {
 	s.mu.Lock()
@@ -191,13 +231,15 @@ func (s *simPlannedStore) ReadOutage(n int) {
 	s.readOutage = max(s.readOutage, n)
 }
 
-// ClearFaults drops every scripted and timed fault (heal-all). Pending late
-// commits stay: they are requests already in flight.
+// ClearFaults drops every scripted and timed fault (heal-all) except a long
+// status denial, which runs its course. Pending late commits stay: they
+// are requests already in flight.
 func (s *simPlannedStore) ClearFaults() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.script = nil
-	s.statusDenied = 0
+	s.metaScript = nil
+	s.statusDenied = s.statusDeniedLong
 	s.readOutage = 0
 }
 
@@ -209,6 +251,7 @@ func (s *simPlannedStore) BeginPoll(p int) {
 	if p > s.poll {
 		elapsed := p - s.poll
 		s.statusDenied = max(0, s.statusDenied-elapsed)
+		s.statusDeniedLong = max(0, s.statusDeniedLong-elapsed)
 		s.readOutage = max(0, s.readOutage-elapsed)
 	}
 	s.poll = p
@@ -259,10 +302,36 @@ func (s *simPlannedStore) Log() []storeOp {
 	return append([]storeOp(nil), s.log...)
 }
 
-// MergeSnapshot is the topology manager's status write: the runner merges
-// the snapshot through the production MergeTopologySnapshotStatus. It
+// MergeSnapshot is the topology manager's status write, in the runner's
+// two steps (updateCRStatus, K042): read the group and merge the snapshot
+// into that status through the production MergeTopologySnapshotStatus;
+// then, possibly after other writers have moved on (a scheduler yield),
+// re-read it and write the computed status back over the fresh object,
+// keeping from the fresh one only the subtrees the runner preserves (the
+// planned-failover block and hold, the reconciler-owned conditions). A
+// field outside those is written back as it was at the first read. It
 // fails while status writes are denied.
 func (s *simPlannedStore) MergeSnapshot(snap controller.TopologySnapshot) error {
+	s.mu.Lock()
+	if s.obj == nil {
+		s.mu.Unlock()
+		return errStoreGone
+	}
+	if s.statusDeniedLocked() {
+		s.logLocked("snapshot", "forbidden")
+		s.mu.Unlock()
+		return errStoreForbidden
+	}
+	computed := *s.obj.Status.DeepCopy()
+	if !controller.MergeTopologySnapshotStatus(&computed, snap) {
+		s.logLocked("snapshot", "stale generation")
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+	if s.yield != nil {
+		s.yield(YieldSnapshotCommit)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.obj == nil {
@@ -272,14 +341,29 @@ func (s *simPlannedStore) MergeSnapshot(snap controller.TopologySnapshot) error 
 		s.logLocked("snapshot", "forbidden")
 		return errStoreForbidden
 	}
-	next := *s.obj.Status.DeepCopy()
-	if !controller.MergeTopologySnapshotStatus(&next, snap) {
-		s.logLocked("snapshot", "stale generation")
+	fresh := s.obj.Status
+	if fresh.TopologyGeneration > snap.TopologyGeneration {
+		s.logLocked("snapshot", "superseded")
 		return nil
+	}
+	next := *computed.DeepCopy()
+	next.PlannedFailover = fresh.PlannedFailover.DeepCopy()
+	next.PlannedFailoverHold = fresh.PlannedFailoverHold.DeepCopy()
+	for _, t := range runnerPreservedConditions {
+		if c := apimeta.FindStatusCondition(fresh.Conditions, t); c != nil {
+			apimeta.SetStatusCondition(&next.Conditions, *c)
+		} else {
+			apimeta.RemoveStatusCondition(&next.Conditions, t)
+		}
 	}
 	s.commitStatusLocked("snapshot", next)
 	return nil
 }
+
+// runnerPreservedConditions are the reconciler-owned conditions the
+// runner's status write re-reads instead of replaying (runner.go
+// reconcilerOwnedConditions) that the simulated group carries.
+var runnerPreservedConditions = []string{v1alpha1.ConditionAutomaticFailoverHeld}
 
 // PatchAnnotations is an unconditioned JSON merge patch of metadata (the
 // out-of-band failover record today; "" deletes a key).
@@ -453,10 +537,19 @@ func (s *simPlannedStore) settle(_ context.Context, base *v1alpha1.MysqlFailover
 		}
 		// rv == base: fence it. The fence is a conditioned metadata write
 		// on base, so once it lands the pending write's precondition can
-		// never hold again.
+		// never hold again. Production stamps a nanosecond wall-clock
+		// instant; the fake clock moves once per poll, so each fence adds
+		// its own nanosecond to keep two fences of one tick distinct
+		// (K029). A fence that moved nothing proves nothing: Unknown.
+		s.fenceSeq++
 		s.patchAnnotationsLocked("statusFence", map[string]string{
-			controller.PlannedFailoverStatusFenceAnnotation: controller.FormatStatusFenceValue(s.clk.Now()),
+			controller.PlannedFailoverStatusFenceAnnotation: controller.FormatStatusFenceValue(
+				s.clk.Now().Add(time.Duration(s.fenceSeq))),
 		})
+		if s.rv == baseRV {
+			s.logLocked("settle", "unknown (fence changed nothing)")
+			return controller.WriteUnknown, errStoreTimeout
+		}
 		s.logLocked("settle", "not committed (fenced)")
 		return controller.WriteNotCommitted, errStoreTimeout
 	}
@@ -534,10 +627,22 @@ func (s *simPlannedStore) ClearDeadlineStart(_ context.Context, base *v1alpha1.M
 func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string,
 	final *v1alpha1.PlannedFailoverStatus) (controller.WriteOutcome, error) {
 	status := *base.Status.DeepCopy()
+	changed := false
 	if final != nil {
 		status.PlannedFailover = final.DeepCopy()
+		changed = true
 	}
-	controller.ClearPlannedHold(&status, runID, base.Generation, s.clk.Now())
+	if controller.ClearPlannedHold(&status, runID, base.Generation, s.clk.Now()) {
+		changed = true
+	}
+	if !changed {
+		// As production: nothing to change from base is a no-op success
+		// with no API call, so it cannot meet a fault (K106).
+		s.mu.Lock()
+		s.logLocked("clearHold "+runID, "no-op (base)")
+		s.mu.Unlock()
+		return controller.WriteCommitted, nil
+	}
 	committed := func(cur *v1alpha1.MysqlFailoverGroup) bool {
 		if holdNames(&cur.Status, runID) {
 			return false
@@ -555,7 +660,7 @@ func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFai
 func (s *simPlannedStore) DeleteHoldAck(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
 	runID string) (controller.WriteOutcome, error) {
 	return s.metadataWrite("deleteHoldAck", base, func(a map[string]string) map[string]string {
-		if a[controller.AcknowledgePlannedFailoverHoldAnnotation] != runID {
+		if v, ok := a[controller.AcknowledgePlannedFailoverHoldAnnotation]; !ok || strings.TrimSpace(v) != runID {
 			return nil
 		}
 		return map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: ""}
@@ -563,12 +668,19 @@ func (s *simPlannedStore) DeleteHoldAck(_ context.Context, base *v1alpha1.MysqlF
 }
 
 // metadataWrite is a MergeFromWithOptimisticLock patch on base: patch
-// computes the change from the current annotations (nil: nothing to do,
-// which commits without moving the resourceVersion).
+// computes the change from base's annotations, as production's
+// patchAnnotations edits a copy of base. Nothing to change (nil) is a
+// no-op success with no API call: no death, gone or resourceVersion check
+// can fail it (K106).
 func (s *simPlannedStore) metadataWrite(op string, base *v1alpha1.MysqlFailoverGroup,
 	patch func(map[string]string) map[string]string) (controller.WriteOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	kv := patch(base.GetAnnotations())
+	if kv == nil {
+		s.logLocked(op, "no-op (base)")
+		return controller.WriteCommitted, nil
+	}
 	if s.deadLocked() {
 		return controller.WriteUnknown, errOperatorDead
 	}
@@ -576,14 +688,29 @@ func (s *simPlannedStore) metadataWrite(op string, base *v1alpha1.MysqlFailoverG
 		s.logLocked(op, "gone")
 		return controller.WriteGone, errStoreGone
 	}
+	if len(s.metaScript) > 0 {
+		f := s.metaScript[0]
+		s.metaScript = s.metaScript[1:]
+		switch f {
+		case metaFaultLost:
+			s.logLocked(op, "timeout, not committed (injected)")
+			return controller.WriteUnknown, errStoreTimeout
+		case metaFaultForbidden:
+			s.logLocked(op, "forbidden (injected)")
+			return controller.WriteNotCommitted, errStoreForbidden
+		case metaFaultAmbiguous:
+			if baseRV := parseRV(base.ResourceVersion); baseRV != s.rv {
+				s.logLocked(op, "conflict, response lost (injected)")
+				return controller.WriteUnknown, errStoreTimeout
+			}
+			s.patchAnnotationsLocked(op, kv)
+			s.logLocked(op, "committed, response lost (injected)")
+			return controller.WriteUnknown, errStoreTimeout
+		}
+	}
 	if baseRV := parseRV(base.ResourceVersion); baseRV != s.rv {
 		s.logLocked(op, fmt.Sprintf("conflict (rv %d != base %d)", s.rv, baseRV))
 		return controller.WriteConflict, errStoreConflict
-	}
-	kv := patch(s.obj.GetAnnotations())
-	if kv == nil {
-		s.logLocked(op, "no-op")
-		return controller.WriteCommitted, nil
 	}
 	s.patchAnnotationsLocked(op, kv)
 	s.logLocked(op, "committed")

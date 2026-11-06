@@ -157,6 +157,26 @@ func (c *Cluster) heldElsewhereLocked(s *siteData, snap gtidVec) bool {
 // incarnation booted read_only=ON with super_read_only OFF, replica
 // threads auto-starting when channel metadata exists. A crashed site is
 // left alone (Recover brings it back).
+// AppWrite lands one application write on site when it is writable, as
+// Tick's application writes do; it reports whether one landed. The
+// restart-promoted-target fault uses it to put the target's own
+// post-promotion transactions in the window between its read_only=OFF and
+// its restart, which Tick (run before the actors each poll) cannot reach.
+func (c *Cluster) AppWrite(site string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.byName[site]
+	if s == nil || s.crashed || s.readOnly || s.superReadOnly {
+		return false
+	}
+	s.executed[s.serverUUID]++
+	s.hasData = true
+	if c.acked[s.serverUUID] < s.executed[s.serverUUID] {
+		c.acked[s.serverUUID] = s.executed[s.serverUUID]
+	}
+	return true
+}
+
 func (c *Cluster) RestartSite(site string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

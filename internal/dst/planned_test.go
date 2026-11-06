@@ -66,6 +66,12 @@ func TestGenerateActors_ShapeAndCoverage(t *testing.T) {
 			if op.At < tr.WarmupPolls {
 				t.Fatalf("seed %d: actor op %s inside warmup", seed, op)
 			}
+			// The settle window is fault-free (K105): every actor op lands
+			// before it, companion restarts of a status denial included.
+			if op.At >= tr.settleStart() {
+				t.Fatalf("seed %d: actor op %s inside the settle window (HealAt %d, settle from %d)",
+					seed, op, tr.HealAt, tr.settleStart())
+			}
 			if op.Kind == OpPlannedFailover {
 				switch op.Site {
 				case tr.SiteNames[0]:
@@ -90,7 +96,7 @@ func TestGenerateActors_ShapeAndCoverage(t *testing.T) {
 			t.Errorf("actor fault kind %s never generated", w.kind)
 		}
 	}
-	for _, k := range []OpKind{OpOrderedUpdate, OpReplaceManager, OpRestartOperator} {
+	for _, k := range []OpKind{OpOrderedUpdate, OpReplaceManager, OpRestartOperator, OpPFStatusDeniedLong, OpManagerAbsentLong} {
 		if kinds[k] == 0 {
 			t.Errorf("actor op %s never generated", k)
 		}
@@ -217,7 +223,9 @@ func TestDST_PlannedQuick(t *testing.T) {
 }
 
 // TestDST_PlannedRepro replays one actors-on seed with full capture.
-// Usage: DST_SEED=12345 go test ./internal/dst -run PlannedRepro -v
+// Usage: DST_SEED=12345 [DST_SKIP=0,3] [DST_ACTOR_SKIP=1,4] go test ./internal/dst -run PlannedRepro -v
+// DST_SKIP masks fault ops and DST_ACTOR_SKIP actor ops, by index in the
+// printed schedules (K090).
 func TestDST_PlannedRepro(t *testing.T) {
 	seedStr := os.Getenv("DST_SEED")
 	if seedStr == "" {
@@ -228,6 +236,8 @@ func TestDST_PlannedRepro(t *testing.T) {
 		t.Fatalf("bad DST_SEED: %v", err)
 	}
 	trial := GeneratePlannedTrial(seed)
+	trial.Skip = parseSkipMask(t, "DST_SKIP", len(trial.Ops))
+	trial.Actors.Skip = parseSkipMask(t, "DST_ACTOR_SKIP", len(trial.Actors.Ops))
 	t.Logf("trial:\n%s", trial)
 	var handler slog.Handler
 	if os.Getenv("DST_LOG") != "" {
@@ -243,5 +253,49 @@ func TestDST_PlannedRepro(t *testing.T) {
 	t.Logf("yields %v; unsupported actor ops %v; stats %+v", r.Planned.Yields, r.Planned.Unsupported, r.Planned.Stats)
 	for _, v := range r.Violations {
 		t.Logf("VIOLATION: %s", v)
+	}
+}
+
+// parseSkipMask reads a comma-separated op-index mask from env (nil when
+// unset).
+func parseSkipMask(t *testing.T, env string, n int) []bool {
+	t.Helper()
+	v := os.Getenv(env)
+	if v == "" {
+		return nil
+	}
+	mask := make([]bool, n)
+	for _, part := range splitCommas(v) {
+		i, err := strconv.Atoi(part)
+		if err != nil || i < 0 || i >= n {
+			t.Fatalf("bad %s entry %q", env, part)
+		}
+		mask[i] = true
+	}
+	return mask
+}
+
+// TestShrinkTrial_MasksActorOps: the shrinker minimizes a planned failure
+// over the actor schedule too (K090): ops the failure does not need are
+// masked, the ones it needs stay, and the shrunk trial reproduces it.
+func TestShrinkTrial_MasksActorOps(t *testing.T) {
+	tr := twoSiteHandTrial(15, true, 40)
+	tr.Actors = Actors{Enabled: true, Ops: []Op{
+		{At: 10, Kind: OpPlannedFailover, Site: "beta"},
+		{At: 11, Kind: OpOOBLateWrite},
+		{At: 12, Kind: OpPFStatusDeniedLong, N: 1000}, // the run outlives the trial
+		{At: 13, Kind: OpReplacePod, Site: "alpha"},
+	}}
+	r := RunTrial(tr, false, nil)
+	if !r.Failed() {
+		t.Fatal("the hand trial does not fail")
+	}
+	fp := fingerprint(r.Violations)
+	shrunk, v := ShrinkTrial(tr, fp)
+	if fingerprint(v) != fp {
+		t.Fatalf("shrunk trial fingerprint %s, want %s", fingerprint(v), fp)
+	}
+	if shrunk.Actors.Skip == nil || shrunk.Actors.Skip[0] || shrunk.Actors.Skip[2] || !shrunk.Actors.Skip[1] || !shrunk.Actors.Skip[3] {
+		t.Fatalf("actor mask %v, want the request and the denial kept and the rest masked (fingerprint %s)", shrunk.Actors.Skip, fp)
 	}
 }

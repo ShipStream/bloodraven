@@ -60,6 +60,9 @@ const (
 	// OpManagerAbsent leaves the group with no registered manager for N
 	// polls.
 	OpManagerAbsent OpKind = "managerAbsent"
+	// OpManagerAbsentLong is OpManagerAbsent past the manager-absent
+	// deadline; it survives heal-all (Trial.settleStart).
+	OpManagerAbsentLong OpKind = "managerAbsentLong"
 	// OpPFWriteLost: the next N engine status writes time out uncommitted.
 	OpPFWriteLost OpKind = "pfWriteLost"
 	// OpPFWriteAmbiguous: the next N engine status writes commit and time
@@ -73,6 +76,9 @@ const (
 	// OpPFStatusDenied: status writes are forbidden for N polls while
 	// metadata writes work.
 	OpPFStatusDenied OpKind = "pfStatusDenied"
+	// OpPFStatusDeniedLong is OpPFStatusDenied past the stall deadline; it
+	// survives heal-all (Trial.settleStart).
+	OpPFStatusDeniedLong OpKind = "pfStatusDeniedLong"
 	// OpOOBLateWrite replays an older out-of-band failover record late.
 	OpOOBLateWrite OpKind = "oobLateWrite"
 	// OpRestartPromotedTarget restarts a run's target K yields after the
@@ -82,9 +88,19 @@ const (
 	// K ticks (#218).
 	OpReplacePod OpKind = "replacePod"
 
-	// opPFSettleOutage fails the next N settlement reads only. Never
-	// generated: hand-built trials use it to reach a settlement that ends
-	// Unknown (an ambiguous write while the API server stops answering).
+	// OpPFMetaFault: the next N engine metadata writes (terminal marker,
+	// request consumption, deadline annotations, acknowledgement cleanup)
+	// fail with class K: 0 timed out uncommitted, 1 committed with the
+	// response lost, 2 forbidden (K184).
+	OpPFMetaFault OpKind = "pfMetaFault"
+	// OpPFAckHold arms a human acknowledgement: K polls after an automation
+	// hold first stands, the acknowledgement annotation is set to the held
+	// run's ID (N=1: padded with whitespace, which the operator trims).
+	// Only inside the fault window (K174).
+	OpPFAckHold OpKind = "pfAckHold"
+	// opPFSettleOutage fails the next N settlement reads only: a settlement
+	// that ends Unknown (an ambiguous write while the API server stops
+	// answering). Generated only as the companion of an OpPFWriteLate.
 	opPFSettleOutage OpKind = "pfSettleOutage"
 )
 

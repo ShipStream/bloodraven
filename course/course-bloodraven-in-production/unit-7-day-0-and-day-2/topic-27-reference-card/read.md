@@ -26,9 +26,9 @@ quote a version, an issue number or a documentation defect.
 | `sidecar.peerCheckInterval` | `5s` | same | Sidecar tick. CEL: ≥ 1 s. 20 / 5 = **4 ticks** of silence before a lease fence. |
 | relay-log drain | `30s` | same | Step 3 of the promotion. Done when `Executed_Gtid_Set` contains the `Retrieved_Gtid_Set` read at its first poll; only an SQL-thread error ends it early. Non-fatal on timeout. |
 | source convergence | `20s` | same | A separate poll stage, not a failover step. |
-| `plannedFailover.maxLagWait` | `5m` | same | The GTID-superset gate. Rollback lives here. |
+| `plannedFailover.maxLagWait` | `5m` | same | The GTID-superset gate. Expiry rolls back (`RolledBack{LagTimeout}`): nothing was written to the target yet. |
 | `plannedFailover.drainTimeout` | `30s` | same | Connection drain before the write endpoint moves. Exhaustion proceeds anyway. |
-| `plannedFailover.onCooldown` | `reject` | same | `defer` parks the request instead of refusing it. |
+| `plannedFailover.onCooldown` | `Reject` | same | `Defer` parks the request instead of refusing it. CamelCase only: the CRD rejects `reject`/`defer`. |
 | `dragonfly.plannedFailover.maxSyncWait` | `30s` | same | Also the `REPLTAKEOVER` timeout argument; the client waits 12 s beyond it for the reply. |
 | Dragonfly emergency steps | 1 s probe, 2 s takeover, ≤ 14 s fallback, 5 s other steps | same | Hard-coded, per step. MySQL only queues the promotion, so failover is never delayed by cache. |
 | `backup.maxLagSecondsForSource` | `300` | — | Picks the backup source. A different setting from `maxLagSeconds`, with the same default. |
