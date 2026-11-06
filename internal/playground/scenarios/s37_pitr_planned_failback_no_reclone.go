@@ -312,7 +312,7 @@ func s37RestoreInsideBEra() runner.Step {
 				return err
 			}
 			if err := assertPITRResult(env, "restore "+s37Restored, rs.PointInTime, pitrExpectation{
-				Backup: "b1", Mode: "timestamp", Fence: f2, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Backup: "b1", Mode: "timestamp", Fence: f2, Outcome: v1alpha1.PointInTimeTargetCovered, TargetLocal: true,
 			}); err != nil {
 				return err
 			}

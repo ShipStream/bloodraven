@@ -746,3 +746,23 @@ func TestPITRReaderSites(t *testing.T) {
 		t.Fatalf("pitrReaderSites=%v, want [reader]", got)
 	}
 }
+
+func TestPITROnlyTargetLocalExtra(t *testing.T) {
+	const a, b, local = "808ed4dd-d9b6-11f1-9bac-4a9f5150b22b", "80925e8f-d9b6-11f1-ad00-766dbd96b6d1", "685eca8a-d9b7-11f1-a3cb-8a03027c3685"
+	want := a + ":1-12,\n" + b + ":1-12"
+	for _, tc := range []struct {
+		name string
+		got  string
+		ok   bool
+	}{
+		{"exact", want, true},
+		{"target-local extra", local + ":1-9,\n" + a + ":1-12,\n" + b + ":1-12", true},
+		{"extra history transaction", a + ":1-13,\n" + b + ":1-12", false},
+		{"missing history transaction", local + ":1-9,\n" + a + ":1-11,\n" + b + ":1-12", false},
+	} {
+		ok, err := pitrOnlyTargetLocalExtra(tc.got, want)
+		if err != nil || ok != tc.ok {
+			t.Errorf("%s: ok=%t err=%v, want %t", tc.name, ok, err, tc.ok)
+		}
+	}
+}

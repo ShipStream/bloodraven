@@ -603,6 +603,47 @@ func gtidSetsEqual(a, b string) (bool, error) {
 	return as.Contains(bs) && bs.Contains(as), nil
 }
 
+// pitrOnlyTargetLocalExtra reports whether got holds every GTID of want and
+// its extra GTIDs all belong to server UUIDs absent from want: the restore
+// target's own first-boot transactions, never a transaction of the restored
+// history.
+func pitrOnlyTargetLocalExtra(got, want string) (bool, error) {
+	missing, err := gtidSubtract(want, got)
+	if err != nil || missing != "" {
+		return false, err
+	}
+	extra, err := gtidSubtract(got, want)
+	if err != nil {
+		return false, err
+	}
+	history := map[string]bool{}
+	for _, u := range gtidSetUUIDs(want) {
+		history[u] = true
+	}
+	for _, u := range gtidSetUUIDs(extra) {
+		if history[u] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// gtidSetUUIDs lists the server UUIDs of a canonical GTID set string
+// ("uuid[:tag]:intervals,…").
+func gtidSetUUIDs(set string) []string {
+	var out []string
+	for _, part := range strings.Split(strings.ReplaceAll(set, "\n", ""), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if i := strings.Index(part, ":"); i > 0 {
+			out = append(out, strings.ToLower(part[:i]))
+		}
+	}
+	return out
+}
+
 // gtidSubtract returns a ∖ b, canonical.
 func gtidSubtract(a, b string) (string, error) {
 	as, err := brmysql.ParseGTIDSet(a)
@@ -744,6 +785,11 @@ type pitrExpectation struct {
 	Outcome v1alpha1.PointInTimeOutcome
 	// Markers are this run's marker phases the result must hold, in order.
 	Markers []string
+	// TargetLocal accepts, on a restore, the target server's own
+	// transactions (users and grants its first boot wrote), which restore.py
+	// keeps and certifies: gtidExecuted may hold extra GTIDs only under
+	// server UUIDs that appear nowhere in the expected history.
+	TargetLocal bool
 }
 
 // expectedSet is the fenced set minus excludeGtids.
@@ -792,6 +838,13 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 	equal, err := gtidSetsEqual(res.GtidExecuted, want)
 	if err != nil {
 		return fmt.Errorf("%s: %w", what, err)
+	}
+	if !equal && e.TargetLocal {
+		if ok, err := pitrOnlyTargetLocalExtra(res.GtidExecuted, want); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		} else if ok {
+			equal = true
+		}
 	}
 	if !equal {
 		extra, _ := gtidSubtract(res.GtidExecuted, want)
