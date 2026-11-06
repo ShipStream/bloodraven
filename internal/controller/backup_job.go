@@ -13,6 +13,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 const (
@@ -83,6 +84,16 @@ type BackupJobInputs struct {
 	// ScriptsConfigMapName is the shared per-group ConfigMap holding the
 	// embedded dump.py script.
 	ScriptsConfigMapName string
+	// DumpKeySecretName is the backup's own immutable dump-key snapshot
+	// (#203, I-17), required for an encrypted profile: the encrypt-upload
+	// container and the backup-stamp init container mount its "passphrase"
+	// key under the backup-passphrase volume, so
+	// status.artifactStorage.passphraseSecret records it (Δ1). The user's
+	// Secret is never mounted.
+	DumpKeySecretName string
+	// PITRArchiveID is the archive ID the group's rendered writers archive
+	// to ("" when they archive nothing), stamped into the backup (K5, Δ30).
+	PITRArchiveID string
 }
 
 // BuildBackupJob renders a batchv1.Job that executes mysqlsh
@@ -283,7 +294,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	// The Job's annotations carry the same UID and archive ID, so status
 	// is recovered from the Job even when the status patch after create
 	// is lost.
-	stamp, err := backupStampTemplate(fg, backup, in.Profile, in.SourceSite)
+	stamp, err := backupStampTemplate(fg, backup, in.Profile, in.SourceSite, in.PITRArchiveID)
 	if err != nil {
 		return nil, err
 	}
@@ -410,6 +421,9 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		if encryption.PassphraseSecret.Name == "" {
 			return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecret.name", in.Profile.Name)
 		}
+		if in.DumpKeySecretName == "" {
+			return nil, fmt.Errorf("backup job: profile %q is encrypted but no dump-key snapshot was given", in.Profile.Name)
+		}
 		if operatorImageFromEnv == "" {
 			return nil, fmt.Errorf("backup job: operator image is not configured (SetOperatorImageDefaults); required for encrypted profile %q", in.Profile.Name)
 		}
@@ -464,11 +478,11 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 			Name: "backup-passphrase",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  encryption.PassphraseSecret.Name,
+					SecretName:  in.DumpKeySecretName,
 					DefaultMode: ptr32(0o400),
 					Items: []corev1.KeyToPath{
 						{
-							Key:  encryption.PassphraseSecret.PassphraseSecretKeyOrDefault(),
+							Key:  pitrKeySnapshotDataKey,
 							Path: backupPassphraseFileName,
 						},
 					},
@@ -596,7 +610,11 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 // but serverClock and createdAt, which the Job adds. ServerID is the
 // source site's server-id (101 + its index in spec.sites, F26), which the
 // backup-stamp init container checks against the server it reaches.
-func backupStampTemplate(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile v1alpha1.BackupProfile, sourceSite string) (backupmeta.Stamp, error) {
+//
+// archiveID is the archive the group's rendered writers archive to (K5):
+// a backup is a PITR baseline only for the archive the pods actually
+// write, which a held render can keep on the previous prefix.
+func backupStampTemplate(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile v1alpha1.BackupProfile, sourceSite, archiveID string) (backupmeta.Stamp, error) {
 	serverID := uint32(0)
 	for i, site := range fg.Spec.Sites {
 		if site.Name == sourceSite {
@@ -607,9 +625,8 @@ func backupStampTemplate(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.Mysql
 	if serverID == 0 {
 		return backupmeta.Stamp{}, fmt.Errorf("backup job: source site %q is not in spec.sites", sourceSite)
 	}
-	archiveID := ""
-	if ident, ok := activePITRArchiveIdentity(fg); ok {
-		archiveID = ident.ArchiveID
+	if archiveID != "" && !pitrarchive.ValidArchiveID(archiveID) {
+		return backupmeta.Stamp{}, fmt.Errorf("backup job: PITR archive ID %q is not an archive ID", archiveID)
 	}
 	var filters backupmeta.DumpFilters
 	if d := profile.Dump; d != nil {

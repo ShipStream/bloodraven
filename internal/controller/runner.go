@@ -804,6 +804,15 @@ func (r *TopologyManagerRunner) removeRecloneAnnotationForSite(ctx context.Conte
 // checkSpecDrift compares the desired spec hash for each site against the live
 // Deployment annotation. If they differ, it records the drifted sites on the
 // topology manager so the next poll cycle can trigger an ordered update.
+//
+// The desired hash includes the group's resolved PITR render (§4.6), which
+// depends on status.pitrArchiveBindings and the Deployments' render
+// annotations. A listed copy of the group can lag the reconciler's binding
+// write, so drift found on cached reads is confirmed against the group and
+// its Deployments read through the APIReader (S5): only sites that still
+// differ are recorded, and a failed re-read keeps the current set. A site
+// the render defers (row 4d: no decodable annotation, no authenticated
+// candidate) is never drift.
 func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, tm *TopologyManager) {
 	// Skip if the updater is already running.
 	if tm.isUpdating() {
@@ -817,45 +826,86 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 		return
 	}
 
+	driftSites, ok := r.specDriftSites(ctx, r.client, fg)
+	if !ok {
+		return
+	}
+	if len(driftSites) > 0 && r.apiReader != nil {
+		var fresh v1alpha1.MysqlFailoverGroup
+		if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &fresh); err != nil {
+			r.logger.Warn("failed to confirm spec drift with an uncached read; preserving current drift set", "error", err)
+			return
+		}
+		confirmed, ok := r.specDriftSites(ctx, r.apiReader, &fresh)
+		if !ok {
+			return
+		}
+		driftSites = confirmed
+	}
+
+	tm.SetSpecDriftSites(driftSites)
+}
+
+// specDriftSites returns the sites of fg whose Deployment (read through
+// reader) carries a spec hash other than the desired one, or ok=false when
+// an input could not be read (the caller keeps the current set).
+func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) ([]string, bool) {
 	// The reconciler creates the digest key before the first Deployment;
 	// until it exists no live hash can match, so keep the current set.
-	digestKey, err := readDigestKey(ctx, r.client, fg)
+	digestKey, err := readDigestKey(ctx, reader, fg)
 	if err != nil {
 		if err != errDigestKeyMissing {
 			r.logger.Warn("failed to read secret digest key; preserving current drift set", "error", err)
 		}
-		return
+		return nil, false
 	}
-	secretInputs, err := specSecretInputs(ctx, r.client, fg)
+	secretInputs, err := specSecretInputs(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to read spec secrets; preserving current drift set", "error", err)
-		return
+		return nil, false
 	}
 	secretDigest := secretContentDigest(digestKey, secretInputs)
+	deploys, err := listPITRSiteDeployments(ctx, reader, fg)
+	if err != nil {
+		r.logger.Warn("failed to list site deployments; preserving current drift set", "error", err)
+		return nil, false
+	}
+	pitr, action := resolvePITRRender(fg, deploys)
+	byName := make(map[string]*appsv1.Deployment, len(deploys))
+	for i := range deploys {
+		byName[deploys[i].Name] = &deploys[i]
+	}
 
 	var driftSites []string
 	for _, site := range fg.Spec.Sites {
-		desiredHash := ComputeSpecHash(fg, site, secretDigest)
-
-		var deploy appsv1.Deployment
-		deployNN := types.NamespacedName{
-			Namespace: fg.Namespace,
-			Name:      resourceName(fg.Name, site.Name),
-		}
-		if err := r.client.Get(ctx, deployNN, &deploy); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue // Deployment doesn't exist yet — reconciler will create it
+		deploy, found := byName[resourceName(fg.Name, site.Name)]
+		if !found {
+			// The list may miss a Deployment the label selector does not
+			// match (an older render); fall back to a direct read.
+			var d appsv1.Deployment
+			deployNN := types.NamespacedName{Namespace: fg.Namespace, Name: resourceName(fg.Name, site.Name)}
+			if err := reader.Get(ctx, deployNN, &d); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue // Deployment doesn't exist yet — reconciler will create it
+				}
+				r.logger.Warn("failed to inspect deployment spec drift; preserving current drift set", "site", site.Name, "error", err)
+				return nil, false
 			}
-			r.logger.Warn("failed to inspect deployment spec drift; preserving current drift set", "site", site.Name, "error", err)
-			return
+			deploy = &d
 		}
-		liveHash := deploy.Annotations[specHashAnnotation]
-		if liveHash != desiredHash {
+		if action == pitrRenderDefer {
+			continue
+		}
+		// The render annotation is repaired on its own (U08): with a
+		// missing or edited one the site's writer would count as a
+		// disagreement (backup stamps, retention) forever, even when the
+		// hash matches.
+		if deploy.Annotations[specHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
+			deploy.Annotations[annotationPITRRender] != pitr.Canonical() {
 			driftSites = append(driftSites, site.Name)
 		}
 	}
-
-	tm.SetSpecDriftSites(driftSites)
+	return driftSites, true
 }
 
 // startManager creates and starts a TopologyManager for a single
@@ -1186,7 +1236,7 @@ func (r *TopologyManagerRunner) newPITRArchiverPoller(ctx context.Context, fg *v
 		r.notePITRArchiveReadFailed(nn, p, readErr)
 	}
 	p.uid = fg.UID
-	p.rolloutRenders = pitrSpecRendersArchiver(fg)
+	p.rolloutRenders = pitrRendersArchiver(r.renderedPITR(ctx, fg))
 	for site, st := range lastGood {
 		p.lastGood[site] = st
 	}
@@ -1966,7 +2016,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// poller's cache. The poller's own writer (updatePITRArchiveStatus)
 	// also sets them after every poll round; both derive them from the
 	// poller's current state rather than from a snapshot copy.
-	r.applyPITRArchiveStatus(nn, &freshFG)
+	r.applyPITRArchiveStatus(ctx, nn, &freshFG)
 
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	// Keyring promotion Events compare in-memory last-seen, so they must
@@ -2024,6 +2074,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// offline_mode fence record: a copy without the prior value makes
 		// the release leave offline_mode ON.
 		encryption := fresh.Status.EncryptionAtRest
+		// The PITR archive bindings are the group reconciler's (#203,
+		// Δ13): a stale copy would undo a Bound transition or resurrect a
+		// released entry.
+		pitrBindings := fresh.Status.PITRArchiveBindings
 		reconcilerConds := make([]*metav1.Condition, len(reconcilerOwnedConditions))
 		for i, t := range reconcilerOwnedConditions {
 			reconcilerConds[i] = apimeta.FindStatusCondition(fresh.Status.Conditions, t)
@@ -2069,6 +2123,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		fresh.Status.RestoreReclones = reclones
 		fresh.Status.RestoreOfflineFence = offlineFence
 		fresh.Status.EncryptionAtRest = encryption
+		fresh.Status.PITRArchiveBindings = pitrBindings
 		fresh.Status.Dragonfly = dragonfly
 		for i, c := range reconcilerConds {
 			if c != nil {
@@ -2086,7 +2141,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		} else {
 			removeCondition(&fresh.Status.Conditions, conditionPITRArchiveReady)
 		}
-		r.applyPITRArchiveStatus(nn, &fresh)
+		r.applyPITRArchiveStatus(ctx, nn, &fresh)
 		if err := r.client.Status().Update(ctx, &fresh); err != nil {
 			return err
 		}
@@ -2256,7 +2311,13 @@ func validSnapshotActiveSite(snap TopologySnapshot) string {
 // either way. Clears the field when PITR is disabled in spec, so a
 // disabled flip doesn't keep showing bounds from a previous
 // configuration. Before the first poll round the field is left alone.
-func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup) {
+func (r *TopologyManagerRunner) populatePITRStatus(ctx context.Context, nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup) {
+	r.populatePITRStatusFor(nn, fg, r.renderedPITR(ctx, fg))
+}
+
+// populatePITRStatusFor is populatePITRStatus with the group's rendered PITR
+// inputs already read.
+func (r *TopologyManagerRunner) populatePITRStatusFor(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup, rendered pitrRenderInputs) {
 	if !pitrEnabled(fg) {
 		fg.Status.PITR = nil
 		return
@@ -2361,7 +2422,7 @@ func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *
 	if fg.Status.PITR != nil {
 		prevArchive = fg.Status.PITR.Archive
 	}
-	out.Archive = pitrArchiveObservation(fg, sites, snaps, lastGood, prevArchive, time.Now())
+	out.Archive = pitrArchiveObservation(rendered, sites, snaps, lastGood, prevArchive, time.Now())
 	fg.Status.PITR = out
 }
 
@@ -2903,7 +2964,7 @@ func conditionBool(v bool) metav1.ConditionStatus {
 // copy, which would undo a concurrent reconciler write.
 // AutomaticFailoverHeld is the planned-failover automation hold: a runner
 // status write must never drop it.
-var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady, conditionPITRMysqlConfAccepted, v1alpha1.ConditionAutomaticFailoverHeld}
+var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady, conditionPITRMysqlConfAccepted, conditionPITRArchiveBindingReady, v1alpha1.ConditionAutomaticFailoverHeld}
 
 // setCondition sets or updates a condition in the slice, preserving LastTransitionTime
 // if the status has not changed.

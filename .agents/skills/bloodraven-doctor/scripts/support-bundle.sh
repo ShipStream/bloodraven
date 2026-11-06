@@ -123,6 +123,23 @@ kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jso
          restore: (.status.restore // null | if . then {phase, reason, message, jobName, pointInTime} else null end),
          restoreInPlacePointInTime: .status.restoreInPlace.pointInTime}' \
     > "$OUTPUT_DIR/pitr-archive.json" 2> "$OUTPUT_DIR/pitr-archive-errors.txt" || true
+
+# PITR archive encryption bindings (#203): status entries and condition, then
+# the operator-made key snapshot Secrets (archive and per-backup dump keys)
+# and the pitr-archive-check Jobs. Secrets are projected through
+# custom-columns so their data (the passphrase) and the acceptance
+# annotation (a passphrase verifier) never enter the bundle.
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o 'custom-columns=ID:.status.pitrArchiveBindings[*].id,STATE:.status.pitrArchiveBindings[*].state,REASON:.status.pitrArchiveBindings[*].reason,MODE:.status.pitrArchiveBindings[*].encryption.mode,KEY_SECRET:.status.pitrArchiveBindings[*].encryption.keySecretName,ARCHIVE_ID:.status.pitrArchiveBindings[*].archiveID,DESTINATION:.status.pitrArchiveBindings[*].destination,CHECK_JOB:.status.pitrArchiveBindings[*].check.jobName,CONDITION:.status.conditions[?(@.type=="PITRArchiveBindingReady")].reason' > "$OUTPUT_DIR/pitr-bindings.txt" 2>/dev/null || true
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq '{bindings: (.status.pitrArchiveBindings // []),
+         pitrArchiveBindingReady: [.status.conditions[]? | select(.type == "PITRArchiveBindingReady")]}' \
+    > "$OUTPUT_DIR/pitr-bindings.json" 2> "$OUTPUT_DIR/pitr-bindings-errors.txt" || true
+for app in mysql-pitr-key mysql-dump-key; do
+    kubectl get secrets -n "$NAMESPACE" -l "app.kubernetes.io/name=$app,shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp,IMMUTABLE:.immutable,OWNERS:.metadata.ownerReferences[*].kind,GROUP_UID:.metadata.labels.bloodraven\.shipstream\.io/failover-group-uid,BINDING_ID:.metadata.labels.bloodraven\.shipstream\.io/pitr-binding-id,BACKUP:.metadata.labels.shipstream\.io/mysqlbackup,BACKUP_UID:.metadata.labels.bloodraven\.shipstream\.io/mysqlbackup-uid,DESTINATION:.metadata.annotations.bloodraven\.shipstream\.io/pitr-destination' \
+        > "$OUTPUT_DIR/${app}-secrets.txt" 2>/dev/null || true
+done
+kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=pitr-archive-check" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp,KEY_SECRET:.metadata.labels.bloodraven\.shipstream\.io/pitr-key-secret,ACTIVE:.status.active,SUCCEEDED:.status.succeeded,FAILED:.status.failed' > "$OUTPUT_DIR/pitr-archive-check-jobs.txt" 2>/dev/null || true
+kubectl get pods -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=pitr-archive-check" -o 'custom-columns=POD:.metadata.name,JOB:.metadata.labels.job-name,PHASE:.status.phase,WAITING:.status.containerStatuses[*].state.waiting.reason,EXIT:.status.containerStatuses[*].state.terminated.exitCode,RESULT:.status.containerStatuses[*].state.terminated.message' > "$OUTPUT_DIR/pitr-archive-check-pods.txt" 2>/dev/null || true
 kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o json 2>/dev/null | \
     jq '[.items[] | {name: .metadata.name, mode: .spec.pointInTime.mode, timestamp: .spec.pointInTime.timestamp,
          excludeGtids: .spec.pointInTime.excludeGtids, phase: .status.phase,

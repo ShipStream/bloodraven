@@ -113,7 +113,7 @@ func TestReconcile_EncryptedConfigMapCarriesComponentFiles(t *testing.T) {
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Namespace: "shared-lion", Name: desiredSiteConfigMapName(fg, fg.Spec.Sites[0]),
+		Namespace: "shared-lion", Name: desiredSiteConfigMapName(fg, fg.Spec.Sites[0], testPITRRender(fg)),
 	}, &cm); err != nil {
 		t.Fatalf("get configmap: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestReconcile_SealedSiteRendersSecretProjection(t *testing.T) {
 	}
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Namespace: "shared-lion", Name: desiredSiteConfigMapName(fg, fg.Spec.Sites[0]),
+		Namespace: "shared-lion", Name: desiredSiteConfigMapName(fg, fg.Spec.Sites[0], testPITRRender(fg)),
 	}, &cm); err != nil {
 		t.Fatalf("get configmap: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 	if err := c.Get(context.Background(), nn, &refreshed); err != nil {
 		t.Fatalf("refresh group: %v", err)
 	}
-	desiredName := desiredSiteConfigMapName(&refreshed, refreshed.Spec.Sites[0])
+	desiredName := desiredSiteConfigMapName(&refreshed, refreshed.Spec.Sites[0], testPITRRender(&refreshed))
 	if desiredName == canonical {
 		t.Fatal("encrypted adoption reused the mutable unencrypted ConfigMap")
 	}
@@ -298,7 +298,7 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 	// ordered update then switches config and keyring wiring atomically.
 	r.Client = &failDeploymentUpdateClient{Client: r.Client, remaining: 2}
 	for attempt := 1; attempt <= 2; attempt++ {
-		if err := r.reconcileDeployment(context.Background(), &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage); err == nil {
+		if err := r.reconcileDeployment(context.Background(), &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage, testGroupPITRRender(&refreshed)); err == nil {
 			t.Fatalf("injected Deployment update failure %d was not returned", attempt)
 		}
 		unrolled = getDeployment(t, r, "dc1")
@@ -309,7 +309,7 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 			t.Fatalf("failed update %d left an unencrypted config paired with keyring wiring", attempt)
 		}
 	}
-	if err := r.reconcileDeployment(context.Background(), &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage); err != nil {
+	if err := r.reconcileDeployment(context.Background(), &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage, testGroupPITRRender(&refreshed)); err != nil {
 		t.Fatalf("retry ordered site update: %v", err)
 	}
 	rolled := getDeployment(t, r, "dc1")
@@ -322,7 +322,7 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 
 	// Garbage collection is gated on rollout completion: until then the old
 	// canonical revision remains available for any surviving old pod.
-	if err := r.cleanupObsoleteSiteConfigMaps(context.Background(), &refreshed); err != nil {
+	if err := r.cleanupObsoleteSiteConfigMaps(context.Background(), &refreshed, testPITRRender(&refreshed)); err != nil {
 		t.Fatalf("cleanup during rollout: %v", err)
 	}
 	if err := c.Get(context.Background(), types.NamespacedName{
@@ -338,7 +338,7 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 	if err := c.Status().Update(context.Background(), rolled); err != nil {
 		t.Fatalf("mark rollout complete: %v", err)
 	}
-	if err := r.cleanupObsoleteSiteConfigMaps(context.Background(), &refreshed); err != nil {
+	if err := r.cleanupObsoleteSiteConfigMaps(context.Background(), &refreshed, testPITRRender(&refreshed)); err != nil {
 		t.Fatalf("cleanup after rollout: %v", err)
 	}
 	err := c.Get(context.Background(), types.NamespacedName{

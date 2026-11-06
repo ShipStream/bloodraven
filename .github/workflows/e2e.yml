@@ -71,22 +71,36 @@ jobs:
       timeout-minutes: 180
       images-artifact: e2e-images
 
-  # Cross-site PITR (#206). Same trigger as encryption: schedule, dispatch,
-  # and PRs labelled e2e, so a label-gated PR run exercises every PITR
-  # scenario; smoke stays unchanged. All four are also in the release
-  # profile.
+  # Cross-site PITR (#206) and the encryption binding of the PITR archive
+  # (#203). Same trigger as encryption: schedule, dispatch, and PRs
+  # labelled e2e, so a label-gated PR run exercises every PITR scenario;
+  # smoke stays unchanged. 31, 37, 68 and 70 are also in the release
+  # profile; 69 is not (it would push the release run past its ceiling).
   pitr:
     needs: images
     uses: ./.github/workflows/_e2e.yml
     with:
       label: pitr
       # 31 first (single-site baseline); 37 and 68 are planned failbacks
-      # (68 with reclones); 70 loses data on purpose and restarts the archive.
-      scenario: 31-pitr-verification-rustfs,37-pitr-planned-failback-no-reclone,68-pitr-failback-with-reclone,70-pitr-lossy-failover
-      # 24m + 60m + 75m + 75m of scenario budgets on one cluster, plus
-      # the reset run-all does before each of 37, 68 and 70
-      # (ResetBeforeRunAll, ~5m each).
-      timeout-minutes: 330
+      # (68 with reclones); 70 loses data on purpose and restarts the
+      # archive; 69 last (key snapshots, refused key and encryption
+      # changes, status-loss recovery, release). run-all stops at the first
+      # failure, so 69, the newest and longest, runs after the #206
+      # scenarios: a red 69 never hides them.
+      scenario: 31-pitr-verification-rustfs,37-pitr-planned-failback-no-reclone,68-pitr-failback-with-reclone,70-pitr-lossy-failover,69-pitr-encryption-binding-refusal
+      # Scenario Timeouts: 24m + 60m + 75m + 75m + 60m = 294m, plus the
+      # reset run-all does before each of 37, 68, 70 and 69
+      # (ResetBeforeRunAll, ~5m each) and setup, under the 360m hard cap of
+      # a GitHub-hosted runner job. Each scenario also has a CleanupTimeout
+      # (32-44m for these five, ~180m together) that is a worst-case
+      # allowance for a hung cleanup, not a planned spend: Timeouts plus
+      # cleanup allowances exceed the cap by design, and
+      # TestPITRScenariosInPITRE2EJob guards only the Timeouts. Measured on
+      # #206, 31/37/68/70 passed in 3/6/6/11 minutes, so a run that passes
+      # them leaves 69 its whole budget plus its cleanup even if it times
+      # out. This is the cap, not a target: the next PITR scenario goes
+      # into a second job rather than into this list.
+      timeout-minutes: 360
       images-artifact: e2e-images
 
   # Durable planned-failover claim (#235). The PR job above runs only the

@@ -65,7 +65,7 @@ func runDaemon(ctx context.Context, cfg *Config, mysql daemonMySQL, logger *slog
 		if retention != nil {
 			archiver.SetConfigure(func(a *BinlogArchiver) {
 				a.SetRetentionClient(retention.BloodravenAddress, retention.Namespace,
-					retention.FailoverGroup, retention.ProfileName, retention.Interval)
+					retention.FailoverGroup, retention.ArchiveID, retention.Interval)
 			})
 		}
 	}
@@ -175,10 +175,11 @@ func runDaemon(ctx context.Context, cfg *Config, mysql daemonMySQL, logger *slog
 // retentionClientFromEnv returns the operator-driven retention wiring,
 // or nil when the identity fields it needs are not all present. Missing
 // any of them simply leaves retention disabled: binlogs still upload,
-// just forever.
+// just forever. The operator gates retention by the archive this pod
+// writes (BLOODRAVEN_PITR_ARCHIVE_ID), not by a profile name.
 func retentionClientFromEnv(cfg *Config) (*retentionClientConfig, error) {
-	profile := os.Getenv("BLOODRAVEN_PITR_PROFILE_NAME")
-	if profile == "" || cfg.BloodravenAddress == "" || cfg.PodNamespace == "" || cfg.FailoverGroup == "" {
+	archiveID := os.Getenv("BLOODRAVEN_PITR_ARCHIVE_ID")
+	if archiveID == "" || cfg.BloodravenAddress == "" || cfg.PodNamespace == "" || cfg.FailoverGroup == "" {
 		return nil, nil
 	}
 	interval := time.Hour
@@ -196,7 +197,7 @@ func retentionClientFromEnv(cfg *Config) (*retentionClientConfig, error) {
 		BloodravenAddress: cfg.BloodravenAddress,
 		Namespace:         cfg.PodNamespace,
 		FailoverGroup:     cfg.FailoverGroup,
-		ProfileName:       profile,
+		ArchiveID:         archiveID,
 		Interval:          interval,
 	}, nil
 }

@@ -43,6 +43,9 @@ func addSourceArchiveProfile(fg *v1alpha1.MysqlFailoverGroup) string {
 		source.Storage.PVC.SubPath = "source-group"
 	}
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
+	// The restore reads it through its read binding (#203), Bound as the
+	// engine leaves it after a verified check.
+	bindAllTestPITRArchives(fg)
 	return source.Name
 }
 

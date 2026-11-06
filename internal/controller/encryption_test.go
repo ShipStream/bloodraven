@@ -85,7 +85,7 @@ func TestEncryptionSettingsOverrideUserConf(t *testing.T) {
 		"binlog-encryption":        "OFF",
 		"default_table_encryption": "OFF",
 	}
-	cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+	cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0])
 	for _, want := range []string{
 		"innodb-redo-log-encrypt=ON",
 		"binlog-encryption=ON",
@@ -111,7 +111,7 @@ func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
 		"x\n[mysqld]\ninnodb-undo-log-encrypt": "OFF",
 	}
 	fg.Spec.Sites[0].MysqlConf = map[string]string{"loose-skip-binlog-encryption": ""}
-	cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+	cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0])
 	for _, forbidden := range []string{
 		"loose-innodb-redo-log-encrypt", "skip-binlog-encryption", "disable-default-table-encryption",
 		"innodb-undo-log-encrypt=OFF", "max-connections=777",
@@ -140,7 +140,7 @@ func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
 func TestGenerateMyCnf_KeepsLoosePluginLoadAdd(t *testing.T) {
 	fg := encTestFG()
 	fg.Spec.MysqlConf = map[string]string{"loose_plugin_load_add": "auth_socket.so"}
-	cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+	cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0])
 	for _, want := range []string{"loose-plugin-load-add=auth_socket.so\n", "plugin-load-add=mysql_clone.so\n"} {
 		if !strings.Contains(cnf, want) {
 			t.Errorf("generated my.cnf must contain %q:\n%s", want, cnf)
@@ -174,7 +174,7 @@ func TestShadowsOwnedSetting(t *testing.T) {
 }
 
 func TestGenerateMyCnf_NoEncryptionKeysWhenDisabled(t *testing.T) {
-	cnf := generateMyCnf(newTestFG(), newTestFG().Spec.Sites[0])
+	cnf := generateMyCnf(newTestFG(), pitrEnabled(newTestFG()), newTestFG().Spec.Sites[0])
 	for _, forbidden := range []string{"default-table-encryption", "binlog-encryption", "innodb-redo-log-encrypt"} {
 		if strings.Contains(cnf, forbidden) {
 			t.Errorf("my.cnf must not mention %q when encryption is disabled:\n%s", forbidden, cnf)
@@ -559,11 +559,11 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 	// running a writable keyring.
 	base := encTestFG()
 	setSitePhase(base, "dc1", v1alpha1.KeyringPhaseUnsealed, "")
-	unsealed := ComputeSpecHash(base, base.Spec.Sites[0], "")
+	unsealed := ComputeSpecHash(base, base.Spec.Sites[0], "", testPITRRender(base))
 
 	sealed := encTestFG()
 	setSitePhase(sealed, "dc1", v1alpha1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v1")
-	sealedHash := ComputeSpecHash(sealed, sealed.Spec.Sites[0], "")
+	sealedHash := ComputeSpecHash(sealed, sealed.Spec.Sites[0], "", testPITRRender(sealed))
 
 	if unsealed == sealedHash {
 		t.Fatal("spec hash must change when a site is sealed")
@@ -573,7 +573,7 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 	// the pod keeps projecting the old Secret.
 	v2 := encTestFG()
 	setSitePhase(v2, "dc1", v1alpha1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v2")
-	if ComputeSpecHash(v2, v2.Spec.Sites[0], "") == sealedHash {
+	if ComputeSpecHash(v2, v2.Spec.Sites[0], "", testPITRRender(v2)) == sealedHash {
 		t.Fatal("spec hash must change when the escrow version changes")
 	}
 }
@@ -581,8 +581,8 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 func TestComputeSpecHash_UnchangedWhenEncryptionDisabled(t *testing.T) {
 	// Existing unencrypted clusters must not roll just because the
 	// operator learned about encryption.
-	a := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], "")
-	b := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], "")
+	a := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], "", testPITRRender(newTestFG()))
+	b := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], "", testPITRRender(newTestFG()))
 	if a != b {
 		t.Fatal("hash must be stable")
 	}
@@ -594,9 +594,9 @@ func TestComputeSpecHash_UnchangedWhenEncryptionDisabled(t *testing.T) {
 func TestComputeSpecHash_EscrowURLChangeRollsEncryptedPods(t *testing.T) {
 	fg := encTestFG()
 	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "https://old.example/keyring/escrow")
-	oldHash := ComputeSpecHash(fg, fg.Spec.Sites[0], "")
+	oldHash := ComputeSpecHash(fg, fg.Spec.Sites[0], "", testPITRRender(fg))
 	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "https://new.example/keyring/escrow")
-	if newHash := ComputeSpecHash(fg, fg.Spec.Sites[0], ""); newHash == oldHash {
+	if newHash := ComputeSpecHash(fg, fg.Spec.Sites[0], "", testPITRRender(fg)); newHash == oldHash {
 		t.Fatal("changing the escrow endpoint must roll encrypted sidecars")
 	}
 }

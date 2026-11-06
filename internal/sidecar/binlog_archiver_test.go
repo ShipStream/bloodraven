@@ -441,7 +441,7 @@ func TestRetentionCutoffIsBounded(t *testing.T) {
 			store := newMemStore()
 			cfg := &PITRConfig{ManifestPrefix: "binlogs"}
 			a := newTestArchiver(cfg, "dc1", &stubRoleChecker{}, store, slog.Default())
-			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
+			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 			payload, err := os.ReadFile("testdata/incarnation-a.bin")
 			if err != nil {
 				t.Fatal(err)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -40,11 +41,11 @@ func identityBackup() *v1alpha1.MysqlBackup {
 
 func identityArchiveID(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) string {
 	t.Helper()
-	ident, ok := activePITRArchiveIdentity(fg)
+	dest, ok := activePITRDestination(fg)
 	if !ok {
 		t.Fatal("no active archive")
 	}
-	return ident.ArchiveID
+	return pitrarchive.CreateArchiveID(fg.UID, dest)
 }
 
 func stampTemplateFromContainer(t *testing.T, c corev1.Container) backupmeta.Stamp {
@@ -77,7 +78,9 @@ func TestBuildBackupJob_BackupStamp(t *testing.T) {
 				profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pp"}}
 			}
 			job, err := BuildBackupJob(BackupJobInputs{
-				FailoverGroup: fg, Profile: profile, Backup: identityBackup(), SourceSite: "pdx",
+				DumpKeySecretName: testDumpKeySecret,
+				PITRArchiveID:     identityArchiveID(t, fg),
+				FailoverGroup:     fg, Profile: profile, Backup: identityBackup(), SourceSite: "pdx",
 				CredsSecretName: "creds", ScriptsConfigMapName: "scripts",
 			})
 			if err != nil {
@@ -154,11 +157,11 @@ func mustCanonical(t *testing.T, s backupmeta.Stamp) string {
 func TestBackupStampTemplate(t *testing.T) {
 	fg := identityFG()
 	fg.Spec.Backup.PITR = nil
-	s, err := backupStampTemplate(fg, identityBackup(), fg.Spec.Backup.Profiles[0], "iad")
+	s, err := backupStampTemplate(fg, identityBackup(), fg.Spec.Backup.Profiles[0], "iad", testPITRRender(fg).ArchiveID)
 	if err != nil || s.PITRArchiveID != "" || s.ServerID != 101 {
 		t.Fatalf("stamp %+v, err %v", s, err)
 	}
-	if _, err := backupStampTemplate(fg, identityBackup(), fg.Spec.Backup.Profiles[0], "ghost"); err == nil {
+	if _, err := backupStampTemplate(fg, identityBackup(), fg.Spec.Backup.Profiles[0], "ghost", testPITRRender(fg).ArchiveID); err == nil {
 		t.Fatal("unknown source site accepted")
 	}
 }
@@ -175,7 +178,9 @@ func TestBackupReconciler_RecoversIdentityFromJob(t *testing.T) {
 			backup := identityBackup()
 			r, c := newBackupReconciler(t, fg, backup)
 			job, err := BuildBackupJob(BackupJobInputs{
-				FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Backup: backup, SourceSite: "pdx",
+				DumpKeySecretName: testDumpKeySecret,
+				PITRArchiveID:     identityArchiveID(t, fg),
+				FailoverGroup:     fg, Profile: fg.Spec.Backup.Profiles[0], Backup: backup, SourceSite: "pdx",
 				CredsSecretName: "creds", ScriptsConfigMapName: "scripts",
 			})
 			if err != nil {
@@ -229,8 +234,8 @@ func archiveStatus(dest string, state pitrarchive.ObservedState, id string, reas
 // destination; any refusal wins, Verified needs every site.
 func TestPITRArchiveObservation(t *testing.T) {
 	fg := identityFG()
-	ident, _ := activePITRArchiveIdentity(fg)
-	dest, id := ident.Destination.String(), ident.ArchiveID
+	activeDest, _ := activePITRDestination(fg)
+	dest, id := activeDest.String(), pitrarchive.CreateArchiveID(fg.UID, activeDest)
 	sites := []string{"iad", "pdx"}
 	tests := []struct {
 		name       string
@@ -254,7 +259,7 @@ func TestPITRArchiveObservation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			now := time.Date(2026, 11, 4, 12, 0, 0, 123456789, time.UTC)
-			got := pitrArchiveObservation(fg, sites, tt.snaps, nil, nil, now)
+			got := pitrArchiveObservation(testPITRRender(fg), sites, tt.snaps, nil, nil, now)
 			if got == nil || got.Destination != dest || got.State != tt.wantState || got.Reason != tt.wantReason || got.ArchiveID != tt.wantID {
 				t.Fatalf("observation = %+v, want state %s reason %s id %q", got, tt.wantState, tt.wantReason, tt.wantID)
 			}
@@ -262,7 +267,7 @@ func TestPITRArchiveObservation(t *testing.T) {
 				t.Fatalf("observedTime = %v", got.ObservedTime)
 			}
 			// An unchanged observation keeps its time; a change moves it.
-			again := pitrArchiveObservation(fg, sites, tt.snaps, nil, got, now.Add(time.Minute))
+			again := pitrArchiveObservation(testPITRRender(fg), sites, tt.snaps, nil, got, now.Add(time.Minute))
 			if !again.ObservedTime.Equal(got.ObservedTime) {
 				t.Fatal("unchanged observation moved observedTime")
 			}
@@ -270,7 +275,7 @@ func TestPITRArchiveObservation(t *testing.T) {
 	}
 	off := identityFG()
 	off.Spec.Backup.PITR.ProfileName = "ghost"
-	if got := pitrArchiveObservation(off, sites, nil, nil, nil, time.Now()); got != nil {
+	if got := pitrArchiveObservation(testPITRRender(off), sites, nil, nil, nil, time.Now()); got != nil {
 		t.Fatalf("no active archive, but observation %+v", got)
 	}
 }
@@ -358,7 +363,7 @@ func TestPITRRefusedMySQLConf(t *testing.T) {
 			}
 			// The render drops exactly the refused options.
 			for _, site := range fg.Spec.Sites {
-				cnf := generateMyCnf(fg, site)
+				cnf := generateMyCnf(fg, pitrEnabled(fg), site)
 				for _, ref := range pitrRefusedMySQLConf(fg, site) {
 					if strings.Contains(cnf, "\n"+ref.key+"=") || strings.Contains(cnf, "\n"+ref.key+"\n") {
 						t.Fatalf("site %s renders refused %s:\n%s", site.Name, ref.key, cnf)
@@ -371,11 +376,11 @@ func TestPITRRefusedMySQLConf(t *testing.T) {
 	fg := identityFG()
 	fg.Spec.Backup.PITR.Enabled = false
 	fg.Spec.MysqlConf = map[string]string{"binlog_format": "MIXED"}
-	if cnf := generateMyCnf(fg, fg.Spec.Sites[0]); !strings.Contains(cnf, "\nbinlog-format=MIXED\n") {
+	if cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0]); !strings.Contains(cnf, "\nbinlog-format=MIXED\n") {
 		t.Fatalf("PITR disabled, but binlog-format dropped:\n%s", cnf)
 	}
 	fg.Spec.Backup.PITR.Enabled = true
-	if cnf := generateMyCnf(fg, fg.Spec.Sites[0]); strings.Contains(cnf, "binlog-format") {
+	if cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0]); strings.Contains(cnf, "binlog-format") {
 		t.Fatalf("PITR enabled, but binlog-format rendered:\n%s", cnf)
 	}
 }
@@ -596,5 +601,35 @@ func TestPITREventReasonsFollowNamingRule(t *testing.T) {
 		if !rule.MatchString(reason) {
 			t.Errorf("Event reason %q breaks A-74's <Subject><PastTenseVerb> rule", reason)
 		}
+	}
+}
+
+// Δ14: while a refused switch holds the group on its previous archive, the
+// observation follows the render the writers run (the held destination),
+// not the spec, so the held writers are counted, not ignored as outdated.
+func TestPITRArchiveObservationFollowsHeldRender(t *testing.T) {
+	fg := renderFG()
+	fg.Spec.Backup.Profiles[2].Encryption = nil
+	held := fg.DeepCopy()
+	held.Spec.Backup.PITR.ProfileName = "c"
+	setBinding(t, held, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
+	hold := testPITRRender(held)
+	fg.Status.PITRArchiveBindings = held.Status.PITRArchiveBindings
+	setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveLegacy, "mysql-lion-pitr-key-aaaaaaaaaa")
+	deploys := []appsv1.Deployment{siteDeploy(fg, "dc1", hold), siteDeploy(fg, "dc2", hold)}
+	rendered := renderedPITRInputs(fg, deploys)
+	if rendered.Destination != hold.Destination {
+		t.Fatalf("rendered %s, want the held %s", rendered.Destination, hold.Destination)
+	}
+	snaps := map[string]*internalmysql.ArchiverStatus{
+		"dc1": archiveStatus(hold.Destination, pitrarchive.StateVerified, hold.ArchiveID, ""),
+		"dc2": archiveStatus(hold.Destination, pitrarchive.StateVerified, hold.ArchiveID, ""),
+	}
+	got := pitrArchiveObservation(rendered, []string{"dc1", "dc2"}, snaps, nil, nil, time.Now())
+	if got == nil || got.State != v1alpha1.PITRArchiveVerified || got.Destination != hold.Destination || got.KeyRevision != "" && got.KeyRevision != pitrKeyRevisionPlaintext {
+		t.Fatalf("observation %+v, want Verified at the held destination", got)
+	}
+	if !pitrRendersArchiver(rendered) {
+		t.Fatal("a held render counts as rendering an archiver")
 	}
 }

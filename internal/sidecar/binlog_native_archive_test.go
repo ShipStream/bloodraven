@@ -89,7 +89,7 @@ func TestNoScratchAcrossEncryptionAndInspection(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(pitrCutoffResponse{Coverage: PITRGTIDCoverageProtocol, CutoffTime: "2026-04-17T00:00:00Z", RetainedGTIDs: []string{coverageTestSID + ":1-10"}})
 			}))
 			defer server.Close()
-			a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
+			a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 			a.maybeRunRetention(ctx)
 			m, err := loadManifest(ctx, store, "binlogs", "iad")
 			if err != nil {

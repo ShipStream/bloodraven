@@ -155,6 +155,15 @@ type PointInTimeVerificationSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=131072
 	ExcludeGtids string `json:"excludeGtids,omitempty"`
+
+	// ArchiveProfileName names the backup profile whose PITR archive the
+	// replay reads. Defaults to the group's spec.backup.pitr.profileName.
+	// Use it to verify history in a retained archive after a prefix switch.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ArchiveProfileName string `json:"archiveProfileName,omitempty"`
 }
 
 // SanityCheckSpec configures the post-load scalar sanity check. The

@@ -104,6 +104,13 @@ func main() {
 			// ahead of mysqlsh's loadDump. See encrypt_upload.go.
 			runDecryptDownload(os.Args[2:])
 			return
+		case "pitr-archive-check":
+			// Invoked as the container of a PITR archive check Job:
+			// verifies one archive's descriptor with the candidate key
+			// snapshot and reports the result on the termination log.
+			// See pitr_archive_check.go.
+			runPITRArchiveCheck(os.Args[2:])
+			return
 		}
 	}
 
@@ -554,10 +561,10 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 		rw.Header().Set("Content-Type", "application/json")
 		ns := r.URL.Query().Get("namespace")
 		group := r.URL.Query().Get("group")
-		profile := r.URL.Query().Get("profile")
-		if ns == "" || group == "" || profile == "" {
+		archive := r.URL.Query().Get("archive")
+		if ns == "" || group == "" || archive == "" {
 			rw.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(rw).Encode(map[string]string{"error": "namespace, group, and profile query parameters are required"})
+			json.NewEncoder(rw).Encode(map[string]string{"error": "namespace, group, and archive query parameters are required"})
 			return
 		}
 		// Guard against callers (notably tests) that build the mux
@@ -569,11 +576,13 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 			return
 		}
 		if r.URL.Query().Get("coverage") != sidecar.PITRGTIDCoverageProtocol {
-			_ = json.NewEncoder(rw).Encode(map[string]any{"namespace": ns, "group": group, "profile": profile})
+			_ = json.NewEncoder(rw).Encode(map[string]any{"namespace": ns, "group": group, "archive": archive})
 			return
 		}
 		// The informer GET rejects junk keys without allocating reservations or
-		// scanning backups. A profile must actually be active on this group.
+		// scanning backups. The archive must be one this group creates at one
+		// of its bound destinations (Δ12): the ID is derived from the group's
+		// UID, so another group's archive, or a copy, is refused.
 		groupCtx, groupCancel := context.WithTimeout(r.Context(), 5*time.Second)
 		var mfg v1alpha1.MysqlFailoverGroup
 		groupErr := k8sClient.Get(groupCtx, types.NamespacedName{Namespace: ns, Name: group}, &mfg)
@@ -587,12 +596,12 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 			_ = json.NewEncoder(rw).Encode(map[string]any{"error": "PITR group unavailable"})
 			return
 		}
-		if mfg.Spec.Backup == nil || mfg.Spec.Backup.PITR == nil || !mfg.Spec.Backup.PITR.Enabled || mfg.Spec.Backup.PITR.ProfileName != profile {
+		if !controller.PITRRetentionArchiveAllowed(&mfg, archive) {
 			rw.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(rw).Encode(map[string]any{"error": "PITR profile is not active on this group"})
+			_ = json.NewEncoder(rw).Encode(map[string]any{"error": "PITR archive is not one of this group's archives"})
 			return
 		}
-		if cached, ok := pitrCache.get(ns, group, profile); ok {
+		if cached, ok := pitrCache.get(ns, group, archive); ok {
 			_ = json.NewEncoder(rw).Encode(cached)
 			return
 		}
@@ -602,20 +611,20 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 			_ = json.NewEncoder(rw).Encode(map[string]any{"error": "PITR cutoff caller rate limited"})
 			return
 		}
-		result, _, _ := pitrLookups.Do(pitrCache.key(ns, group, profile), func() (any, error) {
-			if cached, ok := pitrCache.get(ns, group, profile); ok {
+		result, _, _ := pitrLookups.Do(pitrCache.key(ns, group, archive), func() (any, error) {
+			if cached, ok := pitrCache.get(ns, group, archive); ok {
 				return pitrLookupResult{http.StatusOK, cached}, nil
 			}
 			// One caller disconnecting must not cancel a shared lookup used by
 			// another site. The lookup retains its own bounded deadline.
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 			defer cancel()
-			resp, err := resolvePITRCutoff(ctx, k8sClient, apiReader, ns, group, profile)
+			resp, err := resolvePITRCutoff(ctx, k8sClient, apiReader, ns, group, archive)
 			if err != nil {
 				return pitrLookupResult{http.StatusInternalServerError, map[string]any{"error": "internal error resolving PITR cutoff"}}, nil
 			}
 			if resp["cutoffTime"] == nil {
-				pitrCache.set(ns, group, profile, resp)
+				pitrCache.set(ns, group, archive, resp)
 			}
 			return pitrLookupResult{http.StatusOK, resp}, nil
 		})

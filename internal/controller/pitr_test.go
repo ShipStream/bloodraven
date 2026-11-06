@@ -62,8 +62,12 @@ func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
 				if vol == nil || vol.Secret == nil || vol.Secret.DefaultMode == nil {
 					t.Fatal("expected passphrase Secret with an explicit projection mode")
 				}
-				if vol.Secret.SecretName != "archive-key" || len(vol.Secret.Items) != 1 ||
-					vol.Secret.Items[0].Key != "selected-key" || vol.Secret.Items[0].Path != backupPassphraseFileName {
+				// The binding's immutable key snapshot, not the user's
+				// Secret, mounted optional (#203, Δ32): a missing key
+				// never keeps mysqld from starting.
+				if !strings.HasPrefix(vol.Secret.SecretName, "mysql-lion-pitr-key-") || len(vol.Secret.Items) != 1 ||
+					vol.Secret.Items[0].Key != pitrKeySnapshotDataKey || vol.Secret.Items[0].Path != backupPassphraseFileName ||
+					vol.Secret.Optional == nil || !*vol.Secret.Optional {
 					t.Fatalf("unexpected passphrase projection: %+v", vol.Secret)
 				}
 				mode := os.FileMode(*vol.Secret.DefaultMode)
@@ -115,7 +119,7 @@ func TestBuildPITRSidecarFragments_Disabled(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			frags, err := buildPITRSidecarFragments(tc.fg)
+			frags, err := buildPITRSidecarFragments(tc.fg, testPITRRender(tc.fg))
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -146,7 +150,7 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 		},
 	}
 
-	frags, err := buildPITRSidecarFragments(fg)
+	frags, err := buildPITRSidecarFragments(fg, testPITRRender(fg))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -156,7 +160,12 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_S3_BUCKET", "lion")
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_S3_REGION", "us-east-1")
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_S3_ENDPOINT_URL", "https://s3.example.com")
-	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_PROFILE_NAME", "primary")
+	// K7: no profile name is rendered; plaintext echoes the "plaintext"
+	// key revision (Δ2, K4).
+	if _, ok := envValue(frags.SidecarEnv, "BLOODRAVEN_PITR_PROFILE_NAME"); ok {
+		t.Error("BLOODRAVEN_PITR_PROFILE_NAME is rendered")
+	}
+	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_KEY_REVISION", pitrKeyRevisionPlaintext)
 	// §3.7: the archive identity the sidecar writes and verifies.
 	dest, err := pitrarchive.NewS3Destination("lion", "dumps", "https://s3.example.com")
 	if err != nil {
@@ -237,7 +246,7 @@ func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
 		},
 	}
 
-	frags, err := buildPITRSidecarFragments(fg)
+	frags, err := buildPITRSidecarFragments(fg, testPITRRender(fg))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -278,7 +287,9 @@ func TestBuildRestorePITRFragments_RequiresSourceArchive(t *testing.T) {
 		wantNot      string
 	}{
 		{name: "restore", want: "pointInTime.archiveProfileName must name the archive's profile"},
-		{name: "verification", verification: true, want: "a verification replays the group's own PITR archive", wantNot: "archiveProfileName"},
+		// U69: a verification can replay a retained archive through
+		// pointInTime.archiveProfileName with PITR disabled.
+		{name: "verification", verification: true, want: "set pointInTime.archiveProfileName to the profile of the archive to replay"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := buildRestorePITRFragmentsFor(withBackup(nil), &pitrReplayRequest{Mode: "latest", Verification: tc.verification})
@@ -361,6 +372,7 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
 		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source"},
 	}
+	bindTestPITRArchive(t, fg, "source")
 
 	frags, err := buildRestorePITRFragments(fg)
 	if err != nil {
@@ -540,7 +552,7 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 				{Name: "other", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3,
 					S3: &v1alpha1.S3Storage{Bucket: "lion", Prefix: "elsewhere", EndpointURL: "https://s3.example.com"}}},
 			}
-			ident, ok := activePITRArchiveIdentity(fg)
+			activeDest, ok := activePITRDestination(fg)
 			if !ok {
 				t.Fatal("no active archive")
 			}
@@ -557,15 +569,15 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 				if err != nil {
 					t.Fatalf("expanded destination %q does not parse: %v", got["BLOODRAVEN_PITR_DESTINATION"], err)
 				}
-				if dest != ident.Destination || got["BLOODRAVEN_PITR_MANIFEST_PREFIX"] != dest.KeyPrefix {
+				if dest != activeDest || got["BLOODRAVEN_PITR_MANIFEST_PREFIX"] != dest.KeyPrefix {
 					t.Fatalf("expanded destination %q prefix %q, want %q prefix %q", dest.String(),
-						got["BLOODRAVEN_PITR_MANIFEST_PREFIX"], ident.Destination.String(), ident.Destination.KeyPrefix)
+						got["BLOODRAVEN_PITR_MANIFEST_PREFIX"], activeDest.String(), activeDest.KeyPrefix)
 				}
 				if id, ok := got["BLOODRAVEN_PITR_ARCHIVE_ID"]; ok && !pitrarchive.IsDerivedArchiveID(id, fg.UID, dest) {
 					t.Fatalf("archive ID %s is not derived from the expanded destination %s", id, dest.String())
 				}
 			}
-			frags, err := buildPITRSidecarFragments(fg)
+			frags, err := buildPITRSidecarFragments(fg, testPITRRender(fg))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -575,6 +587,8 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 			reader := fg.DeepCopy()
 			reader.UID = "uid-reader"
 			reader.Spec.Backup.PITR.ProfileName = "other"
+			reader.Status.PITRArchiveBindings = nil
+			bindTestPITRArchive(t, reader, "primary")
 			restore, err := buildRestorePITRFragmentsFor(reader, &pitrReplayRequest{Mode: "latest", ArchiveProfileName: "primary"})
 			if err != nil {
 				t.Fatal(err)
@@ -582,8 +596,8 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 			check(t, restore.InitContainer.Env)
 			job := &batchv1.Job{Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				InitContainers: []corev1.Container{*restore.InitContainer}}}}}
-			if got := renderedPITRRequest(job).Destination; got != ident.Destination.String() {
-				t.Fatalf("rendered request destination %q, want %q", got, ident.Destination.String())
+			if got := renderedPITRRequest(job).Destination; got != activeDest.String() {
+				t.Fatalf("rendered request destination %q, want %q", got, activeDest.String())
 			}
 		})
 	}

@@ -46,7 +46,8 @@ func TestArtifactStorageFromJob(t *testing.T) {
 		t.Helper()
 		mb := backupCR("snap", fg.Name, fg.Spec.Backup.Profiles[profile].Name)
 		job, err := BuildBackupJob(BackupJobInputs{
-			FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[profile], Backup: mb,
+			DumpKeySecretName: testDumpKeySecret,
+			FailoverGroup:     fg, Profile: fg.Spec.Backup.Profiles[profile], Backup: mb,
 			SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts",
 		})
 		if err != nil {
@@ -75,7 +76,7 @@ func TestArtifactStorageFromJob(t *testing.T) {
 			want: v1alpha1.BackupArtifactStorage{Location: "lion/snap", Bucket: "bloodraven-backups", EndpointURL: "https://minio.example:9000", Region: "us-west-2"}},
 		{name: "encrypted S3 reads the uploader", job: func(t *testing.T) *batchv1.Job { return build(t, fgWithEncryptedBackup(), 0) },
 			want: v1alpha1.BackupArtifactStorage{Location: "s3://bloodraven-backups/lion/snap/", Bucket: "bloodraven-backups", EndpointURL: "https://minio.local", Region: "us-east-1",
-				PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "backup-passphrase", Key: "passphrase"}}},
+				PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: testDumpKeySecret, Key: pitrKeySnapshotDataKey}}},
 		{name: "PVC claim", job: func(t *testing.T) *batchv1.Job { return build(t, fgWithBackup(), 1) },
 			want: v1alpha1.BackupArtifactStorage{Location: "/backups/snap", ClaimName: ownedBackupPVCName("lion", "daily-local")}},
 		{name: "bucket from a runtime-only source", job: func(t *testing.T) *batchv1.Job {
@@ -204,7 +205,7 @@ func TestArtifactIdentityProblem(t *testing.T) {
 	t.Cleanup(func() { SetOperatorImageDefaults("", "") })
 	fg := fgWithBackup()
 	mb := backupCR("art", "lion", "nightly-s3")
-	producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Backup: mb,
+	producer, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Backup: mb,
 		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 	if err != nil {
 		t.Fatal(err)
@@ -507,7 +508,7 @@ func TestFinalize_BlockedCleanup(t *testing.T) {
 			name: "producing Job owned by another object",
 			setup: func(t *testing.T, f *cleanupFixture) {
 				f.mb.Status.ArtifactStorage = nil
-				producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
+				producer, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
 					SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 				if err != nil {
 					t.Fatal(err)
@@ -601,7 +602,7 @@ func TestFinalize_BlockedCleanup(t *testing.T) {
 func TestFinalize_RecoversSnapshotFromProducingJob(t *testing.T) {
 	f := newCleanupFixture(t)
 	ctx := context.Background()
-	producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
+	producer, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
 		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 	if err != nil {
 		t.Fatal(err)
@@ -851,7 +852,7 @@ func TestFinalize_StripsDeadHoldsKeepsLiveOnes(t *testing.T) {
 func TestRepairTerminalAttribution_BackfillsArtifactStorage(t *testing.T) {
 	ctx := context.Background()
 	f := newCleanupFixture(t)
-	producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
+	producer, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
 		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 	if err != nil {
 		t.Fatal(err)
@@ -1019,7 +1020,7 @@ func TestReconcile_DoesNotAdoptAnotherBackupsJob(t *testing.T) {
 func TestRepairTerminalAttribution_RestoresLostIdentity(t *testing.T) {
 	ctx := context.Background()
 	f := newCleanupFixture(t)
-	producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
+	producer, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
 		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 	if err != nil {
 		t.Fatal(err)

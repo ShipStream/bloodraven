@@ -3,6 +3,7 @@ package scenarios
 import (
 	"strings"
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -38,6 +39,43 @@ func TestScenariosPITR206RegisteredAndProfiled(t *testing.T) {
 		if !inventoryContains(release, id) || inventoryContains(smoke, id) {
 			t.Errorf("scenario %s must be release-only (release=%v smoke=%v)", id, inventoryContains(release, id), inventoryContains(smoke, id))
 		}
+	}
+}
+
+// scenarioPITR203 is the #203 archive encryption binding scenario
+// (IMPL-203 §7.4). It runs in the label-gated e2e `pitr` job and the full
+// profile, not in release (Δ19: it would push the release run past its
+// ceiling).
+const scenarioPITR203 = "69-pitr-encryption-binding-refusal"
+
+func TestScenarioPITR203RegisteredAndProfiled(t *testing.T) {
+	s, ok := runner.DefaultRegistry.Get(scenarioPITR203)
+	if !ok {
+		t.Fatalf("scenario %s is not registered", scenarioPITR203)
+	}
+	if s.Quarantine != "" {
+		t.Errorf("scenario %s must not be quarantined: %q", s.ID, s.Quarantine)
+	}
+	if !s.ResetBeforeRunAll {
+		t.Errorf("scenario %s must reset before run-all (it leaves bindings, snapshots and profiles if interrupted)", s.ID)
+	}
+	if !strings.HasSuffix(s.DocLink, "#"+s.ID) {
+		t.Errorf("scenario %s DocLink %q must anchor at #%s", s.ID, s.DocLink, s.ID)
+	}
+	if s.Timeout != 60*time.Minute {
+		t.Errorf("scenario %s Timeout=%s, want the 60m the e2e pitr job budgets", s.ID, s.Timeout)
+	}
+	if s.CleanupTimeout < pitrCleanupBaseBudget {
+		t.Errorf("scenario %s CleanupTimeout=%s is below the PITR base %s", s.ID, s.CleanupTimeout, pitrCleanupBaseBudget)
+	}
+	all := runner.DefaultRegistry.List()
+	for _, p := range []runner.Profile{runner.ProfileSmoke, runner.ProfileRelease} {
+		if inventoryContains(runner.SelectForProfile(all, p), s.ID) {
+			t.Errorf("scenario %s must not be in the %s profile", s.ID, p)
+		}
+	}
+	if !inventoryContains(runner.SelectForProfile(all, runner.ProfileFull), s.ID) {
+		t.Errorf("scenario %s must be in the full profile", s.ID)
 	}
 }
 

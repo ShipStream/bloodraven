@@ -218,6 +218,7 @@ func TestBuildBackupJob_AutomountServiceAccountToken_False(t *testing.T) {
 		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
+		DumpKeySecretName:    testDumpKeySecret,
 		FailoverGroup:        fg,
 		Profile:              fg.Spec.Backup.Profiles[0],
 		Backup:               mb,
@@ -270,6 +271,7 @@ func TestBuildVerificationJob_EncryptedSource_InitContainerCarriesResources(t *t
 	fg := fgWithEncryptedBackup()
 	backup := successfulBackup("verify-enc", "lion", "nightly-s3")
 	backup.Status.Encrypted = true
+	recordTestDumpKey(backup)
 	backup.Status.EncryptionAlgorithm = "AES-256-GCM"
 
 	v := &v1alpha1.MysqlBackupVerification{
@@ -389,6 +391,9 @@ func TestBuildRestoreJob_DecryptInitContainerCarriesResources(t *testing.T) {
 			StorageType:         v1alpha1.BackupStorageS3,
 			Encrypted:           true,
 			EncryptionAlgorithm: "AES-256-GCM",
+			ArtifactStorage: &v1alpha1.BackupArtifactStorage{
+				PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "backup-passphrase", Key: "passphrase"},
+			},
 		},
 	}
 	r, _ := newReconciler(fg, seed)
@@ -751,14 +756,14 @@ func TestComputeSpecHash_IncludesSecurityContexts(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
 
-	hNil := ComputeSpecHash(fg, site, "")
+	hNil := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 
 	fg2 := fg.DeepCopy()
 	fg2.Spec.PodSecurityContext = &corev1.PodSecurityContext{
 		RunAsNonRoot: &t1,
 		RunAsUser:    &uid1,
 	}
-	hPod := ComputeSpecHash(fg2, site, "")
+	hPod := ComputeSpecHash(fg2, site, "", testPITRRender(fg2))
 	if hPod == hNil {
 		t.Errorf("hash must change when PodSecurityContext goes nil->set; got %q == %q", hPod, hNil)
 	}
@@ -768,7 +773,7 @@ func TestComputeSpecHash_IncludesSecurityContexts(t *testing.T) {
 		RunAsNonRoot: &t1,
 		RunAsUser:    &uid1,
 	}
-	hBoth := ComputeSpecHash(fg3, site, "")
+	hBoth := ComputeSpecHash(fg3, site, "", testPITRRender(fg3))
 	if hBoth == hPod {
 		t.Errorf("hash must change when ContainerSecurityContext goes nil->set; got %q == %q", hBoth, hPod)
 	}
@@ -776,7 +781,7 @@ func TestComputeSpecHash_IncludesSecurityContexts(t *testing.T) {
 	// Different value in the same field must also produce a new hash.
 	fg4 := fg3.DeepCopy()
 	fg4.Spec.ContainerSecurityContext.RunAsUser = &uid2
-	hBoth2 := ComputeSpecHash(fg4, site, "")
+	hBoth2 := ComputeSpecHash(fg4, site, "", testPITRRender(fg4))
 	if hBoth2 == hBoth {
 		t.Errorf("hash must change when ContainerSecurityContext.RunAsUser changes; got %q == %q", hBoth2, hBoth)
 	}

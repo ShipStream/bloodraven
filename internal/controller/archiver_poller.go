@@ -254,11 +254,10 @@ func (p *archiverPoller) anchor(persisted *metav1.Condition) {
 	p.tracker.anchor(persisted)
 }
 
-// observeSpec refreshes what the poller takes from the group's spec: the
-// archiver scan interval behind the stuck-error bound, and whether the
-// PITR spec renders an enabled archiver.
-func (p *archiverPoller) observeSpec(fg *v1alpha1.MysqlFailoverGroup) {
-	renders := pitrSpecRendersArchiver(fg)
+// observeSpec refreshes what the poller takes from the group: the archiver
+// scan interval behind the stuck-error bound, and whether the group's
+// rendered PITR inputs (Δ14) enable an archiver.
+func (p *archiverPoller) observeSpec(fg *v1alpha1.MysqlFailoverGroup, renders bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.rolloutRenders = renders

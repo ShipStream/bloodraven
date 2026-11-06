@@ -218,6 +218,7 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
+		DumpKeySecretName:    testDumpKeySecret,
 		FailoverGroup:        fg,
 		Profile:              fg.Spec.Backup.Profiles[0],
 		Backup:               mb,
@@ -311,6 +312,7 @@ func TestBuildBackupJob_PVC_MountsClaim(t *testing.T) {
 		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "daily-local"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
+		DumpKeySecretName:    testDumpKeySecret,
 		FailoverGroup:        fg,
 		Profile:              fg.Spec.Backup.Profiles[1],
 		Backup:               mb,
@@ -511,6 +513,7 @@ func TestTruncateDNS1123_LongNameTruncatedWithHash(t *testing.T) {
 
 func newBackupReconciler(t *testing.T, objs ...client.Object) (*MysqlBackupReconciler, client.Client) {
 	t.Helper()
+	objs = withTestPassphraseSecrets(objs)
 	scheme := testScheme()
 	cb := fake.NewClientBuilder().
 		WithScheme(scheme).

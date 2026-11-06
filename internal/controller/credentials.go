@@ -377,7 +377,7 @@ func credentialStatementErrorLabel(roleName, stmt string) string {
 	return fmt.Sprintf("%s statement %q", roleName, truncateSQL(stmt))
 }
 
-// computeCredentialHash fingerprints the referenced Secrets' contents with
+// computeCredentialHash fingerprints the consumed keys of the credential Secrets with
 // the group's digest key (see secret_digest.go): the result is published in
 // an annotation on the group, readable by principals denied Secret access,
 // so an unkeyed digest would let them verify password guesses offline.
@@ -386,13 +386,18 @@ func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context
 	if err != nil {
 		return "", err
 	}
+	// Only what reconcileCredentials consumes (Δ15): the role accounts,
+	// the operator's replication account and, in legacy mode, the dsn.
+	// A passphrase or decryption Secret is never read here, so a missing
+	// one does not fail the reconcile and a passphrase edit does not
+	// re-run credential reconciliation.
 	secrets := make(map[string]map[string][]byte)
-	for _, name := range fg.Spec.AllReferencedSecretNames() {
+	for name, keys := range credentialHashSecretKeys(fg) {
 		var s corev1.Secret
 		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err != nil {
 			return "", fmt.Errorf("get secret %s: %w", name, err)
 		}
-		secrets[name] = s.Data
+		secrets[name] = pickSecretKeys(s.Data, keys)
 	}
 	h := sha256.New()
 	fmt.Fprintf(h, "grants=%s\n", credentialGrantsVersion)

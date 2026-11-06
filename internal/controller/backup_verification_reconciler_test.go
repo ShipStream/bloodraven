@@ -76,6 +76,8 @@ func TestVerificationLoadOptions_ResetsProgressSkipsBinlog(t *testing.T) {
 
 func verifyFG() *v1alpha1.MysqlFailoverGroup {
 	fg := fgWithBackup()
+	// PITR verifications read the archive through its read binding (#203).
+	bindAllTestPITRArchives(fg)
 	return fg
 }
 

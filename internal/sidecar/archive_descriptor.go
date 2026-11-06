@@ -859,3 +859,235 @@ func OpenArchiveForRead(ctx context.Context, store ArchiveStore, prefix string, 
 		Procedure: "check the archive profile, or wait for the first archived binlog",
 	}
 }
+
+// ArchiveProbeState is ProbeArchive's verdict on one archive prefix.
+type ArchiveProbeState string
+
+const (
+	// ArchiveProbeAbsent: the prefix is empty (writer role only). A writer
+	// rendered at this destination creates the descriptor.
+	ArchiveProbeAbsent ArchiveProbeState = "Absent"
+	// ArchiveProbeVerified: the descriptor passed VerifyDescriptor for the
+	// expectation, with the store's key.
+	ArchiveProbeVerified ArchiveProbeState = "Verified"
+	// ArchiveProbeRefused: a check failed; Token says which.
+	ArchiveProbeRefused ArchiveProbeState = "Refused"
+)
+
+// ArchiveProbe is the outcome of ProbeArchive.
+type ArchiveProbe struct {
+	State ArchiveProbeState
+	// Token is the refusal token when State is Refused.
+	Token pitrarchive.Token
+	// Err is the refusal (a *pitrarchive.VerifyError) when State is
+	// Refused.
+	Err error
+	// Descriptor is the descriptor that was read and parsed: set when
+	// Verified, and on a refusal found after parsing (ArchiveForeign,
+	// ArchiveCopy, ArchiveEncryptionMismatch, ArchiveKeyMismatch,
+	// ArchiveIdentityMismatch), so a caller can name the archive's source.
+	Descriptor *pitrarchive.Descriptor
+}
+
+// ProbeArchive classifies prefix for a one-shot check of a candidate key
+// (#203 pitr-archive-check) without writing anything. store may be an
+// encrypting store; its passphrase is the candidate key. It applies the
+// same rules as the consumers it stands in for:
+//
+//   - a descriptor is parsed and verified with VerifyDescriptor for
+//     expect.Role (a writer's own UID and derived archive ID, a reader's
+//     optional expected UID), exactly as OpenArchiveForWrite and
+//     OpenArchiveForRead do;
+//   - with no descriptor, a writer gets Absent on an empty prefix and the
+//     writer refusals of ArchiveSession.Open otherwise
+//     (PITRArchiveDescriptorMissing, PITRArchiveLegacy); a reader gets the
+//     refusals of OpenArchiveForRead (PITRArchiveDescriptorMissing,
+//     PITRArchiveLegacy, PITRArchiveNotFound).
+//
+// A listing refused for lack of permission (an S3 403/AccessDenied, a
+// filesystem EACCES) refuses PITRArchiveListFailed with the remedy for
+// its cause; no other store failure is a verdict: it is returned as an
+// error for the caller to retry.
+func ProbeArchive(ctx context.Context, store ArchiveStore, prefix string, expect pitrarchive.Expectation) (ArchiveProbe, error) {
+	switch expect.Role {
+	case pitrarchive.RoleWriter:
+		if expect.SourceUID == "" || expect.Destination.IsZero() {
+			return ArchiveProbe{}, fmt.Errorf("%w: a writer probe needs its own UID and destination", pitrarchive.ErrInvalidExpectation)
+		}
+	case pitrarchive.RoleReader:
+	default:
+		return ArchiveProbe{}, fmt.Errorf("%w: unknown role %q", pitrarchive.ErrInvalidExpectation, expect.Role)
+	}
+	if err := expect.Encryption.Validate(); err != nil {
+		return ArchiveProbe{}, fmt.Errorf("%w: %v", pitrarchive.ErrInvalidExpectation, err)
+	}
+	dest := expect.Destination.String()
+	refused := func(err error, d *pitrarchive.Descriptor) (ArchiveProbe, error) {
+		var ve *pitrarchive.VerifyError
+		if errors.As(err, &ve) && ve.Destination == "" {
+			ve.Destination = dest
+		}
+		tok, _ := pitrarchive.TokenOf(err)
+		return ArchiveProbe{State: ArchiveProbeRefused, Token: tok, Err: err, Descriptor: d}, nil
+	}
+
+	raw, passphrase := splitArchiveStore(store)
+	b, ok, err := readDescriptor(ctx, raw, prefix)
+	if err != nil {
+		if isVerifyError(err) {
+			return refused(err, nil)
+		}
+		return ArchiveProbe{}, err
+	}
+	if ok {
+		d, err := pitrarchive.ParseDescriptor(b)
+		if err != nil {
+			if isVerifyError(err) {
+				return refused(err, nil)
+			}
+			return ArchiveProbe{}, err
+		}
+		if err := pitrarchive.VerifyDescriptor(d, expect, passphrase); err != nil {
+			if isVerifyError(err) {
+				return refused(err, d)
+			}
+			return ArchiveProbe{}, err
+		}
+		return ArchiveProbe{State: ArchiveProbeVerified, Descriptor: d}, nil
+	}
+
+	c, err := probeArchivePrefix(ctx, store, raw, prefix, expect.Role == pitrarchive.RoleWriter)
+	if err != nil {
+		var le *prefixListError
+		if errors.As(err, &le) && listPermissionDenied(le.err) {
+			return refused(&pitrarchive.VerifyError{
+				Token: pitrarchive.TokenArchiveListFailed, Destination: dest,
+				Detail:    fmt.Sprintf("list archive prefix %q: %v", prefix, le.err),
+				Procedure: listRemedy(le.err),
+			}, nil)
+		}
+		return ArchiveProbe{}, err
+	}
+	if expect.Role == pitrarchive.RoleWriter {
+		if err := c.writerRefusal(expect.Destination); err != nil {
+			return refused(err, nil)
+		}
+		return ArchiveProbe{State: ArchiveProbeAbsent}, nil
+	}
+	switch {
+	case c.v2Manifests:
+		return refused(descriptorMissingError(expect.Destination), nil)
+	case c.otherManifests:
+		return refused(legacyPrefixError(expect.Destination), nil)
+	}
+	return refused(&pitrarchive.VerifyError{
+		Token: pitrarchive.TokenArchiveNotFound, Destination: dest,
+		Detail:    "the prefix holds no archive",
+		Procedure: "check the archive profile, or wait for the first archived binlog",
+	}, nil)
+}
+
+// archivePageLister is a store that lists page by page (S3), so a listing
+// can stop early.
+type archivePageLister interface {
+	ListPages(ctx context.Context, prefix string, fn func(keys []string) error) error
+}
+
+// errStopListing ends listUntil's paging.
+var errStopListing = errors.New("stop listing")
+
+// listUntil lists prefix through raw and calls visit for each key until it
+// returns true. A paging store stops fetching pages there.
+func listUntil(ctx context.Context, raw ArchiveStore, prefix string, visit func(key string) bool) error {
+	if pl, ok := raw.(archivePageLister); ok {
+		err := pl.ListPages(ctx, prefix, func(keys []string) error {
+			for _, k := range keys {
+				if visit(k) {
+					return errStopListing
+				}
+			}
+			return nil
+		})
+		if errors.Is(err, errStopListing) {
+			return nil
+		}
+		return err
+	}
+	keys, err := raw.List(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if visit(k) {
+			break
+		}
+	}
+	return nil
+}
+
+// probeArchivePrefix is classifyArchivePrefix for ProbeArchive, without
+// listing the whole prefix (U52): a check Job has a short deadline, and a
+// prefix with no descriptor may hold a whole history (or be a shared
+// bucket path). The manifests are listed by their own key prefix
+// (<prefix>/manifest-) and loaded; the rest of the prefix is listed only
+// when emptiness decides the verdict (a writer, with no manifest found),
+// and only up to the first object that counts. The verdicts are
+// classifyArchivePrefix's: a v2 manifest wins, then any other manifest or
+// object.
+func probeArchivePrefix(ctx context.Context, store, raw ArchiveStore, prefix string, needEmptiness bool) (archivePrefixContents, error) {
+	var c archivePrefixContents
+	base := prefix
+	if base != "" {
+		base += "/"
+	}
+	listErr := func(err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &prefixListError{prefix: prefix, err: err}
+	}
+	var sites []string
+	if err := listUntil(ctx, raw, base+"manifest-", func(key string) bool {
+		if site := SiteFromManifestKey(key); site != "" && manifestKey(prefix, site) == key {
+			sites = append(sites, site)
+		} else if !pitrarchive.IsIgnoredArchiveKey(key) {
+			c.otherObjects = true
+		}
+		return false
+	}); err != nil {
+		return c, listErr(err)
+	}
+	for _, site := range sites {
+		_, err := loadManifest(ctx, store, prefix, site)
+		switch {
+		case err == nil:
+			c.v2Manifests = true
+		case ctx.Err() != nil:
+			return c, ctx.Err()
+		case isManifestContentError(err):
+			c.otherManifests = true
+		default:
+			return c, fmt.Errorf("read manifest %s: %w", manifestKey(prefix, site), err)
+		}
+	}
+	if !needEmptiness || !c.empty() {
+		return c, nil
+	}
+	descriptor := pitrarchive.DescriptorKey(prefix)
+	if err := listUntil(ctx, raw, base, func(key string) bool {
+		if key == descriptor || pitrarchive.IsIgnoredArchiveKey(key) {
+			return false
+		}
+		c.otherObjects = true
+		return true
+	}); err != nil {
+		return c, listErr(err)
+	}
+	return c, nil
+}
+
+// listPermissionDenied reports a listing refused for lack of permission:
+// retrying cannot help, so a probe reports PITRArchiveListFailed.
+func listPermissionDenied(err error) bool {
+	return isAccessDenied(err) || errors.Is(err, fs.ErrPermission)
+}

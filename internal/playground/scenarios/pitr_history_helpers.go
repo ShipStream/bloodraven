@@ -39,12 +39,14 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -52,6 +54,7 @@ import (
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
+	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -101,9 +104,11 @@ func pitrBackupSpec(prefix, passphraseSecret string) v1alpha1.BackupSpec {
 }
 
 // pitrConfigureArchive patches spec.backup with a fresh PITR prefix under
-// e2e/<scenario>/<runStem>[-<suffix>] and waits for the profile, the PITR
-// rollout and a ready archiver on the active site. It stashes
-// backupRunStem (first call only) and backupPrefix.
+// e2e/<scenario>/<runStem>[-<suffix>] and follows #203's prefix switch to
+// its end (pitrWaitArchiveBound): the new binding Bound, the rollout done,
+// the archive verified, and the active archiver writing there. Only then
+// may a scenario take the full backup the switch requires. It stashes
+// backupRunStem (first call only), backupPrefix and archiveID.
 func pitrConfigureArchive(ctx context.Context, env *runner.Env, scenarioID, short, suffix string, encrypted bool) error {
 	if err := env.Chaos.EnsureRustFSBucket(ctx, backupE2EBucket); err != nil {
 		return err
@@ -150,29 +155,92 @@ func pitrConfigureArchive(ctx context.Context, env *runner.Env, scenarioID, shor
 			return err
 		}
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	if err := waitForBackupProfile(waitCtx, env, prefix, true); err != nil {
+	mfg, binding, err := pitrWaitArchiveBound(ctx, env, prefix)
+	if err != nil {
 		return err
 	}
-	rolloutCtx, rolloutCancel := context.WithTimeout(ctx, 8*time.Minute)
-	defer rolloutCancel()
-	mfg, err := env.Wait.UntilCR(rolloutCtx, env.Namespace, "PITR rollout and archive verified", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		ready := conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
-		archiveID := pitrObservedArchiveID(mfg, prefix)
-		return ready && mfg.Status.UpdatePhase == "" && mfg.Status.ActiveSite != "" && archiveID != "",
-			fmt.Sprintf("ready=%v updatePhase=%q active=%q archive=%s", ready, mfg.Status.UpdatePhase, mfg.Status.ActiveSite, pitrArchiveSummary(mfg)), nil
+	waitCtx, cancel := context.WithTimeout(ctx, pitrArchiveSwitchWait)
+	defer cancel()
+	st, err := waitForArchiverReady(waitCtx, env, mfg.Status.ActiveSite, prefix+"/binlogs")
+	if err != nil {
+		return err
+	}
+	env.Capture.Note(fmt.Sprintf("PITR archive %s bound (binding %s) and verified at prefix %s (encrypted=%v); active archiver: %s", binding.ArchiveID, binding.ID, prefix, encrypted, archiverSummary(st)))
+	return ctxStash(ctx, env, "archiveID", binding.ArchiveID)
+}
+
+// pitrArchiveSwitchWait bounds a PITR enable or prefix switch (#203): the
+// archive check Job (up to its 120 s deadline, plus a retry), the render,
+// an ordered update of every site (each pod restart is ~45 s on CI, and
+// the update fails over to move the writer), and the new writer's first
+// archiver pass, which creates the descriptor that binds the prefix. CI
+// run 6f3fc4b took 2.5 minutes from the patch to Bound; this leaves room
+// for a slow pod start or a check retry.
+const pitrArchiveSwitchWait = 12 * time.Minute
+
+// pitrArchiveDestination is the normalized binding destination of the e2e
+// bucket's archive at prefix (under <prefix>/binlogs).
+func pitrArchiveDestination(prefix string) (string, error) {
+	d, err := pitrarchive.NewS3Destination(backupE2EBucket, prefix, backupE2EEndpoint)
+	if err != nil {
+		return "", err
+	}
+	return d.String(), nil
+}
+
+// pitrWaitArchiveBound follows #203's procedure for a PITR enable or a new
+// archive prefix: the operator checks the prefix (Pending/Authenticating,
+// then Establishing for an empty one), renders it, rolls every site
+// (writers move to the new prefix only once the ordered update has failed
+// over), and the writer's descriptor binds it (Bound). It returns once the
+// prefix's binding is Bound with an archive ID, status.pitr.archive
+// verifies the same archive, and the group is Ready at its generation with
+// no update in progress. Waiting only for the spec or for Ready returns
+// while the binding is still Establishing (s70's remedy, CI 6f3fc4b).
+func pitrWaitArchiveBound(ctx context.Context, env *runner.Env, prefix string) (*v1alpha1.MysqlFailoverGroup, *v1alpha1.PITRArchiveBinding, error) {
+	dest, err := pitrArchiveDestination(prefix)
+	if err != nil {
+		return nil, nil, err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, pitrArchiveSwitchWait)
+	defer cancel()
+	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR archive binding Bound, rollout done and archive verified at "+prefix, func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		ok, msg := pitrArchiveBoundReady(mfg, prefix, dest)
+		return ok, msg, nil
 	})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	st, err := waitForArchiverReady(rolloutCtx, env, mfg.Status.ActiveSite, prefix+"/binlogs")
-	if err != nil {
-		return err
+	return mfg, pitrFindBindingByDestination(mfg, dest), nil
+}
+
+// pitrArchiveBoundReady is pitrWaitArchiveBound's predicate, with a summary
+// of what it still waits on.
+func pitrArchiveBoundReady(mfg *v1alpha1.MysqlFailoverGroup, prefix, dest string) (bool, string) {
+	spec := backupProfileMatches(backupE2EProfileOf(mfg), prefix) && mfg.Spec.Backup.PITR != nil &&
+		mfg.Spec.Backup.PITR.Enabled && mfg.Spec.Backup.PITR.ProfileName == backupE2EProfile
+	b := pitrFindBindingByDestination(mfg, dest)
+	bound := b != nil && b.State == v1alpha1.PITRArchiveBindingBound && b.ArchiveID != ""
+	verified := bound && pitrObservedArchiveID(mfg, prefix) == b.ArchiveID
+	ready := conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
+	settled := ready && backupProfileRolloutReady(mfg)
+	binding := "<none>"
+	if b != nil {
+		binding = fmt.Sprintf("{id=%s %s/%s archive=%q msg=%q}", b.ID, b.State, b.Reason, b.ArchiveID, b.Message)
 	}
-	archiveID := pitrObservedArchiveID(mfg, prefix)
-	env.Capture.Note(fmt.Sprintf("PITR archive %s verified at prefix %s (encrypted=%v); active archiver: %s", archiveID, prefix, encrypted, archiverSummary(st)))
-	return ctxStash(ctx, env, "archiveID", archiveID)
+	return spec && bound && verified && settled, fmt.Sprintf("spec=%v binding=%s archiveVerified=%v ready=%v updatePhase=%q active=%q archive=%s",
+		spec, binding, verified, ready, mfg.Status.UpdatePhase, mfg.Status.ActiveSite, pitrArchiveSummary(mfg))
+}
+
+// pitrFindBindingByDestination returns the binding entry for a normalized
+// destination, or nil.
+func pitrFindBindingByDestination(mfg *v1alpha1.MysqlFailoverGroup, dest string) *v1alpha1.PITRArchiveBinding {
+	for i := range mfg.Status.PITRArchiveBindings {
+		if mfg.Status.PITRArchiveBindings[i].Destination == dest {
+			return &mfg.Status.PITRArchiveBindings[i]
+		}
+	}
+	return nil
 }
 
 // pitrObservedArchiveID is the verified archive ID status.pitr.archive
@@ -250,6 +318,11 @@ type pitrFence struct {
 	Site string
 	T    string
 	GTID string
+	// Manifest and File are set by a flushing fence: the site manifest's
+	// bucket key and the binlog file the flush sealed, which the archiver
+	// uploaded before the fence returned.
+	Manifest string `json:",omitempty"`
+	File     string `json:",omitempty"`
 }
 
 // pitrTakeFence fences site's primary (see the file comment). With flush it
@@ -327,6 +400,7 @@ func pitrTakeFence(ctx context.Context, env *runner.Env, site string, flush bool
 		if err := seal.wait(ctx, env, true); err != nil {
 			return pitrFence{}, err
 		}
+		fence.Manifest, fence.File = seal.key, seal.file
 	}
 	env.Capture.Note(fmt.Sprintf("fence on %s: T=%s flush=%v gtid=%s", site, fence.T, flush, fence.GTID))
 	return fence, nil
@@ -402,9 +476,31 @@ func pitrManifestKey(manifestPrefix, site string) string {
 	return path.Join(strings.Trim(manifestPrefix, "/"), "manifest-"+site+".json")
 }
 
+// pitrManifestFile is one archived file of a site manifest, with the
+// bucket key of its object.
+type pitrManifestFile struct {
+	Name       string `json:"name"`
+	ID         string `json:"id"`
+	RemotePath string `json:"remotePath"`
+}
+
 // pitrReadManifestRows reads site's manifest rows straight from RustFS; a
 // manifest not written yet has none.
 func pitrReadManifestRows(ctx context.Context, env *runner.Env, key string) ([]pitrManifestRow, error) {
+	files, err := pitrReadManifest(ctx, env, key)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]pitrManifestRow, 0, len(files))
+	for _, f := range files {
+		rows = append(rows, pitrManifestRow{Name: f.Name, ID: f.ID})
+	}
+	return rows, nil
+}
+
+// pitrReadManifest reads and, for an encrypted archive, decrypts a site
+// manifest (pitrDecryptArchiveObject).
+func pitrReadManifest(ctx context.Context, env *runner.Env, key string) ([]pitrManifestFile, error) {
 	data, found, err := env.Chaos.ReadRustFSObject(ctx, backupE2EBucket, key)
 	if err != nil {
 		return nil, fmt.Errorf("read manifest %s: %w", key, err)
@@ -412,24 +508,40 @@ func pitrReadManifestRows(ctx context.Context, env *runner.Env, key string) ([]p
 	if !found {
 		return nil, nil
 	}
-	if backupcrypto.LooksEncrypted(data) {
-		// An encrypted archive's manifests are BRV1 streams under the
-		// archive passphrase, which is this run's profile passphrase.
-		pass, err := pitrRunPassphrase(ctx, env)
-		if err != nil {
-			return nil, fmt.Errorf("manifest %s is encrypted: %w", key, err)
-		}
-		if data, err = pitrDecryptObject(data, pass); err != nil {
-			return nil, fmt.Errorf("decrypt manifest %s: %w", key, err)
-		}
+	if data, err = pitrDecryptArchiveObject(env, data); err != nil {
+		return nil, fmt.Errorf("manifest %s: %w", key, err)
 	}
 	var m struct {
-		Files []pitrManifestRow `json:"files"`
+		Files []pitrManifestFile `json:"files"`
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("decode manifest %s: %w", key, err)
 	}
 	return m.Files, nil
+}
+
+// pitrDecryptArchiveObject returns a plaintext archive object as is and
+// decrypts a BRV1 one with the first archive passphrase this run stashed
+// that opens it (pitrArchivePassphrases). It never reads a live Secret: a
+// scenario that rotates the profile's Secret (s69) must still read the
+// archive written under the bytes stashed before the rotation.
+func pitrDecryptArchiveObject(env *runner.Env, data []byte) ([]byte, error) {
+	if !backupcrypto.LooksEncrypted(data) {
+		return data, nil
+	}
+	passes := pitrArchivePassphrases(env)
+	if len(passes) == 0 {
+		return nil, errors.New("the object is encrypted but this run stashed no archive passphrase")
+	}
+	var last error
+	for _, pass := range passes {
+		plain, err := pitrDecryptObject(data, pass)
+		if err == nil {
+			return plain, nil
+		}
+		last = err
+	}
+	return nil, fmt.Errorf("no stashed archive passphrase (%d tried) decrypts it: %w", len(passes), last)
 }
 
 // pitrSealWatch proves that the file one FLUSH BINARY LOGS seals reaches
@@ -712,28 +824,81 @@ func pitrDumpBaseline(ctx context.Context, env *runner.Env, backupName string) (
 	return strings.ReplaceAll(strings.TrimSpace(meta.GTIDExecuted), "\n", ""), nil
 }
 
-func pitrRunPassphrase(ctx context.Context, env *runner.Env) ([]byte, error) {
-	name := ctxFetch(env, backupPassphraseSecretKey)
-	if name == "" {
-		return nil, fmt.Errorf("the dump is encrypted but this run created no passphrase Secret")
+// pitrArchivePassphrasesKey stashes, as a JSON list of strings, every
+// passphrase this run gave an archive profile, the run passphrase first.
+// They are stashed when the Secret is created, before any rotation, so the
+// helpers that decrypt archive objects never depend on a live Secret.
+const pitrArchivePassphrasesKey = "pitrArchivePassphrases"
+
+// pitrStashArchivePassphrase records a passphrase (trimmed, as the operator
+// uses it) for pitrDecryptArchiveObject.
+func pitrStashArchivePassphrase(env *runner.Env, pass []byte) {
+	var list []string
+	if raw := ctxFetch(env, pitrArchivePassphrasesKey); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &list)
 	}
-	sec, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Get(ctx, name, metav1.GetOptions{})
+	p := string(backupcrypto.TrimPassphrase(pass))
+	for _, have := range list {
+		if have == p {
+			return
+		}
+	}
+	body, _ := json.Marshal(append(list, p))
+	stashSet(env, pitrArchivePassphrasesKey, string(body))
+}
+
+// pitrArchivePassphrases lists the stashed archive passphrases, the run
+// passphrase first.
+func pitrArchivePassphrases(env *runner.Env) [][]byte {
+	var list []string
+	if raw := ctxFetch(env, pitrArchivePassphrasesKey); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &list)
+	}
+	out := make([][]byte, 0, len(list))
+	for _, p := range list {
+		out = append(out, []byte(p))
+	}
+	return out
+}
+
+// pitrBackupDumpPassphrase is the passphrase a backup's dump is encrypted
+// with: the dump-key snapshot its status.artifactStorage.passphraseSecret
+// records (#203: an immutable per-backup copy, so a later edit of the
+// profile's Secret does not change it).
+func pitrBackupDumpPassphrase(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlBackup) ([]byte, error) {
+	if b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecret == nil || b.Status.ArtifactStorage.PassphraseSecret.Name == "" {
+		return nil, fmt.Errorf("encrypted MysqlBackup %s records no status.artifactStorage.passphraseSecret", b.Name)
+	}
+	ref := b.Status.ArtifactStorage.PassphraseSecret
+	sec, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("get passphrase secret %s: %w", name, err)
+		return nil, fmt.Errorf("get dump key %s of MysqlBackup %s: %w", ref.Name, b.Name, err)
 	}
-	raw := sec.Data[backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault()]
-	return backupcrypto.TrimPassphrase(raw), nil
+	key := ref.Key
+	if key == "" {
+		key = "passphrase"
+	}
+	pass := backupcrypto.TrimPassphrase(sec.Data[key])
+	if len(pass) == 0 {
+		return nil, fmt.Errorf("dump key %s of MysqlBackup %s has no %q", ref.Name, b.Name, key)
+	}
+	return pass, nil
 }
 
 // pitrBackup creates a MysqlBackup, waits for it, records B, and waits
 // until targets are clear of it (pitrWaitPastBackup).
 func pitrBackup(ctx context.Context, env *runner.Env, scenarioID, key string) error {
+	return pitrBackupOfProfile(ctx, env, scenarioID, key, backupE2EProfile)
+}
+
+// pitrBackupOfProfile is pitrBackup of another profile.
+func pitrBackupOfProfile(ctx context.Context, env *runner.Env, scenarioID, key, profile string) error {
 	name := pitrShortName(scenarioID, "backup-"+key) + "-" + backupRunStamp(env)
 	if err := ctxStash(ctx, env, "backup:"+key, name); err != nil {
 		return err
 	}
 	pitrTrackCR(ctx, env, "MysqlBackup", name)
-	if err := createMysqlBackup(ctx, env, name, scenarioID); err != nil {
+	if err := createMysqlBackupForProfile(ctx, env, name, scenarioID, profile); err != nil {
 		return err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
@@ -785,6 +950,9 @@ type pitrExpectation struct {
 	Outcome v1alpha1.PointInTimeOutcome
 	// Markers are this run's marker phases the result must hold, in order.
 	Markers []string
+	// ArchiveProfile is the verification's pointInTime.archiveProfileName
+	// ("" = the group's active PITR profile).
+	ArchiveProfile string
 	// TargetLocal accepts, on a restore, the target server's own
 	// transactions (users and grants its first boot wrote), which restore.py
 	// keeps and certifies: gtidExecuted may hold extra GTIDs only under
@@ -878,7 +1046,7 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 
 // pitrVerifySpec builds the verification's pointInTime block.
 func pitrVerifySpec(e pitrExpectation) *v1alpha1.PointInTimeVerificationSpec {
-	pit := &v1alpha1.PointInTimeVerificationSpec{Mode: e.Mode, ExcludeGtids: e.Exclude}
+	pit := &v1alpha1.PointInTimeVerificationSpec{Mode: e.Mode, ExcludeGtids: e.Exclude, ArchiveProfileName: e.ArchiveProfile}
 	if e.Mode == "timestamp" {
 		pit.Timestamp = e.Fence.T
 	}
@@ -888,15 +1056,31 @@ func pitrVerifySpec(e pitrExpectation) *v1alpha1.PointInTimeVerificationSpec {
 // pitrVerify runs one MysqlBackupVerification of e.Backup and asserts the
 // certified result and the marker rows.
 func pitrVerify(ctx context.Context, env *runner.Env, scenarioID, db, label string, e pitrExpectation) error {
-	if err := pitrCheckTargetAfterBackup(env, e); err != nil {
+	name, err := pitrStartVerify(ctx, env, scenarioID, db, label, e)
+	if err != nil {
 		return err
+	}
+	return pitrFinishVerify(ctx, env, name, e)
+}
+
+// pitrStartVerify creates the verification pitrVerify runs and returns
+// its name without waiting for it.
+func pitrStartVerify(ctx context.Context, env *runner.Env, scenarioID, db, label string, e pitrExpectation) (string, error) {
+	if err := pitrCheckTargetAfterBackup(env, e); err != nil {
+		return "", err
 	}
 	name := fmt.Sprintf("%s-%s", pitrShortName(scenarioID, label), backupRunStamp(env))
 	pitrTrackCR(ctx, env, "MysqlBackupVerification", name)
 	query := pitrMarkerQuery(db, ctxFetch(env, "backupRunStem"), e.Markers)
 	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pitrVerifySpec(e), query, 1); err != nil {
-		return err
+		return "", err
 	}
+	return name, nil
+}
+
+// pitrFinishVerify waits for a verification pitrStartVerify created and
+// asserts the certified result and the marker rows.
+func pitrFinishVerify(ctx context.Context, env *runner.Env, name string, e pitrExpectation) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	v, err := waitForVerificationPhase(waitCtx, env, name, v1alpha1.VerificationPhaseSucceeded)
@@ -1491,7 +1675,8 @@ func pitrWithWriter(ctx context.Context, env *runner.Env, site, db string, fn fu
 }
 
 // pitrReadDumpObject reads one object of a backup's dump from RustFS,
-// decrypting it with this run's passphrase when the dump is encrypted.
+// decrypting it with the backup's recorded dump key when the dump is
+// encrypted.
 func pitrReadDumpObject(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlBackup, name string) ([]byte, error) {
 	bucket, prefix, ok, err := backupArtifactPrefix(b)
 	if err != nil {
@@ -1509,7 +1694,7 @@ func pitrReadDumpObject(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlB
 		return nil, fmt.Errorf("dump object s3://%s/%s not found", bucket, key)
 	}
 	if b.Status.Encrypted {
-		pass, err := pitrRunPassphrase(ctx, env)
+		pass, err := pitrBackupDumpPassphrase(ctx, env, b)
 		if err != nil {
 			return nil, err
 		}
@@ -1677,4 +1862,334 @@ func refusalNamesExactly(msg, want string) error {
 		}
 	}
 	return fmt.Errorf("the refusal names the sets %q, none equal to %s: %s", found, want, msg)
+}
+
+// Metadata of the #203 archive bindings (IMPL-203 §3.5). The operator's
+// constants are unexported (internal/controller/pitr_binding_contract.go);
+// these mirror them, and TestPITRPlaygroundContractMirrors pins each mirror
+// to the controller's declaration, so a drifted value fails a unit test
+// rather than turning a scenario assertion vacuous.
+const (
+	pitrSnapshotAppLabel       = "app.kubernetes.io/name"
+	pitrKeySnapshotApp         = "mysql-pitr-key"
+	pitrDumpKeySnapshotApp     = "mysql-dump-key"
+	pitrGroupUIDLabel          = "bloodraven.shipstream.io/failover-group-uid"
+	pitrBindingIDLabel         = "bloodraven.shipstream.io/pitr-binding-id"
+	pitrDestinationAnnotation  = "bloodraven.shipstream.io/pitr-destination"
+	pitrAcceptedAnnotation     = "bloodraven.shipstream.io/pitr-accepted"
+	pitrRenderAnnotation       = "bloodraven.shipstream.io/pitr-render"
+	pitrCheckJobSelector       = "app.kubernetes.io/name=mysql-backup,shipstream.io/resource=pitr-archive-check"
+	pitrBindingReadyCondition  = "PITRArchiveBindingReady"
+	pitrSnapshotPassphraseKey  = "passphrase"
+	pitrReleaseBindingWaitTime = 2 * time.Minute
+	// pitrSnapshotUnmountWaitTime bounds the wait, before the cleanup's
+	// releases, for the pods that still mount the run's key snapshots
+	// (old ReplicaSets, deleted verification and restore pods) to finish
+	// terminating.
+	pitrSnapshotUnmountWaitTime = 3 * time.Minute
+)
+
+// pitrKeySnapshotSelector lists a group's archive key snapshots. They have
+// no owner reference (they outlive the group), so the group-UID label is
+// what scopes them.
+func pitrKeySnapshotSelector(groupUID string) string {
+	return pitrSnapshotAppLabel + "=" + pitrKeySnapshotApp + "," + pitrGroupUIDLabel + "=" + groupUID
+}
+
+// pitrGroupSnapshotSelector lists every key snapshot (archive and dump) a
+// group's operator made.
+func pitrGroupSnapshotSelector(groupUID string) string {
+	return pitrSnapshotAppLabel + " in (" + pitrKeySnapshotApp + "," + pitrDumpKeySnapshotApp + ")," + pitrGroupUIDLabel + "=" + groupUID
+}
+
+// pitrDestinationUnderPrefixes reports whether a normalized destination is
+// an S3 archive in the e2e bucket under one of the profile prefixes, in any
+// endpoint spelling (s69's read alias reaches P1 through another one).
+func pitrDestinationUnderPrefixes(destination string, prefixes []string) bool {
+	d, err := pitrarchive.ParseDestination(destination)
+	if err != nil || d.Kind != pitrarchive.DestinationS3 || d.Bucket != backupE2EBucket {
+		return false
+	}
+	for _, p := range prefixes {
+		if d.KeyPrefix == pitrarchive.NormalizeKeyPrefix(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// pitrBindingIDsUnderPrefixes is every binding id of the group that covers
+// one of the prefixes: its status entries, and the id label of every
+// archive key snapshot whose destination is there (an entry that was
+// dropped or lost still has releasable snapshots). Sorted, unique.
+func pitrBindingIDsUnderPrefixes(mfg *v1alpha1.MysqlFailoverGroup, snapshots []corev1.Secret, prefixes []string) []string {
+	seen := map[string]bool{}
+	for _, b := range mfg.Status.PITRArchiveBindings {
+		if pitrDestinationUnderPrefixes(b.Destination, prefixes) {
+			seen[b.ID] = true
+		}
+	}
+	for i := range snapshots {
+		s := &snapshots[i]
+		if id := s.Labels[pitrBindingIDLabel]; id != "" && pitrDestinationUnderPrefixes(s.Annotations[pitrDestinationAnnotation], prefixes) {
+			seen[id] = true
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// pitrFindBindingByID returns the group's binding entry with id, or nil.
+func pitrFindBindingByID(mfg *v1alpha1.MysqlFailoverGroup, id string) *v1alpha1.PITRArchiveBinding {
+	for i := range mfg.Status.PITRArchiveBindings {
+		if mfg.Status.PITRArchiveBindings[i].ID == id {
+			return &mfg.Status.PITRArchiveBindings[i]
+		}
+	}
+	return nil
+}
+
+// pitrListKeySnapshots lists the group's archive key snapshots, optionally
+// only those of one binding id.
+func pitrListKeySnapshots(ctx context.Context, env *runner.Env, groupUID, id string) ([]corev1.Secret, error) {
+	sel := pitrKeySnapshotSelector(groupUID)
+	if id != "" {
+		sel += "," + pitrBindingIDLabel + "=" + id
+	}
+	list, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	if err != nil {
+		return nil, fmt.Errorf("list archive key snapshots (%s): %w", sel, err)
+	}
+	return list.Items, nil
+}
+
+// pitrReleaseValue is the release annotation's value for one binding id
+// (`<id>:confirm=<group>`, one id per annotation).
+func pitrReleaseValue(id, group string) string {
+	return id + ":confirm=" + group
+}
+
+// pitrReleaseBinding asks the operator to release one binding of the
+// scenario's group and waits up to pitrReleaseBindingWaitTime until the
+// annotation is consumed, the entry is gone and no snapshot of the id is
+// left. On a timeout (or the caller's deadline) it takes its own annotation
+// back (pitrWithdrawRelease), so a refused release does not fire later.
+func pitrReleaseBinding(ctx context.Context, env *runner.Env, id string) error {
+	value := pitrReleaseValue(id, env.FG)
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, brcontroller.ReleasePITRArchiveBindingAnnotation, value); err != nil {
+		return fmt.Errorf("annotate the release of %s: %w", id, err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, pitrReleaseBindingWaitTime)
+	defer cancel()
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	var last string
+	for {
+		mfg, err := env.Kube.GetMFGNamed(waitCtx, env.Namespace, env.FG)
+		if err != nil {
+			last = err.Error()
+		} else {
+			pending := mfg.Annotations[brcontroller.ReleasePITRArchiveBindingAnnotation] == value
+			entry := pitrFindBindingByID(mfg, id)
+			snaps, err := pitrListKeySnapshots(waitCtx, env, string(mfg.UID), id)
+			switch {
+			case err != nil:
+				last = err.Error()
+			case !pending && entry == nil && len(snaps) == 0:
+				env.Capture.Note(fmt.Sprintf("released PITR archive binding %s", id))
+				return nil
+			case !pending && entry != nil:
+				return fmt.Errorf("the operator removed the release annotation for %s but kept the entry (%s/%s: %s): the release was rejected", id, entry.State, entry.Reason, entry.Message)
+			default:
+				last = fmt.Sprintf("annotation pending=%v entry=%v snapshots=%d", pending, entry != nil, len(snaps))
+			}
+		}
+		select {
+		case <-waitCtx.Done():
+			err := fmt.Errorf("release of PITR archive binding %s did not finish in %s (last: %s)", id, pitrReleaseBindingWaitTime, last)
+			if werr := pitrWithdrawRelease(ctx, env, value); werr != nil {
+				return errors.Join(err, werr)
+			}
+			return err
+		case <-tick.C:
+		}
+	}
+}
+
+// pitrReleaseWithdrawTimeout bounds pitrWithdrawRelease. It runs on a
+// context detached from the caller's: the withdrawal matters most when the
+// cleanup's own deadline is what ended the wait.
+const pitrReleaseWithdrawTimeout = 30 * time.Second
+
+// pitrWithdrawRelease removes the release annotation only while it still
+// holds this request's value (a JSON Patch test guards the removal, so a
+// newer request is never taken back). An annotation the operator already
+// consumed, or that now holds another value, needs no withdrawal.
+func pitrWithdrawRelease(ctx context.Context, env *runner.Env, value string) error {
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pitrReleaseWithdrawTimeout)
+	defer cancel()
+	err := env.Kube.PatchMFGNamed(wctx, env.Namespace, env.FG, pitrReleaseWithdrawPatch(value))
+	if err == nil {
+		env.Capture.Note("withdrew the pending release request " + value)
+		return nil
+	}
+	mfg, gerr := env.Kube.GetMFGNamed(wctx, env.Namespace, env.FG)
+	if gerr == nil && mfg.Annotations[brcontroller.ReleasePITRArchiveBindingAnnotation] != value {
+		return nil
+	}
+	return fmt.Errorf("withdraw the release request %s: %w; remove the %s annotation by hand or the operator keeps retrying it", value, errors.Join(err, gerr), brcontroller.ReleasePITRArchiveBindingAnnotation)
+}
+
+// pitrReleaseWithdrawPatch removes the release annotation if, and only if,
+// it still equals value.
+func pitrReleaseWithdrawPatch(value string) []pgkube.JSONPatchOp {
+	p := "/metadata/annotations/" + strings.NewReplacer("~", "~0", "/", "~1").Replace(brcontroller.ReleasePITRArchiveBindingAnnotation)
+	return []pgkube.JSONPatchOp{{Op: "test", Path: p, Value: value}, {Op: "remove", Path: p}}
+}
+
+// pitrReleaseBindings is the PITR cleanups' binding hygiene (IMPL-203
+// Δ20): archive key snapshots outlive the group and are never pruned, and
+// a retained Bound entry counts against the 16-binding limit, so every
+// binding this run created under its archive prefixes is released, one
+// annotation per id (an id whose entry was dropped is still released
+// through the snapshots that carry its label). It runs after the original
+// spec.backup is back and the group is healthy. Snapshots are removed only
+// through the operator's release, which refuses while a pod mounts one, an
+// unfinished Job labels one or a live verification holds one: a snapshot
+// left after the releases is reported, never deleted here, since deleting
+// it would bypass exactly that protection. Failures are cleanup warnings:
+// they are noted, never returned.
+func pitrReleaseBindings(ctx context.Context, env *runner.Env, prefixes []string) {
+	if len(prefixes) == 0 {
+		return
+	}
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		env.Capture.Note("cleanup warning: read the group to release PITR bindings: " + err.Error())
+		return
+	}
+	uid := string(mfg.UID)
+	snaps, err := pitrListKeySnapshots(ctx, env, uid, "")
+	if err != nil {
+		env.Capture.Note("cleanup warning: " + err.Error())
+		return
+	}
+	// The operator refuses to release a snapshot a non-terminal pod still
+	// mounts, and the healthy baseline does not wait for the pods of an
+	// old ReplicaSet or a deleted verification to finish terminating.
+	names := map[string]bool{}
+	for _, n := range pitrSnapshotsUnderPrefixes(snaps, prefixes) {
+		names[n] = true
+	}
+	if err := pitrWaitSnapshotsUnmounted(ctx, env, names); err != nil {
+		env.Capture.Note("cleanup warning: " + err.Error())
+	}
+	for _, id := range pitrBindingIDsUnderPrefixes(mfg, snaps, prefixes) {
+		if err := pitrReleaseBinding(ctx, env, id); err != nil {
+			env.Capture.Note("cleanup warning: " + err.Error())
+		}
+	}
+	if snaps, err = pitrListKeySnapshots(ctx, env, uid, ""); err != nil {
+		env.Capture.Note("cleanup warning: " + err.Error())
+		return
+	}
+	if left := pitrSnapshotsUnderPrefixes(snaps, prefixes); len(left) > 0 {
+		env.Capture.Note(fmt.Sprintf("cleanup warning: archive key snapshots %v under this run's prefixes outlived the operator's release and are retained; release them with the %s annotation once nothing uses them", left, brcontroller.ReleasePITRArchiveBindingAnnotation))
+	}
+}
+
+// pitrSnapshotsUnderPrefixes names the snapshots whose destination is under
+// one of the prefixes, sorted.
+func pitrSnapshotsUnderPrefixes(snaps []corev1.Secret, prefixes []string) []string {
+	var out []string
+	for i := range snaps {
+		if pitrDestinationUnderPrefixes(snaps[i].Annotations[pitrDestinationAnnotation], prefixes) {
+			out = append(out, snaps[i].Name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pitrPodsMountingSecrets names the pods that mount one of the Secrets
+// through a secret volume and are not terminal, which is what the
+// operator's release in-use scan counts (a terminating pod is still
+// Running).
+func pitrPodsMountingSecrets(pods []corev1.Pod, names map[string]bool) []string {
+	var out []string
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		for _, v := range p.Spec.Volumes {
+			if v.Secret != nil && names[v.Secret.SecretName] {
+				out = append(out, p.Name+" mounts "+v.Secret.SecretName)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// pitrWaitSnapshotsUnmounted waits up to pitrSnapshotUnmountWaitTime until
+// no non-terminal pod in the namespace mounts one of the named snapshots.
+func pitrWaitSnapshotsUnmounted(ctx context.Context, env *runner.Env, names map[string]bool) error {
+	if len(names) == 0 {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, pitrSnapshotUnmountWaitTime)
+	defer cancel()
+	var last string
+	for {
+		pods, err := env.Kube.Kubernetes.CoreV1().Pods(env.Namespace).List(waitCtx, metav1.ListOptions{})
+		if err != nil {
+			last = err.Error()
+		} else if users := pitrPodsMountingSecrets(pods.Items, names); len(users) == 0 {
+			return nil
+		} else {
+			last = strings.Join(users, "; ")
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("key snapshots still mounted after %s: %s", pitrSnapshotUnmountWaitTime, last)
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// pitrDeleteGroupKeySnapshots deletes every archive and dump key snapshot
+// of a group this run deleted (by its UID label: they have no owner, so
+// group deletion leaves them).
+func pitrDeleteGroupKeySnapshots(ctx context.Context, env *runner.Env, groupUID string) error {
+	if groupUID == "" {
+		return nil
+	}
+	list, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).List(ctx, metav1.ListOptions{LabelSelector: pitrGroupSnapshotSelector(groupUID)})
+	if err != nil {
+		return fmt.Errorf("list key snapshots of group %s: %w", groupUID, err)
+	}
+	var errs []error
+	for i := range list.Items {
+		if err := pitrDeleteSecretExact(ctx, env, &list.Items[i]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// pitrDeleteSecretExact deletes exactly the Secret object read (UID
+// precondition).
+func pitrDeleteSecretExact(ctx context.Context, env *runner.Env, s *corev1.Secret) error {
+	uid := s.UID
+	err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete key snapshot %s: %w", s.Name, err)
+	}
+	env.Capture.Note("deleted key snapshot " + s.Name)
+	return nil
 }

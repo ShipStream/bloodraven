@@ -28,7 +28,7 @@ const (
 	// field change. ComputeSpecHash includes this value so already-enabled
 	// PITR pods roll forward to pick up render-only fixes such as Secret
 	// volume modes.
-	pitrPodRenderVersion = "pitr-pod-render-v5-archive-identity"
+	pitrPodRenderVersion = "pitr-pod-render-v6-key-snapshot"
 
 	// Official MySQL container images own /var/lib/mysql as uid/gid 999.
 	// PITR sidecars must read mysql-bin.index and sealed binlog files from
@@ -77,39 +77,31 @@ type pitrSidecarFragments struct {
 	PodVolumes          []corev1.Volume
 }
 
-// buildPITRSidecarFragments returns the env/mount/volume additions
-// the MySQL Deployment needs when PITR is enabled for this group.
+// buildPITRSidecarFragments returns the env/mount/volume additions the
+// MySQL Deployment needs for the resolved PITR render in (§4.6). A disabled
+// render returns empty fragments. Everything comes from in, never from the
+// live profile: the identity fields may be held (a Bound binding, or the
+// group hold), so a profile or Secret edit changes nothing here unless the
+// resolver accepted it.
 //
-// The function is intentionally non-fatal on misconfiguration — the
-// reconcilerPITR validation path in backup_schedule.go already emits a
-// BackupPITRInvalid event, and returning empty fragments here means
-// the sidecar's PITRConfig ends up nil (archiver goroutine disabled)
-// rather than making the Deployment creation error out. This matches
-// the general reconciler preference of "don't block the happy path on
-// a mis-set knob when the user can fix it without a pod roll".
-func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFragments, error) {
+// The archive key is the binding's immutable snapshot Secret (data key
+// "passphrase"), mounted optional (Δ32, K12): a missing snapshot leaves
+// mysqld running and the archiver failing closed at store init, instead of
+// turning a PITR key problem into a MySQL outage at the next pod restart.
+// BLOODRAVEN_PITR_KEY_REVISION echoes the snapshot name, or "plaintext"
+// for an unencrypted archive (Δ2, K4), so a sidecar report proves which
+// key a writer verified with. No profile name is rendered (K7).
+func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup, in pitrRenderInputs) (pitrSidecarFragments, error) {
 	out := pitrSidecarFragments{}
-
-	if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
+	if !in.Enabled {
 		return out, nil
 	}
-	pitr := fg.Spec.Backup.PITR
-	if pitr.ProfileName == "" {
-		return out, nil
+	if err := in.validate(); err != nil {
+		return out, fmt.Errorf("pitr render: %w", err)
 	}
-	profile := findProfile(fg, pitr.ProfileName)
-	if profile == nil {
-		return out, nil
-	}
-
-	// The archive identity the sidecar writes and verifies (§3.7): the
-	// group's UID, the archive ID derived from it and the normalized
-	// destination, and the profile's encryption mode. The manifest prefix
-	// is the destination's key prefix, so the sidecar, the readers and
-	// the descriptor agree on one spelling of it.
-	ident, err := pitrArchiveIdentityFor(fg, profile)
+	dest, err := pitrarchive.ParseDestination(in.Destination)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("pitr render: %w", err)
 	}
 
 	// Always mount the MySQL data PVC read-only into the sidecar. The
@@ -132,52 +124,51 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		MountPath: pitrStateMountPath,
 	})
 
-	// Core archiver env vars shared by both storage backends.
+	// Core archiver env vars shared by both storage backends. The archive
+	// identity the sidecar writes and verifies (§3.7): the group's UID, the
+	// archive ID, the normalized destination and the encryption mode. The
+	// manifest prefix is the destination's key prefix, so the sidecar, the
+	// readers and the descriptor agree on one spelling of it.
 	out.SidecarEnv = append(out.SidecarEnv,
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STATE_DIR", Value: pitrStateMountPath},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENABLED", Value: "1"},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_BINLOG_DIR", Value: pitrBinlogDir},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_BINLOG_INDEX", Value: pitrBinlogIndex},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
-		// Profile name is echoed so the sidecar's retention client
-		// can query the operator for the per-profile cutoff.
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_PROFILE_NAME", Value: profile.Name},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: in.StorageType},
 		corev1.EnvVar{Name: "BLOODRAVEN_FAILOVER_GROUP_UID", Value: string(fg.UID)},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ARCHIVE_ID", Value: ident.ArchiveID},
+		// Also the retention client's identity (/pitr-cutoff?archive=).
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ARCHIVE_ID", Value: in.ArchiveID},
 		// Literal: kubelet expands $(VAR) and $$ in EnvVar.Value, which
 		// would change the destination the sidecar parses while the
 		// archive ID above was derived from the unexpanded one (F029).
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: literalArtifactEnvValue(ident.Destination.String())},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(ident.Encryption.Mode)},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: literalArtifactEnvValue(ident.Destination.KeyPrefix)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: literalArtifactEnvValue(in.Destination)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: in.EncryptionMode},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_KEY_REVISION", Value: in.keyRevision()},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: literalArtifactEnvValue(dest.KeyPrefix)},
 	)
-	if pitr.ArchivePollInterval != nil {
+	if in.PollInterval != "" {
 		out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
 			Name:  "BLOODRAVEN_PITR_POLL_INTERVAL",
-			Value: pitr.ArchivePollInterval.Duration.String(),
+			Value: in.PollInterval,
 		})
 	}
 
-	switch profile.Storage.Type {
-	case v1alpha1.BackupStorageS3:
-		if profile.Storage.S3 == nil {
-			return out, fmt.Errorf("profile %q type=S3 but storage.s3 nil", profile.Name)
-		}
-		s3 := profile.Storage.S3
+	switch dest.Kind {
+	case pitrarchive.DestinationS3:
 		out.SidecarEnv = append(out.SidecarEnv,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: literalArtifactEnvValue(s3.Bucket)},
+			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: literalArtifactEnvValue(in.Bucket)},
 		)
-		if s3.EndpointURL != "" {
+		if in.EndpointURL != "" {
 			out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: literalArtifactEnvValue(s3.EndpointURL),
+				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: literalArtifactEnvValue(in.EndpointURL),
 			})
 		}
-		if s3.Region != "" {
+		if in.Region != "" {
 			out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(s3.Region),
+				Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(in.Region),
 			})
 		}
-		if s3.CredentialsSecret != "" {
+		if in.CredentialsSecret != "" {
 			// Mount the AWS creds Secret as files readable by the sidecar's
 			// non-root process. Unlike backup/restore Jobs, the MySQL pod
 			// does not get the backup Job's fsGroup defaults, so mode 0400
@@ -187,7 +178,7 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 				Name: "pitr-aws-creds",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName:  s3.CredentialsSecret,
+						SecretName:  in.CredentialsSecret,
 						DefaultMode: ptr32(0o444),
 					},
 				},
@@ -202,17 +193,12 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 			})
 		}
 
-	case v1alpha1.BackupStoragePVC:
-		if profile.Storage.PVC == nil {
-			return out, fmt.Errorf("profile %q type=PVC but storage.pvc nil", profile.Name)
-		}
-		claim := ident.Destination.Claim
-
+	case pitrarchive.DestinationPVC:
 		out.PodVolumes = append(out.PodVolumes, corev1.Volume{
 			Name: "pitr-archive",
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: claim,
+					ClaimName: dest.Claim,
 				},
 			},
 		})
@@ -225,27 +211,26 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		)
 
 	default:
-		return out, fmt.Errorf("profile %q has unknown storage type %q", profile.Name, profile.Storage.Type)
+		return out, fmt.Errorf("pitr render: unknown destination kind %q", dest.Kind)
 	}
 
-	// Encryption wiring. When the profile has encryption enabled we
-	// mount the passphrase Secret onto the sidecar container and
-	// point the archiver at the file; everything else (wrapper
-	// selection, re-upload / prune semantics) falls out naturally
-	// from the encryptedStore that sidecar.NewArchiveStore chooses.
-	if profile.EncryptionEnabled() {
-		ref := profile.Encryption.PassphraseSecret
+	// Encryption wiring: the binding's key snapshot, never the user's
+	// Secret (#203). The archiver reads the file at store init; the
+	// encryptedStore wrapper does the rest.
+	if in.KeySecretName != "" {
+		optional := true
 		// Match the S3 credentials projection: the non-root sidecar
 		// must be able to read this file even without a pod fsGroup.
 		out.PodVolumes = append(out.PodVolumes, corev1.Volume{
 			Name: "pitr-passphrase",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  ref.Name,
+					SecretName:  in.KeySecretName,
 					DefaultMode: ptr32(0o444),
+					Optional:    &optional,
 					Items: []corev1.KeyToPath{
 						{
-							Key:  ref.PassphraseSecretKeyOrDefault(),
+							Key:  pitrKeySnapshotDataKey,
 							Path: backupPassphraseFileName,
 						},
 					},
@@ -266,45 +251,25 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 	return out, nil
 }
 
-// pitrArchiveIdentity is the archive identity a group derives for one of
-// its backup profiles: where the archive lives, the ID a writer creates
-// there, and the encryption the descriptor must record.
-type pitrArchiveIdentity struct {
-	Destination pitrarchive.Destination
-	ArchiveID   string
-	Encryption  pitrarchive.EncryptionIdentity
-}
-
-// pitrArchiveIdentityFor derives profile's archive identity for fg. The
-// archive ID is the creating derivation (ArchiveIDDerivations[0]) of fg's
-// UID and the normalized destination.
-func pitrArchiveIdentityFor(fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.BackupProfile) (pitrArchiveIdentity, error) {
-	dest, err := pitrprofile.DestinationFor(fg, profile)
-	if err != nil {
-		return pitrArchiveIdentity{}, err
-	}
-	return pitrArchiveIdentity{
-		Destination: dest,
-		ArchiveID:   pitrarchive.CreateArchiveID(fg.UID, dest),
-		Encryption:  pitrprofile.EncryptionIdentityFor(profile),
-	}, nil
-}
-
-// activePITRArchiveIdentity is the identity of fg's active PITR archive,
-// or false when PITR is disabled or its profile is missing or invalid.
-func activePITRArchiveIdentity(fg *v1alpha1.MysqlFailoverGroup) (pitrArchiveIdentity, bool) {
+// activePITRDestination is the normalized destination of fg's active PITR
+// profile, or false when PITR is disabled or its profile is missing or
+// invalid. It is only a location: the archive ID and encryption identity
+// an archive has are the ones its binding accepted
+// (status.pitrArchiveBindings), never derived from the live profile
+// (U60).
+func activePITRDestination(fg *v1alpha1.MysqlFailoverGroup) (pitrarchive.Destination, bool) {
 	if !pitrEnabled(fg) || fg.Spec.Backup.PITR.ProfileName == "" {
-		return pitrArchiveIdentity{}, false
+		return pitrarchive.Destination{}, false
 	}
 	profile := findProfile(fg, fg.Spec.Backup.PITR.ProfileName)
 	if profile == nil {
-		return pitrArchiveIdentity{}, false
+		return pitrarchive.Destination{}, false
 	}
-	ident, err := pitrArchiveIdentityFor(fg, profile)
+	dest, err := pitrprofile.DestinationFor(fg, profile)
 	if err != nil {
-		return pitrArchiveIdentity{}, false
+		return pitrarchive.Destination{}, false
 	}
-	return ident, true
+	return dest, true
 }
 
 // restorePITRPVCMountPath is the mount path inside the restore Job's
@@ -522,6 +487,10 @@ type restorePITRFragments struct {
 	// PodVolumes is the set of pod-level volumes that back the init
 	// container and the read-only handoff to the main container.
 	PodVolumes []corev1.Volume
+	// KeySecretName is the read binding's archive key snapshot the init
+	// container mounts ("" for a plaintext archive). Callers label the Job
+	// with it (labelPITRKeySecret, Δ18) and a verification holds it (K9).
+	KeySecretName string
 }
 
 // buildRestorePITRFragments wires up the restore-side PITR handoff
@@ -577,7 +546,7 @@ func validateRestoreArchiveProfile(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha
 	if err != nil {
 		return err
 	}
-	if own, ok := activePITRArchiveIdentity(fg); ok && own.Destination == src {
+	if own, ok := activePITRDestination(fg); ok && own == src {
 		return fmt.Errorf("%s: pointInTime.archiveProfileName %q resolves to %s, which is this group's own active PITR destination (spec.backup.pitr.profileName %q); the restored group would archive into the archive it restores from; archive into a different profile or prefix",
 			pitrarchive.TokenArchiveDestinationShared, pit.ArchiveProfileName, src.String(), fg.Spec.Backup.PITR.ProfileName)
 	}
@@ -609,11 +578,12 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	if profileName == "" {
 		if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
 			if req.Verification {
-				// A verification always replays its group's own archive;
-				// it has no archiveProfileName to point elsewhere (F032).
-				return out, fmt.Errorf("%s: pointInTime is set but spec.backup.pitr.enabled=false; "+
-					"a verification replays the group's own PITR archive, so enable spec.backup.pitr on group %q "+
-					"(or verify without pointInTime)", pitrarchive.TokenTargetInvalid, fg.Name)
+				// Without archiveProfileName a verification replays the
+				// group's active PITR archive; with PITR disabled there is
+				// none, but a retained archive can still be named (U69).
+				return out, fmt.Errorf("%s: pointInTime is set but spec.backup.pitr.enabled=false, so group %q has no active PITR archive to replay; "+
+					"set pointInTime.archiveProfileName to the profile of the archive to replay (a retained archive needs no writer), "+
+					"enable spec.backup.pitr, or verify without pointInTime", pitrarchive.TokenTargetInvalid, fg.Name)
 			}
 			return out, fmt.Errorf("%s: pointInTime is set but spec.backup.pitr.enabled=false; "+
 				"PITR replay reads the source group's binlog archive, so continuous archival "+
@@ -624,6 +594,14 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	profile := findProfile(fg, profileName)
 	if profile == nil {
 		return out, fmt.Errorf("pitr profile %q not found in spec.backup.profiles", profileName)
+	}
+	// The archive is read with the encryption identity its read binding
+	// accepted, never the profile's live Secret (#203, §4.7): a Pending or
+	// refused binding returns an *errPITRBindingNotReady the caller waits
+	// or fails on (Δ22).
+	binding, err := pitrReadBinding(fg, profileName)
+	if err != nil {
+		return out, err
 	}
 
 	// Shared emptyDir volume. Init container writes; main container
@@ -638,11 +616,14 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	mainMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir, ReadOnly: true}
 
 	// The reader opens the archive at the normalized destination and
-	// checks the descriptor's encryption against the profile's. Replay
+	// checks the descriptor's encryption against the binding's. Replay
 	// considers every site manifest under the prefix (D-9).
-	ident, err := pitrArchiveIdentityFor(fg, profile)
+	dest, err := pitrprofile.DestinationFor(fg, profile)
 	if err != nil {
 		return out, err
+	}
+	if dest.String() != binding.Destination {
+		return out, fmt.Errorf("internal error: read binding %s names %q, profile %q resolves to %q", binding.ID, binding.Destination, profile.Name, dest.String())
 	}
 	// The replay request, rendered identically on pitr-download and the
 	// main container (contracts: "WP-B2 assumptions").
@@ -658,9 +639,9 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DUMP_META", Value: restorePITRDumpMetaDir + "/dump.json"},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: literalArtifactEnvValue(ident.Destination.String())},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(ident.Encryption.Mode)},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: literalArtifactEnvValue(ident.Destination.KeyPrefix)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: literalArtifactEnvValue(dest.String())},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(binding.Encryption.Mode)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: literalArtifactEnvValue(dest.KeyPrefix)},
 	)
 	// dump-meta writes dump.json here; pitr-download only reads it.
 	dumpMetaVol := corev1.Volume{
@@ -716,7 +697,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 		if profile.Storage.PVC == nil {
 			return out, fmt.Errorf("pitr profile %q type=PVC but storage.pvc nil", profile.Name)
 		}
-		claim := ident.Destination.Claim
+		claim := dest.Claim
 		volumes = append(volumes, corev1.Volume{
 			Name: "pitr-archive",
 			VolumeSource: corev1.VolumeSource{
@@ -745,22 +726,26 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	// Job spec shape stable.
 	image := pitrOperatorImage()
 
-	// If the backup profile encrypts binlog archives too, mount the
-	// passphrase Secret onto the download init container and point
-	// the sidecar archive-store wrapper at the file. The operator
-	// uses the same conventional path as backup / restore Jobs so
-	// env var names stay consistent.
-	if profile.EncryptionEnabled() {
-		ref := profile.Encryption.PassphraseSecret
+	// An encrypted archive is opened with the read binding's key snapshot
+	// (data key "passphrase"), mounted required: a Job must not start
+	// without its key (the binding is Bound/Bound, so the snapshot was
+	// verified this pass). The path is the conventional one backup and
+	// restore Jobs use, so env var names stay consistent.
+	keySecret := ""
+	if binding.Encryption.Mode == v1alpha1.PITRArchiveEncryptionPassphrase {
+		keySecret = binding.Encryption.KeySecretName
+		if keySecret == "" {
+			return out, fmt.Errorf("internal error: Bound passphrase binding %s has no key snapshot", binding.ID)
+		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "pitr-passphrase",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  ref.Name,
+					SecretName:  keySecret,
 					DefaultMode: ptr32(0o400),
 					Items: []corev1.KeyToPath{
 						{
-							Key:  ref.PassphraseSecretKeyOrDefault(),
+							Key:  pitrKeySnapshotDataKey,
 							Path: backupPassphraseFileName,
 						},
 					},
@@ -812,5 +797,6 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 		MainMounts:    []corev1.VolumeMount{mainMount},
 		InitContainer: &init,
 		PodVolumes:    volumes,
+		KeySecretName: keySecret,
 	}, nil
 }

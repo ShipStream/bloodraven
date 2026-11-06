@@ -40,6 +40,7 @@ func TestBuildBackupJob_TLSLayout(t *testing.T) {
 				},
 			}
 			job, err := BuildBackupJob(BackupJobInputs{
+				DumpKeySecretName:    testDumpKeySecret,
 				FailoverGroup:        fg,
 				Profile:              fg.Spec.Backup.Profiles[0],
 				Backup:               backup,

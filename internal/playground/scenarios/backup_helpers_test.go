@@ -95,39 +95,29 @@ func TestConditionTrueForGeneration(t *testing.T) {
 }
 
 func TestBackupProfileRolloutReady(t *testing.T) {
-	mfg := &v1alpha1.MysqlFailoverGroup{
-		ObjectMeta: metav1.ObjectMeta{Generation: 5},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
-			ActiveSite: "iad",
-			Conditions: []metav1.Condition{{
-				Type:               "Ready",
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: 4,
-			}},
-		},
+	stale := []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 4}}
+	cases := []struct {
+		name   string
+		active string
+		phase  string
+		want   bool
+	}{
+		// A plain profile is inert: status is not rewritten for it, so a
+		// Ready from an older generation must not hold the wait.
+		{"stable topology, stale Ready", "iad", "", true},
+		{"ordered update in progress", "iad", "UpdateReplica", false},
+		{"no active site", "", "", false},
 	}
-
-	if !backupProfileRolloutReady(mfg, false) {
-		t.Fatal("plain backup profile should not wait for an unrelated topology status rewrite")
-	}
-	if backupProfileRolloutReady(mfg, true) {
-		t.Fatal("PITR profile should reject Ready=True from an older generation")
-	}
-
-	mfg.Status.UpdatePhase = "UpdateReplica"
-	if backupProfileRolloutReady(mfg, false) {
-		t.Fatal("plain backup profile should wait for an in-progress topology update")
-	}
-	mfg.Status.UpdatePhase = ""
-	mfg.Status.ActiveSite = ""
-	if backupProfileRolloutReady(mfg, false) {
-		t.Fatal("plain backup profile should wait until an active site is available")
-	}
-
-	mfg.Status.ActiveSite = "iad"
-	mfg.Status.Conditions[0].ObservedGeneration = mfg.Generation
-	if !backupProfileRolloutReady(mfg, true) {
-		t.Fatal("PITR profile should accept a completed current-generation rollout")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mfg := &v1alpha1.MysqlFailoverGroup{
+				ObjectMeta: metav1.ObjectMeta{Generation: 5},
+				Status:     v1alpha1.MysqlFailoverGroupStatus{ActiveSite: tc.active, UpdatePhase: tc.phase, Conditions: stale},
+			}
+			if got := backupProfileRolloutReady(mfg); got != tc.want {
+				t.Fatalf("backupProfileRolloutReady = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

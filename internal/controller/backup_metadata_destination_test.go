@@ -99,7 +99,21 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 						t.Fatalf("recovery changed actual artifact identity: %+v want %q", mb.Status, wantLocation)
 					}
 					fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: mb.Name}}}
-					rr, _ := newReconciler(fg, mb)
+					objs := []client.Object{fg, mb}
+					if encrypted {
+						// The restore decrypts with the backup's dump-key
+						// snapshot (Δ17), made before its Job.
+						var snap corev1.Secret
+						if err := c.Get(ctx, client.ObjectKey{Namespace: mb.Namespace, Name: dumpKeySnapshotName(mb)}, &snap); err != nil {
+							t.Fatal(err)
+						}
+						if got := mb.Status.ArtifactStorage.PassphraseSecret; got == nil || got.Name != snap.Name || got.Key != pitrKeySnapshotDataKey {
+							t.Fatalf("recorded dump key %+v, want snapshot %s", got, snap.Name)
+						}
+						snap.ResourceVersion = ""
+						objs = append(objs, &snap)
+					}
+					rr, _ := newReconciler(objs...)
 					restore, err := rr.buildRestoreJob(ctx, fg, "iad", "creds")
 					if err != nil {
 						t.Fatal(err)

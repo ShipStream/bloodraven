@@ -24,7 +24,28 @@ const (
 	cleanupCompletePrefix = "BLOODRAVEN_CLEANUP_COMPLETE"
 	// CleanupFailedPrefix starts the termination message of a failed run.
 	CleanupFailedPrefix = "BLOODRAVEN_CLEANUP_FAILED:"
+	// CleanupSkippedPrefix starts the termination message of an abandoned
+	// cleanup that deleted nothing because it could not prove the objects
+	// at the location are the backup's (exit 0): the artifacts may remain,
+	// so the key that decrypts them must remain too.
+	CleanupSkippedPrefix = "BLOODRAVEN_CLEANUP_SKIPPED:"
 )
+
+// FormatCleanupSkipped is the skipped verdict with its reason.
+func FormatCleanupSkipped(reason string) string {
+	return CleanupSkippedPrefix + " " + reason
+}
+
+// ParseCleanupSkipped returns the reason of a skipped verdict; ok is false
+// for any other text.
+func ParseCleanupSkipped(message string) (reason string, ok bool) {
+	for _, line := range strings.Split(message, "\n") {
+		if rest, found := strings.CutPrefix(strings.TrimSpace(line), CleanupSkippedPrefix); found {
+			return strings.TrimSpace(rest), true
+		}
+	}
+	return "", false
+}
 
 // FormatCleanupComplete is the success verdict: the number of objects (S3) or
 // files (PVC) that were deleted.

@@ -384,7 +384,7 @@ func TestBackupJobDestinationUsesMainContainer(t *testing.T) {
 						want = "s3://bloodraven-backups/" + want + "/"
 					}
 				}
-				job, err := BuildBackupJob(BackupJobInputs{FailoverGroup: fg, Profile: profile, Backup: backupCR("metadata", fg.Name, profile.Name), SourceSite: "iad", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+				job, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: fg, Profile: profile, Backup: backupCR("metadata", fg.Name, profile.Name), SourceSite: "iad", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -13,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -140,16 +142,9 @@ func (r *MysqlFailoverGroupReconciler) validateEncryptionSecret(ctx context.Cont
 	if !ok {
 		return fmt.Errorf("Secret %q does not contain key %q", ref.Name, key)
 	}
-	// Trim common whitespace so a trailing newline doesn't trigger the
-	// empty check (matches backupcrypto.ReadPassphraseFile semantics).
-	for len(data) > 0 {
-		c := data[len(data)-1]
-		if c == '\n' || c == '\r' || c == ' ' || c == '\t' {
-			data = data[:len(data)-1]
-			continue
-		}
-		break
-	}
+	// The one trim every consumer applies (Δ16, D-7): leading and
+	// trailing whitespace, so the length checked is the key's.
+	data = backupcrypto.TrimPassphrase(data)
 	if len(data) == 0 {
 		return fmt.Errorf("Secret %q key %q is empty", ref.Name, key)
 	}
@@ -249,8 +244,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileOwnedBackupPVC(ctx context.Conte
 func (r *MysqlFailoverGroupReconciler) reconcileBackupSchedules(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	desired := map[string]struct{}{}
 
+	// Remembered refusals of schedules no longer in the spec (or of an
+	// earlier incarnation of the group) are dropped (U27).
+	current := map[string]bool{}
 	if fg.Spec.Backup != nil {
 		for _, sched := range fg.Spec.Backup.Schedules {
+			current[sched.Name] = true
+		}
+	}
+	r.forgetScheduleRefusals(client.ObjectKeyFromObject(fg), fg.UID, current)
+
+	if fg.Spec.Backup != nil {
+		for _, sched := range fg.Spec.Backup.Schedules {
+			// A read-only profile (D-10, Δ23) is never backed up on a
+			// schedule: its CronJob is not rendered (and an existing one
+			// is pruned below), with one Warning per change.
+			if readOnly, why := pitrProfileReadOnly(fg, sched.ProfileName); readOnly {
+				r.noteScheduleRefused(fg, sched.Name, why)
+				continue
+			}
+			r.noteScheduleRefused(fg, sched.Name, "")
 			name := scheduleCronJobName(fg.Name, sched.Name)
 			desired[name] = struct{}{}
 			if err := r.reconcileOneSchedule(ctx, fg, sched); err != nil {
@@ -679,3 +692,46 @@ func startAfter(a, b *v1alpha1.MysqlBackup) bool {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// forgetScheduleRefusals drops what noteScheduleRefused remembers for the
+// group nn, except the schedules in keep of incarnation uid (keep nil:
+// everything, for a deleted group).
+func (r *MysqlFailoverGroupReconciler) forgetScheduleRefusals(nn types.NamespacedName, uid types.UID, keep map[string]bool) {
+	prefix := nn.Namespace + "/" + nn.Name + "/"
+	r.scheduleRefusedMu.Lock()
+	defer r.scheduleRefusedMu.Unlock()
+	for key := range r.scheduleRefused {
+		rest, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			continue
+		}
+		gotUID, schedule, _ := strings.Cut(rest, "/")
+		if keep == nil || types.UID(gotUID) != uid || !keep[schedule] {
+			delete(r.scheduleRefused, key)
+		}
+	}
+}
+
+// noteScheduleRefused emits BackupScheduleRefused when a schedule's
+// read-only refusal starts or its reason changes, and forgets it when the
+// schedule is no longer refused (why == "").
+func (r *MysqlFailoverGroupReconciler) noteScheduleRefused(fg *v1alpha1.MysqlFailoverGroup, schedule, why string) {
+	key := fg.Namespace + "/" + fg.Name + "/" + string(fg.UID) + "/" + schedule
+	r.scheduleRefusedMu.Lock()
+	defer r.scheduleRefusedMu.Unlock()
+	if why == "" {
+		delete(r.scheduleRefused, key)
+		return
+	}
+	if r.scheduleRefused[key] == why {
+		return
+	}
+	if r.scheduleRefused == nil {
+		r.scheduleRefused = map[string]string{}
+	}
+	r.scheduleRefused[key] = why
+	if r.Recorder != nil {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonBackupScheduleRefused,
+			"schedule %q is not run: %s", schedule, why)
+	}
+}

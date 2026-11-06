@@ -1113,6 +1113,7 @@ func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testi
 	seed := succeededSeedBackup()
 	seed.Status.StorageType = v1alpha1.BackupStorageS3
 	seed.Status.Encrypted = true
+	recordTestDumpKey(seed)
 	r, c := newReconciler(fg, seed, dsnSecret())
 
 	func() {

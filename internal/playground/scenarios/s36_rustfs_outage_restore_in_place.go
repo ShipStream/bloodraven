@@ -101,7 +101,7 @@ func s36ConfigureProfile() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
-			return waitForBackupProfile(waitCtx, env, prefix, false)
+			return waitForBackupProfile(waitCtx, env, prefix)
 		},
 	}
 }

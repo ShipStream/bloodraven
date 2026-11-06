@@ -54,7 +54,7 @@ func TestPITRCutoffRequiresEveryBackupGTIDBoundary(t *testing.T) {
 			request := func(query string) map[string]any {
 				t.Helper()
 				w := httptest.NewRecorder()
-				mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&profile=p"+query, nil))
+				mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&archive="+cutoffTestArchive+query, nil))
 				if w.Code != http.StatusOK {
 					t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
 				}
@@ -67,6 +67,9 @@ func TestPITRCutoffRequiresEveryBackupGTIDBoundary(t *testing.T) {
 			legacy := request("")
 			if legacy["cutoffTime"] != nil {
 				t.Errorf("legacy sidecar was authorized for unsafe time-only deletion: %v", legacy)
+			}
+			if legacy["archive"] != cutoffTestArchive || legacy["profile"] != nil {
+				t.Errorf("legacy reply does not echo the archive: %v", legacy)
 			}
 			proof := request("&coverage=gtid-v1")
 			if tc.known {
@@ -105,7 +108,7 @@ func TestPITRCutoffDoesNotCachePositiveCoverage(t *testing.T) {
 	read := func() map[string]any {
 		t.Helper()
 		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&profile=p&coverage=gtid-v1", nil))
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&archive="+cutoffTestArchive+"&coverage=gtid-v1", nil))
 		var body map[string]any
 		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
@@ -188,7 +191,7 @@ func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
 					},
 				})
 			}
-			resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", "p")
+			resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", cutoffTestArchive)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("an unknown reader set produced a cutoff: %v", resp)
@@ -235,12 +238,18 @@ func TestPITRCutoffListsVerificationsOnce(t *testing.T) {
 			return c.List(ctx, list, opts...)
 		},
 	})
-	resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", "p")
+	resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", cutoffTestArchive)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lists != 1 {
 		t.Fatalf("verification Lists = %d, want 1 per request", lists)
+	}
+	if resp["archive"] != cutoffTestArchive {
+		t.Fatalf("response echoes archive %v, want %s", resp["archive"], cutoffTestArchive)
+	}
+	if _, ok := resp["profile"]; ok {
+		t.Fatalf("response still echoes a profile: %v", resp)
 	}
 	if resp["cutoffTime"] != start.Add(time.Hour).Format(time.RFC3339) {
 		t.Fatalf("cutoff %v", resp["cutoffTime"])

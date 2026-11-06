@@ -166,8 +166,11 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 	if slices.Contains(normalize, "encryptionAtRest") {
 		t.Fatalf("normalization fields %v must keep encryptionAtRest on a live cluster", normalize)
 	}
-	if len(wipe) != len(normalize)+1 {
-		t.Fatalf("normalization fields %v must be the wipe fields %v minus encryptionAtRest", normalize, wipe)
+	if !slices.Contains(wipe, "pitrArchiveBindings") || slices.Contains(normalize, "pitrArchiveBindings") {
+		t.Fatalf("only the wipe pass (fields %v, not %v) clears pitrArchiveBindings: it also deletes the snapshots they name", wipe, normalize)
+	}
+	if len(wipe) != len(normalize)+2 {
+		t.Fatalf("normalization fields %v must be the wipe fields %v minus encryptionAtRest and pitrArchiveBindings", normalize, wipe)
 	}
 
 	// Every top-level status field the failover and planned-failover
@@ -193,6 +196,7 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 		"lastBackupTime":      "backup scheduling state",
 		"pitr":                "backup/PITR state",
 		"encryptionAtRest":    "cleared by the wipe pass only (asserted above)",
+		"pitrArchiveBindings": "cleared by the wipe pass only (asserted above)",
 	}
 	statusType := reflect.TypeOf(v1alpha1.MysqlFailoverGroupStatus{})
 	all := map[string]bool{}
@@ -210,6 +214,30 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 		if !all[f] {
 			t.Errorf("reset clears %q, which is not a MysqlFailoverGroup status field", f)
 		}
+	}
+}
+
+func TestStaleKeySnapshotsKeepsDumpKeysOfLiveBackups(t *testing.T) {
+	secret := func(name, app, backupUID string) corev1.Secret {
+		s := corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"app.kubernetes.io/name": app}}}
+		if backupUID != "" {
+			s.Labels["bloodraven.shipstream.io/mysqlbackup-uid"] = backupUID
+		}
+		return s
+	}
+	got := staleKeySnapshots([]corev1.Secret{
+		secret("mysql-playground-pitr-key-0123456789", "mysql-pitr-key", ""),
+		secret("mysqlbackup-live-dump-key-aaaaaaaa", "mysql-dump-key", "live-uid"),
+		secret("mysqlbackup-gone-dump-key-bbbbbbbb", "mysql-dump-key", "gone-uid"),
+		secret("mysqlbackup-unlabelled-dump-key", "mysql-dump-key", ""),
+	}, map[types.UID]bool{"live-uid": true})
+	var names []string
+	for _, s := range got {
+		names = append(names, s.Name)
+	}
+	want := []string{"mysql-playground-pitr-key-0123456789", "mysqlbackup-gone-dump-key-bbbbbbbb", "mysqlbackup-unlabelled-dump-key"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("stale key snapshots = %v, want %v", names, want)
 	}
 }
 

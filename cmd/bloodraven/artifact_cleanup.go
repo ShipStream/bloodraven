@@ -82,6 +82,15 @@ func artifactCleanupRequestFromEnv(getenv func(string) string) artifactCleanupRe
 type cleanupError struct {
 	code int
 	err  error
+	// skipped marks an abandoned cleanup that proved nothing and deleted
+	// nothing (exit 0, verdict backupmeta.CleanupSkippedPrefix).
+	skipped bool
+}
+
+// skippedCleanup is an abandoned cleanup that deletes nothing because the
+// location's objects cannot be shown to be the backup's.
+func skippedCleanup(format string, args ...any) *cleanupError {
+	return &cleanupError{code: 0, err: fmt.Errorf(format, args...), skipped: true}
 }
 
 func (e *cleanupError) Error() string { return e.err.Error() }
@@ -124,6 +133,13 @@ func artifactCleanup(ctx context.Context, req artifactCleanupRequest, newStore f
 	_, _ = fmt.Fprintf(out, "BLOODRAVEN_CLEANUP_START type=%s output=%s\n", req.StorageType, req.Location)
 
 	objects, cerr := runCleanupRequest(ctx, req, newStore)
+	if cerr != nil && cerr.skipped {
+		verdict := backupmeta.FormatCleanupSkipped(cerr.Error())
+		logger.Warn("artifact cleanup skipped", "reason", cerr.err)
+		_, _ = fmt.Fprintln(out, verdict)
+		writeCleanupTerminationLog(verdict)
+		return 0
+	}
 	if cerr != nil {
 		verdict := backupmeta.CleanupFailedPrefix + " " + cerr.Error()
 		logger.Error("artifact cleanup failed", "exitCode", cerr.code, "error", cerr.err)
@@ -216,6 +232,15 @@ type stampGetter interface {
 // live backup in another namespace that shares the prefix, or to a later
 // backup of the same name. The dump is deleted before the stamp, so an
 // interrupted run keeps its proof.
+//
+// Deleting nothing is reported two ways. Another backup's stamp means this
+// backup never wrote there (its Job writes the stamp first, and only on a
+// location with no other stamp), and an empty location holds nothing of
+// it: both are complete with zero objects, and the backup's key is no
+// longer needed. No stamp over a location that still holds objects (the
+// stamp was removed, say by a lifecycle rule) may be this backup's
+// unproven dump: that is skipped (backupmeta.CleanupSkippedPrefix), so the
+// finalizer keeps the key that decrypts it (U05).
 func runAbandonedCleanup(ctx context.Context, req artifactCleanupRequest, newStore func(context.Context, *sidecar.PITRConfig) (cleanupStore, error)) (int, *cleanupError) {
 	if req.UID == "" {
 		return 0, rejected("abandoned cleanup requires BLOODRAVEN_BACKUP_UID")
@@ -251,6 +276,9 @@ func runAbandonedCleanup(ctx context.Context, req artifactCleanupRequest, newSto
 			return 0, transient("read backup stamp %s: %v", stampKey, err)
 		}
 		if owned, cerr := abandonedStampOwned(raw, found, passphrase, req.UID, stampKey); cerr != nil || !owned {
+			if cerr == nil && !found {
+				cerr = abandonedUnstampedS3(ctx, store, prefix, stampKey)
+			}
 			return 0, cerr
 		}
 		n, cerr := cleanupS3(ctx, store, prefix)
@@ -282,12 +310,48 @@ func runAbandonedCleanup(ctx context.Context, req artifactCleanupRequest, newSto
 			return 0, transient("read backup stamp %s: %v", stampKey, err)
 		}
 		if owned, cerr := abandonedStampOwned(raw, found, passphrase, req.UID, stampKey); cerr != nil || !owned {
+			if cerr == nil && !found {
+				cerr = abandonedUnstampedPVC(req.MountPath, rel, stampKey)
+			}
 			return 0, cerr
 		}
 		return cleanupPVC(req.MountPath, rel)
 	default:
 		return 0, rejected("unknown storage type %q", req.StorageType)
 	}
+}
+
+// abandonedUnstampedS3 is the verdict on an S3 location with no stamp: nil
+// (complete, nothing deleted) when nothing is listed under prefix, else
+// skipped.
+func abandonedUnstampedS3(ctx context.Context, store cleanupStore, prefix, stampKey string) *cleanupError {
+	keys, err := store.List(ctx, prefix)
+	if err != nil {
+		return transient("list %s: %v", prefix, err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return skippedCleanup("no backup stamp at %s names this backup, but %d objects remain under %s; nothing was deleted", stampKey, len(keys), prefix)
+}
+
+// abandonedUnstampedPVC is abandonedUnstampedS3 for a PVC location.
+func abandonedUnstampedPVC(mount, rel, stampKey string) *cleanupError {
+	root, err := os.OpenRoot(mount)
+	if err != nil {
+		return transient("open mount %s: %v", mount, err)
+	}
+	defer func() { _ = root.Close() }()
+	_, err = root.Stat(rel)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case pathEscapes(err):
+		return rejected("refusing to read %s: %v", rel, err)
+	case err != nil:
+		return transient("stat %s: %v", rel, err)
+	}
+	return skippedCleanup("no backup stamp at %s names this backup, but %s still exists; nothing was deleted", stampKey, rel)
 }
 
 // abandonedStampOwned decodes the stamp read at key and reports whether it

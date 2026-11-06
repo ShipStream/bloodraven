@@ -443,7 +443,7 @@ func TestRunDaemonServesWhileArchiveStoreFails(t *testing.T) {
 }
 
 func TestRunDaemonRejectsBadRetentionInterval(t *testing.T) {
-	t.Setenv("BLOODRAVEN_PITR_PROFILE_NAME", "nightly")
+	t.Setenv("BLOODRAVEN_PITR_ARCHIVE_ID", "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa")
 	t.Setenv("BLOODRAVEN_PITR_RETENTION_INTERVAL", "hourly")
 	cfg := &Config{
 		ListenAddr:        "127.0.0.1:0",

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestPopulatePITRStatus_DisabledClearsField(t *testing.T) {
 	}
 	fg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ArchivedFileCount: 10}
 
-	r.populatePITRStatus(nn, fg)
+	r.populatePITRStatus(context.Background(), nn, fg)
 
 	if fg.Status.PITR != nil {
 		t.Errorf("PITR should be cleared when disabled, got %+v", fg.Status.PITR)
@@ -72,7 +73,7 @@ func TestPopulatePITRStatus_NoSnapshotsPreservesExisting(t *testing.T) {
 	existing := &v1alpha1.PITRStatus{Enabled: true, ArchivedFileCount: 5}
 	fg.Status.PITR = existing
 
-	r.populatePITRStatus(nn, fg)
+	r.populatePITRStatus(context.Background(), nn, fg)
 
 	// No sidecar responded; we keep the previous status instead of
 	// clobbering it with an empty object that would flap in /status.
@@ -108,7 +109,7 @@ func TestPopulatePITRStatus_AggregatesAcrossSites(t *testing.T) {
 	r := newRunnerWithArchiverSnapshots(t, nn, snaps)
 
 	fg := pitrEnabledFG(nn.Namespace, nn.Name)
-	r.populatePITRStatus(nn, fg)
+	r.populatePITRStatus(context.Background(), nn, fg)
 
 	pitr := fg.Status.PITR
 	if pitr == nil {
@@ -158,7 +159,7 @@ func TestPopulatePITRStatus_DeterministicMessage(t *testing.T) {
 	var first string
 	for i := 0; i < 10; i++ {
 		fg := pitrEnabledFG(nn.Namespace, nn.Name)
-		r.populatePITRStatus(nn, fg)
+		r.populatePITRStatus(context.Background(), nn, fg)
 		if fg.Status.PITR == nil {
 			t.Fatal("expected PITR populated")
 		}
@@ -186,7 +187,7 @@ func TestPopulatePITRStatus_EmptySnapshotsLeaveStale(t *testing.T) {
 	existing := &v1alpha1.PITRStatus{Enabled: true, ArchivedFileCount: 1}
 	fg.Status.PITR = existing
 
-	r.populatePITRStatus(nn, fg)
+	r.populatePITRStatus(context.Background(), nn, fg)
 	if fg.Status.PITR != existing {
 		t.Errorf("expected stale PITR preserved when poller has no snapshots; got %+v", fg.Status.PITR)
 	}

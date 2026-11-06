@@ -117,13 +117,14 @@ func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string,
 	if _, err := rand.Read(passphrase); err != nil {
 		return "", fmt.Errorf("generate backup passphrase: %w", err)
 	}
+	text := hex.EncodeToString(passphrase)
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
 			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
 		},
 		StringData: map[string]string{
-			backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault(): hex.EncodeToString(passphrase),
+			backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault(): text,
 		},
 	}
 	created, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Create(ctx, sec, metav1.CreateOptions{})
@@ -136,6 +137,9 @@ func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string,
 	if err := ctxStash(ctx, env, backupPassphraseSecretUIDKey, string(created.UID)); err != nil {
 		return "", err
 	}
+	// Archive objects are decrypted with these bytes, never with the live
+	// Secret, which a scenario may rotate (s69).
+	pitrStashArchivePassphrase(env, []byte(text))
 	return name, nil
 }
 
@@ -226,66 +230,82 @@ func restoreOriginalBackupSpec(ctx context.Context, env *runner.Env) error {
 	return nil
 }
 
-func waitForBackupProfile(ctx context.Context, env *runner.Env, prefix string, pitr bool) error {
+// waitForBackupProfile waits until a plain (non-PITR) backup profile is in
+// the spec and the topology is stable: starting a backup while a failover
+// or rollout is in progress can select the wrong source. A plain profile
+// does not change MySQL pods, so it does not wait for Ready at the patched
+// generation: status is not rewritten for the otherwise inert spec update,
+// and that wait could last forever. A PITR profile rolls every pod behind
+// an archive binding check; pitrWaitArchiveBound is its wait.
+func waitForBackupProfile(ctx context.Context, env *runner.Env, prefix string) error {
 	_, err := env.Wait.UntilCR(ctx, env.Namespace, "backup profile observed", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		if mfg.Spec.Backup == nil {
-			return false, "spec.backup is nil", nil
-		}
-		var found *v1alpha1.BackupProfile
-		for i := range mfg.Spec.Backup.Profiles {
-			if mfg.Spec.Backup.Profiles[i].Name == backupE2EProfile {
-				found = &mfg.Spec.Backup.Profiles[i]
-				break
-			}
-		}
+		found := backupE2EProfileOf(mfg)
 		if found == nil || found.Storage.S3 == nil {
 			return false, "rustfs-e2e profile not observed", nil
 		}
 		s3 := found.Storage.S3
-		matches := found.Storage.Type == v1alpha1.BackupStorageS3 && s3.Bucket == backupE2EBucket && s3.Prefix == prefix && s3.EndpointURL == backupE2EEndpoint
-		pitrOK := !pitr || (mfg.Spec.Backup.PITR != nil && mfg.Spec.Backup.PITR.Enabled && mfg.Spec.Backup.PITR.ProfileName == backupE2EProfile)
-		// Both paths still require a stable topology: starting a backup while
-		// a failover or rollout is in progress can select the wrong source.
-		// A plain backup profile does not change MySQL pods, though, so only
-		// PITR must also wait for Ready=True at the patched generation.
-		// Requiring that generation acknowledgement for a plain profile can
-		// wait forever when the topology is unchanged and status is not
-		// rewritten for the otherwise inert spec update.
-		rolloutReady := backupProfileRolloutReady(mfg, pitr)
-		return matches && pitrOK && rolloutReady, fmt.Sprintf("profile storage=%s bucket=%q prefix=%q endpoint=%q pitrOK=%v rolloutReady=%v generation=%d active=%q updatePhase=%q", found.Storage.Type, s3.Bucket, s3.Prefix, s3.EndpointURL, pitrOK, rolloutReady, mfg.Generation, mfg.Status.ActiveSite, mfg.Status.UpdatePhase), nil
+		matches := backupProfileMatches(found, prefix)
+		rolloutReady := backupProfileRolloutReady(mfg)
+		return matches && rolloutReady, fmt.Sprintf("profile storage=%s bucket=%q prefix=%q endpoint=%q rolloutReady=%v generation=%d active=%q updatePhase=%q", found.Storage.Type, s3.Bucket, s3.Prefix, s3.EndpointURL, rolloutReady, mfg.Generation, mfg.Status.ActiveSite, mfg.Status.UpdatePhase), nil
 	})
 	return err
 }
 
-func backupProfileRolloutReady(mfg *v1alpha1.MysqlFailoverGroup, pitr bool) bool {
-	if mfg.Status.ActiveSite == "" || mfg.Status.UpdatePhase != "" {
+// backupE2EProfileOf is the group's rustfs-e2e profile, or nil.
+func backupE2EProfileOf(mfg *v1alpha1.MysqlFailoverGroup) *v1alpha1.BackupProfile {
+	if mfg.Spec.Backup == nil {
+		return nil
+	}
+	for i := range mfg.Spec.Backup.Profiles {
+		if mfg.Spec.Backup.Profiles[i].Name == backupE2EProfile {
+			return &mfg.Spec.Backup.Profiles[i]
+		}
+	}
+	return nil
+}
+
+// backupProfileMatches reports whether p is the e2e S3 profile at prefix.
+func backupProfileMatches(p *v1alpha1.BackupProfile, prefix string) bool {
+	if p == nil || p.Storage.S3 == nil {
 		return false
 	}
-	return !pitr || conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
+	s3 := p.Storage.S3
+	return p.Storage.Type == v1alpha1.BackupStorageS3 && s3.Bucket == backupE2EBucket && s3.Prefix == prefix && s3.EndpointURL == backupE2EEndpoint
+}
+
+// backupProfileRolloutReady reports a stable topology: an active site and
+// no ordered update in progress.
+func backupProfileRolloutReady(mfg *v1alpha1.MysqlFailoverGroup) bool {
+	return mfg.Status.ActiveSite != "" && mfg.Status.UpdatePhase == ""
 }
 
 func createMysqlBackup(ctx context.Context, env *runner.Env, name, scenarioID string) error {
+	return createMysqlBackupForProfile(ctx, env, name, scenarioID, backupE2EProfile)
+}
+
+// createMysqlBackupForProfile creates a manual MysqlBackup of profile.
+func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, scenarioID, profile string) error {
 	b := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
 				"shipstream.io/failover-group":                  env.FG,
-				"shipstream.io/backup-profile":                  backupE2EProfile,
+				"shipstream.io/backup-profile":                  profile,
 				"chaos.playground.bloodraven.io/scenario":       scenarioID,
 				"chaos.playground.bloodraven.io/created-by-e2e": "true",
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: env.FG},
-			ProfileName:      backupE2EProfile,
+			ProfileName:      profile,
 			TriggeredBy:      "chaos/" + scenarioID,
 		},
 	}
 	if err := env.Kube.Controller.Create(ctx, b); err != nil {
 		return fmt.Errorf("create MysqlBackup %s: %w", name, err)
 	}
-	env.Capture.Note(fmt.Sprintf("created MysqlBackup %s", name))
+	env.Capture.Note(fmt.Sprintf("created MysqlBackup %s of profile %s", name, profile))
 	return nil
 }
 

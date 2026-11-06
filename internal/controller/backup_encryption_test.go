@@ -43,6 +43,7 @@ func TestBuildBackupJob_EncryptedS3_ShapeChanges(t *testing.T) {
 		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
+		DumpKeySecretName:    testDumpKeySecret,
 		FailoverGroup:        fg,
 		Profile:              fg.Spec.Backup.Profiles[0],
 		Backup:               mb,
@@ -124,7 +125,9 @@ func TestBuildBackupJob_EncryptedS3_ShapeChanges(t *testing.T) {
 		}
 		if v.Name == "backup-passphrase" {
 			hasPass = true
-			if v.Secret == nil || v.Secret.SecretName != "backup-passphrase" {
+			// The backup's own dump-key snapshot, never the profile's
+			// Secret (#203, I-17).
+			if v.Secret == nil || v.Secret.SecretName != testDumpKeySecret || len(v.Secret.Items) != 1 || v.Secret.Items[0].Key != pitrKeySnapshotDataKey {
 				t.Errorf("backup-passphrase volume: %+v", v.Secret)
 			}
 		}
@@ -150,6 +153,7 @@ func TestBuildBackupJob_EncryptedRequiresOperatorImage(t *testing.T) {
 		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	_, err := BuildBackupJob(BackupJobInputs{
+		DumpKeySecretName:    testDumpKeySecret,
 		FailoverGroup:        fg,
 		Profile:              fg.Spec.Backup.Profiles[0],
 		Backup:               mb,
@@ -178,6 +182,7 @@ func TestBuildBackupJob_EncryptedRequiresSecretName(t *testing.T) {
 		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	_, err := BuildBackupJob(BackupJobInputs{
+		DumpKeySecretName:    testDumpKeySecret,
 		FailoverGroup:        fg,
 		Profile:              fg.Spec.Backup.Profiles[0],
 		Backup:               mb,
@@ -316,6 +321,9 @@ func TestBuildRestoreJob_EncryptedSource_AddsDecryptInitContainer(t *testing.T) 
 			StorageType:         v1alpha1.BackupStorageS3,
 			Encrypted:           true,
 			EncryptionAlgorithm: "AES-256-GCM",
+			ArtifactStorage: &v1alpha1.BackupArtifactStorage{
+				PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "backup-passphrase", Key: "passphrase"},
+			},
 		},
 	}
 	r, _ := newReconciler(fg, seed)
@@ -455,6 +463,7 @@ func TestEncryptedS3Location_DecryptSourceIsObjectKey(t *testing.T) {
 			seed := successfulBackup("seed", fg.Name, "nightly-s3")
 			seed.Status.Location = tc.location
 			seed.Status.Encrypted = true
+			recordTestDumpKey(seed)
 			seed.Status.EncryptionAlgorithm = "AES-256-GCM"
 
 			verify := &v1alpha1.MysqlBackupVerification{
@@ -508,6 +517,7 @@ func encryptedRefSeed(profileName string, storage v1alpha1.BackupStorageType) *v
 	seed.Spec.ProfileName = profileName
 	seed.Status.StorageType = storage
 	seed.Status.Encrypted = true
+	recordTestDumpKey(seed)
 	seed.Status.EncryptionAlgorithm = "AES-256-GCM"
 	if storage == v1alpha1.BackupStoragePVC {
 		seed.Status.Location = backupPVCMountPath + "/seed/"

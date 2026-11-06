@@ -22,6 +22,13 @@ for mfg in $(kubectl -n "$NAMESPACE" get mysqlfailovergroup -o name 2>/dev/null)
 done
 helm uninstall bloodraven -n "$NAMESPACE" 2>/dev/null || true
 
+# PITR archive and dump key snapshots have no owner reference: deleting the
+# group leaves them, by design (#203). The namespace deletion below would
+# remove them too; delete them explicitly so a teardown that stops early
+# does not leave key material behind.
+info "Deleting PITR archive and dump key snapshots..."
+kubectl -n "$NAMESPACE" delete secret -l 'app.kubernetes.io/name in (mysql-pitr-key,mysql-dump-key)' --ignore-not-found 2>/dev/null || true
+
 info "Deleting playground manifests..."
 kubectl delete -f "$SCRIPT_DIR/manifests/counter-app.yaml" --ignore-not-found
 kubectl delete -f "$SCRIPT_DIR/manifests/dashboard.yaml" --ignore-not-found

@@ -226,10 +226,13 @@ type BackupArtifactStorage struct {
 	// +optional
 	ClaimName string `json:"claimName,omitempty"`
 	// PassphraseSecret is the passphrase Secret and key the producing Job
-	// mounted, for an encrypted backup. Cleanup of a backup that never
-	// succeeded reads its backup stamp with it after the Job is gone, so a
-	// profile edited since the launch does not decide which passphrase is
-	// used.
+	// mounted, for an encrypted backup: the backup's own immutable dump-key
+	// snapshot (mysqlbackup-<name>-dump-key-<uid8>, key passphrase), which
+	// the operator made from the profile's passphrase before the Job and
+	// deletes only after the backup's artifacts are deleted. Restores,
+	// verifications and cleanup of a backup that never succeeded decrypt
+	// with it, so a profile edited since the launch does not decide which
+	// passphrase is used.
 	// +optional
 	PassphraseSecret *BackupArtifactPassphrase `json:"passphraseSecret,omitempty"`
 }

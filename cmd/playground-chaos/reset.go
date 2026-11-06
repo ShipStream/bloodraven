@@ -118,6 +118,7 @@ func (r *resetter) resetPhases() []resetPhase {
 		{"restart local-path-provisioner", r.restartLocalPathProvisioner},
 		{"reapply mysql secret", r.reapplyMysqlSecret},
 		{"clear MFG status", r.clearMFGStatus},
+		{"delete PITR key snapshots", r.deleteKeySnapshots},
 		{"recreate PVCs", r.recreatePVCs},
 		{"bind deterministic PVs", r.bindPVs},
 		{"start MySQL", r.startMySQL},
@@ -357,11 +358,14 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec
 }
 
 // mfgStatusFieldsToClear lists the MFG status fields a reset removes. The
-// wipe pass clears everything, encryptionAtRest included, because the data
-// and keyrings it describes are gone. The normalization pass runs against a
-// live, converged cluster: its encryptionAtRest records the escrow Secret
-// each site's keyring is projected from, and dropping it would make the
-// restarted operator treat encrypted sites as a fresh bootstrap.
+// wipe pass clears everything, encryptionAtRest and pitrArchiveBindings
+// included, because the data and keyrings encryptionAtRest describes are
+// gone and the wipe also deletes the archive key snapshots the bindings
+// name (deleteKeySnapshots). The normalization pass runs against a live,
+// converged cluster: its encryptionAtRest records the escrow Secret each
+// site's keyring is projected from, and dropping it would make the
+// restarted operator treat encrypted sites as a fresh bootstrap; its
+// archive bindings name the snapshots its pods mount.
 // plannedFailoverHold must go with plannedFailover: a hold left behind is
 // hydrated by the restarted operator and keeps emergency failover,
 // bootstrap and DNS reconcile held on the fresh cluster.
@@ -370,9 +374,64 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec
 func mfgStatusFieldsToClear(keepEncryption bool) []string {
 	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"}
 	if !keepEncryption {
-		fields = append(fields, "encryptionAtRest")
+		fields = append(fields, "encryptionAtRest", "pitrArchiveBindings")
 	}
 	return fields
+}
+
+// Key snapshots the operator makes (#203). They have no owner reference, so
+// nothing else removes them from a reused playground.
+const (
+	keySnapshotSelector   = "app.kubernetes.io/name in (mysql-pitr-key,mysql-dump-key)"
+	keySnapshotAppLabel   = "app.kubernetes.io/name"
+	dumpKeySnapshotApp    = "mysql-dump-key"
+	dumpKeyBackupUIDLabel = "bloodraven.shipstream.io/mysqlbackup-uid"
+)
+
+// staleKeySnapshots selects the key snapshots a wipe deletes: every archive
+// key snapshot (the wipe also clears the bindings that name them), and
+// every dump key whose MysqlBackup is gone. A dump key of a backup that
+// still exists is kept: its artifact cleanup decrypts with it, and blocks
+// with PassphraseSecretMissing without it.
+func staleKeySnapshots(secrets []corev1.Secret, liveBackups map[types.UID]bool) []corev1.Secret {
+	var out []corev1.Secret
+	for _, s := range secrets {
+		if s.Labels[keySnapshotAppLabel] == dumpKeySnapshotApp && liveBackups[types.UID(s.Labels[dumpKeyBackupUIDLabel])] {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// deleteKeySnapshots is the wipe pass's key snapshot hygiene (IMPL-203
+// Δ20). It runs with the operator down, right after clearMFGStatus has
+// removed the bindings that named them; the order does not matter, since
+// no operator runs to act on either half.
+func (r *resetter) deleteKeySnapshots(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+	secrets, err := r.k.Kubernetes.CoreV1().Secrets(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: keySnapshotSelector})
+	if err != nil {
+		return fmt.Errorf("list key snapshots: %w", err)
+	}
+	var backups v1alpha1.MysqlBackupList
+	if err := r.k.Controller.List(ctx, &backups, client.InNamespace(r.namespace)); err != nil {
+		return fmt.Errorf("list MysqlBackups: %w", err)
+	}
+	live := map[types.UID]bool{}
+	for i := range backups.Items {
+		live[backups.Items[i].UID] = true
+	}
+	var errs []error
+	for _, s := range staleKeySnapshots(secrets.Items, live) {
+		uid := s.UID
+		err := r.k.Kubernetes.CoreV1().Secrets(r.namespace).Delete(ctx, s.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+		if err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete key snapshot %s: %w", s.Name, err))
+			continue
+		}
+		r.info("deleted key snapshot %s", s.Name)
+	}
+	return errors.Join(errs...)
 }
 
 // clearMFGStatus is the wipe pass's status clear.

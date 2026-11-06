@@ -367,6 +367,11 @@ func (r *MysqlBackupVerificationReconciler) launchHoldConfirmed(ctx context.Cont
 // releaseVerificationHold removes v's hold from its pinned backup once v's
 // execution has stopped. done is false while readers may still run.
 func (r *MysqlBackupVerificationReconciler) releaseVerificationHold(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (done bool, err error) {
+	// The PITR archive key snapshot hold (K9) goes with the backup hold,
+	// under the same "execution stopped" rule.
+	if done, err := r.releaseKeySnapshotHoldsIfStopped(ctx, v); err != nil || !done {
+		return false, err
+	}
 	ref := v.Status.BackupRef
 	if ref == nil || ref.Name == "" {
 		return true, nil
@@ -445,4 +450,107 @@ func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *
 		return fmt.Errorf("delete old succeeded backup %s: %w", fresh.Name, err)
 	}
 	return nil
+}
+
+// errHoldKeySnapshotGone is stampPITRKeySnapshotHold's error when the read
+// binding's key snapshot is gone (released, or deleted by hand): the
+// verification waits until the binding is ready again (row 28a).
+var errHoldKeySnapshotGone = errors.New("PITR archive key snapshot is gone")
+
+// stampPITRKeySnapshotHold records v's hold on the PITR archive key
+// snapshot its Job will mount (K9, §4.3), with the same optimistic lock
+// stampVerificationHold uses on the backup: a release that read the
+// snapshot before this stamp deletes it with a stale resourceVersion and
+// fails, and a release that deleted it first makes this stamp fail with
+// errHoldKeySnapshotGone. Only an archive key snapshot of v's group is
+// stamped.
+func (r *MysqlBackupVerificationReconciler) stampPITRKeySnapshotHold(ctx context.Context, v *v1alpha1.MysqlBackupVerification, fg *v1alpha1.MysqlFailoverGroup, name string) error {
+	var snap corev1.Secret
+	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: name}, &snap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return errHoldKeySnapshotGone
+		}
+		return fmt.Errorf("get PITR key snapshot: %w", err)
+	}
+	if snap.Labels[labelAppName] != appNamePITRKeySnapshot || snap.Labels[labelFailoverGroupUID] != string(fg.UID) {
+		return fmt.Errorf("Secret %s is not an archive key snapshot of group %s", name, fg.Name)
+	}
+	if !snap.DeletionTimestamp.IsZero() {
+		return errHoldKeySnapshotGone
+	}
+	key := verificationHoldKey(v)
+	if snap.Annotations[key] == v.Name {
+		return nil
+	}
+	patch := client.MergeFromWithOptions(snap.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	if snap.Annotations == nil {
+		snap.Annotations = map[string]string{}
+	}
+	snap.Annotations[key] = v.Name
+	if err := r.Patch(ctx, &snap, patch); err != nil {
+		if apierrors.IsNotFound(err) {
+			return errHoldKeySnapshotGone
+		}
+		return fmt.Errorf("stamp verification hold on PITR key snapshot: %w", err)
+	}
+	return nil
+}
+
+// pitrKeySnapshotHoldConfirmed re-reads the key snapshot right before the
+// Job is created: it must exist and carry v's hold. Returns a reason for
+// waiting, or "".
+func (r *MysqlBackupVerificationReconciler) pitrKeySnapshotHoldConfirmed(ctx context.Context, v *v1alpha1.MysqlBackupVerification, name string) (string, error) {
+	var snap corev1.Secret
+	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: name}, &snap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Sprintf("PITR archive key snapshot %q is gone", name), nil
+		}
+		return "", fmt.Errorf("get PITR key snapshot: %w", err)
+	}
+	switch {
+	case !snap.DeletionTimestamp.IsZero():
+		return fmt.Sprintf("PITR archive key snapshot %q is being deleted", name), nil
+	case snap.Annotations[verificationHoldKey(v)] != v.Name:
+		return fmt.Sprintf("PITR archive key snapshot %q does not carry this verification's hold", name), nil
+	}
+	return "", nil
+}
+
+// releaseKeySnapshotHoldsIfStopped removes v's hold from every archive key
+// snapshot in its namespace that carries it, once v's execution has
+// stopped. Listing by label covers a snapshot whose name v's status never
+// recorded. done is false while readers may still run.
+func (r *MysqlBackupVerificationReconciler) releaseKeySnapshotHoldsIfStopped(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (bool, error) {
+	var list corev1.SecretList
+	if err := r.apiReader().List(ctx, &list, client.InNamespace(v.Namespace),
+		client.MatchingLabels{labelAppName: appNamePITRKeySnapshot}); err != nil {
+		return false, fmt.Errorf("list PITR key snapshots: %w", err)
+	}
+	held := false
+	for i := range list.Items {
+		if _, ok := list.Items[i].Annotations[verificationHoldKey(v)]; ok {
+			held = true
+			break
+		}
+	}
+	if !held {
+		return true, nil
+	}
+	stopped, err := verificationExecutionStopped(ctx, r.apiReader(), v.Namespace, v.Name, !v.DeletionTimestamp.IsZero())
+	if err != nil || !stopped {
+		return false, err
+	}
+	key := verificationHoldKey(v)
+	for i := range list.Items {
+		snap := &list.Items[i]
+		if _, held := snap.Annotations[key]; !held {
+			continue
+		}
+		patch := client.MergeFromWithOptions(snap.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		delete(snap.Annotations, key)
+		if err := r.Patch(ctx, snap, patch); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("release verification hold on PITR key snapshot %s: %w", snap.Name, err)
+		}
+	}
+	return true, nil
 }

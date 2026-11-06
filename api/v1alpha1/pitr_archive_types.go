@@ -250,3 +250,107 @@ type PointInTimeResult struct {
 	// +kubebuilder:validation:Pattern=`^([0-9a-f]{64})?$`
 	GtidExecutedSHA256 string `json:"gtidExecutedSHA256,omitempty"`
 }
+
+// PITRArchiveBindingState is whether a PITR archive binding's encryption
+// identity is accepted.
+// +kubebuilder:validation:Enum=Pending;Bound;Refused
+type PITRArchiveBindingState string
+
+const (
+	// PITRArchiveBindingPending means the binding's candidate identity is
+	// being authenticated (a check Job) or established (a writer creates
+	// the descriptor and proves it).
+	PITRArchiveBindingPending PITRArchiveBindingState = "Pending"
+	// PITRArchiveBindingBound means the identity was proven against the
+	// archive's descriptor and is the one every consumer uses.
+	PITRArchiveBindingBound PITRArchiveBindingState = "Bound"
+	// PITRArchiveBindingRefused means the last candidate was refused;
+	// Reason says why.
+	PITRArchiveBindingRefused PITRArchiveBindingState = "Refused"
+)
+
+// PITRArchiveBindingReason qualifies a binding's State.
+// Pending: Authenticating, Establishing. Bound: Bound, KeyMaterialLost.
+// Refused: the rest.
+// +kubebuilder:validation:Enum=Authenticating;Establishing;Bound;KeyMaterialLost;KeyMismatch;ArchiveForeign;ArchiveCopy;ArchiveLegacy;ArchiveDescriptorMissing;ArchiveNotFound;ArchiveEncryptionMismatch;ArchiveVersionUnsupported;ArchiveListFailed
+type PITRArchiveBindingReason string
+
+// PITRArchiveBinding is the encryption identity the group accepted for one
+// PITR archive destination it writes or reads (#203). Accepted encrypted
+// bindings are reconstructible from their key snapshot's acceptance
+// annotation; plaintext bindings are re-proven (the descriptor records the
+// mode).
+type PITRArchiveBinding struct {
+	// ID identifies the binding: "pab-" and the first 16 hex digits of the
+	// SHA-256 of "bloodraven-pitr-binding-v1\0" and Destination. It is the
+	// release annotation's subject.
+	// +required
+	// +kubebuilder:validation:Pattern=`^pab-[0-9a-f]{16}$`
+	ID string `json:"id"`
+	// Destination is the normalized archive destination (s3://… or
+	// pvc://…).
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	Destination string `json:"destination"`
+	// ArchiveID is the descriptor's archive ID once a descriptor was
+	// verified or created.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^(ar1-[a-z2-7]{26})?$`
+	ArchiveID string `json:"archiveID,omitempty"`
+	// Source is the group that created the archive. Set from a verified
+	// descriptor, and from a refusal that names the owner (ArchiveForeign).
+	// +optional
+	Source *PITRArchiveSource `json:"source,omitempty"`
+	// Encryption is the accepted identity when State is Bound. Otherwise it
+	// is the candidate under test (Pending) or the last candidate tried
+	// (Refused); read it only when State is Bound.
+	// +required
+	Encryption PITRArchiveBindingEncryption `json:"encryption"`
+	// State is whether Encryption is accepted.
+	// +required
+	State PITRArchiveBindingState `json:"state"`
+	// Reason qualifies State.
+	// +required
+	Reason PITRArchiveBindingReason `json:"reason"`
+	// Message is a human-readable explanation of Reason.
+	// +optional
+	// +kubebuilder:validation:MaxLength=2048
+	Message string `json:"message,omitempty"`
+	// Check is the check Job authenticating Encryption, while one runs.
+	// +optional
+	Check *PITRArchiveBindingCheck `json:"check,omitempty"`
+	// LastTransitionTime is when State or Reason last changed.
+	// +optional
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+}
+
+// PITRArchiveBindingEncryption is a binding's encryption identity: the mode
+// and algorithm the archive's descriptor records and, for Passphrase, the
+// operator-made key snapshot every consumer mounts.
+type PITRArchiveBindingEncryption struct {
+	// Mode is the archive's encryption mode.
+	// +required
+	Mode PITRArchiveEncryptionMode `json:"mode"`
+	// Algorithm is empty for None.
+	// +optional
+	Algorithm EncryptionAlgorithm `json:"algorithm,omitempty"`
+	// KeySecretName is the immutable, operator-made key snapshot
+	// (mysql-<group>-pitr-key-<h10>); empty for None.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	KeySecretName string `json:"keySecretName,omitempty"`
+}
+
+// PITRArchiveBindingCheck names the check Job authenticating a binding's
+// candidate identity.
+type PITRArchiveBindingCheck struct {
+	// JobName is the check Job's name.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	JobName string `json:"jobName"`
+	// JobUID is the only Job whose result is accepted.
+	// +optional
+	JobUID types.UID `json:"jobUID,omitempty"`
+}
