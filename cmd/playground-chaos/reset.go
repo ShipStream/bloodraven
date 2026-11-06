@@ -401,6 +401,12 @@ func (r *resetter) clearMFGStatusFields(ctx context.Context, names []string) err
 	if err := brcontroller.ClearPlannedFailoverAnnotations(ctx, r.k.Controller, types.NamespacedName{Namespace: r.namespace, Name: r.fg}); err != nil {
 		return fmt.Errorf("clear planned-failover annotations: %w", err)
 	}
+	// The request annotation too: status.plannedFailover goes below, and a
+	// surviving request (a Deferred one keeps its annotation) would start a
+	// new switchover on the reset cluster.
+	if err := r.clearPlannedFailoverRequest(ctx); err != nil {
+		return fmt.Errorf("clear planned-failover request annotation: %w", err)
+	}
 	status, err := json.Marshal(mfg.Status)
 	if err != nil {
 		return err
@@ -424,6 +430,19 @@ func (r *resetter) clearMFGStatusFields(ctx context.Context, names []string) err
 	}
 	target := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: r.fg, Namespace: r.namespace}}
 	return r.k.Controller.Status().Patch(ctx, target, client.RawPatch(types.JSONPatchType, body))
+}
+
+// clearPlannedFailoverRequest deletes the planned-failover request
+// annotation. Only a reset does this: the operator keeps a request until it
+// has consumed it.
+func (r *resetter) clearPlannedFailoverRequest(ctx context.Context) error {
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{
+		brcontroller.PlannedFailoverAnnotation: nil}}})
+	if err != nil {
+		return err
+	}
+	target := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: r.fg, Namespace: r.namespace}}
+	return r.k.Controller.Patch(ctx, target, client.RawPatch(types.MergePatchType, patch))
 }
 
 func (r *resetter) recreatePVCs(ctx context.Context, sites []v1alpha1.SiteSpec) error {

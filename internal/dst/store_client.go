@@ -30,6 +30,11 @@ type storeClient struct {
 	// denied reports the out-of-band store outage (OpStateOutage), which
 	// rejects metadata patches of the record independently of /status.
 	denied func() bool
+
+	// delivered is the raw body of every patch the server committed, in
+	// order: OpOOBLateWrite re-delivers an older one late, preconditions
+	// and all, as a request the server receives after newer writes (K037).
+	delivered [][]byte
 }
 
 var gr = schema.GroupResource{Group: "shipstream.io", Resource: "mysqlfailovergroups"}
@@ -107,6 +112,7 @@ func (c *storeClient) Patch(_ context.Context, obj client.Object, patch client.P
 	}
 	s.patchAnnotationsLocked("failoverRecord", kv)
 	s.logLocked("recorderPatch", "committed")
+	c.delivered = append(c.delivered, data)
 	s.obj.DeepCopyInto(obj.(*v1alpha1.MysqlFailoverGroup))
 	return nil
 }

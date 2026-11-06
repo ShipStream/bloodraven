@@ -133,6 +133,42 @@ func TestWaitForClusterReconvergeRequiresNoOrderedUpdate(t *testing.T) {
 	}
 }
 
+// A run whose status publication lags a topology that already looks healthy
+// must hold the cleanup gate, or the next scenario's precheck refuses it.
+func TestWaitForClusterReconvergeRequiresTerminalPlannedFailover(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*v1alpha1.MysqlFailoverGroup)
+		want string
+	}{
+		{"non-terminal run", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhasePublishing}
+		}, "plannedFailover.phase=Publishing"},
+		{"standing hold", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.PlannedFailoverHold = &v1alpha1.PlannedFailoverHold{RunID: "r1"}
+		}, "automationHold=r1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mfg := testReconvergeMFG(v1alpha1.DragonflyPhaseReady)
+			tc.edit(mfg)
+			env := testReconvergeEnv(t, mfg)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			err := waitForClusterReconvergeStable(ctx, env, time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("waitForClusterReconverge = %v; want a timeout naming %q", err, tc.want)
+			}
+		})
+	}
+	mfg := testReconvergeMFG(v1alpha1.DragonflyPhaseReady)
+	mfg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForClusterReconvergeStable(ctx, testReconvergeEnv(t, mfg), time.Millisecond); err != nil {
+		t.Fatalf("a terminal run must not hold the gate: %v", err)
+	}
+}
+
 func TestWaitForClusterReconvergeAcceptsDragonflyReady(t *testing.T) {
 	env := testReconvergeEnv(t, testReconvergeMFG(v1alpha1.DragonflyPhaseReady))
 

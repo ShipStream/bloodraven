@@ -339,3 +339,141 @@ func TestSimStore_SnapshotMergeContends(t *testing.T) {
 		t.Fatalf("commit observer saw %v", kinds)
 	}
 }
+
+// TestOOBReplay_RegressionIsDetected: the OOB replay's oracle flags a
+// stored record that moved backwards (K037); the production recorder and
+// the late delivery of an older patch both leave it alone.
+func TestOOBReplay_RegressionIsDetected(t *testing.T) {
+	tr := twoSiteHandTrial(15, true, 20)
+	tr.Actors = Actors{Enabled: true}
+	r := &trialRunner{trial: tr, logger: discardLogger(), operatorDeadUntil: -1,
+		kindsSeen: map[string]struct{}{}, reasonsSeen: map[string]struct{}{}}
+	r.setup(false)
+	pl := r.pl
+	ctx := context.Background()
+	t0 := r.clk.Now().UTC().Truncate(time.Second)
+	older := controller.FailoverRecord{LastFailover: t0, LastFailoverTarget: "beta"}
+	newer := controller.FailoverRecord{LastFailover: t0.Add(time.Minute), LastFailoverTarget: "alpha"}
+	for _, rec := range []controller.FailoverRecord{older, newer} {
+		if err := pl.recordOOB(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pl.replayOOB()
+	if got, _ := pl.storedOOB(); got.LastFailoverTarget != "alpha" || len(pl.mon.violations) != 0 {
+		t.Fatalf("replay regressed the record to %+v (violations %v)", got, pl.mon.violations)
+	}
+	if pl.counts["oobLateDelivered"] != 1 || pl.counts["oobLateRefused"] != 1 {
+		t.Fatalf("late delivery of the older patch: counts %v, want delivered and refused", pl.counts)
+	}
+
+	// A writer that bypasses the recorder's rules is caught.
+	before, _ := pl.storedOOB()
+	a, err := controller.FailoverRecordAnnotations(older)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pl.store.PatchAnnotations("test", a); err != nil {
+		t.Fatal(err)
+	}
+	pl.checkOOBNotRegressed(before, "a test write")
+	if len(pl.mon.violations) != 1 || pl.mon.violations[0].Invariant != "OOBRecordRegressed" {
+		t.Fatalf("violations %v, want OOBRecordRegressed", pl.mon.violations)
+	}
+}
+
+// TestSettle_TwoFencesInOneTickBothMoveTheResourceVersion: two settlement
+// fences at the same fake-clock instant each move the resourceVersion, so
+// NotCommitted always rests on a fence that landed (K029).
+func TestSettle_TwoFencesInOneTickBothMoveTheResourceVersion(t *testing.T) {
+	s, _ := newTestStore(t)
+	never := func(*v1alpha1.MysqlFailoverGroup) bool { return false }
+	for i := range 2 {
+		base := mustLoad(t, s)
+		rv := s.ResourceVersion()
+		out, _ := s.settle(context.Background(), base, never)
+		if out != controller.WriteNotCommitted || s.ResourceVersion() == rv {
+			t.Fatalf("fence %d: outcome %s, rv %d -> %d; want NotCommitted with the rv moved", i+1, out, rv, s.ResourceVersion())
+		}
+	}
+}
+
+// TestMetadataNoOpsAreDecidedFromBase: as production's patchAnnotations and
+// ClearHold, a change that is empty against base succeeds without an API
+// call, however stale base is, and cannot meet a scripted fault; the hold
+// acknowledgement is compared trimmed (K106).
+func TestMetadataNoOpsAreDecidedFromBase(t *testing.T) {
+	ctx := context.Background()
+	s, clk := newTestStore(t)
+	base := mustLoad(t, s)
+	start, out, _ := s.MarkDeadlineStart(ctx, base, controller.DeadlineStatusStall, "r1", clk.Now())
+	if out != controller.WriteCommitted {
+		t.Fatalf("mark: %s", out)
+	}
+	stale := mustLoad(t, s)
+	s.SetRequest("beta") // the server moves on; stale already carries the deadline
+	got, out, err := s.MarkDeadlineStart(ctx, stale, controller.DeadlineStatusStall, "r1", clk.Now())
+	if out != controller.WriteCommitted || err != nil || !got.Equal(start) {
+		t.Fatalf("re-mark on a stale base that has it: %s %v start %v, want Committed %v", out, err, got, start)
+	}
+	if out, _ := s.ClearTerminalMarker(ctx, stale, "r1"); out != controller.WriteCommitted {
+		t.Fatalf("clearing an absent marker on a stale base: %s, want Committed", out)
+	}
+
+	s.ConflictWrites(1)
+	if out, _ := s.ClearHold(ctx, mustLoad(t, s), "r1", nil); out != controller.WriteCommitted {
+		t.Fatalf("no-op ClearHold: %s, want Committed", out)
+	}
+	if out, _ := s.Write(ctx, mustLoad(t, s), v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: 1,
+		Phase: v1alpha1.PlannedFailoverPhaseAdmitting}, nil); out != controller.WriteConflict {
+		t.Fatalf("the scripted conflict was consumed by a no-op ClearHold (next write: %s)", out)
+	}
+
+	if err := s.PatchAnnotations("ack", map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: " r1 \n"}); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := s.DeleteHoldAck(ctx, mustLoad(t, s), "r1"); out != controller.WriteCommitted {
+		t.Fatalf("delete ack: %s", out)
+	}
+	if _, ok := s.Object().GetAnnotations()[controller.AcknowledgePlannedFailoverHoldAnnotation]; ok {
+		t.Fatal("a whitespace-padded acknowledgement survived its deletion")
+	}
+}
+
+// TestMergeSnapshot_TwoStepWrite: the topology manager's status write reads,
+// computes, and commits after other writers moved on (K042), as the
+// runner's updateCRStatus: what it computed replaces the status, except
+// the subtrees the runner re-reads (the planned block and hold, the
+// AutomaticFailoverHeld condition), which keep the concurrent writer's.
+func TestMergeSnapshot_TwoStepWrite(t *testing.T) {
+	ctx := context.Background()
+	s, clk := newTestStore(t)
+	pf := v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "beta"}
+	yielded := false
+	s.yield = func(point string) {
+		if point != YieldSnapshotCommit || yielded {
+			return
+		}
+		yielded = true
+		// A planned write lands between the snapshot's read and its commit.
+		if out, err := s.Write(ctx, mustLoad(t, s), pf, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+			setHoldRecord(st, "r1", "alpha")
+		}); out != controller.WriteCommitted {
+			t.Fatalf("concurrent write: %s %v", out, err)
+		}
+	}
+	if err := s.MergeSnapshot(controller.TopologySnapshot{ActiveSite: "alpha", LastFailover: clk.Now(), LastFailoverTarget: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if !yielded {
+		t.Fatal("the snapshot write did not yield between its read and its commit")
+	}
+	st := s.Object().Status
+	if st.ActiveSite != "alpha" || st.LastFailoverTarget != "alpha" {
+		t.Fatalf("computed fields not written: %+v", st)
+	}
+	if st.PlannedFailover == nil || st.PlannedFailover.RunID != "r1" || st.PlannedFailoverHold == nil ||
+		apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionAutomaticFailoverHeld) == nil {
+		t.Fatalf("the concurrent planned block, hold or condition was overwritten: %+v", st)
+	}
+}

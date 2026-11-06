@@ -226,8 +226,10 @@ func TestS64ClassifyOutcome(t *testing.T) {
 		{"claimed lost primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFencing, SourceSite: "iad"}, false, true},
 		{"already active", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFailed,
 			Result: result(v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAlreadyActive)}, true, false},
+		// The target is the emergency successor, so a success is impossible
+		// and means the run moved the primary off it.
 		{"succeeded from new primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, SourceSite: "pdx",
-			Result: result(v1alpha1.PlannedFailoverOutcomeSucceeded, "")}, true, false},
+			Result: result(v1alpha1.PlannedFailoverOutcomeSucceeded, "")}, false, true},
 		{"succeeded from lost primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, SourceSite: "iad",
 			Result: result(v1alpha1.PlannedFailoverOutcomeSucceeded, "")}, false, true},
 		{"admission timeout", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFailed,

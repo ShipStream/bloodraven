@@ -22,7 +22,7 @@
     },
     {
       "front": "What does the planned Dragonfly path do when REPLTAKEOVER fails?",
-      "back": "There is no REPLICAOF NO ONE fallback. onSyncTimeout decides: proceed continues flagged unpreserved, fail rolls back the MySQL fence.",
+      "back": "There is no REPLICAOF NO ONE fallback. onSyncTimeout decides: Proceed promotes MySQL anyway with dragonfly.sessions: Lost, Fail rolls back the MySQL fence.",
       "orderIndex": 4
     },
     {
@@ -31,7 +31,7 @@
       "orderIndex": 5
     },
     {
-      "front": "Where does status.plannedFailover.dragonfly.sessionsPreserved come from after an emergency promotion?",
+      "front": "Where does status.plannedFailover.dragonfly.sessions come from after an emergency promotion?",
       "back": "Nowhere — emergency promotions never write the field. The outcome lives only in the log line and the Kubernetes event.",
       "orderIndex": 6
     },
@@ -47,7 +47,7 @@
     },
     {
       "front": "onSyncTimeout — allowed values and default?",
-      "back": "An enum of proceed or fail, defaulting to proceed: the promotion goes ahead and the cache outcome is whatever it is.",
+      "back": "An enum of Proceed or Fail (CamelCase; the lower-case spellings of older releases are rejected), defaulting to Proceed: the promotion goes ahead and the cache outcome is whatever it is.",
       "orderIndex": 9
     },
     {
@@ -63,17 +63,17 @@
   ],
   "quiz": [
     {
-      "question": "A planned switchover of `playground` reports Succeeded. You dump the status and `sessionsPreserved` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?",
+      "question": "A planned switchover of `playground` reports Succeeded. You dump the status and `dragonfly.sessions` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
-        "Nothing about the outcome — the field is unknown, and you have to look at the promotion method, the log line and the event to find out",
-        "Sessions were lost; an absent boolean serialises the same as false",
+        "Nothing about the outcome — the field is unknown, and you have to look at `dragonfly.takeover`, the log line and the event to find out",
+        "Sessions were lost; an absent value means `Lost`",
         "Sessions were preserved; the operator only writes the field when something went wrong",
         "The switchover silently skipped the Dragonfly phases, so the session store is still on the old master"
       ],
       "correctOptionIndex": 0,
-      "explanation": "`sessionsPreserved` is a `*bool` and its three states are true, false and nil — nil means unknown, for example because Dragonfly was disabled for that attempt. Reading absent as false makes you chase an incident that did not happen; reading it as success makes you miss one that did. \"Sessions were lost\" is the classic misread of a nil pointer as its zero value: `omitempty` drops nil, not false. \"Only written on failure\" is backwards — a clean REPLTAKEOVER explicitly stamps true. And an absent field is not evidence about routing: the traffic-label shed and the role flip are what move the active Service, and they leave their own traces. (objective 11)"
+      "explanation": "`dragonfly.sessions` has three states: `Preserved`, `Lost`, and absent, which means unknown — for example because Dragonfly was not enabled when the request was accepted, or the run ended before its Dragonfly phases. Reading absent as `Lost` makes you chase an incident that did not happen; reading it as success makes you miss one that did. \"Only written on failure\" is backwards — a clean REPLTAKEOVER explicitly records `Preserved`. And an absent field is not evidence about routing: the traffic-label shed and the role flip are what move the active Service, and they leave their own traces. (objective 11)"
     },
     {
       "question": "Your primary dies. The Dragonfly target's REPLTAKEOVER fails. What does the operator do next, and what does it cost?",

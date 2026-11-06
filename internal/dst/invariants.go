@@ -162,11 +162,13 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		for _, pr := range r.pl.promotions(events) {
 			r.promotionPolls = append(r.promotionPolls, p)
 			r.promotionActors = append(r.promotionActors, pr.actor)
+			r.promotionRuns = append(r.promotionRuns, pr.runID)
 		}
 		physical = tmEvents(events)
 		if target, _ := promotionTarget(physical, effectiveOutcome); target != "" {
 			r.promotionPolls = append(r.promotionPolls, p)
 			r.promotionActors = append(r.promotionActors, ActorTM)
+			r.promotionRuns = append(r.promotionRuns, "")
 			r.armPromotion(target, r.clk.Now())
 		}
 	} else if target, _ := promotionTarget(events, effectiveOutcome); target != "" {
@@ -244,7 +246,12 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 	}
 	// No registered manager (managerAbsent) is no operator, like a dead one.
 	managed := r.pl == nil || r.pl.reg.Current() != nil
-	if !r.cluster.OperatorDead() && managed && writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
+	// A run whose status writes are stalled keeps its claim, and with it
+	// the manager's split-brain fence deferred, until the stall marker ends
+	// it (§6.4): the documented bound on that deferral is the stall
+	// deadline, so the streak counts only once the run outlives it.
+	stalled := r.pl != nil && r.pl.stalledClaimWithinDeadline()
+	if !r.cluster.OperatorDead() && managed && !stalled && writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
 		r.dualStreak++
 		if r.dualStreak > dualWritableGrace && !r.dualFlagged {
 			r.dualFlagged = true
@@ -307,6 +314,14 @@ func (r *trialRunner) checkEnd() []Violation {
 			// stamps the cooldown for what follows but is not held by it.
 			continue
 		}
+		if i-1 < len(r.promotionRuns) && r.promotionRuns[i-1] != "" && r.pl != nil && !r.pl.mon.runRecorded(r.promotionRuns[i-1]) {
+			// A planned run that never recorded its promotion
+			// (PromotedUnconfirmed, ManualRecoveryRequired, a rollback)
+			// stamps no cooldown by rule (§10.1): emergency failover may
+			// follow it, and an acknowledged hold hands the decision to
+			// automation again.
+			continue
+		}
 		gap := r.promotionPolls[i] - r.promotionPolls[i-1]
 		if gap < cooldownPolls {
 			restarts, lost := 0, 0
@@ -337,8 +352,9 @@ func (r *trialRunner) checkEnd() []Violation {
 		// A standing automation hold is the documented manual-recovery
 		// state (§10.5): nothing automatic converges the group until a
 		// human acknowledges it, and the planned invariants judge whether
-		// the hold was warranted (HoldWithoutDataAtRisk).
-		return out
+		// the hold was warranted (HoldWithoutDataAtRisk). Convergence is
+		// exempt; transaction accounting is not (K059).
+		return append(out, r.checkHeldNoLoss(truth)...)
 	}
 	switch {
 	case len(writable) >= 2:
@@ -523,6 +539,36 @@ func (r *trialRunner) checkNoSilentLoss(p SiteTruth, truth []SiteTruth, final *c
 	return out
 }
 
+// checkHeldNoLoss is checkNoSilentLoss under a standing automation hold.
+// The hold leaves the histories it was set over for a human to reconcile:
+// an acknowledged transaction on any site, reachable or not, is reported by
+// the hold and not lost, whichever site is writable. One that exists on no
+// site was destroyed while automation was held: the hold failed to
+// preserve it.
+func (r *trialRunner) checkHeldNoLoss(truth []SiteTruth) []Violation {
+	endPoll := r.trial.Polls - 1
+	acked, err := mysql.ParseGTIDSet(r.cluster.Acked().String())
+	if err != nil {
+		return []Violation{{Invariant: "ModelHole", Poll: endPoll, Detail: "acked set unparseable: " + err.Error()}}
+	}
+	missing := acked
+	for _, t := range truth {
+		have, err := mysql.ParseGTIDSet(t.Executed.String())
+		if err != nil {
+			return []Violation{{Invariant: "ModelHole", Poll: endPoll, Detail: "site set unparseable: " + err.Error()}}
+		}
+		missing = missing.Subtract(have)
+	}
+	if missing.IsEmpty() {
+		return nil
+	}
+	return []Violation{{
+		Invariant: "SilentDataLoss",
+		Poll:      endPoll,
+		Detail:    fmt.Sprintf("acked txns %s exist on no site at the end, under a standing automation hold", missing),
+	}}
+}
+
 // checkWedge decides whether a zero-writable end state is a by-design manual
 // intervention point or a wedge the operator was equipped to heal.
 func (r *trialRunner) checkWedge(byName map[string]SiteTruth) []Violation {
@@ -601,5 +647,6 @@ func (r *trialRunner) plannedHoldStands() bool {
 
 // confirmedClaimMarker tags a DualWritableUnresolved during which a planned
 // run that had already made its target writable held the claim
-// (fingerprint DualWritableUnresolved(confirmedClaim), README, Known finding classes: DST-4).
+// (fingerprint DualWritableUnresolved(confirmedClaim): the fixed DST-4, now a
+// regression; README, Known finding classes).
 const confirmedClaimMarker = "(while a planned run that had made its target writable held the claim)"

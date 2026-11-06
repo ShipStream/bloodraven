@@ -362,7 +362,7 @@ func TestRegistry_SlotSharedByGenerationsAndDroppedByRestart(t *testing.T) {
 	r.setup(false)
 	nn := types.NamespacedName{Namespace: "sim", Name: "sim"}
 	g := newSimRegistry(nn)
-	first, second := r.tm, r.newManager()
+	first, second := r.tm, r.newManager(nil)
 	g.register(first, controller.ManagerWiring{})
 	slot := g.Slot(nn)
 	if slot == nil || g.Snapshot(nn).Slot != slot {
@@ -382,7 +382,7 @@ func TestRegistry_SlotSharedByGenerationsAndDroppedByRestart(t *testing.T) {
 	retired := 0
 	g.retire = func(*controller.TopologyManager) { retired++ }
 	g.changingSites = func(*controller.TopologyManager) bool { return false }
-	third := r.newManager()
+	third := r.newManager(nil)
 	if !g.replace(third, controller.ManagerWiring{}, 2, nil) || retired != 1 {
 		t.Fatalf("seamed replace: retired=%d", retired)
 	}
@@ -398,14 +398,29 @@ func TestRegistry_SlotSharedByGenerationsAndDroppedByRestart(t *testing.T) {
 		t.Fatalf("retiring manager outlived its window")
 	}
 
-	g.setAbsent(2)
-	if g.Current() != nil || g.Snapshot(nn).Current != nil {
+	// An absence retires the current manager (its replacement's starts
+	// fail) and stashes its record; the window's end is reported, and the
+	// harness starts a fresh manager then.
+	third.SetLastFailover(r.clk.Now())
+	third.SetLastFailoverTarget("beta")
+	g.setAbsent(2, nil)
+	if g.Current() != nil || g.Snapshot(nn).Current != nil || !g.absent() {
 		t.Fatal("absent manager still visible")
 	}
-	g.endPoll()
-	g.endPoll()
-	if g.Current() != third {
-		t.Fatal("absence did not end")
+	if snap := g.Snapshot(nn); len(snap.Retiring) != 1 || snap.Retiring[0] != third {
+		t.Fatalf("absence did not retire the current manager: %+v", snap)
+	}
+	if g.endPoll() || !g.endPoll() || g.absent() {
+		t.Fatal("absence window did not end after 2 polls")
+	}
+	g.retiringToPoll() // drops the retired manager: its record stays stashed
+	fourth := r.newManager(nil)
+	g.register(fourth, controller.ManagerWiring{})
+	if g.Current() != fourth {
+		t.Fatal("a start after the absence did not register")
+	}
+	if rec, ok := fourth.FailoverRecordForSim(); !ok || rec.LastFailoverTarget != "beta" {
+		t.Fatalf("the retired manager's stashed record did not reach the fresh start: %+v ok=%v (K185)", rec, ok)
 	}
 
 	restarted := newSimRegistry(nn)
@@ -490,8 +505,10 @@ func TestPlannedTrial_SnapshotWritesContendOnTheObject(t *testing.T) {
 	}
 }
 
-// plannedSweepSeeds is the range the planned fidelity tests share.
-const plannedSweepSeeds = 200
+// plannedSweepSeeds is the range the planned fidelity tests share: wide
+// enough that every terminal outcome, the long-outage deadlines and a
+// WasWritable re-promotion all occur in it.
+const plannedSweepSeeds = 400
 
 var plannedSweepOnce = sync.OnceValues(func() (map[string]int, map[string]int) {
 	y, s, c := plannedSweepOf(plannedSweepSeeds)
@@ -503,7 +520,7 @@ var plannedSweepOnce = sync.OnceValues(func() (map[string]int, map[string]int) {
 
 // plannedSweep aggregates the planned reports of seeds 1..plannedSweepSeeds
 // once per package run.
-func plannedSweep(uint64) (yields, steps, counts map[string]int) {
+func plannedSweep() (yields, steps, counts map[string]int) {
 	y, s := plannedSweepOnce()
 	counts = map[string]int{}
 	steps = map[string]int{}
@@ -531,8 +548,37 @@ func plannedSweepOf(n uint64) (yields, steps, counts map[string]int) {
 		for k, v := range r.Planned.Counts {
 			counts[k] += v
 		}
+		for _, o := range r.Planned.Outcomes {
+			counts["outcome:"+o]++
+		}
+		for _, pf := range r.Planned.Terminals {
+			if pf.Result != nil {
+				counts["reason:"+string(pf.Result.Reason)]++
+			}
+		}
 	}
 	return yields, steps, counts
+}
+
+// TestPlannedSweep_ReachesEveryOutcome: the sweep ends runs with every
+// terminal outcome (K172), so a generator or harness change that stops
+// producing one (the rare PromotedUnconfirmed and ManualRecoveryRequired
+// above all) fails here instead of leaving its invariants unexercised.
+func TestPlannedSweep_ReachesEveryOutcome(t *testing.T) {
+	_, _, counts := plannedSweep()
+	// K041: a live engine holds an Unknown write whose late commit lands.
+	if counts["lateCommitAfterUnknown"] == 0 {
+		t.Errorf("no late commit landed after a settlement ended Unknown (counts %v)", counts)
+	}
+	for _, o := range []v1alpha1.PlannedFailoverOutcome{
+		v1alpha1.PlannedFailoverOutcomeSucceeded, v1alpha1.PlannedFailoverOutcomeNotStarted,
+		v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
+		v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
+	} {
+		if counts["outcome:"+string(o)] == 0 {
+			t.Errorf("no run ended %s over %d seeds", o, plannedSweepSeeds)
+		}
+	}
 }
 
 // TestScheduler_ReachesEveryYieldClass: over a fixed range the production
@@ -541,7 +587,7 @@ func plannedSweepOf(n uint64) (yields, steps, counts map[string]int) {
 // Unknown) needs an ambiguous write and a read outage together, so it gets
 // a targeted trial.
 func TestScheduler_ReachesEveryYieldClass(t *testing.T) {
-	yields, steps, _ := plannedSweep(plannedSweepSeeds)
+	yields, steps, _ := plannedSweep()
 	for _, class := range []string{YieldEngineLoad, YieldEngineWrite, YieldPeerProbe, YieldBeforePublish, YieldAfterPublish,
 		YieldBeforeStmt, YieldAfterStmt, YieldGateProbe, YieldConfirmProbe, YieldStmtIssued, YieldStmtApplied} {
 		if yields[class] == 0 {
@@ -572,7 +618,7 @@ func TestScheduler_ReachesEveryYieldClass(t *testing.T) {
 // inside the statement and other actors (a grant, a Poll, an update step)
 // run while it is blocked.
 func TestSlowStatementInterleavesWithOtherActors(t *testing.T) {
-	_, steps, _ := plannedSweep(plannedSweepSeeds)
+	_, steps, _ := plannedSweep()
 	if steps[YieldStmtIssued] == 0 || steps[YieldStmtApplied] == 0 {
 		t.Fatalf("no actor stepped inside a slow statement (steps %v)", steps)
 	}
@@ -581,32 +627,134 @@ func TestSlowStatementInterleavesWithOtherActors(t *testing.T) {
 // TestRetiringPollAfterReplacement: after a manager replacement the
 // retired manager keeps polling inside its window (a Poll in flight).
 func TestRetiringPollAfterReplacement(t *testing.T) {
-	_, _, counts := plannedSweep(plannedSweepSeeds)
+	_, _, counts := plannedSweep()
 	if counts["managersReplaced"] == 0 || counts["retiringPolls"] == 0 {
 		t.Fatalf("replacements %d, retiring polls %d", counts["managersReplaced"], counts["retiringPolls"])
 	}
 }
 
 // TestRestartPromotedTargetReachesWasWritable: a target restarted after the
-// run's read_only=OFF boots read_only=ON and the run still finishes
-// (§7.1 WasWritable), never rolling back.
+// run's read_only=OFF and an application write on it boots read_only=ON
+// with its own post-promotion transactions; with its replica channel reset
+// that classifies as §7.1 WasWritable, and the run itself (not merely some
+// run of the trial) finishes Succeeded, never rolling back (K028).
 func TestRestartPromotedTargetReachesWasWritable(t *testing.T) {
-	found := false
-	for seed := uint64(1); seed <= 400 && !found; seed++ {
+	_, _, counts := plannedSweep()
+	if n := counts["restartedRun"+string(v1alpha1.PlannedFailoverOutcomeRolledBack)]; n > 0 {
+		t.Fatalf("%d runs whose target restarted holding its own writes rolled back", n)
+	}
+	if counts["restartedRunRewrittenSucceeded"] == 0 {
+		t.Fatal("no run made its target writable again and finished Succeeded after the target restarted holding its own post-promotion writes")
+	}
+}
+
+// TestScheduler_YieldStepsRunTheManagerPolls: a manager actor the scheduler
+// steps at a yield actually polls (K019). The scheduler puts the actor on
+// its stack before the step; a step that re-entered sched.run would find
+// it there and silently skip the Poll while consuming the tick's poll.
+func TestScheduler_YieldStepsRunTheManagerPolls(t *testing.T) {
+	stepped, polled := 0, 0
+	retiringStepped, retiringPolled := 0, 0
+	for seed := uint64(1); seed <= 60; seed++ {
 		r := RunTrial(GeneratePlannedTrial(seed), false, nil)
-		if r.Planned.Counts["promotedTargetRestarted"] == 0 {
-			continue
-		}
-		for _, o := range r.Planned.Outcomes {
-			if o == string(v1alpha1.PlannedFailoverOutcomeRolledBack) {
-				t.Fatalf("seed %d: a run rolled back after its target restarted post-write (outcomes %v)", seed, r.Planned.Outcomes)
-			}
-			if o == string(v1alpha1.PlannedFailoverOutcomeSucceeded) {
-				found = true
-			}
+		stepped += r.Planned.StepsBy["tm"]
+		polled += r.Planned.Counts["tmPollsAtYield"]
+		retiringStepped += r.Planned.StepsBy["retiring"]
+		retiringPolled += r.Planned.Counts["retiringPollsAtYield"]
+		if r.Planned.StepsBy["tm"] != r.Planned.Counts["tmPollsAtYield"] {
+			t.Errorf("seed %d: the tm actor stepped %d times at yields but polled %d times there",
+				seed, r.Planned.StepsBy["tm"], r.Planned.Counts["tmPollsAtYield"])
 		}
 	}
-	if !found {
-		t.Fatal("no run finished after its promoted target restarted")
+	if stepped == 0 || polled == 0 {
+		t.Fatalf("no manager Poll ran at a yield (steps %d, polls %d)", stepped, polled)
+	}
+	t.Logf("tm: %d yield steps, %d polls; retiring: %d yield steps, %d polls", stepped, polled, retiringStepped, retiringPolled)
+}
+
+// TestPlannedTrial_LongOutagesReachTheDeadlines: the generated long
+// outages (K036) outlive the 2m status-stall deadline and the 5m
+// manager-absent deadline, so the sweep ends runs by the stall marker and
+// with outcome ManagerUnavailable reasons, not only the 10s released-run
+// marker.
+func TestPlannedTrial_LongOutagesReachTheDeadlines(t *testing.T) {
+	_, _, counts := plannedSweep()
+	if counts["longStatusDenials"] == 0 || counts["longManagerAbsences"] == 0 {
+		t.Fatalf("no long outage generated (counts %v)", counts)
+	}
+	if counts["stallMarker2m"] == 0 {
+		t.Errorf("no run ended by the 2m status-stall marker (counts %v)", counts)
+	}
+	if counts["reason:"+string(v1alpha1.PlannedFailoverReasonManagerUnavailable)] == 0 {
+		t.Errorf("no run ended ManagerUnavailable (counts %v)", counts)
+	}
+}
+
+// TestSimSession_TransportFailureBreaksTheSession: a statement that timed
+// out breaks the pinned connection, applied or not, so the next statement
+// on the session fails instead of landing (K079); a fresh pin works.
+func TestSimSession_TransportFailureBreaksTheSession(t *testing.T) {
+	for name, inject := range map[string]func(c *Cluster){
+		"notApplied": func(c *Cluster) { c.AddFailMutations("alpha", 1) },
+		"ambiguous":  func(c *Cluster) { c.AddAmbiguousMutations("alpha", 1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := twoSiteCluster()
+			ctx := pfCtx()
+			sess := mustPin(t, c, "alpha")
+			if err := sess.SetSuperReadOnly(ctx, true); err != nil {
+				t.Fatal(err)
+			}
+			inject(c)
+			if err := sess.SetSuperReadOnly(ctx, false); err == nil {
+				t.Fatal("injected timeout did not fail the statement")
+			}
+			roBefore := truthNamed(c.Truth(), "alpha").ReadOnly
+			if err := sess.SetReadOnly(ctx, false); !errors.Is(err, errSessionLost) {
+				t.Fatalf("statement after the timeout: err=%v, want errSessionLost", err)
+			}
+			if got := truthNamed(c.Truth(), "alpha").ReadOnly; got != roBefore {
+				t.Fatalf("a statement on the broken session changed read_only %v -> %v", roBefore, got)
+			}
+			if _, err := mustPin(t, c, "alpha").GetGtidExecuted(ctx); err != nil {
+				t.Fatalf("fresh pin after the broken session: %v", err)
+			}
+		})
+	}
+	// A MySQL rejection (RESET REPLICA ALL on a running replica) does not
+	// break the connection.
+	c := twoSiteCluster()
+	sess := mustPin(t, c, "beta")
+	if err := sess.ResetReplicaAll(pfCtx()); err == nil || !strings.Contains(err.Error(), "Error 3081") {
+		t.Fatalf("RESET REPLICA ALL on a running replica: err=%v, want Error 3081", err)
+	}
+	if _, err := sess.GetGtidExecuted(pfCtx()); err != nil {
+		t.Fatalf("a MySQL rejection broke the session: %v", err)
+	}
+}
+
+// TestScheduler_SwitchAttributesToTheRunningActor: what happens between two
+// scheduler switches is attributed to the actor that ran (K177): an outer
+// actor's work before and after a yield to it, a nested step's to the
+// nested actor.
+func TestScheduler_SwitchAttributesToTheRunningActor(t *testing.T) {
+	s := newYieldScheduler(1)
+	var work []string // what the actors did since the last switch
+	var got []string
+	s.onSwitch = func(owner string) {
+		for _, w := range work {
+			got = append(got, w+"@"+owner)
+		}
+		work = nil
+	}
+	s.addActor(&schedActor{name: "inner", pct: 100, step: func(context.Context) { work = append(work, "i") }})
+	s.addActor(&schedActor{name: "outer", pct: 0, step: func(context.Context) {}})
+	s.run("outer", func() {
+		work = append(work, "o1")
+		s.Yield(YieldEngineWrite)
+		work = append(work, "o2")
+	})
+	if want := "o1@outer,i@inner,o2@outer"; strings.Join(got, ",") != want {
+		t.Fatalf("attribution %v, want %s", got, want)
 	}
 }

@@ -170,8 +170,9 @@ func (a *updateActor) stepOnce(ctx context.Context) {
 		a.upd.RecordHandoffForSim(ctx, a.standby, gtid)
 		a.r.armPromotion(a.standby, a.r.clk.Now())
 		if a.tm != a.r.tm {
-			// Recorded on a retired manager: its status writes are dropped
-			// and its replacement never learns the record (DST-1).
+			// Recorded on a retired manager: its status writes are dropped,
+			// and the record reaches its replacement only by the carry
+			// (DST-1, fixed); the tag marks a regression of that carry.
 			a.r.replacedBeforeRecord = true
 			if a.r.retiredRecordPolls == nil {
 				a.r.retiredRecordPolls = map[int]bool{}

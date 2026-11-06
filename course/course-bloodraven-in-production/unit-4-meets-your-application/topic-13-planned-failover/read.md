@@ -15,9 +15,10 @@ Only planned failover actually drains. Nothing else does.
 ## The trigger
 
 One annotation, `bloodraven.shipstream.io/planned-failover`. Its value is a bare site name, or a site
-name followed by `:key=value` overrides; `maxLagWait` is the only supported key, and an unknown key is
-rejected outright so a typo cannot quietly run with defaults. The annotation is consumed and cleared on
-the next reconcile, like `reclone-site`.
+name followed by `:key=value` overrides; `maxLagWait` is the only supported key, and an unknown or
+repeated key is rejected outright (a `PlannedFailoverRejected` Event, no run) so a typo cannot quietly run
+with defaults. A valid request is given a `runID` and the annotation is removed as the run enters
+`Admitting`; only a `Deferred` request keeps it.
 
 ```widget
 {
@@ -33,8 +34,8 @@ the next reconcile, like `reclone-site`.
       "out": "WaitingForLag"
     },
     {
-      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.plannedFailover.phase} {.status.plannedFailover.transactionsLost}'",
-      "out": "Succeeded 0"
+      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.plannedFailover.phase} {.status.plannedFailover.result.outcome}'",
+      "out": "Succeeded Succeeded"
     }
   ],
   "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
@@ -45,15 +46,20 @@ Leave the counter app running while you do this. That is the point of the exerci
 
 ## The phases
 
-The reconciler advances the state machine by one step per reconcile, so an operator restart always lands
-on a well-defined observable state. The complete list, in order:
+Every transition is one durable status write, and every side effect runs only after the record that
+announces it has committed, so an operator restart always lands on a record whose side effect is either
+done or provably not started. The complete list:
 
-`""`, `Pending`, `Deferred`, `Validating`, `Draining`, `WaitingForLag`, `WaitingForDragonflySync`,
-`PromotingDragonfly`, `Promoting`, `Resuming`, `Succeeded`, `Failed`.
+`Admitting`, `Deferred`, `Fencing`, `Draining`, `WaitingForLag`, `WaitingForDragonflySync`,
+`PromotingDragonfly`, `Promoting`, `Publishing`, `RollingBack`, `Succeeded`, `Failed`.
 
-`Deferred` is only entered when the cooldown blocks you and `onCooldown` is `defer`.
-`WaitingForDragonflySync` and `PromotingDragonfly` are skipped entirely when `spec.dragonfly` is unset or
-disabled — the Dragonfly topics later in this unit take those two apart.
+There is no idle phase: a group that never had a planned failover has no `status.plannedFailover` block
+at all. `Admitting` and `Deferred` own nothing. `Deferred` is entered when the cooldown blocks you and
+`onCooldown` is `Defer`, or when a deployment holds a failover-hold lease. From `Fencing` on, the run
+holds the group's **claim**: emergency failover, split-brain resolution, ordered updates, recovery and
+DNS reconciliation are deferred until the promotion is confirmed, recorded and published.
+`WaitingForDragonflySync` and `PromotingDragonfly` are skipped entirely when Dragonfly was not enabled
+when the request was accepted — the next topic takes those two apart.
 
 ```widget
 {
@@ -61,48 +67,48 @@ disabled — the Dragonfly topics later in this unit take those two apart.
   "title": "Planned failover phases, and where rollback stops",
   "steps": [
     {
-      "label": "\"\"",
-      "detail": "Idle. No planned failover in flight."
-    },
-    {
-      "label": "Pending",
-      "detail": "Annotation observed; about to validate."
+      "label": "Admitting",
+      "detail": "runID stamped, annotation removed. Owns nothing. Re-validates and waits for the claim; ends Failed{NotStarted, AdmissionTimeout} after 2 minutes."
     },
     {
       "label": "Deferred",
-      "detail": "Only on cooldown with onCooldown: defer. Annotation kept; retried at cooldown expiry."
+      "detail": "Cooldown with onCooldown: Defer, or a deployment hold. Owns nothing; annotation kept; retried at admission.retryTime."
     },
     {
-      "label": "Validating",
-      "detail": "Site exists, is primary-candidate, is read-only and replicating; no restore, update or planned run in flight; cooldown clear."
+      "label": "Fencing",
+      "detail": "Claim granted. super_read_only=ON on the source, read back, GTID_EXECUTED recorded in fence.gtidSet. Primary role label stripped."
     },
     {
       "label": "Draining",
-      "detail": "super_read_only=ON on the source, GTID_EXECUTED snapshotted into sourceGtidAtFence, primary role label stripped, connections killed. drainTimeout 30s."
+      "detail": "Application connections on the source killed every second. drainTimeout 30s, then proceeds regardless."
     },
     {
       "label": "WaitingForLag",
-      "detail": "ROLLBACK LIVES HERE. Polls target GTID_EXECUTED until it contains sourceGtidAtFence. LagTimeout or InvalidGTID unfence the source and stamp Failed. maxLagWait 5m."
+      "detail": "Polls the target until its GTID_EXECUTED contains fence.gtidSet. LagTimeout, DivergentTarget or InvalidGTID roll back. maxLagWait 5m."
     },
     {
       "label": "WaitingForDragonflySync",
-      "detail": "Skipped unless spec.dragonfly is enabled."
+      "detail": "Skipped unless Dragonfly was enabled at acceptance."
     },
     {
       "label": "PromotingDragonfly",
-      "detail": "Skipped unless spec.dragonfly is enabled."
+      "detail": "Skipped unless Dragonfly was enabled at acceptance."
     },
     {
       "label": "Promoting",
-      "detail": "PAST THE POINT OF NO UNFENCE. Failure stamps Failed{ExecuteFailed}: manual recovery required."
+      "detail": "Before super_read_only=OFF can reach the target, failures still roll back. AFTER IT, NO ROLLBACK: PromotedUnconfirmed or ManualRecoveryRequired."
     },
     {
-      "label": "Resuming",
-      "detail": "activeSite, lastFailover, lastFailoverTarget and promotionGtidExecuted written. Failure here also leaves the source fenced."
+      "label": "Publishing",
+      "detail": "Promotion confirmed, recorded and published to DNS; claim released. Only status bookkeeping remains."
+    },
+    {
+      "label": "RollingBack",
+      "detail": "Nothing was written to the target: unfence the source if no other site is writable and the fence is provably the run's."
     },
     {
       "label": "Succeeded / Failed",
-      "detail": "Terminal. Status stays populated so kubectl describe explains the outcome."
+      "detail": "Terminal. result.outcome says what the cluster was left in; result.reason says why."
     }
   ]
 }
@@ -113,17 +119,18 @@ disabled — the Dragonfly topics later in this unit take those two apart.
 "Planned failover is safe" is a sentence people repeat without knowing why, so be exact. It is not luck
 and it is not a lag threshold. It is an ordering.
 
-At `Draining` the operator sets `super_read_only = ON` on `iad` and *then* reads `iad`'s
-`GTID_EXECUTED`, recording it in `status.plannedFailover.sourceGtidAtFence`. Fence first, snapshot
-second. A fenced primary accepts no new client writes, so the set `pdx` must catch up to cannot grow
-underneath the gate. That is the whole argument.
+At `Fencing` the operator sets `super_read_only = ON` on `iad`, reads it back, and *then* reads `iad`'s
+`GTID_EXECUTED`, recording it in `status.plannedFailover.fence.gtidSet`. Fence first, snapshot second. A
+fenced primary accepts no new client writes, so the set `pdx` must catch up to cannot grow underneath the
+gate. That is the whole argument.
 
 At `WaitingForLag` the operator polls `pdx`'s `GTID_EXECUTED` and asks one question: does it *contain*
-`sourceGtidAtFence`? The check is a genuine GTID-set superset test — `gtidContains(targetGtid,
-cur.SourceGtidAtFence)`, which resolves to `super.Contains(sub)`. Not seconds. Promotion runs only after
-that returns true, so `status.plannedFailover.transactionsLost` is 0 on a successful switchover by
-construction. The field exists for symmetry with the emergency path's accounting, not because a clean
-switchover can produce a number.
+`fence.gtidSet`? The check is a genuine GTID-set superset test. Not seconds. And immediately before it
+clears `super_read_only` on `pdx`, a pre-write gate demands that `pdx` hold exactly the fenced set, with
+no channel left and every other promotable site answering read-only. On success
+`status.promotionGtidExecuted` equals `fence.gtidSet`: nothing acknowledged was lost, by construction.
+There is no "transactions lost" counter on this path, because a clean switchover cannot produce a
+number.
 
 You met `spec.replication.maxLagSeconds` in Unit 2 and it looks like it belongs here. It does not. It
 drives exactly one thing: the `ReplicationLagging` Degraded condition. It is not a promotion gate
@@ -134,29 +141,34 @@ so it reads 0 when the IO thread has stalled.
 
 ## Draining is a deadline, not a barrier
 
-The defaults on `spec.plannedFailover`: `maxLagWait` 5m, `drainTimeout` 30s, `onCooldown` `reject`.
+The defaults on `spec.plannedFailover`: `maxLagWait` 5m, `drainTimeout` 30s, `onCooldown` `Reject`.
 
-Two things happen at `Draining`. The source's primary role label is stripped to `fenced`, which matches
-neither the `-primary` selector nor the `-replicas` selector, so the write Service sheds the endpoint and
-new connections stop arriving. And the reconciler repeatedly kills the connections already open.
+Two things take the write endpoint away. At `Fencing` the source's primary role label is stripped to
+`fenced`, which matches neither the `-primary` selector nor the `-replicas` selector, so the write
+Service sheds the endpoint and new connections stop arriving. At `Draining` the operator kills the
+connections already open, every second.
 
 Then the sharp edge. When the budget runs out with connections still on the source, the operator logs
-`drain budget exhausted after %s with %d connection(s) remaining on %q; proceeding` — and proceeds. A
-stuck client is not allowed to block a switchover indefinitely. That is a defensible choice, and it is a
-decision you have just inherited: the connections that outlive the drain are exactly the ones from the
-last topic, open against a demoted primary, passing every validation query, serving stale reads until
-something tries to write. Your `drainTimeout` and your pool's maximum connection lifetime are two halves
-of one setting. A pool that holds connections for ten minutes against a thirty-second drain makes the
-drain decoration.
+`drain budget exhausted after %s with %d connection(s) remaining on %q; proceeding` — and proceeds,
+recording the count in `drain.remainingConnections`. A stuck client is not allowed to block a switchover
+indefinitely. That is a defensible choice, and it is a decision you have just inherited: the connections
+that outlive the drain are exactly the ones from the last topic, open against a demoted primary, passing
+every validation query, serving stale reads until something tries to write. Your `drainTimeout` and your
+pool's maximum connection lifetime are two halves of one setting. A pool that holds connections for ten
+minutes against a thirty-second drain makes the drain decoration.
 
-## Rollback exists in exactly one phase
+## Rollback stops at the first possible write
 
-| Failure | Phase | Source afterwards | Who resolves it |
+`result.outcome` says what the cluster was left in. The line that matters is whether
+`super_read_only=OFF` may have reached the target.
+
+| Outcome | When | Source afterwards | Who resolves it |
 | --- | --- | --- | --- |
-| `CooldownActive` | `Validating` | Never fenced | Nobody — re-annotate later |
-| `LagTimeout`, `InvalidGTID` | `WaitingForLag` | Unfenced, still the primary | Nobody — nothing was lost |
-| `ExecuteFailed` | `Promoting` | Still fenced | A human |
-| status write failure | `Resuming` | Still fenced | A human |
+| `NotStarted` | Refused or timed out in admission (`CooldownActive`, `TargetNotPromotable`, `AdmissionTimeout`) | Never fenced | Nobody — re-annotate later |
+| `RolledBack` | Failed before any write to the target (`LagTimeout`, `DivergentTarget`, `FenceFailed`, `TargetLost`, `PromotionAborted`) | Unfenced, still the primary | Nobody — nothing was lost |
+| `SourceLeftFenced` | Nothing was written to the target, but unfencing was unsafe (another site writable, a fence it cannot prove is its own, a lost source) | Still fenced | Often the operator's re-assert; sometimes a human |
+| `PromotedUnconfirmed` | A write may have reached the target and it could not be confirmed | Fenced; the target may be serving | A human, with the runbook |
+| `ManualRecoveryRequired` | A write may have reached the target and the result cannot be explained | Unknown | A human; automation is **held** until the hold is acknowledged |
 
 Draw the operational conclusion. A lag gate that never closes is the *good* failure: `iad` comes back
 writable, the counter app resumes, and you have lost nothing but the fenced window. So when `maxLagWait`
@@ -164,17 +176,21 @@ expires against a `pdx` that is genuinely behind, let the rollback fire and fix 
 `maxLagWait` to force the gate closed does not make `pdx` catch up any faster — it only lengthens the
 window in which your source is fenced and your writes are refused.
 
-Two refusals worth recognising before you meet them. A planned failover aimed at `reader` is hard-refused
-with `only primary-candidate sites may be promoted` — the promotability rule from Unit 1, enforced again
-at this entry point. And the anti-flap cooldown gates planned admission just as it gates the automatic
-path, with reason `CooldownActive`; because `onCooldown` defaults to `reject`, a planned failover
-attempted soon after an emergency one is refused and the annotation cleared, not queued. Set
-`onCooldown: defer` if you would rather it wait in `Deferred` and fire itself at cooldown expiry.
+Two refusals worth recognising before you meet them. A planned failover aimed at `reader` ends
+`Failed{NotStarted, TargetNotPromotable}` with `only primary-candidate sites may be promoted` — the
+promotability rule from Unit 1, enforced again at this entry point. And the anti-flap cooldown gates
+planned admission just as it gates the automatic path, with reason `CooldownActive`; because
+`onCooldown` defaults to `Reject`, a planned failover attempted soon after an emergency one ends
+`NotStarted` and the annotation is cleared, not queued. Set `onCooldown: Defer` if you would rather it
+wait in `Deferred` and retry itself at `admission.retryTime`. One more: planned failover is strict. If a
+`primary-candidate` or `dr-only` site does not answer, admission waits with `waitReason: PeerUnreadable`
+and ends `AdmissionTimeout` after two minutes. A site it cannot read might be writable.
 
 ## What you have now
 
-You can move `playground`' primary on purpose, follow `status.plannedFailover.phase` to `Succeeded`, read
-`transactionsLost: 0`, and argue the superset gate to anyone who thinks it is a lag threshold. You can
-also say which failures hand you the cluster back intact and which hand you a fenced primary and a
-pager. Everything above assumed MySQL was the only thing moving. Next: what happens when there is a
-Dragonfly beside it, and what Bloodraven does and does not promise about it.
+You can move `playground`' primary on purpose, follow `status.plannedFailover.phase` to `Succeeded`,
+check that `status.promotionGtidExecuted` is the fenced set, and argue the superset gate to anyone who
+thinks it is a lag threshold. You can also say which outcomes hand you the cluster back intact and which
+hand you a fenced primary, an automation hold and a pager. Everything above assumed MySQL was the only
+thing moving. Next: what happens when there is a Dragonfly beside it, and what Bloodraven does and does
+not promise about it.

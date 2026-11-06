@@ -325,6 +325,13 @@ func (t *simTransport) serveOperator(w *simResponse, u *url.URL) error {
 			return nil
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if t.r.pl != nil && t.r.pl.noManager() {
+			// As the operator's handler when runner.Status finds no
+			// manager for the group (its start failed, or it is inside an
+			// absence window): 503 with this trial's single group.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return json.NewEncoder(w).Encode(map[string]string{"error": "no active topology managers"})
+		}
 		return json.NewEncoder(w).Encode(map[string]string{
 			"namespace":  q.Get("namespace"),
 			"group":      q.Get("group"),

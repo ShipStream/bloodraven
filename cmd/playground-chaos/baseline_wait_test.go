@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"testing"
 	"time"
 )
@@ -74,5 +75,28 @@ func TestWaitForBaseline_ContextCancelledReturnsPromptly(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("waitForBaseline did not return promptly after context cancellation")
+	}
+}
+
+// TestRunBaselineWait pins that `run` waits for a baseline only when
+// --baseline-wait is given explicitly (the CI scenario loop passes it on the
+// first scenario), while its 5m default still applies to run-all.
+func TestRunBaselineWait(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want time.Duration
+	}{
+		{nil, 0},
+		{[]string{"--baseline-wait=2m"}, 2 * time.Minute},
+		{[]string{"--baseline-wait=0"}, 0},
+	} {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		wait := fs.Duration("baseline-wait", 5*time.Minute, "")
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		if got := runBaselineWait(fs, *wait); got != tc.want {
+			t.Errorf("args %v: runBaselineWait = %s, want %s", tc.args, got, tc.want)
+		}
 	}
 }

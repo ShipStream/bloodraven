@@ -36,4 +36,4 @@ Close on measurement. State explicitly that **no wall-clock recovery number is q
 
 **Inherits:** The learner knows every surface Bloodraven moves on a promotion — selector, A record, taint — and that the application was still reading from the demoted site.
 **Leaves:** The learner can explain the stale-read mechanism from first principles, name Bloodraven's one mitigation and its limits, choose a strategy, and state the three-part pool fix. The Unit 3 wall is resolved.
-**Do not cover:** Planned failover phases, the lag gate, or rollback (topic 3); Dragonfly, `REPLTAKEOVER`, or `sessionsPreserved` (topic 4); anything about backups (Unit 6).
+**Do not cover:** Planned failover phases, the lag gate, or rollback (topic 3); Dragonfly, `REPLTAKEOVER`, or `dragonfly.sessions` (topic 4); anything about backups (Unit 6).

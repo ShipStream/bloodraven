@@ -632,8 +632,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, perr.Error())
 		e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{Result: &v1alpha1.PlannedFailoverResult{
 			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonInvalidAnnotation}})
-		e.consumeRequest(ctx, fg, "invalid")
-		return 0, nil
+		return e.consumeRequest(ctx, fg, "invalid"), nil
 	}
 
 	hold, release, err := e.beginAdmission(ctx, fg)
@@ -654,8 +653,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 	case PlannedFailoverSkip:
 		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped,
 			fmt.Sprintf("planned-failover: site %q is already the active primary; nothing to do", req.Site))
-		e.consumeRequest(ctx, fg, "idempotent")
-		return 0, nil
+		return e.consumeRequest(ctx, fg, "idempotent"), nil
 	case PlannedFailoverReject:
 		if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1alpha1.PlannedFailoverCooldownDefer {
 			next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseDeferred, "")
@@ -687,8 +685,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 			return requeueFor(out), nil
 		}
 		e.reportTerminal(nn, fg, next, v1alpha1.EventPlannedFailoverRejected)
-		e.consumeRequest(ctx, e.reload(ctx, fg), "rejected")
-		return 0, nil
+		return e.consumeRequest(ctx, e.reload(ctx, fg), "rejected"), nil
 	}
 
 	next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseAdmitting,
@@ -745,14 +742,22 @@ func (e *PlannedFailoverEngine) beginAdmission(ctx context.Context, fg *v1alpha1
 
 // consumeRequest removes the request annotation, logging a failure (a
 // later pass retries: an unconsumed request of a live run is recognised).
-func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, why string) {
+//
+// It returns the requeue that later pass needs: zero once the annotation is
+// gone, plannedRequeuePoll when the removal did not commit. A caller that
+// would otherwise return no requeue must return it: nothing else re-runs
+// the engine for an annotation left behind, and a request that outlives
+// its rejection can start a switchover long after it was refused.
+func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, why string) time.Duration {
 	if fg == nil {
-		return
+		return plannedRequeuePoll
 	}
 	if out, err := e.store.ConsumeRequest(ctx, fg); out != WriteCommitted {
 		log.FromContext(ctx).Info("planned failover: could not remove the request annotation; a later pass retries",
 			"fg", fg.Namespace+"/"+fg.Name, "why", why, "outcome", out.String(), "error", errString(err))
+		return plannedRequeuePoll
 	}
+	return 0
 }
 
 // consumeStaleRequest removes a request annotation found while a run is
@@ -855,7 +860,7 @@ func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.
 	d, err := e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: reason, msg: msg,
 		why: why, eventReason: v1alpha1.EventPlannedFailoverRejected})
 	if consume && d == 0 && err == nil {
-		e.consumeRequest(ctx, e.reload(ctx, fg), "rejected")
+		d = e.consumeRequest(ctx, e.reload(ctx, fg), "rejected")
 	}
 	return d, err
 }

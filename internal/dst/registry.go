@@ -28,9 +28,13 @@ type simRegistry struct {
 	retiring []*retiringManager
 	slot     *controller.PlannedClaimSlot
 
-	// absentPolls > 0 makes Snapshot report no current manager (the
-	// replacement failed to start); the harness does not poll it either.
+	// absentPolls > 0 is a window in which the group has no registered
+	// manager: the current one was retired and its replacement's starts
+	// fail (setAbsent). When it ends the harness starts a fresh manager.
 	absentPolls int
+	// absentLong is the part of absentPolls a long absence (K036) keeps
+	// past heal-all.
+	absentLong int
 
 	leaderCtx    context.Context
 	leaderCancel context.CancelFunc
@@ -42,6 +46,14 @@ type simRegistry struct {
 	// either is nil a replaced manager stops polling at once (see replace).
 	retire        func(*controller.TopologyManager)
 	changingSites func(*controller.TopologyManager) bool
+
+	// retiredFailover is the runner's retired-record stash
+	// (stashRetiredFailoverLocked): the newest failover record a retired
+	// manager of this process held, passed to every later registration as
+	// ManagerWiring.RetiredFailover, so a predecessor that has already left
+	// retiring still hands its record on. A restart (a new registry) drops
+	// it with the process.
+	retiredFailover *controller.FailoverRecord
 }
 
 // retiringManager is a replaced manager that still polls for a while,
@@ -118,6 +130,10 @@ func (g *simRegistry) register(tm *controller.TopologyManager, w controller.Mana
 	for _, rm := range g.retiring {
 		w.Predecessors = append(w.Predecessors, rm.tm)
 	}
+	if g.retiredFailover != nil {
+		rec := *g.retiredFailover
+		w.RetiredFailover = &rec
+	}
 	if len(g.retiring) > 0 {
 		for _, rm := range g.retiring {
 			if rm.updateInFlight != nil && rm.updateInFlight() {
@@ -162,18 +178,48 @@ func (g *simRegistry) replace(next *controller.TopologyManager, w controller.Man
 	if g.retire == nil || g.changingSites == nil {
 		pollsLeft = 0
 	}
-	old := g.current
-	g.current = nil
-	if old != nil {
-		g.retiring = append(g.retiring, &retiringManager{tm: old, pollsLeft: pollsLeft, updateInFlight: updateInFlight})
-	}
+	old := g.retireCurrentLocked(pollsLeft, updateInFlight)
 	retire := g.retire
+	changing := g.changingSites
 	g.mu.Unlock()
 	if old != nil && retire != nil {
 		retire(old)
 	}
 	g.register(next, w)
-	return retire != nil
+	return retire != nil && changing != nil
+}
+
+// retireCurrentLocked moves the current manager to retiring (pollsLeft more
+// polls) and stashes its record, as retireManagerLocked does; it returns
+// the retired manager (nil: none). g.mu is held.
+func (g *simRegistry) retireCurrentLocked(pollsLeft int, updateInFlight func() bool) *controller.TopologyManager {
+	old := g.current
+	g.current = nil
+	if old != nil {
+		g.retiring = append(g.retiring, &retiringManager{tm: old, pollsLeft: pollsLeft, updateInFlight: updateInFlight})
+		g.stashLocked(old)
+	}
+	return old
+}
+
+// stashLocked keeps the newer of the stash and tm's in-memory record
+// (stashRetiredFailoverLocked). g.mu is held.
+func (g *simRegistry) stashLocked(tm *controller.TopologyManager) {
+	rec, ok := tm.FailoverRecordForSim()
+	if !ok {
+		return
+	}
+	if g.retiredFailover != nil && !rec.LastFailover.After(g.retiredFailover.LastFailover) {
+		return
+	}
+	g.retiredFailover = &rec
+}
+
+// stash is stashLocked for a caller without g.mu.
+func (g *simRegistry) stash(tm *controller.TopologyManager) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stashLocked(tm)
 }
 
 // Current is the manager the harness polls; nil while absent.
@@ -186,11 +232,44 @@ func (g *simRegistry) Current() *controller.TopologyManager {
 	return g.current
 }
 
-// setAbsent makes the current manager unregistered for n polls.
-func (g *simRegistry) setAbsent(n int) {
+// setAbsent leaves the group without a registered manager for n polls: the
+// current one is retired (its in-flight Poll ends at once) and the
+// replacement's starts fail, as when the runner's startManager errors after
+// retiring its predecessor. A window already open is extended.
+func (g *simRegistry) setAbsent(n int, updateInFlight func() bool) {
+	g.mu.Lock()
+	old := g.retireCurrentLocked(0, updateInFlight)
+	g.absentPolls = max(g.absentPolls, n)
+	retire := g.retire
+	g.mu.Unlock()
+	if old != nil && retire != nil {
+		retire(old)
+	}
+}
+
+// absent reports whether the group is inside an absence window.
+func (g *simRegistry) absent() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.absentPolls > 0
+}
+
+// setAbsentLong is setAbsent for an absence that outlives heal-all.
+func (g *simRegistry) setAbsentLong(n int, updateInFlight func() bool) {
+	g.setAbsent(n, updateInFlight)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.absentPolls = max(g.absentPolls, n)
+	g.absentLong = max(g.absentLong, n)
+}
+
+// healAbsence ends a short absence at heal-all; a long one runs its
+// course. It reports whether an absence ended.
+func (g *simRegistry) healAbsence() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ended := g.absentPolls > 0 && g.absentLong == 0
+	g.absentPolls = g.absentLong
+	return ended
 }
 
 // retiringToPoll returns the retiring managers still inside their poll
@@ -211,6 +290,9 @@ func (g *simRegistry) retiringToPoll() []*controller.TopologyManager {
 		}
 	}
 	g.retiring = kept
+	for _, old := range dropped {
+		g.stashLocked(old)
+	}
 	cur := g.current
 	g.mu.Unlock()
 	// As retireManagerLocked's goroutine once the retired manager's Run
@@ -222,13 +304,19 @@ func (g *simRegistry) retiringToPoll() []*controller.TopologyManager {
 	return out
 }
 
-// endPoll counts the absence window down.
-func (g *simRegistry) endPoll() {
+// endPoll counts the absence window down; it reports whether the window
+// ended at this poll.
+func (g *simRegistry) endPoll() (absenceEnded bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.absentLong > 0 {
+		g.absentLong--
+	}
 	if g.absentPolls > 0 {
 		g.absentPolls--
+		return g.absentPolls == 0
 	}
+	return false
 }
 
 // retiringCount is how many replaced managers are still tracked.

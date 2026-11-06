@@ -7,10 +7,10 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A planned switchover of `playground` reports Succeeded. You dump the status and `sessionsPreserved` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?
+A planned switchover of `playground` reports Succeeded. You dump the status and `dragonfly.sessions` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?
 
-- Nothing about the outcome — the field is unknown, and you have to look at the promotion method, the log line and the event to find out
-- Sessions were lost; an absent boolean serialises the same as false
+- Nothing about the outcome — the field is unknown, and you have to look at `dragonfly.takeover`, the log line and the event to find out
+- Sessions were lost; an absent value means `Lost`
 - Sessions were preserved; the operator only writes the field when something went wrong
 - The switchover silently skipped the Dragonfly phases, so the session store is still on the old master
 
@@ -18,7 +18,7 @@ A planned switchover of `playground` reports Succeeded. You dump the status and 
 
 **Explanation:**
 
-`sessionsPreserved` is a `*bool` and its three states are true, false and nil — nil means unknown, for example because Dragonfly was disabled for that attempt. Reading absent as false makes you chase an incident that did not happen; reading it as success makes you miss one that did. "Sessions were lost" is the classic misread of a nil pointer as its zero value: `omitempty` drops nil, not false. "Only written on failure" is backwards — a clean REPLTAKEOVER explicitly stamps true. And an absent field is not evidence about routing: the traffic-label shed and the role flip are what move the active Service, and they leave their own traces. (objective 11)
+`dragonfly.sessions` has three states: `Preserved`, `Lost`, and absent, which means unknown — for example because Dragonfly was not enabled when the request was accepted, or the run ended before its Dragonfly phases. Reading absent as `Lost` makes you chase an incident that did not happen; reading it as success makes you miss one that did. "Only written on failure" is backwards — a clean REPLTAKEOVER explicitly records `Preserved`. And an absent field is not evidence about routing: the traffic-label shed and the role flip are what move the active Service, and they leave their own traces. (objective 11)
 
 ## Question 2
 

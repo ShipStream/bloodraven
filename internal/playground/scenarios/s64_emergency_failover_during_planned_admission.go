@@ -29,6 +29,7 @@ const (
 	s64KeyBaselineRunID = "s64.baselineRunID"
 	s64KeyRunID         = "s64.runID"
 	s64KeyKilledAt      = "s64.primaryKilledAt"
+	s64KeySuccessor     = "s64.emergencySuccessor"
 )
 
 // scenario64EmergencyFailoverDuringPlannedAdmission proves that a planned
@@ -41,9 +42,10 @@ const (
 // held down (its Deployment scaled to 0, not a pod kill the Deployment would
 // undo in seconds). Emergency failover must promote the peer inside the usual
 // window, revoking the deployment leases as scenario 55 asserts, which also
-// releases the hold. The same planned run must then end Failed{NotStarted,
-// AlreadyActive} (its target is now the primary), or proceed against the new
-// primary; it must never claim the dead source.
+// releases the hold. The planned request targets the peer, which is the
+// emergency failover's only possible successor in the playground, so the same
+// planned run must then end Failed{NotStarted, AlreadyActive}: its target is
+// now the primary. It must never claim the dead source.
 func scenario64EmergencyFailoverDuringPlannedAdmission() runner.Scenario {
 	state := &deployScenarioState{}
 	return runner.Scenario{
@@ -51,8 +53,8 @@ func scenario64EmergencyFailoverDuringPlannedAdmission() runner.Scenario {
 		Title: "Emergency failover is not blocked by a planned request deferred in admission",
 		Hypothesis: "With a planned request Deferred{DeploymentHold} by a live failover-hold lease, holding the " +
 			"primary down still promotes the peer within the emergency window (a pending request owns nothing), " +
-			"revokes the deployment leases, and the planned run then ends Failed{NotStarted, AlreadyActive} or " +
-			"proceeds against the new primary, never claiming the dead source.",
+			"revokes the deployment leases, and the planned run, whose target the emergency failover just promoted, then " +
+			"ends Failed{NotStarted, AlreadyActive}, never claiming the dead source.",
 		Risk:    "high",
 		DocLink: "playground/chaos-scenarios.md#64-emergency-failover-during-planned-admission",
 		Timeout: 14 * time.Minute,
@@ -85,8 +87,9 @@ func scenario64EmergencyFailoverDuringPlannedAdmission() runner.Scenario {
 	}
 }
 
-// requireDeployAPI is scenario 53's precheck: the operator serves the deploy
-// API and the playground TLS Secret its clients trust exists.
+// requireDeployAPI is the deploy-API scenarios' precheck (53, 64): the
+// operator serves the deploy API and the playground TLS Secret its clients
+// trust exists.
 func requireDeployAPI(ctx context.Context, env *runner.Env) error {
 	dep, err := env.Kube.GetDeployment(ctx, env.Namespace, "bloodraven")
 	if err != nil {
@@ -212,8 +215,22 @@ func s64ObserveEmergencyFailover() runner.Step {
 			if err != nil {
 				return err
 			}
-			env.Capture.Note(fmt.Sprintf("emergency failover off %s observed %s after the primary was held down",
-				original, time.Since(killedAt).Round(time.Second)))
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
+			// The scenario's premise: the emergency failover promoted the
+			// planned request's target, so the request is now AlreadyActive.
+			// A topology with another promotable peer breaks it.
+			if target := ctxFetch(env, "switchoverTarget"); mfg.Status.ActiveSite != target {
+				return fmt.Errorf("emergency failover promoted %q, not the planned target %q: scenario 64 needs exactly one promotable peer",
+					mfg.Status.ActiveSite, target)
+			}
+			if err := ctxStash(ctx, env, s64KeySuccessor, mfg.Status.ActiveSite); err != nil {
+				return err
+			}
+			env.Capture.Note(fmt.Sprintf("emergency failover off %s to %s observed %s after the primary was held down",
+				original, mfg.Status.ActiveSite, time.Since(killedAt).Round(time.Second)))
 			return nil
 		},
 	}
@@ -261,10 +278,10 @@ func deployLeasesRevokedAndStopped(records []deployClientRecord, grantGeneration
 func s64ObservePlannedOutcome() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "planned run ends Failed{NotStarted, AlreadyActive} or proceeds against the new primary",
+		Name:  "planned run ends Failed{NotStarted, AlreadyActive}",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			runID := ctxFetch(env, s64KeyRunID)
-			newPrimary := ctxFetch(env, "expectedNewPrimary")
+			newPrimary := ctxFetch(env, s64KeySuccessor)
 			original := ctxFetch(env, "originalPrimary")
 			waitCtx, cancel := context.WithTimeout(ctx, s64OutcomeWindow)
 			defer cancel()
@@ -293,9 +310,10 @@ func s64ObservePlannedOutcome() runner.Step {
 }
 
 // s64ClassifyOutcome decides whether the planned run has settled acceptably
-// after the emergency failover. Accepted: Failed{NotStarted, AlreadyActive},
-// or Succeeded against the new primary (source == newPrimary). A run that
-// claims the lost original primary, or any other terminal result, fails.
+// after the emergency failover promoted its target. Accepted only:
+// Failed{NotStarted, AlreadyActive}. A run that owns sites from anything but
+// the new primary (the lost original primary above all) fails at once; any
+// other terminal result fails.
 func s64ClassifyOutcome(pf *v1alpha1.PlannedFailoverStatus, original, newPrimary string) (bool, string, error) {
 	msg := plannedRunSummary(pf)
 	if pf.Result == nil {
@@ -312,9 +330,7 @@ func s64ClassifyOutcome(pf *v1alpha1.PlannedFailoverStatus, original, newPrimary
 	case pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeNotStarted &&
 		pf.Result.Reason == v1alpha1.PlannedFailoverReasonAlreadyActive:
 		return true, msg, nil
-	case pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && pf.SourceSite == newPrimary:
-		return true, msg, nil
 	}
-	return false, msg, fmt.Errorf("planned run ended %s/%s, want NotStarted/AlreadyActive or Succeeded from %s: %s (%s)",
+	return false, msg, fmt.Errorf("planned run ended %s/%s, want NotStarted/AlreadyActive (its target %s is the new primary): %s (%s)",
 		pf.Result.Outcome, pf.Result.Reason, newPrimary, msg, pf.Message)
 }
