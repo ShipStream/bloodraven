@@ -2,7 +2,9 @@ package pitrplan
 
 import (
 	"testing"
+	"time"
 
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -60,6 +62,20 @@ func TestFrontierReuseAndAfterTarget(t *testing.T) {
 	// The reuse check also runs in latest mode.
 	_, err = s.run(ModeLatest, 0, "", false)
 	wantToken(t, err, pitrarchive.TokenArchiveNamespaceReuse)
+	// P5: the bound is the dumped server's clock, not the dump Job's. A Job
+	// whose clock lags the server by more than δ is not a reissue...
+	s = base()
+	s.backup("A:1-40", "a", 101, 50)
+	s.dump.End = backupmeta.NewMicroTime(time.UnixMicro(sec(20)))
+	if _, err := s.run(ModeTimestamp, 60.5, "", false); err != nil {
+		t.Fatalf("Job clock 30 s behind the server: %v", err)
+	}
+	// ...while a server clock before the archived commit (+δ) is.
+	s = base()
+	s.backup("A:1-40", "a", 101, 50)
+	s.dump.ServerClock.End = backupmeta.NewMicroTime(time.UnixMicro(sec(34)))
+	_, err = s.run(ModeTimestamp, 80, "", false)
+	wantToken(t, err, pitrarchive.TokenArchiveNamespaceReuse, "A:40", "the dumped server's clock read 2026-11-01T12:00:34.000000Z")
 	// T before ceil_s(dumpEnd).
 	s = base()
 	s.backup("A:1-40", "a", 101, 50.2)

@@ -62,6 +62,22 @@ type ArchiveSession struct {
 type manifestGuard struct {
 	marker     *HistoryIntegrity
 	promotions []PromotionRecord
+	// evicted holds the keys of records the MaxPromotionRecords cap
+	// dropped. They are never re-added, so the cap's choice is stable
+	// across saves instead of a dropped record coming back and evicting
+	// another.
+	evicted map[string]bool
+}
+
+// merge returns base plus the records the guard knows that base lacks,
+// capped (see mergePromotionRecords), and remembers the result.
+func (g *manifestGuard) merge(base []PromotionRecord) []PromotionRecord {
+	if g.evicted == nil {
+		g.evicted = map[string]bool{}
+	}
+	out := mergePromotionRecords(base, g.promotions, g.evicted)
+	g.promotions = append([]PromotionRecord(nil), out...)
+	return out
 }
 
 // OpenArchiveForWrite builds a writer session for prefix and opens it: an
@@ -285,6 +301,10 @@ func (s *ArchiveSession) EnsureCreated(ctx context.Context) error {
 	if created && !bytes.Equal(gotBytes, body) {
 		return s.settle(fmt.Errorf("archive descriptor %s read back different bytes than were created", key))
 	}
+	// An S3 SDK retry of a create whose first attempt landed gets 412 for
+	// our own object. The body names this site and a µs creation time, so
+	// identical bytes are this writer's create, not a sibling's.
+	created = created || bytes.Equal(gotBytes, body)
 	if err := s.accept(got); err != nil {
 		return s.settle(err)
 	}
@@ -397,7 +417,7 @@ func (s *ArchiveSession) remember(m *Manifest) {
 		marker := *m.HistoryIntegrity
 		g.marker = &marker
 	}
-	g.promotions = mergePromotionRecords(g.promotions, m.Promotions)
+	g.merge(m.Promotions)
 	s.guards[m.Site] = g
 }
 
@@ -422,7 +442,8 @@ func (s *ArchiveSession) SaveManifest(ctx context.Context, m *Manifest) error {
 		marker := *g.marker
 		m.HistoryIntegrity = &marker
 	}
-	m.Promotions = mergePromotionRecords(m.Promotions, g.promotions)
+	m.Promotions = g.merge(m.Promotions)
+	s.guards[m.Site] = g
 	buf, err := encodeManifest(s.prefix, m)
 	if err != nil {
 		return err
@@ -450,20 +471,27 @@ func (s *ArchiveSession) DeleteObject(ctx context.Context, key string) error {
 	return s.store.Delete(ctx, key)
 }
 
+func promotionRecordKey(r PromotionRecord) string {
+	return r.ServerUUID + "|" + strconv.FormatUint(uint64(r.ServerID), 10) + "|" + r.GTIDExecuted + "|" + strconv.FormatInt(r.ObservedAt.UnixMicro(), 10)
+}
+
 // mergePromotionRecords returns base plus every record in extra that base
-// lacks, ordered by ObservedAt and capped at MaxPromotionRecords (newest kept).
-func mergePromotionRecords(base, extra []PromotionRecord) []PromotionRecord {
-	key := func(r PromotionRecord) string {
-		return r.ServerUUID + "|" + strconv.FormatUint(uint64(r.ServerID), 10) + "|" + r.GTIDExecuted + "|" + strconv.FormatInt(r.ObservedAt.UnixMicro(), 10)
-	}
+// lacks and evicted does not name, ordered by ObservedAt and capped at
+// MaxPromotionRecords (newest kept); the keys it drops are added to
+// evicted (nil: not tracked). The cap never drops base's last record, the
+// one a writer just appended: after a backward clock step it sorts first,
+// and dropping it would report a promotion recorded that the saved
+// manifest lacks.
+func mergePromotionRecords(base, extra []PromotionRecord, evicted map[string]bool) []PromotionRecord {
+	key := promotionRecordKey
 	have := make(map[string]bool, len(base))
 	for _, r := range base {
 		have[key(r)] = true
 	}
 	var missing []PromotionRecord
 	for _, r := range extra {
-		if !have[key(r)] {
-			have[key(r)] = true
+		if k := key(r); !have[k] && !evicted[k] {
+			have[k] = true
 			missing = append(missing, r)
 		}
 	}
@@ -472,10 +500,26 @@ func mergePromotionRecords(base, extra []PromotionRecord) []PromotionRecord {
 	}
 	out := append(append([]PromotionRecord(nil), base...), missing...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ObservedAt.Before(out[j].ObservedAt) })
-	if n := len(out) - MaxPromotionRecords; n > 0 {
-		out = out[n:]
+	n := len(out) - MaxPromotionRecords
+	if n <= 0 {
+		return out
 	}
-	return out
+	protected := ""
+	if len(base) > 0 {
+		protected = key(base[len(base)-1])
+	}
+	kept := make([]PromotionRecord, 0, MaxPromotionRecords)
+	for _, r := range out {
+		if k := key(r); n > 0 && k != protected {
+			n--
+			if evicted != nil {
+				evicted[k] = true
+			}
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
 }
 
 // archivePrefixContents classifies a prefix that has no descriptor.

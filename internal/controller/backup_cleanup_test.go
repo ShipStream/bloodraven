@@ -233,7 +233,7 @@ func TestArtifactIdentityProblem(t *testing.T) {
 			b := mb.DeepCopy()
 			b.Status.Location, b.Status.StorageType = tc.location, tc.storageType
 			storage := &v1alpha1.BackupArtifactStorage{Location: tc.recorded, Bucket: "bloodraven-backups", ClaimName: "claim"}
-			got := artifactIdentityProblem(b, storage, tc.producer)
+			got := artifactIdentityProblem(b, b.Status.Location, storage, tc.producer)
 			if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
@@ -745,8 +745,9 @@ func TestFinalize_RestoresBlankedLocationFromSnapshot(t *testing.T) {
 		t.Fatalf("ArtifactLocationRestored events = %d", n)
 	}
 
-	// A failed backup has no artifact even if its Job's destination was
-	// recorded at creation: still released.
+	// A failed backup's location is never restored: its leftovers (the
+	// backup stamp, part of a dump) are cleaned up in abandoned mode at
+	// the planned destination instead (TestFinalize_AbandonedBackupCleanup).
 	failed := newCleanupFixture(t)
 	if err := failed.c.Get(ctx, client.ObjectKeyFromObject(failed.mb), failed.mb); err != nil {
 		t.Fatal(err)
@@ -755,8 +756,14 @@ func TestFinalize_RestoresBlankedLocationFromSnapshot(t *testing.T) {
 	if err := failed.c.Status().Update(ctx, failed.mb); err != nil {
 		t.Fatal(err)
 	}
-	if done, _ := failed.finalize(t); !done {
-		t.Fatal("a failed backup without an artifact was not released")
+	if done, _ := failed.finalize(t); done {
+		t.Fatal("a failed backup was released before its leftovers were cleaned up")
+	}
+	if failed.mb.Status.Location != "" {
+		t.Fatalf("a failed backup acquired status.location %q", failed.mb.Status.Location)
+	}
+	if job, ok := failed.cleanupJob(t); !ok || envMap(job.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_CLEANUP_MODE"] != "abandoned" {
+		t.Fatal("no abandoned-mode cleanup Job for the failed backup")
 	}
 }
 

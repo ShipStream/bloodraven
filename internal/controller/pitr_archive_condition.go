@@ -93,7 +93,7 @@ var pitrArchiveFalseReasons = func() []string {
 
 // eventReasonPITRArchiveUnsafeHistory is the edge-triggered Warning for the
 // transition into PITRArchiveReady=False/ArchiveUnsafeHistory.
-const eventReasonPITRArchiveUnsafeHistory = "PITRArchiveUnsafeHistory"
+const eventReasonPITRArchiveUnsafeHistory = "PITRArchiveUnsafeHistoryDetected"
 
 // pitrArchiveRefusal returns the D-27 refusal reason a sidecar reports for
 // its archive, or "". The persisted history-integrity marker wins; then the
@@ -719,15 +719,10 @@ func (r *TopologyManagerRunner) applyPITRArchiveStatus(nn types.NamespacedName, 
 	}
 	// A configuration that sets the permanent history marker is reported
 	// before any sidecar runs with it. A refusal a sidecar already reports
-	// stays, since it is what has actually happened.
-	if detail := pitrMySQLConfHistoryViolation(fg); detail != "" && (v.Status != metav1.ConditionFalse || v.Reason != string(pitrarchive.ReasonArchiveUnsafeHistory)) {
-		v = pitrArchiveVerdict{
-			Status: metav1.ConditionFalse,
-			Reason: string(pitrarchive.ReasonArchiveUnsafeHistory),
-			Message: detail + "; with PITR enabled every site's archiver would set the permanent history marker for this prefix " +
-				"(PITRArchiveUnsafeHistory); remove the setting, or start a new archive prefix and take a full backup once it is applied",
-		}
-	}
+	// that ranks at or above ArchiveUnsafeHistory stays, since it is what
+	// has actually happened (status.pitr.archive.reason says the same); the
+	// preview is appended to its message so neither problem is hidden.
+	v = applyPITRMySQLConfPreview(v, pitrMySQLConfHistoryViolation(fg))
 	setCondition(&fg.Status.Conditions, metav1.Condition{
 		Type:               conditionPITRArchiveReady,
 		Status:             v.Status,
@@ -736,6 +731,42 @@ func (r *TopologyManagerRunner) applyPITRArchiveStatus(nn types.NamespacedName, 
 		Reason:             v.Reason,
 		Message:            v.Message,
 	})
+}
+
+// pitrMySQLConfPreviewMessage is the PITRArchiveUnsafeHistory text for a
+// spec.mysqlConf setting no sidecar has run with yet.
+func pitrMySQLConfPreviewMessage(detail string) string {
+	return detail + "; with PITR enabled every site's archiver would set the permanent history marker for this prefix " +
+		"(PITRArchiveUnsafeHistory); remove the setting, or start a new archive prefix and take a full backup once it is applied"
+}
+
+// applyPITRMySQLConfPreview folds the mysqlConf history preview (detail,
+// "" for none) into v: it replaces a verdict that is True or a refusal
+// ranking below ArchiveUnsafeHistory in pitrArchiveFalseReasons, and is
+// appended to the message of one ranking at or above it.
+func applyPITRMySQLConfPreview(v pitrArchiveVerdict, detail string) pitrArchiveVerdict {
+	if detail == "" {
+		return v
+	}
+	unsafe := string(pitrarchive.ReasonArchiveUnsafeHistory)
+	if v.Status == metav1.ConditionFalse && pitrArchiveReasonRank(v.Reason) <= pitrArchiveReasonRank(unsafe) {
+		if v.Reason != unsafe {
+			v.Message += "; also: " + pitrMySQLConfPreviewMessage(detail)
+		}
+		return v
+	}
+	return pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: unsafe, Message: pitrMySQLConfPreviewMessage(detail)}
+}
+
+// pitrArchiveReasonRank is reason's index in pitrArchiveFalseReasons (lower
+// is more specific), or len(pitrArchiveFalseReasons) when unknown.
+func pitrArchiveReasonRank(reason string) int {
+	for i, r := range pitrArchiveFalseReasons {
+		if r == reason {
+			return i
+		}
+	}
+	return len(pitrArchiveFalseReasons)
 }
 
 // pitrArchiveCondition returns a copy of the persisted condition, or nil.

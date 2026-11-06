@@ -2,6 +2,7 @@ package pitrplan
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
@@ -70,45 +71,170 @@ func (p *planner) waived(r *Row) bool {
 		!r.Hints.GTIDs.Overlaps(p.plan.Replay)
 }
 
-// orderCheck is D-51: every pair of downloaded occurrence sequences orders
-// their common GTIDs identically. Edges join adjacent shared GTIDs of each
-// sequence; a cycle is an inversion.
+// orderNodeBytes and orderEdgeBytes are the order check's charges: per
+// node, its map entry, name, adjacency header, Tarjan arrays and stack
+// frames; per edge, the edge record.
+const (
+	orderNodeBytes = 48 + 24 + 24 + 13 + 4 + 16
+	orderEdgeBytes = 16
+)
+
+// orderCheck is D-51: the downloaded binlogs must admit one order of their
+// shared transactions. Each file contributes what its bytes prove about
+// its server's order:
+//
+//   - its transactions in file order (edges between adjacent shared ones);
+//   - prev(f) before every transaction of f (P1): a GTID of prev(f)
+//     precedes f's first transaction. This carries order across a binlog
+//     rotation, where the second half of an inversion is visible only in a
+//     later file's Previous_gtids.
+//
+// A GTID outside X is shared when two downloaded files hold it as a
+// transaction, or one holds it as a transaction and a file of another site
+// holds it in prev. Each file has a start node V_f (prev(f) → V_f → its first shared
+// transaction) and an end node E_f (its last shared transaction → E_f);
+// the files of one site are chained E_f → V_f' when exec(f) ⊆ prev(f'),
+// so only prev(f') ∖ exec(f) needs its own edges and the graph stays
+// linear in the occurrences. A cycle is an inversion.
 func (p *planner) orderCheck() error {
+	charged := int64(0)
+	defer func() { p.budget.Release(charged) }()
+	charge := func(n int64) error {
+		if err := p.budget.Charge(n, "order check"); err != nil {
+			return err
+		}
+		charged += n
+		return nil
+	}
+	// The shared set.
+	txnsBySite := map[string]Set{}
+	for _, f := range p.order {
+		txnsBySite[f.row.Site] = txnsBySite[f.row.Site].Union(f.idx.GTIDs)
+	}
+	shared := Set{}
+	for _, f := range p.order {
+		for site, txns := range txnsBySite {
+			if site != f.row.Site {
+				shared = shared.Union(f.prev.Intersect(txns))
+			}
+		}
+	}
+	for g, o := range p.occ {
+		if o.n >= 2 {
+			shared.add(g)
+		}
+	}
+	// An excluded transaction is never replayed, so how the sites ordered
+	// it does not matter (the refusal's own remedy is to exclude it).
+	shared = shared.Subtract(p.X)
+	if shared.IsEmpty() {
+		return nil
+	}
 	ids := map[GTID]int32{}
-	var names []GTID
+	var names []GTID   // real nodes; virtual nodes have a zero GTID
+	var labels []*file // the file of a virtual node
 	type edge struct {
 		to   int32
 		file *file
 	}
 	var adj [][]edge
+	node := func(g GTID, f *file) (int32, error) {
+		if err := charge(orderNodeBytes); err != nil {
+			return 0, err
+		}
+		id := int32(len(adj)) //nolint:gosec // budget-bounded
+		names, labels, adj = append(names, g), append(labels, f), append(adj, nil)
+		return id, nil
+	}
+	link := func(from, to int32, f *file) error {
+		if from == to {
+			return nil
+		}
+		if err := charge(orderEdgeBytes); err != nil {
+			return err
+		}
+		adj[from] = append(adj[from], edge{to, f})
+		return nil
+	}
+	real := func(g GTID) (int32, error) {
+		if id, ok := ids[g]; ok {
+			return id, nil
+		}
+		id, err := node(g, nil)
+		if err != nil {
+			return 0, err
+		}
+		ids[g] = id
+		return id, nil
+	}
+	start := map[*file]int32{}
+	end := map[*file]int32{}
 	for _, f := range p.order {
-		last := int32(-1)
+		v, err := node(GTID{}, f)
+		if err != nil {
+			return err
+		}
+		e, err := node(GTID{}, f)
+		if err != nil {
+			return err
+		}
+		start[f], end[f] = v, e
+		last := v
 		for i := range f.idx.Txns {
 			g := f.gtid(i)
-			if o := p.occ[g]; o == nil || o.n < 2 {
+			if !shared.Has(g) {
 				continue
 			}
-			id, ok := ids[g]
-			if !ok {
-				id = int32(len(names)) //nolint:gosec // budget-bounded
-				ids[g] = id
-				names = append(names, g)
-				adj = append(adj, nil)
+			id, err := real(g)
+			if err != nil {
+				return err
 			}
-			if last >= 0 && last != id {
-				adj[last] = append(adj[last], edge{id, f})
+			if err := link(last, id, f); err != nil {
+				return err
 			}
 			last = id
 		}
+		if err := link(last, e, f); err != nil {
+			return err
+		}
 	}
-	n := len(names)
-	if n == 0 {
-		return nil
+	// prev edges, chained per site in file order.
+	bySite := map[string][]*file{}
+	for _, f := range p.order {
+		bySite[f.row.Site] = append(bySite[f.row.Site], f)
 	}
+	for _, site := range p.sites {
+		fs := bySite[site]
+		sort.SliceStable(fs, func(i, j int) bool { return rowLess(fs[i].row, fs[j].row) })
+		for k, f := range fs {
+			need := f.prev.Intersect(shared)
+			if k > 0 && f.prev.Contains(fs[k-1].exec) {
+				if err := link(end[fs[k-1]], start[f], f); err != nil {
+					return err
+				}
+				need = need.Subtract(fs[k-1].exec)
+			}
+			for sid, ivs := range need {
+				for _, iv := range ivs {
+					for n := iv.Start; n <= iv.End; n++ {
+						id, err := real(GTID{sid, n})
+						if err != nil {
+							return err
+						}
+						if err := link(id, start[f], f); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+	n := len(adj)
 	// Iterative Tarjan.
 	index := make([]int32, n)
 	low := make([]int32, n)
 	onStack := make([]bool, n)
+	defer probeMemory()
 	for i := range index {
 		index[i] = -1
 	}
@@ -174,12 +300,17 @@ func (p *planner) orderCheck() error {
 	if cycleComp < 0 {
 		return nil
 	}
-	// Name the inversion: a 2-cycle when one exists, else a cycle path.
+	isReal := func(v int32) bool { return labels[v] == nil }
+	// Name the inversion: a 2-cycle between transactions when one exists,
+	// else a cycle path.
 	for v := 0; v < n; v++ {
-		if comp[v] != cycleComp {
+		if comp[v] != cycleComp || !isReal(int32(v)) { //nolint:gosec
 			continue
 		}
 		for _, e := range adj[v] {
+			if !isReal(e.to) {
+				continue
+			}
 			for _, back := range adj[e.to] {
 				if int(back.to) == v {
 					return p.inversion(names[v], names[e.to], e.file, back.file, "")
@@ -188,7 +319,7 @@ func (p *planner) orderCheck() error {
 		}
 	}
 	for v := 0; v < n; v++ {
-		if comp[v] != cycleComp {
+		if comp[v] != cycleComp || !isReal(int32(v)) { //nolint:gosec
 			continue
 		}
 		// Follow in-component edges until a node repeats.
@@ -212,16 +343,55 @@ func (p *planner) orderCheck() error {
 			if at, ok := seen[next.to]; ok {
 				cyc := append(append([]int32(nil), path[at:]...), next.to)
 				cf := files[at:]
-				var through []string
-				for _, id := range cyc[1:] {
-					through = append(through, names[id].String())
+				// Rotate to start at a transaction.
+				r := 0
+				for r < len(cyc)-1 && !isReal(cyc[r]) {
+					r++
 				}
-				var fl []string
-				for _, f := range cf[1:] {
-					fl = append(fl, f.row.Label())
+				if r == len(cyc)-1 {
+					break
 				}
-				return p.inversion(names[cyc[0]], names[cyc[1]], cf[0], cf[len(cf)-1],
-					fmt.Sprintf(" (through %s in %s)", strings.Join(through, ","), strings.Join(fl, ", ")))
+				cyc = append(append([]int32(nil), cyc[r:len(cyc)-1]...), cyc[:r+1]...)
+				cf = append(append([]*file(nil), cf[r:]...), cf[:r]...)
+				// Hops between consecutive transactions, each named by the
+				// file whose bytes prove it; consecutive hops of one file
+				// merge.
+				type hop struct {
+					from, to GTID
+					file     *file
+					viaPrev  bool
+				}
+				var hops []hop
+				from, viaPrev := names[cyc[0]], false
+				for i := 1; i < len(cyc); i++ {
+					if !isReal(cyc[i]) {
+						if v := cyc[i]; start[labels[v]] == v {
+							viaPrev = true
+						}
+						continue
+					}
+					h := hop{from, names[cyc[i]], cf[i-1], viaPrev}
+					if k := len(hops) - 1; k >= 0 && hops[k].file == h.file && hops[k].viaPrev == h.viaPrev {
+						hops[k].to = h.to
+					} else {
+						hops = append(hops, h)
+					}
+					from, viaPrev = names[cyc[i]], false
+				}
+				var parts []string
+				for i, h := range hops {
+					if i == 8 {
+						parts = append(parts, "…")
+						break
+					}
+					how := h.file.row.Label()
+					if h.viaPrev {
+						how += ", by its previous GTIDs"
+					}
+					parts = append(parts, fmt.Sprintf("%s before %s (%s)", h.from, h.to, how))
+				}
+				return refuse(pitrarchive.TokenArchiveOrderInversion, "the downloaded binlogs order shared transactions in a cycle: %s; the sites applied the same transactions in different orders, so equal GTID sets may hold different data (an errant transaction?); exclude the errant transaction, or use a backup and archive prefix that start after it",
+					strings.Join(parts, ", "))
 			}
 			path = append(path, next.to)
 			cur = next.to

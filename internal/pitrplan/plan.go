@@ -177,6 +177,8 @@ type planner struct {
 	wFile  *file
 	wPos   int
 	lambda Set
+	// replayKnown is set once plan.Replay (P) is final.
+	replayKnown bool
 
 	plan *Plan
 }
@@ -275,7 +277,13 @@ func (p *planner) fetch(r *Row) (*file, error) {
 		}
 		p.budget.Release(est)
 	}
-	idx, err := p.fetcher.Fetch(p.ctx, r.ref())
+	var idx *FileIndex
+	var err error
+	if sf, ok := p.fetcher.(StagingFetcher); ok {
+		idx, err = sf.FetchForPlan(p.ctx, r.ref(), p.mayStage(r))
+	} else {
+		idx, err = p.fetcher.Fetch(p.ctx, r.ref())
+	}
 	p.plan.Downloaded++
 	if err != nil {
 		if _, ok := RefusalOf(err); ok {
@@ -283,6 +291,9 @@ func (p *planner) fetch(r *Row) (*file, error) {
 		}
 		if p.ctx.Err() != nil {
 			return nil, p.ctx.Err()
+		}
+		if IsTransient(err) {
+			return nil, err // not evidence about the row; ends planning
 		}
 		u := &unreadableError{row: r, err: err}
 		p.failed[r] = u
@@ -293,6 +304,19 @@ func (p *planner) fetch(r *Row) (*file, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// mayStage reports whether r could become a plan file: an active row of
+// an unmarked site that may hold a member of P (or, before P is known,
+// one not wholly inside B ∪ X, which no segment replays).
+func (p *planner) mayStage(r *Row) bool {
+	if r.State != RowActive || p.isMarked(r.Site) {
+		return false
+	}
+	if p.replayKnown {
+		return r.Hints.mayMeet(p.plan.Replay)
+	}
+	return !r.Hints.Known || !p.B.Union(p.X).Contains(r.Hints.GTIDs)
 }
 
 func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
@@ -511,6 +535,7 @@ func (p *planner) timestamp() error {
 		return err
 	}
 	pl.Replay = p.lambda.Subtract(p.B).Subtract(p.X)
+	p.replayKnown = true
 	if err := p.fetchReplayRows(); err != nil {
 		return err
 	}

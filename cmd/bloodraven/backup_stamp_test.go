@@ -77,9 +77,12 @@ func TestWriteBackupStamp(t *testing.T) {
 		{name: "no atomic create falls back to Put", store: func(t *testing.T) sidecar.ArchiveStore { return noAtomicCreateStore{stampTestStore(t)} }, desired: startedStamp(stampStart), wantStart: stampStart},
 		{name: "identical retry", store: stampTestStore, existing: ptrStamp(startedStamp(stampStart)), desired: startedStamp(stampStart), wantReused: true, wantStart: stampStart},
 		{name: "retried pod keeps the earlier start", store: stampTestStore, existing: ptrStamp(startedStamp(stampStart)), desired: startedStamp(stampStart.Add(time.Minute)), wantReused: true, wantStart: stampStart},
+		// Another namespace's backup sharing the prefix may be live. (An
+		// abandoned stamp of a same-name backup in this namespace is
+		// replaced: TestWriteBackupStampReplacesAbandonedStamp.)
 		{name: "another backup's stamp", store: stampTestStore, existing: func() *backupmeta.Stamp {
 			s := startedStamp(stampStart)
-			s.Backup.UID = "other-uid"
+			s.Backup.Namespace, s.Backup.UID = "other-ns", "other-uid"
 			return &s
 		}(), desired: startedStamp(stampStart), wantErr: ErrBackupStampConflict},
 		{name: "another server", store: stampTestStore, existing: func() *backupmeta.Stamp {

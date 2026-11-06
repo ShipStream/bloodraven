@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -197,5 +198,69 @@ func TestPromotionRecordNeedsRoleProbe(t *testing.T) {
 	a.scanAndArchive(ctx)
 	if st := a.Snapshot(ctx); st.FilesArchived != 0 || st.LastError == "" {
 		t.Fatalf("status = %+v, want uploads blocked", st)
+	}
+}
+
+// At the MaxPromotionRecords cap, a record observed after a backward clock
+// step sorts before every kept record. It must still be in the saved
+// manifest before the episode counts as recorded (A4 iv).
+func TestPromotionRecordAtCapSurvivesBackwardClock(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	cfg := promotionFixture(t)
+	if err := seedTestDescriptor(ctx, store, cfg.ManifestPrefix); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
+	full := &Manifest{Site: "iad", ArchiveID: testArchiveID}
+	for i := 1; i <= MaxPromotionRecords; i++ {
+		full.Promotions = append(full.Promotions, PromotionRecord{
+			ServerUUID: hintSIDA, ServerID: 101, GTIDExecuted: hintSIDA + ":1-" + strconv.Itoa(i),
+			ObservedAt: base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	if err := saveManifest(ctx, store, cfg.ManifestPrefix, full); err != nil {
+		t.Fatal(err)
+	}
+	role := &stubRoleChecker{serverUUID: hintSIDA, serverID: 102, gtidExecuted: hintSIDA + ":1-300"}
+	a := NewBinlogArchiver(withTestArchive(cfg, store), "iad", role, store, slog.Default())
+	a.now = fixedClock(base) // the node's clock stepped back past every record
+	a.scanAndArchive(ctx)
+
+	want := PromotionRecord{ServerUUID: hintSIDA, ServerID: 102, GTIDExecuted: hintSIDA + ":1-300", ObservedAt: base}
+	m, err := loadManifest(ctx, store, cfg.ManifestPrefix, "iad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Promotions) != MaxPromotionRecords || !hasPromotionRecord(m.Promotions, want) {
+		t.Fatalf("saved %d records; new record present = %t", len(m.Promotions), hasPromotionRecord(m.Promotions, want))
+	}
+	if st := a.Snapshot(ctx); !st.PromotionRecordedAt.Equal(base) || st.LastError != "" {
+		t.Fatalf("status = %+v", st)
+	}
+}
+
+func TestMergePromotionRecordsKeepsAppendedRecordAtCap(t *testing.T) {
+	at := func(s int) time.Time { return time.Unix(1776243600+int64(s), 0).UTC() }
+	rec := func(s int) PromotionRecord {
+		return PromotionRecord{ServerUUID: hintSIDA, ServerID: 1, GTIDExecuted: hintSIDA + ":1-" + strconv.Itoa(s+1), ObservedAt: at(s)}
+	}
+	var guard []PromotionRecord
+	for i := 1; i <= MaxPromotionRecords; i++ {
+		guard = append(guard, rec(i))
+	}
+	m := &Manifest{Promotions: append([]PromotionRecord(nil), guard...)}
+	m.AppendPromotionRecord(rec(0)) // older than every kept record
+	got := mergePromotionRecords(m.Promotions, guard, nil)
+	if len(got) != MaxPromotionRecords || !hasPromotionRecord(got, rec(0)) {
+		t.Fatalf("merge kept %d records; appended record present = %t", len(got), hasPromotionRecord(got, rec(0)))
+	}
+	if hasPromotionRecord(got, rec(1)) {
+		t.Fatal("the cap kept the oldest older record instead of dropping it")
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].ObservedAt.Before(got[i-1].ObservedAt) {
+			t.Fatalf("records out of order at %d", i)
+		}
 	}
 }

@@ -63,10 +63,11 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Phase:          v1alpha1.BackupPhaseSucceeded,
-			GtidExecuted:   "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
-			CompletionTime: &now,
-			Location:       "lion/seed/",
+			Phase:            v1alpha1.BackupPhaseSucceeded,
+			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
+			CompletionTime:   &now,
+			Location:         "lion/seed/",
+			FailoverGroupUID: "lion-uid",
 		},
 	}
 }

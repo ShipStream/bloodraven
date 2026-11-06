@@ -149,12 +149,9 @@ func runBackupStamp(args []string) {
 // final step that is not the backup-stamp subcommand itself
 // (encrypt-upload).
 func finishBackupStampFromEnv(ctx context.Context, end string) (backupmeta.Stamp, error) {
-	if end == "" {
-		return backupmeta.Stamp{}, fmt.Errorf("the dump did not report serverClock.end")
-	}
-	at, err := backupmeta.ParseMicroTime(end)
+	at, err := parseStampEnd(end)
 	if err != nil {
-		return backupmeta.Stamp{}, fmt.Errorf("serverClock.end: %w", err)
+		return backupmeta.Stamp{}, err
 	}
 	template, err := backupStampTemplateFromEnv()
 	if err != nil {
@@ -170,6 +167,18 @@ func finishBackupStampFromEnv(ctx context.Context, end string) (backupmeta.Stamp
 		return backupmeta.Stamp{}, err
 	}
 	return finishBackupStamp(ctx, store, key, template, at)
+}
+
+// parseStampEnd parses the serverClock.end the dump reported.
+func parseStampEnd(end string) (backupmeta.MicroTime, error) {
+	if end == "" {
+		return backupmeta.MicroTime{}, fmt.Errorf("the dump did not report serverClock.end")
+	}
+	at, err := backupmeta.ParseMicroTime(end)
+	if err != nil {
+		return backupmeta.MicroTime{}, fmt.Errorf("serverClock.end: %w", err)
+	}
+	return at, nil
 }
 
 // backupStampTemplateFromEnv parses the template the operator pinned in the
@@ -262,8 +271,43 @@ func adoptExistingStamp(key string, existing, desired backupmeta.Stamp) (backupm
 	return existing, nil
 }
 
+// abandonedStampOf reports whether existing is the stamp of an earlier
+// MysqlBackup with desired's namespace and name (so the earlier object is
+// gone: names are unique and its finalizer held the name until cleanup)
+// whose dump never finished. A failed backup's stamp outlives it when its
+// cleanup could not run; without this a re-created backup of the same name
+// would refuse ErrBackupStampConflict on every attempt (review B1).
+func abandonedStampOf(existing, desired backupmeta.Stamp) bool {
+	return existing.Backup.Namespace == desired.Backup.Namespace &&
+		existing.Backup.Name == desired.Backup.Name &&
+		existing.Backup.UID != desired.Backup.UID &&
+		!existing.Complete()
+}
+
+// removeAbandonedStamp deletes an abandoned stamp (abandonedStampOf) so the
+// caller can create its own with an atomic create. It refuses while any
+// object remains under the dump location: the earlier backup may have
+// written part of a dump, and the stamp is what proves whose objects those
+// are, so it is kept until they are removed.
+func removeAbandonedStamp(ctx context.Context, store sidecar.ArchiveStore, key string, existing backupmeta.Stamp) error {
+	location := strings.TrimSuffix(key, backupmeta.StampSuffix)
+	leftover, err := store.List(ctx, location+"/")
+	if err != nil {
+		return fmt.Errorf("list %s/: %w", location, err)
+	}
+	if len(leftover) > 0 {
+		return fmt.Errorf("%w: %s holds the unfinished stamp of an earlier backup %s/%s (uid %s) and %d objects remain under %s/ (first %s); delete them, then retry",
+			ErrBackupStampConflict, key, existing.Backup.Namespace, existing.Backup.Name, existing.Backup.UID, len(leftover), location, leftover[0])
+	}
+	if err := store.Delete(ctx, key); err != nil {
+		return fmt.Errorf("delete abandoned stamp %s: %w", key, err)
+	}
+	return nil
+}
+
 // writeBackupStamp creates the stamp at key, or adopts a retry's earlier
-// stamp, and confirms the stored bytes by reading them back.
+// stamp, or replaces an abandoned stamp of an earlier same-name backup
+// (abandonedStampOf), and confirms the stored bytes by reading them back.
 func writeBackupStamp(ctx context.Context, store sidecar.ArchiveStore, key string, desired backupmeta.Stamp) (backupmeta.Stamp, bool, error) {
 	if err := desired.Validate(); err != nil {
 		return backupmeta.Stamp{}, false, err
@@ -277,7 +321,12 @@ func writeBackupStamp(ctx context.Context, store sidecar.ArchiveStore, key strin
 	}
 	if found {
 		s, err := adoptExistingStamp(key, existing, desired)
-		return s, err == nil, err
+		if err == nil || !abandonedStampOf(existing, desired) {
+			return s, err == nil, err
+		}
+		if err := removeAbandonedStamp(ctx, store, key, existing); err != nil {
+			return backupmeta.Stamp{}, false, err
+		}
 	}
 	data, err := desired.Canonical()
 	if err != nil {

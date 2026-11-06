@@ -195,7 +195,7 @@ MANAGER_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedOb
     | grep -E 'TopologyManagerStart(ed|Failed)' || true)
 PITR_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.name=$MFG_NAME" --sort-by=.lastTimestamp \
     -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
-    | grep -E 'PITRArchive(ReissueRisk|UnsafeHistory)|PointInTime(DivergentHistoryExcluded|OnHistoryExclusions|Partial)' || true)
+    | grep -E 'PITRArchive(ReissueRiskDetected|UnsafeHistoryDetected)|PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PointInTimePartial' || true)
 if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "Topology manager start history for $MFG_NAME. History only, not current state, in either direction:"
     echo "  - Warnings are throttled to one per 5 minutes, so a group that recovered and then broke again can still show TopologyManagerStarted last."
@@ -205,7 +205,7 @@ if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "$MANAGER_EVENTS"
 fi
 if [[ -n "$PITR_EVENTS" ]]; then
-    echo "PITR warnings for $MFG_NAME (PITRArchiveReissueRisk: playbook 39; PITRArchiveUnsafeHistory: playbook 38; PointInTime*: playbooks 32 and 40):"
+    echo "PITR warnings for $MFG_NAME (PITRArchiveReissueRiskDetected: playbook 39; PITRArchiveUnsafeHistoryDetected: playbook 38; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PointInTimePartial: playbooks 32 and 40):"
     echo "$PITR_EVENTS"
 fi
 

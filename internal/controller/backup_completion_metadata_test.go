@@ -338,8 +338,17 @@ func TestMysqlBackupReconciler_RecoversLocationBeforeFinalization(t *testing.T) 
 				t.Fatal(err)
 			}
 			if mode == "failed-job" {
-				if !done || mb.Status.Location != "" {
+				if mb.Status.Location != "" {
 					t.Fatal("failed Job acquired a planned cleanup destination")
+				}
+				// Its leftovers are cleaned up in abandoned mode, which
+				// deletes only what the backup stamp proves is this backup's.
+				var cleanup batchv1.Job
+				if err := c.Get(context.Background(), client.ObjectKey{Namespace: mb.Namespace, Name: cleanupJobName(mb.Name)}, &cleanup); err != nil {
+					t.Fatal(err)
+				}
+				if done || envMap(cleanup.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_CLEANUP_MODE"] != "abandoned" {
+					t.Fatalf("done=%v; want an abandoned-mode cleanup Job", done)
 				}
 				return
 			}

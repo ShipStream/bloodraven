@@ -78,7 +78,10 @@ type BinlogArchiver struct {
 	episode         promotionEpisode
 	persistedMarker *HistoryIntegrity
 	pendingMarker   *HistoryIntegrity
-	unsafeLogged    bool
+	// pendingMarkerErr is an unreadable pending-marker file; it blocks
+	// uploads like a marker, since it may hold one.
+	pendingMarkerErr error
+	unsafeLogged     bool
 
 	// mu guards lastError, lastScanAt, filesArchiv, lastRetentionRun,
 	// uploadFailures, lastUploadAt, backlogFiles, and the manifest
@@ -168,6 +171,7 @@ func NewBinlogArchiver(cfg *PITRConfig, site string, mysql roleChecker, store Ar
 	if a.identityErr != nil {
 		a.identityErr = fmt.Errorf("archive identity: %w", a.identityErr)
 	}
+	a.loadPendingMarker()
 	return a
 }
 
@@ -242,6 +246,8 @@ func (a *BinlogArchiver) observeManifest(m *Manifest) {
 		marker := *m.HistoryIntegrity
 		a.persistedMarker = &marker
 		a.pendingMarker = nil
+		a.pendingMarkerErr = nil
+		a.clearPendingMarker()
 	}
 	a.mu.Lock()
 	a.divergentRows = int64(len(m.Divergent))
@@ -405,17 +411,29 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		return
 	}
 	writable := !obs.ReadOnly
+	// D-34 runs before the session, so a violation is seen and held while
+	// the session awaits the descriptor, is refused or is failing.
+	verifiedBefore := a.session != nil && a.session.Verified()
+	integrityErr := a.checkHistoryIntegrity(ctx)
 	if err := a.ensureSession(ctx, writable); err != nil {
 		a.incUploadFailures()
+		if integrityErr != nil {
+			err = fmt.Errorf("%v; %w", integrityErr, err)
+		}
 		a.setError(err.Error())
 		a.setBacklog(0)
 		a.logger.Debug("archive session not ready; skipping scan", "error", err)
 		return
 	}
+	if verified := a.session != nil && a.session.Verified(); verified && (!verifiedBefore || a.pendingMarker != nil) {
+		// The session just became verified: read the manifest's marker
+		// and persist a pending one.
+		integrityErr = a.checkHistoryIntegrity(ctx)
+	}
 	recordErr := a.observeRole(ctx, obs, complete)
-	if err := a.checkHistoryIntegrity(ctx); err != nil {
+	if integrityErr != nil {
 		a.incUploadFailures()
-		a.setError(err.Error())
+		a.setError(integrityErr.Error())
 		a.setBacklog(0)
 		return
 	}
@@ -781,15 +799,16 @@ type Status struct {
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count the Divergent and
 	// Quarantined entries in this site's own manifest. The runner warns
-	// PITRArchiveReissueRisk when a site with a non-zero sum is promoted.
+	// PITRArchiveReissueRiskDetected when a site with a non-zero sum is promoted.
 	DivergentRows   int64 `json:"divergentRows"`
 	QuarantinedRows int64 `json:"quarantinedRows"`
 	// PromotionRecordedAt is the ObservedAt of the promotion record that
 	// gates the current writable episode's uploads; zero while no record
 	// is confirmed (D-43).
 	PromotionRecordedAt time.Time `json:"promotionRecordedAt,omitzero"`
-	// HistoryIntegrity mirrors the site manifest's persisted marker
-	// (D-34); nil when unmarked.
+	// HistoryIntegrity is the site's history-integrity marker (D-34):
+	// the one persisted in its manifest, else a violation seen but not
+	// yet persisted (no verified session yet); nil when unmarked.
 	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
 }
 

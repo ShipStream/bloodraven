@@ -45,7 +45,7 @@ type ArchiverStatus struct {
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count the Divergent and
 	// Quarantined entries in this site's own manifest. The runner warns
-	// PITRArchiveReissueRisk when a site with a non-zero sum is promoted.
+	// PITRArchiveReissueRiskDetected when a site with a non-zero sum is promoted.
 	DivergentRows   int64 `json:"divergentRows"`
 	QuarantinedRows int64 `json:"quarantinedRows"`
 	// PromotionRecordedAt is the ObservedAt of the promotion record that

@@ -361,12 +361,6 @@ type StandbyActivationStatus struct {
 	// +optional
 	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
 
-	// PointInTime is the certified outcome of the activation's
-	// point-in-time replay (the same shape as
-	// RestoreStatus.PointInTime). No activation writes it yet.
-	// +optional
-	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
-
 	// ActiveSite is the materialised group's status.activeSite once
 	// it becomes writable.
 	// +optional

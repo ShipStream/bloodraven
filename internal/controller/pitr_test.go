@@ -182,17 +182,40 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 		t.Errorf("want pitr-aws-creds mount in sidecar, got %+v", frags.SidecarVolumeMounts)
 	}
 
-	// Pod volume for AWS creds should appear — one entry, sourced from
-	// a secret matching the profile's CredentialsSecret.
-	if len(frags.PodVolumes) != 1 {
-		t.Fatalf("want 1 pod volume, got %d", len(frags.PodVolumes))
+	// Pod volumes: the sidecar's state emptyDir (A3) and the AWS creds,
+	// sourced from a secret matching the profile's CredentialsSecret.
+	assertPITRStateVolume(t, frags)
+	if len(frags.PodVolumes) != 2 {
+		t.Fatalf("want 2 pod volumes, got %d", len(frags.PodVolumes))
 	}
-	v := frags.PodVolumes[0]
+	v := frags.PodVolumes[1]
 	if v.Name != "pitr-aws-creds" || v.Secret == nil || v.Secret.SecretName != "aws-creds" {
 		t.Errorf("unexpected pod volume: %+v", v)
 	}
 	if v.Secret.DefaultMode == nil || *v.Secret.DefaultMode != 0o444 {
 		t.Errorf("pitr aws creds mode: want 0444 for non-root sidecar readability, got %v", v.Secret.DefaultMode)
+	}
+}
+
+// assertPITRStateVolume checks A3's pod-lifetime state dir: an emptyDir
+// mounted writable into the sidecar at BLOODRAVEN_PITR_STATE_DIR, so a
+// pending history-integrity marker survives a sidecar container restart.
+func assertPITRStateVolume(t *testing.T, frags pitrSidecarFragments) {
+	t.Helper()
+	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_STATE_DIR", pitrStateMountPath)
+	var vol, mount bool
+	for _, v := range frags.PodVolumes {
+		if v.Name == pitrStateVolumeName && v.EmptyDir != nil {
+			vol = true
+		}
+	}
+	for _, m := range frags.SidecarVolumeMounts {
+		if m.Name == pitrStateVolumeName && m.MountPath == pitrStateMountPath && !m.ReadOnly {
+			mount = true
+		}
+	}
+	if !vol || !mount {
+		t.Fatalf("sidecar state emptyDir missing: volumes %+v mounts %+v", frags.PodVolumes, frags.SidecarVolumeMounts)
 	}
 }
 
@@ -220,11 +243,13 @@ func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_MANIFEST_PREFIX", "shard1/binlogs")
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_PVC_MOUNT_PATH", pitrPVCMountPath)
 
-	// pitr-archive volume with the user-supplied claim.
-	if len(frags.PodVolumes) != 1 {
-		t.Fatalf("want 1 pod volume, got %d", len(frags.PodVolumes))
+	// The state emptyDir (A3), then the pitr-archive volume with the
+	// user-supplied claim.
+	assertPITRStateVolume(t, frags)
+	if len(frags.PodVolumes) != 2 {
+		t.Fatalf("want 2 pod volumes, got %d", len(frags.PodVolumes))
 	}
-	v := frags.PodVolumes[0]
+	v := frags.PodVolumes[1]
 	if v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != "backup-pvc" {
 		t.Errorf("unexpected pvc source: %+v", v)
 	}

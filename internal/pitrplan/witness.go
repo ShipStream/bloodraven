@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
@@ -135,32 +137,17 @@ func (p *planner) groundTruth(c GTID) (*groundTruth, error) {
 
 // anchoredTruth accepts a replica occurrence through an anchor (D-39):
 //
-//	Anchor(w) = ∪ {R.gtidExecuted : R a promotion record of s with w ∉ R}
+//	Anchor(w) = ∪ {R.gtidExecuted : R a promotion record of s that provably precedes w}
 //	          ∪ exec(q), q the latest archived origin occurrence of s in pred(o_r)
 //
 // and accepts o_r iff every g ∈ pred(o_r) ∖ X ∖ Anchor(w) has sid(g) = sid(w).
+// anchorRecords says which records provably precede w (round-1 G1).
 func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error) {
 	uuid := c.UUID()
-	srv := occs[0].f.txn(occs[0].i).Srv
-	records := Set{}
-	var recordNames []string
-	var lagRecord *promoRef
-	originSites := map[string]bool{}
-	for i := range p.promos {
-		pr := &p.promos[i]
-		if pr.rec.ServerUUID != uuid || pr.rec.ServerID != srv {
-			continue
-		}
-		originSites[pr.site] = true
-		if pr.set.Has(c) {
-			if lagRecord == nil || pr.rec.ObservedAt.Before(lagRecord.rec.ObservedAt) {
-				lagRecord = pr
-			}
-			continue
-		}
-		records = records.Union(pr.set)
-		recordNames = append(recordNames, fmt.Sprintf("%s#%d", pr.site, pr.index))
-	}
+	first := occs[0].f.txn(occs[0].i)
+	srv := first.Srv
+	choice := p.anchorRecords(c, srv, first.OCT)
+	records, recordNames, lagRecord, originSites := choice.set, choice.names, choice.lag, choice.sites
 	var accepted *groundTruth
 	var acceptedKey Set
 	type rejection struct {
@@ -174,7 +161,7 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 			return nil, err
 		}
 		anchor := records
-		q, qExec, err := p.originAnchor(uuid, srv, pred, originSites)
+		q, qExec, err := p.originAnchor(uuid, srv, pred, originSites, o.f.txn(o.i).OCT)
 		if err != nil {
 			return nil, err
 		}
@@ -241,13 +228,23 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 				eraStart = t.OCT
 			}
 		}
-		msg += fmt.Sprintf(", or choose a target after %s's promotion record at %s. %s was committed at %s, in the window (%s, %s] between its era's first commit and that record, which records it as already executed",
-			lagRecord.site, lagRecord.rec.ObservedAt.UTC().Format(microLayout), c, fmtMicros(r.o.f.txn(r.o.i).OCT), fmtMicros(eraStart), lagRecord.rec.ObservedAt.UTC().Format(microLayout))
+		after := p.anchorFrom(lagRecord)
+		msg += fmt.Sprintf(", or choose a target after %s (%s's promotion record at %s plus the %s clock-skew margin). %s was committed at %s, in the window (%s, %s] between its era's first commit and that record, which records it as already executed",
+			fmtMicros(after), lagRecord.site, lagRecord.rec.ObservedAt.UTC().Format(microLayout), p.deltaString(), c, fmtMicros(r.o.f.txn(r.o.i).OCT), fmtMicros(eraStart), lagRecord.rec.ObservedAt.UTC().Format(microLayout))
 		if before > 0 {
-			msg += fmt.Sprintf("; safe targets are at or before %s, or after %s", fmtMicros(before), lagRecord.rec.ObservedAt.UTC().Format(microLayout))
+			msg += fmt.Sprintf("; safe targets are at or before %s, or after %s", fmtMicros(before), fmtMicros(after))
 		}
+	} else if pending := choice.pending; pending != nil {
+		// A record observed after w, or within δ before it, is not
+		// provably before w.
+		msg += fmt.Sprintf(", or choose a target after %s (%s's promotion record at %s, which is not provably before %s, plus the %s clock-skew margin)",
+			fmtMicros(p.anchorFrom(pending)), pending.site, pending.rec.ObservedAt.UTC().Format(microLayout), c, p.deltaString())
 	} else if newest := p.newestRecord(originSites); newest != nil {
-		msg += fmt.Sprintf(", or choose a target after %s's promotion record at %s", newest.site, newest.rec.ObservedAt.UTC().Format(microLayout))
+		msg += fmt.Sprintf(", or choose a target after %s (%s's promotion record at %s plus the %s clock-skew margin)",
+			fmtMicros(p.anchorFrom(newest)), newest.site, newest.rec.ObservedAt.UTC().Format(microLayout), p.deltaString())
+	}
+	if len(choice.shrunk) > 0 {
+		msg += fmt.Sprintf("; the promotion records %s are not anchors, because their site's history may have been replaced (a reclone or reset) before %s", strings.Join(choice.shrunk, ", "), c)
 	}
 	return nil, refuse(pitrarchive.TokenStopAmbiguous, "%s", msg)
 }
@@ -267,8 +264,10 @@ func (p *planner) newestRecord(sites map[string]bool) *promoRef {
 
 // originAnchor finds q: the latest archived origin occurrence of s =
 // (uuid, srv) whose GTID is in pred, among the rows of the sites whose
-// promotion records name s. It returns q's file and exec(q).
-func (p *planner) originAnchor(uuid string, srv uint32, pred Set, sites map[string]bool) (*file, Set, error) {
+// promotion records name s. It returns q's file and exec(q). A q whose
+// site's history may have been replaced between q and w (until = oct(w))
+// is no anchor (G1): exec(q) is then not proven to precede w on s.
+func (p *planner) originAnchor(uuid string, srv uint32, pred Set, sites map[string]bool, until int64) (*file, Set, error) {
 	ofS := pred.OfUUID(uuid)
 	if ofS.IsEmpty() {
 		return nil, nil, nil
@@ -298,11 +297,197 @@ func (p *planner) originAnchor(uuid string, srv uint32, pred Set, sites map[stri
 				if err != nil {
 					return nil, nil, err
 				}
+				// q's commit time and its site's files are on the server's
+				// clock; its site's records on the sidecar's.
+				if p.historyShrinks(r.Site, uuid, srv, exec, f.txn(i).OCT, until, 0, p.delta) {
+					return nil, nil, nil
+				}
 				return f, exec, nil
 			}
 		}
 	}
 	return nil, nil, nil
+}
+
+// anchorChoice is the record part of Anchor(w).
+type anchorChoice struct {
+	set   Set
+	names []string
+	// lag is the earliest record of s that already holds w (D-53).
+	lag *promoRef
+	// pending is the earliest record of s without w observed within δ of
+	// w, or after it: its order against w is unknown.
+	pending *promoRef
+	// shrunk names the records refused because their site's history may
+	// have been replaced before w.
+	shrunk []string
+	// sites are the sites whose records name s.
+	sites map[string]bool
+}
+
+// anchorRecords selects the promotion records of s = (uuid(w), srv) that
+// provably precede w (§4.4, round-1 G1). Per site, it takes the latest
+// record R with
+//
+//	w ∉ R  and  R.observedAt + δ < oct(w)
+//
+// (observed before w even with the clock-skew margin), and uses it only if
+// nothing shows the site's history being replaced between R and w
+// (historyShrinks): R ⊆ pred_s(w) holds because gtid_executed only grows
+// within one server incarnation, and a reclone or reset starts a new one
+// whose history need not hold R. Earlier records of the site add nothing:
+// within one incarnation they are subsets of R.
+func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
+	uuid := c.UUID()
+	out := anchorChoice{set: Set{}, sites: map[string]bool{}}
+	for i := range p.promos {
+		pr := &p.promos[i]
+		if pr.rec.ServerUUID != uuid || pr.rec.ServerID != srv {
+			continue
+		}
+		out.sites[pr.site] = true
+		if pr.set.Has(c) {
+			if out.lag == nil || pr.rec.ObservedAt.Before(out.lag.rec.ObservedAt) {
+				out.lag = pr
+			}
+		}
+	}
+	sites := make([]string, 0, len(out.sites))
+	for s := range out.sites {
+		sites = append(sites, s)
+	}
+	sort.Strings(sites)
+	for _, site := range sites {
+		var best *promoRef
+		for i := range p.promos {
+			pr := &p.promos[i]
+			if pr.site != site || pr.rec.ServerUUID != uuid || pr.rec.ServerID != srv || pr.set.Has(c) {
+				continue
+			}
+			if pr.rec.ObservedAt.UnixMicro()+p.delta >= oct {
+				if out.pending == nil || pr.rec.ObservedAt.Before(out.pending.rec.ObservedAt) {
+					out.pending = pr
+				}
+				continue
+			}
+			if best == nil || pr.rec.ObservedAt.After(best.rec.ObservedAt) {
+				best = pr
+			}
+		}
+		if best == nil {
+			continue
+		}
+		name := fmt.Sprintf("%s#%d", best.site, best.index)
+		// The site's later records share best's clock.
+		if p.historyShrinks(site, uuid, srv, best.set, best.rec.ObservedAt.UnixMicro(), oct, p.delta, 0) {
+			out.shrunk = append(out.shrunk, name)
+			continue
+		}
+		out.set = out.set.Union(best.set)
+		out.names = append(out.names, name)
+	}
+	return out
+}
+
+// historyShrinks reports evidence that site's server may have stopped
+// holding set, its gtid_executed at since, before until (both µs): a new
+// server incarnation (a reclone, a reset, a re-seed) between them.
+// rowMargin and recordMargin widen the comparisons of since with file
+// times (the server's clock) and with record times (the sidecar's clock)
+// for skew; a comparison on one clock needs none. The evidence is
+//
+//   - a later record of the site by the same server that lacks part of set
+//     (any time after since: a shrink cannot be dated more precisely);
+//   - a record of the site by another server observed before until (+δ);
+//   - a row of the site whose prev ∪ base lacks part of set and that is
+//     a clone bridge (baseGtids) or starts from a state that is no subset
+//     of set, unless it is provably opened before since − margin or after
+//     until + margin;
+//   - an ordinary row starting from a proper subset of set (an earlier
+//     state) that is provably opened between since + margin and until +
+//     margin.
+//
+// Without such evidence, gtid_executed only grew from since to until.
+func (p *planner) historyShrinks(site, uuid string, srv uint32, set Set, since, until, rowMargin, recordMargin int64) bool {
+	if set.IsEmpty() {
+		return false
+	}
+	margin := rowMargin
+	for i := range p.promos {
+		pr := &p.promos[i]
+		at := pr.rec.ObservedAt.UnixMicro()
+		if pr.site != site || at+recordMargin <= since {
+			continue
+		}
+		if pr.rec.ServerUUID != uuid || pr.rec.ServerID != srv {
+			if at-p.delta < until {
+				return true
+			}
+			continue
+		}
+		if !pr.set.Contains(set) {
+			return true
+		}
+	}
+	for _, r := range p.rows {
+		if r.Site != site {
+			continue
+		}
+		prev := r.Hints.Previous
+		if f := p.files[r]; f != nil {
+			prev = f.prev
+		}
+		if prev.Contains(set) {
+			continue
+		}
+		openedAfter := func(t int64) bool { return !r.Created.IsZero() && r.Created.UnixMicro() > t }
+		if r.Base.IsEmpty() && set.Contains(prev) {
+			// An ordinary file whose start state is an earlier state of
+			// set: what a file opened before since looks like. Only a
+			// file provably opened after since (and before until) shows
+			// the history going back.
+			if openedAfter(since+margin) && !openedAfter(until+margin) {
+				return true
+			}
+			continue
+		}
+		// A clone bridge, or a start state that is no earlier state of
+		// set: a new incarnation, unless the file provably predates
+		// since or postdates until.
+		if p.openedBy(r, since-margin) || openedAfter(until+margin) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// openedBy reports whether row r's file provably existed at t: its first
+// event time (whole seconds) is at least a second before t, or its bytes
+// hold an origin transaction committed by t (a file exists before its
+// writer commits into it).
+func (p *planner) openedBy(r *Row, t int64) bool {
+	if !r.Created.IsZero() && r.Created.UnixMicro()+int64(time.Second/time.Microsecond) <= t {
+		return true
+	}
+	if f := p.files[r]; f != nil {
+		for i := range f.idx.Txns {
+			if f.origin(i) && f.idx.Txns[i].OCT <= t {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// anchorFrom is the earliest commit time a witness can have for record pr
+// to provably precede it: R.observedAt + δ (exclusive bound).
+func (p *planner) anchorFrom(pr *promoRef) int64 {
+	return pr.rec.ObservedAt.UnixMicro() + p.delta
+}
+
+func (p *planner) deltaString() string {
+	return (time.Duration(p.delta) * time.Microsecond).String()
 }
 
 // unsafe is the D-34 refusal for a marked site's bytes.

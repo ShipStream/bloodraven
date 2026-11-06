@@ -944,6 +944,7 @@ func (r *MysqlFailoverGroupReconciler) patchFailoverTrackingFields(ctx context.C
 			return err
 		}
 		t := now
+		from := fresh.Status.ActiveSite
 		fresh.Status.LastFailover = &t
 		fresh.Status.LastFailoverTarget = target
 		if fresh.Status.ActiveSite != target {
@@ -958,6 +959,11 @@ func (r *MysqlFailoverGroupReconciler) patchFailoverTrackingFields(ctx context.C
 		}
 		if r.Runner != nil {
 			r.Runner.hydrateDeploymentGeneration(&fresh)
+			// D-46 on the planned path: when this write is the one that
+			// moved status.activeSite, the topology writer later sees no
+			// change, so the warning must fire here (once: from is the
+			// persisted pre-write value).
+			r.Runner.emitPITRArchiveReissueRisk(&fresh, from)
 		}
 		return nil
 	})

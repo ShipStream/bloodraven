@@ -884,7 +884,7 @@ spec:
                                     transaction committed between the backup's newest transaction and the
                                     target (or the archive head in latest mode) that is outside the
                                     target history must be listed.
-                                  maxLength: 65536
+                                  maxLength: 131072
                                   type: string
                                 mode:
                                   default: none
@@ -896,13 +896,12 @@ spec:
                                   type: string
                                 timestamp:
                                   description: |-
-                                    Timestamp is the target instant, in the same forms as
-                                    PointInTimeSpec.StopDatetime (at most six fractional digits, exact to
-                                    the microsecond). Replay restores the history of the first archived
+                                    Timestamp is the target instant, a whole second in the same forms as
+                                    PointInTimeSpec.StopDatetime (fractional seconds are refused). Replay restores the history of the first archived
                                     transaction committed at or after it, cut just before that
                                     transaction. Required when Mode=timestamp; ignored otherwise.
                                   maxLength: 40
-                                  pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})?$
+                                  pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
                                   type: string
                               type: object
                             retentionPolicy:
@@ -5597,18 +5596,18 @@ spec:
                           transaction on the target history (for example an accidental DROP
                           TABLE) skips its GTID, but later row images may still carry its
                           effects; such exclusions are reported as onHistoryExclusions.
-                        maxLength: 65536
+                        maxLength: 131072
                         type: string
                       stopDatetime:
                         description: |-
-                          StopDatetime is the target instant: RFC 3339 ("2026-04-15T09:30:00Z",
-                          "2026-04-15T09:30:00.123456+02:00") or "YYYY-MM-DD HH:MM:SS[.ffffff]",
-                          which is read as UTC. At most six fractional digits; the target is
-                          exact to the microsecond. Replay restores the history of the first
-                          archived transaction committed at or after it, cut just before that
-                          transaction. Required.
+                          StopDatetime is the target instant, a whole second: RFC 3339
+                          ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00") or
+                          "YYYY-MM-DD HH:MM:SS", which is read as UTC. Fractional seconds are
+                          refused. Replay restores the history of the first archived
+                          transaction committed at or after it (commit times are compared to
+                          the microsecond), cut just before that transaction. Required.
                         maxLength: 40
-                        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})?$
+                        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
                         type: string
                     required:
                     - stopDatetime
@@ -6201,18 +6200,18 @@ spec:
                           transaction on the target history (for example an accidental DROP
                           TABLE) skips its GTID, but later row images may still carry its
                           effects; such exclusions are reported as onHistoryExclusions.
-                        maxLength: 65536
+                        maxLength: 131072
                         type: string
                       stopDatetime:
                         description: |-
-                          StopDatetime is the target instant: RFC 3339 ("2026-04-15T09:30:00Z",
-                          "2026-04-15T09:30:00.123456+02:00") or "YYYY-MM-DD HH:MM:SS[.ffffff]",
-                          which is read as UTC. At most six fractional digits; the target is
-                          exact to the microsecond. Replay restores the history of the first
-                          archived transaction committed at or after it, cut just before that
-                          transaction. Required.
+                          StopDatetime is the target instant, a whole second: RFC 3339
+                          ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00") or
+                          "YYYY-MM-DD HH:MM:SS", which is read as UTC. Fractional seconds are
+                          refused. Replay restores the history of the first archived
+                          transaction committed at or after it (commit times are compared to
+                          the microsecond), cut just before that transaction. Required.
                         maxLength: 40
-                        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})?$
+                        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
                         type: string
                     required:
                     - stopDatetime
@@ -7248,8 +7247,9 @@ spec:
                         type: string
                       observedTime:
                         description: |-
-                          ObservedTime is when the operator last derived this observation from
-                          sidecar reports.
+                          ObservedTime is when this observation last changed (the operator
+                          keeps the previous time while sidecar reports derive the same
+                          observation), so it is not a freshness heartbeat.
                         format: date-time
                         type: string
                       reason:
@@ -7699,8 +7699,8 @@ spec:
                         type: integer
                       stopTime:
                         description: |-
-                          StopTime is the requested target, exact to the microsecond. Unset in
-                          Latest mode.
+                          StopTime is the requested target (a whole second; commit times are
+                          compared against it to the microsecond). Unset in Latest mode.
                         format: date-time
                         type: string
                     required:
@@ -7960,8 +7960,8 @@ spec:
                         type: integer
                       stopTime:
                         description: |-
-                          StopTime is the requested target, exact to the microsecond. Unset in
-                          Latest mode.
+                          StopTime is the requested target (a whole second; commit times are
+                          compared against it to the microsecond). Unset in Latest mode.
                         format: date-time
                         type: string
                     required:

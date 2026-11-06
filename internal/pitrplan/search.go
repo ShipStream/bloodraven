@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -276,11 +277,12 @@ func (p *planner) buildGraph(fs []*file, goal Set) (*searchGraph, error) {
 		}
 	}
 	// Exact keys: sweep each file once, materializing Key only at the
-	// needed positions; equal keys share one class.
+	// needed positions; equal keys share one class. A class records only
+	// its first file and whether it spans two (all members needs).
 	bStr, gStr := p.B.String(), goal.String()
 	classes := map[string]int32{}
-	var classFiles []map[int]bool
-	var keyBytes int64
+	var classFirst []int32
+	var classMulti []bool
 	for k, f := range fs {
 		cur := f.prev.Subtract(p.X)
 		for i := 0; i <= f.n(); i++ {
@@ -296,29 +298,36 @@ func (p *planner) buildGraph(fs []*file, goal Set) (*searchGraph, error) {
 				}
 				c, ok := classes[s]
 				if !ok {
-					keyBytes += int64(len(s)) + 48
-					if err := p.budget.Charge(int64(len(s))+48, "plan search keys"); err != nil {
+					if err := p.budget.Charge(int64(len(s))+classBytes, "plan search keys"); err != nil {
 						return nil, err
 					}
-					c = int32(len(classFiles)) //nolint:gosec // bounded by n
+					c = int32(len(classFirst)) //nolint:gosec // bounded by n
 					classes[s] = c
-					classFiles = append(classFiles, map[int]bool{})
+					classFirst = append(classFirst, int32(k)) //nolint:gosec // bounded by the file count
+					classMulti = append(classMulti, false)
+				} else if classFirst[c] != int32(k) { //nolint:gosec
+					classMulti[c] = true
 				}
 				g.class[v] = c
-				classFiles[c][k] = true
 			}
 			if i < f.n() && !g.inX[k][i] {
 				cur.add(f.gtid(i))
 			}
 		}
 	}
-	_ = keyBytes
-	g.members = make([][]int32, len(classFiles))
+	g.members = make([][]int32, len(classFirst))
 	for v := 0; v < n; v++ {
-		if c := g.class[v]; c >= 0 && len(classFiles[c]) > 1 {
+		if c := g.class[v]; c >= 0 && classMulti[c] {
 			g.members[c] = append(g.members[c], int32(v)) //nolint:gosec
 		}
 	}
+	probeMemory()
+	// The probe measures the build's peak: keep its locals live.
+	runtime.KeepAlive(classes)
+	runtime.KeepAlive(classFirst)
+	runtime.KeepAlive(classMulti)
+	runtime.KeepAlive(needed)
+	runtime.KeepAlive(idx)
 	return g, nil
 }
 
@@ -334,7 +343,7 @@ func (p *planner) bfs(g *searchGraph) {
 	done := make([]bool, n)
 	type classState struct {
 		pass      uint8
-		firstFile int
+		firstFile int32
 	}
 	state := make([]classState, len(g.members))
 	dq := newDeque(n)
@@ -371,21 +380,25 @@ func (p *planner) bfs(g *searchGraph) {
 		st := &state[c]
 		switch {
 		case st.pass == 0:
-			st.pass, st.firstFile = 1, k
+			st.pass, st.firstFile = 1, int32(k) //nolint:gosec // bounded by the file count
 			for _, u := range g.members[c] {
 				if g.fileOf(int(u)) != k {
 					relax(int(u), g.dist[v]+1, false)
 				}
 			}
-		case st.pass == 1 && k != st.firstFile:
+		case st.pass == 1 && int32(k) != st.firstFile: //nolint:gosec
 			st.pass = 2
 			for _, u := range g.members[c] {
-				if g.fileOf(int(u)) == st.firstFile {
+				if g.fileOf(int(u)) == int(st.firstFile) {
 					relax(int(u), g.dist[v]+1, false)
 				}
 			}
 		}
 	}
+	probeMemory()
+	runtime.KeepAlive(done)
+	runtime.KeepAlive(state)
+	runtime.KeepAlive(dq)
 }
 
 type deque struct {

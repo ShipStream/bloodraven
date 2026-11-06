@@ -222,18 +222,91 @@ func TestPITRDownloadRequestFromEnv(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	for name, kv := range map[string]map[string]string{
+		"bad memory limit":  {"BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES": "2Gi"},
+		"bad staging limit": {"BLOODRAVEN_PITR_STAGING_LIMIT_BYTES": "-1"},
+	} {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range kv {
+			m[k] = v
+		}
+		if _, err := pitrDownloadRequestFromEnv(env(m)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	staging := map[string]string{"BLOODRAVEN_PITR_STAGING_LIMIT_BYTES": "2147483648"}
+	for k, v := range base {
+		staging[k] = v
+	}
+	if req, err := pitrDownloadRequestFromEnv(env(staging)); err != nil || req.stagingLimit != 2<<30 {
+		t.Fatalf("staging limit = %d, %v", req.stagingLimit, err)
+	}
+}
+
+// P3: the memory limit comes from the rendered env, else cgroup v2, else
+// v1; the budget is 60% of it and the Go soft limit 90%, unless GOMEMLIMIT
+// is set.
+func TestPITRDownloadMemoryLimit(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte("1000000000\n"), 0o644); err != nil {
-		t.Fatal(err)
+	write := func(name, v string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
 	}
-	if got := defaultPlanMemory(filepath.Join(dir, "memory.max")); got != 600000000 {
-		t.Errorf("60%% of memory.max = %d", got)
+	v2, v2max, v1, v1max := write("memory.max", "1000000000\n"), write("v2-unlimited", "max\n"), write("limit_in_bytes", "2000000000\n"), write("v1-unlimited", "9223372036854771712\n")
+	missing := filepath.Join(dir, "absent")
+	none := func(string) string { return "" }
+	for _, tc := range []struct {
+		name  string
+		env   func(string) string
+		files []string
+		want  int64
+	}{
+		{"env wins", func(k string) string {
+			if k == "BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES" {
+				return "3000000000"
+			}
+			return ""
+		}, []string{v2}, 3000000000},
+		{"cgroup v2", none, []string{v2, v1}, 1000000000},
+		{"cgroup v1", none, []string{missing, v1}, 2000000000},
+		{"v2 unlimited", none, []string{v2max, v1}, 0},
+		{"v1 unlimited", none, []string{missing, v1max}, 0},
+		{"no cgroup", none, []string{missing}, 0},
+	} {
+		got, err := pitrMemoryLimit(tc.env, tc.files)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: limit %d, %v; want %d", tc.name, got, err, tc.want)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "unlimited"), []byte("max\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if got := defaultPlanMemory(1000000000); got != 600000000 {
+		t.Errorf("budget = %d, want 60%%", got)
 	}
-	if got := defaultPlanMemory(filepath.Join(dir, "unlimited")); got != pitrplan.DefaultPlanMemoryBytes {
-		t.Errorf("unlimited cgroup budget = %d", got)
+	if got := defaultPlanMemory(0); got != pitrplan.DefaultPlanMemoryBytes {
+		t.Errorf("unlimited budget = %d", got)
+	}
+	if got := pitrSoftMemoryLimit(1000000000, ""); got != 900000000 {
+		t.Errorf("soft limit = %d, want 90%%", got)
+	}
+	if pitrSoftMemoryLimit(1000000000, "800MiB") != -1 || pitrSoftMemoryLimit(0, "") != -1 {
+		t.Error("GOMEMLIMIT or no limit must leave the soft limit alone")
+	}
+	// The request reads the cgroup when the env is absent.
+	old := pitrCgroupMemoryFiles
+	defer func() { pitrCgroupMemoryFiles = old }()
+	pitrCgroupMemoryFiles = []string{v2}
+	dest := downloadDest(t)
+	req, err := pitrDownloadRequestFromEnv(func(k string) string {
+		return map[string]string{"BLOODRAVEN_PITR_MODE": "latest", "BLOODRAVEN_PITR_DUMP_META": "/m", "BLOODRAVEN_PITR_OUTPUT_DIR": "/o",
+			"BLOODRAVEN_PITR_DESTINATION": dest.String(), "BLOODRAVEN_PITR_MANIFEST_PREFIX": dest.KeyPrefix, "BLOODRAVEN_PITR_ENCRYPTION_MODE": "None"}[k]
+	})
+	if err != nil || req.memoryLimit != 1000000000 || req.memory != 600000000 {
+		t.Fatalf("request memory %d/%d, %v", req.memoryLimit, req.memory, err)
 	}
 }
 
@@ -275,8 +348,10 @@ func (a *dlArchive) put(t *testing.T, site, name string, fsrv uint32, prev, base
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(data)
+	// Every file is opened at dlEpoch, before any record (the anchor
+	// incarnation check reads firstEventTime).
 	e := sidecar.ManifestEntry{Name: name, ID: hex.EncodeToString(sum[:]), BaseGTIDs: base, PreviousGTIDs: ev.Metadata.PreviousGTIDs,
-		GTIDCoverage: ev.Metadata.GTIDCoverage, Size: int64(len(data))}
+		GTIDCoverage: ev.Metadata.GTIDCoverage, Size: int64(len(data)), FirstEventTime: dlEpoch}
 	key, err := sidecar.ArchiveEntryKey(downloadPrefix, site, e)
 	if err != nil {
 		t.Fatal(err)

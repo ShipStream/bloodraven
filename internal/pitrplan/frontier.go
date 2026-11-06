@@ -84,10 +84,14 @@ func (p *planner) frontier() error {
 		pl.BackupNewestCommit = p.maxOctB
 	}
 
-	dumpEnd := p.req.Dump.End.UnixMicro()
-	if p.maxOctB != math.MinInt64 && p.maxOctB > dumpEnd+p.delta {
-		return refuse(pitrarchive.TokenArchiveNamespaceReuse, "the archive says %s (site %s, %s) committed at %s, after this dump finished at %s; the GTID was reissued (a reclone kept the server_uuid); start a new archive prefix and take a full backup",
-			p.maxOctBGTID, p.maxOctBFile.row.Site, p.maxOctBFile.row.Name, fmtMicros(p.maxOctB), p.req.Dump.End)
+	// D-49 against the dumped server's own clock (P5): commit times are
+	// server clocks, so the Job's clock (@.done.json end) is no bound for
+	// them; δ covers the skew between the dumped server and B's other
+	// origins.
+	serverEnd := p.req.Dump.ServerClock.End.UnixMicro()
+	if p.maxOctB != math.MinInt64 && p.maxOctB > serverEnd+p.delta {
+		return refuse(pitrarchive.TokenArchiveNamespaceReuse, "the archive says %s (site %s, %s) committed at %s, after this dump finished (the dumped server's clock read %s at the dump's end, and the clock-skew margin is %s); the GTID was reissued (a reclone kept the server_uuid); start a new archive prefix and take a full backup",
+			p.maxOctBGTID, p.maxOctBFile.row.Site, p.maxOctBFile.row.Name, fmtMicros(p.maxOctB), p.req.Dump.ServerClock.End, time.Duration(p.delta)*time.Microsecond)
 	}
 	if p.req.Mode != ModeTimestamp {
 		return nil

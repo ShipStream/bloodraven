@@ -81,6 +81,8 @@ jobs:
       # 31 first (single-site baseline); 37 and 68 are planned failbacks
       # (68 with reclones); 70 loses data on purpose and restarts the archive.
       scenario: 31-pitr-verification-rustfs,37-pitr-planned-failback-no-reclone,68-pitr-failback-with-reclone,70-pitr-lossy-failover
-      # 24m + 60m + 75m + 75m of scenario budgets on one cluster.
-      timeout-minutes: 300
+      # 24m + 60m + 75m + 75m of scenario budgets on one cluster, plus
+      # the reset run-all does before each of 37, 68 and 70
+      # (ResetBeforeRunAll, ~5m each).
+      timeout-minutes: 330
       images-artifact: e2e-images

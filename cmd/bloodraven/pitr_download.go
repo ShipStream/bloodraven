@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,8 +54,15 @@ import (
 //	BLOODRAVEN_PITR_ENCRYPTION_MODE    None or Passphrase, from the archive profile
 //	BLOODRAVEN_PITR_PASSPHRASE_FILE    the archive key when Passphrase
 //	BLOODRAVEN_PITR_CLOCK_SKEW_MARGIN  δ (Go duration, default 5s; D-50)
-//	BLOODRAVEN_PITR_PLAN_MEMORY_BYTES  the planner budget (default 60% of the cgroup's memory.max, or 512 MiB; D-42)
+//	BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES the container's memory limit (optional; else the cgroup's)
+//	BLOODRAVEN_PITR_PLAN_MEMORY_BYTES  the planner budget (default 60% of the memory limit, or 512 MiB; D-42)
+//	BLOODRAVEN_PITR_STAGING_LIMIT_BYTES the staging emptyDir's sizeLimit (optional)
 //	plus the S3/PVC storage env pitrDownloadConfigFromEnv reads.
+//
+// With a known memory limit, the Go soft memory limit is set to 90% of it
+// (unless GOMEMLIMIT is set), so the heap stays near the live data the
+// budget charges and planning refuses PITRPlanTooLarge instead of being
+// OOM-killed (review round 1 P3).
 func runPITRDownload(args []string) {
 	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
 	fail := func(code int, msg string, err error) {
@@ -65,6 +73,9 @@ func runPITRDownload(args []string) {
 	req, err := pitrDownloadRequestFromEnv(os.Getenv)
 	if err != nil {
 		fail(2, "invalid pitr-download config", err)
+	}
+	if soft := pitrSoftMemoryLimit(req.memoryLimit, os.Getenv("GOMEMLIMIT")); soft > 0 {
+		debug.SetMemoryLimit(soft)
 	}
 	cfg, err := pitrDownloadStoreConfig()
 	if err != nil {
@@ -102,6 +113,10 @@ type pitrDownloadRequest struct {
 	outDir       string
 	delta        time.Duration
 	memory       int64
+	// memoryLimit is the container's memory limit, 0 when unknown.
+	memoryLimit int64
+	// stagingLimit is the staging emptyDir's sizeLimit, 0 when unset.
+	stagingLimit int64
 }
 
 func pitrDownloadRequestFromEnv(getenv func(string) string) (pitrDownloadRequest, error) {
@@ -154,6 +169,11 @@ func pitrDownloadRequestFromEnv(getenv func(string) string) (pitrDownloadRequest
 		}
 		req.delta = d
 	}
+	limit, err := pitrMemoryLimit(getenv, pitrCgroupMemoryFiles)
+	if err != nil {
+		return req, err
+	}
+	req.memoryLimit = limit
 	if v := getenv("BLOODRAVEN_PITR_PLAN_MEMORY_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n <= 0 {
@@ -161,24 +181,69 @@ func pitrDownloadRequestFromEnv(getenv func(string) string) (pitrDownloadRequest
 		}
 		req.memory = n
 	} else {
-		req.memory = defaultPlanMemory("/sys/fs/cgroup/memory.max")
+		req.memory = defaultPlanMemory(limit)
+	}
+	if v := getenv("BLOODRAVEN_PITR_STAGING_LIMIT_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return req, fmt.Errorf("BLOODRAVEN_PITR_STAGING_LIMIT_BYTES=%q: a positive byte count", v)
+		}
+		req.stagingLimit = n
 	}
 	req.archive, err = pitrArchiveRequestFromEnv(getenv)
 	return req, err
 }
 
-// defaultPlanMemory is 60% of the cgroup's memory.max, or 512 MiB when the
-// cgroup is unlimited or unreadable (D-42).
-func defaultPlanMemory(path string) int64 {
-	b, err := os.ReadFile(path)
-	if err != nil {
+// pitrCgroupMemoryFiles are the container's memory limit under cgroup v2
+// and v1; tests replace them.
+var pitrCgroupMemoryFiles = []string{"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"}
+
+// pitrMemoryLimit is the container's memory limit in bytes, or 0 when none
+// is known: BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES (the controller renders the
+// container's limits.memory), else the first readable cgroup file. cgroup
+// v2's "max" and v1's page-rounded 2^63 mean unlimited.
+func pitrMemoryLimit(getenv func(string) string, cgroupFiles []string) (int64, error) {
+	if v := getenv("BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES=%q: a positive byte count", v)
+		}
+		return n, nil
+	}
+	for _, path := range cgroupFiles {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		if err != nil || n <= 0 || n >= 1<<62 {
+			return 0, nil // "max", or v1's unlimited
+		}
+		return n, nil
+	}
+	return 0, nil
+}
+
+// defaultPlanMemory is 60% of the memory limit, or 512 MiB when there is
+// none (D-42).
+func defaultPlanMemory(limit int64) int64 {
+	if limit <= 0 {
 		return pitrplan.DefaultPlanMemoryBytes
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-	if err != nil || n <= 0 {
-		return pitrplan.DefaultPlanMemoryBytes
+	return limit / 10 * 6
+}
+
+// pitrSoftMemoryLimit is the Go soft memory limit pitr-download sets: 90%
+// of the container's limit, or -1 (leave it) when the limit is unknown or
+// GOMEMLIMIT is set. With the budget at 60% of the limit and the planner's
+// live heap within 1.4× of its charges (pitrplan's TestBudgetBoundsLiveHeap),
+// the live heap stays below the soft limit, which makes the GC collect
+// instead of letting garbage grow the heap toward the kernel's limit.
+func pitrSoftMemoryLimit(limit int64, gomemlimit string) int64 {
+	if limit <= 0 || gomemlimit != "" {
+		return -1
 	}
-	return n / 10 * 6
+	return limit / 10 * 9
 }
 
 // pitrArchiveRequest is what pitr-download expects of the archive it reads.
@@ -300,9 +365,12 @@ func openPITRArchive(ctx context.Context, store sidecar.ArchiveStore, req pitrAr
 }
 
 // rowFetcher downloads, tees, authenticates and indexes rows for the
-// planner. A row is cached in cacheDir iff the free space afterwards
-// stays ≥ max(10%, 256 MiB); an uncached file is re-downloaded with a
-// digest check when staged.
+// planner. A row is cached in cacheDir only when the planner says it may
+// become a plan file (P2), the node filesystem keeps max(10%, 256 MiB)
+// free after it, and the staging emptyDir's sizeLimit (when set) still
+// has room for it; an uncached plan file is re-downloaded with a digest
+// check when staged. Before staging, cached rows the plan does not stage
+// are deleted, and the staged set must fit.
 type rowFetcher struct {
 	store    sidecar.ArchiveStore
 	prefix   string
@@ -312,12 +380,43 @@ type rowFetcher struct {
 	cached   map[pitrplan.RowRef]string
 	digests  map[pitrplan.RowRef]string
 	parts    int
+	// limit is the staging emptyDir's sizeLimit (0: none); cachedBytes is
+	// the cache's usage as the kubelet measures it (whole blocks).
+	limit       int64
+	cachedBytes int64
 	// freeAfter reports the free bytes left after writing n more; tests
 	// replace it.
 	freeAfter func(dir string, n int64) (free, threshold int64)
+	// backoff is the delay before each retry of a transient store error.
+	backoff []time.Duration
 }
 
+// pitrFetchBackoff bounds the in-process retry of transient store errors
+// (P4): 5 retries over 31 s. Restore and verification Jobs have
+// backoffLimit 0, so a network blip must not end the Job.
+var pitrFetchBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
+
+// stagingBlock is the allocation unit the emptyDir's usage is counted in;
+// stagingReserve is headroom for directories and coverage.json's
+// temporary copy.
+const (
+	stagingBlock   = 4096
+	stagingReserve = 1 << 20
+)
+
+func blocks(n int64) int64 { return (n + stagingBlock - 1) / stagingBlock * stagingBlock }
+
+// Fetch implements pitrplan.Fetcher; the planner calls FetchForPlan.
 func (rf *rowFetcher) Fetch(ctx context.Context, ref pitrplan.RowRef) (*pitrplan.FileIndex, error) {
+	return rf.FetchForPlan(ctx, ref, true)
+}
+
+// FetchForPlan implements pitrplan.StagingFetcher. A missing object or an
+// integrity failure is returned as an ordinary error (the planner's
+// unreadable row); any other store error is retried with backoff and then
+// returned as a *pitrplan.TransientError, which ends planning without a
+// refusal.
+func (rf *rowFetcher) FetchForPlan(ctx context.Context, ref pitrplan.RowRef, mayStage bool) (*pitrplan.FileIndex, error) {
 	entry, ok := rf.entries[ref]
 	if !ok {
 		return nil, fmt.Errorf("pitr-download: unknown row %s/%s", ref.Site, ref.Name)
@@ -326,50 +425,181 @@ func (rf *rowFetcher) Fetch(ctx context.Context, ref pitrplan.RowRef) (*pitrplan
 	if err != nil {
 		return nil, &pitrplan.Refusal{Token: pitrarchive.TokenArchiveObjectInvalid, Message: fmt.Sprintf("%s/%s: %v", ref.Site, ref.Name, err)}
 	}
-	r, err := rf.store.Open(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", key, err)
-	}
-	defer r.Close()
-	var src io.Reader = r
-	var out *os.File
-	var part string
-	if free, threshold := rf.freeAfter(rf.cacheDir, entry.Size); free >= threshold {
-		rf.parts++
-		part = filepath.Join(rf.cacheDir, fmt.Sprintf("%d.part", rf.parts))
-		if out, err = os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600); err != nil {
+	for attempt := 0; ; attempt++ {
+		used := rf.budget.Used()
+		idx, transient, err := rf.fetchOnce(ctx, ref, entry, key, mayStage)
+		if err == nil {
+			return idx, nil
+		}
+		// A failed attempt's partial index is garbage.
+		rf.budget.Release(rf.budget.Used() - used)
+		if !transient {
 			return nil, err
 		}
-		src = io.TeeReader(r, out)
+		if attempt == len(rf.backoff) {
+			return nil, &pitrplan.TransientError{Err: fmt.Errorf("read %s after %d attempts: %w", key, attempt+1, err)}
+		}
+		if werr := sleepCtx(ctx, rf.backoff[attempt]); werr != nil {
+			return nil, werr
+		}
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// storeErrorTransient classifies a store error: a missing object or bad
+// bytes are about the row; everything else (timeouts, throttling, 5xx,
+// resets) is transient.
+func storeErrorTransient(err error) bool {
+	return !sidecar.IsArchiveObjectMissing(err) && !sidecar.IsArchiveIntegrityError(err)
+}
+
+// recordingReader remembers the first error, other than EOF, of the
+// store's reader, so a transport failure the index pass reports as a
+// truncated binlog is still seen as transient.
+type recordingReader struct {
+	r   io.Reader
+	err error
+}
+
+func (rr *recordingReader) Read(p []byte) (int, error) {
+	n, err := rr.r.Read(p)
+	if err != nil && err != io.EOF && rr.err == nil {
+		rr.err = err
+	}
+	return n, err
+}
+
+// cacheTee copies what it reads into the cache file until a write fails;
+// then it drops the copy (a full disk only costs a re-download).
+type cacheTee struct {
+	r    io.Reader
+	out  *os.File
+	part string
+}
+
+func (t *cacheTee) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 && t.out != nil {
+		if _, werr := t.out.Write(p[:n]); werr != nil {
+			t.drop()
+		}
+	}
+	return n, err
+}
+
+func (t *cacheTee) drop() {
+	if t.out != nil {
+		_ = t.out.Close()
+		_ = os.Remove(t.part)
+		t.out = nil
+	}
+}
+
+// fetchOnce is one download attempt; transient reports whether a retry
+// may succeed.
+func (rf *rowFetcher) fetchOnce(ctx context.Context, ref pitrplan.RowRef, entry sidecar.ManifestEntry, key string, mayStage bool) (*pitrplan.FileIndex, bool, error) {
+	r, err := rf.store.Open(ctx, key)
+	if err != nil {
+		return nil, storeErrorTransient(err) && ctx.Err() == nil, fmt.Errorf("open %s: %w", key, err)
+	}
+	defer r.Close()
+	rec := &recordingReader{r: r}
+	tee := &cacheTee{r: rec}
+	if mayStage && rf.cacheFits(entry.Size) {
+		rf.parts++
+		tee.part = filepath.Join(rf.cacheDir, fmt.Sprintf("%d.part", rf.parts))
+		if tee.out, err = os.OpenFile(tee.part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600); err != nil {
+			tee.out = nil
+		}
 	}
 	label := ref.Site + "/" + ref.Name
-	idx, err := sidecar.InspectTransactions(src, sidecar.TxIndexOptions{Label: label, Budget: rf.budget})
+	idx, err := sidecar.InspectTransactions(tee, sidecar.TxIndexOptions{Label: label, Budget: rf.budget})
 	if err == nil {
 		// Read to EOF so the object's integrity check completes.
-		_, err = io.Copy(io.Discard, src)
+		_, err = io.Copy(io.Discard, tee)
 	}
-	if out != nil {
-		if cerr := out.Close(); err == nil {
-			err = cerr
-		}
+	if rec.err != nil {
+		// The store's stream failed; whatever the index pass made of it.
+		tee.drop()
+		return nil, storeErrorTransient(rec.err) && ctx.Err() == nil, fmt.Errorf("read %s: %w", key, rec.err)
 	}
 	if err != nil {
-		if part != "" {
-			_ = os.Remove(part)
-		}
-		return nil, err
+		tee.drop()
+		return nil, false, err
 	}
 	if !sidecar.MatchesBinlogDigest(rf.store, entry.ID, idx.Digest) {
-		if part != "" {
-			_ = os.Remove(part)
-		}
-		return nil, &pitrplan.Refusal{Token: pitrarchive.TokenArchiveObjectInvalid, Message: fmt.Sprintf("%s (id %s): the bytes' digest %s does not match the row's content ID", label, entry.ID, idx.Digest)}
+		tee.drop()
+		return nil, false, &pitrplan.Refusal{Token: pitrarchive.TokenArchiveObjectInvalid, Message: fmt.Sprintf("%s (id %s): the bytes' digest %s does not match the row's content ID", label, entry.ID, idx.Digest)}
 	}
 	rf.digests[ref] = idx.Digest
-	if part != "" {
-		rf.cached[ref] = part
+	if tee.out != nil {
+		if cerr := tee.out.Close(); cerr != nil {
+			_ = os.Remove(tee.part)
+		} else {
+			rf.cached[ref] = tee.part
+			rf.cachedBytes += blocks(entry.Size)
+		}
 	}
-	return idx, nil
+	return idx, false, nil
+}
+
+// cacheFits is the tee rule: the node keeps its floor, and the emptyDir's
+// sizeLimit has room for the cache plus this row and the reserve.
+func (rf *rowFetcher) cacheFits(size int64) bool {
+	if rf.limit > 0 && rf.cachedBytes+blocks(size)+stagingReserve > rf.limit {
+		return false
+	}
+	free, threshold := rf.freeAfter(rf.cacheDir, size)
+	return free >= threshold
+}
+
+// prepareStaging deletes cached rows the plan does not stage, then checks
+// that the staged set (plus coverage.json of coverageBytes) fits under the
+// emptyDir's sizeLimit and on the filesystem, refusing PITRPlanTooLarge
+// rather than letting the kubelet evict the pod.
+func (rf *rowFetcher) prepareStaging(files []pitrplan.PlanFile, coverageBytes int64) error {
+	keep := map[pitrplan.RowRef]bool{}
+	for _, f := range files {
+		keep[f.Row] = true
+	}
+	for ref, part := range rf.cached {
+		if !keep[ref] {
+			if err := os.Remove(part); err != nil {
+				return err
+			}
+			rf.cachedBytes -= blocks(rf.entries[ref].Size)
+			delete(rf.cached, ref)
+		}
+	}
+	var staged, download int64
+	for _, f := range files {
+		staged += blocks(f.Size)
+		if _, ok := rf.cached[f.Row]; !ok {
+			download += blocks(f.Size)
+		}
+	}
+	need := staged + blocks(coverageBytes) + stagingReserve
+	if rf.limit > 0 && need > rf.limit {
+		return &pitrplan.Refusal{Token: pitrarchive.TokenPlanTooLarge, Message: fmt.Sprintf(
+			"the plan stages %d binlog files of %s, which with coverage.json needs %s, more than the staging volume's sizeLimit of %s; raise spec.backup.stagingVolumeSizeLimit, or choose a backup closer to the target",
+			len(files), util.HumanBytes(staged), util.HumanBytes(need), util.HumanBytes(rf.limit))}
+	}
+	if free, _ := rf.freeAfter(rf.cacheDir, download+blocks(coverageBytes)); free < 0 {
+		return &pitrplan.Refusal{Token: pitrarchive.TokenPlanTooLarge, Message: fmt.Sprintf(
+			"staging the plan needs %s more on the node's filesystem than it has free; give the Job's node more ephemeral storage, or choose a backup closer to the target",
+			util.HumanBytes(download+blocks(coverageBytes)))}
+	}
+	return nil
 }
 
 // pitrDiskFreeAfter is the tee rule's free-space check; tests replace it.
@@ -387,7 +617,7 @@ func diskFreeAfter(dir string, n int64) (int64, int64) {
 }
 
 // stage places one plan file at its staged path: from the tee cache, or
-// re-downloaded with a digest check.
+// re-downloaded with a digest check (transient store errors retried).
 func (rf *rowFetcher) stage(ctx context.Context, outDir string, f pitrplan.PlanFile) error {
 	rel := f.StagedPath()
 	dst, err := safeJoinUnderRoot(outDir, filepath.FromSlash(rel))
@@ -402,6 +632,7 @@ func (rf *rowFetcher) stage(ctx context.Context, outDir string, f pitrplan.PlanF
 			return err
 		}
 		delete(rf.cached, f.Row)
+		rf.cachedBytes -= blocks(f.Size)
 		return os.Chmod(dst, 0o644)
 	}
 	entry := rf.entries[f.Row]
@@ -409,26 +640,56 @@ func (rf *rowFetcher) stage(ctx context.Context, outDir string, f pitrplan.PlanF
 	if err != nil {
 		return err
 	}
+	for attempt := 0; ; attempt++ {
+		transient, err := rf.stageOnce(ctx, key, dst, f)
+		if err == nil || !transient {
+			return err
+		}
+		if attempt == len(rf.backoff) {
+			return &pitrplan.TransientError{Err: fmt.Errorf("stage %s/%s after %d attempts: %w", f.Row.Site, f.Row.Name, attempt+1, err)}
+		}
+		if werr := sleepCtx(ctx, rf.backoff[attempt]); werr != nil {
+			return werr
+		}
+	}
+}
+
+func (rf *rowFetcher) stageOnce(ctx context.Context, key, dst string, f pitrplan.PlanFile) (bool, error) {
 	r, err := rf.store.Open(ctx, key)
 	if err != nil {
-		return fmt.Errorf("%s: %s/%s became unreadable while staging: %v", pitrarchive.TokenArchiveObjectInvalid, f.Row.Site, f.Row.Name, err)
+		if storeErrorTransient(err) && ctx.Err() == nil {
+			return true, fmt.Errorf("open %s: %w", key, err)
+		}
+		return false, fmt.Errorf("%s: %s/%s became unreadable while staging: %v", pitrarchive.TokenArchiveObjectInvalid, f.Row.Site, f.Row.Name, err)
 	}
 	defer r.Close()
 	tmp := dst + ".part"
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
-		return err
+		return false, err
 	}
+	rec := &recordingReader{r: r}
 	h := sha256.New()
-	_, cerr := io.Copy(io.MultiWriter(out, h), r)
+	_, cerr := io.Copy(io.MultiWriter(out, h), rec)
 	if err := out.Close(); cerr == nil {
 		cerr = err
 	}
-	if cerr != nil || hex.EncodeToString(h.Sum(nil)) != f.Digest {
+	if rec.err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("%s: %s/%s changed or became unreadable during staging (%v); the archive changed during planning", pitrarchive.TokenArchiveObjectInvalid, f.Row.Site, f.Row.Name, cerr)
+		if storeErrorTransient(rec.err) && ctx.Err() == nil {
+			return true, fmt.Errorf("read %s: %w", key, rec.err)
+		}
+		return false, fmt.Errorf("%s: %s/%s became unreadable during staging (%v)", pitrarchive.TokenArchiveObjectInvalid, f.Row.Site, f.Row.Name, rec.err)
 	}
-	return os.Rename(tmp, dst)
+	if cerr != nil {
+		_ = os.Remove(tmp)
+		return false, cerr // a local write failure
+	}
+	if hex.EncodeToString(h.Sum(nil)) != f.Digest {
+		_ = os.Remove(tmp)
+		return false, fmt.Errorf("%s: %s/%s changed during staging; the archive changed during planning", pitrarchive.TokenArchiveObjectInvalid, f.Row.Site, f.Row.Name)
+	}
+	return false, os.Rename(tmp, dst)
 }
 
 // planResult is what planAndStage returns.
@@ -497,14 +758,16 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 	}
 	defer os.RemoveAll(cacheDir)
 	rf := &rowFetcher{store: store, prefix: req.archive.prefix, entries: entries, budget: budget, cacheDir: cacheDir,
-		cached: map[pitrplan.RowRef]string{}, digests: map[pitrplan.RowRef]string{}, freeAfter: pitrDiskFreeAfter}
+		cached: map[pitrplan.RowRef]string{}, digests: map[pitrplan.RowRef]string{}, freeAfter: pitrDiskFreeAfter,
+		limit: req.stagingLimit, backoff: pitrFetchBackoff}
 	plan, err := pitrplan.Run(ctx, pitrplan.Request{Mode: req.mode, Stop: req.stop, AllowPartial: req.allowPartial, Exclude: req.exclude,
 		Delta: req.delta, Dump: dump, Budget: budget}, archive, rf)
 	res.plan = plan
 	if err != nil {
 		if _, ok := pitrplan.RefusalOf(err); !ok && ctx.Err() == nil {
-			// A read error that is not a refusal: keep it retryable and
-			// say what failed.
+			// A read error that is not a refusal (a transient store
+			// error after its retries): keep it retryable and say what
+			// failed.
 			err = fmt.Errorf("pitr plan: %w", err)
 		}
 		if r, ok := pitrplan.RefusalOf(err); ok && r.Token == pitrarchive.TokenArchiveDivergentHistory && plan != nil && !plan.Divergent.IsEmpty() {
@@ -513,6 +776,15 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 		c := plan.Coverage(cov.Archive, cov.Dump, err.Error())
 		_ = os.RemoveAll(cacheDir)
 		return res, writeRefusal(req.outDir, c, err)
+	}
+	res.coverage = plan.Coverage(cov.Archive, cov.Dump, "")
+	covBytes, err := res.coverage.Marshal()
+	if err != nil {
+		return res, err
+	}
+	if err := rf.prepareStaging(plan.Files, int64(len(covBytes))); err != nil {
+		_ = os.RemoveAll(cacheDir)
+		return res, writeRefusal(req.outDir, plan.Coverage(cov.Archive, cov.Dump, err.Error()), err)
 	}
 	for _, f := range plan.Files {
 		if err := rf.stage(ctx, req.outDir, f); err != nil {
@@ -524,7 +796,6 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 	if err := os.RemoveAll(cacheDir); err != nil {
 		return res, err
 	}
-	res.coverage = plan.Coverage(cov.Archive, cov.Dump, "")
 	if err := writeCoverage(req.outDir, res.coverage); err != nil {
 		return res, err
 	}

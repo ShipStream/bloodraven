@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
@@ -43,22 +45,36 @@ type cleanupStore interface {
 //	AWS_REGION                       region from status.artifactStorage (S3, optional)
 //	BLOODRAVEN_AWS_CREDS_DIR         mounted credentialsSecret (S3)
 //	BLOODRAVEN_PVC_MOUNT_PATH        mount of the claim from status.artifactStorage (PVC)
+//
+// A backup that never succeeded is cleaned up in abandoned mode
+// (BLOODRAVEN_CLEANUP_MODE=abandoned): BLOODRAVEN_OUTPUT_URL is then the
+// planned destination from status.artifactStorage, and the artifact is
+// deleted only when the stamp at its key names BLOODRAVEN_BACKUP_UID. An
+// encrypted backup's stamp is BRV1, so the Job also mounts the passphrase
+// (BLOODRAVEN_BACKUP_PASSPHRASE_FILE).
 type artifactCleanupRequest struct {
 	Name, StorageType, Location     string
 	Bucket, Endpoint, Region, Creds string
 	MountPath                       string
+	Mode, UID, PassphraseFile       string
 }
+
+// cleanupModeAbandoned cleans up after a backup that never succeeded.
+const cleanupModeAbandoned = "abandoned"
 
 func artifactCleanupRequestFromEnv(getenv func(string) string) artifactCleanupRequest {
 	return artifactCleanupRequest{
-		Name:        getenv("BLOODRAVEN_BACKUP_NAME"),
-		StorageType: strings.TrimSpace(getenv("BLOODRAVEN_STORAGE_TYPE")),
-		Location:    getenv("BLOODRAVEN_OUTPUT_URL"),
-		Bucket:      getenv("BLOODRAVEN_S3_BUCKET"),
-		Endpoint:    getenv("BLOODRAVEN_S3_ENDPOINT_OVERRIDE"),
-		Region:      getenv("AWS_REGION"),
-		Creds:       getenv("BLOODRAVEN_AWS_CREDS_DIR"),
-		MountPath:   getenv("BLOODRAVEN_PVC_MOUNT_PATH"),
+		Name:           getenv("BLOODRAVEN_BACKUP_NAME"),
+		StorageType:    strings.TrimSpace(getenv("BLOODRAVEN_STORAGE_TYPE")),
+		Location:       getenv("BLOODRAVEN_OUTPUT_URL"),
+		Bucket:         getenv("BLOODRAVEN_S3_BUCKET"),
+		Endpoint:       getenv("BLOODRAVEN_S3_ENDPOINT_OVERRIDE"),
+		Region:         getenv("AWS_REGION"),
+		Creds:          getenv("BLOODRAVEN_AWS_CREDS_DIR"),
+		MountPath:      getenv("BLOODRAVEN_PVC_MOUNT_PATH"),
+		Mode:           strings.TrimSpace(getenv("BLOODRAVEN_CLEANUP_MODE")),
+		UID:            getenv("BLOODRAVEN_BACKUP_UID"),
+		PassphraseFile: getenv("BLOODRAVEN_BACKUP_PASSPHRASE_FILE"),
 	}
 }
 
@@ -132,6 +148,13 @@ func runCleanupRequest(ctx context.Context, req artifactCleanupRequest, newStore
 	if req.Name == "" {
 		return 0, rejected("BLOODRAVEN_BACKUP_NAME is required")
 	}
+	switch req.Mode {
+	case "":
+	case cleanupModeAbandoned:
+		return runAbandonedCleanup(ctx, req, newStore)
+	default:
+		return 0, rejected("unknown BLOODRAVEN_CLEANUP_MODE %q", req.Mode)
+	}
 	switch req.StorageType {
 	case "S3":
 		prefix, cerr := cleanupS3Prefix(req.Location, req.Bucket, req.Name)
@@ -166,6 +189,123 @@ func runCleanupRequest(ctx context.Context, req artifactCleanupRequest, newStore
 	default:
 		return 0, rejected("unknown storage type %q", req.StorageType)
 	}
+}
+
+// stampGetter is the read the abandoned mode needs on S3 to see whose stamp
+// sits at the artifact's key.
+type stampGetter interface {
+	Get(ctx context.Context, key string) ([]byte, bool, error)
+}
+
+// runAbandonedCleanup removes what a backup that never succeeded left at
+// its planned destination (review B1): its backup stamp, written before the
+// dump, and any part of a dump (or, in the encrypted layout, a whole upload
+// whose stamp could not be finished).
+//
+// Ownership is proven by the stamp alone. A backup's Job writes the stamp
+// before anything else and refuses a location that holds another backup's
+// stamp, so the objects under a location whose stamp names this backup's
+// UID are this backup's. No stamp, or another backup's stamp, deletes
+// nothing: the location may belong to a live backup in another namespace
+// that shares the prefix, or to a later backup of the same name. The dump
+// is deleted before the stamp, so an interrupted run keeps its proof.
+func runAbandonedCleanup(ctx context.Context, req artifactCleanupRequest, newStore func(context.Context, *sidecar.PITRConfig) (cleanupStore, error)) (int, *cleanupError) {
+	if req.UID == "" {
+		return 0, rejected("abandoned cleanup requires BLOODRAVEN_BACKUP_UID")
+	}
+	var passphrase []byte
+	if req.PassphraseFile != "" {
+		p, err := backupcrypto.ReadPassphraseFile(req.PassphraseFile)
+		if err != nil {
+			return 0, rejected("read backup passphrase: %v", err)
+		}
+		passphrase = p
+	}
+	switch req.StorageType {
+	case "S3":
+		prefix, cerr := cleanupS3Prefix(req.Location, req.Bucket, req.Name)
+		if cerr != nil {
+			return 0, cerr
+		}
+		store, err := newStore(ctx, &sidecar.PITRConfig{StorageType: "S3", S3: &sidecar.PITRS3Config{
+			Bucket: req.Bucket, Region: req.Region, EndpointURL: req.Endpoint, AWSCredsDir: req.Creds,
+			DefaultRegion: "us-east-1",
+		}})
+		if err != nil {
+			return 0, rejected("init S3 store: %v", err)
+		}
+		getter, ok := store.(stampGetter)
+		if !ok {
+			return 0, rejected("S3 store %T cannot read the backup stamp", store)
+		}
+		stampKey := backupmeta.StampKey(prefix)
+		raw, found, err := getter.Get(ctx, stampKey)
+		if err != nil {
+			return 0, transient("read backup stamp %s: %v", stampKey, err)
+		}
+		if owned, cerr := abandonedStampOwned(raw, found, passphrase, req.UID, stampKey); cerr != nil || !owned {
+			return 0, cerr
+		}
+		n, cerr := cleanupS3(ctx, store, prefix)
+		if cerr != nil {
+			return n, cerr
+		}
+		if err := store.Delete(ctx, stampKey); err != nil {
+			return n, transient("delete backup stamp %s: %v", stampKey, err)
+		}
+		return n, nil
+	case "PVC":
+		rel, cerr := cleanupPVCPath(req.Location, req.MountPath, req.Name)
+		if cerr != nil {
+			return 0, cerr
+		}
+		root, err := os.OpenRoot(req.MountPath)
+		if err != nil {
+			return 0, transient("open mount %s: %v", req.MountPath, err)
+		}
+		stampKey := backupmeta.StampKey(filepath.ToSlash(rel))
+		raw, err := root.ReadFile(stampKey)
+		_ = root.Close()
+		found := err == nil
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case pathEscapes(err):
+			return 0, rejected("refusing to read %s: %v", stampKey, err)
+		case err != nil:
+			return 0, transient("read backup stamp %s: %v", stampKey, err)
+		}
+		if owned, cerr := abandonedStampOwned(raw, found, passphrase, req.UID, stampKey); cerr != nil || !owned {
+			return 0, cerr
+		}
+		return cleanupPVC(req.MountPath, rel)
+	default:
+		return 0, rejected("unknown storage type %q", req.StorageType)
+	}
+}
+
+// abandonedStampOwned decodes the stamp read at key and reports whether it
+// names uid. A missing stamp or another backup's stamp is not this
+// backup's (false, nil); a stamp that cannot be read refuses, because
+// whose it is cannot be told.
+func abandonedStampOwned(raw []byte, found bool, passphrase []byte, uid, key string) (bool, *cleanupError) {
+	if !found {
+		return false, nil
+	}
+	if passphrase != nil {
+		if !backupcrypto.LooksEncrypted(raw) {
+			return false, rejected("backup stamp %s is not BRV1-encrypted, but the backup is", key)
+		}
+		var plain bytes.Buffer
+		if _, err := backupcrypto.Decrypt(&plain, bytes.NewReader(raw), passphrase); err != nil {
+			return false, rejected("decrypt backup stamp %s: %v", key, err)
+		}
+		raw = plain.Bytes()
+	}
+	stamp, err := backupmeta.ParseStamp(raw)
+	if err != nil {
+		return false, rejected("backup stamp %s: %v", key, err)
+	}
+	return string(stamp.Backup.UID) == uid, nil
 }
 
 // cleanupS3Prefix turns a status.location into the object-key prefix that

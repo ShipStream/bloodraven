@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -337,7 +338,7 @@ func TestPITRMySQLConfHistoryViolation(t *testing.T) {
 	}
 }
 
-// D-46: PITRArchiveReissueRisk fires when the active site changes to a site
+// D-46: PITRArchiveReissueRiskDetected fires when the active site changes to a site
 // whose own manifest holds divergent or quarantined rows, whatever moved it
 // (failover, planned failover, re-promotion), and not otherwise.
 func TestEmitPITRArchiveReissueRisk(t *testing.T) {
@@ -379,7 +380,7 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 			fg := identityFG()
 			fg.Spec.Backup.PITR.Enabled = tt.pitr
 			fg.Status.ActiveSite = tt.to
-			r.emitFailoverEvents(fg, &v1alpha1.MysqlFailoverGroupStatus{ActiveSite: tt.from}, TopologySnapshot{})
+			r.emitPITRArchiveReissueRisk(fg, tt.from)
 			var got []string
 			for _, e := range drainRunnerEvents(rec) {
 				if strings.Contains(e, eventReasonPITRArchiveReissueRisk) {
@@ -393,5 +394,57 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 				t.Fatalf("event text: %s", got[0])
 			}
 		})
+	}
+}
+
+// B3: the mysqlConf preview never hides a more specific sidecar refusal
+// (the condition must agree with status.pitr.archive.reason); it replaces
+// only True or a lower-ranked verdict, and is appended otherwise.
+func TestApplyPITRMySQLConfPreview(t *testing.T) {
+	unsafe := string(pitrarchive.ReasonArchiveUnsafeHistory)
+	tests := []struct {
+		name        string
+		in          pitrArchiveVerdict
+		detail      string
+		wantReason  string
+		wantPreview bool
+	}{
+		{name: "no preview keeps True", in: pitrArchiveVerdict{Status: metav1.ConditionTrue, Reason: "ArchiveVerified"}, wantReason: "ArchiveVerified"},
+		{name: "True is replaced", in: pitrArchiveVerdict{Status: metav1.ConditionTrue, Reason: "ArchiveVerified"}, detail: "binlog-format=MIXED", wantReason: unsafe, wantPreview: true},
+		{name: "foreign archive stays", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: string(pitrarchive.ReasonArchiveForeign), Message: "foreign"}, detail: "binlog-format=MIXED", wantReason: string(pitrarchive.ReasonArchiveForeign), wantPreview: true},
+		{name: "key mismatch stays", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: string(pitrarchive.ReasonArchiveKeyMismatch), Message: "key"}, detail: "binlog-format=MIXED", wantReason: string(pitrarchive.ReasonArchiveKeyMismatch), wantPreview: true},
+		{name: "store init failure stays", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: reasonPITRArchiveStoreInitFailed, Message: "init"}, detail: "binlog-format=MIXED", wantReason: reasonPITRArchiveStoreInitFailed, wantPreview: true},
+		{name: "unsafe history stays as reported", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: unsafe, Message: "marker"}, detail: "binlog-format=MIXED", wantReason: unsafe},
+		{name: "sidecar unreachable is outranked", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: reasonPITRSidecarUnreachable, Message: "down"}, detail: "binlog-format=MIXED", wantReason: unsafe, wantPreview: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyPITRMySQLConfPreview(tt.in, tt.detail)
+			if got.Reason != tt.wantReason {
+				t.Fatalf("reason %q, want %q", got.Reason, tt.wantReason)
+			}
+			if has := strings.Contains(got.Message, "binlog-format=MIXED"); has != tt.wantPreview {
+				t.Fatalf("message %q, preview present=%t want %t", got.Message, has, tt.wantPreview)
+			}
+			if tt.in.Message != "" && tt.in.Reason == got.Reason && !strings.Contains(got.Message, tt.in.Message) {
+				t.Fatalf("kept refusal lost its message: %q", got.Message)
+			}
+		})
+	}
+}
+
+// C3: every Event reason #206 adds follows A-74: <Subject><PastTenseVerb>,
+// PITR as the only acronym form, and never the PointInTime prefix.
+func TestPITREventReasonsFollowNamingRule(t *testing.T) {
+	rule := regexp.MustCompile(`^PITR[A-Z][A-Za-z]*(Detected|Excluded|Refused|Skipped|Truncated)$`)
+	for _, reason := range []string{
+		eventReasonPITRArchiveReissueRisk,
+		eventReasonPITRArchiveUnsafeHistory,
+		eventReasonPITRDivergentHistoryExcluded,
+		eventReasonPITROnHistoryTransactionsExcluded,
+	} {
+		if !rule.MatchString(reason) {
+			t.Errorf("Event reason %q breaks A-74's <Subject><PastTenseVerb> rule", reason)
+		}
 	}
 }

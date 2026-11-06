@@ -110,6 +110,22 @@ job['main']()
 print('SEAM_MAIN_OK')
 `
 
+// seamGTIDNext prints mysqlbinlog's GTID_NEXT assignment for every GTID of
+// its --include-gtids=<set> argument.
+const seamGTIDNext = `import re, sys
+spec = sys.argv[1].split('=', 1)[1]
+for member in [m for m in spec.split(',') if m]:
+    parts = member.split(':')
+    sid = parts[0]
+    for part in parts[1:]:
+        r = re.match(r'^(\d+)(?:-(\d+))?$', part)
+        if not r:
+            sid = parts[0] + ':' + part
+            continue
+        for n in range(int(r.group(1)), int(r.group(2) or r.group(1)) + 1):
+            print("SET @@SESSION.GTID_NEXT= '%s:%d'/*!*/;" % (sid, n))
+`
+
 func TestPITRDownloadRestoreScriptSeam(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -218,9 +234,13 @@ func TestPITRDownloadRestoreScriptSeam(t *testing.T) {
 			// restore.py main() over the staged directory.
 			dir, shims := t.TempDir(), t.TempDir()
 			binlogLog, mysqlLog := filepath.Join(dir, "mysqlbinlog.log"), filepath.Join(dir, "mysql.log")
+			// The mysqlbinlog shim emits one GTID_NEXT assignment per GTID
+			// of its --include-gtids set, as the real one does; restore.py
+			// checks them against the segment (P6).
 			for name, body := range map[string]string{
-				"mysqlbinlog": "#!/bin/sh\nprintf '%s\\t%s\\n' \"$1\" \"$2\" >>\"$SEAM_BINLOG_LOG\"\necho \"-- replay $1 $2\"\n",
-				"mysql":       "#!/bin/sh\necho \"$@\" >>\"$SEAM_MYSQL_LOG\"\ncat >>\"$SEAM_MYSQL_LOG\"\n",
+				"mysqlbinlog":  "#!/bin/sh\nprintf '%s\\t%s\\n' \"$1\" \"$2\" >>\"$SEAM_BINLOG_LOG\"\necho \"-- replay $1 $2\"\nexec " + python + " " + filepath.Join(shims, "gtid_next.py") + " \"$1\"\n",
+				"gtid_next.py": seamGTIDNext,
+				"mysql":        "#!/bin/sh\necho \"$@\" >>\"$SEAM_MYSQL_LOG\"\ncat >>\"$SEAM_MYSQL_LOG\"\n",
 			} {
 				if err := os.WriteFile(filepath.Join(shims, name), []byte(body), 0o755); err != nil {
 					t.Fatal(err)

@@ -1,9 +1,14 @@
 package sidecar
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -111,11 +116,15 @@ func unsafeHistoryError(site string, marker *HistoryIntegrity) error {
 		pitrarchive.TokenArchiveUnsafeHistory, site, marker.Violation, marker.Detail)
 }
 
-// checkHistoryIntegrity runs at every scan on every site (D-34). A marker
+// checkHistoryIntegrity runs at every scan on every site (D-34), before
+// the archive session is established, so a violation is seen whatever the
+// session state (awaiting the descriptor, refused, or failing). A marker
 // already in this site's manifest stands, whatever the server says now. A
-// new violation is persisted in the site's own manifest as soon as the
-// session is verified, and held in memory until then. It returns nil only
-// for a clean, unmarked site; any error keeps the site from uploading.
+// new violation is held as the pending marker (in memory and, when
+// cfg.StateDir is set, in a file that outlives a container restart) and is
+// persisted in the site's own manifest at the first verified session. It
+// returns nil only for a clean, unmarked site; any error keeps the site
+// from uploading.
 func (a *BinlogArchiver) checkHistoryIntegrity(ctx context.Context) error {
 	if a.session != nil && a.session.Verified() {
 		if _, err := a.loadManifest(ctx); err != nil {
@@ -124,6 +133,9 @@ func (a *BinlogArchiver) checkHistoryIntegrity(ctx context.Context) error {
 	}
 	marker := a.currentMarker()
 	if marker == nil {
+		if a.pendingMarkerErr != nil {
+			return fmt.Errorf("history integrity: %w", a.pendingMarkerErr)
+		}
 		prober, ok := a.mysql.(historyIntegrityProber)
 		if !ok {
 			return fmt.Errorf("history integrity: the MySQL probe cannot check replication filters and binlog settings")
@@ -137,6 +149,9 @@ func (a *BinlogArchiver) checkHistoryIntegrity(ctx context.Context) error {
 		}
 		marker = &HistoryIntegrity{Violation: violation, Detail: detail, At: a.now().UTC().Truncate(time.Microsecond)}
 		a.pendingMarker = marker
+		if err := a.savePendingMarker(marker); err != nil {
+			a.logger.Warn("persist history integrity marker", "error", err)
+		}
 	}
 	if !a.unsafeLogged {
 		a.unsafeLogged = true
@@ -151,6 +166,97 @@ func (a *BinlogArchiver) checkHistoryIntegrity(ctx context.Context) error {
 	a.historyIntegrity = marker
 	a.mu.Unlock()
 	return unsafeHistoryError(a.site, marker)
+}
+
+// pendingMarkerFile is the pending marker's file name under cfg.StateDir.
+const pendingMarkerFile = "history-integrity-pending.json"
+
+func (a *BinlogArchiver) pendingMarkerPath() string {
+	if a.cfg == nil || a.cfg.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(a.cfg.StateDir, pendingMarkerFile)
+}
+
+// loadPendingMarker restores a pending marker a previous container wrote.
+// An unreadable or invalid file is kept as pendingMarkerErr, which blocks
+// uploads: it may hold a violation, so it is never silently dropped.
+func (a *BinlogArchiver) loadPendingMarker() {
+	path := a.pendingMarkerPath()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		a.pendingMarkerErr = fmt.Errorf("read pending marker %s: %w", path, err)
+		return
+	}
+	var m HistoryIntegrity
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
+		a.pendingMarkerErr = fmt.Errorf("decode pending marker %s: %w", path, err)
+		return
+	}
+	if !slices.Contains(pitrarchive.HistoryViolations, m.Violation) {
+		a.pendingMarkerErr = fmt.Errorf("pending marker %s has unknown violation %q", path, m.Violation)
+		return
+	}
+	a.pendingMarker = &m
+	a.mu.Lock()
+	a.historyIntegrity = &m
+	a.mu.Unlock()
+}
+
+// savePendingMarker writes the pending marker durably (temp file, fsync,
+// rename, directory fsync). A no-op without cfg.StateDir.
+func (a *BinlogArchiver) savePendingMarker(m *HistoryIntegrity) error {
+	path := a.pendingMarkerPath()
+	if path == "" {
+		return nil
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, pendingMarkerFile+".*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+// clearPendingMarker removes the file once the marker is in a manifest.
+func (a *BinlogArchiver) clearPendingMarker() {
+	path := a.pendingMarkerPath()
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		a.logger.Warn("remove pending history integrity marker", "path", path, "error", err)
+	}
 }
 
 // currentMarker is the persisted marker, else a pending one.
@@ -177,5 +283,6 @@ func (a *BinlogArchiver) persistMarker(ctx context.Context) error {
 	}
 	a.persistedMarker = m.HistoryIntegrity
 	a.pendingMarker = nil
+	a.clearPendingMarker()
 	return nil
 }

@@ -778,7 +778,13 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 		if s3 == nil {
 			return "", nil, nil, nil, fmt.Errorf("profile %q storage.type=S3 but storage.s3 is nil", profile.Name)
 		}
-		prefix := strings.TrimRight(s3.Prefix, "/")
+		// The prefix is normalized once, here, so the dump, its backup
+		// stamp, status.location, dump-meta and artifact cleanup all
+		// spell the same bucket-relative key: "/prod" and "prod" are the
+		// same prefix, as they are for the PITR archive. A leading "/"
+		// would make the stamp writer's key differ from the key dump-meta
+		// reads.
+		prefix := strings.Trim(s3.Prefix, "/")
 		if prefix != "" {
 			prefix += "/"
 		}

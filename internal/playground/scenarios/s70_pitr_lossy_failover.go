@@ -24,8 +24,14 @@ const (
 	// failover's 30 s relay-log drain, so b is promoted without them. The
 	// operator auto-recovers a stopped SQL thread (see s14), so the
 	// applier is delayed instead of stopped; the effect for the archive is
-	// the same: a's archived L never reaches b.
-	s70SourceDelay = 90 * time.Second
+	// the same: a's archived L never reaches b. The delay must outlast
+	// everything between L's first commit and b's promotion: the writer
+	// window (seconds), the flushing fence's upload wait (up to 3 min,
+	// pitrWaitArchiverAdvanced), failure detection (~6 s) and the bounded
+	// drain (30 s): 5 min leaves a minute of margin. The drain is bounded
+	// whatever the delay, and promotion resets b's channel, so a longer
+	// delay does not slow the failover.
+	s70SourceDelay = 5 * time.Minute
 )
 
 // scenario70PITRLossyFailover is DESIGN §9.4 s70 and §4.15 Examples 5, 8(c)
@@ -33,7 +39,7 @@ const (
 // covers loss evidence in latest mode, the D window and MBV excludeGtids
 // in timestamp mode, a backup after the loss needing no exclusion, and the
 // D-46 fail-closed path (reclone + failback reissues L's GTIDs:
-// PITRArchiveReissueRisk, then PITRArchiveHistoryReset until a new prefix
+// PITRArchiveReissueRiskDetected, then PITRArchiveHistoryReset until a new prefix
 // and a full backup).
 func scenario70PITRLossyFailover() runner.Scenario {
 	return runner.Scenario{
@@ -42,7 +48,7 @@ func scenario70PITRLossyFailover() runner.Scenario {
 		Hypothesis: "After a failover that loses archived transactions L: latest refuses PITRArchiveDivergentHistory with L " +
 			"and verifies with excludeGtids=L; a timestamp verification of the old backup after new writes refuses the " +
 			"same way and verifies with excludeGtids; a backup taken after the loss verifies without exclusions; " +
-			"recloning the old primary and failing back to it emits PITRArchiveReissueRisk, its new writes make every " +
+			"recloning the old primary and failing back to it emits PITRArchiveReissueRiskDetected, its new writes make every " +
 			"verification refuse PITRArchiveHistoryReset, and a new archive prefix plus a full backup verifies again.",
 		Risk:              "high",
 		DocLink:           "playground/chaos-scenarios.md#70-pitr-lossy-failover",
@@ -122,10 +128,16 @@ func s70LossyFailover() runner.Step {
 			if err := ctxStash(ctx, env, "delayApplied", "true"); err != nil {
 				return err
 			}
-			if err := pitrInsertMarker(ctx, env, a, s70DBName, 2, "L1"); err != nil {
-				return err
-			}
-			if err := pitrInsertMarker(ctx, env, a, s70DBName, 3, "L2"); err != nil {
+			// L is the two markers plus the writer's commits around them.
+			// The writer stops before the flushing fence, so a's sealed
+			// file holds all of it and nothing of a's commits is left
+			// unarchived when a goes down.
+			if err := pitrWithWriter(ctx, env, a, s70DBName, func() error {
+				if err := pitrInsertMarker(ctx, env, a, s70DBName, 2, "L1"); err != nil {
+					return err
+				}
+				return pitrInsertMarker(ctx, env, a, s70DBName, 3, "L2")
+			}); err != nil {
 				return err
 			}
 			// Archive L, then take a down before b's delayed applier
@@ -151,7 +163,7 @@ func s70LossyFailover() runner.Step {
 			if err := ctxStash(ctx, env, "failedOver", "true"); err != nil {
 				return err
 			}
-			if _, err := pitrWaitPromotionRecorded(ctx, env, b, killed); err != nil {
+			if _, err := pitrWaitPromotionRecorded(ctx, env, b, killed, false); err != nil {
 				return err
 			}
 			// b can never receive L now (a is down and b's channel was
@@ -183,12 +195,14 @@ func s70VerifyLatestLoss() runner.Step {
 				return err
 			}
 			lost := ctxFetch(env, "lost")
-			uuid := strings.SplitN(lost, ":", 2)[0]
-			if _, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, "latest-lost", pitrExpectation{
+			if err := s70VerifyRefusedNamingL(ctx, env, "latest-lost", pitrExpectation{
 				Backup: "b1", Mode: "latest", Fence: flushed, Markers: []string{"baseline"},
-			}, "PITRArchiveDivergentHistory", uuid); err != nil {
+			}, lost); err != nil {
 				return err
 			}
+			// excludedDivergentTransactionCount is |D|, the timestamp-mode
+			// D window; latest mode's loss evidence is not counted there, so
+			// latest-x asserts L through gtidExecuted = A-flush ∖ L exactly.
 			return pitrVerify(ctx, env, s70ID, s70DBName, "latest-x", pitrExpectation{
 				Backup: "b1", Mode: "latest", Fence: flushed, Exclude: lost, Outcome: v1alpha1.PointInTimeArchiveHead,
 				Markers: []string{"baseline"},
@@ -203,17 +217,11 @@ func s70VerifyTimestampAfterLoss() runner.Step {
 		Name:  "b writes S; β1 after S refuses DivergentHistory, and verifies with excludeGtids=L",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			b := ctxFetch(env, "siteB")
-			if err := pitrInsertMarker(ctx, env, b, s70DBName, 4, "S"); err != nil {
-				return err
-			}
-			f, err := pitrTakeFence(ctx, env, b, false)
+			f, err := s70Era(ctx, env, b, 4, "S")
 			if err != nil {
 				return err
 			}
 			if err := pitrStashFence(ctx, env, "TS", f); err != nil {
-				return err
-			}
-			if err := pitrInsertMarker(ctx, env, b, s70DBName, 5, "Sb"); err != nil {
 				return err
 			}
 			if err := pitrFlush(ctx, env, b, true); err != nil {
@@ -221,7 +229,7 @@ func s70VerifyTimestampAfterLoss() runner.Step {
 			}
 			lost := ctxFetch(env, "lost")
 			e := pitrExpectation{Backup: "b1", Mode: "timestamp", Fence: f, Markers: []string{"baseline", "S"}}
-			if _, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, "ts-lost", e, "PITRArchiveDivergentHistory", strings.SplitN(lost, ":", 2)[0]); err != nil {
+			if err := s70VerifyRefusedNamingL(ctx, env, "ts-lost", e, lost); err != nil {
 				return err
 			}
 			e.Exclude, e.Outcome = lost, v1alpha1.PointInTimeTargetCovered
@@ -231,6 +239,39 @@ func s70VerifyTimestampAfterLoss() runner.Step {
 			return nil
 		},
 	}
+}
+
+// s70Era writes marker phase (id) on site, fences T and writes the witness
+// marker phase+"b" (id+1) while a background writer commits on site, and
+// returns the fence. The writer is stopped before the caller flushes.
+func s70Era(ctx context.Context, env *runner.Env, site string, id int, phase string) (pitrFence, error) {
+	var f pitrFence
+	err := pitrWithWriter(ctx, env, site, s70DBName, func() error {
+		if err := pitrInsertMarker(ctx, env, site, s70DBName, id, phase); err != nil {
+			return err
+		}
+		var err error
+		if f, err = pitrTakeFence(ctx, env, site, false); err != nil {
+			return err
+		}
+		return pitrInsertMarker(ctx, env, site, s70DBName, id+1, phase+"b")
+	})
+	return f, err
+}
+
+// s70VerifyRefusedNamingL runs a verification that must refuse
+// PITRArchiveDivergentHistory and print exactly L (as a GTID set), not just
+// a set of a's UUID.
+func s70VerifyRefusedNamingL(ctx context.Context, env *runner.Env, label string, e pitrExpectation, lost string) error {
+	v, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, label, e, "PITRArchiveDivergentHistory", strings.SplitN(lost, ":", 2)[0])
+	if err != nil {
+		return err
+	}
+	cond := findCondition(v.Status.Conditions, "Verified")
+	if err := refusalNamesExactly(cond.Message, lost); err != nil {
+		return fmt.Errorf("verification %s: %w", v.Name, err)
+	}
+	return nil
 }
 
 // pitrVerifyExcluded is pitrVerify plus the excluded-divergent count: every
@@ -263,14 +304,8 @@ func s70VerifyBackupAfterLoss() runner.Step {
 			if err := pitrBackup(ctx, env, s70ID, "b2"); err != nil {
 				return err
 			}
-			if err := pitrInsertMarker(ctx, env, b, s70DBName, 6, "S2"); err != nil {
-				return err
-			}
-			f, err := pitrTakeFence(ctx, env, b, false)
+			f, err := s70Era(ctx, env, b, 6, "S2")
 			if err != nil {
-				return err
-			}
-			if err := pitrInsertMarker(ctx, env, b, s70DBName, 7, "S2b"); err != nil {
 				return err
 			}
 			if err := pitrFlush(ctx, env, b, true); err != nil {
@@ -287,7 +322,7 @@ func s70VerifyBackupAfterLoss() runner.Step {
 func s70RecloneAndFailback() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "bring a back, reclone it, fail back: PITRArchiveReissueRisk",
+		Name:  "bring a back, reclone it, fail back: PITRArchiveReissueRiskDetected",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			a := ctxFetch(env, "siteA")
 			if err := env.Chaos.ScaleSiteToOne(ctx, a); err != nil {
@@ -303,17 +338,19 @@ func s70RecloneAndFailback() runner.Step {
 				return err
 			}
 			requested := time.Now()
-			if _, err := pitrPlannedFailover(ctx, env, a); err != nil {
+			// a's audit keeps reporting those rows as LastError for good;
+			// the failback wait tolerates exactly that (G5).
+			if _, err := pitrPlannedFailover(ctx, env, a, true); err != nil {
 				return err
 			}
 			evCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
-			ev, err := waitForMFGEvent(evCtx, env, requested, "PITRArchiveReissueRisk", "site "+a)
+			ev, err := waitForMFGEvent(evCtx, env, requested, "PITRArchiveReissueRiskDetected", "site "+a)
 			if err != nil {
 				return err
 			}
 			if ev.Type != "Warning" {
-				return fmt.Errorf("PITRArchiveReissueRisk event type=%s, want Warning", ev.Type)
+				return fmt.Errorf("PITRArchiveReissueRiskDetected event type=%s, want Warning", ev.Type)
 			}
 			env.Capture.Note("reissue risk emitted: " + ev.Message)
 			return nil
@@ -396,14 +433,8 @@ func s70Remedy() runner.Step {
 			if err := pitrBackup(ctx, env, s70ID, "b3"); err != nil {
 				return err
 			}
-			if err := pitrInsertMarker(ctx, env, a, s70DBName, 9, "F"); err != nil {
-				return err
-			}
-			f, err := pitrTakeFence(ctx, env, a, false)
+			f, err := s70Era(ctx, env, a, 9, "F")
 			if err != nil {
-				return err
-			}
-			if err := pitrInsertMarker(ctx, env, a, s70DBName, 10, "Fb"); err != nil {
 				return err
 			}
 			if err := pitrFlush(ctx, env, a, true); err != nil {

@@ -2,6 +2,7 @@ package pitrarchive
 
 import (
 	"errors"
+	"math/rand"
 	"strings"
 	"testing"
 )
@@ -234,5 +235,62 @@ func TestMaxDestinationLenWorstCase(t *testing.T) {
 		if n < 2000 {
 			t.Errorf("%s worst case %d is implausibly small; the test no longer exercises escaping", d.Kind, n)
 		}
+	}
+}
+
+// TestDestinationConstructorsRoundTrip asserts that every destination the
+// constructors accept is accepted back by ParseDestination unchanged (A2).
+// The sidecar parses the controller's rendered String() at startup, so a
+// destination that does not round-trip crash-loops the pods instead of
+// being refused at reconcile. An endpoint whose percent-escaped path grows
+// past MaxEndpointURLLen is the known case.
+func TestDestinationConstructorsRoundTrip(t *testing.T) {
+	grows := "http://h/" + strings.Repeat("é", 200) // 409 bytes raw, 1209 escaped
+	if _, err := NewS3Destination("b", "p", grows); !errors.Is(err, ErrInvalidDestination) {
+		t.Fatalf("endpoint that escapes past the bound: err = %v, want ErrInvalidDestination", err)
+	}
+
+	alphabet := []string{"a", "Z", "0", "-", ".", "/", "//", "%", "é", "!", " ", "?", "#", "..", "~", ":", "+"}
+	rng := rand.New(rand.NewSource(206))
+	gen := func(maxParts int) string {
+		var b strings.Builder
+		for n := rng.Intn(maxParts + 1); n > 0; n-- {
+			b.WriteString(alphabet[rng.Intn(len(alphabet))])
+		}
+		return b.String()
+	}
+	check := func(label string, d Destination, err error) {
+		t.Helper()
+		if err != nil {
+			if !errors.Is(err, ErrInvalidDestination) {
+				t.Errorf("%s: error %v is not ErrInvalidDestination", label, err)
+			}
+			return
+		}
+		parsed, perr := ParseDestination(d.String())
+		if perr != nil || parsed != d {
+			t.Errorf("%s: ParseDestination(%q) = %+v, %v; want %+v", label, d.String(), parsed, perr, d)
+		}
+	}
+	fixed := []struct{ bucket, prefix, endpoint string }{
+		{"b", "", ""},
+		{"b", "/prod/orders/", "https://S3.Example.com:443/a/b/"},
+		{"b", "p", "http://h/" + strings.Repeat("é", 50)},
+		{"b", "p", "http://h/" + strings.Repeat("x", MaxEndpointURLLen-len("http://h/"))},
+		{"b", "p", grows},
+	}
+	for _, c := range fixed {
+		d, err := NewS3Destination(c.bucket, c.prefix, c.endpoint)
+		check("s3 "+c.endpoint, d, err)
+	}
+	for i := 0; i < 2000; i++ {
+		endpoint := ""
+		if rng.Intn(4) > 0 {
+			endpoint = []string{"http://", "https://"}[rng.Intn(2)] + "h" + gen(3) + "/" + gen(120)
+		}
+		d, err := NewS3Destination("b"+gen(4), gen(40), endpoint)
+		check("random s3", d, err)
+		d, err = NewPVCDestination("ns"+gen(3), "c"+gen(3), gen(40))
+		check("random pvc", d, err)
 	}
 }

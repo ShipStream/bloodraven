@@ -228,6 +228,9 @@ func TestPITRScriptPlanRules(t *testing.T) {
 		{name: "R3 on-history not excluded", mutate: `cov['onHistoryExclusions']=A+':12'`, token: "PITRCoverageInvalid", detail: "R3: onHistoryExclusions"},
 		{name: "R4 segment starts elsewhere", mutate: `cov['segments'][1]['startPredecessors']=A+':1-19'`, token: "PITRCoverageInvalid", detail: "R4: segment 1"},
 		{name: "R4 order reversed", mutate: `cov['segments'].reverse()`, token: "PITRCoverageInvalid", detail: "R4: segment 0"},
+		{name: "R4 segment names the wrong file", mutate: `cov['segments'][1]['file']=0`, token: "PITRCoverageInvalid", detail: "R4: segment 1 replays bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-5, which its file a/mysql-bin.000001.r1 does not hold"},
+		{name: "R4 start outside its file", mutate: `cov['files'][0]['previousGTIDs']=A+':1-12'; cov['files'][0]['gtids']=A+':13-20'`, token: "PITRCoverageInvalid", detail: "R4: segment 0 replays aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:11-12, which its file"},
+		{name: "R4 start before its file", mutate: `cov['files'][0]['previousGTIDs']=A+':1-10,'+B+':9'`, token: "PITRCoverageInvalid", detail: "R4: segment 0 starts after aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10, which is no position of its file"},
 		{name: "R2 loaded dump differs", baseline: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-11", token: "PITRCoverageInvalid", detail: "R2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -330,26 +333,47 @@ print('S=' + job['_verify_pitr_result'](s, cov))
 }
 
 // pythonFakeReplay replaces subprocess.Popen: mysqlbinlog processes emit a
-// marker per segment (or fail for the segment index in FAIL_SEGMENT), and
-// the one mysql process records its stdin and any signal it gets.
+// marker and one GTID_NEXT assignment per GTID of their --include-gtids set,
+// as the real one does (or fail for the segment index in FAIL_SEGMENT, or
+// emit an extra, a missing or a repeated GTID for FAKE_EMIT, or fail to start
+// for EXEC_FAIL); the one mysql process records its stdin and any signal it
+// gets.
 const pythonFakeReplay = `
 procs = []
 class FakeStdin(io.BytesIO):
     def close(self):
         self.final = self.getvalue()
         super().close()
+def gtid_next(g):
+    return ("SET @@SESSION.GTID_NEXT= '%s'/*!*/;\n" % g).encode()
 class FakeProc:
     def __init__(self, args, stdin=None, stdout=None, env=None, **kw):
         self.args, self.signals, self.env = args, [], env
-        procs.append(self)
         self.is_mysql = args[0] == 'mysql'
+        if not self.is_mysql and os.environ.get('EXEC_FAIL') == 'mysqlbinlog':
+            raise OSError(7, 'Argument list too long')
+        procs.append(self)
         if self.is_mysql:
             self.stdin = FakeStdin()
             self.rc = 0
         else:
             seg = len([p for p in procs if not p.is_mysql]) - 1
             self.rc = 1 if seg == int(os.environ.get('FAIL_SEGMENT', '-1')) else 0
-            self.stdout = io.BytesIO(('-- segment %d %s\n' % (seg, args[1])).encode())
+            gtids = []
+            for (uuid, tag), nums in sorted(gparse(args[1].split('=', 1)[1]).items()):
+                gtids += ['%s%s:%d' % (uuid, ':' + tag if tag else '', n) for n in sorted(nums)]
+            mode = os.environ.get('FAKE_EMIT', '')
+            if mode == 'extra' and seg == 1:
+                gtids.insert(1, B + ':6')
+            if mode == 'missing' and seg == 1:
+                gtids = gtids[:-1]
+            if mode == 'repeat' and seg == 1:
+                gtids = gtids[:-1] + [gtids[0]]
+            body = ('-- segment %d %s\n' % (seg, args[1])).encode()
+            for g in gtids:
+                body += gtid_next(g) + ('INSERT /* %s */;\n' % g).encode()
+            body += b"SET @@SESSION.GTID_NEXT= 'AUTOMATIC' /* added by mysqlbinlog */ /*!*/;\n"
+            self.stdout = io.BytesIO(body)
     def wait(self):
         return -9 if signal.SIGKILL in self.signals else self.rc
     def send_signal(self, sig):
@@ -396,6 +420,36 @@ finally:
 	out, term, err = runPITRScript(t, fail, map[string]string{"FAIL_SEGMENT": "0"})
 	if err == nil || term != "BLOODRAVEN_PITR_FAILED: mysqlbinlog exit=1 segment=0" || !strings.Contains(out, "SIGNALS=[<Signals.SIGKILL: 9>]") || !strings.Contains(out, "BINLOGS=1") {
 		t.Fatalf("mysqlbinlog failure: err=%v term=%q out=%s", err, term, out)
+	}
+}
+
+// P6: restore.py checks what mysqlbinlog emits: a transaction outside the
+// segment never reaches mysql, and the emitted set must be exactly the
+// segment's. P7: a mysqlbinlog that cannot start is a recorded failure and
+// mysql is killed.
+func TestPITRScriptSegmentEmittedSet(t *testing.T) {
+	body := `d, cov = base_plan()
+c = read(d)
+` + pythonFakeReplay + `
+try:
+    job['_run_pitr_segments']('db', 3306, 'root', 'secret', c, '/usr/bin/mysqlbinlog')
+finally:
+    mysql = [p for p in procs if p.is_mysql][0]
+    print('SIGNALS=%s' % mysql.signals)
+    print('FORWARDED_EXTRA=%s' % (B + ':6' in mysql.stdin.getvalue().decode() if not mysql.stdin.closed else 'closed'))
+`
+	for _, tc := range []struct{ emit, exec, term string }{
+		{emit: "extra", term: "PITRReplayMismatch: segment 1 (b/mysql-bin.000004): mysqlbinlog emitted bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:6, which the segment does not replay"},
+		{emit: "missing", term: "PITRReplayMismatch: segment 1 (b/mysql-bin.000004): mysqlbinlog emitted 4 transactions (bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-4) but the segment replays 5 (bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-5)"},
+		{emit: "repeat", term: "PITRReplayMismatch: segment 1 (b/mysql-bin.000004): mysqlbinlog emitted 5 transactions (bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-4, some twice)"},
+		{exec: "mysqlbinlog", term: "BLOODRAVEN_PITR_FAILED: cannot start mysqlbinlog for segment=0: [Errno 7] Argument list too long"},
+	} {
+		t.Run(tc.emit+tc.exec, func(t *testing.T) {
+			out, term, err := runPITRScript(t, body, map[string]string{"FAKE_EMIT": tc.emit, "EXEC_FAIL": tc.exec})
+			if err == nil || !strings.HasPrefix(term, tc.term) || !strings.Contains(out, "SIGNALS=[<Signals.SIGKILL: 9>]") || strings.Contains(out, "FORWARDED_EXTRA=True") {
+				t.Fatalf("err=%v term=%q out=%s", err, term, out)
+			}
+		})
 	}
 }
 
@@ -466,6 +520,8 @@ if LONG:
     cov['lineage'] = cov['lineage'] + ',' + extra
     for seg in cov['segments']:
         seg['startPredecessors'] = seg['startPredecessors'] + ',' + extra
+    for f in cov['files']:
+        f['previousGTIDs'] = f['previousGTIDs'] + ',' + extra
 write_coverage(d, cov)
 ` + pythonFakeReplay + `
 order = []
@@ -685,5 +741,18 @@ print('NATIVE_OK')
 				t.Fatalf("rows = %s, want %s", got, tc.rows)
 			}
 		})
+	}
+}
+
+// P8: verify.sh's mysqld comment describes the v2 replay (staged segment
+// files, each GTID once), not v1's download-everything-and-dedup model.
+func TestVerifyScriptDescribesSegmentReplay(t *testing.T) {
+	for _, stale := range []string{"downloads EVERY site", "dedup the same", "double-applying"} {
+		if strings.Contains(verifyScript, stale) {
+			t.Errorf("verify_script.sh still says %q", stale)
+		}
+	}
+	if !strings.Contains(verifyScript, "--include-gtids=<segment>") || !strings.Contains(verifyScript, "--gtid-mode=ON") {
+		t.Error("verify_script.sh must explain why the segment replay needs GTID mode")
 	}
 }

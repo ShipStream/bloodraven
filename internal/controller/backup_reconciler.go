@@ -577,13 +577,37 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactLocationRestored",
 			"status.location was empty; restored %q from status.artifactStorage for cleanup", backup.Status.Location)
 	}
-	if backup.Status.Location == "" {
+	// A backup that never succeeded has no status.location, but its Job
+	// wrote a backup stamp (and perhaps part of a dump) at the planned
+	// destination recorded in status.artifactStorage. Left behind, the
+	// stamp makes a re-created backup of the same name refuse
+	// ErrBackupStampConflict (review B1), so it is cleaned up in
+	// abandoned mode: only when the stamp there names this backup's UID,
+	// and best effort, since the re-created backup's own stamp step also
+	// replaces an abandoned stamp once no dump objects remain.
+	abandoned := false
+	location := backup.Status.Location
+	if location == "" {
 		condition := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionBackupMetadataComplete)
 		if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded || condition != nil && condition.Reason == "DestinationUnavailable" {
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
 				"no recorded artifact destination (producing Job %q); skipping cleanup", backupJobName(backup.Name))
+			return true, 0, nil
 		}
-		return true, 0, nil
+		if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.Location == "" || backup.UID == "" {
+			// No Job ever ran: nothing was written.
+			return true, 0, nil
+		}
+		abandoned = true
+		location = backup.Status.ArtifactStorage.Location
+	}
+	// block reports a cleanup that cannot start. An abandoned artifact's
+	// cleanup is best effort and never holds the deletion.
+	block := func(reason, message string, requeue time.Duration) (bool, time.Duration, error) {
+		if abandoned {
+			return r.skipAbandonedCleanup(backup, location, message)
+		}
+		return r.blockArtifactCleanup(ctx, backup, reason, message, requeue)
 	}
 
 	var fg v1alpha1.MysqlFailoverGroup
@@ -591,7 +615,7 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
-				"failover group %q gone; cannot clean up artifact at %q", fgKey.Name, backup.Status.Location)
+				"failover group %q gone; cannot clean up artifact at %q", fgKey.Name, location)
 			return true, 0, nil
 		}
 		return false, 0, fmt.Errorf("get failover group: %w", err)
@@ -601,7 +625,7 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	if profile == nil {
 		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
 			"profile %q gone from group %q; cannot clean up artifact at %q",
-			backup.Spec.ProfileName, fg.Name, backup.Status.Location)
+			backup.Spec.ProfileName, fg.Name, location)
 		return true, 0, nil
 	}
 
@@ -631,8 +655,16 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		}
 		storage = recovered
 	}
-	if problem := artifactIdentityProblem(backup, storage, producer); problem != "" {
-		return r.blockArtifactCleanup(ctx, backup, cleanupReasonDestinationMismatch, problem, 30*time.Minute)
+	if problem := artifactIdentityProblem(backup, location, storage, producer); problem != "" {
+		return block(cleanupReasonDestinationMismatch, problem, 30*time.Minute)
+	}
+	if abandoned {
+		// The producing Job may still be writing (a Running backup being
+		// deleted). Stop it, and wait for its pods to be gone, before
+		// anything at its destination is deleted.
+		if wait, err := r.stopAbandonedProducer(ctx, backup, producer); err != nil || wait > 0 {
+			return false, wait, err
+		}
 	}
 
 	cleanupJob, err := r.currentCleanupJob(ctx, backup)
@@ -684,22 +716,27 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		} else if active {
 			return false, 5 * time.Second, nil
 		}
-		built, err := buildCleanupJob(cleanupJobInputs{
+		in := cleanupJobInputs{
 			FailoverGroup: &fg,
 			Profile:       profile,
 			Backup:        backup,
 			Storage:       storage,
-		})
+		}
+		if abandoned {
+			in.Abandoned = true
+			in.Passphrase = abandonedCleanupPassphrase(backup, profile, producer)
+		}
+		built, err := buildCleanupJob(in)
 		switch {
 		case errors.Is(err, errOperatorImageUnset):
-			return r.blockArtifactCleanup(ctx, backup, cleanupReasonOperatorImageUnset, err.Error(), 5*time.Minute)
+			return block(cleanupReasonOperatorImageUnset, err.Error(), 5*time.Minute)
 		case errors.Is(err, errCleanupCredentialsMissing):
-			return r.blockArtifactCleanup(ctx, backup, cleanupReasonCredentialsMissing,
+			return block(cleanupReasonCredentialsMissing,
 				fmt.Sprintf("profile %q: %v", profile.Name, err), 5*time.Minute)
 		case err != nil:
 			// The recorded destination or storage type cannot be turned
 			// into a Job (unknown type, snapshot without bucket or claim).
-			return r.blockArtifactCleanup(ctx, backup, cleanupReasonJobInvalid, err.Error(), cleanupRetryAfterRejection)
+			return block(cleanupReasonJobInvalid, err.Error(), cleanupRetryAfterRejection)
 		}
 		if err := controllerutil.SetControllerReference(backup, built, r.Scheme); err != nil {
 			return false, 0, fmt.Errorf("set cleanup job owner ref: %w", err)
@@ -711,11 +748,11 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			return false, 0, fmt.Errorf("create cleanup job: %w", err)
 		}
 		r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupStarted",
-			"created cleanup Job %s for artifact at %q", built.Name, backup.Status.Location)
+			"created cleanup Job %s for artifact at %q", built.Name, location)
 		return false, 15 * time.Second, nil
 	}
 	if !metav1.IsControlledBy(cleanupJob, backup) {
-		return r.blockArtifactCleanup(ctx, backup, cleanupReasonJobConflict,
+		return block(cleanupReasonJobConflict,
 			fmt.Sprintf("Job %s is not owned by this MysqlBackup; waiting for it to be removed", cleanupJob.Name), 30*time.Second)
 	}
 	if cleanupJob.DeletionTimestamp != nil {
@@ -732,6 +769,9 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		_, message, _ := cleanupPodVerdict(pod)
 		objects, counted := backupmeta.ParseCleanupComplete(message)
 		switch {
+		case abandoned:
+			r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupSucceeded",
+				"cleanup of the unfinished backup at %q removed %d objects (nothing is removed unless its backup stamp names this backup)", location, objects)
 		case counted && objects == 0:
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupNothingFound",
 				"no objects found at %q in the recorded destination; nothing was deleted", backup.Status.Location)
@@ -744,6 +784,18 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		}
 		return true, 0, nil
 	case v1alpha1.BackupPhaseFailed:
+		if abandoned {
+			pod, err := latestJobPod(ctx, r.Client, cleanupJob)
+			if err != nil {
+				return false, 0, fmt.Errorf("read cleanup verdict: %w", err)
+			}
+			_, message, _ := cleanupPodVerdict(pod)
+			detail := strings.TrimSpace(strings.TrimPrefix(message, backupmeta.CleanupFailedPrefix))
+			if detail == "" {
+				_, detail = jobPhase(cleanupJob, "cleanup")
+			}
+			return r.skipAbandonedCleanup(backup, location, fmt.Sprintf("cleanup Job %s failed: %s", cleanupJob.Name, detail))
+		}
 		return r.retryFailedCleanup(ctx, backup, cleanupJob)
 	default:
 		// Running. Surface a container that cannot start (image pull,
@@ -770,6 +822,81 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			return false, 0, err
 		}
 		return false, 15 * time.Second, nil
+	}
+}
+
+// skipAbandonedCleanup gives up on an unfinished backup's leftovers and
+// releases the finalizer: a backup that never succeeded did not hold a
+// finalizer-protected artifact before backup stamps existed, and a
+// re-created backup of the same name replaces an abandoned stamp itself
+// once no dump objects remain at the location.
+func (r *MysqlBackupReconciler) skipAbandonedCleanup(backup *v1alpha1.MysqlBackup, location, why string) (bool, time.Duration, error) {
+	r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
+		"cannot clean up what the unfinished backup left at %q (%s); a backup re-created with this name replaces its backup stamp once no dump objects remain there, otherwise delete %q and %q by hand",
+		location, why, location, backupmeta.StampKey(location))
+	return true, 0, nil
+}
+
+// stopAbandonedProducer deletes the producing Job of a backup that never
+// succeeded and returns a requeue until none of its pods is pending or
+// running, so the abandoned cleanup never races the dump.
+func (r *MysqlBackupReconciler) stopAbandonedProducer(ctx context.Context, backup *v1alpha1.MysqlBackup, producer *batchv1.Job) (time.Duration, error) {
+	if producer != nil && producer.DeletionTimestamp == nil {
+		if phase, _ := jobPhase(producer, "backup"); phase == "" {
+			background := metav1.DeletePropagationBackground
+			if err := r.Delete(ctx, producer, &client.DeleteOptions{PropagationPolicy: &background}); err != nil && !apierrors.IsNotFound(err) {
+				return 0, fmt.Errorf("stop producing backup job: %w", err)
+			}
+			r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupDeferred",
+				"stopping backup Job %s before cleaning up its unfinished artifact", producer.Name)
+			return 5 * time.Second, nil
+		}
+	}
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(backup.Namespace), client.MatchingLabels{
+		labelMysqlBackup:  backup.Name,
+		labelResourceKind: "backup",
+	}); err != nil {
+		return 0, fmt.Errorf("list backup pods: %w", err)
+	}
+	for i := range pods.Items {
+		if phase := pods.Items[i].Status.Phase; phase != corev1.PodSucceeded && phase != corev1.PodFailed {
+			return 5 * time.Second, nil
+		}
+	}
+	return 0, nil
+}
+
+// abandonedCleanupPassphrase is the passphrase Secret an abandoned cleanup
+// needs to read an encrypted backup's stamp: the producing Job's own
+// mount when the Job is still there, else the profile's. nil for a
+// plaintext backup.
+func abandonedCleanupPassphrase(backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, producer *batchv1.Job) *corev1.SecretVolumeSource {
+	encrypted := backup.Status.Encrypted
+	if producer != nil {
+		if e, _ := backupJobEncryption(producer); e {
+			encrypted = true
+		}
+		for _, vol := range producer.Spec.Template.Spec.Volumes {
+			if vol.Name == "backup-passphrase" && vol.Secret != nil {
+				return vol.Secret.DeepCopy()
+			}
+		}
+	}
+	if !encrypted {
+		return nil
+	}
+	if profile == nil || profile.Encryption == nil || profile.Encryption.PassphraseSecret.Name == "" {
+		// buildCleanupJob refuses: the stamp cannot be read.
+		return &corev1.SecretVolumeSource{}
+	}
+	return &corev1.SecretVolumeSource{
+		SecretName:  profile.Encryption.PassphraseSecret.Name,
+		DefaultMode: ptr32(0o400),
+		Items: []corev1.KeyToPath{{
+			Key:  profile.Encryption.PassphraseSecret.PassphraseSecretKeyOrDefault(),
+			Path: backupPassphraseFileName,
+		}},
 	}
 }
 

@@ -129,14 +129,54 @@ func TestExample3FailbackWithoutReclone(t *testing.T) {
 	// promotion, so R_b holds Bu:2 and cannot anchor it (D-53).
 	w = example3(t, true)
 	tauB := w.manifest("b").Promotions[0].ObservedAt
+	anchorFrom := tauB.Add(5 * time.Second).Format(microLayout)
 	w.check("3ii lag", query{stop: w.in("Bu:2")}, want{token: pitrarchive.TokenStopAmbiguous,
-		msg: []string{"archived only as a replica copy on a", "after b's promotion record at " + tauB.Format(microLayout),
-			"safe targets are at or before " + w.at("A:100").Format(microLayout)}})
-	w.check("3ii lag, after the record", query{stop: w.in("Bu:5")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:5",
-		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-4", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-4", ""}}})
+		msg: []string{"archived only as a replica copy on a", "after " + anchorFrom + " (b's promotion record at " + tauB.Format(microLayout),
+			"safe targets are at or before " + w.at("A:100").Format(microLayout) + ", or after " + anchorFrom}})
+	// G1: R_b anchors only witnesses committed more than δ after it.
+	// Bu:5 (2 s after) is within the margin.
+	w.check("3ii lag, inside the margin", query{stop: w.in("Bu:5")}, want{token: pitrarchive.TokenStopAmbiguous,
+		msg: []string{"after " + anchorFrom + " (b's promotion record at " + tauB.Format(microLayout) + ", which is not provably before"}})
+	w.check("3ii lag, after the record", query{stop: w.in("Bu:10")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:10",
+		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-9", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-9", ""}}})
 }
 
 const microLayout = "2006-01-02T15:04:05.000000Z"
+
+// TestExampleG1RecloneRecordIsNoAnchor is review round 1's G1: A:85
+// survives only on b, whose copy has b's errant Bu:1 before A:61. a dies
+// with A:61-85 unarchived, is recloned from c (A:1-60,Bu:1, no A:85) and
+// re-promoted; its record R_a' = A:1-60,Bu:1 does not hold A:85, but it was
+// observed after A:85 committed, so it says nothing about a's history at
+// A:85. Anchoring on it would put Bu:1 into Λ.
+func TestExampleG1RecloneRecordIsNoAnchor(t *testing.T) {
+	build := func(withCloneFile bool) *world {
+		w := newWorld(t)
+		w.commit("A:1-60")
+		w.commit("Bu:1")
+		w.commit("A:61-90")
+		tauA := w.pass(time.Minute)
+		w.promote("a", "A", "", epoch.Add(-time.Hour))
+		w.file("a", "a0", 101, "", "", "A:1-30")
+		w.file("a", "a1", 101, "A:1-30", "", "A:31-60")
+		w.file("b", "b0", 102, "", "A:1-10", "A:11-60")
+		w.file("b", "b1", 102, "A:1-60", "", "Bu:1", "A:61-90")
+		w.promote("a", "A", "A:1-60,Bu:1", tauA)
+		if withCloneFile {
+			// a rotated after its promotion: the clone's first file.
+			w.file("a", "a0", 101, "", "A:1-60,Bu:1")
+		}
+		w.backup("A:1-40", "b", 102, w.at("A:42").Add(200*time.Millisecond))
+		return w
+	}
+	for _, withCloneFile := range []bool{false, true} {
+		w := build(withCloneFile)
+		w.check("G1", query{stop: w.in("A:85")}, want{token: pitrarchive.TokenStopAmbiguous,
+			msg: []string{"archived only as a replica copy on b", "predecessors include {Bu}:1", "Exclude {Bu}:1"}})
+		w.check("G1 X", query{stop: w.in("A:85"), exclude: "Bu:1"}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "A:85",
+			truth: pitrplan.GroundTruthAnchored, lambda: "A:1-84", div: "Bu:1", segs: []seg{{"a/a1", "A:41-60", ""}, {"b/b1", "A:61-84", ""}}})
+	}
+}
 
 // example4 is the failback with reclone (s68): a is recloned from b at
 // A:1-100,Bu:1-50 and writes A:101-130 into a new first file (name reused,

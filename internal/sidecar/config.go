@@ -98,6 +98,13 @@ type PITRConfig struct {
 	// rooted at the profile's base prefix with "binlogs/" appended.
 	ManifestPrefix string
 
+	// StateDir, when set, is a writable directory that outlives the
+	// sidecar container (an emptyDir). The archiver keeps a
+	// history-integrity violation it could not yet persist in an archive
+	// manifest there, so a container restart does not forget it (D-34).
+	// "" holds the pending marker in memory only.
+	StateDir string
+
 	// S3 is populated when StorageType is "S3".
 	S3 *PITRS3Config
 
@@ -478,6 +485,7 @@ func pitrConfigFromEnv() (*PITRConfig, error) {
 		PollInterval:   pollInterval,
 		StorageType:    storageType,
 		ManifestPrefix: manifestPrefix,
+		StateDir:       os.Getenv("BLOODRAVEN_PITR_STATE_DIR"),
 	}
 
 	switch storageType {

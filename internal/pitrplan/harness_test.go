@@ -184,7 +184,7 @@ func (w *world) file(site, name string, fsrv uint32, prev, base string, specs ..
 	w.objects[site+"/"+name+"/"+id] = data
 	m := w.manifest(site)
 	m.Files = append(m.Files, sidecar.ManifestEntry{Name: name, ID: id, BaseGTIDs: w.set(base).String(), PreviousGTIDs: ev.Metadata.PreviousGTIDs,
-		GTIDCoverage: ev.Metadata.GTIDCoverage, Size: int64(len(data))})
+		GTIDCoverage: ev.Metadata.GTIDCoverage, Size: int64(len(data)), FirstEventTime: ev.Metadata.FirstEventTime})
 }
 
 // lose deletes a row's object (the row stays listed).

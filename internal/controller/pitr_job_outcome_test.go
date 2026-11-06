@@ -17,6 +17,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -199,17 +200,17 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 		{name: "partial", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial"}), reason: "PointInTimePartial", warnings: []string{"Warning PointInTimePartial"}},
 		{name: "divergent and on-history exclusions", pit: v1alpha1.PointInTimeSpec{ExcludeGtids: "b:1-3"},
 			verdict:  testVerdict(verdictFields{divergent: 2, onHistory: 1, onHistorySet: "b:3"}),
-			warnings: []string{"Warning PointInTimeDivergentHistoryExcluded replay excluded 2 transactions", "Warning PointInTimeOnHistoryExclusions excluded b:3 precedes"},
+			warnings: []string{"Warning PITRDivergentHistoryExcluded replay excluded 2 transactions", "Warning PITROnHistoryTransactionsExcluded excluded b:3 precedes"},
 			check: func(t *testing.T, res *v1alpha1.PointInTimeResult) {
 				if res.ExcludedDivergentTransactionCount != 2 || res.OnHistoryExclusionCount != 1 || res.OnHistoryExclusions != "b:3" {
 					t.Fatalf("exclusion counts: %+v", res)
 				}
 			}},
-		{name: "microsecond stop", pit: v1alpha1.PointInTimeSpec{StopDatetime: "2029-12-31 23:59:59.5"}, verdict: testVerdict(verdictFields{stop: "2029-12-31T23:59:59.500000Z"})},
+		{name: "MySQL-form stop", pit: v1alpha1.PointInTimeSpec{StopDatetime: "2029-12-31 23:59:59"}, verdict: testVerdict(verdictFields{stop: "2029-12-31T23:59:59.000000Z"})},
 		{name: "missing verdict", verdict: "", reason: "PITRCoverageInvalid", failed: true},
 		{name: "version 1", verdict: testVerdict(verdictFields{version: "1"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "stop mismatch", verdict: testVerdict(verdictFields{stop: "2029-01-01T00:00:00.000000Z"}), reason: "PITRCoverageInvalid", failed: true},
-		{name: "second-rounded stop", pit: v1alpha1.PointInTimeSpec{StopDatetime: "2029-12-31T23:59:59.5Z"}, verdict: testVerdict(verdictFields{stop: "2030-01-01T00:00:00.000000Z"}), reason: "PITRCoverageInvalid", failed: true},
+		{name: "fractional echo of a whole-second stop", pit: v1alpha1.PointInTimeSpec{StopDatetime: "2029-12-31T23:59:59Z"}, verdict: testVerdict(verdictFields{stop: "2029-12-31T23:59:59.500000Z"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "mode mismatch", verdict: testVerdict(verdictFields{mode: "latest"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "unauthorized partial", verdict: testVerdict(verdictFields{outcome: "Partial"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "partial without replay", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial", noSegments: true}), reason: "PITRCoverageInvalid", failed: true},
@@ -391,8 +392,20 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(fg *v1alpha1.MysqlFailoverGroup)
+		seed   func(mb *v1alpha1.MysqlBackup)
 		reason string
 	}{
+		// B4: a backup with no recorded source identity has no stamp;
+		// refuse before scheduling dump-meta.
+		{name: "backup without dump identity", mutate: func(*v1alpha1.MysqlFailoverGroup) {}, seed: func(mb *v1alpha1.MysqlBackup) {
+			mb.Status.FailoverGroupUID = ""
+		}, reason: "PITRBackupIdentityUnknown"},
+		{name: "archive profile missing", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup.PointInTime.ArchiveProfileName = ""
+		}, reason: "PITRTargetInvalid"},
+		{name: "archive profile unknown", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup.PointInTime.ArchiveProfileName = "ghost"
+		}, reason: "PITRTargetInvalid"},
 		{name: "seven fractional digits", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.StopDatetime = "2030-01-01T00:00:00.1234567Z"
 		}, reason: "PITRTargetInvalid"},
@@ -418,6 +431,9 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
 			fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, ArchiveProfileName: addSourceArchiveProfile(fg)}
 			tc.mutate(fg)
+			if tc.seed != nil {
+				tc.seed(seed)
+			}
 			r, _ := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), dsnSecret())
 			if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 				t.Fatal(err)
@@ -429,22 +445,22 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 	}
 }
 
-// The parser accepts exactly the CRD pattern, at microsecond precision.
+// The parser accepts exactly the CRD pattern: whole seconds (C2 / A-39).
 func TestParsePITRTarget(t *testing.T) {
 	for in, want := range map[string]string{
-		"2030-01-01T00:00:00Z":             "2030-01-01T00:00:00.000000Z",
-		"2030-01-01 00:00:00":              "2030-01-01T00:00:00.000000Z",
-		"2030-01-01T00:00:00":              "2030-01-01T00:00:00.000000Z",
-		"2030-01-01 00:00:00.123456":       "2030-01-01T00:00:00.123456Z",
-		"2030-01-01T02:00:00.1+02:00":      "2030-01-01T00:00:00.100000Z",
-		"2029-12-31T19:00:00.000001-05:00": "2030-01-01T00:00:00.000001Z",
+		"2030-01-01T00:00:00Z":      "2030-01-01T00:00:00.000000Z",
+		"2030-01-01 00:00:00":       "2030-01-01T00:00:00.000000Z",
+		"2030-01-01T00:00:00":       "2030-01-01T00:00:00.000000Z",
+		"2030-01-01T02:00:00+02:00": "2030-01-01T00:00:00.000000Z",
+		"2029-12-31T19:00:01-05:00": "2030-01-01T00:00:01.000000Z",
 	} {
 		got, err := parsePITRTarget(in)
 		if err != nil || canonicalPITRTarget(got) != want {
 			t.Errorf("%q: got %v %v, want %s", in, canonicalPITRTarget(got), err, want)
 		}
 	}
-	for _, bad := range []string{"", "2030-01-01", "2030-01-01T00:00:00.1234567Z", "2030-01-01T00:00:00,5Z", " 2030-01-01T00:00:00Z", "2030-01-01T00:00:00+0200", "2030-13-01T00:00:00Z"} {
+	for _, bad := range []string{"", "2030-01-01", "2030-01-01T00:00:00.1234567Z",
+		"2030-01-01 00:00:00.123456", "2030-01-01T02:00:00.1+02:00", "2030-01-01T00:00:00.5Z", "2030-01-01T00:00:00+25:00", "2030-01-01T00:00:00+05:99", "2030-01-01T00:00:00,5Z", " 2030-01-01T00:00:00Z", "2030-01-01T00:00:00+0200", "2030-13-01T00:00:00Z"} {
 		if _, err := parsePITRTarget(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
@@ -494,7 +510,7 @@ func TestPITRTargetMustFollowBackupCompletion(t *testing.T) {
 func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 	fg := verifyFG()
 	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-	req, err := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01 00:00:00.25", AllowPartial: true, ExcludeGtids: " other:9 "})
+	req, err := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01 00:00:25", AllowPartial: true, ExcludeGtids: " other:9 "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +522,7 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 	// with the target in its one canonical spelling.
 	for _, env := range [][]corev1.EnvVar{frags.InitContainer.Env, frags.MainEnv} {
 		assertEnvEquals(t, env, "BLOODRAVEN_PITR_MODE", "timestamp")
-		assertEnvEquals(t, env, "BLOODRAVEN_PITR_STOP_DATETIME", "2030-01-01T00:00:00.250000Z")
+		assertEnvEquals(t, env, "BLOODRAVEN_PITR_STOP_DATETIME", "2030-01-01T00:00:25.000000Z")
 		assertEnvEquals(t, env, "BLOODRAVEN_PITR_ALLOW_PARTIAL", "true")
 		assertEnvEquals(t, env, "BLOODRAVEN_PITR_EXCLUDE_GTIDS", "other:9")
 	}
@@ -590,7 +606,7 @@ func TestPITRVerificationVerdictOutcomes(t *testing.T) {
 		{name: "timestamp covered", mode: "timestamp", verdict: testVerdict(verdictFields{}), reason: "Succeeded"},
 		{name: "latest replay", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest"}), reason: "Succeeded", lag: true},
 		{name: "latest with exclusions", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest", divergent: 3}), reason: "Succeeded", lag: true,
-			events: []string{"Warning PointInTimeDivergentHistoryExcluded replay excluded 3"}},
+			events: []string{"Warning PITRDivergentHistoryExcluded replay excluded 3"}},
 		{name: "latest without replay", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest", noSegments: true}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "partial is never verified", mode: "timestamp", verdict: testVerdict(verdictFields{outcome: "Partial"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "latest carries no stop", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest", stop: outcomeStopCanonical}), reason: "PITRCoverageInvalid", failed: true},
@@ -722,5 +738,51 @@ func TestPITRArchiveProfileSeparatesPrefixes(t *testing.T) {
 	req.ArchiveProfileName = "missing"
 	if _, err := buildRestorePITRFragmentsFor(fg, req); err == nil {
 		t.Fatal("unknown archive profile accepted")
+	}
+}
+
+// Round-1 env additions (P2/P3): pitr-download gets the staging emptyDir's
+// sizeLimit and its own memory limit when they are set, and neither when
+// they are not (it then falls back to statfs and the cgroup limit).
+func TestPITRDownloadBudgetEnv(t *testing.T) {
+	limit := resource.MustParse("5Gi")
+	for _, tc := range []struct {
+		name          string
+		staging       *resource.Quantity
+		resources     corev1.ResourceRequirements
+		wantStaging   string
+		wantMemoryEnv string
+	}{
+		{name: "unset"},
+		{name: "staging limit", staging: &limit, wantStaging: "5368709120"},
+		{name: "memory limit", resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}}, wantMemoryEnv: "1073741824"},
+		{name: "memory request only", resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := verifyFG()
+			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			fg.Spec.Backup.StagingVolumeSizeLimit = tc.staging
+			fg.Spec.Backup.Resources = tc.resources
+			req, err := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			frags, err := buildRestorePITRFragmentsFor(fg, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := envMap(frags.InitContainer.Env)
+			if got, ok := env["BLOODRAVEN_PITR_STAGING_LIMIT_BYTES"]; got != tc.wantStaging || ok != (tc.wantStaging != "") {
+				t.Fatalf("staging limit env = %q (set=%t), want %q", got, ok, tc.wantStaging)
+			}
+			if got, ok := env["BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES"]; got != tc.wantMemoryEnv || ok != (tc.wantMemoryEnv != "") {
+				t.Fatalf("memory limit env = %q (set=%t), want %q", got, ok, tc.wantMemoryEnv)
+			}
+			for _, e := range frags.MainEnv {
+				if strings.HasPrefix(e.Name, "BLOODRAVEN_PITR_STAGING_LIMIT") || strings.HasPrefix(e.Name, "BLOODRAVEN_PITR_MEMORY_LIMIT") {
+					t.Fatalf("budget env %s leaked onto the main container", e.Name)
+				}
+			}
+		})
 	}
 }

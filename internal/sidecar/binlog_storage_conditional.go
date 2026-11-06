@@ -169,7 +169,7 @@ func (p *pvcStore) PutIfAbsent(_ context.Context, key string, r io.Reader, _ int
 		return err
 	}
 	dir := filepath.Dir(dst)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := p.mkdirAllDurable(dir); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	// The ".tmp" suffix keeps a crash leftover out of List and the legacy check.
@@ -193,7 +193,7 @@ func (p *pvcStore) PutIfAbsent(_ context.Context, key string, r io.Reader, _ int
 	if err := os.Link(tmpName, dst); err != nil {
 		return fmt.Errorf("link %s: %w", key, mapLinkError(err))
 	}
-	if err := syncDir(dir); err != nil {
+	if err := p.syncDirectory(dir); err != nil {
 		return fmt.Errorf("sync %s: %w", dir, err)
 	}
 	return nil

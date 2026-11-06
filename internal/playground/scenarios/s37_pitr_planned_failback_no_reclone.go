@@ -34,7 +34,7 @@ func scenario37PITRPlannedFailbackNoReclone() runner.Scenario {
 	return runner.Scenario{
 		ID:    s37ID,
 		Title: "PITR across a planned failback without reclone restores every era exactly",
-		Hypothesis: "With an encrypted RustFS archive and the counter app writing throughout, a planned A→B→A failback " +
+		Hypothesis: "With an encrypted RustFS archive and a background writer committing through every era, a planned A→B→A failback " +
 			"without reclone and without a flush on b: before the failback a timestamp in b's era refuses " +
 			"PITRTargetNotCovered and latest is ArchiveHead; after a's flush, timestamp verifications before the " +
 			"failover, inside b's era (anchored by b's promotion record) and after the failback, a latest " +
@@ -104,17 +104,9 @@ func s37EraA() runner.Step {
 		Name:  "era A: marker M1, fence T1, witness M1b, flush a",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			a := ctxFetch(env, "siteA")
-			if err := pitrInsertMarker(ctx, env, a, s37DBName, 2, "M1"); err != nil {
-				return err
-			}
-			f1, err := pitrTakeFence(ctx, env, a, false)
-			if err != nil {
-				return err
-			}
-			if err := pitrStashFence(ctx, env, "T1", f1); err != nil {
-				return err
-			}
-			if err := pitrInsertMarker(ctx, env, a, s37DBName, 3, "M1b"); err != nil {
+			if err := pitrWithWriter(ctx, env, a, s37DBName, func() error {
+				return s37Era(ctx, env, a, 2, "M1", "T1")
+			}); err != nil {
 				return err
 			}
 			// Archives era A through M1b, so latest has something to replay
@@ -134,29 +126,46 @@ func s37FailoverToB() runner.Step {
 		Name:  "planned A→B (no flush); b's promotion record; marker M2, fence T2, witness M2b on b",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			b := ctxFetch(env, "siteB")
-			recorded, err := pitrPlannedFailover(ctx, env, b)
+			recorded, err := pitrPlannedFailover(ctx, env, b, false)
 			if err != nil {
 				return err
 			}
 			// The fence follows the record, so T2 is outside the
 			// promotion-record lag window (D-53) and a replica-copy witness
-			// is anchored by the record.
-			if err := pitrInsertMarker(ctx, env, b, s37DBName, 4, "M2"); err != nil {
+			// is anchored by the record. The writer starts after the
+			// record too, so no era-B commit is in the lag window.
+			if err := pitrWithWriter(ctx, env, b, s37DBName, func() error {
+				return s37Era(ctx, env, b, 4, "M2", "T2")
+			}); err != nil {
 				return err
 			}
-			f2, err := pitrTakeFence(ctx, env, b, false)
+			f2, err := pitrFetchFence(env, "T2")
 			if err != nil {
 				return err
 			}
-			if t2, _ := time.Parse(pitrMicroLayout, f2.T); !t2.After(recorded) {
+			if t2, _ := time.Parse(pitrTargetLayout, f2.T); !t2.After(recorded) {
 				return fmt.Errorf("T2 %s is not after b's promotion record %s", f2.T, recorded.Format(time.RFC3339Nano))
 			}
-			if err := pitrStashFence(ctx, env, "T2", f2); err != nil {
-				return err
-			}
-			return pitrInsertMarker(ctx, env, b, s37DBName, 5, "M2b")
+			return nil
 		},
 	}
+}
+
+// s37Era writes marker phase (id) on site, fences T under key, and writes
+// the witness marker phase+"b" (id+1). Callers run it inside a writer
+// window.
+func s37Era(ctx context.Context, env *runner.Env, site string, id int, phase, key string) error {
+	if err := pitrInsertMarker(ctx, env, site, s37DBName, id, phase); err != nil {
+		return err
+	}
+	f, err := pitrTakeFence(ctx, env, site, false)
+	if err != nil {
+		return err
+	}
+	if err := pitrStashFence(ctx, env, key, f); err != nil {
+		return err
+	}
+	return pitrInsertMarker(ctx, env, site, s37DBName, id+1, phase+"b")
 }
 
 func s37VerifyBetweenEras() runner.Step {
@@ -192,20 +201,12 @@ func s37FailbackToA() runner.Step {
 		Name:  "planned B→A (no flush on b); marker M3, fence T3, witness M3b, flush a",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			a := ctxFetch(env, "siteA")
-			if _, err := pitrPlannedFailover(ctx, env, a); err != nil {
+			if _, err := pitrPlannedFailover(ctx, env, a, false); err != nil {
 				return err
 			}
-			if err := pitrInsertMarker(ctx, env, a, s37DBName, 6, "M3"); err != nil {
-				return err
-			}
-			f3, err := pitrTakeFence(ctx, env, a, false)
-			if err != nil {
-				return err
-			}
-			if err := pitrStashFence(ctx, env, "T3", f3); err != nil {
-				return err
-			}
-			if err := pitrInsertMarker(ctx, env, a, s37DBName, 7, "M3b"); err != nil {
+			if err := pitrWithWriter(ctx, env, a, s37DBName, func() error {
+				return s37Era(ctx, env, a, 6, "M3", "T3")
+			}); err != nil {
 				return err
 			}
 			// Seals a's mixed file: era A's tail (origin), b's era (replica
@@ -257,6 +258,9 @@ func s37RestoreInsideBEra() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			f2, err := pitrFetchFence(env, "T2")
 			if err != nil {
+				return err
+			}
+			if err := pitrCheckTargetAfterBackup(env, pitrExpectation{Backup: "b1", Mode: "timestamp", Fence: f2}); err != nil {
 				return err
 			}
 			src, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)

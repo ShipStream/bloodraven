@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Classify changed paths into Go, site, course and PITR-native jobs; uncertainty
 # selects all. pitr gates test-pitr-native: the replay code paths (pitr-download,
-# the planner, the sidecar binlog reader, restore.py) and their contracts.
+# the planner, the sidecar binlog reader, restore.py, verify_script.sh), the
+# packages they link that change what is replayed (internal/mysql's GTID sets,
+# internal/backupcrypto's archive decryption, the controller's PITR Job
+# rendering) and their contracts.
 set -euo pipefail
 
 go=false site=false course=false pitr=false any=false
@@ -10,7 +13,7 @@ while IFS= read -r f || [ -n "$f" ]; do
   any=true
   case "$f" in *.go) go=true ;; esac
   case "$f" in
-    cmd/bloodraven/*|internal/pitrplan/*|internal/pitrarchive/*|internal/backupmeta/*|internal/sidecar/*|internal/controller/restore_script.py|internal/controller/pitr_restore_script_test.go|go.mod|go.sum) pitr=true ;;
+    cmd/bloodraven/*|internal/pitrplan/*|internal/pitrarchive/*|internal/backupmeta/*|internal/sidecar/*|internal/mysql/*|internal/backupcrypto/*|internal/controller/pitr*.go|internal/controller/restore_script.py|internal/controller/verify_script.sh|go.mod|go.sum) pitr=true ;;
   esac
   case "$f" in
     .github/workflows/ci.yml|.github/actions/*|.github/scripts/*|Makefile|.gitignore) go=true; site=true; course=true; pitr=true ;;

@@ -49,6 +49,13 @@ check pitr-sidecar-fixture 'internal/sidecar/testdata/native/failback/a.bin' tru
 check restore-script 'internal/controller/restore_script.py' true false false true
 check native-test 'internal/controller/pitr_restore_script_test.go' true false false true
 check controller-go 'internal/controller/runner.go' true false false false
+check gtid-sets 'internal/mysql/gtid.go' true false false true
+check archive-crypto 'internal/backupcrypto/stream.go' true false false true
+check pitr-fragments 'internal/controller/pitr.go' true false false true
+check pitr-dump-meta-render 'internal/controller/pitr_dump_meta.go' true false false true
+check verify-script 'internal/controller/verify_script.sh' true false false true
+check mysql-client-other 'internal/mysql/sidecar_client.go' true false false true
+check controller-restore-go 'internal/controller/restore.go' true false false false
 check e2e-workflow '.github/workflows/e2e.yml' false false false false
 
 printf 'Passed %s classifier cases.\n' "$cases"

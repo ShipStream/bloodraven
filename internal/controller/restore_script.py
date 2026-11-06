@@ -58,6 +58,8 @@
 #                                     defaults to /dev/termination-log.
 #   BLOODRAVEN_VERIFY_PITR_MODE       set by verification Jobs, which never
 #                                     accept a Partial outcome.
+import array
+import bisect
 import hashlib
 import json
 import os
@@ -345,7 +347,9 @@ def _maybe_preflight_drops(session):
 # with the server's own GTID functions (_verify_pitr_plan, R1 and R3-R5).
 # After the load it proves the loaded state is the plan's baseline (R2),
 # replays every segment with `mysqlbinlog --include-gtids=<segment>` into ONE
-# mysql session (_run_pitr_segments), and proves the result is exactly the
+# mysql session (_run_pitr_segments, which admits a transaction only if its
+# GTID_NEXT is in the segment and requires the emitted set to be exactly the
+# segment's), and proves the result is exactly the
 # target history minus the exclusions (_verify_pitr_result, R6). Only then
 # does it write the verdict the controller certifies the Job from.
 
@@ -539,6 +543,8 @@ def _read_pitr_coverage(req):
             _require(_SHA256.match(str(entry.get("sha256", ""))) is not None, "files[{}].sha256 is invalid".format(i))
             _require(isinstance(entry.get("site"), str) and entry["site"], "files[{}].site is empty".format(i))
             _require(isinstance(entry.get("name"), str) and entry["name"], "files[{}].name is empty".format(i))
+            _gtid_field(entry, "previousGTIDs")
+            _gtid_field(entry, "gtids")
             _require(os.path.isfile(full), "staged file {} is missing".format(rel))
             _require(_sha256_file(full) == entry["sha256"], "staged file {} differs from the verified archive object".format(rel))
             entry["_path"] = full
@@ -618,12 +624,25 @@ def _verify_pitr_plan(session, cov):
         for key in ("divergent", "lost", "onHistoryExclusions"):
             if not _gtid_subset(session, cov[key], excluded):
                 raise _PITRRefusal("PITRCoverageInvalid: R3: {} holds {}, which is not excluded".format(key, _gtid_subtract(session, cov[key], excluded)))
-        # R4: every segment starts where the previous one left the server.
+        # R4: every segment starts where the previous one left the server,
+        # and is a range of its own file: its GTIDs are the file's, none
+        # precedes its start, and its start lies inside the file.
         applied = baseline
+        files = cov["files"]
         for k, seg in enumerate(segments):
             start = _gtid_subtract(session, seg["startPredecessors"], excluded)
             if not _gtid_equal(session, start, applied):
                 raise _PITRRefusal("PITRCoverageInvalid: R4: segment {} starts after {} but the server will hold {}".format(k, start, applied))
+            entry = files[seg["file"]]
+            outside = _gtid_subtract(session, seg["gtids"], entry["gtids"])
+            if outside:
+                raise _PITRRefusal("PITRCoverageInvalid: R4: segment {} replays {}, which its file {} does not hold".format(k, outside, entry["path"]))
+            again = _gtid_intersect(session, seg["gtids"], seg["startPredecessors"])
+            if again:
+                raise _PITRRefusal("PITRCoverageInvalid: R4: segment {} replays {}, which precede its own start".format(k, again))
+            if not _gtid_subset(session, entry["previousGTIDs"], seg["startPredecessors"]) or \
+                    not _gtid_subset(session, seg["startPredecessors"], _gtid_union(entry["previousGTIDs"], entry["gtids"])):
+                raise _PITRRefusal("PITRCoverageInvalid: R4: segment {} starts after {}, which is no position of its file {}".format(k, seg["startPredecessors"], entry["path"]))
             applied = _gtid_union(applied, seg["gtids"])
         # R5
         if cov["outcome"] in ("ArchiveHead", "Partial") and not _gtid_normalize(replay):
@@ -669,9 +688,89 @@ def _kill(proc):
         pass
 
 
+_GTID_NEXT = re.compile(rb"^SET @@SESSION\.GTID_NEXT= '([^']*)'")
+
+
+def _gtid_intervals(value):
+    """A GTID set as {source id: sorted, merged [(lo, hi)]}, the source id
+    being the lower-case "uuid" or "uuid:tag"."""
+    out = {}
+    for member in _gtid_normalize(value).split(","):
+        if not member:
+            continue
+        parts = member.split(":")
+        uuid = parts[0].lower()
+        sid = uuid
+        for part in parts[1:]:
+            m = _GTID_INTERVAL.match(part)
+            if m is None:
+                sid = uuid + ":" + part.lower()
+                continue
+            lo = int(m.group(1))
+            out.setdefault(sid, []).append((lo, int(m.group(2) or lo)))
+    for sid, ivs in out.items():
+        ivs.sort()
+        merged = []
+        for lo, hi in ivs:
+            if merged and lo <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(hi, merged[-1][1]))
+            else:
+                merged.append((lo, hi))
+        out[sid] = merged
+    return out
+
+
+def _gtid_format(intervals, limit=512):
+    text = ",".join(sid + "".join(":{}".format(lo) if lo == hi else ":{}-{}".format(lo, hi) for lo, hi in intervals[sid])
+                    for sid in sorted(intervals))
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+class _SegmentCheck:
+    """P6: what mysqlbinlog actually emits for a segment, from the GTID_NEXT
+    assignments in its output, must be exactly the segment's set: each one
+    is checked before its transaction reaches mysql, and the whole set
+    after the segment."""
+
+    def __init__(self, gtids):
+        self.want = _gtid_intervals(gtids)
+        self.starts = {sid: [lo for lo, _ in ivs] for sid, ivs in self.want.items()}
+        self.seen = {}
+        self.count = 0
+
+    def admit(self, gtid):
+        sid, _, gno = gtid.rpartition(":")
+        sid = sid.lower()
+        if not gno.isdigit() or sid not in self.want:
+            return False
+        n = int(gno)
+        i = bisect.bisect_right(self.starts[sid], n) - 1
+        if i < 0 or n > self.want[sid][i][1]:
+            return False
+        self.seen.setdefault(sid, array.array("q")).append(n)
+        self.count += 1
+        return True
+
+    def emitted(self):
+        """The emitted set as intervals, and whether any GTID repeated."""
+        out, repeated = {}, False
+        for sid, gnos in self.seen.items():
+            merged = []
+            for n in sorted(gnos):
+                if merged and n <= merged[-1][1]:
+                    repeated = True
+                elif merged and n == merged[-1][1] + 1:
+                    merged[-1] = (merged[-1][0], n)
+                else:
+                    merged.append((n, n))
+            out[sid] = merged
+        return out, repeated
+
+
 def _run_pitr_segments(host, port, user, password, cov, mysqlbinlog):
     """Replay every segment, in order, into ONE mysql session. If any
-    mysqlbinlog fails, mysql is SIGKILLed before it can commit what it has
+    mysqlbinlog fails, cannot start, or emits a transaction its segment
+    does not replay, mysql is SIGKILLed before it can commit what it has
     buffered of a partial stream (closing stdin would let it run that)."""
     segments = cov["segments"]
     files = cov["files"]
@@ -683,20 +782,42 @@ def _run_pitr_segments(host, port, user, password, cov, mysqlbinlog):
     env = dict(os.environ)
     # MYSQL_PWD keeps the password off argv and procfs.
     env["MYSQL_PWD"] = password
-    mysql = subprocess.Popen(_mysql_replay_command(host, port, user), stdin=subprocess.PIPE, env=env)
+    try:
+        mysql = subprocess.Popen(_mysql_replay_command(host, port, user), stdin=subprocess.PIPE, env=env)
+    except OSError as e:
+        _fail("BLOODRAVEN_PITR_FAILED: cannot start mysql: {}".format(e))
     for k, seg in enumerate(segments):
         entry = files[seg["file"]]
+        label = entry["site"] + "/" + entry["name"]
         print("BLOODRAVEN_PITR_SEGMENT k={} file={} gtids={} transactions={}".format(
-              k, _escape_token(entry["site"] + "/" + entry["name"]), _gtid_count(seg["gtids"]), seg["transactions"]), flush=True)
-        binlog = subprocess.Popen([mysqlbinlog, "--include-gtids=" + _gtid_normalize(seg["gtids"]), entry["_path"]],
-                                  stdout=subprocess.PIPE)
-        broken = False
+              k, _escape_token(label), _gtid_count(seg["gtids"]), seg["transactions"]), flush=True)
+        check = _SegmentCheck(seg["gtids"])
         try:
-            shutil.copyfileobj(binlog.stdout, mysql.stdin, 1024 * 1024)
+            binlog = subprocess.Popen([mysqlbinlog, "--include-gtids=" + _gtid_normalize(seg["gtids"]), entry["_path"]],
+                                      stdout=subprocess.PIPE)
+        except OSError as e:
+            # E2BIG, ENOENT, EACCES: nothing of this segment reached mysql.
+            _kill(mysql)
+            _fail("BLOODRAVEN_PITR_FAILED: cannot start mysqlbinlog for segment={}: {}".format(k, e))
+        broken = False
+        unexpected = None
+        try:
+            for line in binlog.stdout:
+                if line.startswith(b"SET @@SESSION.GTID_NEXT="):
+                    m = _GTID_NEXT.match(line)
+                    value = m.group(1).decode("ascii", "replace") if m else line[:200].decode("ascii", "replace").strip()
+                    if value.upper() != "AUTOMATIC" and not check.admit(value):
+                        unexpected = value
+                        break
+                mysql.stdin.write(line)
         except (BrokenPipeError, ConnectionResetError, OSError):
             broken = True
         finally:
             binlog.stdout.close()
+        if unexpected is not None:
+            _kill(binlog)
+            _kill(mysql)
+            _fail("PITRReplayMismatch: segment {} ({}): mysqlbinlog emitted {}, which the segment does not replay".format(k, label, unexpected))
         if broken:
             _kill(binlog)
             rc = mysql.wait()
@@ -705,6 +826,11 @@ def _run_pitr_segments(host, port, user, password, cov, mysqlbinlog):
         if rc != 0:
             _kill(mysql)
             _fail("BLOODRAVEN_PITR_FAILED: mysqlbinlog exit={} segment={}".format(rc, k))
+        emitted, repeated = check.emitted()
+        if repeated or emitted != check.want or check.count != seg["transactions"]:
+            _kill(mysql)
+            _fail("PITRReplayMismatch: segment {} ({}): mysqlbinlog emitted {} transactions ({}{}) but the segment replays {} ({})".format(
+                k, label, check.count, _gtid_format(emitted), ", some twice" if repeated else "", seg["transactions"], _gtid_format(check.want)))
     try:
         mysql.stdin.close()
     except OSError:

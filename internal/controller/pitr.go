@@ -60,6 +60,12 @@ const (
 	pitrBinlogIndex      = "mysql-bin.index"
 	pitrPVCMountPath     = "/run/bloodraven/pitr-archive"
 	pitrAWSCredsMountDir = "/run/bloodraven/pitr-aws-creds"
+	// pitrStateMountPath is the sidecar's pod-lifetime scratch emptyDir
+	// (BLOODRAVEN_PITR_STATE_DIR). The archiver keeps a pending
+	// history-integrity marker there until its first verified session
+	// persists it, so a sidecar container restart does not drop it (A3).
+	pitrStateMountPath  = "/run/bloodraven/pitr-state"
+	pitrStateVolumeName = "pitr-sidecar-state"
 )
 
 // pitrSidecarFragments is the bundle of additions the PITR feature
@@ -115,8 +121,20 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		ReadOnly:  true,
 	})
 
+	// Pod-lifetime state the archiver must keep across a sidecar
+	// container restart (the data PVC is mounted read-only).
+	out.PodVolumes = append(out.PodVolumes, corev1.Volume{
+		Name:         pitrStateVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	out.SidecarVolumeMounts = append(out.SidecarVolumeMounts, corev1.VolumeMount{
+		Name:      pitrStateVolumeName,
+		MountPath: pitrStateMountPath,
+	})
+
 	// Core archiver env vars shared by both storage backends.
 	out.SidecarEnv = append(out.SidecarEnv,
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STATE_DIR", Value: pitrStateMountPath},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENABLED", Value: "1"},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_BINLOG_DIR", Value: pitrBinlogDir},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_BINLOG_INDEX", Value: pitrBinlogIndex},
@@ -337,15 +355,16 @@ type pitrReplayRequest struct {
 // pitrStopPattern is the stopDatetime/timestamp CRD pattern (§6.1). The
 // controller enforces it again because objects admitted before the pattern
 // existed, and every caller of the builders, must not reach a Job.
-var pitrStopPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})?$`)
+var pitrStopPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`)
 
-// parsePITRTarget parses a point-in-time target exactly to the microsecond:
-// RFC 3339 with an optional zone, or the MySQL form, both with at most six
-// fractional digits; no zone means UTC. Callers refuse any other spelling
-// with PITRTargetInvalid.
+// parsePITRTarget parses a point-in-time target, a whole second: RFC 3339
+// with an optional zone, or the MySQL form, neither with a fraction (A-39:
+// the v1beta1 field is a second-precision metav1.Time); no zone means UTC.
+// Callers refuse any other spelling with PITRTargetInvalid. The planner
+// still compares µs commit times against it (commit < T).
 func parsePITRTarget(value string) (time.Time, error) {
 	if len(value) > 40 || !pitrStopPattern.MatchString(value) {
-		return time.Time{}, fmt.Errorf("%q is not a target instant (YYYY-MM-DDTHH:MM:SS[.ffffff][Z|±HH:MM], at most six fractional digits)", value)
+		return time.Time{}, fmt.Errorf("%q is not a target instant (YYYY-MM-DDTHH:MM:SS[Z|±HH:MM], whole seconds; fractional seconds are not accepted)", value)
 	}
 	normalized := strings.Replace(value, " ", "T", 1)
 	if !strings.HasSuffix(normalized, "Z") && !strings.ContainsAny(normalized[19:], "+-") {
@@ -402,6 +421,29 @@ func canonicalExcludeGtids(field, raw string) (string, error) {
 		return "", fmt.Errorf("%s: %s: %v", pitrarchive.TokenTargetInvalid, field, err)
 	}
 	return set.String(), nil
+}
+
+// pitrDownloadBudgetEnv renders the limits pitr-download budgets against
+// (contracts.md "Round-1 env additions"): the pitr-binlogs emptyDir's
+// sizeLimit (spec.backup.stagingVolumeSizeLimit, the same quantity
+// stagingEmptyDirSource sets), and the container's own memory limit. Each
+// is rendered only when set; without them pitr-download falls back to
+// statfs and the cgroup limit. The memory limit is the literal value, not
+// a downward-API reference, because the downward API reports node
+// allocatable memory for a container with no limit.
+func pitrDownloadBudgetEnv(backup *v1alpha1.BackupSpec, res corev1.ResourceRequirements) []corev1.EnvVar {
+	var env []corev1.EnvVar
+	if backup != nil && backup.StagingVolumeSizeLimit != nil {
+		if v := backup.StagingVolumeSizeLimit.Value(); v > 0 {
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_STAGING_LIMIT_BYTES", Value: strconv.FormatInt(v, 10)})
+		}
+	}
+	if q, ok := res.Limits[corev1.ResourceMemory]; ok {
+		if v := q.Value(); v > 0 {
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES", Value: strconv.FormatInt(v, 10)})
+		}
+	}
+	return env
 }
 
 // pitrOperatorImage is the image of the PITR init containers (dump-meta,
@@ -478,11 +520,11 @@ func validateRestoreArchiveProfile(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha
 		return nil
 	}
 	if pit.ArchiveProfileName == "" {
-		return fmt.Errorf("pointInTime.archiveProfileName is required: name the backup profile whose PITR archive the restore reads")
+		return fmt.Errorf("%s: pointInTime.archiveProfileName is required: name the backup profile whose PITR archive the restore reads", pitrarchive.TokenTargetInvalid)
 	}
 	profile := findProfile(fg, pit.ArchiveProfileName)
 	if profile == nil {
-		return fmt.Errorf("pitr profile %q not found in spec.backup.profiles", pit.ArchiveProfileName)
+		return fmt.Errorf("%s: pointInTime.archiveProfileName %q not found in spec.backup.profiles", pitrarchive.TokenTargetInvalid, pit.ArchiveProfileName)
 	}
 	src, err := pitrprofile.DestinationFor(fg, profile)
 	if err != nil {
@@ -695,6 +737,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 		initBackupSrc = &backupResourcesSource{Resources: fg.Spec.Backup.Resources}
 	}
 	initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
+	initEnv = append(initEnv, pitrDownloadBudgetEnv(fg.Spec.Backup, initResources)...)
 	init := corev1.Container{
 		Name:                     restorePITRInitContainerName,
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,

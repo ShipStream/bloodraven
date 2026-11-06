@@ -44,12 +44,32 @@ const (
 	// occurrence registry (FP comparison, lookups) and the D-51 order
 	// check's rank and edge arrays.
 	occurrenceBytes = 64 + 12
-	// nodeBytes is charged per BFS position: hash, count, distance and
-	// class (§4.6).
-	nodeBytes = 8 + 8 + 4 + 4 + 1
+	// nodeBytes is charged per search position (§4.6) for every array
+	// the search allocates per position: hash 8, count 8, class 4,
+	// distance 4, start/goal/needed/step/inX/done 6, the bucket sort index
+	// 4, class membership 4, the BFS deque 8 (it may double), and the
+	// no-plan diagnosis' reach flag and queue 5.
+	nodeBytes = 8 + 8 + 4 + 4 + 6 + 4 + 4 + 8 + 5
+	// classBytes is charged per exact-key class besides its key's bytes:
+	// the key's map slot with growth headroom and string header (64), its
+	// members slice header (24), first file and span flag (5), and BFS
+	// state (8).
+	classBytes = 64 + 24 + 5 + 8
 	// intervalBytes is charged per interval of a materialized set.
 	intervalBytes = int64(unsafe.Sizeof(Interval{})) + 8
 )
+
+// memProbe, when set (tests), runs where the planner's largest transient
+// structures are live: at the end of the search graph build, of the BFS and
+// of the order check's graph build. TestBudgetBoundsLiveHeap measures the
+// live heap there against the charges.
+var memProbe func()
+
+func probeMemory() {
+	if memProbe != nil {
+		memProbe()
+	}
+}
 
 // Budget is the planner's incremental memory budget. It is not safe for
 // concurrent use; the planner is single-threaded.

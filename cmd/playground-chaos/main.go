@@ -44,6 +44,7 @@ func main() {
 	continueOnFailure := rootFlags.Bool("continue-on-failure", false, "run-all only: keep going past the first failure")
 	junitOut := rootFlags.String("junit-out", "", "run-all only: write JUnit XML report to this path")
 	profile := rootFlags.String("profile", string(runner.DefaultProfile), "run-all only: scenario subset (smoke|release|full)")
+	scenarioList := rootFlags.String("scenarios", "", "run-all only: comma-separated scenario IDs to run in this order instead of a profile (resets before each scenario that requires it)")
 	baselineWait := rootFlags.Duration("baseline-wait", 5*time.Minute, "run-all only: wait up to this long for a healthy baseline before the first scenario (0 disables)")
 	verbose := rootFlags.Bool("verbose", false, "verbose logging")
 	kubeconfig := rootFlags.String("kubeconfig", "", "kubeconfig path (default: KUBECONFIG / ~/.kube/config)")
@@ -104,7 +105,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "invalid profile %q; valid: smoke, release, full\n", p)
 			os.Exit(exitFlagParse)
 		}
-		os.Exit(runAll(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *baselineWait, *noCleanup, *force, *autoReset, *continueOnFailure, *junitOut, p, logger))
+		os.Exit(runAll(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *baselineWait, *noCleanup, *force, *autoReset, *continueOnFailure, *junitOut, p, *scenarioList, logger))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", subcmd)
 		usage()
@@ -118,7 +119,7 @@ func usage() {
 	playground-chaos [flags] check                Verify baseline health
 	playground-chaos [flags] reset                Wipe and re-bootstrap MySQL playground state
 	playground-chaos [flags] run <scenario-id>    Run a single scenario
-  playground-chaos [flags] run-all              Run all scenarios
+  playground-chaos [flags] run-all              Run all scenarios (or --scenarios=<id,...>)
 
 Flags:
   --namespace            playground namespace (default: bloodraven-playground)
@@ -131,6 +132,7 @@ Flags:
   --continue-on-failure  run-all only: keep going past first failure
   --junit-out            run-all only: write JUnit XML to path
   --profile              run-all only: scenario subset (smoke|release|full)
+  --scenarios            run-all only: comma-separated scenario IDs, run in order instead of --profile
   --baseline-wait        run-all only: wait for healthy baseline before first scenario (default 5m, 0 disables)
   --verbose              verbose logging
   --kubeconfig           kubeconfig path
@@ -358,7 +360,33 @@ func runReset(ctx context.Context, kubeconfig, kctx, currentCtx, namespace, fg, 
 	return nil
 }
 
-func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout, baselineWait time.Duration, noCleanup, force, autoReset, continueOnFailure bool, junitOut string, profile runner.Profile, logger *slog.Logger) int {
+// selectRunAllScenarios picks run-all's scenarios: the explicit --scenarios
+// list when given (in its order, quarantined entries included because they
+// were named), otherwise the profile. Either way the result goes through the
+// same suite loop, so every selected scenario with ResetBeforeRunAll gets
+// its reset; that is why CI runs scenario lists through run-all rather than
+// one `run` per ID, which never resets.
+func selectRunAllScenarios(registered []runner.Scenario, profile runner.Profile, list string) ([]runner.Scenario, error) {
+	if strings.TrimSpace(list) != "" {
+		return runner.SelectByIDs(registered, list)
+	}
+	scens := runner.SelectForProfile(registered, profile)
+	if len(scens) == 0 {
+		return nil, fmt.Errorf("no scenarios selected for profile %q", profile)
+	}
+	return scens, nil
+}
+
+func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout, baselineWait time.Duration, noCleanup, force, autoReset, continueOnFailure bool, junitOut string, profile runner.Profile, scenarioList string, logger *slog.Logger) int {
+	registered := runner.DefaultRegistry.List()
+	scens, err := selectRunAllScenarios(registered, profile, scenarioList)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "run-all:", err)
+		if strings.TrimSpace(scenarioList) != "" {
+			return exitFlagParse
+		}
+		return exitFailure
+	}
 	k, err := loadKube(kubeconfig, kctx, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -367,20 +395,24 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout, baselin
 		}
 		return exitEnvironment
 	}
-	registered := runner.DefaultRegistry.List()
-	scens := runner.SelectForProfile(registered, profile)
-	if len(scens) == 0 {
-		fmt.Fprintf(os.Stderr, "no scenarios selected for profile %q\n", profile)
-		return exitFailure
-	}
-	if profile != runner.ProfileFull && profile != "" {
-		fmt.Fprintf(os.Stderr, "Running profile %q: %d of %d scenarios\n", profile, len(scens), len(registered))
-	}
-	// Surface any quarantined scenarios excluded from this run so a green
-	// suite is never mistaken for full coverage.
-	for _, s := range registered {
-		if s.Quarantine != "" {
-			fmt.Fprintf(os.Stderr, "!! quarantined (skipped): %s — %s\n", s.ID, s.Quarantine)
+	switch {
+	case strings.TrimSpace(scenarioList) != "":
+		fmt.Fprintf(os.Stderr, "Running %d listed scenarios (--profile ignored)\n", len(scens))
+		for _, s := range scens {
+			if s.Quarantine != "" {
+				fmt.Fprintf(os.Stderr, "!! quarantined but explicitly listed (running): %s — %s\n", s.ID, s.Quarantine)
+			}
+		}
+	default:
+		if profile != runner.ProfileFull && profile != "" {
+			fmt.Fprintf(os.Stderr, "Running profile %q: %d of %d scenarios\n", profile, len(scens), len(registered))
+		}
+		// Surface any quarantined scenarios excluded from this run so a green
+		// suite is never mistaken for full coverage.
+		for _, s := range registered {
+			if s.Quarantine != "" {
+				fmt.Fprintf(os.Stderr, "!! quarantined (skipped): %s — %s\n", s.ID, s.Quarantine)
+			}
 		}
 	}
 	if force {

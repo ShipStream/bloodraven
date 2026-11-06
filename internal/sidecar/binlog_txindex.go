@@ -9,14 +9,39 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrplan"
 )
+
+// IsArchiveObjectMissing reports whether a store error says the object
+// does not exist (ENOENT on a PVC, NoSuchKey/404 on S3). The planner's
+// fetcher treats only this, and integrity failures, as an unreadable row;
+// every other store error is transient (review round 1 P4).
+func IsArchiveObjectMissing(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || isS3NotFound(err)
+}
+
+// IsArchiveIntegrityError reports whether a read error comes from the
+// encrypted store's authentication (a BRV1 failure, a missing BRV1 magic
+// while encryption is required, an AEAD tag mismatch): the bytes are bad,
+// not the connection.
+func IsArchiveIntegrityError(err error) bool {
+	for _, target := range []error{ErrTamperedOrDowngrade, backupcrypto.ErrMagicMismatch, backupcrypto.ErrTruncated,
+		backupcrypto.ErrUnsupportedVersion, backupcrypto.ErrUnsupportedAlgorithm, backupcrypto.ErrChunkTooLarge, backupcrypto.ErrCounterExhausted} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	// crypto/cipher's AEAD Open error is unexported.
+	return err != nil && strings.Contains(err.Error(), "message authentication failed")
+}
 
 // TxIndexOptions configure InspectTransactions.
 type TxIndexOptions struct {
@@ -405,7 +430,7 @@ func PlanSite(m *Manifest) (pitrplan.SiteManifest, error) {
 		divergent[key] = divergent[key].Union(set)
 	}
 	convert := func(e ManifestEntry, state pitrplan.RowState) (pitrplan.Row, error) {
-		row := pitrplan.Row{Site: m.Site, Name: e.Name, ID: e.ID, State: state}
+		row := pitrplan.Row{Site: m.Site, Name: e.Name, ID: e.ID, State: state, Created: e.FirstEventTime}
 		if e.ID == "" {
 			return row, fmt.Errorf("%s: manifest %s row %s has no id; version-2 rows are content-addressed", pitrarchive.TokenArchiveObjectInvalid, m.Site, e.Name)
 		}

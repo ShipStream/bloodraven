@@ -192,9 +192,10 @@ func TestPITRStatusArchiveObservation(t *testing.T) {
 	}
 }
 
-// §6.1: stopDatetime and the verification timestamp accept exactly the
-// microsecond pattern; excludeGtids is bounded at 64 KiB, and verifications
-// accept it.
+// §6.1 / A-39: stopDatetime and the verification timestamp accept a whole
+// second only (RFC 3339 or the MySQL form, bounded offset, no fraction);
+// excludeGtids is bounded at 131072 bytes (A-23), and verifications accept
+// it.
 func TestPITRTargetPatternAndExclusions(t *testing.T) {
 	for i, tc := range []struct {
 		stop    string
@@ -202,14 +203,19 @@ func TestPITRTargetPatternAndExclusions(t *testing.T) {
 		ok      bool
 	}{
 		{stop: "2030-01-01T00:00:00Z", ok: true},
-		{stop: "2030-01-01T00:00:00.123456Z", ok: true},
-		{stop: "2030-01-01 00:00:00.5", ok: true},
-		{stop: "2030-01-01T02:00:00.000001+02:00", ok: true},
+		{stop: "2030-01-01 00:00:00", ok: true},
+		{stop: "2030-01-01T02:00:00+02:00", ok: true},
+		{stop: "2030-01-01T02:00:00-23:59", ok: true},
+		{stop: "2030-01-01T00:00:00.123456Z"},
+		{stop: "2030-01-01 00:00:00.5"},
+		{stop: "2030-01-01T02:00:00.000001+02:00"},
 		{stop: "2030-01-01T00:00:00.1234567Z"},
 		{stop: "2030-01-01T00:00:00,5Z"},
+		{stop: "2030-01-01T00:00:00+25:00"},
+		{stop: "2030-01-01T00:00:00+05:99"},
 		{stop: "yesterday"},
-		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 65536), ok: true},
-		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 65537)},
+		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 131072), ok: true},
+		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 131073)},
 	} {
 		ns := fmt.Sprintf("pitr-target-pattern-%d", i)
 		ensureNamespace(t, ns)
@@ -239,13 +245,13 @@ func TestPITRTargetPatternAndExclusions(t *testing.T) {
 		}
 	}
 	ensureNamespace(t, "pitr-target-pattern-long")
-	if err := k8sClient.Create(ctx, pitrRestoreFG("pitr-target-pattern-long", &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00.123456+02:00" + strings.Repeat(" ", 10), ArchiveProfileName: "nightly-s3"})); err == nil {
+	if err := k8sClient.Create(ctx, pitrRestoreFG("pitr-target-pattern-long", &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00+02:00" + strings.Repeat(" ", 20), ArchiveProfileName: "nightly-s3"})); err == nil {
 		t.Fatal("over-long stopDatetime accepted")
 	}
 }
 
 func pointInTimeFixture() *v1alpha1.PointInTimeResult {
-	stop := metav1.NewMicroTime(time.Date(2030, 1, 1, 0, 0, 0, 123456000, time.UTC))
+	stop := metav1.NewMicroTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	newest := metav1.NewMicroTime(time.Date(2029, 12, 31, 23, 59, 59, 654321000, time.UTC))
 	return &v1alpha1.PointInTimeResult{
 		Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop, Outcome: v1alpha1.PointInTimeTargetCovered,
@@ -267,7 +273,7 @@ func assertPointInTimeRoundTrip(t *testing.T, where string, got *v1alpha1.PointI
 		got.GtidExecuted != want.GtidExecuted || got.LastReplayedBinlog == nil || got.LastReplayedBinlog.Name != want.LastReplayedBinlog.Name {
 		t.Fatalf("%s: pointInTime did not round-trip: %+v", where, got)
 	}
-	if got.StopTime == nil || got.StopTime.UTC().Format("15:04:05.000000") != "00:00:00.123456" ||
+	if got.StopTime == nil || got.StopTime.UTC().Format("15:04:05.000000") != "00:00:00.000000" ||
 		got.NewestReplayedCommitTime == nil || got.NewestReplayedCommitTime.UTC().Format("15:04:05.000000") != "23:59:59.654321" {
 		t.Fatalf("%s: MicroTime lost microseconds: %v %v", where, got.StopTime, got.NewestReplayedCommitTime)
 	}
@@ -279,7 +285,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 	ns := "pitr-result-shape"
 	ensureNamespace(t, ns)
 
-	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00.123456Z", ArchiveProfileName: "nightly-s3"})
+	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ArchiveProfileName: "nightly-s3"})
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -354,18 +360,27 @@ func TestPointInTimeResultShape(t *testing.T) {
 	}
 	assertPointInTimeRoundTrip(t, "verification status", gotV.Status.PointInTime)
 
-	// MSC status.activation.pointInTime.
+	// C6: status.activation carries no pointInTime (no activation writes
+	// one, and A-61 deletes status.activation); the apiserver prunes it.
 	msc := minimalEnvtestStandby("standby", ns)
 	if err := k8sClient.Create(ctx, msc); err != nil {
 		t.Fatal(err)
 	}
-	msc.Status.Activation = &v1alpha1.StandbyActivationStatus{PointInTime: pointInTimeFixture()}
-	if err := k8sClient.Status().Update(ctx, msc); err != nil {
+	u = &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlStandbyCluster"))
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "standby"}, u); err != nil {
 		t.Fatal(err)
 	}
-	gotMSC := &v1alpha1.MysqlStandbyCluster{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "standby"}, gotMSC); err != nil {
+	if err := unstructured.SetNestedField(u.Object, map[string]any{"phase": "Validating", "pointInTime": map[string]any{"mode": "Latest"}}, "status", "activation"); err != nil {
 		t.Fatal(err)
 	}
-	assertPointInTimeRoundTrip(t, "standby activation", gotMSC.Status.Activation.PointInTime)
+	if err := k8sClient.Status().Update(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "standby"}, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "activation", "pointInTime"); found {
+		t.Fatal("status.activation.pointInTime survived")
+	}
 }

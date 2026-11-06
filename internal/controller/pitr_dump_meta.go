@@ -39,6 +39,14 @@ type pitrDumpSource struct {
 // pitrDumpSourceForBackup describes a MysqlBackup's dump for dump-meta.
 // profile must store to the backup's backend (callers check this first).
 func pitrDumpSourceForBackup(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, passphrase *v1alpha1.PassphraseSecretRef) (pitrDumpSource, error) {
+	// §7.1: a backup with no recorded source identity was taken by a
+	// release without dump identity (no stamp), so dump-meta would refuse
+	// it anyway after scheduling and image pulls. Refuse at reconcile.
+	if backup.Status.FailoverGroupUID == "" {
+		return pitrDumpSource{}, fmt.Errorf("%s: backup %q records no source failover group UID, so it has no backup stamp (it was taken by a release without dump identity, "+
+			"or its status lost the UID; the backup reconciler restores it from the backup's Job if the Job still exists); take a new backup",
+			pitrarchive.TokenBackupIdentityUnknown, backup.Name)
+	}
 	src := pitrDumpSource{
 		StorageType:          backup.Status.StorageType,
 		Passphrase:           passphrase,

@@ -2,6 +2,7 @@ package pitrplan
 
 import (
 	"context"
+	"errors"
 	"math"
 	"time"
 
@@ -75,6 +76,11 @@ type Row struct {
 	// Divergent is the audit's MissingGTIDs when the row is listed in the
 	// manifest's Divergent[] (nil otherwise).
 	Divergent Set
+	// Created is the file's first event time (the manifest's
+	// firstEventTime: its server's clock when it opened the file, whole
+	// seconds), or zero when unknown. Only the anchor incarnation check
+	// reads it (§4.4, G1).
+	Created time.Time
 }
 
 // Label is "<site>/<name>".
@@ -108,6 +114,32 @@ type Archive struct {
 // unreadable, and the planner decides what that costs in context.
 type Fetcher interface {
 	Fetch(ctx context.Context, row RowRef) (*FileIndex, error)
+}
+
+// StagingFetcher is a Fetcher that keeps downloaded bytes for staging
+// (pitr-download's tee cache). The planner tells it whether the row may
+// become a plan file, so bytes it can never stage are only verified and
+// indexed, not written (review round 1 P2). mayStage over-approximates:
+// a row it marks false is never staged.
+type StagingFetcher interface {
+	Fetcher
+	FetchForPlan(ctx context.Context, row RowRef, mayStage bool) (*FileIndex, error)
+}
+
+// TransientError is a fetch failure that says nothing about the row: a
+// timeout, throttling, a reset connection, a 5xx, after the fetcher's own
+// bounded retries. Unlike an unreadable row it never becomes a refusal
+// (whose remedy may be to quarantine a healthy row): Run ends with it
+// unchanged, so the Job fails retryably and names the store error.
+type TransientError struct{ Err error }
+
+func (e *TransientError) Error() string { return "transient archive read error: " + e.Err.Error() }
+func (e *TransientError) Unwrap() error { return e.Err }
+
+// IsTransient reports whether err is (or wraps) a *TransientError.
+func IsTransient(err error) bool {
+	var t *TransientError
+	return errors.As(err, &t)
 }
 
 // FetchFunc adapts a function.

@@ -119,20 +119,36 @@ func (a *BinlogArchiver) observeRole(ctx context.Context, obs RoleObservation, c
 }
 
 // writePromotionRecord appends rec to this site's manifest through the
-// single-writer save with read-back. A retry after a save whose read-back
-// failed does not append the same record twice.
+// single-writer save with read-back, and succeeds only when the saved
+// manifest holds rec. A retry after a save whose read-back failed does not
+// append the same record twice.
 func (a *BinlogArchiver) writePromotionRecord(ctx context.Context, rec PromotionRecord) error {
 	m, err := a.loadManifest(ctx)
 	if err != nil {
 		return err
 	}
-	for _, r := range m.Promotions {
-		if r.ServerUUID == rec.ServerUUID && r.ServerID == rec.ServerID && r.GTIDExecuted == rec.GTIDExecuted && r.ObservedAt.Equal(rec.ObservedAt) {
-			return nil
-		}
+	if hasPromotionRecord(m.Promotions, rec) {
+		return nil
 	}
 	m.AppendPromotionRecord(rec)
-	return a.saveManifest(ctx, m)
+	if err := a.saveManifest(ctx, m); err != nil {
+		return err
+	}
+	// SaveManifest merges and caps the records it writes; the episode is
+	// recorded only if this record survived into the saved manifest.
+	if !hasPromotionRecord(m.Promotions, rec) {
+		return fmt.Errorf("the saved manifest for %s does not hold the promotion record observed at %s", a.site, rec.ObservedAt.Format(time.RFC3339Nano))
+	}
+	return nil
+}
+
+func hasPromotionRecord(records []PromotionRecord, rec PromotionRecord) bool {
+	for _, r := range records {
+		if r.ServerUUID == rec.ServerUUID && r.ServerID == rec.ServerID && r.GTIDExecuted == rec.GTIDExecuted && r.ObservedAt.Equal(rec.ObservedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // roleTick is the PEER_CHECK_INTERVAL role probe. It records a promotion

@@ -156,14 +156,10 @@ jobs:
           # Sequential on purpose: these share one cluster and the list is
           # ordered least- to most-destructive. A failure stops the run so
           # forensics are captured against the state that produced it.
-          IFS=',' read -ra ids <<< "$E2E_SCENARIOS"
-          for id in "${ids[@]}"; do
-            id="$(echo "$id" | xargs)"
-            [ -n "$id" ] || continue
-            echo "::group::chaos-run $id"
-            make chaos-run SCENARIO="$id"
-            echo "::endgroup::"
-          done
+          # run-all (not one `chaos-run` per ID) so a listed scenario that
+          # sets ResetBeforeRunAll gets its reset, as in a profile run.
+          make build-playground-chaos
+          ./bin/playground-chaos run-all --scenarios="$E2E_SCENARIOS"
         timeout-minutes: ${{ inputs.timeout-minutes }}
 
       - name: Upload JUnit results

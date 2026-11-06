@@ -94,20 +94,26 @@ func s68Backup() runner.Step {
 	}
 }
 
-// s68Era writes marker phase (id) on site, fences T under key, writes the
-// witness marker phase+"b" (id+1), and optionally flushes.
+// s68Era writes marker phase (id) on site, fences T under key and writes
+// the witness marker phase+"b" (id+1) while a background writer commits on
+// site, stops the writer, and optionally flushes. The writer stays stopped
+// until the next era: in cycle 1 nothing commits on b between its flush and
+// the reclone of a, which would be an unarchived tail (FU-1) and make c1-t3
+// refuse PITRArchiveGap.
 func s68Era(ctx context.Context, env *runner.Env, site string, id int, phase, key string, flush bool) error {
-	if err := pitrInsertMarker(ctx, env, site, s68DBName, id, phase); err != nil {
-		return err
-	}
-	f, err := pitrTakeFence(ctx, env, site, false)
-	if err != nil {
-		return err
-	}
-	if err := pitrStashFence(ctx, env, key, f); err != nil {
-		return err
-	}
-	if err := pitrInsertMarker(ctx, env, site, s68DBName, id+1, phase+"b"); err != nil {
+	if err := pitrWithWriter(ctx, env, site, s68DBName, func() error {
+		if err := pitrInsertMarker(ctx, env, site, s68DBName, id, phase); err != nil {
+			return err
+		}
+		f, err := pitrTakeFence(ctx, env, site, false)
+		if err != nil {
+			return err
+		}
+		if err := pitrStashFence(ctx, env, key, f); err != nil {
+			return err
+		}
+		return pitrInsertMarker(ctx, env, site, s68DBName, id+1, phase+"b")
+	}); err != nil {
 		return err
 	}
 	if flush {
@@ -125,7 +131,7 @@ func s68Cycle1() runner.Step {
 			if err := s68Era(ctx, env, a, 2, "M1", "T1", true); err != nil {
 				return err
 			}
-			if _, err := pitrPlannedFailover(ctx, env, b); err != nil {
+			if _, err := pitrPlannedFailover(ctx, env, b, false); err != nil {
 				return err
 			}
 			if err := s68Era(ctx, env, b, 4, "M2", "T2", true); err != nil {
@@ -134,7 +140,7 @@ func s68Cycle1() runner.Step {
 			if err := pitrRecloneSite(ctx, env, a); err != nil {
 				return err
 			}
-			if _, err := pitrPlannedFailover(ctx, env, a); err != nil {
+			if _, err := pitrPlannedFailover(ctx, env, a, false); err != nil {
 				return err
 			}
 			return s68Era(ctx, env, a, 6, "M3", "T3", true)
@@ -177,7 +183,7 @@ func s68Cycle2() runner.Step {
 		Name:  "cycle 2: A→B, era B without a flush, reclone a, failback, era A'' + flush a",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			a, b := ctxFetch(env, "siteA"), ctxFetch(env, "siteB")
-			if _, err := pitrPlannedFailover(ctx, env, b); err != nil {
+			if _, err := pitrPlannedFailover(ctx, env, b, false); err != nil {
 				return err
 			}
 			uuid, err := pitrServerUUID(ctx, env, b)
@@ -187,14 +193,18 @@ func s68Cycle2() runner.Step {
 			if err := ctxStash(ctx, env, "uuidB", uuid); err != nil {
 				return err
 			}
-			// b's era is never sealed while b is writable: an unarchived tail.
-			if err := pitrInsertMarker(ctx, env, b, s68DBName, 8, "M4"); err != nil {
+			// b's era is never sealed while b is writable: an unarchived
+			// tail, with the writer's commits in it. The writer stops
+			// before the reclone.
+			if err := pitrWithWriter(ctx, env, b, s68DBName, func() error {
+				return pitrInsertMarker(ctx, env, b, s68DBName, 8, "M4")
+			}); err != nil {
 				return err
 			}
 			if err := pitrRecloneSite(ctx, env, a); err != nil {
 				return err
 			}
-			if _, err := pitrPlannedFailover(ctx, env, a); err != nil {
+			if _, err := pitrPlannedFailover(ctx, env, a, false); err != nil {
 				return err
 			}
 			return s68Era(ctx, env, a, 9, "M5", "T5", true)

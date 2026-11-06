@@ -132,8 +132,7 @@ func NewS3Destination(bucket, prefix, endpointURL string) (Destination, error) {
 	if err != nil {
 		return Destination{}, err
 	}
-	d := Destination{Kind: DestinationS3, Endpoint: ep, Bucket: bucket, KeyPrefix: NormalizeKeyPrefix(prefix)}
-	return d, d.checkLen()
+	return roundTrip(Destination{Kind: DestinationS3, Endpoint: ep, Bucket: bucket, KeyPrefix: NormalizeKeyPrefix(prefix)})
 }
 
 // NewPVCDestination builds a normalized PVC destination from the group's
@@ -160,8 +159,30 @@ func NewPVCDestination(namespace, claim, subPath string) (Destination, error) {
 			return Destination{}, fmt.Errorf("%w: pvc subPath %q must not contain '..' segments", ErrInvalidDestination, subPath)
 		}
 	}
-	d := Destination{Kind: DestinationPVC, Namespace: namespace, Claim: claim, KeyPrefix: NormalizeKeyPrefix(subPath)}
-	return d, d.checkLen()
+	return roundTrip(Destination{Kind: DestinationPVC, Namespace: namespace, Claim: claim, KeyPrefix: NormalizeKeyPrefix(subPath)})
+}
+
+// roundTrip refuses a normalized destination that ParseDestination would
+// not accept back. The sidecar parses the controller's rendered
+// destination at startup, so a destination the constructors accept but
+// ParseDestination refuses (an endpoint that grows past its bound when
+// percent-escaped, say) would crash-loop the pods instead of refusing the
+// profile at reconcile.
+func roundTrip(d Destination) (Destination, error) {
+	if err := d.checkFieldBounds(); err != nil {
+		return Destination{}, err
+	}
+	if err := d.checkLen(); err != nil {
+		return Destination{}, err
+	}
+	parsed, err := ParseDestination(d.String())
+	if err != nil {
+		return Destination{}, err
+	}
+	if parsed != d {
+		return Destination{}, fmt.Errorf("%w: %q does not round-trip", ErrInvalidDestination, d.String())
+	}
+	return d, nil
 }
 
 func (d Destination) checkLen() error {

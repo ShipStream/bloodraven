@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +153,114 @@ func TestHistoryIntegrityProbeFailureBlocksUploads(t *testing.T) {
 	a := newTestArchiver(promotionFixture(t), "iad", role, store, slog.Default())
 	a.scanAndArchive(ctx)
 	if st := a.Snapshot(ctx); !strings.HasPrefix(st.LastError, "history integrity: ") || st.FilesArchived != 0 || st.HistoryIntegrity != nil {
+		t.Fatalf("status = %+v", st)
+	}
+}
+
+// A replica that sees a violation before the descriptor exists keeps it in
+// the state dir, so a sidecar container restart (and the setting being
+// cleared meanwhile) does not lose it; the restarted archiver persists the
+// original marker at its first verified session and drops the file (A3).
+func TestHistoryIntegrityPendingMarkerSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	stateDir := t.TempDir()
+	role := &stubRoleChecker{readOnly: true, violation: pitrarchive.ViolationReplicationFilter, detail: "performance_schema.replication_applier_filters has 1 rows"}
+	cfg := withTestArchive(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), BinlogIndex: "mysql-bin.index", StateDir: stateDir}, store)
+	at := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	first := NewBinlogArchiver(cfg, "pdx", role, store, slog.Default())
+	first.now = fixedClock(at)
+	first.scanAndArchive(ctx)
+	if _, err := os.Stat(filepath.Join(stateDir, pendingMarkerFile)); err != nil {
+		t.Fatalf("pending marker not kept in the state dir: %v", err)
+	}
+
+	// The filter is removed and the sidecar container restarts.
+	role.mu.Lock()
+	role.violation, role.detail = "", ""
+	role.mu.Unlock()
+	restarted := NewBinlogArchiver(cfg, "pdx", role, store, slog.Default())
+	restarted.now = fixedClock(at.Add(time.Hour))
+	restarted.scanAndArchive(ctx)
+	st := restarted.Snapshot(ctx)
+	if st.HistoryIntegrity == nil || !st.HistoryIntegrity.At.Equal(at) ||
+		!strings.HasPrefix(st.LastError, "PITRArchiveUnsafeHistory: pdx ReplicationFilter") {
+		t.Fatalf("restarted replica before the descriptor: %+v", st)
+	}
+
+	if err := seedTestDescriptor(ctx, store, "binlogs"); err != nil {
+		t.Fatal(err)
+	}
+	restarted.scanAndArchive(ctx)
+	m, err := loadManifest(ctx, store, "binlogs", "pdx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.HistoryIntegrity == nil || m.HistoryIntegrity.Violation != pitrarchive.ViolationReplicationFilter || !m.HistoryIntegrity.At.Equal(at) {
+		t.Fatalf("persisted marker = %+v, want the original violation at %v", m.HistoryIntegrity, at)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, pendingMarkerFile)); !os.IsNotExist(err) {
+		t.Fatalf("pending marker file kept after it was persisted: %v", err)
+	}
+}
+
+// A refused session (here a descriptor of another group) does not stop the
+// D-34 check: the violation is reported in status and LastError alongside
+// the refusal, and persisted once the session verifies (A3).
+func TestHistoryIntegrityCheckedWhileSessionRefused(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	other := pitrarchive.Source{Namespace: "ns", Name: "other", UID: "00000000-0000-4000-8000-0000000000ff"}
+	putDescriptor(t, store, other, testArchiveDestination, pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}, nil)
+	role := &stubRoleChecker{violation: pitrarchive.ViolationBinlogFormat, detail: "binlog_format=MIXED"}
+	cfg := withTestArchive(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), BinlogIndex: "mysql-bin.index", StateDir: t.TempDir()}, store)
+	a := NewBinlogArchiver(cfg, "iad", role, store, slog.Default())
+	a.scanAndArchive(ctx)
+	st := a.Snapshot(ctx)
+	if st.HistoryIntegrity == nil || st.HistoryIntegrity.Violation != pitrarchive.ViolationBinlogFormat {
+		t.Fatalf("marker not surfaced while the session is refused: %+v", st)
+	}
+	if !strings.HasPrefix(st.LastError, "PITRArchiveUnsafeHistory: iad BinlogFormat") ||
+		!strings.Contains(st.LastError, string(pitrarchive.TokenArchiveForeign)) {
+		t.Fatalf("LastError = %q, want the violation and the refusal", st.LastError)
+	}
+
+	// The operator points the prefix back at this group's archive; the
+	// format is fixed meanwhile. The marker still lands in the manifest.
+	role.mu.Lock()
+	role.violation, role.detail = "", ""
+	role.mu.Unlock()
+	raw, _ := splitArchiveStore(store)
+	if err := raw.Delete(ctx, pitrarchive.DescriptorKey("binlogs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedTestDescriptor(ctx, store, "binlogs"); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewBinlogArchiver(cfg, "iad", role, store, slog.Default())
+	restarted.scanAndArchive(ctx)
+	m, err := loadManifest(ctx, store, "binlogs", "iad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.HistoryIntegrity == nil || m.HistoryIntegrity.Violation != pitrarchive.ViolationBinlogFormat {
+		t.Fatalf("manifest marker = %+v, want the violation seen while refused", m.HistoryIntegrity)
+	}
+}
+
+// An unreadable pending-marker file blocks uploads rather than being
+// treated as clean.
+func TestHistoryIntegrityUnreadablePendingMarkerBlocks(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	cfg := promotionFixture(t)
+	cfg.StateDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, pendingMarkerFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
+	a.scanAndArchive(ctx)
+	if st := a.Snapshot(ctx); !strings.Contains(st.LastError, "pending marker") || st.FilesArchived != 0 {
 		t.Fatalf("status = %+v", st)
 	}
 }

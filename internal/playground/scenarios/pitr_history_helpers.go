@@ -12,20 +12,34 @@ package scenarios
 //
 // Expected sets come from fences. A fence takes FLUSH TABLES WITH READ LOCK
 // on the active primary, which blocks every commit, then reads
-// @@gtid_executed and UTC_TIMESTAMP(6) (the target T) under the lock. Every
-// transaction committed before the lock is in the set and has an original
-// commit time before T; every transaction committed after UNLOCK TABLES has
-// one after T. So the expected history at T is exact even while the counter
-// app writes throughout. A flushing fence also runs FLUSH BINARY LOGS under
-// the lock, so the sealed file's exec set (prev ∪ gtids) is exactly the
-// fenced set: the latest-mode expectation.
+// @@gtid_executed and the server clock under the lock, and holds the lock
+// until the server clock has passed the next whole second, which is the
+// target T (stopDatetime admits no fraction, A-39). Every transaction
+// committed before the lock is in the set and has an original commit time
+// before T; every transaction committed after UNLOCK TABLES has one after T.
+// So the expected history at T is exact even while a writer commits
+// concurrently. A flushing fence also runs FLUSH BINARY LOGS under the lock,
+// so the sealed file's exec set (prev ∪ gtids) is exactly the fenced set:
+// the latest-mode expectation.
+//
+// The playground counter app only writes on request, so the scenarios drive
+// their own concurrent load: pitrWithWriter runs a background writer on the
+// era's primary across each era's marker, fence and witness marker. It is
+// stopped (its last insert committed) before every flush, failover, reclone,
+// scale-down and backup, so the archive boundaries the scenarios assert stay
+// exact: in particular nothing commits on b between s68 cycle 1's flush of b
+// and the reclone of a, which would otherwise be an unarchived tail.
 
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,13 +49,37 @@ import (
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
 )
 
-// pitrMicroLayout is the µs UTC form every PITR target is written in.
+// pitrMicroLayout is the µs UTC form the server clock is read in.
 const pitrMicroLayout = "2006-01-02T15:04:05.000000Z"
+
+// pitrTargetLayout is the whole-second UTC RFC 3339 form every PITR target
+// is written in: stopDatetime and the verification timestamp admit no
+// fraction (A-39).
+const pitrTargetLayout = time.RFC3339
+
+// pitrFenceTarget is the target T for a fence whose server clock read now
+// under the lock: the next whole second, strictly after now, so every
+// commit before the lock is before T.
+func pitrFenceTarget(now time.Time) time.Time {
+	return now.UTC().Truncate(time.Second).Add(time.Second)
+}
+
+// pitrServerNow reads a server's UTC clock at µs precision.
+func pitrServerNow(ctx context.Context, q interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}) (time.Time, error) {
+	var raw string
+	if err := q.QueryRowContext(ctx, "SELECT DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%fZ')").Scan(&raw); err != nil {
+		return time.Time{}, err
+	}
+	return time.Parse(pitrMicroLayout, raw)
+}
 
 // pitrScenarioMaxBinlogSize keeps the counter app from rotating a binlog by
 // size during a scenario: the scenarios decide exactly which files are
@@ -146,7 +184,8 @@ func pitrArchiveSummary(mfg *v1alpha1.MysqlFailoverGroup) string {
 	return fmt.Sprintf("{id=%q state=%s reason=%s mode=%s}", a.ArchiveID, a.State, a.Reason, a.EncryptionMode)
 }
 
-// pitrCreateMarkerTable creates <db>.marker on the active site.
+// pitrCreateMarkerTable creates <db>.marker and the background writer's
+// <db>.load on the active site.
 func pitrCreateMarkerTable(ctx context.Context, env *runner.Env, site, db string) error {
 	c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
 	if err != nil {
@@ -157,6 +196,8 @@ func pitrCreateMarkerTable(ctx context.Context, env *runner.Env, site, db string
 		"CREATE DATABASE IF NOT EXISTS " + db,
 		"DROP TABLE IF EXISTS " + db + ".marker",
 		"CREATE TABLE " + db + ".marker (id INT PRIMARY KEY, run_id VARCHAR(64), phase VARCHAR(32), site VARCHAR(32), created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6))",
+		"DROP TABLE IF EXISTS " + db + ".load",
+		"CREATE TABLE " + db + ".load (id BIGINT AUTO_INCREMENT PRIMARY KEY, site VARCHAR(32), created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6))",
 	} {
 		if _, err := c.Exec(ctx, q); err != nil {
 			return fmt.Errorf("marker schema %q: %w", q, err)
@@ -242,19 +283,28 @@ func pitrTakeFence(ctx context.Context, env *runner.Env, site string, flush bool
 	if readOnly != "0" {
 		return pitrFence{}, fmt.Errorf("fence on %s: the site is read-only; fences must run on the active primary", site)
 	}
-	// Keep T strictly after every fenced commit and strictly before every
-	// later one, whatever the clock granularity.
-	var t string
-	if err := conn.QueryRowContext(fenceCtx, "SELECT SLEEP(0.002), DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%fZ')").Scan(new(int), &t); err != nil {
-		return pitrFence{}, fmt.Errorf("read target time under lock on %s: %w", site, err)
+	// T is the next whole second after the server clock under the lock,
+	// and the lock is held until the clock has passed it: T is strictly
+	// after every fenced commit and strictly before every later one.
+	now, err := pitrServerNow(fenceCtx, conn)
+	if err != nil {
+		return pitrFence{}, fmt.Errorf("read the server clock under lock on %s: %w", site, err)
 	}
+	target := pitrFenceTarget(now)
+	wait := target.Sub(now) + 5*time.Millisecond
+	if _, err := conn.ExecContext(fenceCtx, fmt.Sprintf("DO SLEEP(%.6f)", wait.Seconds())); err != nil {
+		return pitrFence{}, err
+	}
+	if after, err := pitrServerNow(fenceCtx, conn); err != nil {
+		return pitrFence{}, fmt.Errorf("re-read the server clock under lock on %s: %w", site, err)
+	} else if !after.After(target) {
+		return pitrFence{}, fmt.Errorf("fence on %s: the server clock %s has not passed the target %s after the sleep", site, after.Format(pitrMicroLayout), target.Format(pitrTargetLayout))
+	}
+	t := target.Format(pitrTargetLayout)
 	if flush {
 		if _, err := conn.ExecContext(fenceCtx, "FLUSH BINARY LOGS"); err != nil {
 			return pitrFence{}, fmt.Errorf("FLUSH BINARY LOGS under lock on %s: %w", site, err)
 		}
-	}
-	if _, err := conn.ExecContext(fenceCtx, "DO SLEEP(0.002)"); err != nil {
-		return pitrFence{}, err
 	}
 	if _, err := conn.ExecContext(fenceCtx, "UNLOCK TABLES"); err != nil {
 		return pitrFence{}, fmt.Errorf("UNLOCK TABLES on %s: %w", site, err)
@@ -404,37 +454,15 @@ func pitrDumpBaseline(ctx context.Context, env *runner.Env, backupName string) (
 	if err != nil {
 		return "", err
 	}
-	bucket, prefix, ok, err := backupArtifactPrefix(b)
+	data, err := pitrReadDumpObject(ctx, env, b, "@.json")
 	if err != nil {
 		return "", err
-	}
-	if !ok {
-		return "", fmt.Errorf("MysqlBackup %s has no S3 artifact", backupName)
-	}
-	key := prefix + "@.json"
-	data, found, err := env.Chaos.ReadRustFSObject(ctx, bucket, key)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", key, err)
-	}
-	if !found {
-		return "", fmt.Errorf("dump metadata s3://%s/%s not found", bucket, key)
-	}
-	if b.Status.Encrypted {
-		pass, err := pitrRunPassphrase(ctx, env)
-		if err != nil {
-			return "", err
-		}
-		var plain bytes.Buffer
-		if _, err := backupcrypto.Decrypt(&plain, bytes.NewReader(data), pass); err != nil {
-			return "", fmt.Errorf("decrypt %s: %w", key, err)
-		}
-		data = plain.Bytes()
 	}
 	var meta struct {
 		GTIDExecuted string `json:"gtidExecuted"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", fmt.Errorf("decode %s: %w", key, err)
+		return "", fmt.Errorf("decode @.json of %s: %w", backupName, err)
 	}
 	return strings.ReplaceAll(strings.TrimSpace(meta.GTIDExecuted), "\n", ""), nil
 }
@@ -452,7 +480,8 @@ func pitrRunPassphrase(ctx context.Context, env *runner.Env) ([]byte, error) {
 	return backupcrypto.TrimPassphrase(raw), nil
 }
 
-// pitrBackup creates a MysqlBackup, waits for it, and records B.
+// pitrBackup creates a MysqlBackup, waits for it, records B, and waits
+// until targets are clear of it (pitrWaitPastBackup).
 func pitrBackup(ctx context.Context, env *runner.Env, scenarioID, key string) error {
 	name := pitrShortName(scenarioID, "backup-"+key) + "-" + backupRunStamp(env)
 	if err := ctxStash(ctx, env, "backup:"+key, name); err != nil {
@@ -476,7 +505,7 @@ func pitrBackup(ctx context.Context, env *runner.Env, scenarioID, key string) er
 		return err
 	}
 	env.Capture.Note(fmt.Sprintf("backup %s succeeded on site %s (completion=%v); dump gtidExecuted=%s", name, b.Status.SourceSite, b.Status.CompletionTime, baseline))
-	return nil
+	return pitrWaitPastBackup(ctx, env, key, b)
 }
 
 // pitrTrackCR records a CR this run created, for cleanup.
@@ -537,7 +566,11 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 		return fmt.Errorf("%s: pointInTime.outcome=%s, want %s", what, res.Outcome, e.Outcome)
 	}
 	if wantMode == v1alpha1.PointInTimeModeTimestamp {
-		if res.StopTime == nil || res.StopTime.UTC().Format(pitrMicroLayout) != e.Fence.T {
+		wantStop, err := time.Parse(pitrTargetLayout, e.Fence.T)
+		if err != nil {
+			return fmt.Errorf("%s: fence target %q: %w", what, e.Fence.T, err)
+		}
+		if res.StopTime == nil || !res.StopTime.UTC().Equal(wantStop) {
 			return fmt.Errorf("%s: pointInTime.stopTime=%v, want %s", what, res.StopTime, e.Fence.T)
 		}
 	}
@@ -601,6 +634,9 @@ func pitrVerifySpec(e pitrExpectation) *v1alpha1.PointInTimeVerificationSpec {
 // pitrVerify runs one MysqlBackupVerification of e.Backup and asserts the
 // certified result and the marker rows.
 func pitrVerify(ctx context.Context, env *runner.Env, scenarioID, db, label string, e pitrExpectation) error {
+	if err := pitrCheckTargetAfterBackup(env, e); err != nil {
+		return err
+	}
 	name := fmt.Sprintf("%s-%s", pitrShortName(scenarioID, label), backupRunStamp(env))
 	pitrTrackCR(ctx, env, "MysqlBackupVerification", name)
 	query := pitrMarkerQuery(db, ctxFetch(env, "backupRunStem"), e.Markers)
@@ -625,6 +661,9 @@ func pitrVerify(ctx context.Context, env *runner.Env, scenarioID, db, label stri
 // pitrVerifyRefused runs one verification and asserts it fails with token
 // as the Verified=False reason, and that the message contains every snippet.
 func pitrVerifyRefused(ctx context.Context, env *runner.Env, scenarioID, db, label string, e pitrExpectation, token string, snippets ...string) (*v1alpha1.MysqlBackupVerification, error) {
+	if err := pitrCheckTargetAfterBackup(env, e); err != nil {
+		return nil, err
+	}
 	name := fmt.Sprintf("%s-%s", pitrShortName(scenarioID, label), backupRunStamp(env))
 	pitrTrackCR(ctx, env, "MysqlBackupVerification", name)
 	query := pitrMarkerQuery(db, ctxFetch(env, "backupRunStem"), e.Markers)
@@ -682,10 +721,11 @@ func pitrWaitCooldown(ctx context.Context, env *runner.Env) error {
 }
 
 // pitrPlannedFailover runs a planned failover to target and waits for it
-// to succeed, for target's archiver to be primary on the active prefix,
-// and for target's promotion record to be confirmed after the request.
-// It returns the confirmed promotionRecordedAt.
-func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string) (time.Time, error) {
+// to succeed, for target's archiver to be primary on the active prefix and
+// archive, and for target's promotion record to be confirmed after the
+// request (pitrWaitPromotionRecorded; tolerateDivergence as there). It
+// returns the confirmed promotionRecordedAt.
+func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, tolerateDivergence bool) (time.Time, error) {
 	if err := pitrWaitCooldown(ctx, env); err != nil {
 		return time.Time{}, err
 	}
@@ -708,7 +748,7 @@ func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string) (t
 	}); err != nil {
 		return time.Time{}, err
 	}
-	recorded, err := pitrWaitPromotionRecorded(ctx, env, target, requested)
+	recorded, err := pitrWaitPromotionRecorded(ctx, env, target, requested, tolerateDivergence)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -717,15 +757,16 @@ func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string) (t
 }
 
 // pitrWaitPromotionRecorded waits until site's archiver is the primary on
-// the active prefix and reports a promotion record observed after
-// notBefore.
-func pitrWaitPromotionRecorded(ctx context.Context, env *runner.Env, site string, notBefore time.Time) (time.Time, error) {
+// the active prefix and this run's archive, and reports a promotion record
+// observed after notBefore (pitrPromotionReady). It does not wait for a
+// clean LastError when tolerateDivergence is set: after a lossy failover the
+// recloned old primary's audit reports its deliberately retained rows for
+// good, so waitForArchiverReady would never return.
+func pitrWaitPromotionRecorded(ctx context.Context, env *runner.Env, site string, notBefore time.Time, tolerateDivergence bool) (time.Time, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
 	prefix := ctxFetch(env, "backupPrefix") + "/binlogs"
-	if _, err := waitForArchiverReady(waitCtx, env, site, prefix); err != nil {
-		return time.Time{}, err
-	}
+	archiveID := ctxFetch(env, "archiveID")
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	var last string
@@ -739,9 +780,9 @@ func pitrWaitPromotionRecorded(ctx context.Context, env *runner.Env, site string
 			if err != nil {
 				last = err.Error()
 			} else {
-				last = fmt.Sprintf("promotionRecordedAt=%s %s", st.PromotionRecordedAt.Format(time.RFC3339Nano), archiverSummary(st))
-				// observedAt is truncated to µs; allow a second of slack.
-				if !st.PromotionRecordedAt.IsZero() && !st.PromotionRecordedAt.Before(notBefore.Add(-time.Second)) {
+				var ready bool
+				ready, last = pitrPromotionReady(st, prefix, archiveID, notBefore, tolerateDivergence)
+				if ready {
 					return st.PromotionRecordedAt, nil
 				}
 			}
@@ -860,4 +901,275 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 		},
 		Spec: *spec,
 	}, nil
+}
+
+// pitrWriterInterval is the background writer's pace: one committed insert
+// every 50 ms (about 20 transactions per second) on the era's primary.
+const pitrWriterInterval = 50 * time.Millisecond
+
+// pitrWriter commits rows into <db>.load on one site at pitrWriterInterval
+// until stopped. It is what makes the fences' exactness claim observable:
+// commits arrive before, during (blocked on the read lock) and after each
+// fence.
+type pitrWriter struct {
+	site    string
+	stop    chan struct{}
+	done    chan struct{}
+	commits atomic.Int64
+	err     error
+}
+
+// pitrStartWriter starts a writer on site. The connection is opened before
+// it returns, so a site that cannot be written fails the step here.
+func pitrStartWriter(ctx context.Context, env *runner.Env, site, db string) (*pitrWriter, error) {
+	c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
+	if err != nil {
+		return nil, fmt.Errorf("open %s for the background writer: %w", site, err)
+	}
+	w := &pitrWriter{site: site, stop: make(chan struct{}), done: make(chan struct{})}
+	query := "INSERT INTO " + quoteSQLIdentifier(db) + ".load (site) VALUES (?)"
+	go func() {
+		defer close(w.done)
+		defer c.Close()
+		tick := time.NewTicker(pitrWriterInterval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-w.stop:
+				return
+			case <-ctx.Done():
+				w.err = ctx.Err()
+				return
+			case <-tick.C:
+			}
+			// The statement runs on the scenario context, not on stop: a
+			// stop never cancels an insert in flight, so after Stop returns
+			// no commit of this writer can still land.
+			if _, err := c.Exec(ctx, query, site); err != nil {
+				w.err = fmt.Errorf("background writer on %s after %d commits: %w", site, w.commits.Load(), err)
+				return
+			}
+			w.commits.Add(1)
+		}
+	}()
+	return w, nil
+}
+
+// Stop waits for the writer's last insert to finish and returns how many
+// it committed, or its first error.
+func (w *pitrWriter) Stop() (int64, error) {
+	close(w.stop)
+	<-w.done
+	return w.commits.Load(), w.err
+}
+
+// pitrWithWriter runs fn while a background writer commits on site, then
+// stops the writer. A writer that failed, or committed nothing while fn ran,
+// fails the step: the window was meant to have concurrent writes.
+func pitrWithWriter(ctx context.Context, env *runner.Env, site, db string, fn func() error) error {
+	w, err := pitrStartWriter(ctx, env, site, db)
+	if err != nil {
+		return err
+	}
+	fnErr := fn()
+	n, werr := w.Stop()
+	if fnErr != nil {
+		return errors.Join(fnErr, werr)
+	}
+	if werr != nil {
+		return werr
+	}
+	if n == 0 {
+		return fmt.Errorf("the background writer on %s committed nothing during the window", site)
+	}
+	env.Capture.Note(fmt.Sprintf("background writer on %s committed %d transactions during the window", site, n))
+	return nil
+}
+
+// pitrReadDumpObject reads one object of a backup's dump from RustFS,
+// decrypting it with this run's passphrase when the dump is encrypted.
+func pitrReadDumpObject(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlBackup, name string) ([]byte, error) {
+	bucket, prefix, ok, err := backupArtifactPrefix(b)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("MysqlBackup %s has no S3 artifact", b.Name)
+	}
+	key := prefix + name
+	data, found, err := env.Chaos.ReadRustFSObject(ctx, bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", key, err)
+	}
+	if !found {
+		return nil, fmt.Errorf("dump object s3://%s/%s not found", bucket, key)
+	}
+	if b.Status.Encrypted {
+		pass, err := pitrRunPassphrase(ctx, env)
+		if err != nil {
+			return nil, err
+		}
+		var plain bytes.Buffer
+		if _, err := backupcrypto.Decrypt(&plain, bytes.NewReader(data), pass); err != nil {
+			return nil, fmt.Errorf("decrypt %s: %w", key, err)
+		}
+		data = plain.Bytes()
+	}
+	return data, nil
+}
+
+// pitrParseDumpEnd parses @.done.json's end, which the dump container
+// writes in UTC ("YYYY-MM-DD HH:MM:SS[.ffffff]"), as dump-meta does.
+func pitrParseDumpEnd(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{"2006-01-02 15:04:05.999999999", time.RFC3339Nano, "2006-01-02T15:04:05.999999999"} {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("dump end %q is not a timestamp", s)
+}
+
+// pitrBackupClearTime is the earliest instant after which a target is
+// clear of a backup (D-52): a whole second past both the dumped server's
+// clock when the dump finished and the dump's own end, rounded up to the
+// whole second. serverClock.end is read by the backup Job before it exits,
+// so serverSeen, a server clock reading taken after the backup reported
+// Succeeded, bounds it from above without reading the stamp.
+func pitrBackupClearTime(serverSeen, dumpEnd time.Time) time.Time {
+	end := dumpEnd.UTC()
+	if end.Truncate(time.Second) != end {
+		end = end.Truncate(time.Second).Add(time.Second)
+	}
+	clear := serverSeen.UTC()
+	if end.After(clear) {
+		clear = end
+	}
+	return clear.Add(time.Second)
+}
+
+// pitrWaitPastBackup waits until the server clock is past
+// pitrBackupClearTime for backup b, so every later fence's T satisfies
+// T ≥ serverClock.end + 1 s and T > ceil_s(@.done.json end), and stashes the
+// bound for pitrCheckTargetAfterBackup.
+func pitrWaitPastBackup(ctx context.Context, env *runner.Env, key string, b *v1alpha1.MysqlBackup) error {
+	raw, err := pitrReadDumpObject(ctx, env, b, "@.done.json")
+	if err != nil {
+		return err
+	}
+	var done struct {
+		End string `json:"end"`
+	}
+	if err := json.Unmarshal(raw, &done); err != nil {
+		return fmt.Errorf("decode @.done.json of %s: %w", b.Name, err)
+	}
+	dumpEnd, err := pitrParseDumpEnd(done.End)
+	if err != nil {
+		return fmt.Errorf("backup %s: %w", b.Name, err)
+	}
+	site := b.Status.SourceSite
+	if site == "" {
+		if site, _, err = activeAndReplica(ctx, env); err != nil {
+			return err
+		}
+	}
+	c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
+	if err != nil {
+		return fmt.Errorf("open %s for the backup clock: %w", site, err)
+	}
+	defer c.Close()
+	seen, err := pitrServerNow(ctx, c.DB)
+	if err != nil {
+		return fmt.Errorf("read the server clock on %s: %w", site, err)
+	}
+	clear := pitrBackupClearTime(seen, dumpEnd)
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		now, err := pitrServerNow(waitCtx, c.DB)
+		if err != nil {
+			return fmt.Errorf("read the server clock on %s: %w", site, err)
+		}
+		if now.After(clear) {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("server clock on %s did not pass %s: %w", site, clear.Format(pitrMicroLayout), waitCtx.Err())
+		case <-time.After(clear.Sub(now) + 10*time.Millisecond):
+		}
+	}
+	env.Capture.Note(fmt.Sprintf("backup %s: dump end %s, server clock after Succeeded %s; targets are clear after %s",
+		b.Name, dumpEnd.Format(pitrMicroLayout), seen.Format(pitrMicroLayout), clear.Format(pitrMicroLayout)))
+	return ctxStash(ctx, env, "backupClear:"+key, clear.Format(pitrMicroLayout))
+}
+
+// pitrCheckTargetAfterBackup fails a timestamp expectation whose T is not
+// past its backup's clear time: such a target would refuse
+// PITRBackupAfterTarget for a reason the scenario did not mean to test.
+func pitrCheckTargetAfterBackup(env *runner.Env, e pitrExpectation) error {
+	if e.Mode != "timestamp" {
+		return nil
+	}
+	raw := ctxFetch(env, "backupClear:"+e.Backup)
+	if raw == "" {
+		return fmt.Errorf("backup %q has no recorded clear time; take it with pitrBackup", e.Backup)
+	}
+	clear, err := time.Parse(pitrMicroLayout, raw)
+	if err != nil {
+		return err
+	}
+	t, err := time.Parse(pitrTargetLayout, e.Fence.T)
+	if err != nil {
+		return fmt.Errorf("target %q: %w", e.Fence.T, err)
+	}
+	if t.Before(clear) {
+		return fmt.Errorf("target %s is before backup %s's clear time %s (D-52); the scenario's fence came too early", e.Fence.T, e.Backup, raw)
+	}
+	return nil
+}
+
+// pitrPromotionReady reports whether an archiver status shows site's
+// promotion confirmed: primary on the active prefix and the expected
+// archive, scanned, with a promotion record observed no earlier than
+// notBefore (less a second: observedAt is truncated to µs). With
+// tolerateDivergence a LastError is accepted while the site's manifest
+// holds divergent or quarantined rows: the divergence audit keeps reporting
+// rows a lossy failover deliberately left behind (s70), and that error
+// never clears. Any other error, or one with no such rows, is not ready.
+func pitrPromotionReady(st *pgsidecar.ArchiverStatusResponse, prefix, archiveID string, notBefore time.Time, tolerateDivergence bool) (bool, string) {
+	if st == nil {
+		return false, "no status"
+	}
+	summary := fmt.Sprintf("promotionRecordedAt=%s divergentRows=%d quarantinedRows=%d %s", st.PromotionRecordedAt.Format(time.RFC3339Nano), st.DivergentRows, st.QuarantinedRows, archiverSummary(st))
+	if !st.Enabled || !st.Primary || st.LastScanAt.IsZero() || strings.Trim(st.ManifestPrefix, "/") != strings.Trim(prefix, "/") {
+		return false, summary
+	}
+	if st.Archive == nil || st.Archive.State != pitrarchive.StateVerified || (archiveID != "" && st.Archive.ArchiveID != archiveID) {
+		return false, summary + fmt.Sprintf(" archive=%+v want %s", st.Archive, archiveID)
+	}
+	if st.LastError != "" && !(tolerateDivergence && st.DivergentRows+st.QuarantinedRows > 0) {
+		return false, summary
+	}
+	if st.PromotionRecordedAt.IsZero() || st.PromotionRecordedAt.Before(notBefore.Add(-time.Second)) {
+		return false, summary
+	}
+	return true, summary
+}
+
+// gtidSetPattern matches one canonical GTID set in a message: comma-joined
+// <uuid>[:<tag>]:<n>[-<m>]... elements, as pitrplan's Set.String() prints.
+var gtidSetPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::[a-z_][a-z0-9_]{0,31})?(?::[0-9]+(?:-[0-9]+)?)+(?:,[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::[a-z_][a-z0-9_]{0,31})?(?::[0-9]+(?:-[0-9]+)?)+)*`)
+
+// refusalNamesExactly checks that msg prints a GTID set equal to want (as
+// sets): a refusal that names a superset, a subset or another interval of
+// the same source fails.
+func refusalNamesExactly(msg, want string) error {
+	found := gtidSetPattern.FindAllString(msg, -1)
+	for _, set := range found {
+		if eq, err := gtidSetsEqual(set, want); err == nil && eq {
+			return nil
+		}
+	}
+	return fmt.Errorf("the refusal names the sets %q, none equal to %s: %s", found, want, msg)
 }

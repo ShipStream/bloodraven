@@ -136,13 +136,12 @@ type PointInTimeVerificationSpec struct {
 	// +kubebuilder:validation:Enum=none;latest;timestamp
 	Mode string `json:"mode,omitempty"`
 
-	// Timestamp is the target instant, in the same forms as
-	// PointInTimeSpec.StopDatetime (at most six fractional digits, exact to
-	// the microsecond). Replay restores the history of the first archived
+	// Timestamp is the target instant, a whole second in the same forms as
+	// PointInTimeSpec.StopDatetime (fractional seconds are refused). Replay restores the history of the first archived
 	// transaction committed at or after it, cut just before that
 	// transaction. Required when Mode=timestamp; ignored otherwise.
 	// +optional
-	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})?$`
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
 	// +kubebuilder:validation:MaxLength=40
 	Timestamp string `json:"timestamp,omitempty"`
 
@@ -152,7 +151,7 @@ type PointInTimeVerificationSpec struct {
 	// target (or the archive head in latest mode) that is outside the
 	// target history must be listed.
 	// +optional
-	// +kubebuilder:validation:MaxLength=65536
+	// +kubebuilder:validation:MaxLength=131072
 	ExcludeGtids string `json:"excludeGtids,omitempty"`
 }
 

@@ -1,5 +1,10 @@
 package runner
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Profile selects which scenarios run-all executes. The three profiles
 // form a strict superset chain: smoke ⊂ release ⊂ full.
 //
@@ -134,4 +139,40 @@ func SelectForProfile(all []Scenario, p Profile) []Scenario {
 		}
 	}
 	return out
+}
+
+// SelectByIDs returns the scenarios named by ids (a comma-separated list),
+// in the listed order: the explicit list that `run-all --scenarios` runs,
+// with the same suite handling as a profile (ResetBeforeRunAll, the
+// suite-entry baseline wait, JUnit). An explicitly named scenario is
+// selected even when it is quarantined, as `run <id>` would run it. Blank
+// entries are skipped; an unknown or repeated ID, or an empty list, is an
+// error, so a typo in a CI list fails loudly instead of silently shrinking
+// the run.
+func SelectByIDs(all []Scenario, ids string) ([]Scenario, error) {
+	byID := make(map[string]Scenario, len(all))
+	for _, s := range all {
+		byID[s.ID] = s
+	}
+	seen := map[string]bool{}
+	var out []Scenario
+	for _, raw := range strings.Split(ids, ",") {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		s, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("unknown scenario %q", id)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("scenario %q is listed twice", id)
+		}
+		seen[id] = true
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no scenarios listed")
+	}
+	return out, nil
 }

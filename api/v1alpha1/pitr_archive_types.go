@@ -117,8 +117,9 @@ type PITRArchiveObservation struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	KeyRevision string `json:"keyRevision,omitempty"`
-	// ObservedTime is when the operator last derived this observation from
-	// sidecar reports.
+	// ObservedTime is when this observation last changed (the operator
+	// keeps the previous time while sidecar reports derive the same
+	// observation), so it is not a freshness heartbeat.
 	// +optional
 	ObservedTime *metav1.MicroTime `json:"observedTime,omitempty"`
 }
@@ -167,14 +168,14 @@ type ReplayedBinlogRef struct {
 
 // PointInTimeResult is the certified outcome of a point-in-time replay,
 // read from the replay's verdict. Restores (status.restore.pointInTime and
-// status.restoreInPlace.pointInTime), verifications (status.pointInTime)
-// and standby activations (status.activation.pointInTime) share it.
+// status.restoreInPlace.pointInTime) and verifications
+// (status.pointInTime) share it.
 type PointInTimeResult struct {
 	// Mode is the replay mode.
 	// +required
 	Mode PointInTimeMode `json:"mode"`
-	// StopTime is the requested target, exact to the microsecond. Unset in
-	// Latest mode.
+	// StopTime is the requested target (a whole second; commit times are
+	// compared against it to the microsecond). Unset in Latest mode.
 	// +optional
 	StopTime *metav1.MicroTime `json:"stopTime,omitempty"`
 	// Outcome is how the end point was reached.

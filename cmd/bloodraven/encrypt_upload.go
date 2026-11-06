@@ -128,6 +128,19 @@ func runEncryptUpload(args []string) {
 	// init container runs with in the encrypted flow.
 	meta := readDumpMeta(filepath.Join(srcDir, dumpMetaFileName))
 
+	// The stamp is finished after the upload, but its end is known now:
+	// refuse before uploading a dump whose stamp could not be finished,
+	// which would leave a complete-looking artifact that every PITR
+	// refuses (review B1).
+	stamped := os.Getenv(backupStampTemplateEnv) != ""
+	if stamped {
+		if _, err := parseStampEnd(meta.ServerClockEnd); err != nil {
+			logger.Error("finish backup stamp", "error", err)
+			_ = os.WriteFile("/dev/termination-log", []byte(compactTerminationMessage("backup stamp: "+err.Error())), 0644)
+			os.Exit(2)
+		}
+	}
+
 	printlnf("BLOODRAVEN_ENCRYPT_UPLOAD_START src=%s output=%s algorithm=%s",
 		srcDir, outputURL, algorithm)
 
@@ -168,7 +181,7 @@ func runEncryptUpload(args []string) {
 	// The upload is the encrypted Job's final step: only now has the dump
 	// finished, so serverClock.end, which the dump captured on the source
 	// right after mysqlsh succeeded, goes into the stamp (D-8, D-52).
-	if os.Getenv(backupStampTemplateEnv) != "" {
+	if stamped {
 		stamp, err := finishBackupStampFromEnv(ctx, meta.ServerClockEnd)
 		if err != nil {
 			logger.Error("finish backup stamp", "error", err)

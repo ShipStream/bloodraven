@@ -1736,6 +1736,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	superseded := false
 	var pitrArchivePrev *metav1.Condition
+	// persistedActiveFrom is the active site on the object the successful
+	// Update replaced, so the reissue warning fires exactly for the
+	// transition this write persisted (not one another writer persisted).
+	var persistedActiveFrom string
 	if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		// Re-fetch the CR to get the latest resource version.
 		var fresh v1alpha1.MysqlFailoverGroup
@@ -1743,6 +1747,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			return err
 		}
 		pitrArchivePrev = pitrArchiveCondition(&fresh.Status)
+		persistedActiveFrom = fresh.Status.ActiveSite
 		if fresh.Status.TopologyGeneration > snap.TopologyGeneration {
 			superseded = true
 			r.hydrateDeploymentGeneration(&fresh)
@@ -1846,6 +1851,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		r.recorder.Eventf(&freshFG, corev1.EventTypeWarning, "DivergentSitePromoted", "%s", divergentPromotionMessage(*snap.DivergentPromotion))
 	}
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
+	r.emitPITRArchiveReissueRisk(&freshFG, persistedActiveFrom)
 	r.emitOrderedUpdateStallEvent(&freshFG, existingStatus)
 	r.emitPITRArchiveEvents(&freshFG, pitrArchivePrev)
 	r.emitKeyringPromotionEvents(&freshFG, snap)
@@ -2016,7 +2022,6 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		r.recorder.Eventf(fg, corev1.EventTypeNormal, "FailoverExecuted",
 			"Failover completed: %s promoted as new primary", snap.LastFailoverTarget)
 	}
-	r.emitPITRArchiveReissueRisk(fg, existingStatus)
 
 	// Per-site recovery transitions: compare the previously persisted state
 	// against the new snapshot for each site independently, since multiple
@@ -2090,17 +2095,24 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 
 // eventReasonPITRArchiveReissueRisk warns that a promoted site may reissue
 // GTIDs the archive already holds (D-46).
-const eventReasonPITRArchiveReissueRisk = "PITRArchiveReissueRisk"
+const eventReasonPITRArchiveReissueRisk = "PITRArchiveReissueRiskDetected"
 
-// emitPITRArchiveReissueRisk fires when the active site changed (a
-// failover, a planned failover or a re-promotion) to a site whose last
-// archiver status reports divergent or quarantined rows in its own
-// manifest. Rotating server_uuid on reclone is FU-4: until then a site
-// recloned after a lossy failover reissues the lost GTIDs once promoted, and
-// the archive can only be restarted (D-46).
-func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFailoverGroup, existingStatus *v1alpha1.MysqlFailoverGroupStatus) {
+// emitPITRArchiveReissueRisk fires when a status write persisted an
+// active-site change (a failover, a planned failover or a re-promotion) to a
+// site whose last archiver status reports divergent or quarantined rows in
+// its own manifest. Rotating server_uuid on reclone is FU-4: until then a
+// site recloned after a lossy failover reissues the lost GTIDs once
+// promoted, and the archive can only be restarted (D-46).
+//
+// Two writers persist status.activeSite: the topology status writer and the
+// planned-failover reconciler (patchFailoverTrackingFields). Each calls this
+// with from = the active site on the object its successful Update replaced,
+// so a promotion fires exactly once whichever writer persists it first: the
+// optimistic-concurrency resourceVersion makes the persisted transition the
+// promotion's identity, and the other writer then sees from == to.
+func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFailoverGroup, from string) {
 	promoted := fg.Status.ActiveSite
-	if !pitrEnabled(fg) || promoted == "" || existingStatus.ActiveSite == "" || promoted == existingStatus.ActiveSite {
+	if r == nil || r.recorder == nil || !pitrEnabled(fg) || promoted == "" || from == "" || promoted == from {
 		return
 	}
 	rows, ok := r.pitrArchiveSuspectRows(FailoverGroupNamespacedName(fg), promoted)

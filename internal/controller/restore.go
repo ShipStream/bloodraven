@@ -1006,7 +1006,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if pitrReq != nil {
 			ds, err := pitrDumpSourceForBackup(fg, &ref, profile, passphraseRef)
 			if err != nil {
-				return nil, fmt.Errorf("%s.source.mysqlBackupRef: %w", fp, err)
+				return nil, wrapTokenFirst(fp+".source.mysqlBackupRef", err)
 			}
 			dumpSrc = &ds
 		}

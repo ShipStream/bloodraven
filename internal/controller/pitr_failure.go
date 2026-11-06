@@ -36,6 +36,17 @@ func pitrFailureReason(message string) string {
 	return ""
 }
 
+// wrapTokenFirst prefixes err with context while keeping a leading refusal
+// token first, so status messages always start "<token>: " (§7.1).
+func wrapTokenFirst(context string, err error) error {
+	if tok, ok := pitrarchive.ParseToken(err.Error()); ok {
+		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(err.Error()), string(tok)))
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, ":"))
+		return fmt.Errorf("%s: %s: %s", tok, context, rest)
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
+
 // latestJobPod returns the newest pod the Job owns, or nil when none is left.
 // Only an API error is transient; a missing pod is a final observation.
 func latestJobPod(ctx context.Context, c client.Client, job *batchv1.Job) (*corev1.Pod, error) {

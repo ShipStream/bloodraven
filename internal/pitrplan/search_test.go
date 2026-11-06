@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"testing"
 
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
@@ -310,4 +311,54 @@ func TestKeyHashClosedForm(t *testing.T) {
 	}
 	big := MustParseSet("A:1-9223372036854775806")
 	_ = h.set(big) // no overflow panic
+}
+
+// P7: a segment whose GTID set would exceed one mysqlbinlog argument is
+// split into consecutive ranges of the same file; the pieces chain (R4)
+// and replay exactly what the unsplit segment would.
+func TestSegmentSplitBoundsGTIDArgument(t *testing.T) {
+	build := func() *synth {
+		s := newSynth(t)
+		s.file("a", "a1", 101, "", "", run("A", 1, 200, 1, 101))
+		s.backup("A:1-20", "a", 101, 20.5)
+		return s
+	}
+	var excl []string
+	for n := 41; n <= 160; n += 2 {
+		excl = append(excl, "A:"+strconv.Itoa(n))
+	}
+	x := MustParseSet(joinComma(excl)).String()
+	whole, err := build().run(ModeTimestamp, 180.5, x, false)
+	if err != nil || len(whole.Segments) != 1 {
+		t.Fatalf("unsplit: %+v %v", whole, err)
+	}
+	old := maxSegmentGTIDBytes
+	maxSegmentGTIDBytes = 300
+	defer func() { maxSegmentGTIDBytes = old }()
+	p, err := build().run(ModeTimestamp, 180.5, x, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Segments) < 3 {
+		t.Fatalf("%d segments, want a split", len(p.Segments))
+	}
+	applied := p.Baseline
+	var count int64
+	for k, s := range p.Segments {
+		if s.File != 0 || len(s.GTIDs.String()) > 300 || s.Transactions != s.GTIDs.Count() {
+			t.Fatalf("segment %d: %+v", k, s)
+		}
+		if k > 0 && s.Start != p.Segments[k-1].End {
+			t.Fatalf("segment %d starts at %d, previous ends at %d", k, s.Start, p.Segments[k-1].End)
+		}
+		if !s.StartPredecessors.Subtract(p.Excluded).Equal(applied) {
+			t.Fatalf("R4: segment %d starts after %s, the server holds %s", k, s.StartPredecessors.Subtract(p.Excluded), applied)
+		}
+		applied = applied.Union(s.GTIDs)
+		count += s.Transactions
+	}
+	if !applied.Equal(p.Baseline.Union(whole.Replay)) || count != whole.ReplayedTransactions() || !p.OnHistoryExclusions.Equal(whole.OnHistoryExclusions) ||
+		p.NewestReplayedCommit() != whole.NewestReplayedCommit() {
+		t.Fatalf("split plan replays %s (%d), unsplit %s (%d); on-history %s vs %s", applied, count, whole.Replay, whole.ReplayedTransactions(), p.OnHistoryExclusions, whole.OnHistoryExclusions)
+	}
 }

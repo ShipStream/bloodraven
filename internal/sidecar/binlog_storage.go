@@ -392,6 +392,51 @@ func isS3NotFound(err error) bool {
 
 type pvcStore struct {
 	root string
+	// dirSync syncs a directory; nil means syncDir. Tests replace it to
+	// prove that every publish makes its directory entry durable.
+	dirSync func(dir string) error
+}
+
+// syncDirectory fsyncs dir so a rename, link, unlink or mkdir in it
+// survives a node crash. A file's own Sync covers only its data.
+func (p *pvcStore) syncDirectory(dir string) error {
+	if p.dirSync != nil {
+		return p.dirSync(dir)
+	}
+	return syncDir(dir)
+}
+
+// mkdirAllDurable creates dir and any missing parents, then fsyncs the
+// parent of every directory it created, so a new directory's entry is
+// durable before an object published in it is reported as saved.
+func (p *pvcStore) mkdirAllDurable(dir string) error {
+	var missing []string
+	for d := filepath.Clean(dir); ; {
+		if _, err := os.Stat(d); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		missing = append(missing, d)
+		parent := filepath.Dir(d)
+		if parent == d {
+			break
+		}
+		d = parent
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	// Deepest first: each created directory's entry lives in its parent.
+	for _, d := range missing {
+		if err := p.syncDirectory(filepath.Dir(d)); err != nil {
+			return fmt.Errorf("sync %s: %w", filepath.Dir(d), err)
+		}
+	}
+	return nil
 }
 
 // newPVCStore verifies that cfg.MountPath is a mounted volume and, for
@@ -453,8 +498,9 @@ func (p *pvcStore) Put(_ context.Context, key string, r io.Reader, _ int64) erro
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+	dir := filepath.Dir(dst)
+	if err := p.mkdirAllDurable(dir); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	// Write to a tmp file first then rename, so readers never see a
 	// partial manifest under concurrent access.
@@ -480,6 +526,12 @@ func (p *pvcStore) Put(_ context.Context, key string, r io.Reader, _ int64) erro
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename %s -> %s: %w", tmp, dst, err)
+	}
+	// The rename is durable only once the directory is synced; without it
+	// a node crash can bring back the previous manifest after a save (and
+	// a retention delete) was reported as done.
+	if err := p.syncDirectory(dir); err != nil {
+		return fmt.Errorf("sync %s: %w", dir, err)
 	}
 	return nil
 }
@@ -525,8 +577,14 @@ func (p *pvcStore) Delete(_ context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(dst); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("delete %s: %w", key, err)
+	}
+	if err := p.syncDirectory(filepath.Dir(dst)); err != nil {
+		return fmt.Errorf("sync %s: %w", filepath.Dir(dst), err)
 	}
 	return nil
 }

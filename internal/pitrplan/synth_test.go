@@ -101,7 +101,9 @@ func (s *synth) file(site, name string, fsrv uint32, prev, base string, groups .
 	s.idx[ref] = idx
 	baseSet := MustParseSet(base)
 	m := s.site(site)
-	m.Rows = append(m.Rows, Row{Site: site, Name: name, ID: ref.ID, Base: baseSet,
+	// Every synthetic file is opened at synthEpoch unless a test says
+	// otherwise (Row.Created).
+	m.Rows = append(m.Rows, Row{Site: site, Name: name, ID: ref.ID, Base: baseSet, Created: synthEpoch,
 		Hints: Hints{Known: true, Previous: idx.Previous.Union(baseSet), GTIDs: idx.GTIDs, Empty: idx.EmptyGTIDs, Min: idx.CommitMin, Max: idx.CommitMax}})
 	return ref
 }

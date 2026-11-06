@@ -92,8 +92,9 @@ func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
 			ProfileName:      profile,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Phase:        v1alpha1.BackupPhaseSucceeded,
-			GtidExecuted: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
+			Phase:            v1alpha1.BackupPhaseSucceeded,
+			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
+			FailoverGroupUID: "lion-uid",
 			// Completed before the fixed PITR targets the tests request.
 			CompletionTime: &metav1.Time{Time: time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC)},
 			Location:       "lion/nightly/name/",
@@ -535,8 +536,10 @@ func TestVerificationPITRRequest(t *testing.T) {
 		{name: "empty mode", in: &v1alpha1.PointInTimeVerificationSpec{}},
 		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: " a:1 "},
 			want: &pitrReplayRequest{Mode: "latest", ExcludeGtids: "a:1", Verification: true}},
-		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20 03:00:00.5+02:00"},
-			want: &pitrReplayRequest{Mode: "timestamp", Stop: "2026-04-20T01:00:00.500000Z", Verification: true}},
+		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20 03:00:00+02:00"},
+			want: &pitrReplayRequest{Mode: "timestamp", Stop: "2026-04-20T01:00:00.000000Z", Verification: true}},
+		// C2 / A-39: whole seconds only.
+		{name: "fraction refused", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20T01:00:00.5Z"}, wantErr: "PITRTargetInvalid"},
 		{name: "timestamp required", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp"}, wantErr: "PITRTargetInvalid"},
 		{name: "seven digits", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20T01:00:00.1234567Z"}, wantErr: "PITRTargetInvalid"},
 		{name: "unknown mode", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "head"}, wantErr: "not one of"},
@@ -746,23 +749,15 @@ func TestBuildVerificationJob_SanityCheck_RejectsMultiStatement(t *testing.T) {
 	}
 }
 
-func TestParseReplaySentinel_HappyPath(t *testing.T) {
-	mark, ok := parseReplaySentinel(
-		"BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=mysql-bin.000412 position=9183001 timestamp=2026-04-20T01:59:57Z")
-	if !ok {
-		t.Fatal("want ok")
+// B8: verify.sh no longer prints the replay-complete sentinel (replay
+// detail comes from the PITR termination verdict); the log-schema lists it
+// under breaking changes, and the reconciler no longer parses it.
+func TestVerifyReplaySentinelRemoved(t *testing.T) {
+	if strings.Contains(verifyScript, "BLOODRAVEN_VERIFY_REPLAY_COMPLETE") {
+		t.Fatal("verify.sh still prints the removed BLOODRAVEN_VERIFY_REPLAY_COMPLETE sentinel")
 	}
-	if mark.File != "mysql-bin.000412" || mark.Position != 9183001 {
-		t.Errorf("file/pos mismatch: %+v", mark)
-	}
-	if mark.Timestamp == nil || mark.Timestamp.Format(time.RFC3339) != "2026-04-20T01:59:57Z" {
-		t.Errorf("timestamp not parsed: %+v", mark.Timestamp)
-	}
-}
-
-func TestParseReplaySentinel_PrefixMismatch(t *testing.T) {
-	if mark, ok := parseReplaySentinel("hello world"); ok || mark != nil {
-		t.Errorf("non-sentinel line accepted: %+v", mark)
+	if _, ok := parseSanitySentinel("BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=mysql-bin.000412 position=1"); ok {
+		t.Fatal("the replay line parsed as a sanity sentinel")
 	}
 }
 
@@ -793,5 +788,29 @@ func TestParseSanitySentinel_WhitespaceEscape(t *testing.T) {
 	}
 	if !strings.Contains(res.Error, "Table 'x.y' doesn't exist") {
 		t.Errorf("error did not round-trip: %q", res.Error)
+	}
+}
+
+// B4 (§7.1): a PITR verification of a backup without dump identity is
+// refused at build time with PITRBackupIdentityUnknown, before dump-meta.
+func TestBuildVerificationJob_PITRRefusesBackupWithoutIdentity(t *testing.T) {
+	fg := verifyFG()
+	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	backup := successfulBackup("old", "lion", "nightly-s3")
+	backup.Status.FailoverGroupUID = ""
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			ProfileName:      "nightly-s3",
+			PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"},
+		},
+	}
+	_, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup,
+		CredsSecretName: "c", ScriptsConfigMapName: "s",
+	})
+	if err == nil || pitrFailureReason(err.Error()) != "PITRBackupIdentityUnknown" {
+		t.Fatalf("err = %v, want PITRBackupIdentityUnknown", err)
 	}
 }

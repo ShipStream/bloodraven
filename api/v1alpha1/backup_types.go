@@ -224,14 +224,14 @@ type PointInTimeSpec struct {
 	// +kubebuilder:default=false
 	AllowPartial bool `json:"allowPartial,omitempty"`
 
-	// StopDatetime is the target instant: RFC 3339 ("2026-04-15T09:30:00Z",
-	// "2026-04-15T09:30:00.123456+02:00") or "YYYY-MM-DD HH:MM:SS[.ffffff]",
-	// which is read as UTC. At most six fractional digits; the target is
-	// exact to the microsecond. Replay restores the history of the first
-	// archived transaction committed at or after it, cut just before that
-	// transaction. Required.
+	// StopDatetime is the target instant, a whole second: RFC 3339
+	// ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00") or
+	// "YYYY-MM-DD HH:MM:SS", which is read as UTC. Fractional seconds are
+	// refused. Replay restores the history of the first archived
+	// transaction committed at or after it (commit times are compared to
+	// the microsecond), cut just before that transaction. Required.
 	// +required
-	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})?$`
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
 	// +kubebuilder:validation:MaxLength=40
 	StopDatetime string `json:"stopDatetime"`
 
@@ -244,7 +244,7 @@ type PointInTimeSpec struct {
 	// TABLE) skips its GTID, but later row images may still carry its
 	// effects; such exclusions are reported as onHistoryExclusions.
 	// +optional
-	// +kubebuilder:validation:MaxLength=65536
+	// +kubebuilder:validation:MaxLength=131072
 	ExcludeGtids string `json:"excludeGtids,omitempty"`
 }
 
