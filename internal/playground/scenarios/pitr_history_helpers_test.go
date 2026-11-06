@@ -1,7 +1,9 @@
 package scenarios
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -608,5 +611,29 @@ func TestS70OperatorPollSync(t *testing.T) {
 	}
 	if s70OperatorPollFailing(&v1alpha1.PITRStatus{Message: "pdx: archiver status unavailable: x; iad: site iad name ..."}, "iad") {
 		t.Error("another site's failed poll, or iad's own lastError, is not iad's failed poll")
+	}
+}
+
+func TestPITRDecryptObjectReadsEncryptedManifest(t *testing.T) {
+	pass := []byte("s37-test-passphrase-0123456789abcdef")
+	var enc bytes.Buffer
+	if _, err := backupcrypto.Encrypt(&enc, strings.NewReader(`{"files":[{"name":"mysql-bin.000001"}]}`), pass); err != nil {
+		t.Fatal(err)
+	}
+	if !backupcrypto.LooksEncrypted(enc.Bytes()) {
+		t.Fatal("encrypted manifest not recognised as BRV1")
+	}
+	plain, err := pitrDecryptObject(enc.Bytes(), pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Files []pitrManifestRow `json:"files"`
+	}
+	if err := json.Unmarshal(plain, &m); err != nil || len(m.Files) != 1 || m.Files[0].Name != "mysql-bin.000001" {
+		t.Fatalf("decoded %+v err=%v", m, err)
+	}
+	if _, err := pitrDecryptObject(enc.Bytes(), []byte("wrong-passphrase-0123456789abcdef")); err == nil {
+		t.Fatal("wrong passphrase decrypted")
 	}
 }

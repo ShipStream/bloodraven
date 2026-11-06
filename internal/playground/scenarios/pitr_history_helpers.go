@@ -400,6 +400,17 @@ func pitrReadManifestRows(ctx context.Context, env *runner.Env, key string) ([]p
 	if !found {
 		return nil, nil
 	}
+	if backupcrypto.LooksEncrypted(data) {
+		// An encrypted archive's manifests are BRV1 streams under the
+		// archive passphrase, which is this run's profile passphrase.
+		pass, err := pitrRunPassphrase(ctx, env)
+		if err != nil {
+			return nil, fmt.Errorf("manifest %s is encrypted: %w", key, err)
+		}
+		if data, err = pitrDecryptObject(data, pass); err != nil {
+			return nil, fmt.Errorf("decrypt manifest %s: %w", key, err)
+		}
+	}
 	var m struct {
 		Files []pitrManifestRow `json:"files"`
 	}
@@ -1355,13 +1366,20 @@ func pitrReadDumpObject(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlB
 		if err != nil {
 			return nil, err
 		}
-		var plain bytes.Buffer
-		if _, err := backupcrypto.Decrypt(&plain, bytes.NewReader(data), pass); err != nil {
+		if data, err = pitrDecryptObject(data, pass); err != nil {
 			return nil, fmt.Errorf("decrypt %s: %w", key, err)
 		}
-		data = plain.Bytes()
 	}
 	return data, nil
+}
+
+// pitrDecryptObject decrypts one BRV1 object read straight from the store.
+func pitrDecryptObject(data, passphrase []byte) ([]byte, error) {
+	var plain bytes.Buffer
+	if _, err := backupcrypto.Decrypt(&plain, bytes.NewReader(data), passphrase); err != nil {
+		return nil, err
+	}
+	return plain.Bytes(), nil
 }
 
 // pitrParseDumpEnd parses @.done.json's end, which the dump container
