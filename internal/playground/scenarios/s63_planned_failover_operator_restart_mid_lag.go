@@ -63,6 +63,7 @@ const (
 	s63KeyBaselineRunID   = "s63.baselineRunID"
 	s63KeyBaselineLFT     = "s63.baselineLastFailoverTarget"
 	s63KeyRunID           = "s63.runID"
+	s63KeyClaimTime       = "s63.claimTime"
 	s63KeyAnnotatedAt     = "s63.annotatedAt"
 	s63KeyGeneralLog      = "s63.origGeneralLog"
 	s63KeyLogOutput       = "s63.origLogOutput"
@@ -99,8 +100,8 @@ func scenario63PlannedFailoverOperatorRestartMidLag() runner.Scenario {
 		Title: "Planned failover claim survives an operator restart mid WaitingForLag",
 		Hypothesis: "With the target's SQL thread stopped mid WaitingForLag, killing the operator leaves the run " +
 			"claimed: the replacement keeps the same runId in WaitingForLag, promotes nothing, and logs the " +
-			"cross-site deferral. Restarting the SQL thread ends the run Succeeded with one PlannedFailoverClaimGranted " +
-			"Event, one RESET REPLICA ALL on the target, and fence.sourceServerUUID and " +
+			"cross-site deferral. Restarting the SQL thread ends the run Succeeded with its claim granted once (claimTime unchanged, at most one PlannedFailoverClaimGranted " +
+			"Event), one RESET REPLICA ALL on the target, and fence.sourceServerUUID and " +
 			"promotion.targetServerUUID recorded.",
 		Risk:     "medium",
 		DocLink:  "playground/chaos-scenarios.md#63-planned-failover-operator-restart-mid-lag",
@@ -279,6 +280,12 @@ func s63HoldInWaitingForLag() runner.Step {
 			if err := ctxStash(ctx, env, s63KeyRunID, pf.RunID); err != nil {
 				return err
 			}
+			if pf.ClaimTime == nil {
+				return fmt.Errorf("run %s reached WaitingForLag without a claimTime", pf.RunID)
+			}
+			if err := ctxStash(ctx, env, s63KeyClaimTime, pf.ClaimTime.UTC().Format(time.RFC3339)); err != nil {
+				return err
+			}
 			client, err := env.MySQL(target)
 			if err != nil {
 				return fmt.Errorf("open target %s: %w", target, err)
@@ -287,39 +294,8 @@ func s63HoldInWaitingForLag() runner.Step {
 				return fmt.Errorf("stop target SQL thread: %w", err)
 			}
 			env.Capture.Note(fmt.Sprintf("run %s held in WaitingForLag; SQL thread stopped on %s", pf.RunID, target))
-			// Events are recorded asynchronously by the operator's broadcaster,
-			// so a kill right after the grant can drop the claim Event. Wait
-			// until it is visible before the operator is killed, so the
-			// exactly-one check after the restart tests re-granting, not the
-			// dying process's event buffer.
-			return s63WaitClaimEventVisible(ctx, env)
-		},
-	}
-}
-
-// s63WaitClaimEventVisible waits up to 30s for the run's claim Event.
-func s63WaitClaimEventVisible(ctx context.Context, env *runner.Env) error {
-	since, err := time.Parse(time.RFC3339Nano, ctxFetch(env, s63KeyAnnotatedAt))
-	if err != nil {
-		return fmt.Errorf("parse stash %s: %w", s63KeyAnnotatedAt, err)
-	}
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		events, err := env.Kube.RecentEvents(ctx, env.Namespace, 0)
-		if err == nil && countMFGEvents(events, env.FG, since, plannedClaimedEventReason) >= 1 {
 			return nil
-		}
-		if time.Now().After(deadline) {
-			if err != nil {
-				return fmt.Errorf("list Events while waiting for %s: %w", plannedClaimedEventReason, err)
-			}
-			return fmt.Errorf("no %s Event within 30s of the claim", plannedClaimedEventReason)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
+		},
 	}
 }
 
@@ -584,8 +560,25 @@ func s63VerifyRunRecords() runner.Step {
 func s63VerifyClaimedOnce() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "exactly one " + plannedClaimedEventReason + " Event for the run",
+		Name:  "the claim was granted once: claimTime unchanged across the restart, at most one " + plannedClaimedEventReason + " Event",
 		Do: func(ctx context.Context, env *runner.Env) error {
+			runID := ctxFetch(env, s63KeyRunID)
+			want := ctxFetch(env, s63KeyClaimTime)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
+			pf := mfg.Status.PlannedFailover
+			if pf == nil || pf.RunID != runID {
+				return fmt.Errorf("planned run %s no longer in status", runID)
+			}
+			// The durable proof: a replacement operator that re-granted the
+			// claim would have written a new claimTime. Events are not proof
+			// either way: they are best-effort, and late in a long run the
+			// recorder's per-object spam filter can drop them.
+			if pf.ClaimTime == nil || pf.ClaimTime.UTC().Format(time.RFC3339) != want {
+				return fmt.Errorf("run %s claimTime changed across the restart: %v, want %s", runID, pf.ClaimTime, want)
+			}
 			since, err := time.Parse(time.RFC3339Nano, ctxFetch(env, s63KeyAnnotatedAt))
 			if err != nil {
 				return fmt.Errorf("parse stash %s: %w", s63KeyAnnotatedAt, err)
@@ -596,11 +589,11 @@ func s63VerifyClaimedOnce() runner.Step {
 			}
 			// The run is the only one this scenario started, so the window
 			// since the annotation scopes the count to it. A second Event
-			// (or a recount of the first) would mean the replacement
-			// operator re-granted a claim the run already held.
-			n := countMFGEvents(events, env.FG, since, plannedClaimedEventReason)
-			if n != 1 {
-				return fmt.Errorf("%s Events since the annotation: %d, want exactly 1", plannedClaimedEventReason, n)
+			// (or a recount of the first) would mean a re-grant.
+			if n := countMFGEvents(events, env.FG, since, plannedClaimedEventReason); n > 1 {
+				return fmt.Errorf("%s Events since the annotation: %d, want at most 1", plannedClaimedEventReason, n)
+			} else if n == 0 {
+				env.Capture.Note(plannedClaimedEventReason + " Event not visible (best-effort Events); claimTime is the proof")
 			}
 			return nil
 		},
