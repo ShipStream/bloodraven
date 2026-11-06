@@ -26,19 +26,29 @@ type PlannedFailoverSpec struct {
 	// +optional
 	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
 
-	// OnCooldown controls how the state machine reacts when the
-	// anti-flap cooldown rejects a request at Validating:
-	//   - "reject" (default): stamp Failed{CooldownActive} and clear the
-	//     annotation. The admin must re-annotate after the cooldown
-	//     expires.
-	//   - "defer": stamp Deferred and keep the annotation in place;
-	//     the reconciler re-tries validation at cooldown expiry and
-	//     transitions to Draining automatically.
-	// +kubebuilder:default="reject"
-	// +kubebuilder:validation:Enum=reject;defer
+	// OnCooldown controls how admission reacts when the anti-flap
+	// cooldown is active:
+	//   - Reject (default): the run ends Failed{NotStarted, CooldownActive}
+	//     and the request annotation is removed. The admin re-annotates
+	//     after the cooldown expires.
+	//   - Defer: the run waits in Deferred{CooldownActive}, keeps the
+	//     annotation in place, and re-tries admission at cooldown expiry.
+	// +kubebuilder:default=Reject
 	// +optional
-	OnCooldown string `json:"onCooldown,omitempty"`
+	OnCooldown PlannedFailoverCooldownPolicy `json:"onCooldown,omitempty"`
 }
+
+// PlannedFailoverCooldownPolicy is spec.plannedFailover.onCooldown.
+// +kubebuilder:validation:Enum=Reject;Defer
+type PlannedFailoverCooldownPolicy string
+
+const (
+	// PlannedFailoverCooldownReject ends a request that meets an active
+	// cooldown Failed{NotStarted, CooldownActive}.
+	PlannedFailoverCooldownReject PlannedFailoverCooldownPolicy = "Reject"
+	// PlannedFailoverCooldownDefer defers it until the cooldown expires.
+	PlannedFailoverCooldownDefer PlannedFailoverCooldownPolicy = "Defer"
+)
 
 // PlannedFailoverPhase enumerates the discrete states a planned-failover
 // run progresses through. Each transition is one durable, conditioned
@@ -48,7 +58,7 @@ type PlannedFailoverPhase string
 
 const (
 	// PlannedFailoverPhaseAdmitting means the request was accepted and
-	// stamped with a runId, and the run is waiting for the topology
+	// stamped with a runID, and the run is waiting for the topology
 	// manager to grant its claim. The run owns nothing yet; it ends
 	// Failed{NotStarted, AdmissionTimeout} if no grant arrives before
 	// admission.deadline.
@@ -58,7 +68,7 @@ const (
 	// anti-flap cooldown is active with spec.plannedFailover.onCooldown
 	// "defer", or a deployment failover-hold lease stands. The run owns
 	// nothing; the annotation remains in place and admission is retried
-	// at admission.retryAfter.
+	// at admission.retryTime.
 	PlannedFailoverPhaseDeferred PlannedFailoverPhase = "Deferred"
 
 	// PlannedFailoverPhaseFencing means the claim is granted and the
@@ -138,7 +148,7 @@ const (
 
 // PlannedFailoverReason is a machine-readable reason for a run's outcome
 // (result.reason) or for a rollback (rollback.reason).
-// +kubebuilder:validation:Enum=InvalidAnnotation;UnknownSite;TargetNotPromotable;AlreadyActive;TargetUnhealthy;DivergentTarget;KeyringRotation;CooldownActive;ConcurrentOperation;InvalidFailoverState;Cancelled;AdmissionTimeout;AuthorityChanged;LegacyRunRefused;FenceFailed;SourceLost;SourceUnfenced;TargetLost;ForeignWritable;PeerUnreadable;LagTimeout;InvalidGTID;DragonflySyncTimeout;DragonflyPromotionFailed;TargetChanged;PromotionAborted;PromotionUnconfirmed;ManagerUnavailable;StatusStalled;ManualRecoveryPending;ExecuteFailed;InternalError
+// +kubebuilder:validation:Enum=InvalidAnnotation;UnknownSite;TargetNotPromotable;AlreadyActive;TargetUnhealthy;DivergentTarget;KeyringRotation;CooldownActive;ConcurrentOperation;InvalidFailoverState;Canceled;AdmissionTimeout;AuthorityChanged;LegacyRunRefused;FenceFailed;SourceLost;SourceUnfenced;TargetLost;ForeignWritable;PeerUnreadable;LagTimeout;InvalidGTID;DragonflySyncTimeout;DragonflyPromotionFailed;TargetChanged;PromotionAborted;PromotionUnconfirmed;ManagerUnavailable;StatusStalled;ManualRecoveryPending;ExecuteFailed;InternalError
 type PlannedFailoverReason string
 
 const (
@@ -152,7 +162,7 @@ const (
 	PlannedFailoverReasonCooldownActive           PlannedFailoverReason = "CooldownActive"
 	PlannedFailoverReasonConcurrentOperation      PlannedFailoverReason = "ConcurrentOperation"
 	PlannedFailoverReasonInvalidFailoverState     PlannedFailoverReason = "InvalidFailoverState"
-	PlannedFailoverReasonCancelled                PlannedFailoverReason = "Cancelled"
+	PlannedFailoverReasonCanceled                 PlannedFailoverReason = "Canceled"
 	PlannedFailoverReasonAdmissionTimeout         PlannedFailoverReason = "AdmissionTimeout"
 	PlannedFailoverReasonAuthorityChanged         PlannedFailoverReason = "AuthorityChanged"
 	PlannedFailoverReasonLegacyRunRefused         PlannedFailoverReason = "LegacyRunRefused"
@@ -256,12 +266,12 @@ const (
 )
 
 // PlannedFailoverStatus is the record of the most recent planned-failover
-// run. Every field belongs to the run named by runId. Target and Settings
-// are the run's parameters, copied from the consumed annotation and the
+// run. Every field belongs to the run named by runID. TargetSite and
+// Settings are the run's parameters, copied from the consumed annotation and the
 // spec at acceptance (the annotation is removed, so they are recorded here
 // rather than re-read). The operator writes this block conditioned on the
 // object's resourceVersion and refuses a non-terminal block without a
-// runId (a block written by an older operator).
+// runID (a block written by an older operator).
 //
 // The required fields use omitempty/omitzero so that an unchanged block
 // written by an older operator re-serializes byte for byte and stays
@@ -272,10 +282,10 @@ type PlannedFailoverStatus struct {
 	// of the run's claim.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	RunID string `json:"runId,omitempty"`
+	RunID string `json:"runID,omitempty"`
 
 	// Revision increments on every write the run makes. Settlement of an
-	// ambiguous write identifies a committed write by (runId, revision).
+	// ambiguous write identifies a committed write by (runID, revision).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	Revision int64 `json:"revision,omitempty"`
@@ -284,10 +294,10 @@ type PlannedFailoverStatus struct {
 	// +kubebuilder:validation:Required
 	Phase PlannedFailoverPhase `json:"phase,omitempty"`
 
-	// Target is the site the admin asked to promote.
+	// TargetSite is the site the admin asked to promote.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	Target string `json:"target,omitempty"`
+	TargetSite string `json:"targetSite,omitempty"`
 
 	// Settings are the run's effective timing settings, snapshotted at
 	// acceptance from the annotation overrides and the spec.
@@ -298,21 +308,21 @@ type PlannedFailoverStatus struct {
 	// +kubebuilder:validation:Required
 	StartTime metav1.Time `json:"startTime,omitzero"`
 
-	// Source is the site the topology manager named the unique writable
+	// SourceSite is the site the topology manager named the unique writable
 	// primary when it granted the claim. Empty until Fencing.
 	// +optional
-	Source string `json:"source,omitempty"`
+	SourceSite string `json:"sourceSite,omitempty"`
 
-	// ClaimedAt is when the claim was granted.
+	// ClaimTime is when the claim was granted.
 	// +optional
-	ClaimedAt *metav1.Time `json:"claimedAt,omitempty"`
+	ClaimTime *metav1.Time `json:"claimTime,omitempty"`
 
-	// ClaimBaseline is the durable failover record {lastFailover,
-	// lastFailoverTarget} at the grant (the newer of status and the
-	// out-of-band record), at second precision. A re-proof compares it by
-	// value.
+	// ClaimBaseline is the durable failover record at the grant (the newer
+	// of status and the out-of-band record): its time, at second
+	// precision, and its target. A re-proof compares those two by value;
+	// promotionGtidExecuted is not recorded here.
 	// +optional
-	ClaimBaseline *PlannedFailoverRecordRef `json:"claimBaseline,omitempty"`
+	ClaimBaseline *FailoverRecord `json:"claimBaseline,omitempty"`
 
 	// Admission records why a run that owns nothing yet is waiting or
 	// deferred, and its admission deadline.
@@ -358,15 +368,22 @@ type PlannedFailoverStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
-// PlannedFailoverRecordRef is a value copy of the failover record
-// {lastFailover, lastFailoverTarget}, stored at second precision (the
-// precision of both durable copies). Both are optional because a group may
-// have no failover history.
-type PlannedFailoverRecordRef struct {
+// FailoverRecord is the failover record {time, target,
+// promotionGtidExecuted}: when the last failover was recorded, the site it
+// promoted, and the promotion watermark. Every field is optional because a
+// group may have no failover history. A planned run's claimBaseline carries
+// time (at second precision, the precision of both durable copies) and
+// target only.
+type FailoverRecord struct {
+	// Time is when the failover was recorded.
 	// +optional
-	LastFailover *metav1.Time `json:"lastFailover,omitempty"`
+	Time *metav1.Time `json:"time,omitempty"`
+	// Target is the site the failover promoted.
 	// +optional
-	LastFailoverTarget string `json:"lastFailoverTarget,omitempty"`
+	Target string `json:"target,omitempty"`
+	// PromotionGtidExecuted is the promotion watermark.
+	// +optional
+	PromotionGtidExecuted string `json:"promotionGtidExecuted,omitempty"`
 }
 
 // PlannedFailoverSettings are a run's effective timing settings.
@@ -384,42 +401,41 @@ type PlannedFailoverSettings struct {
 type PlannedFailoverDragonflySettings struct {
 	// MaxSyncWait bounds WaitingForDragonflySync.
 	MaxSyncWait metav1.Duration `json:"maxSyncWait"`
-	// OnSyncTimeout mirrors spec.dragonfly.plannedFailover.onSyncTimeout
-	// (lower case like spec.plannedFailover.onCooldown).
-	// +kubebuilder:validation:Enum=proceed;fail
-	OnSyncTimeout string `json:"onSyncTimeout"`
+	// OnSyncTimeout is spec.dragonfly.plannedFailover.onSyncTimeout at
+	// acceptance.
+	OnSyncTimeout DragonflySyncTimeoutPolicy `json:"onSyncTimeout"`
 }
 
 // PlannedFailoverAdmission records an admission that owns nothing yet.
 type PlannedFailoverAdmission struct {
-	// Deadline is when an Admitting run that still has no claim ends
+	// DeadlineTime is when an Admitting run that still has no claim ends
 	// Failed{NotStarted, AdmissionTimeout}.
 	// +optional
-	Deadline *metav1.Time `json:"deadline,omitempty"`
+	DeadlineTime *metav1.Time `json:"deadlineTime,omitempty"`
 	// WaitReason is the latest reason the claim was not granted.
 	// +optional
 	WaitReason PlannedFailoverWaitReason `json:"waitReason,omitempty"`
 	// DeferReason is why the run is Deferred.
 	// +optional
 	DeferReason PlannedFailoverDeferReason `json:"deferReason,omitempty"`
-	// RetryAfter is the earliest time a Deferred run re-tries admission.
+	// RetryTime is the earliest time a Deferred run re-tries admission.
 	// +optional
-	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
+	RetryTime *metav1.Time `json:"retryTime,omitempty"`
 }
 
 // PlannedFailoverFenceRecord is the write-ahead record of the run's fence.
 type PlannedFailoverFenceRecord struct {
 	State      PlannedFailoverFenceState `json:"state"`
-	IntendedAt metav1.Time               `json:"intendedAt"`
+	IntentTime metav1.Time               `json:"intentTime"`
 	// SourceServerUUID is the source's @@server_uuid recorded by the grant's
 	// evidence probe and written with the intent. The fence is sent only to a
 	// server with this uuid, and a cross-process re-run attributes
 	// super_read_only=ON to this run only when the uuid still matches.
 	// +kubebuilder:validation:MinLength=1
 	SourceServerUUID string `json:"sourceServerUUID"`
-	// AppliedAt is set iff state is Applied.
+	// ApplyTime is set iff state is Applied.
 	// +optional
-	AppliedAt *metav1.Time `json:"appliedAt,omitempty"`
+	ApplyTime *metav1.Time `json:"applyTime,omitempty"`
 	// GtidSet is the fenced source set ("" is a valid empty set). It is also
 	// the promotion watermark.
 	// +optional
@@ -430,7 +446,7 @@ type PlannedFailoverFenceRecord struct {
 type PlannedFailoverDrainRecord struct {
 	StartTime metav1.Time `json:"startTime"`
 	// +optional
-	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 	// +optional
 	RemainingConnections *int32 `json:"remainingConnections,omitempty"`
 }
@@ -440,20 +456,20 @@ type PlannedFailoverDrainRecord struct {
 type PlannedFailoverLagWaitRecord struct {
 	StartTime metav1.Time `json:"startTime"`
 	// +optional
-	CaughtUpAt *metav1.Time `json:"caughtUpAt,omitempty"`
+	CatchUpTime *metav1.Time `json:"catchUpTime,omitempty"`
 }
 
 // PlannedFailoverPromotionRecord is the write-ahead record of the target's
 // promotion.
 type PlannedFailoverPromotionRecord struct {
 	State      PlannedFailoverPromotionState `json:"state"`
-	IntendedAt metav1.Time                   `json:"intendedAt"`
+	IntentTime metav1.Time                   `json:"intentTime"`
 	// TargetServerUUID is the target's @@server_uuid read on a pinned
 	// session before the first promotion statement.
 	// +kubebuilder:validation:MinLength=1
 	TargetServerUUID string `json:"targetServerUUID"`
 	// +optional
-	ConfirmedAt *metav1.Time `json:"confirmedAt,omitempty"`
+	ConfirmationTime *metav1.Time `json:"confirmationTime,omitempty"`
 	// Warnings are the warnings the run had collected when its promotion
 	// was confirmed. The Publishing record carries them so that the
 	// terminal record keeps them when another process writes it.
@@ -465,7 +481,7 @@ type PlannedFailoverPromotionRecord struct {
 // PlannedFailoverDNSRecord records publishing the promoted target.
 type PlannedFailoverDNSRecord struct {
 	State       PlannedFailoverDNSState `json:"state"`
-	AttemptedAt metav1.Time             `json:"attemptedAt"`
+	AttemptTime metav1.Time             `json:"attemptTime"`
 	// +optional
 	LastError string `json:"lastError,omitempty"`
 }
@@ -473,7 +489,7 @@ type PlannedFailoverDNSRecord struct {
 // PlannedFailoverRollbackRecord is the write-ahead record of a rollback.
 type PlannedFailoverRollbackRecord struct {
 	Reason     PlannedFailoverReason `json:"reason"`
-	IntendedAt metav1.Time           `json:"intendedAt"`
+	IntentTime metav1.Time           `json:"intentTime"`
 }
 
 // PlannedFailoverResult is a run's terminal result.
@@ -485,6 +501,41 @@ type PlannedFailoverResult struct {
 	// +optional
 	// +listType=set
 	Warnings []PlannedFailoverWarning `json:"warnings,omitempty"`
+}
+
+// PlannedFailoverHold is status.plannedFailoverHold: the automation hold of
+// a planned-failover run that ended ManualRecoveryRequired. The operator
+// writes it with that run's terminal record and removes it, with the
+// AutomaticFailoverHeld condition set False, when the hold is acknowledged.
+type PlannedFailoverHold struct {
+	// RunID is the held run; the acknowledgement names it.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	RunID string `json:"runID"`
+
+	// Reason is the run's result.reason.
+	// +optional
+	Reason PlannedFailoverReason `json:"reason,omitempty"`
+
+	// SourceSite is the run's sourceSite (empty if the run never fenced).
+	// +optional
+	SourceSite string `json:"sourceSite,omitempty"`
+
+	// TargetSite is the run's targetSite.
+	// +optional
+	TargetSite string `json:"targetSite,omitempty"`
+
+	// AmbiguousSites are the sites that were writable, or whose
+	// writability could not be read, when the run ended.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=16
+	AmbiguousSites []string `json:"ambiguousSites,omitempty"`
+
+	// HoldTime is when the hold was recorded.
+	// +kubebuilder:validation:Required
+	HoldTime metav1.Time `json:"holdTime"`
 }
 
 // DragonflyOffsetState says whether the source Dragonfly's replication
@@ -507,13 +558,19 @@ const (
 	DragonflyTakeoverFailed    DragonflyTakeoverState = "Failed"
 )
 
-// DragonflyTakeoverMethod is how the target Dragonfly was promoted.
-// +kubebuilder:validation:Enum=REPLTAKEOVER;Skipped
+// DragonflyTakeoverMethod is how the target Dragonfly was promoted. A
+// planned run writes only ReplTakeover today; ReplicaOfNoOne (the
+// emergency path's fallback) and Skipped are the rest of the closed set.
+// +kubebuilder:validation:Enum=ReplTakeover;ReplicaOfNoOne;Skipped
 type DragonflyTakeoverMethod string
 
 const (
-	DragonflyTakeoverMethodReplTakeover DragonflyTakeoverMethod = "REPLTAKEOVER"
-	DragonflyTakeoverMethodSkipped      DragonflyTakeoverMethod = "Skipped"
+	// DragonflyTakeoverMethodReplTakeover: REPLTAKEOVER on the target.
+	DragonflyTakeoverMethodReplTakeover DragonflyTakeoverMethod = "ReplTakeover"
+	// DragonflyTakeoverMethodReplicaOfNoOne: REPLICAOF NO ONE on the target.
+	DragonflyTakeoverMethodReplicaOfNoOne DragonflyTakeoverMethod = "ReplicaOfNoOne"
+	// DragonflyTakeoverMethodSkipped: no takeover was attempted.
+	DragonflyTakeoverMethodSkipped DragonflyTakeoverMethod = "Skipped"
 )
 
 // DragonflySessions says whether Dragonfly sessions survived the run.
@@ -539,9 +596,9 @@ const (
 // Dragonfly's takeover.
 type DragonflyTakeoverRecord struct {
 	State      DragonflyTakeoverState `json:"state"`
-	IntendedAt metav1.Time            `json:"intendedAt"`
+	IntentTime metav1.Time            `json:"intentTime"`
 	// +optional
-	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 	// +optional
 	Method DragonflyTakeoverMethod `json:"method,omitempty"`
 	// +optional

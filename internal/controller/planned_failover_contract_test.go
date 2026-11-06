@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -82,7 +83,7 @@ func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 	}
 
 	for phase, w := range table {
-		pf := &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, Source: "iad", Target: "pdx"}
+		pf := &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, SourceSite: "iad", TargetSite: "pdx"}
 		fg := contractGroup(pf, nil)
 		if got := plannedFailoverPending(fg); got != w.pending {
 			t.Errorf("%q: pending = %v, want %v", phase, got, w.pending)
@@ -116,7 +117,7 @@ func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 		}
 
 		// A marker naming another run, or a malformed one, does not.
-		for _, v := range []string{"run-2/SourceLeftFenced/StatusStalled", "run-1/Bogus/StatusStalled", "run-1"} {
+		for _, v := range []string{`{"schemaVersion":1,"runID":"run-2","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, `{"schemaVersion":1,"runID":"run-1","outcome":"Bogus","reason":"StatusStalled"}`, "run-1"} {
 			fg = contractGroup(pf, map[string]string{PlannedFailoverTerminalAnnotation: v})
 			if _, marked := plannedFailoverRun(fg); marked {
 				t.Errorf("%q: marker %q marks the run", phase, v)
@@ -169,20 +170,28 @@ func TestTerminalMarker_RoundTrip(t *testing.T) {
 		{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled},
 		{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1alpha1.PlannedFailoverReasonForeignWritable},
 	} {
-		got, ok := parseTerminalMarker(m.String())
+		got, ok := ParseTerminalMarker(m.String())
 		if !ok || got != m {
-			t.Errorf("parseTerminalMarker(%q) = %+v, %v; want %+v", m.String(), got, ok, m)
+			t.Errorf("ParseTerminalMarker(%q) = %+v, %v; want %+v", m.String(), got, ok, m)
 		}
 	}
-	if s := (TerminalMarker{RunID: "r", Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}).String(); s != "r/NotStarted/StatusStalled" {
+	if s := (TerminalMarker{RunID: "r", Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}).String(); s != `{"schemaVersion":1,"runID":"r","outcome":"NotStarted","reason":"StatusStalled"}` {
 		t.Errorf("String() = %q", s)
 	}
 	for _, bad := range []string{
-		"", "run-1", "run-1/Succeeded", "/Succeeded/", "run-1/Unknown/", "run-1/Succeeded/NotAReason",
+		"", "run-1", "run-1/Succeeded", "/Succeeded/", "run-1/Unknown/", `{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded","reason":"NotAReason"}`,
 		"run-1/Succeeded//extra", "run/1/Succeeded/",
+		// The pre-JSON form, a future schema version, an unknown member,
+		// an empty run, trailing data.
+		"run-1/Succeeded/",
+		`{"schemaVersion":2,"runID":"run-1","outcome":"Succeeded"}`,
+		`{"runID":"run-1","outcome":"Succeeded"}`,
+		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded","extra":true}`,
+		`{"schemaVersion":1,"runID":"","outcome":"Succeeded"}`,
+		`{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"} {}`,
 	} {
-		if m, ok := parseTerminalMarker(bad); ok {
-			t.Errorf("parseTerminalMarker(%q) = %+v, accepted", bad, m)
+		if m, ok := ParseTerminalMarker(bad); ok {
+			t.Errorf("ParseTerminalMarker(%q) = %+v, accepted", bad, m)
 		}
 	}
 }
@@ -224,7 +233,7 @@ func TestSameFailoverRecord_NanosecondClock(t *testing.T) {
 		!sameFailoverRecord(FailoverRecordRef{}, failoverRecordRefFromAPI(FailoverRecordRef{}.toAPI())) {
 		t.Error("no history does not round-trip as no history")
 	}
-	if (FailoverRecordRef{}).toAPI().LastFailover != nil {
+	if (FailoverRecordRef{}).toAPI().Time != nil {
 		t.Error("a zero time is persisted")
 	}
 }
@@ -252,34 +261,54 @@ func TestDurableFailoverRecord(t *testing.T) {
 }
 
 func TestPlannedHoldFrom(t *testing.T) {
-	heldCondition := func(msg string) metav1.Condition {
-		return metav1.Condition{Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue,
-			Reason: v1alpha1.ReasonPlannedFailoverManualRecovery, Message: msg}
+	hold := v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+		SourceSite: "iad", TargetSite: "pdx", AmbiguousSites: []string{"iad", "pdx"}, HoldTime: metav1.Now()}
+	held := func() v1alpha1.MysqlFailoverGroupStatus {
+		var st v1alpha1.MysqlFailoverGroupStatus
+		setPlannedHold(&st, hold, 7)
+		return st
 	}
-	msg := plannedHoldConditionMessage("run-1", v1alpha1.PlannedFailoverReasonForeignWritable, []string{"iad", "pdx"})
-	if !strings.Contains(msg, AckPlannedFailoverHoldAnnotation+"=run-1") || !strings.Contains(msg, "iad, pdx") {
-		t.Fatalf("hold message %q does not name the ack and the sites", msg)
+	acknowledged := func() v1alpha1.MysqlFailoverGroupStatus {
+		st := held()
+		if !ClearPlannedHold(&st, "run-1", 8, time.Now()) {
+			t.Fatal("ClearPlannedHold did not clear the hold it names")
+		}
+		return st
+	}
+	st := held()
+	c := apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonPlannedFailoverManualRecoveryRequired ||
+		c.ObservedGeneration != 7 || !strings.Contains(c.Message, AcknowledgePlannedFailoverHoldAnnotation+"=run-1") ||
+		!strings.Contains(c.Message, "iad, pdx") {
+		t.Fatalf("hold condition = %+v, want True/%s at generation 7 naming the ack and the sites", c,
+			v1alpha1.ReasonPlannedFailoverManualRecoveryRequired)
+	}
+	if ClearPlannedHold(&st, "run-2", 8, time.Now()) || st.PlannedFailoverHold == nil {
+		t.Fatal("ClearPlannedHold cleared a hold of another run")
+	}
+	st = acknowledged()
+	c = apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
+	if st.PlannedFailoverHold != nil || c == nil || c.Status != metav1.ConditionFalse ||
+		c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged || c.ObservedGeneration != 8 {
+		t.Fatalf("acknowledged hold = %+v, condition %+v; want no hold and False/%s at generation 8",
+			st.PlannedFailoverHold, c, v1alpha1.ReasonPlannedFailoverHoldAcknowledged)
 	}
 	holdMarker := TerminalMarker{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
 		Reason: v1alpha1.PlannedFailoverReasonExecuteFailed}
 
 	cases := []struct {
 		name        string
-		conditions  []metav1.Condition
+		status      v1alpha1.MysqlFailoverGroupStatus
 		annotations map[string]string
 		want        *PlannedHold
 	}{
 		{name: "nothing"},
 		{
-			name:       "condition",
-			conditions: []metav1.Condition{heldCondition(msg)},
-			want:       &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromCondition: true},
+			name:   "status hold",
+			status: held(),
+			want:   &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromStatus: true},
 		},
-		{
-			name: "condition False",
-			conditions: []metav1.Condition{{Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionFalse,
-				Reason: "Acknowledged", Message: msg}},
-		},
+		{name: "acknowledged (condition False)", status: acknowledged()},
 		{
 			name:        "marker",
 			annotations: map[string]string{PlannedFailoverTerminalAnnotation: holdMarker.String()},
@@ -292,38 +321,40 @@ func TestPlannedHoldFrom(t *testing.T) {
 		},
 		{
 			name:        "both",
-			conditions:  []metav1.Condition{heldCondition(msg)},
+			status:      held(),
 			annotations: map[string]string{PlannedFailoverTerminalAnnotation: holdMarker.String()},
-			want:        &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromCondition: true, FromMarker: true},
+			want:        &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromStatus: true, FromMarker: true},
 		},
 		{
-			name:       "both, different runs",
-			conditions: []metav1.Condition{heldCondition(msg)},
+			name:   "both, different runs",
+			status: held(),
 			annotations: map[string]string{PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-2",
 				Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}.String()},
-			want: &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromCondition: true},
+			want: &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, FromStatus: true},
 		},
 		{
-			name:       "condition naming no run still holds",
-			conditions: []metav1.Condition{heldCondition("edited by hand")},
-			want:       &PlannedHold{FromCondition: true},
+			name: "True condition without the status hold still holds, naming no run",
+			status: v1alpha1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{Type: v1alpha1.ConditionAutomaticFailoverHeld,
+				Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPlannedFailoverManualRecoveryRequired, Message: "edited by hand"}}},
+			want: &PlannedHold{FromStatus: true},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := contractGroup(nil, tc.annotations)
-			fg.Status.Conditions = tc.conditions
-			got := plannedHoldFrom(fg)
+			fg.Status.Conditions = tc.status.Conditions
+			fg.Status.PlannedFailoverHold = tc.status.PlannedFailoverHold
+			got := PlannedHoldFrom(fg)
 			switch {
 			case tc.want == nil && got != nil:
-				t.Fatalf("plannedHoldFrom = %+v, want nil", *got)
+				t.Fatalf("PlannedHoldFrom = %+v, want nil", *got)
 			case tc.want != nil && (got == nil || *got != *tc.want):
-				t.Fatalf("plannedHoldFrom = %+v, want %+v", got, *tc.want)
+				t.Fatalf("PlannedHoldFrom = %+v, want %+v", got, *tc.want)
 			}
 		})
 	}
-	if plannedHoldFrom(nil) != nil {
-		t.Fatal("plannedHoldFrom(nil) is a hold")
+	if PlannedHoldFrom(nil) != nil {
+		t.Fatal("PlannedHoldFrom(nil) is a hold")
 	}
 }
 
@@ -378,5 +409,34 @@ func TestRunnerPlannedClaim_NoManager(t *testing.T) {
 	}
 	if r.ReleasePlannedFailoverClaim(nn, "run-2", ReleaseTerminal) || !r.ReleasePlannedFailoverClaim(nn, "run-1", ReleaseTerminal) {
 		t.Error("the slot was released by another run, or not by its own")
+	}
+}
+
+// The operator-written annotation values follow A-78: no ':' inside an
+// instant, and every value of the deadline starts in the value charset.
+func TestPlannedAnnotationValueFormats(t *testing.T) {
+	at := time.Date(2026, 11, 4, 10, 0, 0, 987654321, time.FixedZone("x", 3600))
+	v := FormatDeadlineStart("6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f", at)
+	if v != "6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f:since=20261104T090000Z" {
+		t.Fatalf("FormatDeadlineStart = %q", v)
+	}
+	id, got, ok := ParseDeadlineStart(v)
+	if !ok || id != "6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f" || !got.Equal(at.Truncate(time.Second)) {
+		t.Fatalf("ParseDeadlineStart(%q) = %q %v %v", v, id, got, ok)
+	}
+	for _, bad := range []string{"", "run-1", "run-1/2026-11-04T09:00:00Z", ":since=20261104T090000Z",
+		"run-1:until=20261104T090000Z", "run-1:since=2026-11-04T09:00:00Z"} {
+		if _, _, ok := ParseDeadlineStart(bad); ok {
+			t.Errorf("ParseDeadlineStart(%q) accepted", bad)
+		}
+	}
+	valueRE := regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
+	_, pair, _ := strings.Cut(v, ":")
+	if _, ts, _ := strings.Cut(pair, "="); !valueRE.MatchString(ts) {
+		t.Errorf("deadline instant %q is outside the A-78 value charset", ts)
+	}
+	fence := FormatStatusFenceValue(at)
+	if fence != "20261104T090000.987654321Z" || !valueRE.MatchString(fence) {
+		t.Errorf("FormatStatusFenceValue = %q", fence)
 	}
 }

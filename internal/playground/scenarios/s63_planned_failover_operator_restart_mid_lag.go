@@ -41,7 +41,7 @@ const (
 
 	// plannedClaimedEventReason is the Event the run emits once, when the
 	// topology manager grants its claim (spec §11 Events).
-	plannedClaimedEventReason = "PlannedFailoverClaimed"
+	plannedClaimedEventReason = "PlannedFailoverClaimGranted"
 	// plannedDeferredCrossSiteLog is the topology manager's line for a
 	// cross-site action deferred while a planned failover holds its claim.
 	plannedDeferredCrossSiteLog = "cross-site action deferred: planned failover in progress"
@@ -88,7 +88,7 @@ const (
 // target still read-only (no emergency promotion of a fenced group's only
 // candidate), the source still fenced, and its topology manager logging the
 // cross-site deferral. Restarting the SQL thread must then complete the same
-// run with exactly one PlannedFailoverClaimed Event, exactly one RESET
+// run with exactly one PlannedFailoverClaimGranted Event, exactly one RESET
 // REPLICA ALL on the target (counted from the MySQL general log, which
 // catches a recovery path that re-pointed the stopped replica behind the
 // claim's back) and both server-uuid records present and matching the live
@@ -99,7 +99,7 @@ func scenario63PlannedFailoverOperatorRestartMidLag() runner.Scenario {
 		Title: "Planned failover claim survives an operator restart mid WaitingForLag",
 		Hypothesis: "With the target's SQL thread stopped mid WaitingForLag, killing the operator leaves the run " +
 			"claimed: the replacement keeps the same runId in WaitingForLag, promotes nothing, and logs the " +
-			"cross-site deferral. Restarting the SQL thread ends the run Succeeded with one PlannedFailoverClaimed " +
+			"cross-site deferral. Restarting the SQL thread ends the run Succeeded with one PlannedFailoverClaimGranted " +
 			"Event, one RESET REPLICA ALL on the target, and fence.sourceServerUUID and " +
 			"promotion.targetServerUUID recorded.",
 		Risk:     "medium",
@@ -273,8 +273,8 @@ func s63HoldInWaitingForLag() runner.Step {
 				return err
 			}
 			pf := mfg.Status.PlannedFailover
-			if pf.Target != target {
-				return fmt.Errorf("planned run target=%q, want %q", pf.Target, target)
+			if pf.TargetSite != target {
+				return fmt.Errorf("planned run target=%q, want %q", pf.TargetSite, target)
 			}
 			if err := ctxStash(ctx, env, s63KeyRunID, pf.RunID); err != nil {
 				return err
@@ -420,7 +420,7 @@ func s63HoldViolation(mfg *v1alpha1.MysqlFailoverGroup, runID, target, baselineL
 		return fmt.Errorf("status.plannedFailover vanished while run %s was held", runID)
 	}
 	if pf.RunID != runID {
-		return fmt.Errorf("planned run identity changed across the restart: runId=%q, want %q (%s)", pf.RunID, runID, plannedRunSummary(pf))
+		return fmt.Errorf("planned run identity changed across the restart: runID=%q, want %q (%s)", pf.RunID, runID, plannedRunSummary(pf))
 	}
 	if pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForLag {
 		return fmt.Errorf("planned run %s left WaitingForLag while the target applier was stopped: %s", runID, plannedRunSummary(pf))
@@ -477,7 +477,7 @@ func s63ObserveSucceeded() runner.Step {
 					}
 					msg := plannedRunSummary(pf)
 					if pf.RunID != runID {
-						return false, msg, fmt.Errorf("planned run replaced before it finished: runId=%q, want %q", pf.RunID, runID)
+						return false, msg, fmt.Errorf("planned run replaced before it finished: runID=%q, want %q", pf.RunID, runID)
 					}
 					if pf.Result == nil {
 						if plannedTerminal(pf.Phase) {
@@ -488,8 +488,8 @@ func s63ObserveSucceeded() runner.Step {
 					if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded || pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
 						return false, msg, fmt.Errorf("planned run ended %s/%s, want Succeeded: %s", pf.Result.Outcome, pf.Result.Reason, pf.Message)
 					}
-					if pf.Target != target {
-						return false, msg, fmt.Errorf("planned run succeeded with target=%q, want %q", pf.Target, target)
+					if pf.TargetSite != target {
+						return false, msg, fmt.Errorf("planned run succeeded with target=%q, want %q", pf.TargetSite, target)
 					}
 					return true, msg, nil
 				})
@@ -516,8 +516,8 @@ func s63VerifyRunRecords() runner.Step {
 			if pf == nil || pf.RunID != ctxFetch(env, s63KeyRunID) {
 				return fmt.Errorf("planned run %s no longer in status", ctxFetch(env, s63KeyRunID))
 			}
-			if pf.Source != source {
-				return fmt.Errorf("plannedFailover.source=%q, want %q", pf.Source, source)
+			if pf.SourceSite != source {
+				return fmt.Errorf("plannedFailover.sourceSite=%q, want %q", pf.SourceSite, source)
 			}
 			if pf.Fence == nil || pf.Fence.SourceServerUUID == "" {
 				return fmt.Errorf("plannedFailover.fence.sourceServerUUID missing: fence=%+v", pf.Fence)
@@ -752,7 +752,7 @@ func plannedOwnsSites(phase v1alpha1.PlannedFailoverPhase) bool {
 // plannedRunSummary is a one-line description of a run for wait messages.
 func plannedRunSummary(pf *v1alpha1.PlannedFailoverStatus) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "runId=%q revision=%d phase=%q target=%q source=%q", pf.RunID, pf.Revision, pf.Phase, pf.Target, pf.Source)
+	fmt.Fprintf(&b, "runID=%q revision=%d phase=%q targetSite=%q sourceSite=%q", pf.RunID, pf.Revision, pf.Phase, pf.TargetSite, pf.SourceSite)
 	if a := pf.Admission; a != nil {
 		fmt.Fprintf(&b, " admission{wait=%q defer=%q}", a.WaitReason, a.DeferReason)
 	}

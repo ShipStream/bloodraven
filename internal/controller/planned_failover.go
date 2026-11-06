@@ -13,6 +13,7 @@ package controller
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -41,15 +42,6 @@ const (
 	// defaultPlannedFailoverDrainTimeout is the fallback drainTimeout
 	// when spec.plannedFailover.drainTimeout is not supplied.
 	defaultPlannedFailoverDrainTimeout = 30 * time.Second
-
-	// PlannedFailoverOnCooldownReject is the default behaviour: a
-	// cooldown at admission ends the run Failed{NotStarted, CooldownActive}.
-	PlannedFailoverOnCooldownReject = "reject"
-
-	// PlannedFailoverOnCooldownDefer keeps the annotation in place and
-	// re-tries validation at cooldown expiry; the run waits in the
-	// Deferred phase in the interim.
-	PlannedFailoverOnCooldownDefer = "defer"
 )
 
 // PlannedFailoverRequest is the parsed form of the
@@ -66,16 +58,24 @@ type PlannedFailoverRequest struct {
 	MaxLagWait time.Duration
 }
 
+// annotationValueRE is A-78's value charset for one-shot action
+// annotations: a value never contains ':' or '=', so the pair split is
+// unambiguous.
+var annotationValueRE = regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
+
 // parsePlannedFailoverAnnotation parses a planned-failover annotation
-// value. The grammar is:
+// value. The grammar is A-78's <subject>(:<key>=<value>)*:
 //
 //	<siteName>
-//	<siteName>:<key>=<value>[:<key>=<value>...]
+//	<siteName>:maxLagWait=<duration>
 //
-// Whitespace around tokens is trimmed. Unknown keys are rejected so
-// typos do not silently accept a request with default knobs. Returns a
-// PlannedFailoverRequest on success; an error on unknown keys or
-// malformed values.
+// The subject is the target site. Each pair splits at its first '=', its
+// value matches ^[A-Za-z0-9._/+-]+$, and a key appears at most once.
+// Whitespace around the whole value is trimmed (a shell heredoc's trailing
+// newline). Unknown keys are rejected so typos do not silently accept a
+// request with default knobs. Returns a PlannedFailoverRequest on success;
+// an error on an empty pair, an unknown or repeated key, or a malformed
+// value.
 func parsePlannedFailoverAnnotation(raw string) (PlannedFailoverRequest, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
@@ -84,20 +84,28 @@ func parsePlannedFailoverAnnotation(raw string) (PlannedFailoverRequest, error) 
 	}
 
 	parts := strings.Split(v, ":")
-	req := PlannedFailoverRequest{Site: strings.TrimSpace(parts[0])}
+	req := PlannedFailoverRequest{Site: parts[0]}
+	if req.Site != "" && !annotationValueRE.MatchString(req.Site) {
+		return PlannedFailoverRequest{}, fmt.Errorf(
+			"planned-failover annotation: site %q contains characters outside [A-Za-z0-9._/+-]", req.Site)
+	}
 
+	seen := map[string]bool{}
 	for _, kv := range parts[1:] {
-		kv = strings.TrimSpace(kv)
-		if kv == "" {
-			continue
-		}
-		eq := strings.Index(kv, "=")
-		if eq < 0 {
+		key, val, ok := strings.Cut(kv, "=")
+		if !ok || key == "" {
 			return PlannedFailoverRequest{}, fmt.Errorf(
 				"planned-failover annotation override %q must be key=value", kv)
 		}
-		key := strings.TrimSpace(kv[:eq])
-		val := strings.TrimSpace(kv[eq+1:])
+		if seen[key] {
+			return PlannedFailoverRequest{}, fmt.Errorf(
+				"planned-failover annotation: key %q appears more than once", key)
+		}
+		seen[key] = true
+		if !annotationValueRE.MatchString(val) {
+			return PlannedFailoverRequest{}, fmt.Errorf(
+				"planned-failover annotation: %s=%q: the value must match [A-Za-z0-9._/+-]+", key, val)
+		}
 		switch key {
 		case "maxLagWait":
 			d, err := time.ParseDuration(val)
@@ -328,17 +336,14 @@ func effectiveDrainTimeout(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
 }
 
 // effectiveOnCooldown returns the spec.plannedFailover.onCooldown
-// policy, defaulting to "reject". An empty value or any unknown value
-// falls back to "reject" so a malformed spec does not accidentally
+// policy, defaulting to Reject. An empty value or any unknown value
+// falls back to Reject so a malformed spec does not accidentally
 // enable the defer path.
-func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) string {
-	if fg.Spec.PlannedFailover != nil {
-		switch fg.Spec.PlannedFailover.OnCooldown {
-		case PlannedFailoverOnCooldownDefer:
-			return PlannedFailoverOnCooldownDefer
-		}
+func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) v1alpha1.PlannedFailoverCooldownPolicy {
+	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.OnCooldown == v1alpha1.PlannedFailoverCooldownDefer {
+		return v1alpha1.PlannedFailoverCooldownDefer
 	}
-	return PlannedFailoverOnCooldownReject
+	return v1alpha1.PlannedFailoverCooldownReject
 }
 
 // cooldownRetryAfter returns the earliest time after which the cooldown
@@ -392,7 +397,7 @@ func plannedSettings(pf *v1alpha1.PlannedFailoverStatus) v1alpha1.PlannedFailove
 			dd.MaxSyncWait.Duration = defaultDragonflySyncWait
 		}
 		if dd.OnSyncTimeout == "" {
-			dd.OnSyncTimeout = "proceed"
+			dd.OnSyncTimeout = v1alpha1.DragonflySyncTimeoutProceed
 		}
 		s.Dragonfly = &dd
 	}

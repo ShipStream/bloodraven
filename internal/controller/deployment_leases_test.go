@@ -363,7 +363,7 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	fresh := fetchFG(t, r, client.ObjectKeyFromObject(fg))
 	pf := fresh.Status.PlannedFailover
 	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil || pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold ||
-		pf.Admission.RetryAfter == nil || !pf.Admission.RetryAfter.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) ||
+		pf.Admission.RetryTime == nil || !pf.Admission.RetryTime.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) ||
 		!strings.Contains(pf.Message, "op1") || !strings.Contains(pf.Message, "tenant") {
 		t.Fatalf("deferral = %+v", pf)
 	}
@@ -475,7 +475,7 @@ func TestDeploymentLeaseStatusRetryPreservesNewerOperations(t *testing.T) {
 				}
 				fresh.Status.TopologyGeneration = 9
 				fresh.Status.ActiveSite = "pdx"
-				fresh.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhasePublishing, Target: "pdx"}
+				fresh.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhasePublishing, TargetSite: "pdx"}
 				fresh.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing}
 				if err := c.Status().Update(ctx, fresh); err != nil {
 					return err

@@ -572,7 +572,7 @@ func TestPlannedFailover_RollbackKeepsRecloneQueue(t *testing.T) {
 // making a stale queued site the primary, which a new clone would copy.
 func TestRestoreReclone_NoRequestDuringPlannedFailover(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "pdx", Source: "iad"}
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "pdx", SourceSite: "iad"}
 	r, c := newReconciler(fg, dsnSecret())
 	if d := reconcileRestoreStep(t, r, fg); d <= 0 {
 		t.Errorf("want a requeue, got %s", d)

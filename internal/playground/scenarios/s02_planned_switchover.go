@@ -173,13 +173,13 @@ func observePlannedFailoverSucceeded() runner.Step {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
 							pf.StartTime, env.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, plannedReason(pf))
+					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.TargetSite, plannedReason(pf))
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
 						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", plannedReason(pf), pf.Message)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
-						if pf.Target != target {
-							return false, msg, fmt.Errorf("plannedFailover succeeded but target=%q want %q", pf.Target, target)
+						if pf.TargetSite != target {
+							return false, msg, fmt.Errorf("plannedFailover succeeded but target=%q want %q", pf.TargetSite, target)
 						}
 						return true, msg, nil
 					}
@@ -213,7 +213,7 @@ func verifyPlannedFailoverWatermark() runner.Step {
 			if pf.Fence == nil || pf.Fence.GtidSet == nil || pf.Fence.SourceServerUUID == "" {
 				return fmt.Errorf("fence record incomplete on a Succeeded run: %+v", pf.Fence)
 			}
-			if pf.Promotion == nil || pf.Promotion.ConfirmedAt == nil || pf.Promotion.TargetServerUUID == "" {
+			if pf.Promotion == nil || pf.Promotion.ConfirmationTime == nil || pf.Promotion.TargetServerUUID == "" {
 				return fmt.Errorf("promotion record incomplete on a Succeeded run: %+v", pf.Promotion)
 			}
 			if mfg.Status.PromotionGtidExecuted != *pf.Fence.GtidSet {

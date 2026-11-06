@@ -942,10 +942,10 @@ func (p *runnerPlannedTopology) CheckRunClaim(ref PlannedRunRef) error {
 // only when the selected copy carries none is the other copy used, and
 // only if it describes the same event.
 func ownFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, rec FailoverRecord, pf *v1alpha1.PlannedFailoverStatus) bool {
-	if pf.Promotion == nil || pf.Fence == nil || pf.Fence.GtidSet == nil || rec.LastFailoverTarget != pf.Target {
+	if pf.Promotion == nil || pf.Fence == nil || pf.Fence.GtidSet == nil || rec.LastFailoverTarget != pf.TargetSite {
 		return false
 	}
-	if rec.LastFailover.Before(pf.Promotion.IntendedAt.UTC().Truncate(time.Second)) {
+	if rec.LastFailover.Before(pf.Promotion.IntentTime.UTC().Truncate(time.Second)) {
 		return false
 	}
 	watermark := rec.PromotionGtidExecuted
@@ -973,7 +973,7 @@ func runRecordDurable(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailo
 	if err != nil && rec.IsZero() {
 		return false
 	}
-	want := FailoverRecord{LastFailover: confirmedAt.UTC().Truncate(time.Second), LastFailoverTarget: pf.Target}
+	want := FailoverRecord{LastFailover: confirmedAt.UTC().Truncate(time.Second), LastFailoverTarget: pf.TargetSite}
 	return rec.sameEvent(want) && ownFailoverRecord(fg, rec, pf)
 }
 

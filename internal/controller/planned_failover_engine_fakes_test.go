@@ -614,10 +614,10 @@ func pfRunAt(phase v1alpha1.PlannedFailoverPhase, now time.Time) *v1alpha1.Plann
 	deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
 	f := "uuid-iad:1-10"
 	pf := &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-1", Revision: 1, Phase: phase, Target: "pdx", StartTime: t,
+		RunID: "run-1", Revision: 1, Phase: phase, TargetSite: "pdx", StartTime: t,
 		Settings: v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute},
 			DrainTimeout: metav1.Duration{Duration: 5 * time.Second}},
-		Admission: &v1alpha1.PlannedFailoverAdmission{Deadline: &deadline},
+		Admission: &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline},
 	}
 	order := []v1alpha1.PlannedFailoverPhase{
 		v1alpha1.PlannedFailoverPhaseFencing, v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag,
@@ -633,32 +633,32 @@ func pfRunAt(phase v1alpha1.PlannedFailoverPhase, now time.Time) *v1alpha1.Plann
 		idx = 2
 	}
 	if idx >= 0 {
-		pf.Source = "iad"
-		pf.ClaimedAt = &t
-		pf.ClaimBaseline = &v1alpha1.PlannedFailoverRecordRef{}
-		pf.Fence = &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, IntendedAt: t, SourceServerUUID: "uuid-iad"}
+		pf.SourceSite = "iad"
+		pf.ClaimTime = &t
+		pf.ClaimBaseline = &v1alpha1.FailoverRecord{}
+		pf.Fence = &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, IntentTime: t, SourceServerUUID: "uuid-iad"}
 	}
 	if idx >= 1 {
 		pf.Fence.State = v1alpha1.PlannedFailoverFenceApplied
-		pf.Fence.AppliedAt = &t
+		pf.Fence.ApplyTime = &t
 		pf.Fence.GtidSet = &f
 		pf.Drain = &v1alpha1.PlannedFailoverDrainRecord{StartTime: t}
 	}
 	if idx >= 2 {
-		pf.Drain.CompletedAt = &t
+		pf.Drain.CompletionTime = &t
 		pf.LagWait = &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: t}
 	}
 	if idx >= 3 {
-		pf.LagWait.CaughtUpAt = &t
-		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, IntendedAt: t, TargetServerUUID: "uuid-pdx"}
+		pf.LagWait.CatchUpTime = &t
+		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, IntentTime: t, TargetServerUUID: "uuid-pdx"}
 	}
 	if idx >= 4 {
 		pf.Promotion.State = v1alpha1.PlannedFailoverPromotionConfirmed
-		pf.Promotion.ConfirmedAt = &t
-		pf.DNS = &v1alpha1.PlannedFailoverDNSRecord{State: v1alpha1.PlannedFailoverDNSApplied, AttemptedAt: t}
+		pf.Promotion.ConfirmationTime = &t
+		pf.DNS = &v1alpha1.PlannedFailoverDNSRecord{State: v1alpha1.PlannedFailoverDNSApplied, AttemptTime: t}
 	}
 	if phase == v1alpha1.PlannedFailoverPhaseRollingBack {
-		pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonLagTimeout, IntendedAt: t}
+		pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonLagTimeout, IntentTime: t}
 	}
 	return pf
 }

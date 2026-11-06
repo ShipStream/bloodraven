@@ -38,11 +38,16 @@ func TestDeploymentHoldDefersRequest(t *testing.T) {
 		pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold || pf.RunID == "" {
 		t.Fatalf("expected deployment deferral, got %+v", pf)
 	}
-	if pf.Admission.RetryAfter == nil || !pf.Admission.RetryAfter.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) {
-		t.Fatalf("retryAfter = %v, want %s", pf.Admission.RetryAfter, hold.ExpiresAt)
+	if pf.Admission.RetryTime == nil || !pf.Admission.RetryTime.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) {
+		t.Fatalf("retryTime = %v, want %s", pf.Admission.RetryTime, hold.ExpiresAt)
 	}
 	if !pf.StartTime.Time.Equal(now.Truncate(time.Second)) {
 		t.Fatalf("startTime = %v, want %s", pf.StartTime, *now)
+	}
+	// The deferral is recorded in status only: the user's annotation is
+	// kept byte for byte, never rewritten (A-50 item 4).
+	if v := fresh.Annotations[PlannedFailoverAnnotation]; v != "pdx:maxLagWait=45s" {
+		t.Fatalf("request annotation = %q, want it unchanged", v)
 	}
 	req, err := parsePlannedFailoverAnnotation(fresh.Annotations[PlannedFailoverAnnotation])
 	if err != nil || req.Site != "pdx" || req.MaxLagWait != 45*time.Second {

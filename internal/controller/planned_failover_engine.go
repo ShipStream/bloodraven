@@ -51,19 +51,19 @@ const (
 	// claim waits for a topology manager, from the durable absent-since
 	// time, before it ends without MySQL access.
 	plannedFailoverManagerAbsentDeadline = 5 * time.Minute
-	// plannedFailoverManagerAbsentWarnAfter is when the PlannedFailoverStalled
+	// plannedFailoverManagerAbsentWarnAfter is when the PlannedFailoverStalledManagerAbsent
 	// Warning is emitted for an absent manager.
 	plannedFailoverManagerAbsentWarnAfter = 30 * time.Second
-	// plannedFailoverFenceDeadline bounds fence retries from fence.intendedAt.
+	// plannedFailoverFenceDeadline bounds fence retries from fence.intentTime.
 	plannedFailoverFenceDeadline = 30 * time.Second
-	// plannedFailoverPromotionDeadline bounds Promoting from promotion.intendedAt.
+	// plannedFailoverPromotionDeadline bounds Promoting from promotion.intentTime.
 	plannedFailoverPromotionDeadline = 2 * time.Minute
-	// plannedFailoverRollbackDeadline bounds RollingBack from rollback.intendedAt.
+	// plannedFailoverRollbackDeadline bounds RollingBack from rollback.intentTime.
 	plannedFailoverRollbackDeadline = 30 * time.Second
 	// plannedFailoverLossWindow is how long consecutive failed probes of the
 	// source or the target are tolerated before the run treats it as lost.
 	plannedFailoverLossWindow = defaultActivePrimaryLossWindow
-	// plannedFailoverHoldPendingInterval paces the PlannedFailoverHoldPending
+	// plannedFailoverHoldPendingInterval paces the PlannedFailoverHoldPersisted
 	// Warning while an automation hold stands.
 	plannedFailoverHoldPendingInterval = 10 * time.Minute
 	// plannedFailoverMarkerRetryInterval paces the retries of a marked
@@ -314,12 +314,12 @@ func (e *PlannedFailoverEngine) passBound(pf *v1alpha1.PlannedFailoverStatus) ti
 func (e *PlannedFailoverEngine) pass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, start time.Time) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	pf, marked := plannedFailoverRun(fg)
-	hold := plannedHoldFrom(fg)
+	hold := PlannedHoldFrom(fg)
 
 	ctx, cancel := context.WithDeadline(ctx, start.Add(e.passBound(pf)))
 	defer cancel()
 
-	if ack := strings.TrimSpace(fg.GetAnnotations()[AckPlannedFailoverHoldAnnotation]); ack != "" {
+	if ack := strings.TrimSpace(fg.GetAnnotations()[AcknowledgePlannedFailoverHoldAnnotation]); ack != "" {
 		if d, done := e.ackPass(ctx, fg, hold, ack); done {
 			return d, nil
 		}
@@ -393,7 +393,7 @@ func plannedLegacyBlock(pf *v1alpha1.PlannedFailoverStatus) bool {
 }
 
 func plannedRunRef(nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) PlannedRunRef {
-	return PlannedRunRef{Group: nn, RunID: pf.RunID, Source: pf.Source, Target: pf.Target}
+	return PlannedRunRef{Group: nn, RunID: pf.RunID, Source: pf.SourceSite, Target: pf.TargetSite}
 }
 
 func plannedFenceSet(pf *v1alpha1.PlannedFailoverStatus) string {
@@ -609,13 +609,13 @@ func (e *PlannedFailoverEngine) newRunBlock(fg *v1alpha1.MysqlFailoverGroup, req
 	now := metav1.NewTime(e.clk.Now())
 	settings := plannedFailoverSettingsFor(fg, req)
 	return &v1alpha1.PlannedFailoverStatus{
-		RunID:     e.newRunID(),
-		Revision:  1,
-		Phase:     phase,
-		Target:    req.Site,
-		Settings:  settings,
-		StartTime: now,
-		Message:   msg,
+		RunID:      e.newRunID(),
+		Revision:   1,
+		Phase:      phase,
+		TargetSite: req.Site,
+		Settings:   settings,
+		StartTime:  now,
+		Message:    msg,
 	}
 }
 
@@ -625,7 +625,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 	raw := fg.GetAnnotations()[PlannedFailoverAnnotation]
 	req, perr := parsePlannedFailoverAnnotation(raw)
 	if perr != nil {
-		e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverRejected", perr.Error())
+		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, perr.Error())
 		e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{Result: &v1alpha1.PlannedFailoverResult{
 			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonInvalidAnnotation}})
 		e.consumeRequest(ctx, fg, "invalid")
@@ -648,12 +648,12 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 	result, reason, verr := validatePlannedFailoverRequest(fg, req, now, false)
 	switch result {
 	case PlannedFailoverSkip:
-		e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverSkipped",
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped,
 			fmt.Sprintf("planned-failover: site %q is already the active primary; nothing to do", req.Site))
 		e.consumeRequest(ctx, fg, "idempotent")
 		return 0, nil
 	case PlannedFailoverReject:
-		if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == PlannedFailoverOnCooldownDefer {
+		if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1alpha1.PlannedFailoverCooldownDefer {
 			next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseDeferred, "")
 			return e.writeDeferredCooldown(ctx, fg, nil, next, verr.Error(), true)
 		}
@@ -664,7 +664,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 		if out != WriteCommitted {
 			return requeueFor(out), nil
 		}
-		e.reportTerminal(nn, fg, next, "PlannedFailoverRejected")
+		e.reportTerminal(nn, fg, next, v1alpha1.EventPlannedFailoverRejected)
 		e.consumeRequest(ctx, e.reload(ctx, fg), "rejected")
 		return 0, nil
 	}
@@ -672,14 +672,14 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 	next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseAdmitting,
 		fmt.Sprintf("admin requested graceful switchover to %q", req.Site))
 	deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
-	next.Admission = &v1alpha1.PlannedFailoverAdmission{Deadline: &deadline}
+	next.Admission = &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline}
 	out, _, _ := e.commit(ctx, fg, false, freshRunBuild(next))
 	if out != WriteCommitted {
 		return requeueFor(out), nil
 	}
 	e.groupMemo(nn).lastRunID = next.RunID
 	e.consumeRequest(ctx, e.reload(ctx, fg), "accepted")
-	e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverStarted",
+	e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverStarted,
 		fmt.Sprintf("planned failover from %q to %q accepted (maxLagWait=%s, drainTimeout=%s)",
 			fg.Status.ActiveSite, req.Site, next.Settings.MaxLagWait.Duration, next.Settings.DrainTimeout.Duration))
 	return plannedRequeueNext, nil
@@ -741,8 +741,8 @@ func (e *PlannedFailoverEngine) consumeStaleRequest(ctx context.Context, fg *v1a
 	if !ok {
 		return
 	}
-	if req, err := parsePlannedFailoverAnnotation(raw); err != nil || req.Site != pf.Target || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting {
-		e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverRejected",
+	if req, err := parsePlannedFailoverAnnotation(raw); err != nil || req.Site != pf.TargetSite || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting {
+		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected,
 			fmt.Sprintf("planned-failover annotation ignored: a previous planned failover is still running (phase=%q)", pf.Phase))
 	}
 	e.consumeRequest(ctx, fg, "stale")
@@ -763,11 +763,11 @@ func (e *PlannedFailoverEngine) writeDeferredCooldown(ctx context.Context, fg *v
 		e.sink.Deferred(nn, v1alpha1.PlannedFailoverDeferCooldownActive)
 		target := ""
 		if fresh != nil {
-			target = fresh.Target
+			target = fresh.TargetSite
 		} else if cur != nil {
-			target = cur.Target
+			target = cur.TargetSite
 		}
-		e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverDeferred",
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverDeferred,
 			fmt.Sprintf("planned failover to %q deferred: cooldown active, retrying at %s", target, retry.UTC().Format(time.RFC3339)))
 	}
 	if retry.IsZero() {
@@ -793,7 +793,7 @@ func (e *PlannedFailoverEngine) writeDeferredHold(ctx context.Context, fg *v1alp
 	}
 	if initial {
 		e.sink.Deferred(nn, v1alpha1.PlannedFailoverDeferDeploymentHold)
-		e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverDeferred", msg)
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverDeferred, msg)
 	}
 	return max(time.Second, hold.ExpiresAt.Sub(now)+time.Nanosecond), nil
 }
@@ -809,7 +809,7 @@ func (e *PlannedFailoverEngine) writeDeferred(ctx context.Context, fg *v1alpha1.
 	}
 	if fresh != nil {
 		fresh.Phase = v1alpha1.PlannedFailoverPhaseDeferred
-		fresh.Admission = &v1alpha1.PlannedFailoverAdmission{DeferReason: reason, RetryAfter: retryMeta}
+		fresh.Admission = &v1alpha1.PlannedFailoverAdmission{DeferReason: reason, RetryTime: retryMeta}
 		fresh.Message = msg
 		out, _, err := e.commit(ctx, fg, false, freshRunBuild(fresh))
 		if out == WriteCommitted {
@@ -818,11 +818,11 @@ func (e *PlannedFailoverEngine) writeDeferred(ctx context.Context, fg *v1alpha1.
 		return out, err
 	}
 	if a := cur.Admission; a != nil && a.DeferReason == reason && cur.Message == msg &&
-		((a.RetryAfter == nil && retryMeta == nil) || (a.RetryAfter != nil && retryMeta != nil && a.RetryAfter.Equal(retryMeta))) {
+		((a.RetryTime == nil && retryMeta == nil) || (a.RetryTime != nil && retryMeta != nil && a.RetryTime.Equal(retryMeta))) {
 		return WriteCommitted, nil
 	}
 	return e.advance(ctx, fg, cur, func(next *v1alpha1.PlannedFailoverStatus) {
-		next.Admission = &v1alpha1.PlannedFailoverAdmission{DeferReason: reason, RetryAfter: retryMeta}
+		next.Admission = &v1alpha1.PlannedFailoverAdmission{DeferReason: reason, RetryTime: retryMeta}
 		next.Message = msg
 	})
 }
@@ -831,7 +831,7 @@ func (e *PlannedFailoverEngine) writeDeferred(ctx context.Context, fg *v1alpha1.
 func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	reason v1alpha1.PlannedFailoverReason, msg string, why ClaimReleaseReason, consume bool) (time.Duration, error) {
 	d, err := e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: reason, msg: msg,
-		why: why, eventReason: "PlannedFailoverRejected"})
+		why: why, eventReason: v1alpha1.EventPlannedFailoverRejected})
 	if consume && d == 0 && err == nil {
 		e.consumeRequest(ctx, e.reload(ctx, fg), "rejected")
 	}
@@ -842,7 +842,7 @@ func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.
 func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
 	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
 	if !ok {
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonCancelled,
+		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonCanceled,
 			"planned-failover annotation removed while deferred; run cancelled", ReleaseTerminal, false)
 	}
 	req, perr := parsePlannedFailoverAnnotation(raw)
@@ -865,27 +865,27 @@ func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.M
 		settings := plannedFailoverSettingsFor(fg, req)
 		out, _ := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
 			next.Phase = v1alpha1.PlannedFailoverPhaseAdmitting
-			next.Target = req.Site
+			next.TargetSite = req.Site
 			next.Settings = settings
 			deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
-			next.Admission = &v1alpha1.PlannedFailoverAdmission{Deadline: &deadline}
+			next.Admission = &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline}
 			next.Message = fmt.Sprintf("proceeding with deferred planned failover to %q", req.Site)
 		})
 		if out != WriteCommitted {
 			return requeueFor(out), nil
 		}
 		e.consumeRequest(ctx, e.reload(ctx, fg), "resumed")
-		e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverStarted",
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverStarted,
 			fmt.Sprintf("deferred planned failover to %q resumed (maxLagWait=%s, drainTimeout=%s)",
 				req.Site, settings.MaxLagWait.Duration, settings.DrainTimeout.Duration))
 		return plannedRequeueNext, nil
 	case PlannedFailoverSkip:
-		e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverSkipped",
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped,
 			fmt.Sprintf("deferred planned failover: site %q is already the active primary; clearing annotation", req.Site))
 		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonAlreadyActive,
 			fmt.Sprintf("deferred planned failover to %q resolved as no-op: target is already active", req.Site), ReleaseTerminal, true)
 	}
-	if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == PlannedFailoverOnCooldownDefer {
+	if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1alpha1.PlannedFailoverCooldownDefer {
 		return e.writeDeferredCooldown(ctx, fg, pf, nil, verr.Error(), false)
 	}
 	return e.endNotStarted(ctx, fg, pf, reason, verr.Error(), ReleaseTerminal, true)
@@ -898,13 +898,13 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 	now := e.clk.Now()
 	e.consumeStaleRequest(ctx, fg, pf)
 
-	if pf.Admission != nil && pf.Admission.Deadline != nil && !now.Before(pf.Admission.Deadline.Time) {
+	if pf.Admission != nil && pf.Admission.DeadlineTime != nil && !now.Before(pf.Admission.DeadlineTime.Time) {
 		last := v1alpha1.PlannedFailoverWaitReason("none")
 		if pf.Admission.WaitReason != "" {
 			last = pf.Admission.WaitReason
 		}
 		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonAdmissionTimeout,
-			fmt.Sprintf("planned failover to %q was not admitted within %s (last wait reason: %s)", pf.Target,
+			fmt.Sprintf("planned failover to %q was not admitted within %s (last wait reason: %s)", pf.TargetSite,
 				plannedFailoverAdmissionTimeout, last), ReleaseAdmissionTimeout, false)
 	}
 
@@ -922,12 +922,12 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 			fmt.Sprintf("planned-failover held by operation %s instance %s until %s; re-annotate once it is released",
 				hold.OperationID, hold.Instance, hold.ExpiresAt.UTC().Format(time.RFC3339)), ReleaseTerminal, false)
 	}
-	req := PlannedFailoverRequest{Site: pf.Target}
+	req := PlannedFailoverRequest{Site: pf.TargetSite}
 	result, reason, verr := validatePlannedFailoverRequest(fg, req, now, true)
 	switch result {
 	case PlannedFailoverSkip:
 		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonAlreadyActive,
-			fmt.Sprintf("planned-failover: target %q is already the active primary; nothing to do", pf.Target), ReleaseTerminal, false)
+			fmt.Sprintf("planned-failover: target %q is already the active primary; nothing to do", pf.TargetSite), ReleaseTerminal, false)
 	case PlannedFailoverReject:
 		return e.endNotStarted(ctx, fg, pf, reason, verr.Error(), ReleaseTerminal, false)
 	}
@@ -941,7 +941,7 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonInvalidFailoverState,
 			fmt.Sprintf("planned-failover: durable failover record is invalid: %v", berr), ReleaseTerminal, false)
 	}
-	dec, err := e.topo.ClaimPlannedFailover(ctx, nn, PlannedClaimRequest{RunID: pf.RunID, Target: pf.Target, DurableBaseline: baseline})
+	dec, err := e.topo.ClaimPlannedFailover(ctx, nn, PlannedClaimRequest{RunID: pf.RunID, Target: pf.TargetSite, DurableBaseline: baseline})
 	switch {
 	case errors.Is(err, errManagerAbsent):
 		return e.noteWait(ctx, fg, pf, v1alpha1.PlannedFailoverWaitManagerAbsent, "no topology manager is registered for the group")
@@ -959,7 +959,7 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 	case ClaimReject:
 		msg := dec.Message
 		if msg == "" {
-			msg = fmt.Sprintf("planned failover to %q refused: %s", pf.Target, dec.RejectReason)
+			msg = fmt.Sprintf("planned failover to %q refused: %s", pf.TargetSite, dec.RejectReason)
 		}
 		return e.endNotStarted(ctx, fg, pf, dec.RejectReason, msg, ReleaseTerminal, false)
 	}
@@ -970,11 +970,11 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 	claimedAt := metav1.NewTime(e.clk.Now())
 	out, _ := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
 		next.Phase = v1alpha1.PlannedFailoverPhaseFencing
-		next.Source = dec.Source
-		next.ClaimedAt = &claimedAt
+		next.SourceSite = dec.Source
+		next.ClaimTime = &claimedAt
 		next.ClaimBaseline = dec.Baseline.toAPI()
 		next.Fence = &v1alpha1.PlannedFailoverFenceRecord{
-			State: v1alpha1.PlannedFailoverFenceIntended, IntendedAt: claimedAt, SourceServerUUID: dec.SourceServerUUID,
+			State: v1alpha1.PlannedFailoverFenceIntended, IntentTime: claimedAt, SourceServerUUID: dec.SourceServerUUID,
 		}
 		next.Message = fmt.Sprintf("claim granted; fencing source %q", dec.Source)
 	})
@@ -993,14 +993,14 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 		return requeueFor(out), nil
 	}
 	log.FromContext(ctx).Info("planned failover: claim granted", "fg", nn.String(), "runId", pf.RunID,
-		"source", dec.Source, "target", pf.Target)
-	e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverClaimed",
-		fmt.Sprintf("planned failover %s claimed %q → %q", pf.RunID, dec.Source, pf.Target))
+		"source", dec.Source, "target", pf.TargetSite)
+	e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverClaimGranted,
+		fmt.Sprintf("planned failover %s claimed %q → %q", pf.RunID, dec.Source, pf.TargetSite))
 	return plannedRequeueNext, nil
 }
 
 // noteWait records an admission wait reason when it changes, with a
-// PlannedFailoverWaiting Event.
+// PlannedFailoverAdmissionDelayed Event.
 func (e *PlannedFailoverEngine) noteWait(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	reason v1alpha1.PlannedFailoverWaitReason, msg string) (time.Duration, error) {
 	if pf.Admission != nil && pf.Admission.WaitReason == reason {
@@ -1019,8 +1019,8 @@ func (e *PlannedFailoverEngine) noteWait(ctx context.Context, fg *v1alpha1.Mysql
 		}
 	})
 	if out == WriteCommitted {
-		e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverWaiting",
-			fmt.Sprintf("planned failover to %q waiting: %s %s", pf.Target, reason, msg))
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverAdmissionDelayed,
+			fmt.Sprintf("planned failover to %q waiting: %s %s", pf.TargetSite, reason, msg))
 	}
 	if out == WriteGone {
 		return 0, nil
@@ -1159,7 +1159,7 @@ func (e *PlannedFailoverEngine) facadeErr(ctx context.Context, fg *v1alpha1.Mysq
 // named.
 func (e *PlannedFailoverEngine) endSiteRemoved(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
 	return e.endWithoutMySQL(ctx, fg, pf, v1alpha1.PlannedFailoverReasonUnknownSite,
-		fmt.Sprintf("the run's source %q or target %q is no longer in spec.sites; the run ended without MySQL access", pf.Source, pf.Target),
+		fmt.Sprintf("the run's source %q or target %q is no longer in spec.sites; the run ended without MySQL access", pf.SourceSite, pf.TargetSite),
 		ReleaseTerminal)
 }
 
@@ -1246,7 +1246,7 @@ func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1alpha1.My
 		// authority first.
 		m.fence.sent = false
 	}
-	pastDeadline := !e.clk.Now().Before(pf.Fence.IntendedAt.Add(plannedFailoverFenceDeadline))
+	pastDeadline := !e.clk.Now().Before(pf.Fence.IntentTime.Add(plannedFailoverFenceDeadline))
 	if proof.Kind != FenceSourceUnreachable {
 		m.sourceLossSince = time.Time{}
 	}
@@ -1263,18 +1263,18 @@ func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1alpha1.My
 			next.Phase = v1alpha1.PlannedFailoverPhaseDraining
 			next.Fence = next.Fence.DeepCopy()
 			next.Fence.State = v1alpha1.PlannedFailoverFenceApplied
-			next.Fence.AppliedAt = &now
+			next.Fence.ApplyTime = &now
 			next.Fence.GtidSet = &gtid
 			next.Drain = &v1alpha1.PlannedFailoverDrainRecord{StartTime: now}
-			next.Message = fmt.Sprintf("source %q fenced at %s; draining connections", pf.Source, plannedGtidHint(gtid))
+			next.Message = fmt.Sprintf("source %q fenced at %s; draining connections", pf.SourceSite, plannedGtidHint(gtid))
 			if len(proof.UnreadablePeers) > 0 {
 				next.Message += fmt.Sprintf(" (unreadable peers: %s)", strings.Join(proof.UnreadablePeers, ", "))
 			}
 		})
 		if out == WriteCommitted {
-			e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverDraining",
+			e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverDrainStarted,
 				fmt.Sprintf("fenced source primary %q; draining application connections (timeout %s)",
-					pf.Source, plannedSettings(pf).DrainTimeout.Duration))
+					pf.SourceSite, plannedSettings(pf).DrainTimeout.Duration))
 		}
 		return e.afterAdvance(ctx, fg, pf, out, werr)
 	case FenceNotSent:
@@ -1286,9 +1286,9 @@ func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1alpha1.My
 		if proof.SourceWritable {
 			outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
 		}
-		msg := fmt.Sprintf("authority moved before the fence was sent to %q; nothing was sent", pf.Source)
+		msg := fmt.Sprintf("authority moved before the fence was sent to %q; nothing was sent", pf.SourceSite)
 		if m.fence.setSent {
-			msg = fmt.Sprintf("authority moved after a fence was sent to %q; the source no longer holds the run's fence", pf.Source)
+			msg = fmt.Sprintf("authority moved after a fence was sent to %q; the source no longer holds the run's fence", pf.SourceSite)
 		}
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: outcome, reason: reason, msg: msg})
 	case FenceForeignWritable:
@@ -1299,7 +1299,7 @@ func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1alpha1.My
 		}
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
 			warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningFenceNotAttributable},
-			msg:      fmt.Sprintf("source %q is read-only, but the fence is not this run's; check which site is writable, then unfence the source or re-annotate", pf.Source)})
+			msg:      fmt.Sprintf("source %q is read-only, but the fence is not this run's; check which site is writable, then unfence the source or re-annotate", pf.SourceSite)})
 	case FenceSourceUnreachable:
 		if e.lossWindow(&m.sourceLossSince, false) {
 			return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonSourceLost)
@@ -1342,10 +1342,10 @@ func (e *PlannedFailoverEngine) drainingStep(ctx context.Context, fg *v1alpha1.M
 		return plannedRequeuePoll, nil
 	}
 	now := metav1.NewTime(e.clk.Now())
-	msg := fmt.Sprintf("source %q drained cleanly in %s", pf.Source, truncateDur(elapsed))
+	msg := fmt.Sprintf("source %q drained cleanly in %s", pf.SourceSite, truncateDur(elapsed))
 	if err != nil || remaining > 0 {
 		msg = fmt.Sprintf("drain budget exhausted after %s with %d connection(s) remaining on %q; proceeding",
-			truncateDur(elapsed), remaining, pf.Source)
+			truncateDur(elapsed), remaining, pf.SourceSite)
 	}
 	out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
 		next.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
@@ -1354,11 +1354,11 @@ func (e *PlannedFailoverEngine) drainingStep(ctx context.Context, fg *v1alpha1.M
 		} else {
 			next.Drain = next.Drain.DeepCopy()
 		}
-		next.Drain.CompletedAt = &now
+		next.Drain.CompletionTime = &now
 		left := remaining
 		next.Drain.RemainingConnections = &left
 		next.LagWait = &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: now}
-		next.Message = fmt.Sprintf("%s; waiting for target %q to catch up", msg, pf.Target)
+		next.Message = fmt.Sprintf("%s; waiting for target %q to catch up", msg, pf.TargetSite)
 	})
 	return e.afterAdvance(ctx, fg, pf, out, werr)
 }
@@ -1408,34 +1408,34 @@ func (e *PlannedFailoverEngine) lagStep(ctx context.Context, fg *v1alpha1.MysqlF
 	elapsed := e.clk.Now().Sub(start)
 	settings := plannedSettings(pf)
 	if probe.CaughtUp {
-		e.sink.LagWaitObserved(nn, pf.Target, elapsed)
+		e.sink.LagWaitObserved(nn, pf.TargetSite, elapsed)
 		now := metav1.NewTime(e.clk.Now())
 		if settings.Dragonfly != nil {
 			out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
 				next.Phase = v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync
 				next.LagWait = plannedLagCaughtUp(next.LagWait, now)
 				next.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{SyncWaitStartTime: &now,
-					Message: fmt.Sprintf("waiting for target %q replica to catch up", pf.Target)}
-				next.Message = fmt.Sprintf("target %q caught up in %s; waiting for Dragonfly replica", pf.Target, truncateDur(elapsed))
+					Message: fmt.Sprintf("waiting for target %q replica to catch up", pf.TargetSite)}
+				next.Message = fmt.Sprintf("target %q caught up in %s; waiting for Dragonfly replica", pf.TargetSite, truncateDur(elapsed))
 			})
 			if out == WriteCommitted {
-				e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverLagOK",
-					fmt.Sprintf("target %q caught up after %s; proceeding", pf.Target, truncateDur(elapsed)))
+				e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverTargetCaughtUp,
+					fmt.Sprintf("target %q caught up after %s; proceeding", pf.TargetSite, truncateDur(elapsed)))
 			}
 			return e.afterAdvance(ctx, fg, pf, out, werr)
 		}
 		d, perr := e.enterPromoting(ctx, fg, pf, ref, func(next *v1alpha1.PlannedFailoverStatus) {
 			next.LagWait = plannedLagCaughtUp(next.LagWait, now)
-			next.Message = fmt.Sprintf("target %q caught up in %s; promoting", pf.Target, truncateDur(elapsed))
+			next.Message = fmt.Sprintf("target %q caught up in %s; promoting", pf.TargetSite, truncateDur(elapsed))
 		})
 		if d == plannedRequeueNext {
-			e.sink.Event(fg, corev1.EventTypeNormal, "PlannedFailoverLagOK",
-				fmt.Sprintf("target %q caught up after %s; proceeding", pf.Target, truncateDur(elapsed)))
+			e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverTargetCaughtUp,
+				fmt.Sprintf("target %q caught up after %s; proceeding", pf.TargetSite, truncateDur(elapsed)))
 		}
 		return d, perr
 	}
 	if elapsed >= settings.MaxLagWait.Duration {
-		e.sink.LagWaitObserved(nn, pf.Target, elapsed)
+		e.sink.LagWaitObserved(nn, pf.TargetSite, elapsed)
 		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonLagTimeout)
 	}
 	return plannedRequeuePoll, nil
@@ -1447,7 +1447,7 @@ func plannedLagCaughtUp(lw *v1alpha1.PlannedFailoverLagWaitRecord, now metav1.Ti
 	} else {
 		lw = lw.DeepCopy()
 	}
-	lw.CaughtUpAt = &now
+	lw.CatchUpTime = &now
 	return lw
 }
 
@@ -1473,7 +1473,7 @@ func (e *PlannedFailoverEngine) enterPromoting(ctx context.Context, fg *v1alpha1
 		edit(next)
 		next.Phase = v1alpha1.PlannedFailoverPhasePromoting
 		next.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{
-			State: v1alpha1.PlannedFailoverPromotionIntended, IntendedAt: now, TargetServerUUID: targetUUID,
+			State: v1alpha1.PlannedFailoverPromotionIntended, IntentTime: now, TargetServerUUID: targetUUID,
 		}
 	})
 	return e.afterAdvance(ctx, fg, pf, out, werr)
@@ -1521,11 +1521,11 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 			if out.Terminal == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
 				return e.endManualRecovery(ctx, fg, pf, reason, "the promotion found the target in a state the run cannot explain")
 			}
-			msg := fmt.Sprintf("promotion of %q aborted (%s); nothing was written to the target", pf.Target, reason)
+			msg := fmt.Sprintf("promotion of %q aborted (%s); nothing was written to the target", pf.TargetSite, reason)
 			if out.MayHaveWritten || m.promote.mayHaveWritten {
 				// A WasWritable gate refusal: an earlier attempt may have made
 				// the target writable.
-				msg = fmt.Sprintf("promotion of %q aborted (%s); the target may have accepted writes from an earlier attempt", pf.Target, reason)
+				msg = fmt.Sprintf("promotion of %q aborted (%s); the target may have accepted writes from an earlier attempt", pf.TargetSite, reason)
 			}
 			return e.finish(ctx, fg, pf, plannedEnd{outcome: out.Terminal, reason: reason, msg: msg})
 		}
@@ -1543,15 +1543,15 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 			// under the run's fence, and no site is writable. Roll back; §9
 			// still decides whether the source is unfenced.
 			log.FromContext(ctx).Info("planned failover: target replaced before the promotion was recorded; rolling back",
-				"fg", fg.Namespace+"/"+fg.Name, "runId", pf.RunID, "target", pf.Target, "targetServerUUID", out.TargetServerUUID)
+				"fg", fg.Namespace+"/"+fg.Name, "runId", pf.RunID, "target", pf.TargetSite, "targetServerUUID", out.TargetServerUUID)
 			return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonTargetChanged)
 		}
-		return e.endManualRecovery(ctx, fg, pf, reason, fmt.Sprintf("target %q is in a state the run cannot explain (stage %s)", pf.Target, out.Stage))
+		return e.endManualRecovery(ctx, fg, pf, reason, fmt.Sprintf("target %q is in a state the run cannot explain (stage %s)", pf.TargetSite, out.Stage))
 	}
 	// Unconfirmed: stay Promoting and re-classify on a new pinned session.
 	intended := e.clk.Now()
 	if pf.Promotion != nil {
-		intended = pf.Promotion.IntendedAt.Time
+		intended = pf.Promotion.IntentTime.Time
 	}
 	targetLost := e.lossWindow(&m.targetLossSince, out.TargetReachable)
 	pastDeadline := !e.clk.Now().Before(intended.Add(plannedFailoverPromotionDeadline))
@@ -1565,7 +1565,7 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 		}
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, reason: reason,
 			msg: fmt.Sprintf("super_read_only=OFF may have been sent to %q but the promotion cannot be confirmed; %q is named as the last failover target only",
-				pf.Target, pf.Target)})
+				pf.TargetSite, pf.TargetSite)})
 	}
 	if targetLost {
 		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonTargetLost)
@@ -1611,7 +1611,7 @@ func (e *PlannedFailoverEngine) confirmedTail(ctx context.Context, fg *v1alpha1.
 		if d, ferr, handled := e.facadeErr(ctx, fg, pf, err); handled {
 			return d, ferr
 		}
-		rec := &v1alpha1.PlannedFailoverDNSRecord{State: state, AttemptedAt: metav1.NewTime(e.clk.Now())}
+		rec := &v1alpha1.PlannedFailoverDNSRecord{State: state, AttemptTime: metav1.NewTime(e.clk.Now())}
 		if err != nil {
 			rec.State = v1alpha1.PlannedFailoverDNSFailed
 			rec.LastError = err.Error()
@@ -1621,8 +1621,8 @@ func (e *PlannedFailoverEngine) confirmedTail(ctx context.Context, fg *v1alpha1.
 		}
 		if rec.State == v1alpha1.PlannedFailoverDNSFailed {
 			m.warnings = addPlannedWarnings(m.warnings, v1alpha1.PlannedFailoverWarningDNSUpdateFailed)
-			e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverDNSUpdateFailed",
-				fmt.Sprintf("planned failover promoted %q but the DNS update failed (%s); the topology manager retries it", pf.Target, rec.LastError))
+			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverDNSUpdateFailed,
+				fmt.Sprintf("planned failover promoted %q but the DNS update failed (%s); the topology manager retries it", pf.TargetSite, rec.LastError))
 		}
 		m.promote.dns = rec
 	}
@@ -1646,10 +1646,10 @@ func (e *PlannedFailoverEngine) writePublishing(ctx context.Context, fg *v1alpha
 		next.Phase = v1alpha1.PlannedFailoverPhasePublishing
 		next.Promotion = next.Promotion.DeepCopy()
 		next.Promotion.State = v1alpha1.PlannedFailoverPromotionConfirmed
-		next.Promotion.ConfirmedAt = &confirmedAt
+		next.Promotion.ConfirmationTime = &confirmedAt
 		next.Promotion.Warnings = warnings
 		next.DNS = dns
-		next.Message = fmt.Sprintf("promoted %q; publishing", pf.Target)
+		next.Message = fmt.Sprintf("promoted %q; publishing", pf.TargetSite)
 	})
 	if out != WriteCommitted {
 		return e.afterAdvance(ctx, fg, pf, out, err)
@@ -1676,7 +1676,7 @@ func (e *PlannedFailoverEngine) publishingPass(ctx context.Context, fg *v1alpha1
 	// not run (a restart in between) is harmless to repeat.
 	e.release(ctx, nn, pf.RunID, ReleasePublishing, "")
 	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded,
-		msg: fmt.Sprintf("promoted %q", pf.Target), why: ReleasePublishing, eventReason: "PlannedFailoverCompleted"})
+		msg: fmt.Sprintf("promoted %q", pf.TargetSite), why: ReleasePublishing, eventReason: v1alpha1.EventPlannedFailoverSucceeded})
 }
 
 // toRollingBack writes the rollback intent.
@@ -1685,12 +1685,12 @@ func (e *PlannedFailoverEngine) toRollingBack(ctx context.Context, fg *v1alpha1.
 	now := metav1.NewTime(e.clk.Now())
 	out, err := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
 		next.Phase = v1alpha1.PlannedFailoverPhaseRollingBack
-		next.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: reason, IntendedAt: now}
+		next.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: reason, IntentTime: now}
 		next.Message = fmt.Sprintf("rolling back (%s)", reason)
 	})
 	if out == WriteCommitted {
-		e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverRollingBack",
-			fmt.Sprintf("planned failover to %q rolling back (%s)", pf.Target, reason))
+		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRollbackStarted,
+			fmt.Sprintf("planned failover to %q rolling back (%s)", pf.TargetSite, reason))
 	}
 	return e.afterAdvance(ctx, fg, pf, out, err)
 }
@@ -1703,7 +1703,7 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 	intended := e.clk.Now()
 	if pf.Rollback != nil {
 		reason = pf.Rollback.Reason
-		intended = pf.Rollback.IntendedAt.Time
+		intended = pf.Rollback.IntentTime.Time
 	}
 	res, err := e.topo.Rollback(ctx, ref, pf)
 	if d, ferr, handled := e.facadeErr(ctx, fg, pf, err); handled {
@@ -1729,7 +1729,7 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 	if !e.clk.Now().Before(intended.Add(plannedFailoverRollbackDeadline)) {
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
 			msg: fmt.Sprintf("rollback (%s) could not confirm the source %q writable within %s; it stays fenced",
-				reason, pf.Source, plannedFailoverRollbackDeadline)})
+				reason, pf.SourceSite, plannedFailoverRollbackDeadline)})
 	}
 	return plannedRequeuePoll, nil
 }
@@ -1737,13 +1737,13 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 func plannedRollbackMessage(pf *v1alpha1.PlannedFailoverStatus, outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) string {
 	switch outcome {
 	case v1alpha1.PlannedFailoverOutcomeRolledBack:
-		return fmt.Sprintf("planned failover to %q rolled back (%s); source %q is writable", pf.Target, reason, pf.Source)
+		return fmt.Sprintf("planned failover to %q rolled back (%s); source %q is writable", pf.TargetSite, reason, pf.SourceSite)
 	case v1alpha1.PlannedFailoverOutcomeSourceLeftFenced:
-		return fmt.Sprintf("planned failover to %q rolled back (%s); source %q left fenced", pf.Target, reason, pf.Source)
+		return fmt.Sprintf("planned failover to %q rolled back (%s); source %q left fenced", pf.TargetSite, reason, pf.SourceSite)
 	case v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed:
-		return fmt.Sprintf("planned failover to %q ended unconfirmed (%s); %q is named as the last failover target only", pf.Target, reason, pf.Target)
+		return fmt.Sprintf("planned failover to %q ended unconfirmed (%s); %q is named as the last failover target only", pf.TargetSite, reason, pf.TargetSite)
 	}
-	return fmt.Sprintf("planned failover to %q ended %s (%s)", pf.Target, outcome, reason)
+	return fmt.Sprintf("planned failover to %q ended %s (%s)", pf.TargetSite, outcome, reason)
 }
 
 // ---------- manager absence (§6.3) ----------
@@ -1768,7 +1768,7 @@ func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1alpha1.
 	elapsed := e.clk.Now().Sub(start)
 	if elapsed >= plannedFailoverManagerAbsentWarnAfter && !m.absentWarned {
 		m.absentWarned = true
-		e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverStalled",
+		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverStalledManagerAbsent,
 			fmt.Sprintf("planned failover %s (phase %s) has had no topology manager for %s; it ends after %s",
 				pf.RunID, pf.Phase, truncateDur(elapsed), plannedFailoverManagerAbsentDeadline))
 	}
@@ -1833,14 +1833,14 @@ type plannedEnd struct {
 func (e *PlannedFailoverEngine) endManualRecovery(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	reason v1alpha1.PlannedFailoverReason, why string) (time.Duration, error) {
 	sites := []string{}
-	if pf.Target != "" {
-		sites = append(sites, pf.Target)
+	if pf.TargetSite != "" {
+		sites = append(sites, pf.TargetSite)
 	}
-	if pf.Source != "" && pf.Source != pf.Target {
-		sites = append(sites, pf.Source)
+	if pf.SourceSite != "" && pf.SourceSite != pf.TargetSite {
+		sites = append(sites, pf.SourceSite)
 	}
 	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, reason: reason,
-		msg: fmt.Sprintf("%s (%s); automatic failover is held until %s=%s", why, reason, AckPlannedFailoverHoldAnnotation, pf.RunID),
+		msg: fmt.Sprintf("%s (%s); automatic failover is held until %s=%s", why, reason, AcknowledgePlannedFailoverHoldAnnotation, pf.RunID),
 		why: ReleaseToHold, holdSites: sites})
 }
 
@@ -1876,24 +1876,24 @@ func (e *PlannedFailoverEngine) terminalRecord(pf *v1alpha1.PlannedFailoverStatu
 		warnings = addPlannedWarnings(warnings, v1alpha1.PlannedFailoverWarningDNSUpdateFailed)
 	}
 	if end.outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && !end.confirmedAt.IsZero() && next.Promotion != nil &&
-		next.Promotion.ConfirmedAt == nil {
+		next.Promotion.ConfirmationTime == nil {
 		// A Succeeded record ended before Publishing committed (the status
 		// stall, or a marker): it carries the confirmation, so its terminal
 		// write applies the run's failover record (§5.3).
 		next.Promotion = next.Promotion.DeepCopy()
 		next.Promotion.State = v1alpha1.PlannedFailoverPromotionConfirmed
 		at := metav1.NewTime(end.confirmedAt.UTC().Truncate(time.Second))
-		next.Promotion.ConfirmedAt = &at
+		next.Promotion.ConfirmationTime = &at
 	}
 	if pf.Dragonfly != nil && pf.Dragonfly.Takeover != nil && pf.Dragonfly.Takeover.State == v1alpha1.DragonflyTakeoverSucceeded &&
 		end.outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
 		warnings = addPlannedWarnings(warnings, v1alpha1.PlannedFailoverWarningDragonflySessionsLost)
 	}
 	slices.Sort(warnings)
-	if next.Admission != nil && next.Admission.RetryAfter != nil {
+	if next.Admission != nil && next.Admission.RetryTime != nil {
 		// A finished run is not retried.
 		next.Admission = next.Admission.DeepCopy()
-		next.Admission.RetryAfter = nil
+		next.Admission.RetryTime = nil
 	}
 	next.Result = &v1alpha1.PlannedFailoverResult{
 		Outcome: end.outcome, Reason: end.reason, CompletionTime: metav1.NewTime(e.clk.Now()), Warnings: warnings,
@@ -1913,18 +1913,23 @@ func (e *PlannedFailoverEngine) terminalRecord(pf *v1alpha1.PlannedFailoverStatu
 // MergePlannedAuthority, the rule the runner's snapshot writes use, so the
 // terminal record never lands beside an activeSite that still names the
 // source (§5.3, §12).
-func (e *PlannedFailoverEngine) terminalMutate(nn types.NamespacedName, next *v1alpha1.PlannedFailoverStatus, sites []string) func(*v1alpha1.MysqlFailoverGroupStatus) {
+func (e *PlannedFailoverEngine) terminalMutate(base *v1alpha1.MysqlFailoverGroup, next *v1alpha1.PlannedFailoverStatus, sites []string) func(*v1alpha1.MysqlFailoverGroupStatus) {
+	nn := types.NamespacedName{Namespace: base.Namespace, Name: base.Name}
 	switch next.Result.Outcome {
 	case v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
-		runID, reason, now := next.RunID, next.Result.Reason, e.clk.Now()
+		hold := v1alpha1.PlannedFailoverHold{
+			RunID: next.RunID, Reason: next.Result.Reason, SourceSite: next.SourceSite, TargetSite: next.TargetSite,
+			AmbiguousSites: slices.Clone(sites), HoldTime: metav1.NewTime(e.clk.Now()),
+		}
+		generation := base.Generation
 		return func(st *v1alpha1.MysqlFailoverGroupStatus) {
-			setPlannedHoldCondition(st, runID, reason, sites, now)
+			setPlannedHold(st, hold, generation)
 		}
 	case v1alpha1.PlannedFailoverOutcomeSucceeded:
-		if next.Promotion == nil || next.Promotion.ConfirmedAt == nil {
+		if next.Promotion == nil || next.Promotion.ConfirmationTime == nil {
 			return nil
 		}
-		confirmedAt, target, watermark := next.Promotion.ConfirmedAt.Time, next.Target, plannedFenceSet(next)
+		confirmedAt, target, watermark := next.Promotion.ConfirmationTime.Time, next.TargetSite, plannedFenceSet(next)
 		authority, haveAuthority := e.topo.ManagerAuthority(nn)
 		return func(st *v1alpha1.MysqlFailoverGroupStatus) {
 			if haveAuthority {
@@ -1976,7 +1981,7 @@ func (e *PlannedFailoverEngine) finish(ctx context.Context, fg *v1alpha1.MysqlFa
 			return nil, nil, false
 		}
 		written = e.terminalRecord(cur, end)
-		return written, e.terminalMutate(nn, written, end.holdSites), true
+		return written, e.terminalMutate(base, written, end.holdSites), true
 	})
 	if next != nil {
 		m.pendingTerminal = next.DeepCopy()
@@ -2067,20 +2072,20 @@ func (e *PlannedFailoverEngine) reportTerminal(nn types.NamespacedName, fg *v1al
 	switch {
 	case r.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded:
 		if eventReason == "" {
-			eventReason = "PlannedFailoverCompleted"
+			eventReason = v1alpha1.EventPlannedFailoverSucceeded
 		}
 		e.sink.Event(fg, corev1.EventTypeNormal, eventReason,
-			fmt.Sprintf("planned failover to %q complete (warnings: %s)", final.Target, plannedWarningList(r.Warnings)))
+			fmt.Sprintf("planned failover to %q complete (warnings: %s)", final.TargetSite, plannedWarningList(r.Warnings)))
 	case r.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
-		e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverManualRecoveryRequired",
+		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverManualRecoveryRequired,
 			fmt.Sprintf("planned failover %s ended ManualRecoveryRequired (%s): resolve the split brain by hand, then annotate %s=%s",
-				final.RunID, r.Reason, AckPlannedFailoverHoldAnnotation, final.RunID))
+				final.RunID, r.Reason, AcknowledgePlannedFailoverHoldAnnotation, final.RunID))
 	default:
 		if eventReason == "" {
-			eventReason = "PlannedFailoverFailed"
+			eventReason = v1alpha1.EventPlannedFailoverFailed
 		}
 		if r.Outcome == v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed {
-			e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverPromotionUnconfirmed", final.Message)
+			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverPromotionConfirmationFailed, final.Message)
 		}
 		e.sink.Event(fg, corev1.EventTypeWarning, eventReason,
 			fmt.Sprintf("planned failover %s (%s): %s", r.Outcome, r.Reason, final.Message))
@@ -2158,8 +2163,8 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 		end = plannedEnd{outcome: p.Result.Outcome, reason: p.Result.Reason,
 			warnings: addPlannedWarnings(slices.Clone(p.Result.Warnings), v1alpha1.PlannedFailoverWarningStatusStalled), msg: p.Message,
 			confirmedAt: end.confirmedAt}
-		if p.Promotion != nil && p.Promotion.ConfirmedAt != nil {
-			end.confirmedAt = p.Promotion.ConfirmedAt.Time
+		if p.Promotion != nil && p.Promotion.ConfirmationTime != nil {
+			end.confirmedAt = p.Promotion.ConfirmationTime.Time
 		}
 	}
 	if end.outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && cur.Phase != v1alpha1.PlannedFailoverPhasePublishing {
@@ -2200,19 +2205,19 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 	if out != WriteCommitted {
 		if e.clk.Now().Sub(m.cannotWriteAt) >= time.Minute {
 			m.cannotWriteAt = e.clk.Now()
-			e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverStatusStalled",
+			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverStatusStalled,
 				fmt.Sprintf("the operator cannot write MysqlFailoverGroup %s (status and metadata writes fail: %s); the planned-failover claim stays held",
 					nn, errString(err)))
 		}
 		return plannedRequeueBackoff, true
 	}
 	if final.Result.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired && len(m.holdSites) == 0 {
-		m.holdSites = []string{cur.Target}
+		m.holdSites = []string{cur.TargetSite}
 	}
 	m.pendingTerminal = final.DeepCopy()
 	log.FromContext(ctx).Error(err, "planned failover: status stalled; ended the run with a terminal marker",
 		"fg", nn.String(), "runId", cur.RunID, "outcome", string(final.Result.Outcome), "reason", string(final.Result.Reason))
-	e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverStatusStalled",
+	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverStatusStalled,
 		fmt.Sprintf("status writes for planned failover %s failed for %s; the run ended %s (%s) with the %s annotation",
 			cur.RunID, plannedFailoverStatusStallDeadline, final.Result.Outcome, final.Result.Reason, PlannedFailoverTerminalAnnotation))
 	why := ReleaseStatusStalled
@@ -2230,7 +2235,7 @@ func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.Names
 	switch {
 	case pf.Phase == v1alpha1.PlannedFailoverPhasePublishing:
 		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, warnings: stalled,
-			msg: fmt.Sprintf("promoted %q; status writes stalled", pf.Target)}
+			msg: fmt.Sprintf("promoted %q; status writes stalled", pf.TargetSite)}
 	case m.promote.confirmed:
 		ref := plannedRunRef(nn, pf)
 		if !m.promote.recorded {
@@ -2245,10 +2250,10 @@ func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.Names
 			}
 		}
 		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, warnings: stalled, confirmedAt: m.promote.confirmedAt,
-			msg: fmt.Sprintf("promoted %q; status writes stalled", pf.Target)}
+			msg: fmt.Sprintf("promoted %q; status writes stalled", pf.TargetSite)}
 	case m.promote.mayHaveWritten:
 		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, reason: reason, warnings: stalled,
-			msg: fmt.Sprintf("status writes stalled after super_read_only=OFF may have been sent to %q", pf.Target)}
+			msg: fmt.Sprintf("status writes stalled after super_read_only=OFF may have been sent to %q", pf.TargetSite)}
 	case pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting:
 		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: reason, warnings: stalled,
 			msg: "status writes stalled before the claim was durable; nothing was sent"}
@@ -2258,10 +2263,10 @@ func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.Names
 		// attempt that returned before its SET (an unreadable peer, say)
 		// left the source untouched.
 		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, reason: reason, warnings: stalled,
-			msg: fmt.Sprintf("status writes stalled before the fence was sent; source %q is untouched", pf.Source)}
+			msg: fmt.Sprintf("status writes stalled before the fence was sent; source %q is untouched", pf.SourceSite)}
 	}
 	return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason, warnings: stalled,
-		msg: fmt.Sprintf("status writes stalled; source %q left fenced", pf.Source)}
+		msg: fmt.Sprintf("status writes stalled; source %q left fenced", pf.SourceSite)}
 }
 
 // markedRunPass handles a run the terminal marker ended: retry its
@@ -2269,7 +2274,7 @@ func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.Names
 // step 4). The claim is released (or held) whatever status says.
 func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	marker, _ := parseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	marker, _ := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
 	m := e.runMemo(pf.RunID)
 	e.markTerminated(pf.RunID)
 	isHold := marker.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
@@ -2305,7 +2310,7 @@ func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.
 	}
 	sites := m.holdSites
 	if isHold && len(sites) == 0 {
-		sites = []string{pf.Target}
+		sites = []string{pf.TargetSite}
 	}
 	out, _, _ := e.commit(ctx, fg, false, func(base *v1alpha1.MysqlFailoverGroup) (*v1alpha1.PlannedFailoverStatus,
 		func(*v1alpha1.MysqlFailoverGroupStatus), bool) {
@@ -2315,7 +2320,7 @@ func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.
 		}
 		next := final.DeepCopy()
 		next.Revision = cur.Revision + 1
-		return next, e.terminalMutate(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, next, sites), true
+		return next, e.terminalMutate(base, next, sites), true
 	})
 	if out != WriteCommitted {
 		return plannedFailoverMarkerRetryInterval, nil
@@ -2334,8 +2339,8 @@ func plannedOwnRecordDurable(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.Plann
 // plannedOwnRecordTime is the time of the run's own failover record when
 // the durable record of fg is it (§4.4 check 1's by-content rule), or zero.
 func plannedOwnRecordTime(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) time.Time {
-	if pf.Promotion != nil && pf.Promotion.ConfirmedAt != nil {
-		return pf.Promotion.ConfirmedAt.Time
+	if pf.Promotion != nil && pf.Promotion.ConfirmationTime != nil {
+		return pf.Promotion.ConfirmationTime.Time
 	}
 	rec, _, err := EffectiveFailoverRecord(fg, now)
 	if (err != nil && rec.IsZero()) || !ownFailoverRecord(fg, rec, pf) {
@@ -2364,15 +2369,16 @@ func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.M
 	if !pf.StartTime.IsZero() {
 		start = pf.StartTime
 	}
-	target := pf.Target
+	target := pf.TargetSite
 	if target == "" {
 		target = "unknown"
 	}
-	// The older operator's sourcePrimary is pruned on read: the source is
-	// not known, which is why the message asks a human to check.
+	// The older operator's target and sourcePrimary are pruned on read
+	// (they are targetSite and sourceSite now): neither site is known, which
+	// is why the message asks a human to check.
 	next := &v1alpha1.PlannedFailoverStatus{
 		RunID: e.newRunID(), Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseFailed,
-		Target: target, Source: pf.Source, StartTime: start, Message: msg,
+		TargetSite: target, SourceSite: pf.SourceSite, StartTime: start, Message: msg,
 		Settings: plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: target}),
 		Result:   &v1alpha1.PlannedFailoverResult{Outcome: outcome, Reason: v1alpha1.PlannedFailoverReasonLegacyRunRefused, CompletionTime: now},
 	}
@@ -2390,6 +2396,6 @@ func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.M
 	}
 	log.FromContext(ctx).Info("planned failover: legacy status refused", "fg", nn.String(), "phase", string(phase))
 	e.sink.RunTerminal(nn, next)
-	e.sink.Event(fg, corev1.EventTypeWarning, "PlannedFailoverLegacyRefused", msg)
+	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverLegacyRunRefused, msg)
 	return plannedRequeueNext, nil
 }

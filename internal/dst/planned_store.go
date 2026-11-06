@@ -6,12 +6,9 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -458,7 +455,7 @@ func (s *simPlannedStore) settle(_ context.Context, base *v1alpha1.MysqlFailover
 		// on base, so once it lands the pending write's precondition can
 		// never hold again.
 		s.patchAnnotationsLocked("statusFence", map[string]string{
-			controller.PlannedFailoverStatusFenceAnnotation: s.clk.Now().UTC().Format(time.RFC3339Nano),
+			controller.PlannedFailoverStatusFenceAnnotation: controller.FormatStatusFenceValue(s.clk.Now()),
 		})
 		s.logLocked("settle", "not committed (fenced)")
 		return controller.WriteNotCommitted, errStoreTimeout
@@ -511,7 +508,7 @@ func (s *simPlannedStore) MarkDeadlineStart(_ context.Context, base *v1alpha1.My
 			return nil
 		}
 		start = now.UTC().Truncate(time.Second)
-		return map[string]string{key: runID + "/" + start.Format(time.RFC3339)}
+		return map[string]string{key: controller.FormatDeadlineStart(runID, start)}
 	})
 	if out != controller.WriteCommitted {
 		return time.Time{}, out, err
@@ -532,18 +529,17 @@ func (s *simPlannedStore) ClearDeadlineStart(_ context.Context, base *v1alpha1.M
 }
 
 // ClearHold commits final (when non-nil) and the removal of the
-// AutomaticFailoverHeld condition naming runID in one status write.
+// status.plannedFailoverHold naming runID (its condition set False) in one
+// status write.
 func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string,
 	final *v1alpha1.PlannedFailoverStatus) (controller.WriteOutcome, error) {
 	status := *base.Status.DeepCopy()
 	if final != nil {
 		status.PlannedFailover = final.DeepCopy()
 	}
-	if holdConditionNames(status.Conditions, runID) {
-		apimeta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
-	}
+	controller.ClearPlannedHold(&status, runID, base.Generation, s.clk.Now())
 	committed := func(cur *v1alpha1.MysqlFailoverGroup) bool {
-		if holdConditionNames(cur.Status.Conditions, runID) {
+		if holdNames(&cur.Status, runID) {
 			return false
 		}
 		if final == nil {
@@ -559,10 +555,10 @@ func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFai
 func (s *simPlannedStore) DeleteHoldAck(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
 	runID string) (controller.WriteOutcome, error) {
 	return s.metadataWrite("deleteHoldAck", base, func(a map[string]string) map[string]string {
-		if a[controller.AckPlannedFailoverHoldAnnotation] != runID {
+		if a[controller.AcknowledgePlannedFailoverHoldAnnotation] != runID {
 			return nil
 		}
-		return map[string]string{controller.AckPlannedFailoverHoldAnnotation: ""}
+		return map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: ""}
 	})
 }
 
@@ -661,53 +657,38 @@ func parseRV(rv string) int64 {
 	return n
 }
 
-// markerRunID is the runId a terminal-marker value names ("" if malformed).
-// The controller's parser is unexported; the grammar is
-// "<runId>/<outcome>/<reason>" (controller.TerminalMarker.String).
+// markerRunID is the runID a terminal-marker value names ("" if malformed).
 func markerRunID(v string) string {
-	parts := strings.Split(v, "/")
-	if len(parts) != 3 {
+	m, ok := controller.ParseTerminalMarker(v)
+	if !ok {
 		return ""
 	}
-	return parts[0]
+	return m.RunID
 }
 
-// parseDeadlineStart reads "<runId>/<RFC3339>".
+// parseDeadlineStart reads a controller.FormatDeadlineStart value.
 func parseDeadlineStart(v string) (runID string, t time.Time, ok bool) {
-	i := strings.LastIndex(v, "/")
-	if i <= 0 {
-		return "", time.Time{}, false
-	}
-	t, err := time.Parse(time.RFC3339, v[i+1:])
-	if err != nil {
-		return "", time.Time{}, false
-	}
-	return v[:i], t, true
+	return controller.ParseDeadlineStart(v)
 }
 
-// holdConditionNames reports whether a True AutomaticFailoverHeld condition
-// names runID (the message grammar of the controller's
-// plannedHoldConditionMessage: "planned failover run <runId> ended ...").
-func holdConditionNames(conds []metav1.Condition, runID string) bool {
-	c := apimeta.FindStatusCondition(conds, v1alpha1.ConditionAutomaticFailoverHeld)
-	return c != nil && c.Status == metav1.ConditionTrue &&
-		strings.HasPrefix(c.Message, "planned failover run "+runID+" ")
+// holdNames reports whether status.plannedFailoverHold names runID.
+func holdNames(st *v1alpha1.MysqlFailoverGroupStatus, runID string) bool {
+	return st.PlannedFailoverHold != nil && st.PlannedFailoverHold.RunID == runID
 }
 
-// holdStands reports whether obj carries either durable hold record: a True
-// AutomaticFailoverHeld condition, or a terminal marker with outcome
-// ManualRecoveryRequired (§10.5).
+// holdStands reports whether obj carries either durable hold record:
+// status.plannedFailoverHold (or a True AutomaticFailoverHeld condition
+// without it, which the controller treats as a hold), or a terminal marker
+// with outcome ManualRecoveryRequired (§10.5).
 func holdStands(obj *v1alpha1.MysqlFailoverGroup) bool {
 	if obj == nil {
 		return false
 	}
-	if c := apimeta.FindStatusCondition(obj.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil &&
-		c.Status == metav1.ConditionTrue {
+	if obj.Status.PlannedFailoverHold != nil || holdConditionTrue(obj) {
 		return true
 	}
-	parts := strings.Split(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation], "/")
-	return len(parts) == 3 && parts[0] != "" &&
-		v1alpha1.PlannedFailoverOutcome(parts[1]) == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
+	m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation])
+	return ok && m.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
 }
 
 // PlannedStore is the simulated planned-failover store, exported for the

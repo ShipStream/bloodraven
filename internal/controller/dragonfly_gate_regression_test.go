@@ -104,7 +104,7 @@ func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T)
 // gate busy, neither deadlocks nor stalls the planned Dragonfly phase.
 
 func TestDragonflySnapshotUpgrade_AnnotationDuringPlannedFailoverNoDeadlock(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{Dir: "s3://x/y"}

@@ -23,10 +23,10 @@ func TestEngine_ZombieClearReleasesHydratedClaimNeverSeen(t *testing.T) {
 		name  string
 		block *v1alpha1.PlannedFailoverStatus
 	}{
-		{"terminal block", &v1alpha1.PlannedFailoverStatus{RunID: "run-hydrated", Revision: 5, Phase: v1alpha1.PlannedFailoverPhaseFailed, Target: "pdx",
+		{"terminal block", &v1alpha1.PlannedFailoverStatus{RunID: "run-hydrated", Revision: 5, Phase: v1alpha1.PlannedFailoverPhaseFailed, TargetSite: "pdx",
 			Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, CompletionTime: metav1.Now()}}},
 		{"absent block", nil},
-		{"another run's block", &v1alpha1.PlannedFailoverStatus{RunID: "run-other", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseFailed, Target: "pdx",
+		{"another run's block", &v1alpha1.PlannedFailoverStatus{RunID: "run-other", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseFailed, TargetSite: "pdx",
 			Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, CompletionTime: metav1.Now()}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,12 +60,12 @@ func TestEngine_SucceededWriteMergesManagerAuthority(t *testing.T) {
 		&pfFakeSink{}, clock.NewFakeClock(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)), SimHooks{})
 	confirmed := metav1.NewTime(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC))
 	gtid := "uuid-iad:1-10"
-	next := &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Target: "pdx",
+	next := &v1alpha1.PlannedFailoverStatus{RunID: "run-1", TargetSite: "pdx",
 		Fence:     &v1alpha1.PlannedFailoverFenceRecord{GtidSet: &gtid},
-		Promotion: &v1alpha1.PlannedFailoverPromotionRecord{ConfirmedAt: &confirmed},
+		Promotion: &v1alpha1.PlannedFailoverPromotionRecord{ConfirmationTime: &confirmed},
 		Result:    &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded}}
 	st := &v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad", TopologyGeneration: 7}
-	e.terminalMutate(types.NamespacedName{Namespace: "ns", Name: "fg"}, next, nil)(st)
+	e.terminalMutate(&v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "fg"}}, next, nil)(st)
 	if st.ActiveSite != "pdx" || st.TopologyGeneration != 8 || st.LastFailoverTarget != "pdx" || st.PromotionGtidExecuted != gtid {
 		t.Fatalf("status = activeSite %q gen %d target %q watermark %q; want pdx/8/pdx/F",
 			st.ActiveSite, st.TopologyGeneration, st.LastFailoverTarget, st.PromotionGtidExecuted)

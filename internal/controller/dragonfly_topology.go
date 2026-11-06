@@ -755,14 +755,14 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 // master, though status.activeSite has not moved yet (§8.4). "" otherwise.
 func plannedTakeoverMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	pf, marked := plannedFailoverRun(fg)
-	if pf == nil || marked || pf.RunID == "" || pf.Target == "" || pf.Dragonfly == nil || pf.Dragonfly.Takeover == nil ||
+	if pf == nil || marked || pf.RunID == "" || pf.TargetSite == "" || pf.Dragonfly == nil || pf.Dragonfly.Takeover == nil ||
 		pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
 		return ""
 	}
 	switch pf.Phase {
 	case v1alpha1.PlannedFailoverPhasePromotingDragonfly, v1alpha1.PlannedFailoverPhasePromoting,
 		v1alpha1.PlannedFailoverPhasePublishing, v1alpha1.PlannedFailoverPhaseRollingBack:
-		return pf.Target
+		return pf.TargetSite
 	}
 	return ""
 }
@@ -1227,8 +1227,8 @@ func rolloutPromotionBlocked(fg *v1alpha1.MysqlFailoverGroup, target, oldSource 
 func supersededPromotionRequest(fg *v1alpha1.MysqlFailoverGroup, req *dragonflyPromotionRequest) string {
 	issued := req.issued.Truncate(time.Second)
 	if pf := fg.Status.PlannedFailover; pf != nil {
-		if at := pf.ClaimedAt; at != nil && !at.Time.Before(issued) {
-			return fmt.Sprintf("planned failover to %q claimed the group after the request", pf.Target)
+		if at := pf.ClaimTime; at != nil && !at.Time.Before(issued) {
+			return fmt.Sprintf("planned failover to %q claimed the group after the request", pf.TargetSite)
 		}
 	}
 	if t := fg.Status.LastFailoverTarget; t != "" && t != req.target && fg.Status.LastFailover != nil && !fg.Status.LastFailover.Time.Before(issued) {

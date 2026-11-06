@@ -1769,18 +1769,19 @@ spec:
                           Default: 30s.
                         type: string
                       onSyncTimeout:
-                        default: proceed
+                        default: Proceed
                         description: |-
                           OnSyncTimeout governs behavior when the target replica fails to
                           reach the source's offset within MaxSyncWait, or when REPLTAKEOVER
                           fails:
-                            - "proceed" (default): continue with MySQL promotion, stamp
-                              sessionsPreserved=false. Cache/session continuity is best-effort.
-                            - "fail": abort planned failover before MySQL promotion, roll
-                              back the source MySQL fence, leave activeSite unchanged.
+                            - Proceed (default): continue with the MySQL promotion and record
+                              status.plannedFailover.dragonfly.sessions=Lost. Cache/session
+                              continuity is best-effort.
+                            - Fail: abort the planned failover before the MySQL promotion,
+                              roll back the source MySQL fence, leave activeSite unchanged.
                         enum:
-                        - proceed
-                        - fail
+                        - Proceed
+                        - Fail
                         type: string
                     type: object
                   podSecurityContext:
@@ -5752,19 +5753,18 @@ spec:
                       as a Go time.Duration. Default: 5m.
                     type: string
                   onCooldown:
-                    default: reject
+                    default: Reject
                     description: |-
-                      OnCooldown controls how the state machine reacts when the
-                      anti-flap cooldown rejects a request at Validating:
-                        - "reject" (default): stamp Failed{CooldownActive} and clear the
-                          annotation. The admin must re-annotate after the cooldown
-                          expires.
-                        - "defer": stamp Deferred and keep the annotation in place;
-                          the reconciler re-tries validation at cooldown expiry and
-                          transitions to Draining automatically.
+                      OnCooldown controls how admission reacts when the anti-flap
+                      cooldown is active:
+                        - Reject (default): the run ends Failed{NotStarted, CooldownActive}
+                          and the request annotation is removed. The admin re-annotates
+                          after the cooldown expires.
+                        - Defer: the run waits in Deferred{CooldownActive}, keeps the
+                          annotation in place, and re-tries admission at cooldown expiry.
                     enum:
-                    - reject
-                    - defer
+                    - Reject
+                    - Defer
                     type: string
                 type: object
               podAnnotations:
@@ -7291,9 +7291,9 @@ spec:
                       Admission records why a run that owns nothing yet is waiting or
                       deferred, and its admission deadline.
                     properties:
-                      deadline:
+                      deadlineTime:
                         description: |-
-                          Deadline is when an Admitting run that still has no claim ends
+                          DeadlineTime is when an Admitting run that still has no claim ends
                           Failed{NotStarted, AdmissionTimeout}.
                         format: date-time
                         type: string
@@ -7303,8 +7303,8 @@ spec:
                         - CooldownActive
                         - DeploymentHold
                         type: string
-                      retryAfter:
-                        description: RetryAfter is the earliest time a Deferred run
+                      retryTime:
+                        description: RetryTime is the earliest time a Deferred run
                           re-tries admission.
                         format: date-time
                         type: string
@@ -7332,25 +7332,30 @@ spec:
                     type: object
                   claimBaseline:
                     description: |-
-                      ClaimBaseline is the durable failover record {lastFailover,
-                      lastFailoverTarget} at the grant (the newer of status and the
-                      out-of-band record), at second precision. A re-proof compares it by
-                      value.
+                      ClaimBaseline is the durable failover record at the grant (the newer
+                      of status and the out-of-band record): its time, at second
+                      precision, and its target. A re-proof compares those two by value;
+                      promotionGtidExecuted is not recorded here.
                     properties:
-                      lastFailover:
+                      promotionGtidExecuted:
+                        description: PromotionGtidExecuted is the promotion watermark.
+                        type: string
+                      target:
+                        description: Target is the site the failover promoted.
+                        type: string
+                      time:
+                        description: Time is when the failover was recorded.
                         format: date-time
                         type: string
-                      lastFailoverTarget:
-                        type: string
                     type: object
-                  claimedAt:
-                    description: ClaimedAt is when the claim was granted.
+                  claimTime:
+                    description: ClaimTime is when the claim was granted.
                     format: date-time
                     type: string
                   dns:
                     description: DNS records publishing the promoted target.
                     properties:
-                      attemptedAt:
+                      attemptTime:
                         format: date-time
                         type: string
                       lastError:
@@ -7365,7 +7370,7 @@ spec:
                         - Skipped
                         type: string
                     required:
-                    - attemptedAt
+                    - attemptTime
                     - state
                     type: object
                   dragonfly:
@@ -7420,17 +7425,20 @@ spec:
                           Takeover is the write-ahead record of the target Dragonfly's
                           promotion.
                         properties:
-                          completedAt:
+                          completionTime:
                             format: date-time
                             type: string
-                          intendedAt:
+                          intentTime:
                             format: date-time
                             type: string
                           method:
-                            description: DragonflyTakeoverMethod is how the target
-                              Dragonfly was promoted.
+                            description: |-
+                              DragonflyTakeoverMethod is how the target Dragonfly was promoted. A
+                              planned run writes only ReplTakeover today; ReplicaOfNoOne (the
+                              emergency path's fallback) and Skipped are the rest of the closed set.
                             enum:
-                            - REPLTAKEOVER
+                            - ReplTakeover
+                            - ReplicaOfNoOne
                             - Skipped
                             type: string
                           state:
@@ -7445,14 +7453,14 @@ spec:
                             format: int64
                             type: integer
                         required:
-                        - intendedAt
+                        - intentTime
                         - state
                         type: object
                     type: object
                   drain:
                     description: Drain records the source connection drain.
                     properties:
-                      completedAt:
+                      completionTime:
                         format: date-time
                         type: string
                       remainingConnections:
@@ -7468,8 +7476,8 @@ spec:
                     description: Fence is the write-ahead record of the run's fence
                       on the source.
                     properties:
-                      appliedAt:
-                        description: AppliedAt is set iff state is Applied.
+                      applyTime:
+                        description: ApplyTime is set iff state is Applied.
                         format: date-time
                         type: string
                       gtidSet:
@@ -7477,7 +7485,7 @@ spec:
                           GtidSet is the fenced source set ("" is a valid empty set). It is also
                           the promotion watermark.
                         type: string
-                      intendedAt:
+                      intentTime:
                         format: date-time
                         type: string
                       sourceServerUUID:
@@ -7496,7 +7504,7 @@ spec:
                         - Applied
                         type: string
                     required:
-                    - intendedAt
+                    - intentTime
                     - sourceServerUUID
                     - state
                     type: object
@@ -7504,7 +7512,7 @@ spec:
                     description: LagWait records the wait for the target to apply
                       the fenced set.
                     properties:
-                      caughtUpAt:
+                      catchUpTime:
                         format: date-time
                         type: string
                       startTime:
@@ -7538,10 +7546,10 @@ spec:
                     description: Promotion is the write-ahead record of the target's
                       promotion.
                     properties:
-                      confirmedAt:
+                      confirmationTime:
                         format: date-time
                         type: string
-                      intendedAt:
+                      intentTime:
                         format: date-time
                         type: string
                       state:
@@ -7577,7 +7585,7 @@ spec:
                         type: array
                         x-kubernetes-list-type: set
                     required:
-                    - intendedAt
+                    - intentTime
                     - state
                     - targetServerUUID
                     type: object
@@ -7614,7 +7622,7 @@ spec:
                         - CooldownActive
                         - ConcurrentOperation
                         - InvalidFailoverState
-                        - Cancelled
+                        - Canceled
                         - AdmissionTimeout
                         - AuthorityChanged
                         - LegacyRunRefused
@@ -7659,14 +7667,14 @@ spec:
                   revision:
                     description: |-
                       Revision increments on every write the run makes. Settlement of an
-                      ambiguous write identifies a committed write by (runId, revision).
+                      ambiguous write identifies a committed write by (runID, revision).
                     format: int64
                     minimum: 1
                     type: integer
                   rollback:
                     description: Rollback is the write-ahead record of a rollback.
                     properties:
-                      intendedAt:
+                      intentTime:
                         format: date-time
                         type: string
                       reason:
@@ -7684,7 +7692,7 @@ spec:
                         - CooldownActive
                         - ConcurrentOperation
                         - InvalidFailoverState
-                        - Cancelled
+                        - Canceled
                         - AdmissionTimeout
                         - AuthorityChanged
                         - LegacyRunRefused
@@ -7708,10 +7716,10 @@ spec:
                         - InternalError
                         type: string
                     required:
-                    - intendedAt
+                    - intentTime
                     - reason
                     type: object
-                  runId:
+                  runID:
                     description: |-
                       RunID identifies the run this block belongs to. It is minted when a
                       request is first stamped (Admitting or Deferred) and is the token
@@ -7732,11 +7740,11 @@ spec:
                             type: string
                           onSyncTimeout:
                             description: |-
-                              OnSyncTimeout mirrors spec.dragonfly.plannedFailover.onSyncTimeout
-                              (lower case like spec.plannedFailover.onCooldown).
+                              OnSyncTimeout is spec.dragonfly.plannedFailover.onSyncTimeout at
+                              acceptance.
                             enum:
-                            - proceed
-                            - fail
+                            - Proceed
+                            - Fail
                             type: string
                         required:
                         - maxSyncWait
@@ -7752,26 +7760,102 @@ spec:
                     - drainTimeout
                     - maxLagWait
                     type: object
-                  source:
+                  sourceSite:
                     description: |-
-                      Source is the site the topology manager named the unique writable
+                      SourceSite is the site the topology manager named the unique writable
                       primary when it granted the claim. Empty until Fencing.
                     type: string
                   startTime:
                     description: StartTime is when the request was first accepted.
                     format: date-time
                     type: string
-                  target:
-                    description: Target is the site the admin asked to promote.
+                  targetSite:
+                    description: TargetSite is the site the admin asked to promote.
                     minLength: 1
                     type: string
                 required:
                 - phase
                 - revision
-                - runId
+                - runID
                 - settings
                 - startTime
-                - target
+                - targetSite
+                type: object
+              plannedFailoverHold:
+                description: |-
+                  PlannedFailoverHold is the automation hold left by a planned
+                  failover that may have written to its target and ended
+                  ManualRecoveryRequired. It outlives that run's plannedFailover block
+                  (a refused request can replace the block) and stays until an
+                  administrator acknowledges it with
+                  bloodraven.shipstream.io/acknowledge-planned-failover-hold=<runID>.
+                  The AutomaticFailoverHeld condition summarises it.
+                properties:
+                  ambiguousSites:
+                    description: |-
+                      AmbiguousSites are the sites that were writable, or whose
+                      writability could not be read, when the run ended.
+                    items:
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                  holdTime:
+                    description: HoldTime is when the hold was recorded.
+                    format: date-time
+                    type: string
+                  reason:
+                    description: Reason is the run's result.reason.
+                    enum:
+                    - InvalidAnnotation
+                    - UnknownSite
+                    - TargetNotPromotable
+                    - AlreadyActive
+                    - TargetUnhealthy
+                    - DivergentTarget
+                    - KeyringRotation
+                    - CooldownActive
+                    - ConcurrentOperation
+                    - InvalidFailoverState
+                    - Canceled
+                    - AdmissionTimeout
+                    - AuthorityChanged
+                    - LegacyRunRefused
+                    - FenceFailed
+                    - SourceLost
+                    - SourceUnfenced
+                    - TargetLost
+                    - ForeignWritable
+                    - PeerUnreadable
+                    - LagTimeout
+                    - InvalidGTID
+                    - DragonflySyncTimeout
+                    - DragonflyPromotionFailed
+                    - TargetChanged
+                    - PromotionAborted
+                    - PromotionUnconfirmed
+                    - ManagerUnavailable
+                    - StatusStalled
+                    - ManualRecoveryPending
+                    - ExecuteFailed
+                    - InternalError
+                    type: string
+                  runID:
+                    description: RunID is the held run; the acknowledgement names
+                      it.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  sourceSite:
+                    description: SourceSite is the run's sourceSite (empty if the
+                      run never fenced).
+                    type: string
+                  targetSite:
+                    description: TargetSite is the run's targetSite.
+                    type: string
+                required:
+                - holdTime
+                - runID
                 type: object
               promotionGtidExecuted:
                 description: |-

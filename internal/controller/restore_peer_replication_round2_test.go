@@ -34,10 +34,10 @@ func TestReconcile_PlannedFailoverInFlightFinishesBeforeRestoreFences(t *testing
 	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
 	fenced := restoreRoundTwoUUID + ":1-10"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-before-restore", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "pdx", Source: "iad",
-		StartTime: start, ClaimedAt: &start, ClaimBaseline: &v1alpha1.PlannedFailoverRecordRef{},
+		RunID: "run-before-restore", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "pdx", SourceSite: "iad",
+		StartTime: start, ClaimTime: &start, ClaimBaseline: &v1alpha1.FailoverRecord{},
 		Settings: v1alpha1.PlannedFailoverSettings{DrainTimeout: metav1.Duration{Duration: 30 * time.Second}, MaxLagWait: metav1.Duration{Duration: time.Nanosecond}},
-		Fence:    &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntendedAt: start, SourceServerUUID: restoreRoundTwoUUID, GtidSet: &fenced},
+		Fence:    &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: start, SourceServerUUID: restoreRoundTwoUUID, GtidSet: &fenced},
 		Drain:    &v1alpha1.PlannedFailoverDrainRecord{StartTime: start},
 	}
 	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{

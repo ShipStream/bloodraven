@@ -283,12 +283,12 @@ func opsRun(phase v1alpha1.PlannedFailoverPhase) *v1alpha1.PlannedFailoverStatus
 	gtid := opsF
 	t0 := metav1.NewTime(time.Date(2026, 11, 4, 11, 59, 0, 0, time.UTC))
 	pf := &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-1", Revision: 3, Phase: phase, Target: "dc2", Source: "dc1", StartTime: t0, ClaimedAt: &t0,
-		ClaimBaseline: &v1alpha1.PlannedFailoverRecordRef{},
-		Fence:         &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntendedAt: t0, SourceServerUUID: opsUUIDA, GtidSet: &gtid},
+		RunID: "run-1", Revision: 3, Phase: phase, TargetSite: "dc2", SourceSite: "dc1", StartTime: t0, ClaimTime: &t0,
+		ClaimBaseline: &v1alpha1.FailoverRecord{},
+		Fence:         &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: t0, SourceServerUUID: opsUUIDA, GtidSet: &gtid},
 	}
 	if phase == v1alpha1.PlannedFailoverPhasePromoting {
-		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, IntendedAt: t0, TargetServerUUID: opsUUIDB}
+		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, IntentTime: t0, TargetServerUUID: opsUUIDB}
 	}
 	return pf
 }
@@ -691,7 +691,7 @@ func TestRollbackPreconditions(t *testing.T) {
 			if tc.phase == v1alpha1.PlannedFailoverPhasePromoting {
 				pf.Promotion = opsRun(tc.phase).Promotion
 			}
-			pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: tc.reason, IntendedAt: metav1.NewTime(f.clk.Now())}
+			pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: tc.reason, IntentTime: metav1.NewTime(f.clk.Now())}
 			res, err := f.topo.Rollback(context.Background(), f.ref, pf)
 			if err != nil || res.Outcome != tc.outcome {
 				t.Fatalf("Rollback = %+v, %v; want outcome %q", res, err, tc.outcome)
@@ -820,9 +820,9 @@ func TestReprove_RecognisesOwnRecord(t *testing.T) {
 	f.fenced()
 	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
 	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
-	fg := opsReproveGroup(f, pf, pf.Promotion.IntendedAt.Add(2*time.Second), "dc2")
+	fg := opsReproveGroup(f, pf, pf.Promotion.IntentTime.Add(2*time.Second), "dc2")
 	fg.Annotations = map[string]string{
-		LastFailoverAnnotation:          failoverStampFormat(pf.Promotion.IntendedAt.Add(2 * time.Second)),
+		LastFailoverAnnotation:          failoverStampFormat(pf.Promotion.IntentTime.Add(2 * time.Second)),
 		LastFailoverTargetAnnotation:    "dc2",
 		PromotionGtidExecutedAnnotation: opsF,
 	}

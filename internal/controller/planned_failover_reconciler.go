@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -57,7 +56,7 @@ func (r *MysqlFailoverGroupReconciler) StepPlannedFailoverForTest(ctx context.Co
 // only lets a quiet group skip the read.
 func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 	a := fg.GetAnnotations()
-	for _, k := range []string{PlannedFailoverAnnotation, AckPlannedFailoverHoldAnnotation, PlannedFailoverTerminalAnnotation,
+	for _, k := range []string{PlannedFailoverAnnotation, AcknowledgePlannedFailoverHoldAnnotation, PlannedFailoverTerminalAnnotation,
 		PlannedFailoverStallSinceAnnotation, PlannedFailoverManagerAbsentSinceAnnotation} {
 		if _, ok := a[k]; ok {
 			return true
@@ -66,8 +65,7 @@ func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 	if pf := fg.Status.PlannedFailover; pf != nil && !plannedFailoverTerminal(pf) {
 		return true
 	}
-	c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
-	return c != nil && c.Status == "True"
+	return PlannedHoldFrom(fg) != nil
 }
 
 // plannedClaimHeld reports whether the group's planned-failover claim slot
@@ -123,10 +121,10 @@ func (s reconcilerPlannedSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.
 	if pf == nil {
 		return
 	}
-	metrics.PlannedFailoversTotal.WithLabelValues(pf.Target, mapOutcomeToMetricResult(pf.Result)).Inc()
+	metrics.PlannedFailoversTotal.WithLabelValues(pf.TargetSite, mapOutcomeToMetricResult(pf.Result)).Inc()
 	if !pf.StartTime.IsZero() && pf.Result != nil {
 		if d := pf.Result.CompletionTime.Sub(pf.StartTime.Time); d > 0 {
-			metrics.PlannedFailoverDurationSeconds.WithLabelValues(pf.Target).Observe(d.Seconds())
+			metrics.PlannedFailoverDurationSeconds.WithLabelValues(pf.TargetSite).Observe(d.Seconds())
 		}
 	}
 }

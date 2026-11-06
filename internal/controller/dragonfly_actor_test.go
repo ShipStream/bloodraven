@@ -596,7 +596,7 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 
 	fg = get()
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, RunID: "run-1", Source: "dc2", Target: "dc1",
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, RunID: "run-1", SourceSite: "dc2", TargetSite: "dc1",
 		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{Takeover: &v1alpha1.DragonflyTakeoverRecord{
 			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
@@ -1045,7 +1045,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	live := getFGByKey(t, c, key)
 	live.Status.ActiveSite = "dc2"
 	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromotingDragonfly, RunID: "run-1", Source: "dc2", Target: "dc1",
+		Phase: v1alpha1.PlannedFailoverPhasePromotingDragonfly, RunID: "run-1", SourceSite: "dc2", TargetSite: "dc1",
 		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{},
 	}
 	if err := c.Status().Update(context.Background(), live); err != nil {
@@ -1115,7 +1115,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 // emergency falls back on its own budget and records dc2 before the
 // planned phase dials anything, so the planned phase starts from it.
 func TestPlannedFailoverPromotingDragonfly_WaitsForSentEmergencyTakeover(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	stored := fg.DeepCopy()

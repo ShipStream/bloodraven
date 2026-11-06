@@ -10,9 +10,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -27,31 +27,38 @@ import (
 // ---------- annotations ----------
 
 const (
-	// PlannedFailoverStatusFenceAnnotation is bumped (RFC3339Nano) with a
-	// write conditioned on the resourceVersion an ambiguous status write was
-	// made against. Its success proves that write can never commit.
+	// PlannedFailoverStatusFenceAnnotation is bumped (an ISO 8601 basic UTC
+	// instant with nanoseconds, FormatStatusFenceValue) with a write
+	// conditioned on the resourceVersion an ambiguous status write was made
+	// against. Its success proves that write can never commit. Internal.
 	PlannedFailoverStatusFenceAnnotation = "bloodraven.shipstream.io/planned-failover-status-fence"
 
 	// PlannedFailoverTerminalAnnotation ends a run outside /status when its
-	// status writes stall: "<runId>/<outcome>/<reason>" (TerminalMarker).
-	// Every planned-failover predicate treats the run it names as terminal.
+	// status writes stall. Its value is a versioned JSON TerminalMarker
+	// ({"schemaVersion":1,"runID":…,"outcome":…,"reason":…}). Every
+	// planned-failover predicate treats the run it names as terminal.
+	// Internal.
 	PlannedFailoverTerminalAnnotation = "bloodraven.shipstream.io/planned-failover-terminal"
 
-	// AckPlannedFailoverHoldAnnotation acknowledges an automation hold. Its
-	// value is the held run's runId.
-	AckPlannedFailoverHoldAnnotation = "bloodraven.shipstream.io/ack-planned-failover-hold"
+	// AcknowledgePlannedFailoverHoldAnnotation acknowledges an automation
+	// hold. Its value is the held run's runID
+	// (status.plannedFailoverHold.runID). Public; wrapped by kubectl
+	// bloodraven ack-planned-failover-hold.
+	AcknowledgePlannedFailoverHoldAnnotation = "bloodraven.shipstream.io/acknowledge-planned-failover-hold"
 
 	// PromotionGtidExecutedAnnotation is the out-of-band copy of the
 	// promotion watermark, beside LastFailoverAnnotation and
-	// LastFailoverTargetAnnotation.
+	// LastFailoverTargetAnnotation. Operator-owned read-only.
 	PromotionGtidExecutedAnnotation = "bloodraven.shipstream.io/promotion-gtid-executed"
 
 	// PlannedFailoverStallSinceAnnotation is the durable start of the
-	// status-stall deadline: "<runId>/<RFC3339>".
+	// status-stall deadline: "<runID>:since=<YYYYMMDDThhmmssZ>"
+	// (FormatDeadlineStart). Internal.
 	PlannedFailoverStallSinceAnnotation = "bloodraven.shipstream.io/planned-failover-stall-since"
 
 	// PlannedFailoverManagerAbsentSinceAnnotation is the durable start of
-	// the manager-absence deadline: "<runId>/<RFC3339>".
+	// the manager-absence deadline, in the same form as
+	// PlannedFailoverStallSinceAnnotation. Internal.
 	PlannedFailoverManagerAbsentSinceAnnotation = "bloodraven.shipstream.io/planned-failover-manager-absent-since"
 )
 
@@ -88,24 +95,24 @@ func sameFailoverRecord(a, b FailoverRecordRef) bool {
 }
 
 // failoverRecordRefFromAPI converts the persisted copy; nil is no history.
-func failoverRecordRefFromAPI(r *v1alpha1.PlannedFailoverRecordRef) FailoverRecordRef {
+func failoverRecordRefFromAPI(r *v1alpha1.FailoverRecord) FailoverRecordRef {
 	if r == nil {
 		return FailoverRecordRef{}
 	}
 	var t time.Time
-	if r.LastFailover != nil {
-		t = r.LastFailover.Time
+	if r.Time != nil {
+		t = r.Time.Time
 	}
-	return newFailoverRecordRef(t, r.LastFailoverTarget)
+	return newFailoverRecordRef(t, r.Target)
 }
 
 // toAPI converts to the persisted copy, at second precision. A zero time is
 // omitted.
-func (r FailoverRecordRef) toAPI() *v1alpha1.PlannedFailoverRecordRef {
-	out := &v1alpha1.PlannedFailoverRecordRef{LastFailoverTarget: r.LastFailoverTarget}
+func (r FailoverRecordRef) toAPI() *v1alpha1.FailoverRecord {
+	out := &v1alpha1.FailoverRecord{Target: r.LastFailoverTarget}
 	if !r.LastFailover.IsZero() {
 		t := metav1.NewTime(r.LastFailover.UTC().Truncate(time.Second))
-		out.LastFailover = &t
+		out.Time = &t
 	}
 	return out
 }
@@ -117,6 +124,10 @@ func durableFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (Fail
 	return newFailoverRecordRef(rec.LastFailover, rec.LastFailoverTarget), err
 }
 
+// TerminalMarkerSchemaVersion is the only planned-failover-terminal payload
+// version this operator writes and reads.
+const TerminalMarkerSchemaVersion = 1
+
 // TerminalMarker is the planned-failover-terminal annotation value.
 type TerminalMarker struct {
 	RunID   string
@@ -124,24 +135,37 @@ type TerminalMarker struct {
 	Reason  v1alpha1.PlannedFailoverReason
 }
 
-// String renders "<runId>/<outcome>/<reason>"; the reason may be empty.
-func (m TerminalMarker) String() string {
-	return m.RunID + "/" + string(m.Outcome) + "/" + string(m.Reason)
+// terminalMarkerPayload is the annotation's JSON form.
+type terminalMarkerPayload struct {
+	SchemaVersion int                             `json:"schemaVersion"`
+	RunID         string                          `json:"runID"`
+	Outcome       v1alpha1.PlannedFailoverOutcome `json:"outcome"`
+	Reason        v1alpha1.PlannedFailoverReason  `json:"reason,omitempty"`
 }
 
-// parseTerminalMarker parses a TerminalMarker. false means malformed: an
-// empty runId, an unknown outcome or reason, or the wrong number of parts.
-// Callers treat a malformed marker as absent and log it.
-func parseTerminalMarker(v string) (TerminalMarker, bool) {
-	parts := strings.Split(v, "/")
-	if len(parts) != 3 || parts[0] == "" {
+// String renders the versioned JSON payload; the reason may be empty.
+func (m TerminalMarker) String() string {
+	b, err := json.Marshal(terminalMarkerPayload{SchemaVersion: TerminalMarkerSchemaVersion, RunID: m.RunID,
+		Outcome: m.Outcome, Reason: m.Reason})
+	if err != nil {
+		// Unreachable: every member is a string or an int.
+		panic(err)
+	}
+	return string(b)
+}
+
+// ParseTerminalMarker parses a TerminalMarker. false means malformed: not
+// the JSON payload, an unknown schemaVersion, an empty runID, or an unknown
+// outcome or reason. A malformed marker never proves anything: callers
+// treat it as absent and log it.
+func ParseTerminalMarker(v string) (TerminalMarker, bool) {
+	var p terminalMarkerPayload
+	dec := json.NewDecoder(strings.NewReader(v))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil || dec.More() || p.SchemaVersion != TerminalMarkerSchemaVersion || p.RunID == "" {
 		return TerminalMarker{}, false
 	}
-	m := TerminalMarker{
-		RunID:   parts[0],
-		Outcome: v1alpha1.PlannedFailoverOutcome(parts[1]),
-		Reason:  v1alpha1.PlannedFailoverReason(parts[2]),
-	}
+	m := TerminalMarker{RunID: p.RunID, Outcome: p.Outcome, Reason: p.Reason}
 	if !slices.Contains(plannedFailoverOutcomes, m.Outcome) {
 		return TerminalMarker{}, false
 	}
@@ -173,7 +197,7 @@ var (
 		v1alpha1.PlannedFailoverReasonCooldownActive,
 		v1alpha1.PlannedFailoverReasonConcurrentOperation,
 		v1alpha1.PlannedFailoverReasonInvalidFailoverState,
-		v1alpha1.PlannedFailoverReasonCancelled,
+		v1alpha1.PlannedFailoverReasonCanceled,
 		v1alpha1.PlannedFailoverReasonAdmissionTimeout,
 		v1alpha1.PlannedFailoverReasonAuthorityChanged,
 		v1alpha1.PlannedFailoverReasonLegacyRunRefused,
@@ -201,35 +225,100 @@ var (
 // PlannedHold is the uncached evidence of an automation hold.
 // ManagerWiring.HoldFrom carries it; nil means no hold.
 type PlannedHold struct {
-	RunID         string
-	Reason        v1alpha1.PlannedFailoverReason
-	FromCondition bool // the AutomaticFailoverHeld condition names RunID
-	FromMarker    bool // a terminal marker with outcome ManualRecoveryRequired names RunID
+	RunID      string
+	Reason     v1alpha1.PlannedFailoverReason
+	FromStatus bool // status.plannedFailoverHold names RunID (or a True AutomaticFailoverHeld condition stands without it)
+	FromMarker bool // a terminal marker with outcome ManualRecoveryRequired names RunID
 }
 
-// plannedHoldConditionMessage is the message of a True AutomaticFailoverHeld
-// condition. It names the run (parsePlannedHoldConditionMessage reads it
-// back), the sites that were writable or ambiguous, and the acknowledgement.
-func plannedHoldConditionMessage(runID string, reason v1alpha1.PlannedFailoverReason, sites []string) string {
+// plannedHoldConditionMessage is the human-readable message of a True
+// AutomaticFailoverHeld condition, a summary of status.plannedFailoverHold.
+// Nothing reads it back: the hold's fields are the record.
+func plannedHoldConditionMessage(h *v1alpha1.PlannedFailoverHold) string {
 	named := "none recorded"
-	if len(sites) > 0 {
-		named = strings.Join(sites, ", ")
+	if len(h.AmbiguousSites) > 0 {
+		named = strings.Join(h.AmbiguousSites, ", ")
 	}
 	return fmt.Sprintf("planned failover run %s ended ManualRecoveryRequired (%s); writable or ambiguous sites: %s. "+
 		"Automatic failover is held: resolve the split brain by hand, then annotate %s=%s",
-		runID, reason, named, AckPlannedFailoverHoldAnnotation, runID)
+		h.RunID, h.Reason, named, AcknowledgePlannedFailoverHoldAnnotation, h.RunID)
 }
 
-var plannedHoldConditionMessageRE = regexp.MustCompile(`^planned failover run (\S+) ended ManualRecoveryRequired \(([A-Za-z]*)\)`)
+// setPlannedHold records the automation hold h in status and sets the True
+// AutomaticFailoverHeld condition that summarises it, stamped with
+// generation (the generation of the object the terminal write is built on).
+// Runner status writes preserve both: they are reconciler-owned.
+func setPlannedHold(st *v1alpha1.MysqlFailoverGroupStatus, h v1alpha1.PlannedFailoverHold, generation int64) {
+	st.PlannedFailoverHold = h.DeepCopy()
+	apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionAutomaticFailoverHeld,
+		Status:             metav1.ConditionTrue,
+		Reason:             v1alpha1.ReasonPlannedFailoverManualRecoveryRequired,
+		Message:            plannedHoldConditionMessage(&h),
+		ObservedGeneration: generation,
+		LastTransitionTime: h.HoldTime,
+	})
+}
 
-// parsePlannedHoldConditionMessage reads the run and reason back from a
-// plannedHoldConditionMessage.
-func parsePlannedHoldConditionMessage(msg string) (runID string, reason v1alpha1.PlannedFailoverReason, ok bool) {
-	m := plannedHoldConditionMessageRE.FindStringSubmatch(msg)
-	if m == nil {
-		return "", "", false
+// ClearPlannedHold removes the hold of runID from status and sets the
+// AutomaticFailoverHeld condition False/PlannedFailoverHoldAcknowledged.
+// false: status carries no hold of runID, and nothing changed.
+func ClearPlannedHold(st *v1alpha1.MysqlFailoverGroupStatus, runID string, generation int64, now time.Time) bool {
+	if st.PlannedFailoverHold == nil || st.PlannedFailoverHold.RunID != runID {
+		return false
 	}
-	return m[1], v1alpha1.PlannedFailoverReason(m[2]), true
+	st.PlannedFailoverHold = nil
+	apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionAutomaticFailoverHeld,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1alpha1.ReasonPlannedFailoverHoldAcknowledged,
+		Message:            fmt.Sprintf("the automation hold of planned failover run %s was acknowledged; automatic failover resumes", runID),
+		ObservedGeneration: generation,
+		LastTransitionTime: metav1.NewTime(now),
+	})
+	return true
+}
+
+// statusHoldNames reports whether status records the hold of runID.
+func statusHoldNames(st *v1alpha1.MysqlFailoverGroupStatus, runID string) bool {
+	return st.PlannedFailoverHold != nil && st.PlannedFailoverHold.RunID == runID
+}
+
+// deadlineStartLayout is the ISO 8601 basic UTC form of a deadline start
+// (A-78: an instant inside an annotation value has no colons).
+const deadlineStartLayout = "20060102T150405Z"
+
+// FormatDeadlineStart renders a durable deadline start:
+// "<runID>:since=<YYYYMMDDThhmmssZ>", at second precision.
+func FormatDeadlineStart(runID string, start time.Time) string {
+	return runID + ":since=" + start.UTC().Truncate(time.Second).Format(deadlineStartLayout)
+}
+
+// ParseDeadlineStart reads a FormatDeadlineStart value; false when it is
+// absent or malformed.
+func ParseDeadlineStart(v string) (runID string, start time.Time, ok bool) {
+	id, pair, found := strings.Cut(v, ":")
+	if !found || id == "" {
+		return "", time.Time{}, false
+	}
+	key, ts, found := strings.Cut(pair, "=")
+	if !found || key != "since" {
+		return "", time.Time{}, false
+	}
+	t, err := time.Parse(deadlineStartLayout, ts)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	return id, t.UTC(), true
+}
+
+// statusFenceLayout is the ISO 8601 basic UTC form with nanoseconds, so
+// that every bump changes the value.
+const statusFenceLayout = "20060102T150405.000000000Z"
+
+// FormatStatusFenceValue renders a planned-failover-status-fence bump.
+func FormatStatusFenceValue(now time.Time) string {
+	return now.UTC().Format(statusFenceLayout)
 }
 
 // ---------- predicates; defined here, wired by the engine and the claim ----------
@@ -245,7 +334,7 @@ func plannedFailoverRun(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.PlannedFa
 	if pf.RunID == "" {
 		return pf, false
 	}
-	m, ok := parseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
 	return pf, ok && m.RunID == pf.RunID
 }
 
@@ -302,26 +391,28 @@ func plannedFailoverFencedSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	if !plannedFailoverOwnsSites(fg) {
 		return ""
 	}
-	return fg.Status.PlannedFailover.Source
+	return fg.Status.PlannedFailover.SourceSite
 }
 
-// plannedHoldFrom returns the durable evidence of an automation hold, or nil.
-// Either record holds on its own: a True AutomaticFailoverHeld condition, or
-// a terminal marker with outcome ManualRecoveryRequired. A True condition
-// whose message does not name a run still holds (RunID ""): no
+// PlannedHoldFrom returns the durable evidence of an automation hold, or nil.
+// Either record holds on its own: status.plannedFailoverHold, or a terminal
+// marker with outcome ManualRecoveryRequired. A True AutomaticFailoverHeld
+// condition without status.plannedFailoverHold (an inconsistent or
+// hand-edited status) still holds, fail closed, with RunID "": no
 // acknowledgement can match it, so an administrator removes it by hand.
-// When both records name different runs the condition's run is reported;
-// the marker rebuilds its own hold once the condition is gone.
-func plannedHoldFrom(fg *v1alpha1.MysqlFailoverGroup) *PlannedHold {
+// When both records name different runs the status hold's run is reported;
+// the marker rebuilds its own hold once the status hold is gone.
+func PlannedHoldFrom(fg *v1alpha1.MysqlFailoverGroup) *PlannedHold {
 	if fg == nil {
 		return nil
 	}
 	var hold *PlannedHold
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil && c.Status == metav1.ConditionTrue {
-		runID, reason, _ := parsePlannedHoldConditionMessage(c.Message)
-		hold = &PlannedHold{RunID: runID, Reason: reason, FromCondition: true}
+	if h := fg.Status.PlannedFailoverHold; h != nil {
+		hold = &PlannedHold{RunID: h.RunID, Reason: h.Reason, FromStatus: true}
+	} else if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil && c.Status == metav1.ConditionTrue {
+		hold = &PlannedHold{FromStatus: true}
 	}
-	m, ok := parseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
 	if !ok || m.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
 		return hold
 	}

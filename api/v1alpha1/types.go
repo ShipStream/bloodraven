@@ -642,6 +642,16 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	PlannedFailover *PlannedFailoverStatus `json:"plannedFailover,omitempty"`
 
+	// PlannedFailoverHold is the automation hold left by a planned
+	// failover that may have written to its target and ended
+	// ManualRecoveryRequired. It outlives that run's plannedFailover block
+	// (a refused request can replace the block) and stays until an
+	// administrator acknowledges it with
+	// bloodraven.shipstream.io/acknowledge-planned-failover-hold=<runID>.
+	// The AutomaticFailoverHeld condition summarises it.
+	// +optional
+	PlannedFailoverHold *PlannedFailoverHold `json:"plannedFailoverHold,omitempty"`
+
 	// Dragonfly is the observed state of the Dragonfly subsystem when
 	// spec.dragonfly is configured.
 	// +optional
@@ -652,19 +662,6 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	EncryptionAtRest *EncryptionAtRestStatus `json:"encryptionAtRest,omitempty"`
 }
-
-// ConditionAutomaticFailoverHeld is True while a planned failover that may
-// have written to its target ended ManualRecoveryRequired: automatic
-// cross-site actions (emergency failover, re-assert, split-brain
-// resolution, ordered updates, rotations, follower mutations, bootstrap and
-// DNS reconciliation) stay held for the group until an administrator
-// resolves the split brain and acknowledges the hold with the
-// bloodraven.shipstream.io/ack-planned-failover-hold=<runId> annotation.
-const ConditionAutomaticFailoverHeld = "AutomaticFailoverHeld"
-
-// ReasonPlannedFailoverManualRecovery is the reason of a True
-// AutomaticFailoverHeld condition.
-const ReasonPlannedFailoverManualRecovery = "PlannedFailoverManualRecovery"
 
 // SiteStatus describes the observed state of a single site.
 type SiteStatus struct {

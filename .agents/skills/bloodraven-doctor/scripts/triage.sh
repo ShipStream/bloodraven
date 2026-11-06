@@ -114,26 +114,33 @@ if [[ -n "$UPDATING" ]]; then
         echo "  The ordered update stopped on a site whose pod is not Ready and rolls nothing else until it is: see playbook 34."
     fi
 fi
-# A True AutomaticFailoverHeld condition means a planned failover ended
-# ManualRecoveryRequired: automatic failover is off for this group until a
-# human resolves the split brain and acknowledges the hold.
-HOLD=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="AutomaticFailoverHeld")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
-if [[ "$HOLD" == True* ]]; then
-    echo "🔴 AutomaticFailoverHeld: $HOLD"
+# status.plannedFailoverHold (summarised by a True AutomaticFailoverHeld
+# condition) means a planned failover ended ManualRecoveryRequired: automatic
+# failover is off for this group until a human resolves the split brain and
+# acknowledges the hold.
+HOLD=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="AutomaticFailoverHeld")]}{.status}{" "}{.reason}{end}' 2>/dev/null || true)
+HOLD_RECORD=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailoverHold.runID}{" reason="}{.status.plannedFailoverHold.reason}{" "}{.status.plannedFailoverHold.sourceSite}{"->"}{.status.plannedFailoverHold.targetSite}{" ambiguousSites="}{.status.plannedFailoverHold.ambiguousSites}' 2>/dev/null || true)
+HOLD_RUN=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailoverHold.runID}' 2>/dev/null || true)
+if [[ "$HOLD" == True* || -n "$HOLD_RUN" ]]; then
+    echo "🔴 AutomaticFailoverHeld: ${HOLD:-<no condition>}; plannedFailoverHold: run=${HOLD_RUN:-<none>}${HOLD_RUN:+ ${HOLD_RECORD#"$HOLD_RUN"}}"
     echo "  Emergency failover, split-brain resolution, the re-assert, ordered updates, rotations, recovery and DNS reconcile are held for this group."
-    echo "  Resolve the split brain by hand, then annotate bloodraven.shipstream.io/ack-planned-failover-hold=<runId> (with approval): see playbook 38."
+    if [[ -n "$HOLD_RUN" ]]; then
+        echo "  Resolve the split brain by hand, then (with approval) kubectl bloodraven ack-planned-failover-hold $MFG_NAME -n $NAMESPACE, or annotate bloodraven.shipstream.io/acknowledge-planned-failover-hold=$HOLD_RUN: see playbook 38."
+    else
+        echo "  The condition names no run (no status.plannedFailoverHold): no acknowledgement can clear it; see playbook 38."
+    fi
 elif [[ -n "$HOLD" ]]; then
     echo "AutomaticFailoverHeld: $HOLD"
 fi
 PF_PHASE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailover.phase}' 2>/dev/null || true)
 if [[ -n "$PF_PHASE" ]]; then
-    PF_SUMMARY=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='run={.status.plannedFailover.runId} {.status.plannedFailover.source}->{.status.plannedFailover.target} outcome={.status.plannedFailover.result.outcome} reason={.status.plannedFailover.result.reason} warnings={.status.plannedFailover.result.warnings} waitReason={.status.plannedFailover.admission.waitReason} deferReason={.status.plannedFailover.admission.deferReason}' 2>/dev/null || true)
+    PF_SUMMARY=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='run={.status.plannedFailover.runID} {.status.plannedFailover.sourceSite}->{.status.plannedFailover.targetSite} outcome={.status.plannedFailover.result.outcome} reason={.status.plannedFailover.result.reason} warnings={.status.plannedFailover.result.warnings} waitReason={.status.plannedFailover.admission.waitReason} deferReason={.status.plannedFailover.admission.deferReason}' 2>/dev/null || true)
     PF_OUTCOME=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailover.result.outcome}' 2>/dev/null || true)
     PF_WAIT=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.plannedFailover.admission.waitReason}' 2>/dev/null || true)
     PF_MARKER=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/planned-failover-terminal}' 2>/dev/null || true)
     echo "Planned failover:    phase=$PF_PHASE $PF_SUMMARY"
     if [[ -n "$PF_MARKER" ]]; then
-        echo "  Terminal marker $PF_MARKER (<runId>/<outcome>/<reason>): status writes stalled and the marker ended the run it names, whatever phase says."
+        echo "  Terminal marker $PF_MARKER: status writes stalled and the marker ended the run it names (runID), whatever phase says."
     fi
     case "$PF_OUTCOME" in
         SourceLeftFenced)

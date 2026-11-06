@@ -301,15 +301,15 @@ func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {
 					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%q reason=%q message=%q", pf.Phase, pf.Target, plannedReason(pf), pf.Message)
+					msg := fmt.Sprintf("phase=%q target=%q reason=%q message=%q", pf.Phase, pf.TargetSite, plannedReason(pf), pf.Message)
 					if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed {
 						if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
 							return false, msg, fmt.Errorf("planned failover to reader %q succeeded; role gate is broken", state.topo.reader)
 						}
 						return false, msg, nil
 					}
-					if pf.Target != state.topo.reader {
-						return false, msg, fmt.Errorf("rejected plannedFailover has target=%q, want %q", pf.Target, state.topo.reader)
+					if pf.TargetSite != state.topo.reader {
+						return false, msg, fmt.Errorf("rejected plannedFailover has target=%q, want %q", pf.TargetSite, state.topo.reader)
 					}
 					if !strings.Contains(pf.Message, "only primary-candidate sites may be promoted") {
 						return false, msg, fmt.Errorf("rejection message %q does not carry the role error", pf.Message)

@@ -33,7 +33,7 @@ func plannedFailoverFGWithDragonfly(activePolicy string) *v1alpha1.MysqlFailover
 		AdminPort: 9999,
 		PlannedFailover: &v1alpha1.DragonflyPlannedFailoverSpec{
 			MaxSyncWait:   &metav1.Duration{Duration: 100 * time.Millisecond},
-			OnSyncTimeout: activePolicy,
+			OnSyncTimeout: v1alpha1.DragonflySyncTimeoutPolicy(activePolicy),
 		},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
@@ -42,7 +42,7 @@ func plannedFailoverFGWithDragonfly(activePolicy string) *v1alpha1.MysqlFailover
 	now := metav1.Now()
 	pf := pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, now.Time)
 	pf.Phase = v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync
-	pf.LagWait.CaughtUpAt = &now
+	pf.LagWait.CatchUpTime = &now
 	pf.Settings = plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: "pdx"})
 	pf.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{SyncWaitStartTime: &now}
 	fg.Status.PlannedFailover = pf
@@ -103,7 +103,7 @@ func pfDFPass(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.Namespaced
 }
 
 func TestPlannedFailoverDragonflySync_DisabledSkips(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Spec.Dragonfly = nil
 	r, _, _ := pfDFReconciler(t, fg)
 	pfDFPass(t, r, fgNN(fg))
@@ -116,7 +116,7 @@ func TestPlannedFailoverDragonflySync_DisabledSkips(t *testing.T) {
 // Capture the source offset, see the target in sync, then take over: the
 // MySQL Promoting intent records the takeover's success.
 func TestPlannedFailoverDragonfly_HappyPath(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
 	r, c, _ := pfDFReconciler(t, fg, sourcePod, targetPod)
@@ -169,11 +169,11 @@ func TestPlannedFailoverDragonfly_HappyPath(t *testing.T) {
 // A re-run whose takeover intent is durable but whose result was lost
 // finds the target master and never sends a second REPLTAKEOVER.
 func TestPlannedFailoverDragonfly_RerunNeverRepeatsTakeover(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	now := metav1.Now()
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
-	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
+	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: now}
 	r, _, _ := pfDFReconciler(t, fg)
 	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}}
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: &fakeDragonflyConn{}})
@@ -189,7 +189,7 @@ func TestPlannedFailoverDragonfly_RerunNeverRepeatsTakeover(t *testing.T) {
 
 // onSyncTimeout=proceed goes on to the takeover with sessions lost.
 func TestPlannedFailoverDragonflySync_TimeoutProceedAdvances(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
 	offset := int64(500)
 	fg.Status.PlannedFailover.Dragonfly.SourceOffset = &offset
@@ -207,7 +207,7 @@ func TestPlannedFailoverDragonflySync_TimeoutProceedAdvances(t *testing.T) {
 
 // An unreachable source offset proceeds with sessions lost.
 func TestPlannedFailoverDragonflySync_OffsetCaptureFailsProceedsWithSessionsLost(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	r, _, _ := pfDFReconciler(t, fg)
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{})
 	pfDFPass(t, r, fgNN(fg))
@@ -223,7 +223,7 @@ func TestPlannedFailoverDragonflySync_OffsetCaptureFailsProceedsWithSessionsLost
 
 // onSyncTimeout=fail rolls back.
 func TestPlannedFailoverDragonflySync_TimeoutFailRollsBack(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("fail")
+	fg := plannedFailoverFGWithDragonfly("Fail")
 	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetUnavailable
 	r, _, _ := pfDFReconciler(t, fg)
 	pfDFPass(t, r, fgNN(fg))
@@ -236,10 +236,10 @@ func TestPlannedFailoverDragonflySync_TimeoutFailRollsBack(t *testing.T) {
 // A failed strip short-circuits the takeover (no dial), restores nothing it
 // did not change, and proceeds with the takeover Failed.
 func TestPlannedFailoverDragonfly_StripFailsProceeds(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	now := metav1.Now()
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
+	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: now}
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
@@ -282,10 +282,10 @@ func TestPlannedFailoverDragonfly_StripFailsProceeds(t *testing.T) {
 // A failed REPLTAKEOVER restores the source's traffic label; with
 // onSyncTimeout=fail the run rolls back with the takeover recorded Failed.
 func TestPlannedFailoverDragonfly_TakeoverFailsFailRollsBack(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("fail")
+	fg := plannedFailoverFGWithDragonfly("Fail")
 	now := metav1.Now()
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
+	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: now}
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	r, c, _ := pfDFReconciler(t, fg, sourcePod, makeDragonflyPod(fg.Name, "pdx", "replica", true))
 	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave"},
@@ -308,7 +308,7 @@ func TestPlannedFailoverDragonfly_TakeoverFailsFailRollsBack(t *testing.T) {
 
 // The source-loss window still applies in the Dragonfly phases.
 func TestPlannedFailoverDragonfly_SourceLossRollsBack(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Status.PlannedFailover.Settings.Dragonfly.MaxSyncWait = metav1.Duration{Duration: time.Hour}
 	r, _, topo := pfDFReconciler(t, fg)
 	topo.probe = func(PlannedRunRef) (LagProbe, error) { return LagProbe{TargetReachable: true}, nil }
@@ -329,11 +329,11 @@ func TestPlannedFailoverDragonfly_SourceLossRollsBack(t *testing.T) {
 // The strip predicate and the Dragonfly master follow the takeover record,
 // and a marked run strips nothing.
 func TestPlannedFailoverDragonflyPredicates(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	pf := fg.Status.PlannedFailover
 	now := metav1.Now()
 	pf.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: now}
+	pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: now}
 	if !plannedFailoverDragonflyStripActive(fg) || plannedFailoverSourceSite(fg) != "iad" || effectiveDragonflyMasterSite(fg) != "iad" {
 		t.Errorf("intended: strip=%v source=%q master=%q", plannedFailoverDragonflyStripActive(fg), plannedFailoverSourceSite(fg), effectiveDragonflyMasterSite(fg))
 	}
@@ -347,7 +347,7 @@ func TestPlannedFailoverDragonflyPredicates(t *testing.T) {
 	}
 	pf.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	pf.Dragonfly.Takeover.State = v1alpha1.DragonflyTakeoverIntended
-	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: "run-1/SourceLeftFenced/StatusStalled"}
+	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if plannedFailoverDragonflyStripActive(fg) || plannedFailoverSourceSite(fg) != "" {
 		t.Error("a marked run still strips the source")
 	}
@@ -378,13 +378,13 @@ func pfDragonflyTakeoverPass(t *testing.T, r *MysqlFailoverGroupReconciler, ctx 
 		pf.StartTime = metav1.Now()
 	}
 	if pf.Settings.MaxLagWait.Duration == 0 {
-		pf.Settings = plannedFailoverSettingsFor(&live, PlannedFailoverRequest{Site: pf.Target})
+		pf.Settings = plannedFailoverSettingsFor(&live, PlannedFailoverRequest{Site: pf.TargetSite})
 	}
 	if pf.Dragonfly == nil {
 		pf.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	}
 	if pf.Dragonfly.Takeover == nil {
-		pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: metav1.Now()}
+		pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: metav1.Now()}
 	}
 	if err := r.Client.Status().Update(ctx, &live); err != nil {
 		t.Fatal(err)

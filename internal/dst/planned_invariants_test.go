@@ -56,7 +56,7 @@ func (f *monFixture) write(phase v1alpha1.PlannedFailoverPhase, edit func(*v1alp
 	mutate func(*v1alpha1.MysqlFailoverGroupStatus)) {
 	f.t.Helper()
 	f.rev++
-	pf := v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: f.rev, Phase: phase, Target: "beta", Source: "alpha",
+	pf := v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: f.rev, Phase: phase, TargetSite: "beta", SourceSite: "alpha",
 		Fence: &v1alpha1.PlannedFailoverFenceRecord{State: "Intended", SourceServerUUID: "00000000-0000-0000-0000-000000000001"}}
 	if cur := f.store.Object().Status.PlannedFailover; cur != nil {
 		pf = *cur.DeepCopy()
@@ -100,9 +100,17 @@ func (f *monFixture) want(invariants ...string) {
 }
 
 func setHold(st *v1alpha1.MysqlFailoverGroupStatus) {
+	setHoldRecord(st, "r1", "alpha", "beta")
+}
+
+// setHoldRecord writes status.plannedFailoverHold for runID and its True
+// AutomaticFailoverHeld condition, as the controller's terminal write does.
+func setHoldRecord(st *v1alpha1.MysqlFailoverGroupStatus, runID string, sites ...string) {
+	st.PlannedFailoverHold = &v1alpha1.PlannedFailoverHold{RunID: runID, Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+		AmbiguousSites: sites, HoldTime: metav1.Now()}
 	apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
-		Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue, Reason: "ManualRecoveryRequired",
-		Message: "planned failover run r1 ended ManualRecoveryRequired (ForeignWritable); writable or ambiguous sites: alpha, beta",
+		Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue,
+		Reason: v1alpha1.ReasonPlannedFailoverManualRecoveryRequired, Message: "held",
 	})
 }
 
@@ -392,7 +400,7 @@ func TestPlannedInvariant_WatermarkRegressed(t *testing.T) {
 	confirmed := metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 5, 0, time.UTC))
 	f.write(v1alpha1.PlannedFailoverPhasePublishing, func(pf *v1alpha1.PlannedFailoverStatus) {
 		pf.Fence.GtidSet = &fence
-		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: "Confirmed", ConfirmedAt: &confirmed}
+		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: "Confirmed", ConfirmationTime: &confirmed}
 	}, func(st *v1alpha1.MysqlFailoverGroupStatus) {
 		st.PromotionGtidExecuted = fence
 		st.LastFailover = &confirmed
@@ -417,7 +425,7 @@ func TestPlannedInvariant_WatermarkRegressed(t *testing.T) {
 	g := newMonFixture(t)
 	g.write(v1alpha1.PlannedFailoverPhasePublishing, func(pf *v1alpha1.PlannedFailoverStatus) {
 		pf.Fence.GtidSet = &fence
-		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: "Confirmed", ConfirmedAt: &confirmed}
+		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: "Confirmed", ConfirmationTime: &confirmed}
 	}, func(st *v1alpha1.MysqlFailoverGroupStatus) { st.PromotionGtidExecuted = fence })
 	_ = g.store.MergeSnapshot(controller.TopologySnapshot{
 		LastFailover: confirmed.Add(time.Minute), LastFailoverTarget: "alpha", PromotionGtidExecuted: "00000000-0000-0000-0000-000000000002:1-3",

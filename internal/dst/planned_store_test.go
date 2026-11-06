@@ -31,7 +31,7 @@ func mustLoad(t *testing.T, s *simPlannedStore) *v1alpha1.MysqlFailoverGroup {
 }
 
 func block(run string, rev int64, phase v1alpha1.PlannedFailoverPhase) v1alpha1.PlannedFailoverStatus {
-	return v1alpha1.PlannedFailoverStatus{RunID: run, Revision: rev, Phase: phase, Target: "beta"}
+	return v1alpha1.PlannedFailoverStatus{RunID: run, Revision: rev, Phase: phase, TargetSite: "beta"}
 }
 
 func wantOutcome(t *testing.T, got, want controller.WriteOutcome, err error) {
@@ -257,7 +257,7 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 	}
 	out, err = s.ClearDeadlineStart(ctx, mustLoad(t, s), controller.DeadlineStatusStall, "r1")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if v := mustLoad(t, s).GetAnnotations()[controller.PlannedFailoverStallSinceAnnotation]; !strings.HasPrefix(v, "r2/") {
+	if v := mustLoad(t, s).GetAnnotations()[controller.PlannedFailoverStallSinceAnnotation]; !strings.HasPrefix(v, "r2:since=") {
 		t.Fatalf("r1 cleared r2's deadline: %q", v)
 	}
 	if _, out, _ := s.MarkDeadlineStart(ctx, mustLoad(t, s), controller.DeadlineKind("bogus"), "r1", clk.Now()); out == controller.WriteCommitted {
@@ -266,16 +266,16 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 
 	// Hold acknowledgement.
 	s.mu.Lock()
-	s.patchAnnotationsLocked("ack", map[string]string{controller.AckPlannedFailoverHoldAnnotation: "r1"})
+	s.patchAnnotationsLocked("ack", map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: "r1"})
 	s.mu.Unlock()
 	out, err = s.DeleteHoldAck(ctx, mustLoad(t, s), "r9")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if mustLoad(t, s).GetAnnotations()[controller.AckPlannedFailoverHoldAnnotation] != "r1" {
+	if mustLoad(t, s).GetAnnotations()[controller.AcknowledgePlannedFailoverHoldAnnotation] != "r1" {
 		t.Fatal("a non-matching ack delete removed the ack")
 	}
 	out, err = s.DeleteHoldAck(ctx, mustLoad(t, s), "r1")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if _, ok := mustLoad(t, s).GetAnnotations()[controller.AckPlannedFailoverHoldAnnotation]; ok {
+	if _, ok := mustLoad(t, s).GetAnnotations()[controller.AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Fatal("ack not deleted")
 	}
 }
@@ -285,14 +285,11 @@ func TestSimStore_ClearHold(t *testing.T) {
 	ctx := context.Background()
 	held := block("r1", 4, v1alpha1.PlannedFailoverPhaseFailed)
 	out, err := s.Write(ctx, mustLoad(t, s), held, func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
-			Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue, Reason: "ManualRecoveryRequired",
-			Message: "planned failover run r1 ended ManualRecoveryRequired (ForeignWritable); writable or ambiguous sites: alpha",
-		})
+		setHoldRecord(st, "r1", "alpha")
 	})
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if !holdStands(mustLoad(t, s)) || !holdConditionNames(mustLoad(t, s).Status.Conditions, "r1") {
-		t.Fatal("hold condition not set")
+	if !holdStands(mustLoad(t, s)) || !holdNames(&mustLoad(t, s).Status, "r1") {
+		t.Fatal("hold not set")
 	}
 
 	// Another run's ClearHold leaves the condition.
@@ -310,6 +307,10 @@ func TestSimStore_ClearHold(t *testing.T) {
 	obj := mustLoad(t, s)
 	if holdStands(obj) || obj.Status.PlannedFailover.Revision != 5 {
 		t.Fatalf("hold not cleared in one write: %+v", obj.Status)
+	}
+	if c := apimeta.FindStatusCondition(obj.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c == nil ||
+		c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged {
+		t.Fatalf("hold condition after the acknowledgement = %+v, want False/%s", c, v1alpha1.ReasonPlannedFailoverHoldAcknowledged)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
@@ -107,7 +106,7 @@ func lastFailoverAge(fg *v1alpha1.MysqlFailoverGroup) string {
 
 func plannedFailoverSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 	held := ""
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil && c.Status == metav1.ConditionTrue {
+	if brcontroller.PlannedHoldFrom(fg) != nil {
 		held = "+held"
 	}
 	pf := fg.Status.PlannedFailover
@@ -143,15 +142,11 @@ func plannedTerminalMarker(fg *v1alpha1.MysqlFailoverGroup) (v1alpha1.PlannedFai
 	if pf == nil || pf.RunID == "" {
 		return "", "", false
 	}
-	m := fg.Annotations[brcontroller.PlannedFailoverTerminalAnnotation]
-	if !strings.HasPrefix(m, pf.RunID+"/") {
+	m, ok := brcontroller.ParseTerminalMarker(fg.Annotations[brcontroller.PlannedFailoverTerminalAnnotation])
+	if !ok || m.RunID != pf.RunID {
 		return "", "", false
 	}
-	parts := strings.SplitN(m, "/", 3)
-	if len(parts) != 3 || parts[1] == "" {
-		return "", "", false
-	}
-	return v1alpha1.PlannedFailoverOutcome(parts[1]), v1alpha1.PlannedFailoverReason(parts[2]), true
+	return m.Outcome, m.Reason, true
 }
 
 // plannedOutcomeReason renders a terminal result: the reason alone for a

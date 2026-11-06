@@ -240,7 +240,7 @@ func TestRegisterManager_HydratesUncachedBeforeRun(t *testing.T) {
 	nn := FailoverGroupNamespacedName(fg)
 	live := fg.DeepCopy()
 	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-restart", Revision: 4, Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "dc2", Source: "dc1",
+		RunID: "run-restart", Revision: 4, Phase: v1alpha1.PlannedFailoverPhasePromoting, TargetSite: "dc2", SourceSite: "dc1",
 	}
 	live.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc2", RecoveryState: recoveryStateInProgress}}
 	if err := c.Status().Update(context.Background(), live); err != nil {

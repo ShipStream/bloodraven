@@ -35,48 +35,48 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 	srcOffset, tgtOffset, syncSecs := int64(100), int64(100), int64(3)
 
 	full := &v1alpha1.PlannedFailoverStatus{
-		RunID:    "6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f",
-		Revision: 7,
-		Phase:    v1alpha1.PlannedFailoverPhasePublishing,
-		Target:   "dc2",
+		RunID:      "6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f",
+		Revision:   7,
+		Phase:      v1alpha1.PlannedFailoverPhasePublishing,
+		TargetSite: "dc2",
 		Settings: v1alpha1.PlannedFailoverSettings{
 			MaxLagWait:   metav1.Duration{Duration: 5 * time.Minute},
 			DrainTimeout: metav1.Duration{Duration: 30 * time.Second},
 			Dragonfly: &v1alpha1.PlannedFailoverDragonflySettings{
-				MaxSyncWait: metav1.Duration{Duration: 30 * time.Second}, OnSyncTimeout: "proceed",
+				MaxSyncWait: metav1.Duration{Duration: 30 * time.Second}, OnSyncTimeout: v1alpha1.DragonflySyncTimeoutProceed,
 			},
 		},
 		StartTime:     ts(0),
-		Source:        "dc1",
-		ClaimedAt:     ptrTime(1),
-		ClaimBaseline: &v1alpha1.PlannedFailoverRecordRef{LastFailover: ptrTime(2), LastFailoverTarget: "dc1"},
+		SourceSite:    "dc1",
+		ClaimTime:     ptrTime(1),
+		ClaimBaseline: &v1alpha1.FailoverRecord{Time: ptrTime(2), Target: "dc1"},
 		Admission: &v1alpha1.PlannedFailoverAdmission{
-			Deadline: ptrTime(3), WaitReason: v1alpha1.PlannedFailoverWaitRecoveryInFlight,
-			DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive, RetryAfter: ptrTime(4),
+			DeadlineTime: ptrTime(3), WaitReason: v1alpha1.PlannedFailoverWaitRecoveryInFlight,
+			DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive, RetryTime: ptrTime(4),
 		},
 		Fence: &v1alpha1.PlannedFailoverFenceRecord{
-			State: v1alpha1.PlannedFailoverFenceApplied, IntendedAt: ts(5), SourceServerUUID: "uuid-src",
-			AppliedAt: ptrTime(6), GtidSet: &gtid,
+			State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: ts(5), SourceServerUUID: "uuid-src",
+			ApplyTime: ptrTime(6), GtidSet: &gtid,
 		},
-		Drain:   &v1alpha1.PlannedFailoverDrainRecord{StartTime: ts(7), CompletedAt: ptrTime(8), RemainingConnections: &remaining},
-		LagWait: &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: ts(9), CaughtUpAt: ptrTime(10)},
+		Drain:   &v1alpha1.PlannedFailoverDrainRecord{StartTime: ts(7), CompletionTime: ptrTime(8), RemainingConnections: &remaining},
+		LagWait: &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: ts(9), CatchUpTime: ptrTime(10)},
 		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{
 			SyncWaitStartTime: ptrTime(11),
 			SourceOffsetState: v1alpha1.DragonflyOffsetCaptured,
 			SourceOffset:      &srcOffset,
 			SyncWaitSeconds:   &syncSecs,
 			Takeover: &v1alpha1.DragonflyTakeoverRecord{
-				State: v1alpha1.DragonflyTakeoverSucceeded, IntendedAt: ts(12), CompletedAt: ptrTime(13),
+				State: v1alpha1.DragonflyTakeoverSucceeded, IntentTime: ts(12), CompletionTime: ptrTime(13),
 				Method: v1alpha1.DragonflyTakeoverMethodReplTakeover, TargetOffset: &tgtOffset,
 			},
 			Sessions: v1alpha1.DragonflySessionsPreserved,
 		},
 		Promotion: &v1alpha1.PlannedFailoverPromotionRecord{
-			State: v1alpha1.PlannedFailoverPromotionConfirmed, IntendedAt: ts(14), TargetServerUUID: "uuid-tgt",
-			ConfirmedAt: ptrTime(15),
+			State: v1alpha1.PlannedFailoverPromotionConfirmed, IntentTime: ts(14), TargetServerUUID: "uuid-tgt",
+			ConfirmationTime: ptrTime(15),
 		},
-		DNS:      &v1alpha1.PlannedFailoverDNSRecord{State: v1alpha1.PlannedFailoverDNSFailed, AttemptedAt: ts(16), LastError: "timeout"},
-		Rollback: &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonLagTimeout, IntendedAt: ts(17)},
+		DNS:      &v1alpha1.PlannedFailoverDNSRecord{State: v1alpha1.PlannedFailoverDNSFailed, AttemptTime: ts(16), LastError: "timeout"},
+		Rollback: &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonLagTimeout, IntentTime: ts(17)},
 		Result: &v1alpha1.PlannedFailoverResult{
 			Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: ts(18),
 			Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningDNSUpdateFailed, v1alpha1.PlannedFailoverWarningUnreachablePeers},
@@ -134,12 +134,12 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 	}
 
 	// A new block without its run identity or parameters is rejected:
-	// runId, revision, phase, target, settings and startTime are required.
+	// runID, revision, phase, targetSite, settings and startTime are required.
 	for name, mutate := range map[string]func(pf *v1alpha1.PlannedFailoverStatus){
-		"no runId":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.RunID = "" },
+		"no runID":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.RunID = "" },
 		"no revision":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Revision = 0 },
 		"no phase":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "" },
-		"no target":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.Target = "" },
+		"no target":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.TargetSite = "" },
 		"no settings":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Settings = v1alpha1.PlannedFailoverSettings{} },
 		"no startTime": func(pf *v1alpha1.PlannedFailoverStatus) { pf.StartTime = metav1.Time{} },
 		"old phase":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "Validating" },
@@ -163,11 +163,13 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 		"warning": func(pf *v1alpha1.PlannedFailoverStatus) {
 			pf.Result.Warnings = []v1alpha1.PlannedFailoverWarning{"Spooky"}
 		},
-		"fence state": func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.State = "Maybe" },
-		"zero uuid":   func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.SourceServerUUID = "" },
-		"revision":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.Revision = -1 },
-		"on sync":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Settings.Dragonfly.OnSyncTimeout = "Proceed" },
-		"df takeover": func(pf *v1alpha1.PlannedFailoverStatus) { pf.Dragonfly.Takeover.State = "Halfway" },
+		"fence state":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.State = "Maybe" },
+		"zero uuid":       func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.SourceServerUUID = "" },
+		"revision":        func(pf *v1alpha1.PlannedFailoverStatus) { pf.Revision = -1 },
+		"on sync":         func(pf *v1alpha1.PlannedFailoverStatus) { pf.Settings.Dragonfly.OnSyncTimeout = "proceed" },
+		"df method":       func(pf *v1alpha1.PlannedFailoverStatus) { pf.Dragonfly.Takeover.Method = "REPLTAKEOVER" },
+		"reason spelling": func(pf *v1alpha1.PlannedFailoverStatus) { pf.Result.Reason = "Cancelled" },
+		"df takeover":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Dragonfly.Takeover.State = "Halfway" },
 	}
 	for name, mutate := range invalid {
 		target := create("invalid-" + strings.ReplaceAll(name, " ", "-"))
@@ -341,5 +343,35 @@ func TestEnvtest_FailoverStateRecorder_ConditionedRefusesOlder(t *testing.T) {
 	}
 	if got, _ := controller.FailoverRecordFromAnnotations(pfEnvGet(t, nn).Annotations); got.LastFailoverTarget != "dc1" {
 		t.Fatalf("a newer record was not stored: %+v", got)
+	}
+}
+
+// TestCRD_PlannedFailoverHoldRoundTrip pins status.plannedFailoverHold: every
+// field persists unpruned, and a hold without its run id is rejected.
+func TestCRD_PlannedFailoverHoldRoundTrip(t *testing.T) {
+	ns := createNamespace(t, "pf-hold-roundtrip")
+	fg := newTestFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	hold := &v1alpha1.PlannedFailoverHold{
+		RunID: "6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+		SourceSite: "dc1", TargetSite: "dc2", AmbiguousSites: []string{"dc1", "dc2"},
+		HoldTime: metav1.NewTime(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)),
+	}
+	fg.Status.PlannedFailoverHold = hold.DeepCopy()
+	if err := k8sClient.Status().Update(ctx, fg); err != nil {
+		t.Fatalf("status update with a hold: %v", err)
+	}
+	var got v1alpha1.MysqlFailoverGroup
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !equality.Semantic.DeepEqual(got.Status.PlannedFailoverHold, hold) {
+		t.Fatalf("plannedFailoverHold did not round-trip:\n got %+v\nwant %+v", got.Status.PlannedFailoverHold, hold)
+	}
+	got.Status.PlannedFailoverHold.RunID = ""
+	if err := k8sClient.Status().Update(ctx, &got); !apierrors.IsInvalid(err) {
+		t.Fatalf("a hold without runID: status update error = %v; want Invalid", err)
 	}
 }

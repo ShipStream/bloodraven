@@ -55,7 +55,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `23-failover-state-durability` (§23; WISHLIST #38 guard — clean failover, then kills the operator pod; asserts post-restart `lastFailoverTarget`, `activeSite`, and `lastFailover` survive, with up to 90s tolerance on the stamp to absorb a status-enrichment rewrite)
 - `24-emergency-mysql-dragonfly-down` (§26; all Dragonfly StatefulSets scaled to 0, MySQL emergency failover still completes)
 - `25-operator-restart-mid-dragonfly-failover` (§27; operator restart while planned failover is in Dragonfly sync/promotion phase resumes safely)
-- `26-planned-dragonfly-sync-timeout-proceed` (§28; `onSyncTimeout=proceed` marks sessions not preserved and still completes MySQL failover)
+- `26-planned-dragonfly-sync-timeout-proceed` (§28; `onSyncTimeout=Proceed` marks sessions not preserved and still completes MySQL failover)
 - `27-dragonfly-rolling-image-update` (§D6b; ordinary `spec.dragonfly.image` patch rolls one pod at a time and promotes the updated replica before rolling the old active pod)
 - `29-dragonfly-snapshot-upgrade` (§29; D6a snapshot-restore upgrade using the playground RustFS bucket)
 - `30-backup-verification-rustfs` (§30; configures a RustFS backup profile, creates a real `MysqlBackup`, pins `MysqlBackupVerification.spec.backupRef`, and asserts marker rows restore)
@@ -786,7 +786,7 @@ The scenario temporarily scales the target Dragonfly StatefulSet to 0 and patche
 ### 28. Planned Dragonfly Sync Timeout Proceeds
 **Category**: Degraded planned failover | **Risk**: Medium
 
-**Hypothesis**: With `maxSyncWait=1ms`, target Dragonfly scaled to 0, and `onSyncTimeout=proceed`, the planned failover does not claim session preservation but still completes MySQL promotion.
+**Hypothesis**: With `maxSyncWait=1ms`, target Dragonfly scaled to 0, and `onSyncTimeout=Proceed`, the planned failover does not claim session preservation but still completes MySQL promotion.
 
 **Injection**: `make chaos-run SCENARIO=26-planned-dragonfly-sync-timeout-proceed`
 

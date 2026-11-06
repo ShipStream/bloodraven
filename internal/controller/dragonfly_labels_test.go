@@ -75,12 +75,12 @@ func TestSyncDragonflyPodLabels_SkipsRestoreDuringStripWindow(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID:  "run-1",
-		Phase:  v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		Target: "dc2",
-		Source: "dc1",
+		RunID:      "run-1",
+		Phase:      v1alpha1.PlannedFailoverPhasePromotingDragonfly,
+		TargetSite: "dc2",
+		SourceSite: "dc1",
 		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{
-			Takeover: &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: metav1.Now()},
+			Takeover: &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: metav1.Now()},
 		},
 	}
 	// dc1 (source) has role=master but traffic stripped (no traffic label).
@@ -108,12 +108,12 @@ func TestSyncDragonflyPodLabels_RestoresAfterTakeoverSucceeded(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID:  "run-1",
-		Phase:  v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		Target: "dc2",
-		Source: "dc1",
+		RunID:      "run-1",
+		Phase:      v1alpha1.PlannedFailoverPhasePromotingDragonfly,
+		TargetSite: "dc2",
+		SourceSite: "dc1",
 		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{
-			Takeover: &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverSucceeded, IntendedAt: metav1.Now(),
+			Takeover: &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverSucceeded, IntentTime: metav1.Now(),
 				Method: v1alpha1.DragonflyTakeoverMethodReplTakeover},
 		},
 	}

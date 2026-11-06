@@ -74,10 +74,10 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 		want  pfExpect
 	}{
 		{name: "admitting/granted/committed", phase: adm, steps: 1,
-			want: pfExpect{phase: v1alpha1.PlannedFailoverPhaseFencing, held: "run-1", events: []string{"PlannedFailoverClaimed"},
+			want: pfExpect{phase: v1alpha1.PlannedFailoverPhaseFencing, held: "run-1", events: []string{"PlannedFailoverClaimGranted"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					pf := h.pf()
-					if pf.Source != "iad" || pf.Fence == nil || pf.Fence.State != v1alpha1.PlannedFailoverFenceIntended ||
+					if pf.SourceSite != "iad" || pf.Fence == nil || pf.Fence.State != v1alpha1.PlannedFailoverFenceIntended ||
 						pf.Fence.SourceServerUUID != "uuid-iad" || pf.ClaimBaseline == nil || pf.Revision != 2 {
 						t.Errorf("fencing record = %+v", pf)
 					}
@@ -115,12 +115,12 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 					return PlannedClaimDecision{Kind: ClaimWait, WaitReason: v1alpha1.PlannedFailoverWaitPeerUnreadable}, nil
 				}
 			},
-			want: pfExpect{phase: adm, events: []string{"PlannedFailoverWaiting"},
+			want: pfExpect{phase: adm, events: []string{"PlannedFailoverAdmissionDelayed"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					if a := h.pf().Admission; a == nil || a.WaitReason != v1alpha1.PlannedFailoverWaitPeerUnreadable {
 						t.Errorf("admission = %+v", a)
 					}
-					if n := h.sink.eventCount("PlannedFailoverWaiting"); n != 1 {
+					if n := h.sink.eventCount("PlannedFailoverAdmissionDelayed"); n != 1 {
 						t.Errorf("Waiting events = %d, want 1 (only on change)", n)
 					}
 				}}},
@@ -147,7 +147,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 				}
 			}}},
 		{name: "fencing/applied", phase: v1alpha1.PlannedFailoverPhaseFencing, steps: 1,
-			want: pfExpect{phase: v1alpha1.PlannedFailoverPhaseDraining, held: "run-1", events: []string{"PlannedFailoverDraining"},
+			want: pfExpect{phase: v1alpha1.PlannedFailoverPhaseDraining, held: "run-1", events: []string{"PlannedFailoverDrainStarted"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					pf := h.pf()
 					if pf.Fence.State != v1alpha1.PlannedFailoverFenceApplied || plannedFenceSet(pf) != "uuid-iad:1-10" || pf.Drain == nil {
@@ -185,7 +185,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			setup: func(h *pfEngineHarness) {
 				h.topo.fence = func(PlannedRunRef) (FenceProof, error) { return FenceProof{Kind: FenceForeignWritable}, nil }
 			},
-			want: pfExpect{phase: v1alpha1.PlannedFailoverPhaseRollingBack, held: "run-1", events: []string{"PlannedFailoverRollingBack"}}},
+			want: pfExpect{phase: v1alpha1.PlannedFailoverPhaseRollingBack, held: "run-1", events: []string{"PlannedFailoverRollbackStarted"}}},
 		{name: "fencing/retry past the deadline", phase: v1alpha1.PlannedFailoverPhaseFencing, steps: 1,
 			setup: func(h *pfEngineHarness) {
 				h.topo.fence = func(PlannedRunRef) (FenceProof, error) { return FenceProof{Kind: FenceRetry}, nil }
@@ -218,7 +218,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 					}
 				}}},
 		{name: "lag/caught up writes the promoting intent", phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, steps: 1,
-			want: pfExpect{phase: v1alpha1.PlannedFailoverPhasePromoting, held: "run-1", events: []string{"PlannedFailoverLagOK"},
+			want: pfExpect{phase: v1alpha1.PlannedFailoverPhasePromoting, held: "run-1", events: []string{"PlannedFailoverTargetCaughtUp"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					if p := h.pf().Promotion; p == nil || p.TargetServerUUID != "uuid-pdx" || p.State != v1alpha1.PlannedFailoverPromotionIntended {
 						t.Errorf("promotion = %+v", p)
@@ -263,7 +263,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			want: pfExpect{phase: v1alpha1.PlannedFailoverPhasePublishing, releases: []string{"run-1:publishing"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					pf := h.pf()
-					if pf.Promotion.State != v1alpha1.PlannedFailoverPromotionConfirmed || pf.Promotion.ConfirmedAt == nil ||
+					if pf.Promotion.State != v1alpha1.PlannedFailoverPromotionConfirmed || pf.Promotion.ConfirmationTime == nil ||
 						pf.DNS == nil || pf.DNS.State != v1alpha1.PlannedFailoverDNSApplied {
 						t.Errorf("publishing record = %+v %+v", pf.Promotion, pf.DNS)
 					}
@@ -278,7 +278,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 				}
 			},
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, releases: []string{"run-1:publishing"},
-				events: []string{"PlannedFailoverDNSUpdateFailed", "PlannedFailoverCompleted"},
+				events: []string{"PlannedFailoverDNSUpdateFailed", "PlannedFailoverSucceeded"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					if !slices.Contains(h.pf().Result.Warnings, v1alpha1.PlannedFailoverWarningDNSUpdateFailed) {
 						t.Errorf("warnings = %v", h.pf().Result.Warnings)
@@ -310,8 +310,8 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 				releases: []string{"run-1:toHold"}, held: "run-1", holdMode: true, named: []string{},
 				events: []string{"PlannedFailoverManualRecoveryRequired"},
 				check: func(t *testing.T, h *pfEngineHarness) {
-					hold := plannedHoldFrom(h.fg())
-					if hold == nil || hold.RunID != "run-1" || !hold.FromCondition || hold.Reason != v1alpha1.PlannedFailoverReasonForeignWritable {
+					hold := PlannedHoldFrom(h.fg())
+					if hold == nil || hold.RunID != "run-1" || !hold.FromStatus || hold.Reason != v1alpha1.PlannedFailoverReasonForeignWritable {
 						t.Errorf("hold = %+v", hold)
 					}
 				}}},
@@ -324,7 +324,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			},
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, reason: v1alpha1.PlannedFailoverReasonPromotionUnconfirmed,
 				releases: []string{"run-1:terminal"}, named: []string{"target:pdx"},
-				events: []string{"PlannedFailoverPromotionUnconfirmed"}}},
+				events: []string{"PlannedFailoverPromotionConfirmationFailed"}}},
 		{name: "promoting/unconfirmed with nothing sent, past the deadline", phase: v1alpha1.PlannedFailoverPhasePromoting, steps: 1,
 			setup: func(h *pfEngineHarness) {
 				h.topo.promote = func(PlannedRunRef) (PromoteOutcome, error) {
@@ -370,7 +370,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: v1alpha1.PlannedFailoverReasonLagTimeout,
 				releases: []string{"run-1:terminal"}, named: []string{"source:iad"}}},
 		{name: "publishing/succeeded writes the failover record", phase: v1alpha1.PlannedFailoverPhasePublishing, steps: 1,
-			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, events: []string{"PlannedFailoverCompleted"},
+			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, events: []string{"PlannedFailoverSucceeded"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					st := h.fg().Status
 					if st.LastFailover == nil || st.LastFailoverTarget != "pdx" || st.PromotionGtidExecuted != "uuid-iad:1-10" {
@@ -449,14 +449,14 @@ func TestPlannedFailoverEngine_HappyPath(t *testing.T) {
 // onCooldown=defer defers and keeps the annotation.
 func TestPlannedFailoverEngine_DeferredCooldown(t *testing.T) {
 	fg := plannedFailoverFG("pdx")
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: PlannedFailoverOnCooldownDefer}
+	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: v1alpha1.PlannedFailoverCooldownDefer}
 	recent := metav1.NewTime(time.Date(2026, 11, 4, 11, 58, 0, 0, time.UTC))
 	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &recent, "iad"
 	h := newPFEngineHarness(t, fg)
 	h.step()
 	pf := h.pf()
 	if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil || pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferCooldownActive ||
-		pf.Admission.RetryAfter == nil {
+		pf.Admission.RetryTime == nil {
 		t.Fatalf("deferred record = %+v", pf)
 	}
 	if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; !ok {
@@ -480,7 +480,7 @@ func TestPlannedFailoverEngine_DeferredAnnotationRemovedCancels(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseDeferred)
 	h.step()
 	if pf := h.pf(); pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeNotStarted ||
-		pf.Result.Reason != v1alpha1.PlannedFailoverReasonCancelled {
+		pf.Result.Reason != v1alpha1.PlannedFailoverReasonCanceled {
 		t.Fatalf("block = %+v", pf)
 	}
 }
@@ -529,13 +529,13 @@ func TestPlannedFailoverEngine_LegacyRefused(t *testing.T) {
 		t.Run(string(tc.phase), func(t *testing.T) {
 			h := newPFEngineHarness(t, plannedFailoverFG(""))
 			start := metav1.NewTime(h.clk.Now())
-			h.setBlock(&v1alpha1.PlannedFailoverStatus{Phase: tc.phase, Target: "pdx", StartTime: start})
+			h.setBlock(&v1alpha1.PlannedFailoverStatus{Phase: tc.phase, TargetSite: "pdx", StartTime: start})
 			h.step()
 			pf := h.pf()
 			if pf.Result == nil || pf.Result.Outcome != tc.outcome || pf.Result.Reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused || pf.RunID == "" {
 				t.Fatalf("block = %+v", pf)
 			}
-			if h.sink.eventCount("PlannedFailoverLegacyRefused") != 1 {
+			if h.sink.eventCount("PlannedFailoverLegacyRunRefused") != 1 {
 				t.Errorf("events = %v", h.sink.events)
 			}
 			if len(h.topo.calls) != 0 || h.topo.PlannedClaimHeld(h.nn) {
@@ -570,7 +570,7 @@ func TestPF_StallDeadlineSurvivesRepeatedRestarts(t *testing.T) {
 	h.restart()
 	h.step()
 	fg := h.fg()
-	m, ok := parseTerminalMarker(fg.Annotations[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(fg.Annotations[PlannedFailoverTerminalAnnotation])
 	if !ok || m.RunID != "run-1" || m.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced || m.Reason != v1alpha1.PlannedFailoverReasonStatusStalled {
 		t.Fatalf("marker = %q", fg.Annotations[PlannedFailoverTerminalAnnotation])
 	}
@@ -604,7 +604,7 @@ func TestPF_StatusStallBeforeFenceIsNotStarted(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG(""))
 	pf := pfRunAt(v1alpha1.PlannedFailoverPhaseAdmitting, h.clk.Now())
 	later := metav1.NewTime(h.clk.Now().Add(10 * time.Minute))
-	pf.Admission.Deadline = &later // the stall, not the admission deadline, ends this run
+	pf.Admission.DeadlineTime = &later // the stall, not the admission deadline, ends this run
 	h.setBlock(pf)
 	h.faults.statusDefault = pfWriteDropTimeout
 	h.faults.denyMetaKey = PlannedFailoverStatusFenceAnnotation
@@ -614,7 +614,7 @@ func TestPF_StatusStallBeforeFenceIsNotStarted(t *testing.T) {
 	}
 	h.clk.Advance(plannedFailoverStatusStallDeadline)
 	h.step()
-	m, ok := parseTerminalMarker(h.fg().Annotations[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(h.fg().Annotations[PlannedFailoverTerminalAnnotation])
 	if !ok || m.Outcome != v1alpha1.PlannedFailoverOutcomeNotStarted || m.Reason != v1alpha1.PlannedFailoverReasonStatusStalled {
 		t.Fatalf("marker = %+v ok=%v", m, ok)
 	}
@@ -635,8 +635,8 @@ func TestPF_ManagerAbsenceDeadlineSurvivesRestart(t *testing.T) {
 	}
 	h.clk.Advance(plannedFailoverManagerAbsentWarnAfter)
 	h.step()
-	if h.sink.eventCount("PlannedFailoverStalled") != 1 {
-		t.Errorf("events = %v, want PlannedFailoverStalled after 30s", h.sink.events)
+	if h.sink.eventCount("PlannedFailoverStalledManagerAbsent") != 1 {
+		t.Errorf("events = %v, want PlannedFailoverStalledManagerAbsent after 30s", h.sink.events)
 	}
 	for i := 0; i < 3; i++ {
 		h.clk.Advance(time.Minute)
@@ -668,7 +668,7 @@ func TestPF_ManagerAbsenceDeadlineSurvivesRestart(t *testing.T) {
 // A run this process marked is never driven as live again.
 func TestPF_MarkedRunNeverRehydrated(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseWaitingForLag)
-	h.setAnnotation(PlannedFailoverTerminalAnnotation, "run-1/SourceLeftFenced/StatusStalled")
+	h.setAnnotation(PlannedFailoverTerminalAnnotation, `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`)
 	h.faults.statusDenied = true
 	h.step()
 	if held, _ := h.topo.held(); held != "" {
@@ -755,19 +755,25 @@ func TestNoCachedDecisionReads(t *testing.T) {
 	}
 }
 
-// The hold condition survives in status after the terminal write and names
-// the run in the grammar plannedHoldFrom reads back.
-func TestPlannedFailoverEngine_HoldConditionGrammar(t *testing.T) {
+// The terminal write records the hold in status.plannedFailoverHold, and
+// the True condition summarises it: PlannedHoldFrom reads the typed field,
+// never the message.
+func TestPlannedFailoverEngine_HoldRecord(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
 	h.topo.promote = func(PlannedRunRef) (PromoteOutcome, error) {
 		return PromoteOutcome{Kind: PromoteInconsistent, Reason: v1alpha1.PlannedFailoverReasonForeignWritable}, nil
 	}
 	h.step()
-	c := apimeta.FindStatusCondition(h.fg().Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
-	if c == nil || c.Reason != plannedHoldConditionReason || !strings.Contains(c.Message, AckPlannedFailoverHoldAnnotation+"=run-1") {
+	fg := h.fg()
+	c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonPlannedFailoverManualRecoveryRequired ||
+		c.ObservedGeneration != fg.Generation || !strings.Contains(c.Message, AcknowledgePlannedFailoverHoldAnnotation+"=run-1") {
 		t.Fatalf("condition = %+v", c)
 	}
-	if id, reason, ok := parsePlannedHoldConditionMessage(c.Message); !ok || id != "run-1" || reason != v1alpha1.PlannedFailoverReasonForeignWritable {
-		t.Errorf("parsed = %q %q %v", id, reason, ok)
+	hold := fg.Status.PlannedFailoverHold
+	if hold == nil || hold.RunID != "run-1" || hold.Reason != v1alpha1.PlannedFailoverReasonForeignWritable ||
+		hold.TargetSite != fg.Status.PlannedFailover.TargetSite || hold.SourceSite != fg.Status.PlannedFailover.SourceSite ||
+		hold.HoldTime.IsZero() {
+		t.Errorf("status.plannedFailoverHold = %+v", hold)
 	}
 }

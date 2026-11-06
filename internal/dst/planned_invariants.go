@@ -472,9 +472,9 @@ func (m *plannedMonitor) onCommit(_ string, before, after *v1alpha1.MysqlFailove
 		m.runs[pf.RunID] = r
 		m.order = append(m.order, pf.RunID)
 	}
-	r.target = pf.Target
-	if pf.Source != "" {
-		r.source = pf.Source
+	r.target = pf.TargetSite
+	if pf.SourceSite != "" {
+		r.source = pf.SourceSite
 	}
 	if pf.Fence != nil {
 		r.intentUUID = pf.Fence.SourceServerUUID
@@ -495,8 +495,8 @@ func (m *plannedMonitor) onCommit(_ string, before, after *v1alpha1.MysqlFailove
 		!r.published && r.fenceSet != "" {
 		r.published = true
 		r.publishWritable = m.c.writableSites()
-		if pf.Promotion != nil && pf.Promotion.ConfirmedAt != nil {
-			r.confirmedAt = pf.Promotion.ConfirmedAt.UTC().Truncate(time.Second)
+		if pf.Promotion != nil && pf.Promotion.ConfirmationTime != nil {
+			r.confirmedAt = pf.Promotion.ConfirmationTime.UTC().Truncate(time.Second)
 		}
 		if m.onRecorded != nil {
 			m.onRecorded(r.target, r.confirmedAt)

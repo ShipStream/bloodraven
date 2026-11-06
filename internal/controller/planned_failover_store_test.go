@@ -209,20 +209,23 @@ func TestStore_MarkDeadlineStartNeverMovesForward(t *testing.T) {
 	}
 }
 
-// ClearHold removes only the condition naming the run, with the terminal
-// record when given, in one conditioned status write.
+// ClearHold removes only the hold naming the run (its condition set
+// False/PlannedFailoverHoldAcknowledged), with the terminal record when
+// given, in one conditioned status write.
 func TestStore_ClearHold(t *testing.T) {
 	store, _, _, load := pfStoreFixture(t)
 	base := load()
-	setPlannedHoldCondition(&base.Status, "run-9", v1alpha1.PlannedFailoverReasonForeignWritable, []string{"pdx"}, time.Now())
+	setPlannedHold(&base.Status, v1alpha1.PlannedFailoverHold{RunID: "run-9", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+		AmbiguousSites: []string{"pdx"}, HoldTime: metav1.Now()}, base.Generation)
 	if err := store.client.Status().Update(context.Background(), base); err != nil {
 		t.Fatal(err)
 	}
 	if out, _ := store.ClearHold(context.Background(), load(), "run-1", nil); out != WriteCommitted {
 		t.Fatal(out)
 	}
-	if apimeta.FindStatusCondition(load().Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld) == nil {
-		t.Fatal("the condition of another run was removed")
+	if c := apimeta.FindStatusCondition(load().Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c == nil ||
+		c.Status != metav1.ConditionTrue || load().Status.PlannedFailoverHold == nil {
+		t.Fatal("the hold of another run was cleared")
 	}
 	cur := load()
 	final := cur.Status.PlannedFailover.DeepCopy()
@@ -232,8 +235,10 @@ func TestStore_ClearHold(t *testing.T) {
 		t.Fatal(out)
 	}
 	got := load()
-	if apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld) != nil || got.Status.PlannedFailover.RunID != "run-9" {
-		t.Fatalf("after ClearHold: conditions %v block %+v", got.Status.Conditions, got.Status.PlannedFailover)
+	c := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
+	if got.Status.PlannedFailoverHold != nil || c == nil || c.Status != metav1.ConditionFalse ||
+		c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged || got.Status.PlannedFailover.RunID != "run-9" {
+		t.Fatalf("after ClearHold: hold %+v conditions %v block %+v", got.Status.PlannedFailoverHold, got.Status.Conditions, got.Status.PlannedFailover)
 	}
 }
 

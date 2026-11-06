@@ -351,34 +351,10 @@ func (pl *plannedHarness) wiring() controller.ManagerWiring {
 	return w
 }
 
-// plannedHoldOf mirrors the controller's plannedHoldFrom (unexported) for
-// the wiring: either durable hold record holds.
+// plannedHoldOf is the controller's PlannedHoldFrom: either durable hold
+// record holds.
 func plannedHoldOf(obj *v1alpha1.MysqlFailoverGroup) *controller.PlannedHold {
-	if !holdStands(obj) {
-		return nil
-	}
-	h := &controller.PlannedHold{}
-	if holdConditionTrue(obj) {
-		h.FromCondition = true
-		for _, c := range obj.Status.Conditions {
-			if c.Type == v1alpha1.ConditionAutomaticFailoverHeld {
-				if f := strings.Fields(c.Message); len(f) > 3 && f[0] == "planned" {
-					h.RunID = f[3]
-				}
-			}
-		}
-	}
-	parts := strings.Split(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation], "/")
-	if len(parts) == 3 && v1alpha1.PlannedFailoverOutcome(parts[1]) == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
-		if h.RunID == "" || h.RunID == parts[0] {
-			h.RunID = parts[0]
-			h.FromMarker = true
-			if h.Reason == "" {
-				h.Reason = v1alpha1.PlannedFailoverReason(parts[2])
-			}
-		}
-	}
-	return h
+	return controller.PlannedHoldFrom(obj)
 }
 
 // restartProcess is an operator restart: a new process with a new registry

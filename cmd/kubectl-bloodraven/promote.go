@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -129,7 +130,14 @@ func buildPlannedFailoverValue(site string, maxLagWait time.Duration) (string, e
 	}
 	pairs := []kv{}
 	if maxLagWait > 0 {
-		pairs = append(pairs, kv{"maxLagWait", maxLagWait.String()})
+		// The annotation grammar admits only [A-Za-z0-9._/+-] in a value;
+		// time.Duration renders microseconds with "µs", so a sub-millisecond
+		// value is written in nanoseconds instead.
+		d := maxLagWait.String()
+		if strings.ContainsRune(d, 'µ') {
+			d = strconv.FormatInt(int64(maxLagWait), 10) + "ns"
+		}
+		pairs = append(pairs, kv{"maxLagWait", d})
 	}
 	if len(pairs) == 0 {
 		return site, nil
@@ -242,8 +250,8 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 			return fmt.Errorf("planned failover failed: %s", reason)
 		case v1alpha1.PlannedFailoverPhaseDeferred:
 			retry := "(unset)"
-			if pf != nil && pf.Admission != nil && pf.Admission.RetryAfter != nil {
-				retry = pf.Admission.RetryAfter.Time.UTC().Format(time.RFC3339)
+			if pf != nil && pf.Admission != nil && pf.Admission.RetryTime != nil {
+				retry = pf.Admission.RetryTime.Time.UTC().Format(time.RFC3339)
 			}
 			fmt.Fprintf(stderr, "Planned failover deferred; the operator will retry after %s — rerun status to check.\n", retry)
 			return fmt.Errorf("planned failover deferred until %s; the operator has not performed the promotion yet", retry)

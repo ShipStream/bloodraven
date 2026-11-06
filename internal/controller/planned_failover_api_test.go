@@ -20,7 +20,9 @@ import (
 // phases.
 var (
 	pfRemovedStatusFields = []string{"sourcePrimary", "sourceGtidAtFence", "targetGtidAtPromotion", "completionTime",
-		"durationSeconds", "transactionsLost", "reason", "maxLagWait", "drainTimeout", "drainStartTime", "lagWaitStartTime", "retryAfter"}
+		"durationSeconds", "transactionsLost", "reason", "maxLagWait", "drainTimeout", "drainStartTime", "lagWaitStartTime", "retryAfter",
+		// A-50: the pre-v1beta1 spellings of the durable-claim record.
+		"runId", "target", "source", "claimedAt"}
 	pfRemovedDragonflyFields = []string{"enabled", "sourceOffsetAtDrain", "offsetCaptureFailed", "targetOffsetAtPromotion",
 		"sessionsPreserved", "promotionMethod"}
 	pfRemovedPhases = []string{"", "Pending", "Validating", "Resuming"}
@@ -94,7 +96,7 @@ func TestPlannedFailoverOldFieldsGone(t *testing.T) {
 					t.Errorf("%s: phase enum still has %q", path, p)
 				}
 			}
-			for _, req := range []string{"runId", "revision", "phase", "target", "settings", "startTime"} {
+			for _, req := range []string{"runID", "revision", "phase", "targetSite", "settings", "startTime"} {
 				if !slices.Contains(pf.Required, req) {
 					t.Errorf("%s: status.plannedFailover.%s is not required", path, req)
 				}

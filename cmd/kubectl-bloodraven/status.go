@@ -233,8 +233,8 @@ func printPlannedFailover(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
 	if outcome, reason, ok := plannedTerminalMarker(fg); ok {
 		fmt.Fprintf(out, "  Ended by terminal marker: %s (status writes stalled)\n", plannedOutcomeReason(outcome, reason))
 	}
-	if pf.Source != "" || pf.Target != "" {
-		fmt.Fprintf(out, "  Source -> Target: %s -> %s\n", emptyDash(pf.Source), emptyDash(pf.Target))
+	if pf.SourceSite != "" || pf.TargetSite != "" {
+		fmt.Fprintf(out, "  Source -> Target: %s -> %s\n", emptyDash(pf.SourceSite), emptyDash(pf.TargetSite))
 	}
 	if r := pf.Result; r != nil {
 		fmt.Fprintf(out, "  Outcome: %s\n", r.Outcome)
@@ -271,8 +271,8 @@ func printPlannedFailover(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
 			}
 		}
 	}
-	if a := pf.Admission; a != nil && a.RetryAfter != nil {
-		fmt.Fprintf(out, "  Retry after: %s\n", a.RetryAfter.Time.UTC().Format(time.RFC3339))
+	if a := pf.Admission; a != nil && a.RetryTime != nil {
+		fmt.Fprintf(out, "  Retry after: %s\n", a.RetryTime.Time.UTC().Format(time.RFC3339))
 	}
 }
 

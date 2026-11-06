@@ -45,10 +45,10 @@ func init() {
 func scenario26PlannedDragonflySyncTimeout() runner.Scenario {
 	return runner.Scenario{
 		ID:    "26-planned-dragonfly-sync-timeout-proceed",
-		Title: "Planned failover with Dragonfly sync timeout (onSyncTimeout=proceed) marks sessions lost but still succeeds",
+		Title: "Planned failover with Dragonfly sync timeout (onSyncTimeout=Proceed) marks sessions lost but still succeeds",
 		Hypothesis: "Patching maxSyncWait=1ms and scaling the target's Dragonfly StatefulSet to 0 forces both " +
 			"the WaitingForDragonflySync target-poll and the PromotingDragonfly REPLTAKEOVER to fail. " +
-			"With onSyncTimeout=proceed, the operator records dragonfly.sessions=Lost, completes MySQL " +
+			"With onSyncTimeout=Proceed, the operator records dragonfly.sessions=Lost, completes MySQL " +
 			"failover anyway, and increments dragonfly_promotions_total{result=\"failed\"}.",
 		Risk:     "medium",
 		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D4)",
@@ -106,10 +106,10 @@ func snapshotForS26() runner.Step {
 func tightenS26SyncBudget() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "patch maxSyncWait=1ms onSyncTimeout=proceed",
+		Name:  "patch maxSyncWait=1ms onSyncTimeout=Proceed",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			env.Capture.Note("patching dragonfly sync budget to 1ms / proceed")
-			return env.Chaos.PatchDragonflySyncBudget(ctx, "1ms", "proceed")
+			return env.Chaos.PatchDragonflySyncBudget(ctx, "1ms", string(v1alpha1.DragonflySyncTimeoutProceed))
 		},
 	}
 }
@@ -171,13 +171,13 @@ func observeS26PlannedFailoverSucceeded() runner.Step {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
 							pf.StartTime, env.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, plannedReason(pf))
+					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.TargetSite, plannedReason(pf))
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
 						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", plannedReason(pf), pf.Message)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
-						if pf.Target != target {
-							return false, msg, fmt.Errorf("plannedFailover succeeded but target=%q want %q", pf.Target, target)
+						if pf.TargetSite != target {
+							return false, msg, fmt.Errorf("plannedFailover succeeded but target=%q want %q", pf.TargetSite, target)
 						}
 						return true, msg, nil
 					}

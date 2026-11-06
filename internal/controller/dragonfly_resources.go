@@ -751,7 +751,7 @@ func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Co
 	// grant, or an automation hold) or a standing hold owns the active
 	// Dragonfly. The temporary promoter has no planned owner of its own,
 	// so the check is here.
-	if r.plannedClaimHeld(nn) || plannedHoldFrom(fresh) != nil {
+	if r.plannedClaimHeld(nn) || PlannedHoldFrom(fresh) != nil {
 		logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target,
 			"reason", "a planned failover claim or automation hold owns the sites", "fg", nn)
 		return false, true
@@ -1023,7 +1023,7 @@ func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1
 // to the stale source and fight the promotion path.
 func effectiveDragonflyMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	if plannedDragonflyTakeoverSucceeded(fg) {
-		return fg.Status.PlannedFailover.Target
+		return fg.Status.PlannedFailover.TargetSite
 	}
 	if fg.Status.Dragonfly != nil && fg.Status.Dragonfly.ActiveSite != "" {
 		return fg.Status.Dragonfly.ActiveSite

@@ -160,7 +160,7 @@ Before executing a planned failover with `kubectl bloodraven promote <group> -n 
 - [ ] No planned failover is in flight before an operator upgrade across the claim release: an older operator's in-flight block is refused, not resumed.
 - [ ] Dragonfly replica is caught up and `status.dragonfly.replTakeoverSupported == true`.
 - [ ] DNS provider / `external-dns` is healthy.
-- [ ] No unexpired deployment `failover-hold` is active; otherwise expect `Deferred/DeploymentHold` and inspect the named operation, instance, and `admission.retryAfter`.
+- [ ] No unexpired deployment `failover-hold` is active; otherwise expect `Deferred/DeploymentHold` and inspect the named operation, instance, and `admission.retryTime`.
 
 ## 6. Deployment lease lost or planned operation deferred
 
@@ -1056,7 +1056,7 @@ A planned failover ended `Failed` with `result.outcome: SourceLeftFenced`. Nothi
 ### Diagnostic steps
 1. Read the run:
    ```bash
-   kubectl get mfg <group> -n <ns> -o json | jq '{run: .status.plannedFailover | {runId, phase, source, target, result, message, fence: (.fence // {} | {state, sourceServerUUID})}, lastFailoverTarget: .status.lastFailoverTarget, activeSite: .status.activeSite, marker: .metadata.annotations["bloodraven.shipstream.io/planned-failover-terminal"]}'
+   kubectl get mfg <group> -n <ns> -o json | jq '{run: .status.plannedFailover | {runID, phase, sourceSite, targetSite, result, message, fence: (.fence // {} | {state, sourceServerUUID})}, lastFailoverTarget: .status.lastFailoverTarget, activeSite: .status.activeSite, marker: .metadata.annotations["bloodraven.shipstream.io/planned-failover-terminal"]}'
    ```
 2. On every site: `SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only, @@GLOBAL.server_uuid, @@GLOBAL.gtid_executed;`.
 3. Operator log for the run: `planned failover: named fenced source for re-assert` (the source was handed to the re-assert), and later WARN `re-asserting fenced promoted primary`.
@@ -1078,17 +1078,17 @@ Do not:
 A planned failover may have written to its target and could not explain what it found (a foreign writable site, transactions outside the fenced set, a writable target with a replication channel, a replaced server after a possible write or after the run's failover record was durable). A target found replaced by a restarted operator before the run's record was durable, with the source still holding the fenced set under the run's fence and every other promotable site read-only, rolls back (`TargetChanged`) instead of holding. It ended `ManualRecoveryRequired` and holds automation for the group instead of letting split-brain resolution pick a winner, which could fence the only holder of acknowledged writes.
 
 ### Symptoms
-- Condition `AutomaticFailoverHeld=True`, reason `PlannedFailoverManualRecovery`; `kubectl bloodraven status` summary ends `+held`.
-- Warning Events `PlannedFailoverManualRecoveryRequired`, then `PlannedFailoverHoldPending` every 10 minutes.
+- `status.plannedFailoverHold` is set and the condition `AutomaticFailoverHeld=True`, reason `PlannedFailoverManualRecoveryRequired`, summarises it; `kubectl bloodraven status` summary ends `+held`.
+- Warning Events `PlannedFailoverManualRecoveryRequired`, then `PlannedFailoverHoldPersisted` every 10 minutes.
 - Operator log `planned failover: automation held pending acknowledgement` (once per hold, not per pass) and, every poll, `cross-site action deferred: planned failover in progress`. Backups, schedules, verification, keyring work and pod labels keep reconciling during the hold.
 - New planned-failover requests end `NotStarted/ManualRecoveryPending`.
 
 ### Diagnostic steps
 1. Read the hold:
    ```bash
-   kubectl get mfg <group> -n <ns> -o json | jq '{hold: [.status.conditions[]? | select(.type == "AutomaticFailoverHeld")], run: .status.plannedFailover | {runId, source, target, result, message}, marker: .metadata.annotations["bloodraven.shipstream.io/planned-failover-terminal"], ack: .metadata.annotations["bloodraven.shipstream.io/ack-planned-failover-hold"]}'
+   kubectl get mfg <group> -n <ns> -o json | jq '{hold: .status.plannedFailoverHold, condition: [.status.conditions[]? | select(.type == "AutomaticFailoverHeld")], run: .status.plannedFailover | {runID, sourceSite, targetSite, result, message}, marker: .metadata.annotations["bloodraven.shipstream.io/planned-failover-terminal"], ack: .metadata.annotations["bloodraven.shipstream.io/acknowledge-planned-failover-hold"]}'
    ```
-   The message reads `planned failover run <runId> ended ManualRecoveryRequired (<reason>); writable or ambiguous sites: <sites>`. A marker `<runId>/ManualRecoveryRequired/<reason>` carries the same hold when status writes had stalled.
+   `hold` names the run (`runID`), its `reason`, `sourceSite`, `targetSite` and the `ambiguousSites` that were writable or unreadable. Read the run from there, not from the condition message. When status writes had stalled, a marker `{"schemaVersion":1,"runID":"<runID>","outcome":"ManualRecoveryRequired","reason":"<reason>"}` carries the same hold instead.
 2. On every site: `read_only`, `super_read_only`, `server_uuid`, `gtid_executed`, `SHOW REPLICA STATUS`. Run `gtid-audit.sh`.
 3. Compare the source and the target both ways: `SELECT GTID_SUBTRACT('<target set>', '<source set>'), GTID_SUBTRACT('<source set>', '<target set>');`.
 
@@ -1099,11 +1099,12 @@ Get explicit approval for every step; this is a data decision.
 3. Make sure exactly one `primary-candidate` is writable and DNS points at it; the operator does not move DNS while the hold stands.
 4. Acknowledge with the held run's id:
    ```bash
-   kubectl annotate mfg <group> -n <ns> bloodraven.shipstream.io/ack-planned-failover-hold=<runId>
+   kubectl bloodraven ack-planned-failover-hold <group> -n <ns>
+   # or: kubectl annotate mfg <group> -n <ns> bloodraven.shipstream.io/acknowledge-planned-failover-hold=<runID>
    ```
-5. Verify: the condition is removed, the operator deletes the annotation, Event `PlannedFailoverHoldCleared`, log `planned failover: hold acknowledged` then `planned failover: claim released` with `why=ack`. Old-primary recovery then repoints the fenced site, or reports divergence ([playbook 33](#33-a-healthy-replica-reports-divergent-transactions-or-an-ordered-updateplanned-failover-refuses-a-divergent-target)).
+5. Verify: `status.plannedFailoverHold` is removed and the condition turns `False` with reason `PlannedFailoverHoldAcknowledged`, the operator deletes the annotation, Event `PlannedFailoverHoldAcknowledged`, log `planned failover: hold acknowledged` then `planned failover: claim released` with `why=ack`. Old-primary recovery then repoints the fenced site, or reports divergence ([playbook 33](#33-a-healthy-replica-reports-divergent-transactions-or-an-ordered-updateplanned-failover-refuses-a-divergent-target)).
 
 Do not:
 - Acknowledge before the sites are resolved: the next poll acts on whatever state they are in.
-- Delete the `planned-failover-terminal` annotation or the condition by hand to clear a hold that names a run; the acknowledgement clears them in a restart-safe order. The exception is a `True` condition whose message names no run: no acknowledgement can match it, so remove it by hand after resolving the sites.
-- Expect `PlannedFailoverHoldAckIgnored` to clear anything: it means the value names the wrong run.
+- Delete the `planned-failover-terminal` annotation, `status.plannedFailoverHold` or the condition by hand to clear a hold that names a run; the acknowledgement clears them in a restart-safe order. The exception is a `True` condition without `status.plannedFailoverHold`: it names no run, no acknowledgement can match it, so remove it by hand after resolving the sites.
+- Expect `PlannedFailoverHoldAcknowledgementIgnored` to clear anything: it means the value names the wrong run.

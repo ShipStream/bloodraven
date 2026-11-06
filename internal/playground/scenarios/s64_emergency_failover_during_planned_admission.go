@@ -202,7 +202,7 @@ func s64ObserveEmergencyFailover() runner.Step {
 				fmt.Sprintf("activeSite moves off %s within %s with the planned run pending", original, s64EmergencyWindow),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					if pf := mfg.Status.PlannedFailover; pf != nil && pf.RunID == runID {
-						if plannedOwnsSites(pf.Phase) && pf.Source == original {
+						if plannedOwnsSites(pf.Phase) && pf.SourceSite == original {
 							return false, "", fmt.Errorf("pending planned run claimed the lost primary %s: %s", original, plannedRunSummary(pf))
 						}
 					}
@@ -302,9 +302,9 @@ func s64ClassifyOutcome(pf *v1alpha1.PlannedFailoverStatus, original, newPrimary
 		if plannedTerminal(pf.Phase) {
 			return false, msg, fmt.Errorf("terminal phase %s without result: %s", pf.Phase, msg)
 		}
-		if (plannedOwnsSites(pf.Phase) || pf.Phase == v1alpha1.PlannedFailoverPhasePublishing) && pf.Source != newPrimary {
+		if (plannedOwnsSites(pf.Phase) || pf.Phase == v1alpha1.PlannedFailoverPhasePublishing) && pf.SourceSite != newPrimary {
 			return false, msg, fmt.Errorf("planned run owns sites with source %q (lost primary %s, new primary %s): %s",
-				pf.Source, original, newPrimary, msg)
+				pf.SourceSite, original, newPrimary, msg)
 		}
 		return false, msg, nil
 	}
@@ -312,7 +312,7 @@ func s64ClassifyOutcome(pf *v1alpha1.PlannedFailoverStatus, original, newPrimary
 	case pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeNotStarted &&
 		pf.Result.Reason == v1alpha1.PlannedFailoverReasonAlreadyActive:
 		return true, msg, nil
-	case pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && pf.Source == newPrimary:
+	case pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && pf.SourceSite == newPrimary:
 		return true, msg, nil
 	}
 	return false, msg, fmt.Errorf("planned run ended %s/%s, want NotStarted/AlreadyActive or Succeeded from %s: %s (%s)",

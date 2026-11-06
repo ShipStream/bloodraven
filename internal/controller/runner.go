@@ -1353,7 +1353,7 @@ func (r *TopologyManagerRunner) registerManagerWith(nn types.NamespacedName, vie
 		w.RetiredFailover = &rec
 	}
 	if view != nil {
-		w.HoldFrom = plannedHoldFrom(view)
+		w.HoldFrom = PlannedHoldFrom(view)
 		if plannedFailoverOwnsSites(view) {
 			w.HydrateFrom = view.Status.PlannedFailover
 		}
@@ -1846,6 +1846,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		}
 		dragonfly := fresh.Status.Dragonfly
 		planned := fresh.Status.PlannedFailover
+		plannedHold := fresh.Status.PlannedFailoverHold
 		initialRestore := fresh.Status.Restore
 		restore := fresh.Status.RestoreInPlace
 		reclones := fresh.Status.RestoreReclones
@@ -1870,6 +1871,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			}
 		}
 		fresh.Status.PlannedFailover = planned
+		fresh.Status.PlannedFailoverHold = plannedHold
 		fresh.Status.Restore = initialRestore
 		fresh.Status.RestoreInPlace = restore
 		fresh.Status.RestoreReclones = reclones

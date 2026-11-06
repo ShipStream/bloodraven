@@ -264,7 +264,7 @@ func TestPlannedClaim_WaitingOwnsNothing(t *testing.T) {
 	for _, phase := range []v1alpha1.PlannedFailoverPhase{v1alpha1.PlannedFailoverPhaseAdmitting, v1alpha1.PlannedFailoverPhaseDeferred} {
 		t.Run(string(phase), func(t *testing.T) {
 			fg := newTestFG()
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, Target: "dc2"}
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, TargetSite: "dc2"}
 			for i, col := range claimants {
 				f := newClaimFixture(t)
 				// Whatever the cached status says, nothing hydrates a
@@ -285,7 +285,7 @@ func TestWireRegisteredManager_HydratesHoldOverRun(t *testing.T) {
 	f := newOpsFixture(t, "")
 	slot := &PlannedClaimSlot{}
 	pf := opsRun(v1alpha1.PlannedFailoverPhaseDraining)
-	WireRegisteredManager(f.tm, ManagerWiring{Slot: slot, HydrateFrom: pf, HoldFrom: &PlannedHold{RunID: "run-0", FromCondition: true}})
+	WireRegisteredManager(f.tm, ManagerWiring{Slot: slot, HydrateFrom: pf, HoldFrom: &PlannedHold{RunID: "run-0", FromStatus: true}})
 	if v, _ := slot.View(); v.Mode != "Hold" || v.RunID != "run-0" {
 		t.Fatalf("slot = %+v; want the hold", v)
 	}
@@ -296,7 +296,7 @@ func TestWireRegisteredManager_HydratesHoldOverRun(t *testing.T) {
 	}
 	// A legacy block (no runId) is never hydrated.
 	legacy := &PlannedClaimSlot{}
-	WireRegisteredManager(f.tm, ManagerWiring{Slot: legacy, HydrateFrom: &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "dc2"}})
+	WireRegisteredManager(f.tm, ManagerWiring{Slot: legacy, HydrateFrom: &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "dc2"}})
 	if legacy.Held() {
 		t.Fatal("a legacy block was hydrated")
 	}
@@ -353,7 +353,7 @@ func TestSync_NeverTouchesClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := metav1.Now()
-	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseFailed, Target: "dc2",
+	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseFailed, TargetSite: "dc2",
 		Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, CompletionTime: now}}
 	if err := c.Status().Update(context.Background(), &live); err != nil {
 		t.Fatal(err)
@@ -363,7 +363,7 @@ func TestSync_NeverTouchesClaim(t *testing.T) {
 		t.Fatal("a sync released the claim")
 	}
 	r.Slot(nn).release("run-1", ReleaseTerminal)
-	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-2", Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "dc2", Source: "dc1"}
+	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-2", Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "dc2", SourceSite: "dc1"}
 	if err := c.Status().Update(context.Background(), &live); err != nil {
 		t.Fatal(err)
 	}

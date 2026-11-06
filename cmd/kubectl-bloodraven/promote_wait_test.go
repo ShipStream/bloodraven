@@ -19,7 +19,7 @@ func waitFixture(marker string, phase v1alpha1.PlannedFailoverPhase) *v1alpha1.M
 	if marker != "" {
 		fg.Annotations = map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: marker}
 	}
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 4, Phase: phase, Target: "pdx", Source: "iad",
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 4, Phase: phase, TargetSite: "pdx", SourceSite: "iad",
 		StartTime: metav1.Now()}
 	return fg
 }
@@ -42,8 +42,8 @@ func TestWaitForPlannedFailover_HonoursTerminalMarker(t *testing.T) {
 		wantErr      string
 		wantOut      string
 	}{
-		{name: "succeeded", marker: "run-1/Succeeded/", wantOut: "succeeded (ended by the terminal marker"},
-		{name: "left fenced", marker: "run-1/SourceLeftFenced/StatusStalled", wantErr: "SourceLeftFenced:StatusStalled"},
+		{name: "succeeded", marker: `{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"}`, wantOut: "succeeded (ended by the terminal marker"},
+		{name: "left fenced", marker: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, wantErr: "SourceLeftFenced:StatusStalled"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,7 +69,7 @@ func TestWaitForPlannedFailover_HonoursTerminalMarker(t *testing.T) {
 
 // A marker of an earlier run does not end the current one.
 func TestPlannedTerminalMarker_OtherRunIgnored(t *testing.T) {
-	if _, _, ok := plannedTerminalMarker(waitFixture("run-0/Succeeded/", v1alpha1.PlannedFailoverPhasePromoting)); ok {
+	if _, _, ok := plannedTerminalMarker(waitFixture(`{"schemaVersion":1,"runID":"run-0","outcome":"Succeeded"}`, v1alpha1.PlannedFailoverPhasePromoting)); ok {
 		t.Fatal("a marker naming another run ended the current one")
 	}
 }
@@ -88,7 +88,7 @@ func TestPlannedFailoverOutput_WarningsAndMarker(t *testing.T) {
 		t.Fatalf("stdout = %q", out.String())
 	}
 	var detail bytes.Buffer
-	printPlannedFailover(&detail, waitFixture("run-1/SourceLeftFenced/StatusStalled", v1alpha1.PlannedFailoverPhaseDraining))
+	printPlannedFailover(&detail, waitFixture(`{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, v1alpha1.PlannedFailoverPhaseDraining))
 	if !strings.Contains(detail.String(), "Ended by terminal marker: SourceLeftFenced:StatusStalled") {
 		t.Fatalf("status detail = %q", detail.String())
 	}

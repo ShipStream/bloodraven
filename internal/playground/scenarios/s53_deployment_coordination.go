@@ -340,11 +340,11 @@ func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, 
 		if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
 			return false, fmt.Sprintf("phase=%s reason=%s", pf.Phase, plannedReason(pf)), nil
 		}
-		if pf.Admission.RetryAfter == nil || !strings.Contains(pf.Message, s.operation) || !strings.Contains(pf.Message, s.name) {
+		if pf.Admission.RetryTime == nil || !strings.Contains(pf.Message, s.operation) || !strings.Contains(pf.Message, s.name) {
 			return false, "", fmt.Errorf("DeploymentHold missing retryAfter, operationId, or instance: %+v", pf)
 		}
-		if !kill && pf.Admission.RetryAfter.Time.Sub(s.expiry).Abs() > time.Second {
-			return false, "", fmt.Errorf("retryAfter=%s does not match hold expiry=%s", pf.Admission.RetryAfter, s.expiry)
+		if !kill && pf.Admission.RetryTime.Time.Sub(s.expiry).Abs() > time.Second {
+			return false, "", fmt.Errorf("retryAfter=%s does not match hold expiry=%s", pf.Admission.RetryTime, s.expiry)
 		}
 		return true, "hold deferred with owner and expiry", nil
 	})

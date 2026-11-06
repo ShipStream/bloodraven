@@ -146,7 +146,7 @@ func TestPlannedFailoverSummary(t *testing.T) {
 	}
 	fg.Status.Conditions = nil
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
-	fg.Annotations = map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: "run-1/SourceLeftFenced/StatusStalled"}
+	fg.Annotations = map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if got := plannedFailoverSummary(fg); got != "Ended(SourceLeftFenced:StatusStalled)" {
 		t.Errorf("marked planned failover -> %q, want Ended(SourceLeftFenced:StatusStalled)", got)
 	}

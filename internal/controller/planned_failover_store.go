@@ -19,7 +19,6 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -151,7 +150,7 @@ func (s *apiPlannedFailoverStore) settleOnce(ctx context.Context, nn types.Names
 	if fenced.Annotations == nil {
 		fenced.Annotations = map[string]string{}
 	}
-	fenced.Annotations[PlannedFailoverStatusFenceAnnotation] = s.clk.Now().UTC().Format(time.RFC3339Nano)
+	fenced.Annotations[PlannedFailoverStatusFenceAnnotation] = FormatStatusFenceValue(s.clk.Now())
 	patch := client.MergeFromWithOptions(cur.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	switch err := s.client.Patch(actx, fenced, patch); {
 	case err == nil:
@@ -225,7 +224,7 @@ func (s *apiPlannedFailoverStore) ClearTerminalMarker(ctx context.Context, base 
 		if !ok {
 			return false
 		}
-		if m, parsed := parseTerminalMarker(v); !parsed || m.RunID != runID {
+		if m, parsed := ParseTerminalMarker(v); !parsed || m.RunID != runID {
 			return false
 		}
 		delete(a, PlannedFailoverTerminalAnnotation)
@@ -257,7 +256,7 @@ func (s *apiPlannedFailoverStore) MarkDeadlineStart(ctx context.Context, base *v
 	}
 	start := now.UTC().Truncate(time.Second)
 	outcome, err := s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		a[key] = formatDeadlineStart(runID, start)
+		a[key] = FormatDeadlineStart(runID, start)
 		return true
 	})
 	if outcome != WriteCommitted {
@@ -278,9 +277,10 @@ func (s *apiPlannedFailoverStore) ClearDeadlineStart(ctx context.Context, base *
 	})
 }
 
-// ClearHold commits final (if non-nil) and the removal of the
-// AutomaticFailoverHeld condition naming runID in one conditioned status
-// write. Nothing to change is a no-op success.
+// ClearHold commits final (if non-nil) and the removal of
+// status.plannedFailoverHold naming runID, with the AutomaticFailoverHeld
+// condition set False/PlannedFailoverHoldAcknowledged, in one conditioned
+// status write. Nothing to change is a no-op success.
 func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string,
 	final *v1alpha1.PlannedFailoverStatus) (WriteOutcome, error) {
 	obj := base.DeepCopy()
@@ -289,11 +289,8 @@ func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1alpha1.
 		obj.Status.PlannedFailover = final.DeepCopy()
 		changed = true
 	}
-	if c := apimeta.FindStatusCondition(obj.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil {
-		if id, _, ok := parsePlannedHoldConditionMessage(c.Message); ok && id == runID {
-			apimeta.RemoveStatusCondition(&obj.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
-			changed = true
-		}
+	if ClearPlannedHold(&obj.Status, runID, base.Generation, s.clk.Now()) {
+		changed = true
 	}
 	if !changed {
 		return WriteCommitted, nil
@@ -304,10 +301,8 @@ func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1alpha1.
 		return outcome, err
 	}
 	settled, serr := s.settle(ctx, client.ObjectKeyFromObject(base), base.ResourceVersion, func(cur *v1alpha1.MysqlFailoverGroup) bool {
-		if c := apimeta.FindStatusCondition(cur.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil {
-			if id, _, ok := parsePlannedHoldConditionMessage(c.Message); ok && id == runID {
-				return false
-			}
+		if statusHoldNames(&cur.Status, runID) {
+			return false
 		}
 		if final == nil {
 			return true
@@ -327,30 +322,21 @@ func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1alpha1.
 // DeleteHoldAck removes the acknowledgement annotation if it names runID.
 func (s *apiPlannedFailoverStore) DeleteHoldAck(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) (WriteOutcome, error) {
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		v, ok := a[AckPlannedFailoverHoldAnnotation]
+		v, ok := a[AcknowledgePlannedFailoverHoldAnnotation]
 		if !ok || strings.TrimSpace(v) != runID {
 			return false
 		}
-		delete(a, AckPlannedFailoverHoldAnnotation)
+		delete(a, AcknowledgePlannedFailoverHoldAnnotation)
 		return true
 	})
-}
-
-// formatDeadlineStart renders a durable deadline start: "<runId>/<RFC3339>".
-func formatDeadlineStart(runID string, start time.Time) string {
-	return runID + "/" + start.UTC().Truncate(time.Second).Format(time.RFC3339)
 }
 
 // parseDeadlineStart returns the start recorded for runID; false when the
 // value is absent, malformed, or names another run.
 func parseDeadlineStart(v, runID string) (time.Time, bool) {
-	id, ts, ok := strings.Cut(v, "/")
-	if !ok || id == "" || id != runID {
+	id, t, ok := ParseDeadlineStart(v)
+	if !ok || id != runID {
 		return time.Time{}, false
 	}
-	t, err := time.Parse(time.RFC3339, ts)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t.UTC(), true
+	return t, true
 }

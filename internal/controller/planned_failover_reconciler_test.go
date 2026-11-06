@@ -82,7 +82,7 @@ func TestReconcilePlannedFailover_NoopTerminalStatusWithoutAnnotation(t *testing
 	fg := plannedFailoverFG("")
 	now := metav1.Now()
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
-		Target: "pdx", StartTime: now, Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: now}}
+		TargetSite: "pdx", StartTime: now, Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: now}}
 	r, _ := pfReconciler(t, fg)
 	if !plannedFailoverPassDue(fg) == false {
 		t.Fatal("a terminal block with no annotation needs no pass")
@@ -105,9 +105,9 @@ func TestReconcilePlannedFailover_AcceptStampsAdmitting(t *testing.T) {
 	}
 	got := fetchFG(t, r, fgNN(fg))
 	pf := got.Status.PlannedFailover
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Target != "pdx" ||
+	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.TargetSite != "pdx" ||
 		pf.Settings.MaxLagWait.Duration != 30*time.Second ||
-		pf.Settings.DrainTimeout.Duration != defaultPlannedFailoverDrainTimeout || pf.Admission == nil || pf.Admission.Deadline == nil {
+		pf.Settings.DrainTimeout.Duration != defaultPlannedFailoverDrainTimeout || pf.Admission == nil || pf.Admission.DeadlineTime == nil {
 		t.Fatalf("admitting record = %+v", pf)
 	}
 	if _, ok := got.Annotations[PlannedFailoverAnnotation]; ok {
@@ -250,17 +250,20 @@ func TestEffectiveDrainTimeout(t *testing.T) {
 
 func TestEffectiveOnCooldown(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{}
-	if got := effectiveOnCooldown(fg); got != PlannedFailoverOnCooldownReject {
-		t.Errorf("default: got %q, want reject", got)
+	if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownReject {
+		t.Errorf("default: got %q, want Reject", got)
 	}
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: "defer"}
-	if got := effectiveOnCooldown(fg); got != PlannedFailoverOnCooldownDefer {
-		t.Errorf("defer: got %q, want defer", got)
+	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: v1alpha1.PlannedFailoverCooldownDefer}
+	if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownDefer {
+		t.Errorf("Defer: got %q, want Defer", got)
 	}
-	// Malformed values fall back to reject (defence against typos).
-	fg.Spec.PlannedFailover.OnCooldown = "skip"
-	if got := effectiveOnCooldown(fg); got != PlannedFailoverOnCooldownReject {
-		t.Errorf("typo: got %q, want reject fallback", got)
+	// Malformed values, including the v1alpha1 lower-case spelling, fall
+	// back to Reject (defence against typos).
+	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"skip", "defer"} {
+		fg.Spec.PlannedFailover.OnCooldown = v
+		if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownReject {
+			t.Errorf("%q: got %q, want Reject fallback", v, got)
+		}
 	}
 }
 
@@ -284,9 +287,9 @@ func TestPlannedSettings(t *testing.T) {
 	if s := plannedSettings(nil); s.DrainTimeout.Duration != defaultPlannedFailoverDrainTimeout || s.MaxLagWait.Duration != defaultPlannedFailoverMaxLagWait || s.Dragonfly != nil {
 		t.Errorf("nil block: %+v", s)
 	}
-	fg := plannedFailoverFGWithDragonfly("fail")
+	fg := plannedFailoverFGWithDragonfly("Fail")
 	s := plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: "pdx", MaxLagWait: 7 * time.Second})
-	if s.MaxLagWait.Duration != 7*time.Second || s.Dragonfly == nil || s.Dragonfly.OnSyncTimeout != "fail" ||
+	if s.MaxLagWait.Duration != 7*time.Second || s.Dragonfly == nil || s.Dragonfly.OnSyncTimeout != v1alpha1.DragonflySyncTimeoutFail ||
 		s.Dragonfly.MaxSyncWait.Duration != 100*time.Millisecond {
 		t.Errorf("snapshot: %+v %+v", s, s.Dragonfly)
 	}

@@ -372,7 +372,7 @@ func NewerFailoverRecord(a, b FailoverRecord) FailoverRecord {
 var plannedFailoverInternalAnnotations = []string{
 	PlannedFailoverStatusFenceAnnotation,
 	PlannedFailoverTerminalAnnotation,
-	AckPlannedFailoverHoldAnnotation,
+	AcknowledgePlannedFailoverHoldAnnotation,
 	PlannedFailoverStallSinceAnnotation,
 	PlannedFailoverManagerAbsentSinceAnnotation,
 }

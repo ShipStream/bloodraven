@@ -403,7 +403,7 @@ func pfOwnsSites(obj *v1alpha1.MysqlFailoverGroup) bool {
 	if pf == nil || pf.RunID == "" || pf.Result != nil {
 		return false
 	}
-	if strings.HasPrefix(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation], pf.RunID+"/") {
+	if m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]); ok && m.RunID == pf.RunID {
 		return false
 	}
 	switch pf.Phase {
@@ -1213,8 +1213,8 @@ func TestPF_I03_InFlightPromotionAtGrantWaits(t *testing.T) {
 	h.src.respawn(true) // the old primary is back, read-only
 	h.src.setRO(true, true)
 	pf := h.runUntil(60, terminal)
-	if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && pf.Source != "dc2" {
-		t.Fatalf("the run named %q as its source, want the new primary dc2", pf.Source)
+	if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && pf.SourceSite != "dc2" {
+		t.Fatalf("the run named %q as its source, want the new primary dc2", pf.SourceSite)
 	}
 }
 
@@ -1307,8 +1307,8 @@ func TestPF_I11_UnobservedPromotionWaits(t *testing.T) {
 	h.clk.Advance(2 * time.Second) // past the emergency promotion's cooldown
 	pf := h.runUntil(60, terminal)
 	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
-	if pf.Source != "dc2" {
-		t.Fatalf("source %q, want dc2 (the observed new primary)", pf.Source)
+	if pf.SourceSite != "dc2" {
+		t.Fatalf("source %q, want dc2 (the observed new primary)", pf.SourceSite)
 	}
 }
 
@@ -1684,7 +1684,7 @@ func TestPF_StatusStallWritesTerminalMarker(t *testing.T) {
 		h.pass()
 	}
 	marker := h.store.Object().GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]
-	if !strings.HasPrefix(marker, pf.RunID+"/") {
+	if m, ok := controller.ParseTerminalMarker(marker); !ok || m.RunID != pf.RunID {
 		t.Fatalf("no terminal marker for %s after the stall deadline: %q", pf.RunID, marker)
 	}
 	if _, _, ok := h.held(); ok {

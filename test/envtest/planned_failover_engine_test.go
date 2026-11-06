@@ -358,7 +358,7 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		}
 		pf := get(tc.nn).Status.PlannedFailover
 		if pf.Result == nil || pf.Result.Outcome != tc.outcome || pf.Result.Reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused ||
-			pf.RunID == "" || pf.Revision != 1 || pf.Target != "dc2" {
+			pf.RunID == "" || pf.Revision != 1 || pf.TargetSite != "unknown" {
 			t.Fatalf("%s: block = %+v", tc.nn.Name, pf)
 		}
 	}
@@ -367,12 +367,12 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	}
 	found := false
 	for len(r.Recorder.(*record.FakeRecorder).Events) > 0 {
-		if ev := <-r.Recorder.(*record.FakeRecorder).Events; strings.Contains(ev, "PlannedFailoverLegacyRefused") {
+		if ev := <-r.Recorder.(*record.FakeRecorder).Events; strings.Contains(ev, "PlannedFailoverLegacyRunRefused") {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("no PlannedFailoverLegacyRefused event")
+		t.Error("no PlannedFailoverLegacyRunRefused event")
 	}
 
 	// A legacy terminal block is history: a new request replaces it.
@@ -408,12 +408,12 @@ func TestEnvtest_PlannedFailoverStatusFence_NoOpTrapAndLateCommit(t *testing.T) 
 		if fenced.Annotations == nil {
 			fenced.Annotations = map[string]string{}
 		}
-		fenced.Annotations[key] = "run-1/SourceLeftFenced/StatusStalled"
+		fenced.Annotations[key] = `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`
 		if err := k8sClient.Patch(ctx, fenced, client.MergeFromWithOptions(cur.DeepCopy(), client.MergeFromWithOptimisticLock{})); err != nil {
 			t.Fatalf("%s: %v", key, err)
 		}
 		late := cur.DeepCopy()
-		late.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 9, Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "dc2"}
+		late.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 9, Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "dc2"}
 		if err := k8sClient.Status().Update(ctx, late); !apierrors.IsConflict(err) {
 			t.Fatalf("%s: late commit after the fence = %v, want a conflict", key, err)
 		}
@@ -445,22 +445,26 @@ func TestEnvtest_PlannedFailover_HoldSurvivesRunnerWriteAndAck(t *testing.T) {
 	if err := runner.WriteStatusForTest(ctx, nn, snap); err != nil {
 		t.Fatal(err)
 	}
-	if c := apimeta.FindStatusCondition(pfEnvGet(t, nn).Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c == nil {
-		t.Fatal("a runner status write dropped the hold condition")
+	if got := pfEnvGet(t, nn); apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld) == nil ||
+		got.Status.PlannedFailoverHold == nil || got.Status.PlannedFailoverHold.RunID != pf.RunID {
+		t.Fatalf("a runner status write dropped the hold: hold %+v", got.Status.PlannedFailoverHold)
 	}
 
 	fg = pfEnvGet(t, nn)
-	fg.Annotations = map[string]string{controller.AckPlannedFailoverHoldAnnotation: pf.RunID}
+	fg.Annotations = map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: pf.RunID}
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	pfEnvStepUntil(t, r, nn, 5, func(fg *v1alpha1.MysqlFailoverGroup) bool {
-		_, ack := fg.Annotations[controller.AckPlannedFailoverHoldAnnotation]
+		_, ack := fg.Annotations[controller.AcknowledgePlannedFailoverHoldAnnotation]
 		return !ack
 	})
 	fg = pfEnvGet(t, nn)
-	if apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld) != nil {
-		t.Error("hold condition kept after the acknowledgement")
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); fg.Status.PlannedFailoverHold != nil ||
+		c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged ||
+		c.ObservedGeneration != fg.Generation {
+		t.Errorf("after the acknowledgement: hold %+v, condition %+v; want no hold and False/%s at the current generation",
+			fg.Status.PlannedFailoverHold, c, v1alpha1.ReasonPlannedFailoverHoldAcknowledged)
 	}
 	if topo.PlannedClaimHeld(nn) {
 		t.Error("slot still held after the acknowledgement")
@@ -476,11 +480,11 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 	now := metav1.Now()
 	f := "uuid-dc1:1-5"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		Target: "dc2", Source: "dc1", StartTime: now,
+		TargetSite: "dc2", SourceSite: "dc1", StartTime: now,
 		Settings: v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Hour}, DrainTimeout: metav1.Duration{Duration: time.Second}},
-		Fence: &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntendedAt: now, SourceServerUUID: "uuid-dc1",
-			AppliedAt: &now, GtidSet: &f},
-		Drain: &v1alpha1.PlannedFailoverDrainRecord{StartTime: now, CompletedAt: &now}, LagWait: &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: now}}
+		Fence: &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: now, SourceServerUUID: "uuid-dc1",
+			ApplyTime: &now, GtidSet: &f},
+		Drain: &v1alpha1.PlannedFailoverDrainRecord{StartTime: now, CompletionTime: &now}, LagWait: &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: now}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}

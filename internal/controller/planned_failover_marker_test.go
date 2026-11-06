@@ -11,15 +11,16 @@ import (
 
 // TestHoldAckLifecycle: a ManualRecoveryRequired run sets the hold (status
 // condition + hold-mode slot); new requests are refused; an
-// acknowledgement for another run is ignored; the matching one clears the
-// condition, then releases the slot, then deletes the acknowledgement.
+// acknowledgement for another run is ignored; the matching one clears
+// status.plannedFailoverHold (the condition turns False), then releases the
+// slot, then deletes the acknowledgement.
 func TestHoldAckLifecycle(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
 	h.topo.promote = func(PlannedRunRef) (PromoteOutcome, error) {
 		return PromoteOutcome{Kind: PromoteInconsistent, Reason: v1alpha1.PlannedFailoverReasonForeignWritable, MayHaveWritten: true}, nil
 	}
 	h.step()
-	if hold := plannedHoldFrom(h.fg()); hold == nil || hold.RunID != "run-1" {
+	if hold := PlannedHoldFrom(h.fg()); hold == nil || hold.RunID != "run-1" {
 		t.Fatalf("hold = %+v", hold)
 	}
 	if held, mode := h.topo.held(); held != "run-1" || !mode {
@@ -42,18 +43,20 @@ func TestHoldAckLifecycle(t *testing.T) {
 	}
 
 	// An acknowledgement naming another run is ignored.
-	h.setAnnotation(AckPlannedFailoverHoldAnnotation, "run-0")
+	h.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-0")
 	h.step()
-	if plannedHoldFrom(h.fg()) == nil || h.sink.eventCount("PlannedFailoverHoldAckIgnored") != 1 {
+	if PlannedHoldFrom(h.fg()) == nil || h.sink.eventCount("PlannedFailoverHoldAcknowledgementIgnored") != 1 {
 		t.Fatalf("a foreign acknowledgement cleared the hold (events %v)", h.sink.events)
 	}
 
 	// The matching acknowledgement: condition, then slot, then the ack.
-	h.setAnnotation(AckPlannedFailoverHoldAnnotation, "run-1")
+	h.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-1")
 	h.step()
 	fg = h.fg()
-	if apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld) != nil {
-		t.Fatal("condition not removed by the first acknowledged pass")
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); fg.Status.PlannedFailoverHold != nil ||
+		c == nil || c.Status != "False" || c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged {
+		t.Fatalf("the first acknowledged pass left hold %+v, condition %+v; want no hold and False/%s",
+			fg.Status.PlannedFailoverHold, c, v1alpha1.ReasonPlannedFailoverHoldAcknowledged)
 	}
 	if held, _ := h.topo.held(); held != "run-1" {
 		t.Fatal("slot released before the acknowledgement order reached it")
@@ -63,13 +66,13 @@ func TestHoldAckLifecycle(t *testing.T) {
 	if held, _ := h.topo.held(); held != "" {
 		t.Errorf("slot still held by %q", held)
 	}
-	if _, ok := fg.Annotations[AckPlannedFailoverHoldAnnotation]; ok {
+	if _, ok := fg.Annotations[AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Error("acknowledgement not deleted")
 	}
 	if got := h.topo.releasesCopy(); !slices.Equal(got, []string{"run-1:toHold", "run-1:ack"}) {
 		t.Errorf("releases = %v", got)
 	}
-	if h.sink.eventCount("PlannedFailoverHoldCleared") != 1 {
+	if h.sink.eventCount("PlannedFailoverHoldAcknowledged") != 1 {
 		t.Errorf("events = %v", h.sink.events)
 	}
 }
@@ -81,9 +84,9 @@ func TestHoldAckLifecycle(t *testing.T) {
 // until the marker is gone, and only then is the acknowledgement deleted.
 func TestHoldAck_FailedMarkerDeleteThenRestart(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
-	h.setAnnotation(PlannedFailoverTerminalAnnotation, "run-1/ManualRecoveryRequired/ForeignWritable")
+	h.setAnnotation(PlannedFailoverTerminalAnnotation, `{"schemaVersion":1,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"ForeignWritable"}`)
 	h.topo.setHeld("run-1", true)
-	h.setAnnotation(AckPlannedFailoverHoldAnnotation, "run-1")
+	h.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-1")
 	h.faults.denyMetaKey = PlannedFailoverTerminalAnnotation
 
 	h.step() // step 2: the terminal record lands (no condition to remove)
@@ -108,7 +111,7 @@ func TestHoldAck_FailedMarkerDeleteThenRestart(t *testing.T) {
 	if held, mode := h.topo.held(); held != "run-1" || !mode {
 		t.Fatalf("slot = %q hold=%v; the hold must stand while the marker does", held, mode)
 	}
-	if _, ok := h.fg().Annotations[AckPlannedFailoverHoldAnnotation]; !ok {
+	if _, ok := h.fg().Annotations[AcknowledgePlannedFailoverHoldAnnotation]; !ok {
 		t.Fatal("acknowledgement deleted before the marker")
 	}
 	if plannedFailoverOwnsSites(h.fg()) || plannedFailoverActive(h.fg()) {
@@ -122,7 +125,7 @@ func TestHoldAck_FailedMarkerDeleteThenRestart(t *testing.T) {
 	if _, ok := fg.Annotations[PlannedFailoverTerminalAnnotation]; ok {
 		t.Error("marker kept")
 	}
-	if _, ok := fg.Annotations[AckPlannedFailoverHoldAnnotation]; ok {
+	if _, ok := fg.Annotations[AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Error("acknowledgement kept")
 	}
 	if held, _ := h.topo.held(); held != "" {

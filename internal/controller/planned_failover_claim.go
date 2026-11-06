@@ -438,18 +438,18 @@ func (tm *TopologyManager) requireRunClaim(leader context.Context, ref PlannedRu
 // or ok=false when pf cannot be hydrated (no runId, no source, or a
 // phase that owns nothing).
 func hydratedRunClaim(pf *v1alpha1.PlannedFailoverStatus, now time.Time) (plannedClaim, bool) {
-	if pf == nil || pf.RunID == "" || pf.Source == "" || pf.Target == "" {
+	if pf == nil || pf.RunID == "" || pf.SourceSite == "" || pf.TargetSite == "" {
 		return plannedClaim{}, false
 	}
 	if !plannedFailoverOwnsSites(&v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{PlannedFailover: pf}}) {
 		return plannedClaim{}, false
 	}
 	c := plannedClaim{
-		mode: claimModeRun, runID: pf.RunID, source: pf.Source, target: pf.Target,
+		mode: claimModeRun, runID: pf.RunID, source: pf.SourceSite, target: pf.TargetSite,
 		grantedAt: now, baseline: failoverRecordRefFromAPI(pf.ClaimBaseline), needsReprove: true,
 	}
-	if pf.ClaimedAt != nil {
-		c.grantedAt = pf.ClaimedAt.Time
+	if pf.ClaimTime != nil {
+		c.grantedAt = pf.ClaimTime.Time
 	}
 	return c, true
 }
@@ -643,8 +643,8 @@ func plannedRunStartTime(pf *v1alpha1.PlannedFailoverStatus) time.Time {
 	if !pf.StartTime.IsZero() {
 		return pf.StartTime.Time
 	}
-	if pf.ClaimedAt != nil {
-		return pf.ClaimedAt.Time
+	if pf.ClaimTime != nil {
+		return pf.ClaimTime.Time
 	}
 	return time.Time{}
 }
@@ -657,7 +657,7 @@ func plannedRunStartTime(pf *v1alpha1.PlannedFailoverStatus) time.Time {
 // already moved.
 func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.PlannedFailoverStatus, ok bool) {
 	pf, marked := plannedFailoverRun(fg)
-	if pf == nil || pf.RunID == "" || pf.Source == "" || pf.Fence == nil {
+	if pf == nil || pf.RunID == "" || pf.SourceSite == "" || pf.Fence == nil {
 		return nil, false
 	}
 	var reason v1alpha1.PlannedFailoverReason
@@ -668,7 +668,7 @@ func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.
 		}
 		reason = pf.Result.Reason
 	case marked:
-		m, _ := parseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+		m, _ := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
 		if m.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
 			return nil, false
 		}
@@ -705,8 +705,8 @@ func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager,
 	defer tm.mu.Unlock()
 	confirmed := pf.Phase == v1alpha1.PlannedFailoverPhasePublishing ||
 		(pf.Result != nil && pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded)
-	if confirmed && pf.Promotion != nil && pf.Promotion.ConfirmedAt != nil && pf.Fence != nil && pf.Fence.GtidSet != nil {
-		tm.applyPlannedPromotionLocked(pf.Promotion.ConfirmedAt.Time, pf.Target, *pf.Fence.GtidSet)
+	if confirmed && pf.Promotion != nil && pf.Promotion.ConfirmationTime != nil && pf.Fence != nil && pf.Fence.GtidSet != nil {
+		tm.applyPlannedPromotionLocked(pf.Promotion.ConfirmationTime.Time, pf.TargetSite, *pf.Fence.GtidSet)
 	}
 	src, ok := plannedFenceAttributableEnd(view)
 	if !ok {
@@ -716,8 +716,8 @@ func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager,
 	if tm.lastFailover.UTC().Truncate(time.Second).After(started) {
 		return
 	}
-	tm.lastActiveSite, tm.lastActiveSiteNamed = src.Source, true
-	tm.logger.Info("planned failover: named fenced source for re-assert", "fg", nn.String(), "runId", src.RunID, "site", src.Source)
+	tm.lastActiveSite, tm.lastActiveSiteNamed = src.SourceSite, true
+	tm.logger.Info("planned failover: named fenced source for re-assert", "fg", nn.String(), "runId", src.RunID, "site", src.SourceSite)
 }
 
 // plannedFailoverView is the start's uncached read of the group, for the

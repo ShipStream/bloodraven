@@ -103,7 +103,7 @@ func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 			PromotionGtidExecuted: "uuid1:1-10",
 			UpdatePhase:           "UpdatingReplicas",
 			Conditions:            []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "TopologyPolled"}},
-			PlannedFailover:       &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, Target: "pdx"},
+			PlannedFailover:       &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, TargetSite: "pdx"},
 			RestoreReclones:       &v1alpha1.RestoreReclonesStatus{Pending: []string{"pdx"}},
 			Dragonfly:             &v1alpha1.DragonflyStatus{},
 		},

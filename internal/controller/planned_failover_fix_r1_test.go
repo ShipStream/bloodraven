@@ -37,11 +37,12 @@ func TestReconcile_StandingHoldStillReconcilesBackups(t *testing.T) {
 	fg.Spec.Backup = fgWithBackup().Spec.Backup
 	now := metav1.Now()
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-1", Revision: 9, Phase: v1alpha1.PlannedFailoverPhaseFailed, Target: "pdx", Source: "iad", StartTime: now,
+		RunID: "run-1", Revision: 9, Phase: v1alpha1.PlannedFailoverPhaseFailed, TargetSite: "pdx", SourceSite: "iad", StartTime: now,
 		Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
 			Reason: v1alpha1.PlannedFailoverReasonForeignWritable, CompletionTime: now},
 	}
-	setPlannedHoldCondition(&fg.Status, "run-1", v1alpha1.PlannedFailoverReasonForeignWritable, []string{"pdx", "iad"}, now.Time)
+	setPlannedHold(&fg.Status, v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+		SourceSite: "iad", TargetSite: "pdx", AmbiguousSites: []string{"pdx", "iad"}, HoldTime: now}, fg.Generation)
 
 	r, c := newReconciler(fg)
 	r.Recorder = record.NewFakeRecorder(64)
@@ -142,7 +143,7 @@ func TestFixR1_ConfirmedStallMarksOnlyDurableRecord(t *testing.T) {
 	h.setAnnotation(LastFailoverTargetAnnotation, "pdx")
 	h.setAnnotation(PromotionGtidExecutedAnnotation, "uuid-iad:1-10")
 	h.step()
-	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != "run-1/Succeeded/" {
+	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded"}` {
 		t.Fatalf("marker = %q, want run-1/Succeeded/ once the record is durable", m)
 	}
 	// A new process recovers the run from the marker and applies its record.
@@ -151,7 +152,7 @@ func TestFixR1_ConfirmedStallMarksOnlyDurableRecord(t *testing.T) {
 	h.stepUntil(5, func(fg *v1alpha1.MysqlFailoverGroup) bool { return plannedFailoverTerminal(fg.Status.PlannedFailover) })
 	fg := h.fg()
 	pf := fg.Status.PlannedFailover
-	if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded || pf.Promotion == nil || pf.Promotion.ConfirmedAt == nil {
+	if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded || pf.Promotion == nil || pf.Promotion.ConfirmationTime == nil {
 		t.Fatalf("terminal block = %+v", pf)
 	}
 	if fg.Status.LastFailoverTarget != "pdx" || fg.Status.PromotionGtidExecuted != "uuid-iad:1-10" || fg.Status.LastFailover == nil {
@@ -270,7 +271,7 @@ func TestFixR1_FencingStallWithNoSETRollsBack(t *testing.T) {
 		h.step()
 		h.clk.Advance(time.Second)
 	}
-	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != "run-1/RolledBack/StatusStalled" {
+	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"RolledBack","reason":"StatusStalled"}` {
 		t.Fatalf("marker = %q, want run-1/RolledBack/StatusStalled (nothing was sent)", m)
 	}
 }
@@ -416,7 +417,7 @@ func pfDFTakeoverFixture(policy string, intendedAt time.Time) *v1alpha1.MysqlFai
 	pf.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	off := int64(100)
 	pf.Dragonfly.SourceOffsetState, pf.Dragonfly.SourceOffset = v1alpha1.DragonflyOffsetCaptured, &off
-	pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntendedAt: metav1.NewTime(intendedAt)}
+	pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: metav1.NewTime(intendedAt)}
 	return fg
 }
 
@@ -429,8 +430,8 @@ func TestFixR1_DragonflyTakeoverDeadline(t *testing.T) {
 		policy string
 		want   v1alpha1.PlannedFailoverPhase
 	}{
-		{"fail", v1alpha1.PlannedFailoverPhaseRollingBack},
-		{"proceed", v1alpha1.PlannedFailoverPhasePromoting},
+		{"Fail", v1alpha1.PlannedFailoverPhaseRollingBack},
+		{"Proceed", v1alpha1.PlannedFailoverPhasePromoting},
 	} {
 		t.Run(tc.policy, func(t *testing.T) {
 			probe := pfDFTakeoverFixture(tc.policy, time.Now())
@@ -456,9 +457,9 @@ func TestFixR1_DragonflyTakeoverDeadline(t *testing.T) {
 	// result write lost) is finished, never failed: the fail policy must not
 	// roll MySQL back beside a Dragonfly target holding the master role.
 	t.Run("earlier takeover finished", func(t *testing.T) {
-		probe := pfDFTakeoverFixture("fail", time.Now())
+		probe := pfDFTakeoverFixture("Fail", time.Now())
 		late := time.Now().Add(-plannedDragonflyTakeoverDeadline(probe.Status.PlannedFailover) - 5*time.Second)
-		fg := pfDFTakeoverFixture("fail", late)
+		fg := pfDFTakeoverFixture("Fail", late)
 		r, _, _ := pfDFReconciler(t, fg, makeDragonflyPod(fg.Name, "iad", "master", true), makeDragonflyPod(fg.Name, "pdx", "replica", true))
 		target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}}
 		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target,
@@ -473,7 +474,7 @@ func TestFixR1_DragonflyTakeoverDeadline(t *testing.T) {
 		}
 	})
 	e := &PlannedFailoverEngine{runs: map[string]*plannedRunMemo{}}
-	pf := pfDFTakeoverFixture("proceed", time.Now()).Status.PlannedFailover
+	pf := pfDFTakeoverFixture("Proceed", time.Now()).Status.PlannedFailover
 	if got, want := e.passBound(pf), defaultDragonflyGateWait+plannedDragonflyMaxSyncWait(pf)+plannedDragonflyTakeoverSlack+plannedPassOrdinary; got != want {
 		t.Fatalf("PromotingDragonfly pass bound = %s, want %s", got, want)
 	}
@@ -483,7 +484,7 @@ func TestFixR1_DragonflyTakeoverDeadline(t *testing.T) {
 // re-proves before any role-changing Dragonfly step, and a lost claim sends
 // nothing.
 func TestFixR1_DragonflyTakeoverRequiresReprovenClaim(t *testing.T) {
-	fg := pfDFTakeoverFixture("proceed", time.Now())
+	fg := pfDFTakeoverFixture("Proceed", time.Now())
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
 	r, _, topo := pfDFReconciler(t, fg, sourcePod, targetPod)
@@ -502,7 +503,7 @@ func TestFixR1_DragonflyTakeoverRequiresReprovenClaim(t *testing.T) {
 		t.Fatalf("after the re-proof: takeovers=%d, want 1", target.takeovers)
 	}
 
-	fg2 := pfDFTakeoverFixture("proceed", time.Now())
+	fg2 := pfDFTakeoverFixture("Proceed", time.Now())
 	r2, _, topo2 := pfDFReconciler(t, fg2, makeDragonflyPod(fg2.Name, "iad", "master", true), makeDragonflyPod(fg2.Name, "pdx", "replica", true))
 	topo2.probeUnguarded = true
 	// The run's claim is gone (here: converted to a hold) although its
@@ -552,7 +553,8 @@ func TestFixR1_RolloutPromotionRespectsClaimAndHold(t *testing.T) {
 		fresh := getFGByKey(t, c, mgr.fgKey)
 		runner := &TopologyManagerRunner{}
 		if viaCondition {
-			setPlannedHoldCondition(&fresh.Status, "run-1", v1alpha1.PlannedFailoverReasonForeignWritable, []string{"dc2"}, time.Now())
+			setPlannedHold(&fresh.Status, v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+				AmbiguousSites: []string{"dc2"}, HoldTime: metav1.Now()}, fresh.Generation)
 			if err := c.Status().Update(context.Background(), fresh); err != nil {
 				t.Fatal(err)
 			}
@@ -649,7 +651,7 @@ func TestFixR1_RunSiteRemovedFacade(t *testing.T) {
 	f.ref.Target = "dc9"
 	f.hold(true)
 	pf := opsRun(v1alpha1.PlannedFailoverPhaseWaitingForLag)
-	pf.Target = "dc9"
+	pf.TargetSite = "dc9"
 	if _, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(pf)); !errors.Is(err, errSiteNotFound) {
 		t.Fatalf("Reprove with the target gone = %v, want errSiteNotFound", err)
 	}
@@ -658,7 +660,7 @@ func TestFixR1_RunSiteRemovedFacade(t *testing.T) {
 	g.hold(false)
 	g.tgt.repl = nil
 	pf = opsRun(v1alpha1.PlannedFailoverPhasePromoting)
-	pf.Source = "dc9"
+	pf.SourceSite = "dc9"
 	if _, err := g.topo.Promote(context.Background(), g.ref, pf); !errors.Is(err, errSiteNotFound) {
 		t.Fatalf("Promote with the source gone = %v, want errSiteNotFound", err)
 	}
@@ -786,7 +788,7 @@ func TestFixR1_HydrationUsesManagerClock(t *testing.T) {
 	f := newOpsFixture(t, "")
 	f.fenced()
 	pf := opsRun(v1alpha1.PlannedFailoverPhaseWaitingForLag)
-	pf.ClaimedAt = nil
+	pf.ClaimTime = nil
 	d, err := f.topo.EnsureClaim(context.Background(), f.ref, opsGroup(pf))
 	if err != nil || d.Kind != ClaimGranted {
 		t.Fatalf("EnsureClaim = %+v, %v", d, err)
@@ -825,10 +827,10 @@ func TestFixR1_OwnRecordUsesSelectedWatermark(t *testing.T) {
 	f.fenced()
 	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
 	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
-	t0 := pf.Promotion.IntendedAt.Add(-time.Hour).UTC().Truncate(time.Second)
+	t0 := pf.Promotion.IntentTime.Add(-time.Hour).UTC().Truncate(time.Second)
 	t0m := metav1.NewTime(t0)
-	pf.ClaimBaseline = &v1alpha1.PlannedFailoverRecordRef{LastFailover: &t0m, LastFailoverTarget: "dc1"}
-	fg := opsReproveGroup(f, pf, pf.Promotion.IntendedAt.Add(2*time.Second), "dc2")
+	pf.ClaimBaseline = &v1alpha1.FailoverRecord{Time: &t0m, Target: "dc1"}
+	fg := opsReproveGroup(f, pf, pf.Promotion.IntentTime.Add(2*time.Second), "dc2")
 	fg.Status.PromotionGtidExecuted = opsF
 	fg.Annotations = map[string]string{
 		LastFailoverAnnotation:          failoverStampFormat(t0),

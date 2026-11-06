@@ -50,7 +50,7 @@ func TestPF_I27_WaitingRequestNotDragonflyOwner(t *testing.T) {
 	mgr.SetPlannedOwner(slot.Held)
 	fg := fgWithDragonflyEnabledAndActive()
 	for _, phase := range []v1alpha1.PlannedFailoverPhase{v1alpha1.PlannedFailoverPhaseAdmitting, v1alpha1.PlannedFailoverPhaseDeferred} {
-		fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, Target: "dc2"}
+		fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, TargetSite: "dc2"}
 		if plannedFailoverOwnsDragonfly(fg, slot.Held()) {
 			t.Errorf("a %s request owns the group's Dragonfly", phase)
 		}
@@ -108,7 +108,7 @@ func TestPF_I28_DragonflyUpgradeSupersededByMySQLAuthority(t *testing.T) {
 // Row 6, Dragonfly part: a run that fails the Dragonfly sync under the
 // `fail` policy rolls back with nothing written to the MySQL target.
 func TestPF_I06_DragonflyFailRollsBack(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("fail")
+	fg := plannedFailoverFGWithDragonfly("Fail")
 	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetUnavailable
 	r, _, _ := pfDFReconciler(t, fg)
 	pfDFPass(t, r, fgNN(fg))

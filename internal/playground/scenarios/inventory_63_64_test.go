@@ -91,7 +91,7 @@ func TestS63HoldViolation(t *testing.T) {
 		mfg := &v1alpha1.MysqlFailoverGroup{}
 		mfg.Status.ActiveSite = ""
 		mfg.Status.LastFailoverTarget = "iad"
-		mfg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, Target: "pdx"}
+		mfg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, TargetSite: "pdx"}
 		return mfg
 	}
 	if err := s63HoldViolation(held(), "r1", "pdx", "iad"); err != nil {
@@ -222,13 +222,13 @@ func TestS64ClassifyOutcome(t *testing.T) {
 	}{
 		{"still deferred", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDeferred}, false, false},
 		{"admitting", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseAdmitting}, false, false},
-		{"claimed new primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining, Source: "pdx"}, false, false},
-		{"claimed lost primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFencing, Source: "iad"}, false, true},
+		{"claimed new primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining, SourceSite: "pdx"}, false, false},
+		{"claimed lost primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFencing, SourceSite: "iad"}, false, true},
 		{"already active", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFailed,
 			Result: result(v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAlreadyActive)}, true, false},
-		{"succeeded from new primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Source: "pdx",
+		{"succeeded from new primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, SourceSite: "pdx",
 			Result: result(v1alpha1.PlannedFailoverOutcomeSucceeded, "")}, true, false},
-		{"succeeded from lost primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Source: "iad",
+		{"succeeded from lost primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, SourceSite: "iad",
 			Result: result(v1alpha1.PlannedFailoverOutcomeSucceeded, "")}, false, true},
 		{"admission timeout", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFailed,
 			Result: result(v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAdmissionTimeout)}, false, true},

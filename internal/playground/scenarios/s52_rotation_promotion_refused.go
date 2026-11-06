@@ -194,7 +194,7 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
 					msg := fmt.Sprintf("phase=%q target=%q reason=%q active=%q",
-						pf.Phase, pf.Target, plannedReason(pf), m.Status.ActiveSite)
+						pf.Phase, pf.TargetSite, plannedReason(pf), m.Status.ActiveSite)
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
 						return false, msg, fmt.Errorf("planned failover onto rotating %s unexpectedly Succeeded", state.replicaSite)
 					}
@@ -203,8 +203,8 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 							return false, msg, fmt.Errorf("planned failover Failed with reason %q, want %s",
 								plannedReason(pf), s52PlannedFailoverRejectReason)
 						}
-						if pf.Target != state.replicaSite {
-							return false, msg, fmt.Errorf("plannedFailover target=%q, want %q", pf.Target, state.replicaSite)
+						if pf.TargetSite != state.replicaSite {
+							return false, msg, fmt.Errorf("plannedFailover target=%q, want %q", pf.TargetSite, state.replicaSite)
 						}
 						return true, msg, nil
 					}

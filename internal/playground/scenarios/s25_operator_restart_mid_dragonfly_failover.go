@@ -100,7 +100,7 @@ func stallDragonflyTargetForOperatorRestart() runner.Step {
 		Name:  "hold target Dragonfly offline to create a deterministic sync window",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			target := ctxFetch(env, "switchoverTarget")
-			if err := env.Chaos.PatchDragonflySyncBudget(ctx, "45s", "proceed"); err != nil {
+			if err := env.Chaos.PatchDragonflySyncBudget(ctx, "45s", string(v1alpha1.DragonflySyncTimeoutProceed)); err != nil {
 				return err
 			}
 			if err := env.Chaos.ScaleDragonflyToZero(ctx, target); err != nil {
@@ -255,15 +255,15 @@ func observePlannedFailoverConverges() runner.Step {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
 							pf.StartTime, env.StartTime), nil
 					}
-					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, plannedReason(pf))
+					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.TargetSite, plannedReason(pf))
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
 						return false, msg, fmt.Errorf("planned failover entered Failed after operator restart: %s (%s)",
 							plannedReason(pf), pf.Message)
 					}
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
-						if pf.Target != target {
+						if pf.TargetSite != target {
 							return false, msg, fmt.Errorf("plannedFailover succeeded but target=%q want %q "+
-								"(operator silently swapped targets on resume)", pf.Target, target)
+								"(operator silently swapped targets on resume)", pf.TargetSite, target)
 						}
 						return true, msg, nil
 					}
