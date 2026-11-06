@@ -17,10 +17,13 @@ import (
 // MysqlFailoverGroup.status.pitr.
 type ArchiverStatus struct {
 	Enabled bool `json:"enabled"`
-	// StoreReady is false while a configured archiver's store cannot be
-	// built (LastError says why). nil when the sidecar did not report it:
-	// PITR is not configured, or the sidecar predates the field. nil is
-	// not false.
+	// StoreReady is false while archival is configured but cannot reach a
+	// verified archive session: the store cannot be built, the configured
+	// archive identity is unusable, or establishing or opening the archive
+	// is failing on a transient store error (LastError says why). A
+	// refusal of a reachable archive keeps it true and is reported in
+	// Archive. nil when the sidecar did not report it: PITR is not
+	// configured, or the sidecar predates the field. nil is not false.
 	StoreReady     *bool     `json:"storeReady,omitempty"`
 	Primary        bool      `json:"primary"`
 	LastScanAt     time.Time `json:"lastScanAt"`
@@ -52,8 +55,10 @@ type ArchiverStatus struct {
 	// gates the current writable episode's uploads; zero while no record
 	// is confirmed (D-43).
 	PromotionRecordedAt time.Time `json:"promotionRecordedAt,omitzero"`
-	// HistoryIntegrity mirrors the site manifest's persisted marker
-	// (D-34); nil when unmarked.
+	// HistoryIntegrity is the site's history-integrity marker (D-34):
+	// the one persisted in its manifest, or a pending one the sidecar
+	// detected before the manifest existed (held for the pod's lifetime
+	// only); nil when unmarked.
 	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
 }
 

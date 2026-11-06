@@ -2110,9 +2110,17 @@ const eventReasonPITRArchiveReissueRisk = "PITRArchiveReissueRiskDetected"
 // so a promotion fires exactly once whichever writer persists it first: the
 // optimistic-concurrency resourceVersion makes the persisted transition the
 // promotion's identity, and the other writer then sees from == to.
+//
+// An empty from is a bootstrap only on a group that has never failed over:
+// a promotion deferred across a persisted NoPrimary interval (A -> "" -> B,
+// say during the anti-flap cooldown) persists B with from == "" and is a
+// promotion all the same (F041).
 func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFailoverGroup, from string) {
 	promoted := fg.Status.ActiveSite
-	if r == nil || r.recorder == nil || !pitrEnabled(fg) || promoted == "" || from == "" || promoted == from {
+	if r == nil || r.recorder == nil || !pitrEnabled(fg) || promoted == "" || promoted == from {
+		return
+	}
+	if from == "" && fg.Status.LastFailover == nil && fg.Status.LastFailoverTarget == "" {
 		return
 	}
 	rows, ok := r.pitrArchiveSuspectRows(FailoverGroupNamespacedName(fg), promoted)
@@ -2537,7 +2545,7 @@ func conditionBool(v bool) metav1.ConditionStatus {
 // reconcilerOwnedConditions are the condition types the group reconciler
 // writes. updateCRStatus re-reads them instead of replaying its snapshot's
 // copy, which would undo a concurrent reconciler write.
-var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady}
+var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady, conditionPITRMysqlConfAccepted}
 
 func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 	for i, existing := range *conditions {

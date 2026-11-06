@@ -12,10 +12,13 @@ import (
 
 // groundTruth is a candidate witness's established predecessor set.
 type groundTruth struct {
-	g       GTID
-	lambda  Set
-	kind    GroundTruth
-	occ     occurrence
+	g      GTID
+	lambda Set
+	kind   GroundTruth
+	occ    occurrence
+	// occs are every downloaded occurrence of g; all of their rows enter
+	// the closure U (review F010).
+	occs    []occurrence
 	records []string
 	origin  string
 	anchor  *file
@@ -39,7 +42,7 @@ func (p *planner) witness() (bool, error) {
 		f, err := p.fetch(r)
 		if err != nil {
 			if isUnreadable(err) {
-				return false, refuse(pitrarchive.TokenArchiveObjectInvalid, "cannot read %v, which may hold the first transaction at or after %s; quarantine the row with bloodraven pitr-quarantine if its object is lost", err, fmtMicros(p.T))
+				return false, refuse(pitrarchive.TokenArchiveObjectInvalid, "cannot read %v, which may hold the first transaction at or after %s; %s", err, fmtMicros(p.T), lostObjectAdvice)
 			}
 			return false, err
 		}
@@ -86,10 +89,11 @@ func (p *planner) witness() (bool, error) {
 		}
 	}
 	p.lambda = w.lambda
-	p.wFile, p.wPos = w.occ.f, w.occ.i
 	p.w = &Witness{GTID: w.g, Row: w.occ.f.row.ref(), CommitTime: best, GroundTruth: w.kind, AnchorRecords: w.records, AnchorOriginRow: w.origin}
 	p.plan.Witness = p.w
-	p.used[w.occ.f.row] = true
+	for _, o := range w.occs {
+		p.used[o.f.row] = true
+	}
 	if w.anchor != nil {
 		p.used[w.anchor.row] = true
 	}
@@ -130,9 +134,14 @@ func (p *planner) groundTruth(c GTID) (*groundTruth, error) {
 				return nil, refuse(pitrarchive.TokenStopAmbiguous, "%s has origin copies with different predecessor sets (%s and %s)", c, origins[0].f.row.Label(), o.f.row.Label())
 			}
 		}
-		return &groundTruth{g: c, lambda: lambda, kind: GroundTruthOrigin, occ: origins[0]}, nil
+		return &groundTruth{g: c, lambda: lambda, kind: GroundTruthOrigin, occ: origins[0], occs: occs}, nil
 	}
-	return p.anchoredTruth(c, occs)
+	gt, err := p.anchoredTruth(c, occs)
+	if err != nil {
+		return nil, err
+	}
+	gt.occs = occs
+	return gt, nil
 }
 
 // anchoredTruth accepts a replica occurrence through an anchor (D-39):
@@ -161,7 +170,7 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 			return nil, err
 		}
 		anchor := records
-		q, qExec, err := p.originAnchor(uuid, srv, pred, originSites, o.f.txn(o.i).OCT)
+		q, qExec, err := p.originAnchor(c, srv, pred, originSites, o.f.txn(o.i).OCT)
 		if err != nil {
 			return nil, err
 		}
@@ -267,7 +276,8 @@ func (p *planner) newestRecord(sites map[string]bool) *promoRef {
 // promotion records name s. It returns q's file and exec(q). A q whose
 // site's history may have been replaced between q and w (until = oct(w))
 // is no anchor (G1): exec(q) is then not proven to precede w on s.
-func (p *planner) originAnchor(uuid string, srv uint32, pred Set, sites map[string]bool, until int64) (*file, Set, error) {
+func (p *planner) originAnchor(c GTID, srv uint32, pred Set, sites map[string]bool, until int64) (*file, Set, error) {
+	uuid := c.UUID()
 	ofS := pred.OfUUID(uuid)
 	if ofS.IsEmpty() {
 		return nil, nil, nil
@@ -299,7 +309,7 @@ func (p *planner) originAnchor(uuid string, srv uint32, pred Set, sites map[stri
 				}
 				// q's commit time and its site's files are on the server's
 				// clock; its site's records on the sidecar's.
-				if p.historyShrinks(r.Site, uuid, srv, exec, f.txn(i).OCT, until, 0, p.delta) {
+				if p.historyShrinks(r.Site, c, srv, exec, f.txn(i).OCT, until, 0, p.delta) {
 					return nil, nil, nil
 				}
 				return f, exec, nil
@@ -379,7 +389,7 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 		}
 		name := fmt.Sprintf("%s#%d", best.site, best.index)
 		// The site's later records share best's clock.
-		if p.historyShrinks(site, uuid, srv, best.set, best.rec.ObservedAt.UnixMicro(), oct, p.delta, 0) {
+		if p.historyShrinks(site, c, srv, best.set, best.rec.ObservedAt.UnixMicro(), oct, p.delta, 0) {
 			out.shrunk = append(out.shrunk, name)
 			continue
 		}
@@ -389,43 +399,49 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 	return out
 }
 
-// historyShrinks reports evidence that site's server may have stopped
-// holding set, its gtid_executed at since, before until (both µs): a new
-// server incarnation (a reclone, a reset, a re-seed) between them.
+// historyShrinks reports evidence that site's server, s = (uuid(w), srv),
+// may have stopped holding set, its gtid_executed at since, before until
+// (both µs; until is oct(w)): a new server incarnation (a reclone, a
+// reset, a re-seed) between them.
 // rowMargin and recordMargin widen the comparisons of since with file
-// times (the server's clock) and with record times (the sidecar's clock)
-// for skew; a comparison on one clock needs none. The evidence is
+// times (the server's clock) and with the site's record times (its
+// sidecar's clock) for skew; a comparison on one clock needs none. The
+// evidence is
 //
 //   - a later record of the site by the same server that lacks part of set
 //     (any time after since: a shrink cannot be dated more precisely);
-//   - a record of the site by another server observed before until (+δ);
-//   - a row of the site whose prev ∪ base lacks part of set and that is
-//     a clone bridge (baseGtids) or starts from a state that is no subset
-//     of set, unless it is provably opened before since − margin or after
-//     until + margin;
-//   - an ordinary row starting from a proper subset of set (an earlier
-//     state) that is provably opened between since + margin and until +
-//     margin.
+//   - a record by another server, on any site, observed between since and
+//     until (each ±δ) that does not hold w: s lost its role and regained
+//     it in between, and its new era's record, which would anchor
+//     instead, is missing or not provably before until, so a reclone may
+//     have come in between (review F062). A record that holds w was taken
+//     after w committed, so it is no role change before w;
+//   - a row of the site whose prev ∪ base lacks part of set and that is a
+//     clone bridge (baseGtids) or starts from a state that is no subset of
+//     set: a new incarnation, at a time nothing proves (review F009, N3:
+//     neither the manifest's firstEventTime nor a commit time in the bytes
+//     proves when a file was opened);
+//   - an ordinary row starting from a proper subset of set (the shape of a
+//     file opened before since) whose firstEventTime falls between since +
+//     margin and until + margin. That time only ever adds evidence; it
+//     never discards any.
 //
 // Without such evidence, gtid_executed only grew from since to until.
-func (p *planner) historyShrinks(site, uuid string, srv uint32, set Set, since, until, rowMargin, recordMargin int64) bool {
+func (p *planner) historyShrinks(site string, w GTID, srv uint32, set Set, since, until, rowMargin, recordMargin int64) bool {
 	if set.IsEmpty() {
 		return false
 	}
-	margin := rowMargin
+	uuid := w.UUID()
 	for i := range p.promos {
 		pr := &p.promos[i]
 		at := pr.rec.ObservedAt.UnixMicro()
-		if pr.site != site || at+recordMargin <= since {
-			continue
-		}
 		if pr.rec.ServerUUID != uuid || pr.rec.ServerID != srv {
-			if at-p.delta < until {
+			if at+p.delta > since && at-p.delta < until && !pr.set.Has(w) {
 				return true
 			}
 			continue
 		}
-		if !pr.set.Contains(set) {
+		if pr.site == site && at+recordMargin > since && !pr.set.Contains(set) {
 			return true
 		}
 	}
@@ -440,41 +456,11 @@ func (p *planner) historyShrinks(site, uuid string, srv uint32, set Set, since, 
 		if prev.Contains(set) {
 			continue
 		}
-		openedAfter := func(t int64) bool { return !r.Created.IsZero() && r.Created.UnixMicro() > t }
-		if r.Base.IsEmpty() && set.Contains(prev) {
-			// An ordinary file whose start state is an earlier state of
-			// set: what a file opened before since looks like. Only a
-			// file provably opened after since (and before until) shows
-			// the history going back.
-			if openedAfter(since+margin) && !openedAfter(until+margin) {
-				return true
-			}
-			continue
+		if !r.Base.IsEmpty() || !set.Contains(prev) {
+			return true
 		}
-		// A clone bridge, or a start state that is no earlier state of
-		// set: a new incarnation, unless the file provably predates
-		// since or postdates until.
-		if p.openedBy(r, since-margin) || openedAfter(until+margin) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-// openedBy reports whether row r's file provably existed at t: its first
-// event time (whole seconds) is at least a second before t, or its bytes
-// hold an origin transaction committed by t (a file exists before its
-// writer commits into it).
-func (p *planner) openedBy(r *Row, t int64) bool {
-	if !r.Created.IsZero() && r.Created.UnixMicro()+int64(time.Second/time.Microsecond) <= t {
-		return true
-	}
-	if f := p.files[r]; f != nil {
-		for i := range f.idx.Txns {
-			if f.origin(i) && f.idx.Txns[i].OCT <= t {
-				return true
-			}
+		if !r.Created.IsZero() && r.Created.UnixMicro() > since+rowMargin && r.Created.UnixMicro() <= until+rowMargin {
+			return true
 		}
 	}
 	return false

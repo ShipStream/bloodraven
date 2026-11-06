@@ -67,11 +67,20 @@ func TestBudgetBoundsLiveHeap(t *testing.T) {
 
 // TestIndexBudgetBoundsLiveHeap: the index pass's transaction array grows
 // by appending, so it may hold up to twice its length (and both arrays
-// during a copy); the charges cover that.
+// during a copy); the charges cover that. With a distinct tag per
+// transaction every one also adds a source identifier to the file's sets
+// and identifier tables (review F047); with every other GNO it adds an
+// interval.
 func TestIndexBudgetBoundsLiveHeap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates tens of MB")
 	}
+	for _, shape := range []string{"one source", "a tag per transaction", "gaps"} {
+		t.Run(shape, func(t *testing.T) { indexHeapRatio(t, shape) })
+	}
+}
+
+func indexHeapRatio(t *testing.T, shape string) {
 	const n = 300000
 	budget := NewBudget(4 << 30)
 	var ms runtime.MemStats
@@ -89,10 +98,19 @@ func TestIndexBudgetBoundsLiveHeap(t *testing.T) {
 		ratio = max(ratio, float64(int64(ms.HeapAlloc)-int64(base))/float64(budget.Used()))
 	}
 	for i := int64(1); i <= n; i++ {
-		if err := b.BeginTxn(GTID{"A", i}, i, 1); err != nil {
+		g := GTID{"A", i}
+		switch shape {
+		case "a tag per transaction":
+			g = GTID{"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:t" + strconv.FormatInt(i, 10), 1}
+		case "gaps":
+			g = GTID{"A", 2 * i}
+		}
+		if err := b.BeginTxn(g, i, 1); err != nil {
 			t.Fatal(err)
 		}
-		b.MarkData()
+		if i%2 == 0 {
+			b.MarkData() // the others are empty: EmptyGTIDs grows too
+		}
 		if i%(n/16) == 0 {
 			measure()
 		}
@@ -103,8 +121,60 @@ func TestIndexBudgetBoundsLiveHeap(t *testing.T) {
 	}
 	measure()
 	runtime.KeepAlive(idx)
-	t.Logf("index: live/charged %.2f×", ratio)
+	t.Logf("index (%s): live/charged %.2f×", shape, ratio)
 	if ratio > liveHeapFactor {
 		t.Fatalf("the index holds %.2f× what it charged, more than %.1f×", ratio, liveHeapFactor)
+	}
+}
+
+// TestBudgetBoundsLiveHeapManyTags: a replay file whose transactions each
+// carry a distinct tag. Every predecessor set then has a source identifier
+// per transaction, and the segments split on the mysqlbinlog argument
+// bound, each keeping its own StartPredecessors (review F047, F055). The
+// probes at the end of the search build, the BFS, the order check and the
+// segment fill stay within liveHeapFactor of the charges.
+func TestBudgetBoundsLiveHeapManyTags(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates tens of MB")
+	}
+	const n = 6000
+	s := newSynth(t)
+	var txns []stx
+	for i := 1; i <= n; i++ {
+		txns = append(txns, stx{g: "A:t" + strconv.Itoa(i) + ":1", oct: sec(float64(i + 1)), srv: 101})
+	}
+	s.file("a", "a1", 101, "A:1", "", txns, run("A", 2, 2, float64(n+2), 101))
+	s.backup("A:1", "a", 101, 1.5)
+	var a Archive
+	for _, name := range s.order {
+		a.Sites = append(a.Sites, *s.sites[name])
+	}
+	fetch := FetchFunc(func(_ context.Context, r RowRef) (*FileIndex, error) { return s.idx[r], nil })
+	budget := NewBudget(4 << 30)
+	var ms runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&ms)
+	base := ms.HeapAlloc
+	var ratio float64
+	memProbe = func() {
+		runtime.GC()
+		runtime.ReadMemStats(&ms)
+		ratio = max(ratio, float64(int64(ms.HeapAlloc)-int64(base))/float64(budget.Used()))
+	}
+	defer func() { memProbe = nil }()
+	old := maxSegmentGTIDBytes
+	maxSegmentGTIDBytes = 16 << 10
+	defer func() { maxSegmentGTIDBytes = old }()
+	stop := time.UnixMicro(sec(float64(n) + 1.5)).UTC()
+	p, err := Run(context.Background(), Request{Mode: ModeTimestamp, Stop: stop, Dump: s.dump, Budget: budget}, a, fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Segments) < 10 {
+		t.Fatalf("%d segments, want the split", len(p.Segments))
+	}
+	t.Logf("many tags: %d segments, live/charged %.2f× (budget peak %d B)", len(p.Segments), ratio, budget.Peak())
+	if ratio > liveHeapFactor {
+		t.Fatalf("the planner holds %.2f× what it charged, more than %.1f×", ratio, liveHeapFactor)
 	}
 }

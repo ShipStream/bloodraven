@@ -200,9 +200,12 @@ type PITRStatus struct {
 
 // PointInTimeSpec configures a restore that replays archived binlogs on
 // top of a loaded full dump. It lives under InitFromBackupSpec; leaving
-// it unset yields a plain dump-only restore. PITR requires the target
-// failover group's spec.backup.pitr block to have been enabled at the
-// time of the full dump, otherwise no binlog archive exists to replay.
+// it unset yields a plain dump-only restore. The binlogs come from the
+// source archive that ArchiveProfileName names: the group that took the
+// dump must have archived its binlogs there continuously from before the
+// dump to the target (its spec.backup.pitr enabled with that profile's
+// destination). The restored group's own spec.backup.pitr is not
+// involved; it may be disabled.
 type PointInTimeSpec struct {
 	// ArchiveProfileName names the spec.backup.profiles entry whose binlog
 	// archive the restore reads. Required under initFromBackup: the restore
@@ -230,6 +233,10 @@ type PointInTimeSpec struct {
 	// refused. Replay restores the history of the first archived
 	// transaction committed at or after it (commit times are compared to
 	// the microsecond), cut just before that transaction. Required.
+	// An object stored with a fractional target before this rule existed
+	// fails every update (finalizer removal included) on clusters without
+	// CRD validation ratcheting until an update also corrects the target;
+	// correct such targets before applying the CRD.
 	// +required
 	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
 	// +kubebuilder:validation:MaxLength=40
@@ -273,8 +280,11 @@ type BackupRetrySpec struct {
 
 // BackupProfile is a named, reusable backup configuration.
 type BackupProfile struct {
-	// Name is the unique profile identifier within this failover group.
+	// Name is the unique profile identifier within this failover group, a
+	// DNS label of at most 63 characters (the bound every reference to a
+	// profile, such as pointInTime.archiveProfileName, carries).
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
@@ -458,7 +468,14 @@ type S3Storage struct {
 	Bucket string `json:"bucket"`
 
 	// Prefix is the object-name prefix inside the bucket. Each backup
-	// lands under "<prefix>/<mysqlbackup-name>/".
+	// lands under "<prefix>/<mysqlbackup-name>/" and the PITR archive under
+	// "<prefix>/binlogs/". A leading or trailing "/" is ignored. Empty
+	// segments ("a//b") and "." or ".." segments are refused: the dump
+	// writer keeps a prefix as written, while the archive and every reader
+	// (standby discovery, dump-meta) resolve it as a path, so such a
+	// prefix would name different keys for each.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$`
 	Prefix string `json:"prefix,omitempty"`
 
 	// Region is the AWS region. Optional for non-AWS S3 stores.

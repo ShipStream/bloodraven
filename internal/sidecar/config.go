@@ -265,9 +265,11 @@ type PITRS3Config struct {
 	// AWS SDK credential chain (IRSA, instance profile, env vars).
 	AWSCredsDir string
 	// DefaultRegion signs requests when no region is configured anywhere.
-	// Only artifact cleanup sets it ("us-east-1", what mysqlsh assumes),
-	// so a plain-AWS profile without a region keeps working there; the
-	// sidecar keeps the SDK's behaviour.
+	// The cmd/bloodraven Job steps that read or write next to mysqlsh's
+	// dump set it to "us-east-1" (what mysqlsh assumes): artifact cleanup,
+	// dump-meta and the backup stamp writer, so a plain-AWS profile
+	// without a region keeps working there. The sidecar leaves it empty
+	// and keeps the SDK's behaviour.
 	DefaultRegion string
 }
 

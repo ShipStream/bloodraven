@@ -125,39 +125,51 @@ func unsafeHistoryError(site string, marker *HistoryIntegrity) error {
 // persisted in the site's own manifest at the first verified session. It
 // returns nil only for a clean, unmarked site; any error keeps the site
 // from uploading.
+//
+// A manifest that cannot be read on a verified session blocks uploads, but
+// the MySQL probe still runs: a violation that comes and goes during a
+// storage outage is held as the pending marker, not missed.
 func (a *BinlogArchiver) checkHistoryIntegrity(ctx context.Context) error {
+	var manifestErr error
 	if a.session != nil && a.session.Verified() {
 		if _, err := a.loadManifest(ctx); err != nil {
-			return fmt.Errorf("history integrity: load manifest: %w", err)
+			manifestErr = wrapKeepToken("history integrity: load manifest", err)
 		}
 	}
 	marker := a.currentMarker()
 	if marker == nil {
 		if a.pendingMarkerErr != nil {
-			return fmt.Errorf("history integrity: %w", a.pendingMarkerErr)
+			return joinIntegrity(manifestErr, fmt.Errorf("history integrity: %w", a.pendingMarkerErr))
 		}
 		prober, ok := a.mysql.(historyIntegrityProber)
 		if !ok {
-			return fmt.Errorf("history integrity: the MySQL probe cannot check replication filters and binlog settings")
+			return joinIntegrity(manifestErr, fmt.Errorf("history integrity: the MySQL probe cannot check replication filters and binlog settings"))
 		}
 		violation, detail, err := prober.HistoryIntegrityViolation(ctx)
 		if err != nil {
-			return fmt.Errorf("history integrity: %w", err)
+			return joinIntegrity(manifestErr, fmt.Errorf("history integrity: %w", err))
 		}
 		if violation == "" {
-			return nil
+			return manifestErr
 		}
 		marker = &HistoryIntegrity{Violation: violation, Detail: detail, At: a.now().UTC().Truncate(time.Microsecond)}
 		a.pendingMarker = marker
-		if err := a.savePendingMarker(marker); err != nil {
+		a.pendingMarkerSaved = false
+	}
+	// A pending marker whose file write failed is retried every scan
+	// until it is durable or persisted in the manifest.
+	if a.pendingMarker != nil && !a.pendingMarkerSaved {
+		if err := a.savePendingMarker(a.pendingMarker); err != nil {
 			a.logger.Warn("persist history integrity marker", "error", err)
+		} else {
+			a.pendingMarkerSaved = true
 		}
 	}
 	if !a.unsafeLogged {
 		a.unsafeLogged = true
 		a.logger.Warn("archive history unsafe", "violation", marker.Violation, "detail", marker.Detail)
 	}
-	if a.pendingMarker != nil && a.session != nil && a.session.Verified() {
+	if a.pendingMarker != nil && manifestErr == nil && a.session != nil && a.session.Verified() {
 		if err := a.persistMarker(ctx); err != nil {
 			a.logger.Warn("persist history integrity marker", "error", err)
 		}
@@ -165,7 +177,20 @@ func (a *BinlogArchiver) checkHistoryIntegrity(ctx context.Context) error {
 	a.mu.Lock()
 	a.historyIntegrity = marker
 	a.mu.Unlock()
+	// The unsafe-history refusal leads: its remedy (a new prefix) stands
+	// whatever else fails.
+	if manifestErr != nil {
+		return joinKeepToken(unsafeHistoryError(a.site, marker), manifestErr)
+	}
 	return unsafeHistoryError(a.site, marker)
+}
+
+// joinIntegrity adds a probe-side error to a manifest read error.
+func joinIntegrity(manifestErr, err error) error {
+	if manifestErr == nil {
+		return err
+	}
+	return joinKeepToken(manifestErr, err)
 }
 
 // pendingMarkerFile is the pending marker's file name under cfg.StateDir.
@@ -206,6 +231,7 @@ func (a *BinlogArchiver) loadPendingMarker() {
 		return
 	}
 	a.pendingMarker = &m
+	a.pendingMarkerSaved = true
 	a.mu.Lock()
 	a.historyIntegrity = &m
 	a.mu.Unlock()

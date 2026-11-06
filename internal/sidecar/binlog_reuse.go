@@ -160,7 +160,10 @@ func (a *BinlogArchiver) detectArchiveReuse(ctx context.Context, m *Manifest, en
 			// A quarantined row is often quarantined because its object is
 			// gone. Without its bytes there is no reuse proof to record;
 			// the planner refuses rows it cannot verify on its own (§4.9).
-			if p.quarantined && (errors.Is(err, os.ErrNotExist) || isS3NotFound(err)) {
+			// Only the quarantined prior's absence is waived: the new
+			// object vanishing is a failure to read what is about to be
+			// published (F204).
+			if p.quarantined && issuanceOperandMissing(err, true) {
 				continue
 			}
 			return err
@@ -175,15 +178,17 @@ func (a *BinlogArchiver) detectArchiveReuse(ctx context.Context, m *Manifest, en
 
 // CheckArchiveIssuance verifies both streams before comparing overlapping GTIDs.
 // It also protects restore lower cuts when older manifests lack a reuse guard.
+// A read failure is an *issuanceReadError naming the operand; its message
+// is the underlying error's.
 func CheckArchiveIssuance(ctx context.Context, store ArchiveStore, prefix, site string, first, second ManifestEntry, overlap internalmysql.GTIDSet) (*ArchiveReuseEvidence, error) {
 	a := &BinlogArchiver{cfg: &PITRConfig{ManifestPrefix: prefix}, site: site, store: store}
 	before, beforeID, err := a.archivedOrigins(ctx, first, overlap)
 	if err != nil {
-		return nil, err
+		return nil, &issuanceReadError{first: true, err: err}
 	}
 	after, afterID, err := a.archivedOrigins(ctx, second, overlap)
 	if err != nil {
-		return nil, err
+		return nil, &issuanceReadError{first: false, err: err}
 	}
 	if beforeID == afterID {
 		return nil, nil
@@ -203,6 +208,27 @@ func CheckArchiveIssuance(ctx context.Context, store ArchiveStore, prefix, site 
 	}
 	return nil, fmt.Errorf("overlapping GTID issuance remains unverified for %s", overlap.String())
 }
+
+// issuanceReadError is a CheckArchiveIssuance failure to read one operand.
+type issuanceReadError struct {
+	first bool // the first (prior) operand, else the second
+	err   error
+}
+
+func (e *issuanceReadError) Error() string { return e.err.Error() }
+func (e *issuanceReadError) Unwrap() error { return e.err }
+
+// issuanceOperandMissing reports whether err is CheckArchiveIssuance
+// failing because the first (first=true) or second operand's object does
+// not exist.
+func issuanceOperandMissing(err error, first bool) bool {
+	var re *issuanceReadError
+	if !errors.As(err, &re) || re.first != first {
+		return false
+	}
+	return errors.Is(re.err, os.ErrNotExist) || isS3NotFound(re.err)
+}
+
 func recordArchiveReuse(m *Manifest, proof ArchiveReuseEvidence) {
 	if m.Epoch == nil {
 		m.Epoch = &ArchiveEpoch{}

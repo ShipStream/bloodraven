@@ -240,6 +240,35 @@ def _server_clock(session):
     return str(r[0])
 
 
+def _server_uuid(session):
+    r = session.run_sql("SELECT @@global.server_uuid").fetch_one()
+    if not r or not r[0]:
+        raise RuntimeError("@@server_uuid returned no value")
+    return str(r[0]).lower()
+
+
+def _server_clock_after_dump(conn, server_uuid):
+    """serverClock.end through a fresh connection. The session opened
+    before the dump sits idle while dump_instance works on its own
+    connections, and the server drops it once the dump outlasts
+    wait_timeout (MySQL error 4031, reproduced with mysqlsh against
+    mysql:9.7, F027), which would fail a completed dump. The fresh session
+    must reach the server that was dumped."""
+    fresh = mysqlsh.globals.shell.open_session(conn)
+    try:
+        got = _server_uuid(fresh)
+        if got != server_uuid:
+            raise RuntimeError(
+                "{} now reaches server {}, not the dumped server {}".format(
+                    conn.get("host"), got, server_uuid))
+        return _server_clock(fresh)
+    finally:
+        try:
+            fresh.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _finish_stamp(output, end):
     """Add serverClock.end to the backup stamp. A plaintext Job runs the
     bloodraven binary the backup-stamp init container installed
@@ -354,6 +383,12 @@ def main():
     session = mysqlsh.globals.session
 
     meta = _capture_gtid_metadata(session)
+    try:
+        server_uuid = _server_uuid(session)
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_DUMP_FAILED: read server_uuid: {}".format(e),
+              file=sys.stderr, flush=True)
+        sys.exit(2)
 
     try:
         mysqlsh.globals.util.dump_instance(output, opts)
@@ -366,7 +401,7 @@ def main():
     # succeeded (D-52). A failure leaves the stamp without an end, which
     # every later PITR refuses, so it fails the backup too.
     try:
-        server_clock_end = _server_clock(session)
+        server_clock_end = _server_clock_after_dump(conn, server_uuid)
         end_in_meta = _finish_stamp(output, server_clock_end)
     except Exception as e:  # noqa: BLE001
         print("BLOODRAVEN_DUMP_FAILED: backup stamp: {}".format(e),

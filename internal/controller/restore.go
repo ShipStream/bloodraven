@@ -923,9 +923,10 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded || ref.Status.Location == "" {
 			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded or has no location", ref.Name)
 		}
-		if err := pitrBackupBefore(pitrReq, ref.Status); err != nil {
-			return nil, err
-		}
+		// D-44 (a target before the dump ended) is enforced by dump-meta
+		// against the dump's own serverClock.end. status.completionTime is
+		// no bound: it includes the upload, which can end long after the
+		// dump did, so it would refuse valid targets in between (F034).
 		sourceMeta = restoreMetadataFromBackupStatus(ref.Status)
 
 		// Prefer the structured StorageType set by the backup
@@ -1042,7 +1043,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 
 	case src.S3 != nil:
-		inputURL = mysqlShellDumpInput(src.S3.Prefix, v1alpha1.BackupStorageS3)
+		// One spelling of the prefix for loading, decryption and
+		// dump-meta, the one the backup writer uses ("/prod" and "prod"
+		// name the same keys, F036).
+		s3Prefix := strings.Trim(src.S3.Prefix, "/")
+		inputURL = mysqlShellDumpInput(s3Prefix, v1alpha1.BackupStorageS3)
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: src.S3.Bucket},
 		)
@@ -1063,12 +1068,12 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			decryptS3Bucket = src.S3.Bucket
 			decryptS3EndpointOverride = src.S3.EndpointURL
 			decryptS3Region = src.S3.Region
-			decryptS3Prefix = strings.TrimSuffix(src.S3.Prefix, "/")
+			decryptS3Prefix = s3Prefix
 			decryptAWSCredsSecret = src.S3.CredentialsSecret
 		}
 		if pitrReq != nil {
 			dumpSrc = &pitrDumpSource{
-				StorageType: v1alpha1.BackupStorageS3, Prefix: strings.Trim(src.S3.Prefix, "/"),
+				StorageType: v1alpha1.BackupStorageS3, Prefix: s3Prefix,
 				S3Bucket: src.S3.Bucket, S3EndpointURL: src.S3.EndpointURL, S3Region: src.S3.Region,
 				AWSCredsSecret: src.S3.CredentialsSecret, Passphrase: passphraseRef,
 			}
@@ -1135,12 +1140,12 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	}
 	var dumpMeta *corev1.Container
 	if pitrReq != nil {
-		if dumpSrc == nil || dumpSrc.Prefix == "" {
-			return nil, fmt.Errorf("%s.pointInTime: the dump's location is unknown, so its identity cannot be read", fp)
+		if dumpSrc == nil {
+			return nil, fmt.Errorf("internal error: %s.pointInTime: no dump source rendered", fp)
 		}
 		container, volumes, err := buildDumpMetaInitContainer(fg, *dumpSrc)
 		if err != nil {
-			return nil, fmt.Errorf("%s.pointInTime: %w", fp, err)
+			return nil, wrapTokenFirst(fp+".pointInTime", err)
 		}
 		dumpMeta = &container
 		extraVolumes = append(extraVolumes, volumes...)

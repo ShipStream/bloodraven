@@ -55,7 +55,10 @@ func (p *planner) compareRow(r *Row) error {
 	if r.State == RowQuarantined && p.waived(r) {
 		return nil
 	}
-	return refuse(pitrarchive.TokenArchiveNamespaceReuse, "cannot verify %v, which overlaps the target history; restore its object, or (for a lost object) quarantine it and take a full backup after the quarantine", err)
+	if r.State == RowQuarantined {
+		return refuse(pitrarchive.TokenArchiveNamespaceReuse, "cannot verify %v, a quarantined row that overlaps the target history; restore its object (in an archive copy, copy it again from the source archive), or use a full backup taken after the quarantine that holds its transactions", err)
+	}
+	return refuse(pitrarchive.TokenArchiveNamespaceReuse, "cannot verify %v, which overlaps the target history; %s, then take a full backup after the quarantine", err, lostObjectAdvice)
 }
 
 // waived is the quarantine waiver (O2-4): an unreadable quarantined row
@@ -313,7 +316,7 @@ func (p *planner) orderCheck() error {
 			}
 			for _, back := range adj[e.to] {
 				if int(back.to) == v {
-					return p.inversion(names[v], names[e.to], e.file, back.file, "")
+					return p.inversion(names[v], names[e.to], e.file, back.file)
 				}
 			}
 		}
@@ -400,7 +403,7 @@ func (p *planner) orderCheck() error {
 	return refuse(pitrarchive.TokenArchiveOrderInversion, "downloaded binlogs order shared transactions inconsistently")
 }
 
-func (p *planner) inversion(g1, g2 GTID, f1, f2 *file, via string) error {
-	return refuse(pitrarchive.TokenArchiveOrderInversion, "%s and %s are ordered %s,%s in %s and %s,%s in %s%s; the sites applied the same transactions in different orders, so equal GTID sets may hold different data (an errant transaction?); exclude the errant transaction, or use a backup and archive prefix that start after it",
-		g1, g2, g1, g2, f1.row.Label(), g2, g1, f2.row.Label(), via)
+func (p *planner) inversion(g1, g2 GTID, f1, f2 *file) error {
+	return refuse(pitrarchive.TokenArchiveOrderInversion, "%s and %s are ordered %s,%s in %s and %s,%s in %s; the sites applied the same transactions in different orders, so equal GTID sets may hold different data (an errant transaction?); exclude the errant transaction, or use a backup and archive prefix that start after it",
+		g1, g2, g1, g2, f1.row.Label(), g2, g1, f2.row.Label())
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -244,9 +245,82 @@ func TestPITRTargetPatternAndExclusions(t *testing.T) {
 			}
 		}
 	}
+	// The anchored pattern rejects trailing whitespace.
 	ensureNamespace(t, "pitr-target-pattern-long")
 	if err := k8sClient.Create(ctx, pitrRestoreFG("pitr-target-pattern-long", &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00+02:00" + strings.Repeat(" ", 20), ArchiveProfileName: "nightly-s3"})); err == nil {
-		t.Fatal("over-long stopDatetime accepted")
+		t.Fatal("stopDatetime with trailing whitespace accepted")
+	}
+	// No string the pattern admits is longer than 25 characters, so the
+	// maxLength of 40 (which bounds the pattern's CEL/regex cost) is never
+	// the deciding rejection; assert the installed schema carries it
+	// (F233).
+	for _, path := range [][]string{
+		{"mysqlfailovergroups.shipstream.io", "spec", "initFromBackup", "pointInTime", "stopDatetime"},
+		{"mysqlbackupverifications.shipstream.io", "spec", "pointInTime", "timestamp"},
+	} {
+		prop := installedSchemaProperty(t, path[0], path[1:]...)
+		if prop.MaxLength == nil || *prop.MaxLength != 40 {
+			t.Fatalf("%s %v: maxLength %v, want 40", path[0], path[1:], prop.MaxLength)
+		}
+	}
+}
+
+// installedSchemaProperty returns the v1alpha1 schema property at fields
+// of the CRD named crd, as envtest installed it.
+func installedSchemaProperty(t *testing.T, crd string, fields ...string) apiextensionsv1.JSONSchemaProps {
+	t.Helper()
+	for _, c := range testEnv.CRDs {
+		if c.Name != crd {
+			continue
+		}
+		for _, v := range c.Spec.Versions {
+			if v.Name != "v1alpha1" || v.Schema == nil || v.Schema.OpenAPIV3Schema == nil {
+				continue
+			}
+			prop := *v.Schema.OpenAPIV3Schema
+			for _, f := range fields {
+				next, ok := prop.Properties[f]
+				if !ok {
+					t.Fatalf("CRD %s has no property %v", crd, fields)
+				}
+				prop = next
+			}
+			return prop
+		}
+	}
+	t.Fatalf("CRD %s v1alpha1 not installed", crd)
+	return apiextensionsv1.JSONSchemaProps{}
+}
+
+// F042: an S3 prefix with an empty, "." or ".." segment is refused at
+// admission: the dump writer keeps it as written while the archive and
+// the readers resolve it as a path.
+func TestS3PrefixRefusesAmbiguousSegments(t *testing.T) {
+	for i, tc := range []struct {
+		prefix string
+		ok     bool
+	}{
+		{prefix: "", ok: true},
+		{prefix: "prod", ok: true},
+		{prefix: "/team/prod/", ok: true},
+		{prefix: ".hidden/a...b", ok: true},
+		{prefix: "team//prod"},
+		{prefix: "team/./prod"},
+		{prefix: "team/../prod"},
+		{prefix: strings.Repeat("p", 513)},
+	} {
+		ns := fmt.Sprintf("s3-prefix-%d", i)
+		ensureNamespace(t, ns)
+		fg := newVerificationFG(ns)
+		for j := range fg.Spec.Backup.Profiles {
+			if s3 := fg.Spec.Backup.Profiles[j].Storage.S3; s3 != nil {
+				s3.Prefix = tc.prefix
+			}
+		}
+		err := k8sClient.Create(ctx, fg)
+		if (err == nil) != tc.ok {
+			t.Fatalf("prefix %q: %v", tc.prefix, err)
+		}
 	}
 }
 
@@ -382,5 +456,19 @@ func TestPointInTimeResultShape(t *testing.T) {
 	}
 	if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "activation", "pointInTime"); found {
 		t.Fatal("status.activation.pointInTime survived")
+	}
+}
+
+// F139 (AREA=S cross-scope): a backup named like a stamp key would put its
+// dump location on another backup's stamp; admission refuses the name.
+func TestMysqlBackupNameRefusesStampSuffix(t *testing.T) {
+	ns := "backup-stamp-suffix"
+	ensureNamespace(t, ns)
+	for name, ok := range map[string]bool{"nightly-1": true, "nightly.bloodraven-backup.json": false} {
+		b := newSucceededBackup(ns, "lion", "nightly-s3")
+		b.Name = name
+		if err := k8sClient.Create(ctx, b); (err == nil) != ok {
+			t.Fatalf("backup %q: %v", name, err)
+		}
 	}
 }

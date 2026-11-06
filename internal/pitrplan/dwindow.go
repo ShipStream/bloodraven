@@ -24,6 +24,11 @@ func (p *planner) dWindow() error {
 	known := p.lambda.Union(p.B)
 	floor := p.maxOctB
 	unread := Set{}
+	// The time remedies must clear the unreadable contributors too: their
+	// row's hinted bounds widen the window, and an unknown bound drops the
+	// remedies (review F048).
+	var ulo, uhi int64 = math.MaxInt64, math.MinInt64
+	usites := map[string]bool{}
 	for _, r := range p.rows {
 		if r.Hints.hi() <= floor || r.Hints.lo() >= p.T {
 			continue
@@ -37,13 +42,18 @@ func (p *planner) dWindow() error {
 			}
 			if r.State == RowQuarantined && r.Hints.Known {
 				// Fail closed: count its hinted transactions (§4.5 L4).
-				unread = unread.Union(r.Hints.GTIDs.Subtract(p.lambda).Subtract(p.B))
+				c := r.Hints.GTIDs.Subtract(p.lambda).Subtract(p.B)
+				unread = unread.Union(c)
+				if !p.X.Contains(c) {
+					ulo, uhi = min(ulo, r.Hints.lo()), max(uhi, r.Hints.hi())
+					usites[r.Site+" (quarantined "+r.Name+", unreadable)"] = true
+				}
 				continue
 			}
 			if r.State == RowQuarantined {
 				return refuse(pitrarchive.TokenArchiveNamespaceReuse, "cannot verify %v, a quarantined row with no complete hints that may hold transactions committed before the target", err)
 			}
-			return refuse(pitrarchive.TokenArchiveObjectInvalid, "cannot read %v, which may hold transactions committed before the target; quarantine the row with bloodraven pitr-quarantine if its object is lost", err)
+			return refuse(pitrarchive.TokenArchiveObjectInvalid, "cannot read %v, which may hold transactions committed before the target; %s", err, lostObjectAdvice)
 		}
 	}
 	D := unread.Clone()
@@ -88,19 +98,26 @@ func (p *planner) dWindow() error {
 	for s := range sites {
 		siteList = append(siteList, s)
 	}
-	sort.Strings(siteList)
-	if len(siteList) == 0 {
-		siteList = []string{"unreadable quarantined rows"}
+	for s := range usites {
+		siteList = append(siteList, s)
 	}
+	sort.Strings(siteList)
 	window := ""
 	if lo != math.MaxInt64 {
 		window = ", " + fmtMicros(lo) + "…" + fmtMicros(hi)
 	}
+	// An unreadable contributor's hinted bounds: a target at or before
+	// its hmin, or a backup after its hmax, leaves it out of the window.
+	timesKnown := ulo != math.MinInt64 && uhi != math.MaxInt64
+	lo, hi = min(lo, ulo), max(hi, uhi)
 	msg := strings.Builder{}
 	msg.WriteString(fmt.Sprintf("%d archived transactions committed between the backup's newest transaction (%s) and %s are not in the history of %s (site %s, committed %s): %s (sites %s%s). They were lost at a failover, written on a replica (errant), or belong to another branch. To restore %s's history, add them to excludeGtids",
 		bad.Count(), fmtMicros(p.plan.BackupNewestCommit), fmtMicros(p.T), p.w.GTID, p.w.Row.Site, fmtMicros(p.w.CommitTime), bad.bounded(1024), strings.Join(siteList, ","), window, p.w.GTID))
-	if lo != math.MaxInt64 {
-		msg.WriteString(fmt.Sprintf(", or choose a target at or before %s, or use a backup taken after %s", fmtMicros(lo), fmtMicros(hi)))
+	if lo != math.MaxInt64 && timesKnown {
+		if lo > floor {
+			msg.WriteString(", or choose a target at or before " + fmtMicros(lo))
+		}
+		msg.WriteString(", or use a backup taken after " + fmtMicros(hi))
 	}
 	if alt := p.witnessBranch(bad); !alt.IsEmpty() {
 		msg.WriteString(fmt.Sprintf(". To keep the other history instead, exclude %s's branch: %s", p.w.GTID, alt.bounded(512)))

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -198,11 +199,11 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 			}
 		}},
 		{name: "partial", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial"}), reason: "PointInTimePartial", warnings: []string{"Warning PointInTimePartial"}},
-		{name: "divergent and on-history exclusions", pit: v1alpha1.PointInTimeSpec{ExcludeGtids: "b:1-3"},
-			verdict:  testVerdict(verdictFields{divergent: 2, onHistory: 1, onHistorySet: "b:3"}),
-			warnings: []string{"Warning PITRDivergentHistoryExcluded replay excluded 2 transactions", "Warning PITROnHistoryTransactionsExcluded excluded b:3 precedes"},
+		{name: "divergent and on-history exclusions", pit: v1alpha1.PointInTimeSpec{ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3"},
+			verdict:  testVerdict(verdictFields{divergent: 2, onHistory: 1, onHistorySet: "3e11fa47-71ca-11e1-9e33-c80aa9429562:3"}),
+			warnings: []string{"Warning PITRDivergentHistoryExcluded replay excluded 2 transactions", "Warning PITROnHistoryTransactionsExcluded excluded 3e11fa47-71ca-11e1-9e33-c80aa9429562:3 precedes"},
 			check: func(t *testing.T, res *v1alpha1.PointInTimeResult) {
-				if res.ExcludedDivergentTransactionCount != 2 || res.OnHistoryExclusionCount != 1 || res.OnHistoryExclusions != "b:3" {
+				if res.ExcludedDivergentTransactionCount != 2 || res.OnHistoryExclusionCount != 1 || res.OnHistoryExclusions != "3e11fa47-71ca-11e1-9e33-c80aa9429562:3" {
 					t.Fatalf("exclusion counts: %+v", res)
 				}
 			}},
@@ -418,9 +419,8 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 		{name: "exclude filter", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.LoadOptions = &v1alpha1.LoadOptions{ExcludeSchemas: []string{"audit"}}
 		}, reason: "PITRBackupFiltered"},
-		{name: "target before the backup", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.InitFromBackup.PointInTime.StopDatetime = "2026-04-15T07:59:59Z"
-		}, reason: "PITRBackupAfterTarget"},
+		// A target before the backup is refused PITRBackupAfterTarget by
+		// dump-meta against the dump's serverClock.end, not here (F034).
 		{name: "shared destination", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.ArchiveProfileName = fg.Spec.Backup.PITR.ProfileName
 		}, reason: "PITRArchiveDestinationShared"},
@@ -467,50 +467,31 @@ func TestParsePITRTarget(t *testing.T) {
 	}
 }
 
-// The controller's completionTime check is early feedback for D-44: a
-// target before the backup finished refuses, and the whole-second
-// completion time is rounded up.
-func TestPITRTargetMustFollowBackupCompletion(t *testing.T) {
-	completed := metav1.NewTime(time.Date(2030, 1, 1, 0, 30, 0, 0, time.UTC))
-	fractional := metav1.NewTime(time.Date(2030, 1, 1, 0, 30, 0, 400_000_000, time.UTC))
-	for _, tc := range []struct {
-		stop      string
-		completed metav1.Time
-		allow     bool
-	}{
-		{stop: "2029-12-31T23:59:00.000000Z", completed: completed},
-		{stop: "2030-01-01T00:29:59.999999Z", completed: completed},
-		{stop: "2030-01-01T00:30:00.000000Z", completed: completed, allow: true},
-		{stop: "2030-01-01T00:30:00.500000Z", completed: fractional},
-		{stop: "2030-01-01T00:30:01.000000Z", completed: fractional, allow: true},
-	} {
-		status := v1alpha1.MysqlBackupStatus{CompletionTime: &tc.completed}
-		err := pitrBackupBefore(&pitrReplayRequest{Mode: "timestamp", Stop: tc.stop}, status)
-		if (err == nil) != tc.allow || (err != nil && pitrFailureReason(err.Error()) != "PITRBackupAfterTarget") {
-			t.Fatalf("%q: %v", tc.stop, err)
-		}
-	}
-	if err := pitrBackupBefore(&pitrReplayRequest{Mode: "timestamp", Stop: outcomeStopCanonical}, v1alpha1.MysqlBackupStatus{}); err == nil {
-		t.Fatal("backup without completion time admitted")
-	}
-	if err := pitrBackupBefore(&pitrReplayRequest{Mode: "latest"}, v1alpha1.MysqlBackupStatus{}); err != nil {
-		t.Fatalf("latest mode has no target to check: %v", err)
-	}
+// F034: the controller does not bound the target by status.completionTime,
+// which includes the upload of an encrypted dump and can be hours after the
+// dump ended; dump-meta enforces D-44 against the dump's serverClock.end.
+// A target between the two is rendered.
+func TestPITRTargetNotBoundedByBackupCompletion(t *testing.T) {
+	completed := metav1.NewTime(time.Date(2030, 1, 1, 14, 0, 0, 0, time.UTC))
 	vfg := verifyFG()
 	vfg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	backup.Status.CompletionTime = &completed
 	v := verifyCR("verify-before-completion", "lion", "nightly-s3")
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2030-01-01T00:10:00Z"}
-	if _, err := buildVerificationJob(verificationJobInputs{FailoverGroup: vfg, Profile: vfg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"}); err == nil || pitrFailureReason(err.Error()) != "PITRBackupAfterTarget" {
-		t.Fatalf("verification inside the dump window accepted: %v", err)
+	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2030-01-01T13:00:00Z"}
+	job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: vfg, Profile: vfg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
+	if err != nil {
+		t.Fatalf("target after the dump but before the upload finished refused: %v", err)
+	}
+	if got := renderedPITRRequest(job).Stop; got != "2030-01-01T13:00:00.000000Z" {
+		t.Fatalf("rendered stop %q", got)
 	}
 }
 
 func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 	fg := verifyFG()
 	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-	req, err := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01 00:00:25", AllowPartial: true, ExcludeGtids: " other:9 "})
+	req, err := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01 00:00:25", AllowPartial: true, ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:9 "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +505,7 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 		assertEnvEquals(t, env, "BLOODRAVEN_PITR_MODE", "timestamp")
 		assertEnvEquals(t, env, "BLOODRAVEN_PITR_STOP_DATETIME", "2030-01-01T00:00:25.000000Z")
 		assertEnvEquals(t, env, "BLOODRAVEN_PITR_ALLOW_PARTIAL", "true")
-		assertEnvEquals(t, env, "BLOODRAVEN_PITR_EXCLUDE_GTIDS", "other:9")
+		assertEnvEquals(t, env, "BLOODRAVEN_PITR_EXCLUDE_GTIDS", "3e11fa47-71ca-11e1-9e33-c80aa9429562:9")
 	}
 	assertEnvEquals(t, frags.InitContainer.Env, "BLOODRAVEN_PITR_DUMP_META", "/pitr-dump-meta/dump.json")
 	// D-9 and B from dump.json: no site list, cross-site switch or start set.
@@ -537,7 +518,7 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 		t.Fatal("init refusals need a termination message")
 	}
 	for _, mode := range []string{"timestamp", "latest"} {
-		v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"}, Spec: v1alpha1.MysqlBackupVerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: mode, Timestamp: outcomeStop, ExcludeGtids: "x:1"}}}
+		v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"}, Spec: v1alpha1.MysqlBackupVerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: mode, Timestamp: outcomeStop, ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1"}}}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		backup.Status.FailoverGroupUID = outcomeSourceUID
 		job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
@@ -546,7 +527,7 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 		}
 		spec := job.Spec.Template.Spec
 		dl := containerEnv(spec.InitContainers, restorePITRInitContainerName)
-		if dl["BLOODRAVEN_PITR_MODE"] != mode || dl["BLOODRAVEN_PITR_ALLOW_PARTIAL"] != "false" || dl["BLOODRAVEN_PITR_EXCLUDE_GTIDS"] != "x:1" {
+		if dl["BLOODRAVEN_PITR_MODE"] != mode || dl["BLOODRAVEN_PITR_ALLOW_PARTIAL"] != "false" || dl["BLOODRAVEN_PITR_EXCLUDE_GTIDS"] != "3e11fa47-71ca-11e1-9e33-c80aa9429562:1" {
 			t.Fatalf("%s pitr-download env: %v", mode, dl)
 		}
 		if _, ok := dl["BLOODRAVEN_PITR_STOP_DATETIME"]; ok != (mode == "timestamp") {
@@ -605,8 +586,10 @@ func TestPITRVerificationVerdictOutcomes(t *testing.T) {
 	}{
 		{name: "timestamp covered", mode: "timestamp", verdict: testVerdict(verdictFields{}), reason: "Succeeded"},
 		{name: "latest replay", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest"}), reason: "Succeeded", lag: true},
-		{name: "latest with exclusions", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest", divergent: 3}), reason: "Succeeded", lag: true,
-			events: []string{"Warning PITRDivergentHistoryExcluded replay excluded 3"}},
+		// F150: a latest plan succeeds only with no divergent set (loss
+		// evidence refuses PITRArchiveDivergentHistory), so a verdict that
+		// reports one is not certified.
+		{name: "latest reporting divergent transactions", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest", divergent: 3}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "latest without replay", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest", noSegments: true}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "partial is never verified", mode: "timestamp", verdict: testVerdict(verdictFields{outcome: "Partial"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "latest carries no stop", mode: "latest", verdict: testVerdict(verdictFields{mode: "latest", stop: outcomeStopCanonical}), reason: "PITRCoverageInvalid", failed: true},
@@ -782,6 +765,68 @@ func TestPITRDownloadBudgetEnv(t *testing.T) {
 				if strings.HasPrefix(e.Name, "BLOODRAVEN_PITR_STAGING_LIMIT") || strings.HasPrefix(e.Name, "BLOODRAVEN_PITR_MEMORY_LIMIT") {
 					t.Fatalf("budget env %s leaked onto the main container", e.Name)
 				}
+			}
+		})
+	}
+}
+
+// F148, F149: the verdict parser's guards, each isolated against an
+// otherwise valid verdict: site list and its "+N" marker (kept as
+// ReplaySitesOmitted), count overflow, the executedSha256 format, and the
+// on-history line's count and alphabet.
+func TestParsePITRVerdictGuards(t *testing.T) {
+	req := pitrRenderedRequest{Mode: "timestamp", Stop: outcomeStopCanonical, EncryptionMode: "None", ExpectedSourceUID: outcomeSourceUID}
+	sites17 := make([]string, 17)
+	for i := range sites17 {
+		sites17[i] = fmt.Sprintf("s%02d", i)
+	}
+	replace := func(v, old, new string) string {
+		if !strings.Contains(v, old) {
+			t.Fatalf("fixture lacks %q", old)
+		}
+		return strings.Replace(v, old, new, 1)
+	}
+	base := testVerdict(verdictFields{})
+	tests := []struct {
+		name        string
+		verdict     string
+		wantErr     string
+		wantSites   []string
+		wantOmitted int32
+	}{
+		{name: "plain", verdict: base, wantSites: []string{"dfw", "iad"}},
+		{name: "truncated list keeps its omitted count", verdict: testVerdict(verdictFields{sites: "a,b,c,d,e,f,g,h,+1"}),
+			wantSites: []string{"a", "b", "c", "d", "e", "f", "g", "h"}, wantOmitted: 1},
+		{name: "count only", verdict: testVerdict(verdictFields{sites: "+9"}), wantOmitted: 9},
+		{name: "over the status bound", verdict: testVerdict(verdictFields{sites: strings.Join(sites17, ",")}), wantSites: sites17[:16], wantOmitted: 1},
+		{name: "marker not last", verdict: testVerdict(verdictFields{sites: "a,+1,b"}), wantErr: "site marker"},
+		{name: "marker of zero", verdict: testVerdict(verdictFields{sites: "a,+0"}), wantErr: "site marker"},
+		{name: "marker not a number", verdict: testVerdict(verdictFields{sites: "a,+x"}), wantErr: "site marker"},
+		{name: "marker with a sign", verdict: testVerdict(verdictFields{sites: "a,++1"}), wantErr: "site marker"},
+		{name: "invalid site", verdict: testVerdict(verdictFields{sites: "a,B_C"}), wantErr: "site \"B_C\" is invalid"},
+		{name: "segment count overflow", verdict: replace(base, "segments=2 files=2", "segments=2147483648 files=2"), wantErr: "counts overflow"},
+		{name: "negative count", verdict: replace(base, "transactions=32", "transactions=-1"), wantErr: "invalid transactions"},
+		{name: "malformed digest", verdict: replace(base, "executedSha256="+sha256Hex(outcomeExecuted), "executedSha256="+strings.ToUpper(sha256Hex(outcomeExecuted))), wantErr: "executedSha256 is malformed"},
+		{name: "on-history line without a count", verdict: testVerdict(verdictFields{onHistorySet: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:3"}), wantErr: "on-history exclusions line is malformed"},
+		{name: "on-history line with foreign characters", verdict: testVerdict(verdictFields{onHistory: 1, onHistorySet: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:3;drop"}), wantErr: "on-history exclusions line is malformed"},
+		{name: "on-history line", verdict: testVerdict(verdictFields{onHistory: 1, onHistorySet: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:3"}), wantSites: []string{"dfw", "iad"}},
+		// F045 (AREA=S cross-scope): the source must fit the status fields.
+		{name: "source name outside Kubernetes bounds", verdict: replace(base, "sourceName=src", "sourceName=Src_Bad"), wantErr: "archive source"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := parsePITRVerdict(tt.verdict, req)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(res.ReplaySites, tt.wantSites) || res.ReplaySitesOmitted != tt.wantOmitted {
+				t.Fatalf("sites %v omitted %d, want %v and %d", res.ReplaySites, res.ReplaySitesOmitted, tt.wantSites, tt.wantOmitted)
 			}
 		})
 	}

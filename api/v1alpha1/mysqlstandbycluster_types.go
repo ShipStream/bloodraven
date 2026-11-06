@@ -424,11 +424,13 @@ const (
 
 	// StandbyConditionSourceConfigKnown is True when the controller has
 	// resolved at least one full dump AND at least one binlog manifest
-	// under the configured prefix. The default `kubectl get` printcolumn
+	// under the configured prefix, and verified the source PITR archive's
+	// identity (descriptor and every manifest). The default `kubectl get` printcolumn
 	// surfaces this as the neutral `SourceKnown`.
 	//
 	// Reasons:
-	//   - DumpFound (True): a dump and at least one binlog manifest exist.
+	//   - DumpFound (True): a dump and at least one binlog manifest exist,
+	//     and the source archive's descriptor and manifests verified.
 	//   - NoDumpFound (False): no dump @.json under the prefix.
 	//   - NoBinlogManifests (False): a dump WAS found, but no PITR binlog
 	//     manifests exist under <prefix>/binlogs/ yet. This is NOT a
@@ -445,6 +447,17 @@ const (
 	//     good) and no BucketScanned event is emitted. Distinct from
 	//     MetadataUnreadable (which is genuine corruption) and ListFailed.
 	//   - ConfigError (False): propagated from a storage-backend error.
+	//   - Archive* (False): the source PITR archive was refused, while the
+	//     dump is still published without an archive window. The reason
+	//     is the refusal token without its "PITR" prefix:
+	//     ArchiveDescriptorMissing, ArchiveLegacy, ArchiveVersionUnsupported,
+	//     ArchiveObjectInvalid, ArchiveEncryptionMismatch,
+	//     ArchiveKeyMismatch, ArchiveIdentityMismatch (a manifest names
+	//     another archive), ArchiveHistoryReset (a site's manifest records a
+	//     reset epoch), ArchiveUnsafeHistory (every site carries a
+	//     history-integrity marker), or ArchiveUnreadable (no token). A
+	//     marked site among unmarked ones is left out of the window
+	//     instead.
 	StandbyConditionSourceConfigKnown = "SourceConfigKnown"
 
 	// StandbyConditionRestorable is True when the most recent owned

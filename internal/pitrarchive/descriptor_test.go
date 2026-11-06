@@ -1,9 +1,15 @@
 package pitrarchive
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
 )
 
 var (
@@ -187,4 +193,104 @@ func TestIsIgnoredArchiveKey(t *testing.T) {
 	if got := DescriptorKey("team/binlogs"); got != "team/binlogs/archive.json" {
 		t.Fatalf("DescriptorKey = %q", got)
 	}
+}
+
+// F046/F138-style: a stray '}' after the object is trailing data too
+// (Decoder.More does not see it), and only a newer version (or an
+// unknown encryption mode) carries the upgrade remedy; corrupt bytes get
+// the repair procedure.
+func TestParseDescriptorProcedureByCause(t *testing.T) {
+	pd, _ := NewDescriptor(testSource, testDest(t), encNone, nil, "iad", testNow)
+	valid, _ := pd.Canonical()
+	sub := func(old, new string) string { return strings.Replace(string(valid), old, new, 1) }
+	cases := []struct {
+		name, raw string
+		want      string
+	}{
+		{"truncated", `{`, procedureCorrupt},
+		{"stray brace", string(valid) + `}`, procedureCorrupt},
+		{"trailing garbage", string(valid) + ` x`, procedureCorrupt},
+		{"second value", string(valid) + `{}`, procedureCorrupt},
+		{"wrong kind", sub(`"kind":"BloodravenPITRArchive"`, `"kind":"Other"`), procedureCorrupt},
+		{"version 0", sub(`"version":1`, `"version":0`), procedureCorrupt},
+		{"malformed id", sub(pd.ArchiveID, "ar1-short"), procedureCorrupt},
+		{"version 2", sub(`"version":1`, `"version":2`), procedureVersion},
+		{"unknown mode", sub(`"mode":"None"`, `"mode":"KMS"`), procedureVersion},
+	}
+	for _, c := range cases {
+		_, err := ParseDescriptor([]byte(c.raw))
+		var ve *VerifyError
+		if !errors.As(err, &ve) || ve.Token != TokenArchiveVersionUnsupported || ve.Procedure != c.want {
+			t.Errorf("%s: err = %v, want token %s with procedure %q", c.name, err, TokenArchiveVersionUnsupported, c.want)
+		}
+	}
+	// The procedure survives ParseAndVerifyDescriptor.
+	dest := testDest(t)
+	_, err := ParseAndVerifyDescriptor([]byte(`{`), Expectation{Role: RoleReader, Destination: dest, Encryption: encNone}, nil)
+	if err == nil || !strings.Contains(err.Error(), procedureCorrupt) || strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("corrupt descriptor refusal = %v, want the repair procedure", err)
+	}
+}
+
+// F045: a descriptor whose source cannot be written to the API status
+// (namespace > 63, name > 253, not DNS-1123) is refused at parse time.
+func TestParseDescriptorRefusesSourceOutsideAPIBounds(t *testing.T) {
+	pd, _ := NewDescriptor(testSource, testDest(t), encNone, nil, "iad", testNow)
+	for name, src := range map[string]Source{
+		"namespace 64":        {Namespace: strings.Repeat("a", 64), Name: "orders", UID: goldenUID},
+		"namespace uppercase": {Namespace: "DB", Name: "orders", UID: goldenUID},
+		"name 254":            {Namespace: "db", Name: strings.Repeat("a", 254), UID: goldenUID},
+		"name with slash":     {Namespace: "db", Name: "a/b", UID: goldenUID},
+		"uid too long":        {Namespace: "db", Name: "orders", UID: types.UID(strings.Repeat("u", MaxSourceUIDLength+1))},
+	} {
+		d := *pd
+		d.Source = src
+		b, err := json.Marshal(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseDescriptor(b); err == nil {
+			t.Errorf("%s: ParseDescriptor accepted the descriptor", name)
+		} else if tok, _ := TokenOf(err); tok != TokenArchiveVersionUnsupported {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		if _, err := NewDescriptor(src, testDest(t), encNone, nil, "iad", testNow); err == nil {
+			t.Errorf("%s: NewDescriptor accepted the source", name)
+		}
+	}
+	// The bounds themselves are accepted.
+	ok := Source{Namespace: strings.Repeat("a", 63), Name: strings.Repeat("b", 253), UID: goldenUID}
+	if _, err := NewDescriptor(ok, testDest(t), encNone, nil, "iad", testNow); err != nil {
+		t.Fatalf("maximal source refused: %v", err)
+	}
+}
+
+// F199: descriptor reads are bounded.
+func TestReadDescriptorBytesBounded(t *testing.T) {
+	small := []byte(`{"kind":"x"}`)
+	if b, err := ReadDescriptorBytes(bytes.NewReader(small)); err != nil || !bytes.Equal(b, small) {
+		t.Fatalf("ReadDescriptorBytes(small) = %q, %v", b, err)
+	}
+	exact := bytes.Repeat([]byte{' '}, MaxDescriptorSize)
+	if _, err := ReadDescriptorBytes(bytes.NewReader(exact)); err != nil {
+		t.Fatalf("ReadDescriptorBytes(max) = %v", err)
+	}
+	big := io.MultiReader(bytes.NewReader(exact), strings.NewReader("x"), neverEnding{})
+	_, err := ReadDescriptorBytes(big)
+	if tok, _ := TokenOf(err); tok != TokenArchiveVersionUnsupported || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("ReadDescriptorBytes(oversized) = %v", err)
+	}
+	if _, err := ParseDescriptor(append(exact, ' ')); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("ParseDescriptor(oversized) = %v", err)
+	}
+}
+
+// neverEnding fails the test by hanging if a reader is read past its cap.
+type neverEnding struct{}
+
+func (neverEnding) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'z'
+	}
+	return len(p), nil
 }

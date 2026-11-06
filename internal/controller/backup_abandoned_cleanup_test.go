@@ -9,9 +9,11 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
@@ -224,4 +226,243 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 			t.Fatal("cleanup Job created for a backup that wrote nothing")
 		}
 	})
+}
+
+// runningProducerPod creates a still-running pod of the backup's producer.
+func (f *cleanupFixture) runningProducerPod(t *testing.T, mutate func(*corev1.Pod)) *corev1.Pod {
+	t.Helper()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dump-pod", Namespace: "ns",
+		Labels: map[string]string{labelMysqlBackup: f.mb.Name, labelResourceKind: "backup"}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	if mutate != nil {
+		mutate(pod)
+	}
+	if err := f.c.Create(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	return pod
+}
+
+// F002: every abandoned-mode release waits for the producer to stop, even
+// the early ones (group or profile gone, destination mismatch), since a
+// release lets a backup of the same name reuse the destination while the
+// old uploader may still write to it.
+func TestFinalize_AbandonedEarlyReleaseStopsProducerFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, f *cleanupFixture)
+	}{
+		{"profile gone", func(t *testing.T, f *cleanupFixture) {
+			f.fg.Spec.Backup.Profiles[0].Name = "renamed"
+			if err := f.c.Update(context.Background(), f.fg); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"group gone", func(t *testing.T, f *cleanupFixture) {
+			if err := f.c.Delete(context.Background(), f.fg); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"destination mismatch", func(t *testing.T, f *cleanupFixture) {
+			ctx := context.Background()
+			if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+				t.Fatal(err)
+			}
+			f.mb.Status.ArtifactStorage.Location = "lion/other"
+			if err := f.c.Status().Update(ctx, f.mb); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
+			producer := f.producerJob(t, "")
+			pod := f.runningProducerPod(t, nil)
+			tc.mutate(t, f)
+			if done, _ := f.finalize(t); done {
+				t.Fatal("released before the producing Job was stopped")
+			}
+			if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(producer), &batchv1.Job{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("producing Job not deleted: %v", err)
+			}
+			if done, _ := f.finalize(t); done {
+				t.Fatal("released while the dump pod still runs")
+			}
+			if err := f.c.Delete(context.Background(), pod); err != nil {
+				t.Fatal(err)
+			}
+			drainEvents(f.rec)
+			if done, _ := f.finalize(t); !done {
+				t.Fatal("not released once the producer stopped")
+			}
+			if n := countEvents(f.rec, "ArtifactCleanupSkipped"); n != 1 {
+				t.Fatal("no skip warning")
+			}
+			if _, ok := f.cleanupJob(t); ok {
+				t.Fatal("a cleanup Job ran although cleanup cannot proceed")
+			}
+		})
+	}
+}
+
+// F024: a lost post-create status patch leaves status.artifactStorage
+// empty; the failed producer's own destination is recovered so its stamp
+// and partial dump are cleaned up instead of released silently.
+func TestFinalize_AbandonedRecoversDestinationFromFailedProducer(t *testing.T) {
+	f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
+	ctx := context.Background()
+	producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
+		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerutil.SetControllerReference(f.mb, producer, f.r.Scheme); err != nil {
+		t.Fatal(err)
+	}
+	producer.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	if err := f.c.Create(ctx, producer); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	f.mb.Status.ArtifactStorage = nil
+	if err := f.c.Status().Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := f.finalize(t); done {
+		t.Fatal("released the failed producer's artifacts without cleanup")
+	}
+	if s := f.mb.Status.ArtifactStorage; s == nil || s.Location != "lion/art" || s.Bucket != "bloodraven-backups" {
+		t.Fatalf("planned destination not recovered from the producer: %+v", s)
+	}
+	job, ok := f.cleanupJob(t)
+	if !ok {
+		t.Fatal("no cleanup Job")
+	}
+	if env := envMap(job.Spec.Template.Spec.Containers[0].Env); env["BLOODRAVEN_CLEANUP_MODE"] != "abandoned" || env["BLOODRAVEN_OUTPUT_URL"] != "lion/art" {
+		t.Fatalf("cleanup env %v", env)
+	}
+}
+
+// F025: the passphrase an encrypted producer mounted is recorded with its
+// destination, so cleanup after the stopped Job is gone still reads the
+// stamp with it rather than with a profile edited since.
+func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
+	t.Run("artifactStorageFromJob records the mounted passphrase", func(t *testing.T) {
+		SetOperatorImageDefaults(cleanupTestImage, "bloodraven")
+		t.Cleanup(func() { SetOperatorImageDefaults("", "") })
+		fg := fgWithBackup()
+		profile := fg.Spec.Backup.Profiles[0]
+		profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "secret-a", Key: "pp"}}
+		mb := backupCR("art", "lion", profile.Name)
+		job, err := BuildBackupJob(BackupJobInputs{FailoverGroup: fg, Profile: profile, Backup: mb,
+			SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		storage, err := artifactStorageFromJob(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := storage.PassphraseSecret; got == nil || got.Name != "secret-a" || got.Key != "pp" {
+			t.Fatalf("passphrase not recorded: %+v", got)
+		}
+		profile.Encryption = nil
+		plain, err := BuildBackupJob(BackupJobInputs{FailoverGroup: fg, Profile: profile, Backup: mb,
+			SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if storage, err := artifactStorageFromJob(plain); err != nil || storage.PassphraseSecret != nil {
+			t.Fatalf("plaintext Job records a passphrase: %+v %v", storage, err)
+		}
+	})
+
+	t.Run("cleanup after the producer is gone mounts the recorded Secret", func(t *testing.T) {
+		f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
+		ctx := context.Background()
+		f.fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "secret-b"}}
+		if err := f.c.Update(ctx, f.fg); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+			t.Fatal(err)
+		}
+		f.mb.Status.Encrypted = true
+		f.mb.Status.ArtifactStorage.PassphraseSecret = &v1alpha1.BackupArtifactPassphrase{Name: "secret-a", Key: "pp"}
+		if err := f.c.Status().Update(ctx, f.mb); err != nil {
+			t.Fatal(err)
+		}
+		f.producerJob(t, "", corev1.Volume{Name: "backup-passphrase", VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: "secret-a", Items: []corev1.KeyToPath{{Key: "pp", Path: backupPassphraseFileName}}}}})
+		f.finalize(t) // stops the producer
+		f.finalize(t)
+		job, ok := f.cleanupJob(t)
+		if !ok {
+			t.Fatal("no cleanup Job")
+		}
+		for _, v := range job.Spec.Template.Spec.Volumes {
+			if v.Name == "backup-passphrase" {
+				if v.Secret == nil || v.Secret.SecretName != "secret-a" || len(v.Secret.Items) != 1 || v.Secret.Items[0].Key != "pp" {
+					t.Fatalf("passphrase volume %+v, want the launch Secret secret-a/pp", v.Secret)
+				}
+				return
+			}
+		}
+		t.Fatal("no passphrase volume")
+	})
+}
+
+// F026: a producer pod that never stops (an unreachable node) keeps the
+// deletion held, since it may still write, but after producerStopStuckAfter
+// the wait is reported with the remedy instead of requeueing silently.
+func TestFinalize_AbandonedReportsStuckProducer(t *testing.T) {
+	f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
+	stopping := metav1.NewTime(time.Now().Add(-producerStopStuckAfter - time.Minute))
+	pod := f.runningProducerPod(t, func(p *corev1.Pod) {
+		p.Finalizers = []string{"test/hold"}
+		p.Status.Phase = corev1.PodUnknown
+	})
+	// The pod is Terminating on an unreachable node.
+	if err := f.c.Delete(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	if done, requeue := f.finalize(t); done || requeue != 5*time.Second {
+		t.Fatalf("done=%v requeue=%s, want a quiet short wait before the deadline", done, requeue)
+	}
+	if n := countEvents(f.rec, "ArtifactCleanupProducerStuck"); n != 0 {
+		t.Fatal("stuck warning before the deadline")
+	}
+	f.r.now = func() time.Time { return time.Now().Add(producerStopStuckAfter + time.Minute) }
+	drainEvents(f.rec)
+	done, requeue := f.finalize(t)
+	if done || requeue != 30*time.Second {
+		t.Fatalf("done=%v requeue=%s, want a held deletion", done, requeue)
+	}
+	cond := apiMeta.FindStatusCondition(f.mb.Status.Conditions, ConditionArtifactCleanup)
+	if cond == nil || cond.Reason != cleanupReasonProducerStopStuck || !strings.Contains(cond.Message, "dump-pod") ||
+		!strings.Contains(cond.Message, "--force") {
+		t.Fatalf("condition %+v", cond)
+	}
+	if n := countEvents(f.rec, "Warning ArtifactCleanupProducerStuck"); n != 1 {
+		t.Fatal("no stuck warning")
+	}
+	f.finalize(t)
+	if n := countEvents(f.rec, "ArtifactCleanupProducerStuck"); n != 0 {
+		t.Fatal("stuck warning repeated for an unchanged wait")
+	}
+	if _, ok := f.cleanupJob(t); ok {
+		t.Fatal("cleanup started while the producer may write")
+	}
+
+	// A fresh pod is not reported yet.
+	if got := stuckProducerPods([]corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}},
+		&metav1.Time{Time: time.Now()}, time.Now()); got != "" {
+		t.Fatalf("fresh pod reported stuck: %q", got)
+	}
+	if got := stuckProducerPods([]corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}},
+		&stopping, time.Now()); got != "" {
+		t.Fatalf("terminated pod reported stuck: %q", got)
+	}
 }

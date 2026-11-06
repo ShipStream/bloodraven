@@ -623,3 +623,61 @@ func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) 
 		}
 	})
 }
+
+// F036, F037: a direct S3 or PVC restore source with PITR. The S3 prefix
+// is spelled one way (the writer's, exterior "/" trimmed) for loading,
+// decryption and dump-meta; a source at the root of its store is refused
+// PITRBackupIdentityUnknown, token first, with the remedy.
+func TestBuildRestoreJob_DirectSourcePITR(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+	direct := func(src v1alpha1.InitFromBackupSource, decrypt bool) *v1alpha1.MysqlFailoverGroup {
+		fg := fgWithBackup()
+		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src}
+		fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
+		if decrypt {
+			fg.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pp"}}
+		}
+		return fg
+	}
+	s3 := func(prefix string) v1alpha1.InitFromBackupSource {
+		return v1alpha1.InitFromBackupSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: prefix, CredentialsSecret: "aws"}}
+	}
+
+	for _, decrypt := range []bool{false, true} {
+		fg := direct(s3("/prod/nightly/"), decrypt)
+		r, _ := newReconciler(fg)
+		job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+		if err != nil {
+			t.Fatalf("decrypt=%v: %v", decrypt, err)
+		}
+		for _, c := range job.Spec.Template.Spec.InitContainers {
+			env := envMap(c.Env)
+			if p, ok := env["BLOODRAVEN_SOURCE_PREFIX"]; ok && p != "prod/nightly" {
+				t.Fatalf("decrypt=%v: %s reads prefix %q, want prod/nightly", decrypt, c.Name, p)
+			}
+		}
+		if !decrypt {
+			if got := envMap(job.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_INPUT_URL"]; got != "prod/nightly" {
+				t.Fatalf("load input %q, want prod/nightly", got)
+			}
+		}
+	}
+
+	for name, src := range map[string]v1alpha1.InitFromBackupSource{
+		"S3 without prefix":   s3(""),
+		"S3 prefix of '/'":    s3("/"),
+		"PVC without subPath": {PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dumps"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fg := direct(src, false)
+			r, _ := newReconciler(fg)
+			_, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+			if err == nil || !strings.HasPrefix(err.Error(), "PITRBackupIdentityUnknown: ") ||
+				!strings.Contains(err.Error(), "root of its store") || !strings.Contains(err.Error(), "mysqlBackupRef") {
+				t.Fatalf("err = %v, want a token-first PITRBackupIdentityUnknown refusal", err)
+			}
+		})
+	}
+}

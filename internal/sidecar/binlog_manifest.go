@@ -36,6 +36,10 @@ var (
 	ErrManifestInvalid = errors.New(string(pitrarchive.TokenArchiveObjectInvalid))
 )
 
+// errManifestDecode: the stored manifest bytes are not JSON a Manifest
+// decodes from (content, not transport). Untokenized, as before.
+var errManifestDecode = errors.New("decode manifest")
+
 // PromotionRecord and HistoryIntegrity are defined in pitrarchive so the
 // planner and the sidecar status share one definition (D-43, D-34).
 type (
@@ -135,6 +139,11 @@ type Manifest struct {
 	// HistoryIntegrity is set once on the first history-integrity
 	// violation and never cleared by any writer (D-34).
 	HistoryIntegrity *HistoryIntegrity `json:"historyIntegrity,omitempty"`
+
+	// appendedPromotion is the record AppendPromotionRecord added since
+	// the last save: the one record ArchiveSession.SaveManifest may keep
+	// although an earlier cap eviction named it. Not serialized.
+	appendedPromotion *PromotionRecord
 }
 
 // AppendPromotionRecord appends r and drops the oldest records beyond
@@ -145,6 +154,17 @@ func (m *Manifest) AppendPromotionRecord(r PromotionRecord) {
 	if n := len(m.Promotions) - MaxPromotionRecords; n > 0 {
 		m.Promotions = append([]PromotionRecord(nil), m.Promotions[n:]...)
 	}
+	rec := r
+	m.appendedPromotion = &rec
+}
+
+// appendedPromotionKey is the key of the record appended since the last
+// save, or "".
+func (m *Manifest) appendedPromotionKey() string {
+	if m.appendedPromotion == nil {
+		return ""
+	}
+	return promotionRecordKey(*m.appendedPromotion)
 }
 
 // checkManifestVersion refuses every manifest version except
@@ -231,7 +251,7 @@ func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) 
 	}
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("decode manifest %s: %w", manifestKey(prefix, site), err)
+		return nil, fmt.Errorf("%w %s: %w", errManifestDecode, manifestKey(prefix, site), err)
 	}
 	if err := checkManifestVersion(manifestKey(prefix, site), &m); err != nil {
 		return nil, err

@@ -148,7 +148,9 @@ spec:
                   timestamp:
                     description: |-
                       Timestamp is the target instant, a whole second in the same forms as
-                      PointInTimeSpec.StopDatetime (fractional seconds are refused). Replay restores the history of the first archived
+                      PointInTimeSpec.StopDatetime (fractional seconds are refused; a
+                      stored fractional value must be corrected in the same update, as for
+                      StopDatetime). Replay restores the history of the first archived
                       transaction committed at or after it, cut just before that
                       transaction. Required when Mode=timestamp; ignored otherwise.
                     maxLength: 40
@@ -560,8 +562,9 @@ spec:
                     - ArchiveHead
                     type: string
                   replaySites:
-                    description: ReplaySites are the sites whose archived binlogs
-                      were staged, sorted.
+                    description: |-
+                      ReplaySites are the sites whose archived binlogs were staged, sorted;
+                      see ReplaySitesOmitted for the ones the verdict left out.
                     items:
                       maxLength: 63
                       pattern: ^[a-z0-9-]+$
@@ -569,6 +572,14 @@ spec:
                     maxItems: 16
                     type: array
                     x-kubernetes-list-type: atomic
+                  replaySitesOmitted:
+                    description: |-
+                      ReplaySitesOmitted counts further staged sites the verdict did not
+                      name: its site list is bounded, so ReplaySites is complete only when
+                      this is zero.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   replayedBinlogCount:
                     description: |-
                       ReplayedBinlogCount is the number of distinct archived binlogs the
@@ -606,18 +617,20 @@ spec:
                   verified coverage window against their RPO target.
                 properties:
                   file:
-                    description: File is the last binlog file applied, e.g. "mysql-bin.000412".
+                    description: |-
+                      File is the last binlog file the replay applied, e.g.
+                      "mysql-bin.000412".
                     type: string
                   position:
-                    description: |-
-                      Position is the byte offset within File of the last applied
-                      event.
+                    description: Position is not reported by current releases and
+                      stays unset.
                     format: int64
                     type: integer
                   timestamp:
                     description: |-
-                      Timestamp is the wall-clock time of the last applied event, in
-                      RFC3339. Used to compute bloodraven_backup_verification_replay_lag_seconds.
+                      Timestamp is the newest original commit time among the replayed
+                      transactions. Used to compute
+                      bloodraven_backup_verification_replay_lag_seconds.
                     format: date-time
                     type: string
                 type: object

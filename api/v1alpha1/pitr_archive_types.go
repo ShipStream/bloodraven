@@ -74,15 +74,18 @@ type PITRArchiveIdentity struct {
 type PITRArchiveObservedState string
 
 const (
-	// PITRArchiveAwaitingDescriptor means no sidecar has verified a
-	// descriptor yet (no writer has created it, or a replica is waiting for
-	// the writer).
+	// PITRArchiveAwaitingDescriptor means not every site has verified the
+	// descriptor yet and none refused it: no writer has created it, a
+	// replica is waiting for the writer, or a site has not reported the
+	// active destination yet. Sites that did verify may already supply
+	// ArchiveID.
 	PITRArchiveAwaitingDescriptor PITRArchiveObservedState = "AwaitingDescriptor"
-	// PITRArchiveVerified means every reporting sidecar verified the
-	// descriptor against this group's identity.
+	// PITRArchiveVerified means every site of the group verified the
+	// descriptor against this group's identity, all with one archive ID.
 	PITRArchiveVerified PITRArchiveObservedState = "Verified"
-	// PITRArchiveRefused means at least one sidecar refused the archive;
-	// Reason says why.
+	// PITRArchiveRefused means at least one site refused the archive
+	// (Reason says why), or sites verified different archive IDs at one
+	// destination (Reason and ArchiveID empty: nothing is certified).
 	PITRArchiveRefused PITRArchiveObservedState = "Refused"
 )
 
@@ -103,13 +106,18 @@ type PITRArchiveObservation struct {
 	// +optional
 	// +kubebuilder:validation:Pattern=`^(ar1-[a-z2-7]{26})?$`
 	ArchiveID string `json:"archiveID,omitempty"`
-	// EncryptionMode is the archive's encryption mode.
+	// EncryptionMode is the encryption mode the group's profile configures
+	// for the archive; once a site has verified the descriptor it is the
+	// mode that site reported, which equals the descriptor's. While the
+	// archive is refused (ArchiveEncryptionMismatch, say) it is still the
+	// configured mode, not the descriptor's.
 	// +optional
 	EncryptionMode PITRArchiveEncryptionMode `json:"encryptionMode,omitempty"`
 	// State summarizes the sidecars' reports.
 	// +required
 	State PITRArchiveObservedState `json:"state"`
-	// Reason is set when State is Refused.
+	// Reason is set when State is Refused by a site's refusal; empty when
+	// sites verified conflicting archive IDs.
 	// +optional
 	Reason PITRArchiveRefusalReason `json:"reason,omitempty"`
 	// KeyRevision is the snapshot name every counted sidecar echoed (#203);
@@ -184,13 +192,20 @@ type PointInTimeResult struct {
 	// Archive identifies the archive the replay read.
 	// +optional
 	Archive *PITRArchiveIdentity `json:"archive,omitempty"`
-	// ReplaySites are the sites whose archived binlogs were staged, sorted.
+	// ReplaySites are the sites whose archived binlogs were staged, sorted;
+	// see ReplaySitesOmitted for the ones the verdict left out.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9-]+$`
 	// +kubebuilder:validation:items:MaxLength=63
 	ReplaySites []string `json:"replaySites,omitempty"`
+	// ReplaySitesOmitted counts further staged sites the verdict did not
+	// name: its site list is bounded, so ReplaySites is complete only when
+	// this is zero.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ReplaySitesOmitted int32 `json:"replaySitesOmitted,omitempty"`
 	// SegmentCount is the number of replay segments.
 	// +optional
 	SegmentCount int32 `json:"segmentCount,omitempty"`

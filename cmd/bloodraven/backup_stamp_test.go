@@ -113,7 +113,7 @@ func TestWriteBackupStamp(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, reused, err := writeBackupStamp(ctx, store, stampKey, tt.desired)
+			got, reused, err := writeBackupStamp(ctx, store, store, stampKey, tt.desired)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("err = %v, want %v", err, tt.wantErr)
@@ -144,7 +144,7 @@ func TestFinishBackupStamp(t *testing.T) {
 	ctx := context.Background()
 	end := backupmeta.NewMicroTime(stampStart.Add(42 * time.Minute))
 	store := stampTestStore(t)
-	if _, _, err := writeBackupStamp(ctx, store, stampKey, startedStamp(stampStart)); err != nil {
+	if _, _, err := writeBackupStamp(ctx, store, store, stampKey, startedStamp(stampStart)); err != nil {
 		t.Fatal(err)
 	}
 	before := stampBytes(t, store, stampKey)
@@ -181,7 +181,7 @@ func TestFinishBackupStamp(t *testing.T) {
 		t.Fatalf("missing stamp: %v", err)
 	}
 	early := stampTestStore(t)
-	if _, _, err := writeBackupStamp(ctx, early, stampKey, startedStamp(stampStart)); err != nil {
+	if _, _, err := writeBackupStamp(ctx, early, early, stampKey, startedStamp(stampStart)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := finishBackupStamp(ctx, early, stampKey, stampTemplate(), backupmeta.NewMicroTime(stampStart.Add(-time.Second))); !errors.Is(err, backupmeta.ErrStampInvalid) {
@@ -195,7 +195,7 @@ func TestBackupStampEncrypted(t *testing.T) {
 	ctx := context.Background()
 	raw := stampTestStore(t)
 	store := sidecar.WrapWithEncryptionOptions(raw, []byte("dump key"), false)
-	if _, _, err := writeBackupStamp(ctx, store, stampKey, startedStamp(stampStart)); err != nil {
+	if _, _, err := writeBackupStamp(ctx, store, store, stampKey, startedStamp(stampStart)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := finishBackupStamp(ctx, store, stampKey, stampTemplate(), backupmeta.NewMicroTime(stampStart.Add(time.Hour))); err != nil {

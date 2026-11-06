@@ -155,7 +155,7 @@ func TestPITRArchiveHandoffRequiresSameGroupAndSites(t *testing.T) {
 
 func scanObs(scanAt time.Time, failed *int64, lastErr string) pitrObs {
 	return pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, StoreReady: pitrBool(true),
-		LastScanAt: scanAt, ConsecutiveFailedScans: failed, LastError: lastErr}}
+		LastScanAt: scanAt, ConsecutiveFailedScans: failed, LastError: lastErr, Archive: pitrArchiveBlock()}}
 }
 
 func pitrInt(v int64) *int64 { return &v }
@@ -241,7 +241,7 @@ func TestPITRArchiveNeverAnsweredSiteGetsLongerGrace(t *testing.T) {
 // no longer pending it is False/ArchiverDisabled.
 func TestPITRArchiveDisabledDuringPendingRolloutIsAwaitingRollout(t *testing.T) {
 	iad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"enabled":true,"storeReady":true,"consecutiveFailedScans":0}`)
+		fmt.Fprint(w, `{"enabled":true,"storeReady":true,"consecutiveFailedScans":0,"archive":{"destination":"s3://b/p","encryptionMode":"None","state":"Verified","archiveID":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
 	}))
 	defer iad.Close()
 	pdx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

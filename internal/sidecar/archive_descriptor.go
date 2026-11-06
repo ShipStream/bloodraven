@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -44,6 +45,16 @@ type ArchiveSession struct {
 	probed bool                    // atomic create certified in this session
 	desc   *pitrarchive.Descriptor // verified descriptor; nil until verified
 	guards map[string]manifestGuard
+	// createdBody holds the bytes this session created with PutIfAbsent
+	// until a read verifies them, so "archive descriptor created" is
+	// logged once even when the read-back right after the create failed.
+	createdBody []byte
+	// lastAttempt is when Open (also through EnsureCreated) last ran.
+	lastAttempt time.Time
+	// unpublished holds binlog objects this session uploaded whose
+	// manifest publication then failed, by key, so a retry publishes the
+	// already uploaded object instead of uploading it again (F213).
+	unpublished map[string]ManifestEntry
 
 	mu         sync.Mutex
 	state      pitrarchive.ObservedState
@@ -56,28 +67,92 @@ type ArchiveSession struct {
 	transient bool
 }
 
+// errArchiveIdentityConfig marks a writer identity that cannot create the
+// descriptor: a configuration error, reported as such and never as a
+// transient store failure.
+var errArchiveIdentityConfig = errors.New("archive identity")
+
 // manifestGuard is what this session last saw or wrote in a site manifest.
 // Saves never drop a history-integrity marker or a promotion record the
 // session knows about, even when a caller saves a stale copy (D-34, D-43).
 type manifestGuard struct {
 	marker     *HistoryIntegrity
 	promotions []PromotionRecord
-	// evicted holds the keys of records the MaxPromotionRecords cap
-	// dropped. They are never re-added, so the cap's choice is stable
-	// across saves instead of a dropped record coming back and evicting
-	// another.
-	evicted map[string]bool
+	// evicted holds the keys (and ObservedAt) of records the
+	// MaxPromotionRecords cap dropped. They are never re-added, from a
+	// stale base or the guard, so the cap's choice is stable across saves
+	// instead of a dropped record coming back and evicting another.
+	evicted map[string]time.Time
+	// floor bounds evicted: a key observed before floor is pruned from
+	// evicted, and any record observed before floor that the guard does
+	// not retain is treated as evicted. Such a record, re-added, would sort
+	// before every retained record and be the cap's first drop anyway; the
+	// floor only makes that drop independent of the protection the cap
+	// gives a base's last record. Zero until the first prune.
+	floor time.Time
 }
 
 // merge returns base plus the records the guard knows that base lacks,
-// capped (see mergePromotionRecords), and remembers the result.
-func (g *manifestGuard) merge(base []PromotionRecord) []PromotionRecord {
+// capped (see mergePromotionRecords), and remembers the result. appended
+// is the key of the record the caller just appended to base
+// (Manifest.AppendPromotionRecord), or "": only that record may survive
+// in base after an eviction named it.
+func (g *manifestGuard) merge(base []PromotionRecord, appended string) []PromotionRecord {
 	if g.evicted == nil {
-		g.evicted = map[string]bool{}
+		g.evicted = map[string]time.Time{}
 	}
-	out := mergePromotionRecords(base, g.promotions, g.evicted)
+	out := mergePromotionRecords(g.filterEvicted(base, appended), g.promotions, g.evicted)
 	g.promotions = append([]PromotionRecord(nil), out...)
+	g.pruneEvicted()
 	return out
+}
+
+// filterEvicted drops from base the records the cap already evicted, so a
+// stale manifest copy cannot resurrect them, keeping only the explicit new
+// append.
+func (g *manifestGuard) filterEvicted(base []PromotionRecord, appended string) []PromotionRecord {
+	if len(g.evicted) == 0 && g.floor.IsZero() {
+		return base
+	}
+	retained := make(map[string]bool, len(g.promotions))
+	for _, r := range g.promotions {
+		retained[promotionRecordKey(r)] = true
+	}
+	out := make([]PromotionRecord, 0, len(base))
+	for _, r := range base {
+		k := promotionRecordKey(r)
+		_, evicted := g.evicted[k]
+		stale := !g.floor.IsZero() && r.ObservedAt.Before(g.floor) && !retained[k]
+		if k != appended && (evicted || stale) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// pruneEvicted keeps evicted bounded (F197): keys observed before the
+// oldest retained record move under floor.
+func (g *manifestGuard) pruneEvicted() {
+	if len(g.evicted) == 0 || len(g.promotions) == 0 {
+		return
+	}
+	oldest := g.promotions[0].ObservedAt
+	for _, r := range g.promotions[1:] {
+		if r.ObservedAt.Before(oldest) {
+			oldest = r.ObservedAt
+		}
+	}
+	pruned := false
+	for k, at := range g.evicted {
+		if at.Before(oldest) {
+			delete(g.evicted, k)
+			pruned = true
+		}
+	}
+	if pruned && oldest.After(g.floor) {
+		g.floor = oldest
+	}
 }
 
 // OpenArchiveForWrite builds a writer session for prefix and opens it: an
@@ -187,6 +262,10 @@ func (s *ArchiveSession) settle(err error) error {
 	case errors.Is(err, ErrDescriptorAbsent):
 		s.desc = nil
 		s.state, s.reason = pitrarchive.StateAwaitingDescriptor, ""
+	case errors.Is(err, errArchiveIdentityConfig):
+		// Configuration, not the store: the prefix is still empty.
+		s.desc = nil
+		s.state, s.reason = pitrarchive.StateAwaitingDescriptor, ""
 	default:
 		if token, ok := pitrarchive.TokenOf(err); ok {
 			s.desc = nil
@@ -202,40 +281,92 @@ func (s *ArchiveSession) settle(err error) error {
 }
 
 func (s *ArchiveSession) loadDescriptor(ctx context.Context) (*pitrarchive.Descriptor, []byte, error) {
-	key := pitrarchive.DescriptorKey(s.prefix)
-	b, ok, err := s.raw.Get(ctx, key)
+	b, ok, err := readDescriptor(ctx, s.raw, s.prefix)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read archive descriptor %s: %w", key, err)
+		return nil, nil, s.withDestination(err)
 	}
 	if !ok {
 		return nil, nil, nil
 	}
 	d, err := pitrarchive.ParseDescriptor(b)
 	if err != nil {
-		var ve *pitrarchive.VerifyError
-		if errors.As(err, &ve) {
-			ve.Destination = s.identity.Destination.String()
-		}
-		return nil, b, err
+		return nil, b, s.withDestination(err)
 	}
 	return d, b, nil
+}
+
+// readDescriptor reads archive.json under prefix, bounded by
+// pitrarchive.MaxDescriptorSize so a corrupt or hostile object is refused
+// without buffering it (F199). ok is false when it is absent. The S3 and
+// PVC backends read at most one byte past the cap; any other store (test
+// fakes) is read whole and then checked.
+func readDescriptor(ctx context.Context, raw ArchiveStore, prefix string) ([]byte, bool, error) {
+	key := pitrarchive.DescriptorKey(prefix)
+	var (
+		b   []byte
+		ok  bool
+		err error
+	)
+	if lg, bounded := raw.(limitedGetter); bounded {
+		b, ok, err = lg.getLimited(ctx, key, pitrarchive.MaxDescriptorSize+1)
+	} else {
+		b, ok, err = raw.Get(ctx, key)
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read archive descriptor %s: %w", key, err)
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	if b, err = pitrarchive.ReadDescriptorBytes(bytes.NewReader(b)); err != nil {
+		return nil, false, err
+	}
+	return b, true, nil
 }
 
 // Open loads and verifies the descriptor. With no descriptor it classifies
 // the prefix: empty gives ErrDescriptorAbsent; v2 manifests give
 // PITRArchiveDescriptorMissing; any other object gives PITRArchiveLegacy.
 func (s *ArchiveSession) Open(ctx context.Context) error {
-	d, _, err := s.loadDescriptor(ctx)
+	s.lastAttempt = time.Now()
+	d, b, err := s.loadDescriptor(ctx)
 	if err != nil {
 		return s.settle(err)
 	}
 	if d != nil {
-		return s.settle(s.accept(d))
+		err := s.accept(d)
+		if err == nil {
+			s.noteCreated(d, b)
+		}
+		return s.settle(err)
 	}
 	if err := s.classifyAbsent(ctx); err != nil {
 		return s.settle(err)
 	}
 	return s.settle(ErrDescriptorAbsent)
+}
+
+// attemptedSince reports whether Open ran at or after t.
+func (s *ArchiveSession) attemptedSince(t time.Time) bool {
+	return !s.lastAttempt.IsZero() && !s.lastAttempt.Before(t)
+}
+
+// noteCreated logs "archive descriptor created" when b, just verified, is
+// the body this session created, and forgets the body: the event is
+// logged once per create, also when the read-back right after the create
+// failed and a later Open is the first to verify it (F195).
+func (s *ArchiveSession) noteCreated(d *pitrarchive.Descriptor, b []byte) {
+	if s.createdBody == nil {
+		return
+	}
+	mine := bytes.Equal(b, s.createdBody)
+	s.createdBody = nil
+	if mine {
+		// The archiver's logger already carries site; repeating it here
+		// would emit a duplicate "site" key.
+		s.logger.Info("archive descriptor created",
+			"archiveID", d.ArchiveID, "destination", s.identity.Destination.String())
+	}
 }
 
 func (s *ArchiveSession) accept(d *pitrarchive.Descriptor) error {
@@ -264,23 +395,30 @@ func (s *ArchiveSession) EnsureCreated(ctx context.Context) error {
 	if !errors.Is(err, ErrDescriptorAbsent) {
 		return err
 	}
+	// Creation needs the source namespace and name, which verification
+	// does not. Build the descriptor before probing the store, so a
+	// missing or invalid creation identity is a configuration error, not
+	// a store failure retried forever (F194).
+	desc, err := pitrarchive.NewDescriptor(s.identity.Source, s.identity.Destination, s.identity.Encryption, s.passphrase, s.site, s.now())
+	if err != nil {
+		return s.settle(fmt.Errorf("%w: cannot create the archive descriptor (POD_NAMESPACE, FAILOVER_GROUP): %v", errArchiveIdentityConfig, err))
+	}
+	body, err := desc.Canonical()
+	if err != nil {
+		return s.settle(err)
+	}
 	if !s.probed {
 		if err := ProbeAtomicCreate(ctx, s.raw, s.prefix); err != nil {
 			return s.settle(s.withDestination(err))
 		}
 		s.probed = true
 	}
-	desc, err := pitrarchive.NewDescriptor(s.identity.Source, s.identity.Destination, s.identity.Encryption, s.passphrase, s.site, s.now())
-	if err != nil {
-		return s.settle(fmt.Errorf("%w: %v", pitrarchive.ErrInvalidExpectation, err))
-	}
-	body, err := desc.Canonical()
-	if err != nil {
-		return s.settle(err)
-	}
 	key := pitrarchive.DescriptorKey(s.prefix)
 	err = PutIfAbsent(ctx, s.raw, key, bytes.NewReader(body), int64(len(body)))
 	created := err == nil
+	if created {
+		s.createdBody = body
+	}
 	switch {
 	case created, errors.Is(err, ErrObjectExists):
 	case errors.Is(err, ErrConditionalWriteUnsupported):
@@ -304,16 +442,13 @@ func (s *ArchiveSession) EnsureCreated(ctx context.Context) error {
 	// An S3 SDK retry of a create whose first attempt landed gets 412 for
 	// our own object. The body names this site and a µs creation time, so
 	// identical bytes are this writer's create, not a sibling's.
-	created = created || bytes.Equal(gotBytes, body)
+	if bytes.Equal(gotBytes, body) {
+		s.createdBody = body
+	}
 	if err := s.accept(got); err != nil {
 		return s.settle(err)
 	}
-	if created {
-		// The archiver's logger already carries site; repeating it here
-		// would emit a duplicate "site" key.
-		s.logger.Info("archive descriptor created",
-			"archiveID", got.ArchiveID, "destination", s.identity.Destination.String())
-	}
+	s.noteCreated(got, gotBytes)
 	return s.settle(nil)
 }
 
@@ -417,7 +552,7 @@ func (s *ArchiveSession) remember(m *Manifest) {
 		marker := *m.HistoryIntegrity
 		g.marker = &marker
 	}
-	g.merge(m.Promotions)
+	g.merge(m.Promotions, m.appendedPromotionKey())
 	s.guards[m.Site] = g
 }
 
@@ -442,7 +577,7 @@ func (s *ArchiveSession) SaveManifest(ctx context.Context, m *Manifest) error {
 		marker := *g.marker
 		m.HistoryIntegrity = &marker
 	}
-	m.Promotions = g.merge(m.Promotions)
+	m.Promotions = g.merge(m.Promotions, m.appendedPromotionKey())
 	s.guards[m.Site] = g
 	buf, err := encodeManifest(s.prefix, m)
 	if err != nil {
@@ -460,7 +595,24 @@ func (s *ArchiveSession) SaveManifest(ctx context.Context, m *Manifest) error {
 		return fmt.Errorf("read back manifest %s: stored bytes differ from the save; another writer may own this site", key)
 	}
 	s.remember(m)
+	m.appendedPromotion = nil
 	return nil
+}
+
+// noteUnpublished records that entry's object was uploaded to key but its
+// manifest row was not published.
+func (s *ArchiveSession) noteUnpublished(key string, entry ManifestEntry) {
+	if s.unpublished == nil {
+		s.unpublished = map[string]ManifestEntry{}
+	}
+	s.unpublished[key] = entry
+}
+
+// takeUnpublished returns and forgets the unpublished upload at key.
+func (s *ArchiveSession) takeUnpublished(key string) (ManifestEntry, bool) {
+	entry, ok := s.unpublished[key]
+	delete(s.unpublished, key)
+	return entry, ok
 }
 
 // DeleteObject removes a retired archive object after Reverify (§3.5).
@@ -478,11 +630,13 @@ func promotionRecordKey(r PromotionRecord) string {
 // mergePromotionRecords returns base plus every record in extra that base
 // lacks and evicted does not name, ordered by ObservedAt and capped at
 // MaxPromotionRecords (newest kept); the keys it drops are added to
-// evicted (nil: not tracked). The cap never drops base's last record, the
-// one a writer just appended: after a backward clock step it sorts first,
-// and dropping it would report a promotion recorded that the saved
-// manifest lacks.
-func mergePromotionRecords(base, extra []PromotionRecord, evicted map[string]bool) []PromotionRecord {
+// evicted with their ObservedAt (nil: not tracked). The cap never drops
+// base's last record, the one a writer just appended: after a backward
+// clock step it sorts first, and dropping it would report a promotion
+// recorded that the saved manifest lacks. The guard removes evicted
+// records from base first (manifestGuard.filterEvicted), so base's last
+// record is never one the cap already dropped.
+func mergePromotionRecords(base, extra []PromotionRecord, evicted map[string]time.Time) []PromotionRecord {
 	key := promotionRecordKey
 	have := make(map[string]bool, len(base))
 	for _, r := range base {
@@ -490,7 +644,8 @@ func mergePromotionRecords(base, extra []PromotionRecord, evicted map[string]boo
 	}
 	var missing []PromotionRecord
 	for _, r := range extra {
-		if k := key(r); !have[k] && !evicted[k] {
+		k := key(r)
+		if _, gone := evicted[k]; !have[k] && !gone {
 			have[k] = true
 			missing = append(missing, r)
 		}
@@ -513,7 +668,7 @@ func mergePromotionRecords(base, extra []PromotionRecord, evicted map[string]boo
 		if k := key(r); n > 0 && k != protected {
 			n--
 			if evicted != nil {
-				evicted[k] = true
+				evicted[k] = r.ObservedAt
 			}
 			continue
 		}
@@ -525,10 +680,43 @@ func mergePromotionRecords(base, extra []PromotionRecord, evicted map[string]boo
 // archivePrefixContents classifies a prefix that has no descriptor.
 type archivePrefixContents struct {
 	v2Manifests    bool // a manifest that loads as version 2 with the mounted key
-	otherManifests bool // a manifest that does not
+	otherManifests bool // a manifest whose content is not a readable v2 manifest
 	otherObjects   bool // any other non-ignored key
 }
 
+// prefixListError is a failed listing of an archive prefix. Its message
+// carries the remedy for its cause (listRemedy).
+type prefixListError struct {
+	prefix string
+	err    error
+}
+
+func (e *prefixListError) Error() string {
+	return fmt.Sprintf("list archive prefix %q: %v; %s", e.prefix, e.err, listRemedy(e.err))
+}
+
+func (e *prefixListError) Unwrap() error { return e.err }
+
+// listRemedy names the fix for a failed listing by its cause: an S3
+// access denial needs s3:ListBucket, a filesystem permission error needs
+// the volume to be readable, anything else is retried (F073).
+func listRemedy(err error) string {
+	switch {
+	case isAccessDenied(err):
+		return "grant s3:ListBucket on the bucket"
+	case errors.Is(err, fs.ErrPermission):
+		return "make the archive volume readable by the sidecar's user"
+	default:
+		return "check that the archive store is reachable; it is retried"
+	}
+}
+
+// classifyArchivePrefix lists prefix and loads each manifest. A manifest
+// whose content cannot be a v2 manifest (undecodable, another version,
+// another key, tampered) counts as otherManifests; a failure to read it
+// (transport, store or cancellation) is returned, never classified, so an
+// outage is not reported as legacy content (F072). A listing failure is a
+// *prefixListError.
 func classifyArchivePrefix(ctx context.Context, store, raw ArchiveStore, prefix string) (archivePrefixContents, error) {
 	var c archivePrefixContents
 	listPrefix := prefix
@@ -537,10 +725,10 @@ func classifyArchivePrefix(ctx context.Context, store, raw ArchiveStore, prefix 
 	}
 	keys, err := raw.List(ctx, listPrefix)
 	if err != nil {
-		if isAccessDenied(err) {
-			return c, fmt.Errorf("list archive prefix %q: %w; grant s3:ListBucket on the bucket", prefix, err)
+		if ctx.Err() != nil {
+			return c, ctx.Err()
 		}
-		return c, fmt.Errorf("list archive prefix %q: %w", prefix, err)
+		return c, &prefixListError{prefix: prefix, err: err}
 	}
 	descriptor := pitrarchive.DescriptorKey(prefix)
 	for _, key := range keys {
@@ -552,16 +740,35 @@ func classifyArchivePrefix(ctx context.Context, store, raw ArchiveStore, prefix 
 			c.otherObjects = true
 			continue
 		}
-		if m, err := loadManifest(ctx, store, prefix, site); err == nil && m.Version == ManifestVersion {
+		// loadManifest succeeds only for a version-2 manifest.
+		_, err := loadManifest(ctx, store, prefix, site)
+		switch {
+		case err == nil:
 			c.v2Manifests = true
-		} else {
-			if ctx.Err() != nil {
-				return c, ctx.Err()
-			}
+		case ctx.Err() != nil:
+			return c, ctx.Err()
+		case isManifestContentError(err):
 			c.otherManifests = true
+		default:
+			return c, fmt.Errorf("read manifest %s: %w", key, err)
 		}
 	}
 	return c, nil
+}
+
+// isManifestContentError reports whether a loadManifest failure is about
+// the stored bytes (they are not a v2 manifest this key can read) rather
+// than the store failing to deliver them.
+func isManifestContentError(err error) bool {
+	for _, content := range []error{
+		errManifestDecode, ErrManifestLegacy, ErrManifestVersionUnsupported, ErrManifestInvalid,
+		ErrTamperedOrDowngrade, errObjectUndecryptable,
+	} {
+		if errors.Is(err, content) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c archivePrefixContents) empty() bool {
@@ -604,30 +811,41 @@ func isAccessDenied(err error) bool {
 }
 
 // OpenArchiveForRead loads and verifies the descriptor for a reader
-// (pitr-download, dump-meta, pitr-archive-check). With no descriptor it
-// refuses PITRArchiveNotFound (no manifests), PITRArchiveDescriptorMissing
-// (version-2 manifests) or PITRArchiveLegacy (other manifests). A listing
-// failure refuses PITRArchiveListFailed. store may be an encrypting store;
-// its passphrase verifies the keyCheck.
+// (pitr-download, the standby reconciler's discovery scan and, with #203,
+// pitr-archive-check). With no descriptor it refuses PITRArchiveNotFound
+// (no manifests), PITRArchiveDescriptorMissing (version-2 manifests) or
+// PITRArchiveLegacy (other manifests). A listing failure refuses
+// PITRArchiveListFailed with the remedy for its cause; a failed read
+// (descriptor or manifest) and cancellation are returned as plain errors,
+// to be retried. store may be an encrypting store; its passphrase
+// verifies the keyCheck.
 func OpenArchiveForRead(ctx context.Context, store ArchiveStore, prefix string, expect pitrarchive.Expectation) (*pitrarchive.Descriptor, error) {
 	if expect.Role != pitrarchive.RoleReader {
 		return nil, fmt.Errorf("%w: OpenArchiveForRead needs the reader role", pitrarchive.ErrInvalidExpectation)
 	}
 	raw, passphrase := splitArchiveStore(store)
-	key := pitrarchive.DescriptorKey(prefix)
-	b, ok, err := raw.Get(ctx, key)
+	b, ok, err := readDescriptor(ctx, raw, prefix)
 	if err != nil {
-		return nil, fmt.Errorf("read archive descriptor %s: %w", key, err)
+		var ve *pitrarchive.VerifyError
+		if errors.As(err, &ve) {
+			ve.Destination = expect.Destination.String()
+		}
+		return nil, err
 	}
 	if ok {
 		return pitrarchive.ParseAndVerifyDescriptor(b, expect, passphrase)
 	}
 	c, err := classifyArchivePrefix(ctx, store, raw, prefix)
 	if err != nil {
-		return nil, &pitrarchive.VerifyError{
-			Token: pitrarchive.TokenArchiveListFailed, Destination: expect.Destination.String(),
-			Detail: err.Error(), Procedure: "grant s3:ListBucket on the bucket",
+		var le *prefixListError
+		if errors.As(err, &le) {
+			return nil, &pitrarchive.VerifyError{
+				Token: pitrarchive.TokenArchiveListFailed, Destination: expect.Destination.String(),
+				Detail:    fmt.Sprintf("list archive prefix %q: %v", prefix, le.err),
+				Procedure: listRemedy(le.err),
+			}
 		}
+		return nil, err
 	}
 	switch {
 	case c.v2Manifests:

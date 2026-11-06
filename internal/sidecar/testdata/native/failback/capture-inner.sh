@@ -31,8 +31,10 @@ target() { # label server: the state committed before T
  sleep 0.05
 }
 record() { # site server: a promotion record, then more than δ (5 s) before
- # the era's first commit, so latest mode's loss evidence (D-37) does not
- # count the next era's transactions against this record.
+ # the era's first commit, so every witness w of the era satisfies
+ # observedAt + δ < oct(w) and the record can anchor its replica copies
+ # (D-43). Transactions after a record can never be loss evidence against
+ # it, so the delay is about anchoring, not loss evidence.
  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$(q $2 'SELECT @@server_uuid')" "$(q $2 'SELECT @@server_id')" "$(executed $2)" "$(now $2)" >>"$out/records.tsv"
  sleep 6
 }

@@ -18,7 +18,9 @@ import (
 // Review B7: encrypt-upload is the encrypted Job's final step and finishes
 // the backup stamp with the serverClock.end dump.py left in
 // BLOODRAVEN_DUMP_META.json. Without an end it fails before uploading, so
-// no complete-looking artifact sits beside an unfinished stamp.
+// no complete-looking artifact sits beside an unfinished stamp. Review
+// F016: a location whose stamp is no longer this backup's (a same-name
+// backup of another namespace replaced it) refuses before any upload.
 func TestEncryptUploadFinishesBackupStamp(t *testing.T) {
 	if os.Getenv("BLOODRAVEN_TEST_ENCRYPT_STAMP") == "1" {
 		useTempDirMountVerifier(t)
@@ -30,10 +32,14 @@ func TestEncryptUploadFinishesBackupStamp(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		meta       dumpMeta
+		foreign    bool
 		wantFinish bool
+		wantOutput string
 	}{
 		{name: "end from dump meta", meta: dumpMeta{GTIDExecuted: "uuid:1-3", ServerClockEnd: end}, wantFinish: true},
-		{name: "missing end fails before the upload", meta: dumpMeta{GTIDExecuted: "uuid:1-3"}},
+		{name: "missing end fails before the upload", meta: dumpMeta{GTIDExecuted: "uuid:1-3"}, wantOutput: "did not report serverClock.end"},
+		{name: "another backup's stamp fails before the upload", meta: dumpMeta{GTIDExecuted: "uuid:1-3", ServerClockEnd: end}, foreign: true,
+			wantOutput: "holds another backup's stamp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src, mount := t.TempDir(), t.TempDir()
@@ -57,7 +63,11 @@ func TestEncryptUploadFinishesBackupStamp(t *testing.T) {
 				t.Fatal(err)
 			}
 			key := "prod/nightly-1" + backupmeta.StampSuffix
-			if _, _, err := writeBackupStamp(context.Background(), store, key, startedStamp(stampStart)); err != nil {
+			stamp := startedStamp(stampStart)
+			if tc.foreign {
+				stamp.Backup.Namespace, stamp.Backup.UID = "other-ns", "other-uid"
+			}
+			if _, _, err := writeBackupStamp(context.Background(), store, store, key, stamp); err != nil {
 				t.Fatal(err)
 			}
 			template, err := json.Marshal(stampTemplate())
@@ -81,7 +91,7 @@ func TestEncryptUploadFinishesBackupStamp(t *testing.T) {
 			}
 			_, uploadErr := os.Stat(filepath.Join(location, "chunk.json"))
 			if !tc.wantFinish {
-				if runErr == nil || got.Complete() || !bytes.Contains(out, []byte("did not report serverClock.end")) {
+				if runErr == nil || got.Complete() || !sameStampBytes(got, stamp) || !bytes.Contains(out, []byte(tc.wantOutput)) {
 					t.Fatalf("err=%v complete=%t; output %s", runErr, got.Complete(), out)
 				}
 				if !os.IsNotExist(uploadErr) || strings.Contains(string(out), "BLOODRAVEN_DUMP_COMPLETE") {

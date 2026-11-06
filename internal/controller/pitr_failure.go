@@ -36,6 +36,26 @@ func pitrFailureReason(message string) string {
 	return ""
 }
 
+// tokenFirstMessage moves tok, found in message (pitrFailureReason), to the
+// front: "verification job: PITRX: detail" becomes "PITRX: verification
+// job: detail" (§7.1).
+func tokenFirstMessage(tok, message string) string {
+	message = strings.TrimSpace(message)
+	if strings.HasPrefix(message, tok) {
+		return message
+	}
+	i := strings.Index(message, tok)
+	if i < 0 {
+		return tok + ": " + message
+	}
+	context := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(message[:i]), ":"))
+	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(message[i+len(tok):]), ":"))
+	if context == "" {
+		return tok + ": " + rest
+	}
+	return tok + ": " + context + ": " + rest
+}
+
 // wrapTokenFirst prefixes err with context while keeping a leading refusal
 // token first, so status messages always start "<token>: " (§7.1).
 func wrapTokenFirst(context string, err error) error {
@@ -132,14 +152,23 @@ type pitrRenderedRequest struct {
 	Verification      bool
 }
 
+// containerEnv returns the named container's env as the container sees
+// it: kubelet's $(VAR) and $$ expansion applied, so a literal-escaped value
+// (the PITR destination, F029) reads back unescaped.
 func containerEnv(containers []corev1.Container, name string) map[string]string {
 	env := map[string]string{}
 	for _, c := range containers {
 		if c.Name != name {
 			continue
 		}
+		seen := map[string]backupEnvironmentValue{}
 		for _, e := range c.Env {
-			env[e.Name] = e.Value
+			entry := backupEnvironmentValue{known: false}
+			if e.ValueFrom == nil {
+				entry = expandBackupEnvironment(e.Value, seen)
+			}
+			seen[e.Name] = entry
+			env[e.Name] = entry.value
 		}
 	}
 	return env
@@ -293,6 +322,11 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 	if fields["sourceUID"] == "" || fields["sourceNamespace"] == "" || fields["sourceName"] == "" {
 		return nil, fmt.Errorf("PITR verdict names no complete archive source")
 	}
+	// The same bounds the descriptor's source carries (F045), so a verdict
+	// cannot put a source the status fields refuse.
+	if err := (pitrarchive.Source{Namespace: fields["sourceNamespace"], Name: fields["sourceName"], UID: types.UID(fields["sourceUID"])}).ValidateNames(); err != nil {
+		return nil, fmt.Errorf("PITR verdict archive source: %w", err)
+	}
 	if req.ExpectedSourceUID != "" && fields["sourceUID"] != req.ExpectedSourceUID {
 		return nil, fmt.Errorf("PITR verdict source uid %s differs from the backup's source group %s", fields["sourceUID"], req.ExpectedSourceUID)
 	}
@@ -339,17 +373,37 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		res.NewestReplayedCommitTime = &mt
 	}
 	if fields["sites"] != "" {
-		for _, site := range strings.Split(fields["sites"], ",") {
-			if strings.HasPrefix(site, "+") {
-				continue // restore.py's "+N more" marker
+		sites := strings.Split(fields["sites"], ",")
+		var omitted int64
+		for i, site := range sites {
+			if more, isMarker := strings.CutPrefix(site, "+"); isMarker {
+				// restore.py's "+N" marker for the sites it left out of
+				// its bounded list: last, and a positive count (F148).
+				n, err := strconv.ParseInt(more, 10, 32)
+				if err != nil || n <= 0 || i != len(sites)-1 || more != strconv.FormatInt(n, 10) {
+					return nil, fmt.Errorf("PITR verdict site marker %q is invalid", site)
+				}
+				omitted += n
+				continue
 			}
 			if !pitrSiteName.MatchString(site) || len(site) > 63 {
 				return nil, fmt.Errorf("PITR verdict site %q is invalid", site)
 			}
 			if len(res.ReplaySites) < pitrMaxReplaySites {
 				res.ReplaySites = append(res.ReplaySites, site)
+			} else {
+				omitted++
 			}
 		}
+		if omitted > math.MaxInt32 {
+			return nil, fmt.Errorf("PITR verdict site marker overflows")
+		}
+		res.ReplaySitesOmitted = int32(omitted)
+	}
+	if req.Mode == "latest" && counts["divergent"] != 0 {
+		// A latest plan succeeds only with D empty: loss evidence and audit
+		// findings refuse PITRArchiveDivergentHistory instead (F150).
+		return nil, fmt.Errorf("latest PITR verdict reports %d divergent transactions", counts["divergent"])
 	}
 	res.ExcludedDivergentTransactionCount = counts["divergent"]
 	res.OnHistoryExclusionCount = counts["onHistoryExcluded"]

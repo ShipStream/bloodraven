@@ -39,3 +39,27 @@ func TestParseUserSetCanonical(t *testing.T) {
 		t.Fatal("a reversed interval parsed")
 	}
 }
+
+// F169: GNOs MySQL never issues are refused by both parsers, so the
+// interval arithmetic (End+1) cannot overflow.
+func TestParseRefusesOutOfRangeGNOs(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	for _, in := range []string{u + ":1-9223372036854775807", u + ":0-5", u + ":0", u + ":tag:9223372036854775807"} {
+		if _, err := ParseUserSet(in); err == nil {
+			t.Errorf("ParseUserSet(%q) accepted", in)
+		}
+		if _, err := ParseSet(in); err == nil {
+			t.Errorf("ParseSet(%q) accepted", in)
+		}
+	}
+	top, err := ParseUserSet(u + ":1-9223372036854775806")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := top.Subtract(top); !d.IsEmpty() {
+		t.Fatalf("S ∖ S = %s", d)
+	}
+	if d := top.Subtract(MustParseSet(u + ":5")); d.String() != u+":1-4:6-9223372036854775806" {
+		t.Fatalf("subtract near the top: %s", d)
+	}
+}

@@ -73,15 +73,21 @@ type BinlogArchiver struct {
 
 	// Archive identity (§3.5-§3.7), owned by the scan goroutine. session
 	// is nil only when the configured identity is unusable (identityErr).
-	session         *ArchiveSession
-	identityErr     error
-	episode         promotionEpisode
+	session     *ArchiveSession
+	identityErr error
+	episode     promotionEpisode
+	// roles is fed by the role sampler goroutine and the scan; it has
+	// its own lock.
+	roles           roleTimeline
 	persistedMarker *HistoryIntegrity
 	pendingMarker   *HistoryIntegrity
 	// pendingMarkerErr is an unreadable pending-marker file; it blocks
 	// uploads like a marker, since it may hold one.
 	pendingMarkerErr error
-	unsafeLogged     bool
+	// pendingMarkerSaved: the pending marker's file is durable (or there
+	// is no state directory); a failed write is retried every scan.
+	pendingMarkerSaved bool
+	unsafeLogged       bool
 
 	// mu guards lastError, lastScanAt, filesArchiv, lastRetentionRun,
 	// uploadFailures, lastUploadAt, backlogFiles, and the manifest
@@ -228,8 +234,12 @@ func (a *BinlogArchiver) loadManifest(ctx context.Context) (*Manifest, error) {
 	return m, nil
 }
 
-// saveManifest is the archiver's only manifest write path.
+// saveManifest is the archiver's only manifest write path. A recorded
+// episode that the role timeline has since ended writes nothing (D-43).
 func (a *BinlogArchiver) saveManifest(ctx context.Context, m *Manifest) error {
+	if err := a.episodeCurrent(); err != nil {
+		return err
+	}
 	if err := a.openSession(ctx); err != nil {
 		return err
 	}
@@ -290,6 +300,19 @@ func (a *BinlogArchiver) Run(ctx context.Context) {
 			a.historyTask.close()
 			a.historyTask = nil
 		}
+	}()
+	// The role sampler runs apart from the archive I/O below, so a long
+	// scan neither delays the observation a promotion record holds nor
+	// hides a demotion (D-43).
+	samplerCtx, stopSampler := context.WithCancel(ctx)
+	samplerDone := make(chan struct{})
+	go func() {
+		defer close(samplerDone)
+		a.runRoleSampler(samplerCtx)
+	}()
+	defer func() {
+		stopSampler()
+		<-samplerDone
 	}()
 	a.logger.Info("binlog archiver starting",
 		"storageType", a.cfg.StorageType,
@@ -356,7 +379,7 @@ func (a *BinlogArchiver) Run(ctx context.Context) {
 			a.reuseWork.notified = true
 			a.scanAndArchive(ctx)
 		case <-roleTicker.C:
-			a.roleTick(ctx)
+			a.recordTick(ctx)
 		case <-ticker.C:
 			a.scanAndArchive(ctx)
 		}
@@ -380,7 +403,7 @@ func (a *BinlogArchiver) runPollOnly(ctx context.Context) {
 			a.reuseWork.notified = true
 			a.scanAndArchive(ctx)
 		case <-roleTicker.C:
-			a.roleTick(ctx)
+			a.recordTick(ctx)
 		case <-ticker.C:
 			a.scanAndArchive(ctx)
 		}
@@ -402,15 +425,20 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	// Only the primary uploads; every site maintains its own archive.
 	// On failover the former replica starts uploading on its next scan,
 	// once its promotion record is confirmed (D-43).
-	obs, complete, err := a.probeRole(ctx)
+	_, _, err := a.sampleRole(ctx)
+	// The episode follows the timeline before anything below can return:
+	// a read-only or failed observation ends it here.
+	snap := a.syncEpisode()
+	if err == nil && snap.state == roleUnknown {
+		err = errors.New("a concurrent role probe failed")
+	}
 	if err != nil {
-		a.resetEpisode()
 		a.incUploadFailures()
 		a.setError(fmt.Sprintf("role check: %v", err))
 		a.logger.Debug("role check failed; skipping scan", "error", err)
 		return
 	}
-	writable := !obs.ReadOnly
+	writable := snap.state == roleWritable
 	// D-34 runs before the session, so a violation is seen and held while
 	// the session awaits the descriptor, is refused or is failing.
 	verifiedBefore := a.session != nil && a.session.Verified()
@@ -418,7 +446,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	if err := a.ensureSession(ctx, writable); err != nil {
 		a.incUploadFailures()
 		if integrityErr != nil {
-			err = fmt.Errorf("%v; %w", integrityErr, err)
+			err = joinKeepToken(integrityErr, err)
 		}
 		a.setError(err.Error())
 		a.setBacklog(0)
@@ -430,7 +458,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		// and persist a pending one.
 		integrityErr = a.checkHistoryIntegrity(ctx)
 	}
-	recordErr := a.observeRole(ctx, obs, complete)
+	recordErr := a.observeRole(ctx, snap)
 	if integrityErr != nil {
 		a.incUploadFailures()
 		a.setError(integrityErr.Error())
@@ -473,7 +501,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	manifest, err := a.loadManifest(ctx)
 	if err != nil {
 		a.incUploadFailures()
-		a.setError(fmt.Sprintf("load manifest: %v", err))
+		a.setError(wrapKeepToken("load manifest", err).Error())
 		a.logger.Warn("load manifest", "error", err)
 		return
 	}
@@ -752,11 +780,15 @@ func (a *BinlogArchiver) fetchRetentionCutoff(ctx context.Context) (retentionCov
 // polling / humans can tell at a glance whether archival is running.
 type Status struct {
 	Enabled bool `json:"enabled"`
-	// StoreReady reports whether the archive store has been constructed.
-	// false means archival is configured but stopped, and LastError says
-	// why. Absent when PITR is not configured, and from sidecars that
-	// predate the field, which exit instead of serving while the store is
-	// down; readers must treat absent as "not reported", not as false.
+	// StoreReady is false while archival is configured but cannot reach
+	// a verified archive session: the store cannot be constructed, the
+	// configured archive identity is unusable, or establishing or opening
+	// the archive (its descriptor) is failing on a transient store error.
+	// LastError says why. A refusal of a reachable archive (foreign, copy,
+	// legacy, ...) keeps it true and reports the refusal in Archive.
+	// Absent when PITR is not configured, and from sidecars that predate
+	// the field, which exit instead of serving while the store is down;
+	// readers must treat absent as "not reported", not as false.
 	StoreReady     *bool     `json:"storeReady,omitempty"`
 	Primary        bool      `json:"primary"`
 	LastScanAt     time.Time `json:"lastScanAt"`
@@ -795,7 +827,9 @@ type Status struct {
 	NewestArchivedTime time.Time `json:"newestArchivedTime,omitempty"`
 	// Archive is the archive identity this sidecar observes (§3.7): its
 	// destination, verified descriptor ID, encryption mode, state, refusal
-	// reason and key revision. nil when PITR is not configured.
+	// reason and key revision. nil when PITR is not configured, and when
+	// the configured identity is unusable (StoreReady=false, LastError
+	// names the identity error).
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count the Divergent and
 	// Quarantined entries in this site's own manifest. The runner warns
@@ -827,7 +861,9 @@ func (a *BinlogArchiver) Snapshot(ctx context.Context) Status {
 	if a.session != nil {
 		st := a.session.Status()
 		archive = &st
-		if st.State != pitrarchive.StateVerified && a.session.transientFailure() {
+		// An identity that cannot create the descriptor is unusable like
+		// one rejected at construction (StoreReady=false, F194).
+		if st.State != pitrarchive.StateVerified && (a.session.transientFailure() || errors.Is(a.session.Err(), errArchiveIdentityConfig)) {
 			storeReady = new(bool)
 		}
 	} else {
@@ -970,3 +1006,39 @@ func readBinlogIndex(path string) ([]string, error) {
 	sort.Strings(names)
 	return names, nil
 }
+
+// wrapKeepToken adds context to err while keeping a leading PITR refusal
+// token first, so a LastError still starts with the token the controller
+// reports (pitrarchive.ParseToken). errors.Is/As still see err.
+func wrapKeepToken(context string, err error) error {
+	msg := err.Error()
+	tok, ok := pitrarchive.ParseToken(msg)
+	if !ok {
+		return fmt.Errorf("%s: %w", context, err)
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(msg), string(tok)))
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, ":"))
+	if rest == "" {
+		return &tokenContextError{msg: fmt.Sprintf("%s: %s", tok, context), err: err}
+	}
+	return &tokenContextError{msg: fmt.Sprintf("%s: %s: %s", tok, context, rest), err: err}
+}
+
+// joinKeepToken joins two errors into one message, the one that starts
+// with a PITR refusal token first (first when both or neither do).
+func joinKeepToken(first, second error) error {
+	if _, ok := pitrarchive.ParseToken(first.Error()); !ok {
+		if _, ok := pitrarchive.ParseToken(second.Error()); ok {
+			first, second = second, first
+		}
+	}
+	return &tokenContextError{msg: first.Error() + "; " + second.Error(), err: errors.Join(first, second)}
+}
+
+type tokenContextError struct {
+	msg string
+	err error
+}
+
+func (e *tokenContextError) Error() string { return e.msg }
+func (e *tokenContextError) Unwrap() error { return e.err }

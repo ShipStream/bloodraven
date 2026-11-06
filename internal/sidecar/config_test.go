@@ -223,3 +223,35 @@ func TestPITRConfigArchiveIdentityFromEnv(t *testing.T) {
 		})
 	}
 }
+
+// F215: the PVC identity guards (destination kind and namespace) refuse.
+func TestPITRConfigArchiveIdentityPVCGuards(t *testing.T) {
+	tests := []struct {
+		name, destination, wantErr string
+	}{
+		{name: "pvc ok", destination: "pvc://ns/archive/orders/binlogs"},
+		{name: "s3 destination for pvc", destination: "s3://bucket/orders/binlogs?endpoint=aws", wantErr: "is not a PVC destination"},
+		{name: "pvc in another namespace", destination: "pvc://other/archive/orders/binlogs", wantErr: `is in namespace "other", not "ns"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BLOODRAVEN_PITR_ENABLED", "1")
+			t.Setenv("BLOODRAVEN_PITR_STORAGE_TYPE", "PVC")
+			t.Setenv("BLOODRAVEN_PITR_PVC_MOUNT_PATH", "/run/bloodraven/pitr-archive")
+			t.Setenv("BLOODRAVEN_PITR_MANIFEST_PREFIX", "orders/binlogs")
+			t.Setenv("BLOODRAVEN_PITR_PASSPHRASE_FILE", "")
+			setPITRIdentityEnv(t, tt.destination, "None")
+			cfg := &PITRConfig{StorageType: "PVC", ManifestPrefix: "orders/binlogs", PVC: &PITRPVCConfig{MountPath: "/run/bloodraven/pitr-archive"}}
+			id, err := ArchiveIdentityFromEnv(cfg)
+			if tt.wantErr == "" {
+				if err != nil || id.Destination.String() != tt.destination {
+					t.Fatalf("ArchiveIdentityFromEnv = %+v, %v", id, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}

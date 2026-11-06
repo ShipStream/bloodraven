@@ -3,13 +3,11 @@ package controller
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -44,7 +42,7 @@ func pitrDumpSourceForBackup(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.M
 	// it anyway after scheduling and image pulls. Refuse at reconcile.
 	if backup.Status.FailoverGroupUID == "" {
 		return pitrDumpSource{}, fmt.Errorf("%s: backup %q records no source failover group UID, so it has no backup stamp (it was taken by a release without dump identity, "+
-			"or its status lost the UID; the backup reconciler restores it from the backup's Job if the Job still exists); take a new backup",
+			"or its status lost the UID and the backup's Job, which the backup reconciler restores it from, is gone); take a new backup",
 			pitrarchive.TokenBackupIdentityUnknown, backup.Name)
 	}
 	src := pitrDumpSource{
@@ -100,7 +98,12 @@ func pitrDumpSourceForBackup(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.M
 // caller's dump-loading wiring can change without affecting it.
 func buildDumpMetaInitContainer(fg *v1alpha1.MysqlFailoverGroup, src pitrDumpSource) (corev1.Container, []corev1.Volume, error) {
 	if src.Prefix == "" {
-		return corev1.Container{}, nil, fmt.Errorf("point-in-time replay: the dump has no location")
+		// F037: a dump at the root of its store (a direct source with
+		// no S3 prefix or PVC subPath) has no directory a backup stamp
+		// could sit beside, so nothing can identify it.
+		return corev1.Container{}, nil, fmt.Errorf("%s: point-in-time replay needs the dump's own directory, where its backup stamp identifies it, but the dump is at the root of its store (no S3 prefix or PVC subPath); "+
+			"name the dump's directory in source.s3.prefix or source.pvc.subPath, or restore from the MysqlBackup with source.mysqlBackupRef",
+			pitrarchive.TokenBackupIdentityUnknown)
 	}
 	env := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_DUMP_META_OUTPUT_DIR", Value: restorePITRDumpMetaDir},
@@ -198,30 +201,4 @@ func pitrLoadFilterRefusal(fp string, opts *v1alpha1.LoadOptions) error {
 	}
 	return fmt.Errorf("%s: %s.loadOptions includeSchemas/excludeSchemas cannot be combined with %s.pointInTime: point-in-time replay needs the full dump loaded; remove the schema filters",
 		pitrarchive.TokenBackupFiltered, fp, fp)
-}
-
-// pitrBackupBefore is the controller's early feedback for D-44 (dump-meta
-// enforces the exact bound): a target before the backup finished can
-// already be inside the dump. completionTime is a whole second (F27), so
-// the bound is rounded up.
-func pitrBackupBefore(req *pitrReplayRequest, backup v1alpha1.MysqlBackupStatus) error {
-	if req == nil || req.Mode != "timestamp" {
-		return nil
-	}
-	stop, err := backupmeta.ParseMicroTime(req.Stop)
-	if err != nil {
-		return fmt.Errorf("%s: %v", pitrarchive.TokenTargetInvalid, err)
-	}
-	if backup.CompletionTime == nil {
-		return fmt.Errorf("%s: the backup has no completionTime, so it cannot be shown to finish before the target %s", pitrarchive.TokenBackupAfterTarget, req.Stop)
-	}
-	completed := backup.CompletionTime.UTC()
-	if rounded := completed.Truncate(time.Second); !rounded.Equal(completed) {
-		completed = rounded.Add(time.Second)
-	}
-	if stop.Before(completed) {
-		return fmt.Errorf("%s: the backup finished at %s, after the target %s, so the dump may already contain later changes; use a backup that completed before the target",
-			pitrarchive.TokenBackupAfterTarget, completed.Format("2006-01-02T15:04:05Z"), req.Stop)
-	}
-	return nil
 }

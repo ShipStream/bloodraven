@@ -2,6 +2,7 @@ package pitrplan
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,13 +47,34 @@ type Interval struct{ Start, End int64 }
 // only add mutates, and only on a Set built locally.
 type Set map[string][]Interval
 
+// MaxGNO is the largest GNO MySQL issues (GNO_END − 1 = 2⁶³ − 2). The
+// interval arithmetic computes End+1, so a larger endpoint would overflow.
+const MaxGNO = math.MaxInt64 - 1
+
 // ParseSet parses a MySQL GTID set (tags included) into canonical form.
+// Interval endpoints outside 1..MaxGNO are refused.
 func ParseSet(s string) (Set, error) {
 	raw, err := internalmysql.ParseGTIDSet(s)
 	if err != nil {
 		return nil, err
 	}
+	if err := checkGNOs(raw); err != nil {
+		return nil, err
+	}
 	return FromMySQL(raw), nil
+}
+
+// checkGNOs refuses interval endpoints MySQL never issues (review F169):
+// 0, negative, or above MaxGNO.
+func checkGNOs(raw internalmysql.GTIDSet) error {
+	for sid, ivs := range raw {
+		for _, iv := range ivs {
+			if iv.Start < 1 || iv.End > MaxGNO {
+				return fmt.Errorf("GTID interval %s:%d-%d is outside 1-%d", sid, iv.Start, iv.End, int64(MaxGNO))
+			}
+		}
+	}
+	return nil
 }
 
 // MustParseSet is ParseSet for constants in tests and fixtures.
@@ -84,6 +106,9 @@ func FromMySQL(raw internalmysql.GTIDSet) Set {
 func ParseUserSet(s string) (Set, error) {
 	raw, err := internalmysql.ParseGTIDSet(s)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkGNOs(raw); err != nil {
 		return nil, err
 	}
 	folded := make(internalmysql.GTIDSet, len(raw))
@@ -146,6 +171,14 @@ func (s Set) add(g GTID) bool {
 	return true
 }
 
+// adjacent reports whether adding g (∉ s) would extend or merge existing
+// intervals rather than open a new one.
+func (s Set) adjacent(g GTID) bool {
+	ivs := s[g.SID]
+	i := sort.Search(len(ivs), func(i int) bool { return ivs[i].End >= g.GNO })
+	return (i > 0 && ivs[i-1].End+1 == g.GNO) || (i < len(ivs) && ivs[i].Start-1 == g.GNO)
+}
+
 // Has reports g ∈ s.
 func (s Set) Has(g GTID) bool {
 	ivs := s[g.SID]
@@ -156,12 +189,17 @@ func (s Set) Has(g GTID) bool {
 // IsEmpty reports s = ∅.
 func (s Set) IsEmpty() bool { return len(s) == 0 }
 
-// Count is |s|.
+// Count is |s|, saturating at math.MaxInt64 (a set of parsed GNOs can
+// hold more members than an int64 counts).
 func (s Set) Count() int64 {
 	var n int64
 	for _, ivs := range s {
 		for _, iv := range ivs {
-			n += iv.End - iv.Start + 1
+			k := iv.End - iv.Start + 1
+			if k > math.MaxInt64-n {
+				return math.MaxInt64
+			}
+			n += k
 		}
 	}
 	return n

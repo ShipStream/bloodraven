@@ -547,6 +547,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.reconcileS3CredentialsCondition(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("check S3 credentials secrets: %w", err)
 	}
+	if err := r.reconcilePITRMySQLConfCondition(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("report refused PITR mysqlConf: %w", err)
+	}
 
 	if err := r.reconcileScheduleTriggerRBAC(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile schedule trigger rbac: %w", err)
@@ -952,9 +955,45 @@ func normalizedMySQLSettings(raw map[string]string) map[string]string {
 		if unsafeMySQLSetting(key, raw[key]) {
 			continue
 		}
-		out[strings.ReplaceAll(key, "_", "-")] = raw[key]
+		out[canonicalMySQLOptionName(strings.ReplaceAll(key, "_", "-"))] = raw[key]
 	}
 	return out
+}
+
+// legacyMySQLOptionAliases maps the deprecated spellings MySQL 9.7 still
+// accepts for operator-owned options to the current names. MySQL applies
+// an alias exactly like the option itself and honours the last occurrence,
+// so in the sorted my.cnf "slave-preserve-commit-order=OFF" after
+// "replica-preserve-commit-order=ON" turns commit ordering off, and
+// "log-slave-updates=OFF" turns off log_replica_updates (verified against
+// mysql:9.7.4, F153).
+var legacyMySQLOptionAliases = map[string]string{
+	"log-slave-updates":           "log-replica-updates",
+	"skip-slave-start":            "skip-replica-start",
+	"slave-preserve-commit-order": "replica-preserve-commit-order",
+}
+
+// canonicalMySQLOptionName rewrites a hyphenated option name that is a
+// legacy alias, alone or behind option prefixes (loose-, skip-, ...), to
+// the current name with the same prefixes, so the owned-setting override
+// and shadowing checks see it.
+func canonicalMySQLOptionName(key string) string {
+	prefix, k := "", key
+	for {
+		if current, ok := legacyMySQLOptionAliases[k]; ok {
+			return prefix + current
+		}
+		stripped := false
+		for _, p := range mysqlOptionPrefixes {
+			if strings.HasPrefix(k, p) {
+				prefix, k, stripped = prefix+p, strings.TrimPrefix(k, p), true
+				break
+			}
+		}
+		if !stripped {
+			return key
+		}
+	}
 }
 
 // mysqlOptionPrefixes are the modifiers MySQL accepts in front of an option
@@ -1092,10 +1131,20 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 	for k, v := range normalizedMySQLSettings(fg.Spec.MysqlConf) {
 		settings[k] = v
 	}
+	var site v1alpha1.SiteSpec
 	if len(sites) > 0 {
-		for k, v := range normalizedMySQLSettings(sites[0].MysqlConf) {
+		site = sites[0]
+		for k, v := range normalizedMySQLSettings(site.MysqlConf) {
 			settings[k] = v
 		}
+	}
+	// While PITR is enabled, an option that breaks replay certification
+	// is refused here rather than left to the sidecar's history-integrity
+	// marker, which is permanent for the prefix (N6). MySQL's defaults
+	// for the refused options (ROW, FULL, no filter) are the safe values.
+	// PITRMysqlConfAccepted and a PITRMysqlConfRefused Event report it.
+	for _, refused := range pitrRefusedMySQLConf(fg, site) {
+		delete(settings, refused.key)
 	}
 
 	owned := ownedMySQLSettings(fg)

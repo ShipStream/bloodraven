@@ -139,6 +139,15 @@ func runEncryptUpload(args []string) {
 			_ = os.WriteFile("/dev/termination-log", []byte(compactTerminationMessage("backup stamp: "+err.Error())), 0644)
 			os.Exit(2)
 		}
+		// The location must still hold this backup's stamp before any
+		// object is uploaded there: the end step's identity check comes
+		// too late to keep this upload from overwriting another backup's
+		// objects (review F016).
+		if err := checkBackupStampOwnerFromEnv(ctx); err != nil {
+			logger.Error("check backup stamp", "error", err)
+			_ = os.WriteFile("/dev/termination-log", []byte(compactTerminationMessage("backup stamp: "+err.Error())), 0644)
+			os.Exit(2)
+		}
 	}
 
 	printlnf("BLOODRAVEN_ENCRYPT_UPLOAD_START src=%s output=%s algorithm=%s",

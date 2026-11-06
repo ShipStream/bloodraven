@@ -8,6 +8,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -534,8 +535,8 @@ func TestVerificationPITRRequest(t *testing.T) {
 		{name: "nil", in: nil},
 		{name: "none", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "none"}},
 		{name: "empty mode", in: &v1alpha1.PointInTimeVerificationSpec{}},
-		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: " a:1 "},
-			want: &pitrReplayRequest{Mode: "latest", ExcludeGtids: "a:1", Verification: true}},
+		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:1 "},
+			want: &pitrReplayRequest{Mode: "latest", ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1", Verification: true}},
 		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20 03:00:00+02:00"},
 			want: &pitrReplayRequest{Mode: "timestamp", Stop: "2026-04-20T01:00:00.000000Z", Verification: true}},
 		// C2 / A-39: whole seconds only.
@@ -614,7 +615,7 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 		t.Errorf("main PITR env: %v", main)
 	}
 	if _, ok := main["BLOODRAVEN_SOURCE_GTID_EXECUTED"]; ok {
-		t.Error("restore.py no longer reads the backup's status.gtidExecuted")
+		t.Error("a verification Job must not render BLOODRAVEN_SOURCE_GTID_EXECUTED: its PITR baseline comes from dump.json (dump-meta), not the backup's status.gtidExecuted")
 	}
 }
 
@@ -812,5 +813,54 @@ func TestBuildVerificationJob_PITRRefusesBackupWithoutIdentity(t *testing.T) {
 	})
 	if err == nil || pitrFailureReason(err.Error()) != "PITRBackupIdentityUnknown" {
 		t.Fatalf("err = %v, want PITRBackupIdentityUnknown", err)
+	}
+}
+
+// F028: a PITR refusal from the reconcile-time build is recorded by its
+// catalog token, token first, not as BuildJobFailed.
+func TestVerificationReconciler_PITRBuildRefusalKeepsToken(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(fg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.MysqlBackup, v *v1alpha1.MysqlBackupVerification)
+		want   string
+	}{
+		{name: "backup without source identity", mutate: func(_ *v1alpha1.MysqlFailoverGroup, b *v1alpha1.MysqlBackup, _ *v1alpha1.MysqlBackupVerification) {
+			b.Status.FailoverGroupUID = ""
+		}, want: "PITRBackupIdentityUnknown"},
+		{name: "PITR disabled on the group", mutate: func(fg *v1alpha1.MysqlFailoverGroup, _ *v1alpha1.MysqlBackup, _ *v1alpha1.MysqlBackupVerification) {
+			fg.Spec.Backup.PITR.Enabled = false
+		}, want: "PITRTargetInvalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := verifyFG()
+			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			backup := successfulBackup("nightly-pitr", "lion", "nightly-s3")
+			v := verifyCR("verify-pitr", "lion", "nightly-s3")
+			v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
+			tc.mutate(fg, backup, v)
+			r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+			reconcileVerifUntilStable(t, r, "verify-pitr")
+			var got v1alpha1.MysqlBackupVerification
+			if err := c.Get(context.Background(), types.NamespacedName{Name: "verify-pitr", Namespace: "ns"}, &got); err != nil {
+				t.Fatal(err)
+			}
+			cond := apimeta.FindStatusCondition(got.Status.Conditions, ConditionVerified)
+			if got.Status.Phase != v1alpha1.VerificationPhaseFailed || cond == nil || cond.Reason != tc.want ||
+				!strings.HasPrefix(cond.Message, tc.want+": ") {
+				t.Fatalf("phase %s condition %+v, want Verified=False/%s token first", got.Status.Phase, cond, tc.want)
+			}
+		})
+	}
+}
+
+func TestTokenFirstMessage(t *testing.T) {
+	for in, want := range map[string]string{
+		"PITRTargetInvalid: x":                       "PITRTargetInvalid: x",
+		"verification job: PITRTargetInvalid: x":     "PITRTargetInvalid: verification job: x",
+		"a: b: PITRTargetInvalid: detail; procedure": "PITRTargetInvalid: a: b: detail; procedure",
+	} {
+		if got := tokenFirstMessage("PITRTargetInvalid", in); got != want {
+			t.Errorf("tokenFirstMessage(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

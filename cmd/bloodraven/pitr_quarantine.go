@@ -19,7 +19,7 @@ func pitrQuarantine(ctx context.Context, args []string, out, errOut io.Writer) e
 	name := flags.String("name", "", "Exact binlog basename")
 	id := flags.String("id", "", "Exact archive ID, or 'legacy' for a basename-only row")
 	reason := flags.String("reason", "", "Audit reason; objects are preserved")
-	resume := flags.String("resume-gtids", "", "Trusted canonical full-backup GTID bound for verification or affected-row exclusion")
+	resume := flags.String("resume-gtids", "", "GTID set of a trusted canonical full backup; recorded with the change and checked against earlier quarantine and acknowledgement bounds. Restores do not use it: excludeGtids still decides which transactions a restore drops")
 	ack := flags.Bool("acknowledge-history", false, "Verify active history and overlapping issuance against a canonical backup, then supersede an obsolete guard")
 	undo := flags.Bool("undo", false, "Restore a quarantined row after repairing its object")
 	confirm := flags.Bool("confirm", false, "Apply the metadata change; stop the site's writer first")
@@ -89,7 +89,7 @@ func openQuarantineSession(ctx context.Context, store sidecar.ArchiveStore, cfg 
 	}
 	session, err := sidecar.OpenArchiveForWrite(ctx, store, prefix, identity, "", nil)
 	if errors.Is(err, sidecar.ErrDescriptorAbsent) {
-		return nil, fmt.Errorf("%s: no archive at %s; nothing to quarantine", pitrarchive.TokenArchiveNotFound, identity.Destination)
+		return nil, fmt.Errorf("%s: no archive at %s; nothing to update", pitrarchive.TokenArchiveNotFound, identity.Destination)
 	}
 	if err != nil {
 		return nil, err

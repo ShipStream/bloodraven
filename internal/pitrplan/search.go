@@ -3,6 +3,7 @@ package pitrplan
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"runtime"
@@ -129,8 +130,11 @@ func (g *searchGraph) fileOf(v int) int {
 }
 
 // search runs §4.6 for goal G. On failure the result still lists the
-// search set, which identity() treats as the used files.
+// search set, which identity() treats as the used files. The graph dies
+// when search returns, and so do its charges (review F060).
 func (p *planner) search(goal Set) (*searchResult, error) {
+	held := charges{b: p.budget}
+	defer held.release()
 	P := p.plan.Replay
 	var fs []*file
 	for _, r := range p.rows {
@@ -147,7 +151,7 @@ func (p *planner) search(goal Set) (*searchResult, error) {
 		res.files = nil
 		return res, nil
 	}
-	g, err := p.buildGraph(fs, goal)
+	g, err := p.buildGraph(fs, goal, &held)
 	if err != nil {
 		return res, err
 	}
@@ -208,13 +212,19 @@ func (p *planner) search(goal Set) (*searchResult, error) {
 	return res, nil
 }
 
-func (p *planner) buildGraph(fs []*file, goal Set) (*searchGraph, error) {
+func (p *planner) buildGraph(fs []*file, goal Set, held *charges) (*searchGraph, error) {
 	g := &searchGraph{files: fs, off: make([]int, len(fs)+1)}
+	// Besides the per-position arrays: one file's running key at a time
+	// (at most exec(f)), the hasher's coefficients per source identifier,
+	// and the spellings of B and G (review F047).
+	var keyBytes, sources int64
 	for k, f := range fs {
 		g.off[k+1] = g.off[k] + f.n() + 1
+		keyBytes = max(keyBytes, setBytes(f.exec))
+		sources += int64(len(f.prev) + len(f.idx.SIDs))
 	}
 	n := g.off[len(fs)]
-	if err := p.budget.Charge(int64(n)*nodeBytes, "plan search positions"); err != nil {
+	if err := held.charge(int64(n)*nodeBytes+keyBytes+sources*sourceBytes, "plan search positions"); err != nil {
 		return nil, err
 	}
 	h := &keyHasher{coeff: map[string][3]uint64{}, force: searchHashOverride}
@@ -277,9 +287,14 @@ func (p *planner) buildGraph(fs []*file, goal Set) (*searchGraph, error) {
 		}
 	}
 	// Exact keys: sweep each file once, materializing Key only at the
-	// needed positions; equal keys share one class. A class records only
-	// its first file and whether it spans two (all members needs).
+	// needed positions; equal keys share one class. A class records the
+	// file of its first member and whether a member lies in another file;
+	// only such spanning classes keep a member list (a jump needs two
+	// files).
 	bStr, gStr := p.B.String(), goal.String()
+	if err := held.charge(int64(len(bStr)+len(gStr)), "plan search keys"); err != nil {
+		return nil, err
+	}
 	classes := map[string]int32{}
 	var classFirst []int32
 	var classMulti []bool
@@ -298,7 +313,7 @@ func (p *planner) buildGraph(fs []*file, goal Set) (*searchGraph, error) {
 				}
 				c, ok := classes[s]
 				if !ok {
-					if err := p.budget.Charge(int64(len(s))+classBytes, "plan search keys"); err != nil {
+					if err := held.charge(int64(len(s))+classBytes, "plan search keys"); err != nil {
 						return nil, err
 					}
 					c = int32(len(classFirst)) //nolint:gosec // bounded by n
@@ -535,6 +550,14 @@ func (p *planner) gapRefusal(missing Set, lastOCT int64) error {
 	for _, r := range p.rows {
 		if r.State == RowQuarantined && r.Hints.Known && r.Hints.GTIDs.Overlaps(missing) {
 			fmt.Fprintf(&b, "; it is in quarantined row %s (id %s); un-quarantine it, or use a backup taken after it", r.Label(), r.ID)
+			return refuse(pitrarchive.TokenArchiveGap, "%s", b.String())
+		}
+	}
+	// An archived row whose object cannot be read is not a never-archived
+	// tail (review F061).
+	for _, r := range p.rows {
+		if err := p.failed[r]; err != nil && r.State == RowActive && r.Hints.mayMeet(missing) {
+			fmt.Fprintf(&b, "; it may be in %s (id %s), whose object cannot be read (%v); %s, or use a backup taken after it", r.Label(), r.ID, errors.Unwrap(err), lostObjectAdvice)
 			return refuse(pitrarchive.TokenArchiveGap, "%s", b.String())
 		}
 	}

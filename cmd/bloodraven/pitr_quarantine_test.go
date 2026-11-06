@@ -147,3 +147,33 @@ func TestPITRQuarantineCommandRefusals(t *testing.T) {
 		})
 	}
 }
+
+// Review F136: the no-archive refusal names no operation, so it reads
+// right for --acknowledge-history as well as for a quarantine.
+func TestPITRQuarantineNoArchiveIsOperationNeutral(t *testing.T) {
+	for _, args := range [][]string{
+		{"--site=iad", "--name=mysql-bin.legacy", "--id=legacy", "--reason=r", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"},
+		{"--site=iad", "--acknowledge-history", "--reason=r", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"},
+	} {
+		root := t.TempDir()
+		setQuarantineEnv(t, root)
+		err := pitrQuarantine(context.Background(), args, io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), string(pitrarchive.TokenArchiveNotFound)) ||
+			!strings.Contains(err.Error(), "nothing to update") || strings.Contains(err.Error(), "quarantine") {
+			t.Fatalf("%v: err = %v", args, err)
+		}
+	}
+}
+
+// Review F135: --resume-gtids is recorded and checked, never a restore
+// exclusion; the help must not promise one.
+func TestPITRQuarantineResumeGTIDsHelp(t *testing.T) {
+	var help bytes.Buffer
+	if err := pitrQuarantine(context.Background(), []string{"--help"}, io.Discard, &help); err != nil {
+		t.Fatal(err)
+	}
+	text := help.String()
+	if strings.Contains(text, "exclusion") || !strings.Contains(text, "excludeGtids still decides") {
+		t.Fatalf("resume-gtids help:\n%s", text)
+	}
+}

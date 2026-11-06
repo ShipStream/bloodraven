@@ -25,13 +25,14 @@ type Plan struct {
 	Lineage             Set // Λ
 	Replay              Set // P
 	PostStop            Set // Q
-	Divergent           Set // D (⊆ X on success)
+	Divergent           Set // D (⊆ X on success; the set to exclude on a DivergentHistory refusal)
 	OnHistoryExclusions Set // D-48
-	Lost                Set // latest-mode loss evidence ⊆ X
+	Lost                Set // latest-mode loss evidence (⊆ X on success)
 
 	// BackupNewestCommit is maxOct(B) in µs; 0 means −∞ (no archived
-	// member of B). BackupFrontierProven is false when B-frontier bytes are
-	// missing (D-52).
+	// member of B was read). BackupFrontierProven is false when it is only
+	// a lower bound: B-frontier bytes are missing, or a row holding members
+	// of B was left unread on its unverified hint (D-52, review F005).
 	BackupNewestCommit   int64
 	BackupFrontierProven bool
 
@@ -104,7 +105,6 @@ type file struct {
 	prev   Set
 	exec   Set
 	marked bool
-	seq    int
 	// posW caches witnessPos.
 	posW     int
 	posWDone bool
@@ -120,6 +120,12 @@ type occRef struct {
 	i int32
 	n uint16
 }
+
+// lostObjectAdvice is the remedy for a row whose object cannot be read
+// (review F063). pitr-quarantine writes only an archive its caller owns,
+// so a reader of an archive copy repairs the copy, or has the row
+// quarantined at the source.
+const lostObjectAdvice = "restore the object (in an archive copy, copy it again from the source archive); if it is lost at the source, quarantine the row there with bloodraven pitr-quarantine, and let the copy take the source's updated manifest"
 
 // unreadableError marks a row whose bytes could not be read.
 type unreadableError struct {
@@ -164,18 +170,20 @@ type planner struct {
 	order    []*file
 	occ      map[GTID]*occRef
 	mismatch *Refusal
+	// reissue is the first downloaded copy of a member of B committed
+	// after the dump finished (D-49 over every downloaded row, review
+	// F050); serverEnd is the dumped server's clock at the dump's end (µs).
+	reissue   *Refusal
+	serverEnd int64
 
 	// used are the rows whose bytes the plan relies on (closure U).
 	used map[*Row]bool
 
-	maxOctB      int64 // math.MinInt64 = −∞
-	maxOctBGTID  GTID
-	maxOctBFile  *file
-	frontierMiss Set
+	maxOctB     int64 // math.MinInt64 = −∞
+	maxOctBGTID GTID
+	maxOctBFile *file
 
 	w      *Witness
-	wFile  *file
-	wPos   int
 	lambda Set
 	// replayKnown is set once plan.Replay (P) is final.
 	replayKnown bool
@@ -202,6 +210,7 @@ func newPlanner(ctx context.Context, req Request, archive Archive, fetcher Fetch
 		return nil, refuse(pitrarchive.TokenBackupInconsistent, "dump.json gtidExecuted %q is not a GTID set: %v", req.Dump.GTIDExecuted, err)
 	}
 	p.B = b
+	p.serverEnd = req.Dump.ServerClock.End.UnixMicro()
 	if !req.Stop.IsZero() {
 		p.T = req.Stop.UnixMicro()
 	}
@@ -257,6 +266,18 @@ func (p *planner) sortRows(rows []*Row) {
 
 func (p *planner) isMarked(site string) bool { return p.marked[site] != nil }
 
+// markedMayHold refuses PITRArchiveUnsafeHistory when an active row of a
+// marked site satisfies may: the answer may be in bytes that cannot
+// certify history.
+func (p *planner) markedMayHold(may func(*Row) bool, what string) error {
+	for _, r := range p.rows {
+		if r.State == RowActive && p.isMarked(r.Site) && may(r) {
+			return p.unsafe(r.Site, fmt.Sprintf("%s, and %s may hold it", what, r.Label()))
+		}
+	}
+	return nil
+}
+
 // fetch downloads and indexes a row at most once.
 func (p *planner) fetch(r *Row) (*file, error) {
 	if f := p.files[r]; f != nil {
@@ -269,9 +290,12 @@ func (p *planner) fetch(r *Row) (*file, error) {
 		return nil, err
 	}
 	// The up-front estimate from hinted counts refuses before any bytes
-	// are read (D-42).
+	// are read (D-42). A count too large to multiply is over any budget.
 	if r.Hints.Known {
-		est := r.Hints.GTIDs.Count() * (TxnBytes + occurrenceBytes)
+		est := int64(math.MaxInt64)
+		if n := r.Hints.GTIDs.Count(); n <= math.MaxInt64/(TxnBytes+occurrenceBytes) {
+			est = n * (TxnBytes + occurrenceBytes)
+		}
 		if err := p.budget.Charge(est, "estimated index of "+r.Label()); err != nil {
 			return nil, err
 		}
@@ -286,7 +310,9 @@ func (p *planner) fetch(r *Row) (*file, error) {
 	}
 	p.plan.Downloaded++
 	if err != nil {
-		if _, ok := RefusalOf(err); ok {
+		if ref, ok := RefusalOf(err); ok && ref.Token != pitrarchive.TokenArchiveObjectInvalid {
+			// Semantic (NamespaceReuse, ReplayUnsupported) and resource
+			// (PlanTooLarge) refusals hold for the authentic bytes.
 			return nil, err
 		}
 		if p.ctx.Err() != nil {
@@ -295,6 +321,11 @@ func (p *planner) fetch(r *Row) (*file, error) {
 		if IsTransient(err) {
 			return nil, err // not evidence about the row; ends planning
 		}
+		// A missing object, or bytes that fail their content integrity
+		// (digest, framing, CRC: ObjectInvalid), are the same evidence:
+		// the row's authentic bytes cannot be read. Each caller decides
+		// what that costs, which lets a corrupt quarantined row take the
+		// waiver (review F052).
 		u := &unreadableError{row: r, err: err}
 		p.failed[r] = u
 		return nil, u
@@ -321,7 +352,6 @@ func (p *planner) mayStage(r *Row) bool {
 
 func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
 	prev := idx.Previous.Union(r.Base)
-	f := &file{row: r, idx: idx, prev: prev, exec: prev.Union(idx.GTIDs), marked: p.isMarked(r.Site), seq: len(p.order)}
 	if r.Base.Overlaps(idx.GTIDs) {
 		return nil, refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s: %s are in the row's baseGtids and among its transactions; the GTIDs were reissued", r.Label(), r.Base.Intersect(idx.GTIDs))
 	}
@@ -346,11 +376,17 @@ func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
 	if err := p.budget.Charge(int64(len(idx.Txns))*occurrenceBytes, "occurrence registry"); err != nil {
 		return nil, err
 	}
-	if err := p.budget.chargeSet(f.exec, "file sets"); err != nil {
+	// prev and exec (⊆ prev ∪ gtids) are both retained (review F047:
+	// prev was uncharged).
+	if err := p.budget.Charge(2*setBytes(prev)+setBytes(idx.GTIDs), "file sets"); err != nil {
 		return nil, err
 	}
+	f := &file{row: r, idx: idx, prev: prev, exec: prev.Union(idx.GTIDs), marked: p.isMarked(r.Site)}
 	for i, t := range idx.Txns {
 		g := f.gtid(i)
+		if p.reissue == nil && t.OCT > p.serverEnd+p.delta && p.B.Has(g) {
+			p.reissue = p.reissueRefusal(g, f, t.OCT)
+		}
 		o := p.occ[g]
 		if o == nil {
 			p.occ[g] = &occRef{f: f, i: int32(i), n: 1}
@@ -424,7 +460,7 @@ func (p *planner) occurrences(g GTID, purpose string) ([]occurrence, error) {
 		}
 		if _, err := p.fetch(r); err != nil {
 			if isUnreadable(err) {
-				return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "cannot read %v, which may hold %s (%s); quarantine the row with bloodraven pitr-quarantine if its object is lost", err, g, purpose)
+				return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "cannot read %v, which may hold %s (%s); %s", err, g, purpose, lostObjectAdvice)
 			}
 			return nil, err
 		}
@@ -505,6 +541,14 @@ func (p *planner) run() error {
 		return err
 	}
 	if !found {
+		// A marked site may hold the target's witness: refuse as unsafe
+		// history, not as an archive that has yet to catch up (whose
+		// remedies cannot help a site that stopped uploading; review F057).
+		bx := p.B.Union(p.X)
+		may := func(r *Row) bool { return r.Hints.hi() >= p.T && (!r.Hints.Known || !bx.Contains(r.Hints.GTIDs)) }
+		if err := p.markedMayHold(may, "no unmarked site archived a transaction at or after "+fmtMicros(p.T)); err != nil {
+			return err
+		}
 		if !p.req.AllowPartial {
 			return refuse(pitrarchive.TokenTargetNotCovered, "the archive holds no transaction at or after %s; wait for archiving (the active binlog is archived after it rotates, e.g. FLUSH BINARY LOGS on the primary), or set allowPartial", fmtMicros(p.T))
 		}
@@ -569,6 +613,9 @@ func (p *planner) searchAndFinish(outcome Outcome) error {
 	if err := p.identity(); err != nil {
 		return err
 	}
+	if p.reissue != nil {
+		return p.reissue
+	}
 	if p.mismatch != nil {
 		return p.mismatch
 	}
@@ -581,8 +628,10 @@ func (p *planner) searchAndFinish(outcome Outcome) error {
 	if err := p.checkL5(res); err != nil {
 		return err
 	}
+	if err := p.fillSegments(res); err != nil {
+		return err
+	}
 	pl.Outcome = outcome
-	p.fillSegments(res)
 	for _, rule := range p.req.Rules {
 		if err := rule(pl); err != nil {
 			pl.Outcome = ""

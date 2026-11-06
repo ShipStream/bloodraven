@@ -202,13 +202,20 @@ type stampGetter interface {
 // dump, and any part of a dump (or, in the encrypted layout, a whole upload
 // whose stamp could not be finished).
 //
-// Ownership is proven by the stamp alone. A backup's Job writes the stamp
-// before anything else and refuses a location that holds another backup's
-// stamp, so the objects under a location whose stamp names this backup's
-// UID are this backup's. No stamp, or another backup's stamp, deletes
-// nothing: the location may belong to a live backup in another namespace
-// that shares the prefix, or to a later backup of the same name. The dump
-// is deleted before the stamp, so an interrupted run keeps its proof.
+// Ownership is proven by the stamp alone. The stamp key is derived from the
+// dump location (prefix plus backup name), so it is shared by every backup
+// of that name under the prefix: earlier incarnations in this namespace and
+// same-name backups in other namespaces. A backup's Job writes the stamp
+// before anything else, only on a location that holds no object, and
+// refuses a location that holds another backup's stamp, with one
+// exception: the unfinished stamp of an earlier incarnation of the same
+// namespace and name is replaced, and only once nothing remains under the
+// location (backup-stamp's abandonedStampOf). So the objects under a
+// location whose stamp names this backup's UID are this backup's. No stamp,
+// or another backup's stamp, deletes nothing: the location may belong to a
+// live backup in another namespace that shares the prefix, or to a later
+// backup of the same name. The dump is deleted before the stamp, so an
+// interrupted run keeps its proof.
 func runAbandonedCleanup(ctx context.Context, req artifactCleanupRequest, newStore func(context.Context, *sidecar.PITRConfig) (cleanupStore, error)) (int, *cleanupError) {
 	if req.UID == "" {
 		return 0, rejected("abandoned cleanup requires BLOODRAVEN_BACKUP_UID")

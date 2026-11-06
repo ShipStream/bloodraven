@@ -144,9 +144,12 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_PROFILE_NAME", Value: profile.Name},
 		corev1.EnvVar{Name: "BLOODRAVEN_FAILOVER_GROUP_UID", Value: string(fg.UID)},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ARCHIVE_ID", Value: ident.ArchiveID},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: ident.Destination.String()},
+		// Literal: kubelet expands $(VAR) and $$ in EnvVar.Value, which
+		// would change the destination the sidecar parses while the
+		// archive ID above was derived from the unexpanded one (F029).
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: literalArtifactEnvValue(ident.Destination.String())},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(ident.Encryption.Mode)},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: ident.Destination.KeyPrefix},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: literalArtifactEnvValue(ident.Destination.KeyPrefix)},
 	)
 	if pitr.ArchivePollInterval != nil {
 		out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
@@ -162,16 +165,16 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		}
 		s3 := profile.Storage.S3
 		out.SidecarEnv = append(out.SidecarEnv,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: s3.Bucket},
+			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: literalArtifactEnvValue(s3.Bucket)},
 		)
 		if s3.EndpointURL != "" {
 			out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: s3.EndpointURL,
+				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: literalArtifactEnvValue(s3.EndpointURL),
 			})
 		}
 		if s3.Region != "" {
 			out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_REGION", Value: s3.Region,
+				Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(s3.Region),
 			})
 		}
 		if s3.CredentialsSecret != "" {
@@ -415,12 +418,56 @@ func pitrRequestFromSpec(pit *v1alpha1.PointInTimeSpec) (*pitrReplayRequest, err
 // spelling (MySQL's multi-line output, unmerged or unsorted intervals, tags
 // grouped under one UUID, uppercase UUIDs) would otherwise fail that
 // comparison. A set that does not parse is refused at reconcile.
+//
+// Two bounds keep one admitted string from hurting anything (F030, F031):
+// every source identifier must be a UUID before the parser expands tags
+// grouped under it (an arbitrary long "UUID" times thousands of tags would
+// otherwise allocate gigabytes in the operator), and the canonical set must
+// fit maxExcludeGtidsEnvBytes, since it travels as one container env
+// string and Linux refuses to exec with a string over 128 KiB (E2BIG),
+// which no PITR refusal would ever report.
 func canonicalExcludeGtids(field, raw string) (string, error) {
+	if err := checkUserGTIDSetUUIDs(raw); err != nil {
+		return "", fmt.Errorf("%s: %s: %v", pitrarchive.TokenTargetInvalid, field, err)
+	}
 	set, err := pitrplan.ParseUserSet(raw)
 	if err != nil {
 		return "", fmt.Errorf("%s: %s: %v", pitrarchive.TokenTargetInvalid, field, err)
 	}
-	return set.String(), nil
+	canonical := set.String()
+	if len(canonical) > maxExcludeGtidsEnvBytes {
+		return "", fmt.Errorf("%s: %s is %d bytes in canonical form (tags grouped under one UUID are spelled out per tag), over the %d-byte limit for the replay containers; exclude fewer GTIDs",
+			pitrarchive.TokenTargetInvalid, field, len(canonical), maxExcludeGtidsEnvBytes)
+	}
+	return canonical, nil
+}
+
+// maxExcludeGtidsEnvBytes bounds the canonical excludeGtids rendered into
+// BLOODRAVEN_PITR_EXCLUDE_GTIDS: half of Linux's 128 KiB per-string exec
+// limit (MAX_ARG_STRLEN), the same 64 KiB the planner allows a segment's
+// GTID set.
+const maxExcludeGtidsEnvBytes = 64 << 10
+
+// gtidSourceUUID is a server UUID as MySQL prints it, either case.
+var gtidSourceUUID = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+
+// checkUserGTIDSetUUIDs requires every entry of a user GTID set, split the
+// way internalmysql.ParseGTIDSet splits it, to start with a UUID.
+func checkUserGTIDSetUUIDs(raw string) error {
+	for _, part := range strings.Split(strings.ReplaceAll(raw, "\n", ","), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		sid, _, _ := strings.Cut(part, ":")
+		if !gtidSourceUUID.MatchString(sid) {
+			if len(sid) > 64 {
+				sid = sid[:64] + "..."
+			}
+			return fmt.Errorf("GTID entry source %q is not a server UUID", sid)
+		}
+	}
+	return nil
 }
 
 // pitrDownloadBudgetEnv renders the limits pitr-download budgets against
@@ -561,10 +608,16 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	profileName := req.ArchiveProfileName
 	if profileName == "" {
 		if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
-			return out, fmt.Errorf(
-				"pointInTime is set but spec.backup.pitr.enabled=false; " +
-					"PITR replay reads the source group's binlog archive, so continuous archival " +
-					"must be configured, or pointInTime.archiveProfileName must name the archive's profile")
+			if req.Verification {
+				// A verification always replays its group's own archive;
+				// it has no archiveProfileName to point elsewhere (F032).
+				return out, fmt.Errorf("%s: pointInTime is set but spec.backup.pitr.enabled=false; "+
+					"a verification replays the group's own PITR archive, so enable spec.backup.pitr on group %q "+
+					"(or verify without pointInTime)", pitrarchive.TokenTargetInvalid, fg.Name)
+			}
+			return out, fmt.Errorf("%s: pointInTime is set but spec.backup.pitr.enabled=false; "+
+				"PITR replay reads the source group's binlog archive, so continuous archival "+
+				"must be configured, or pointInTime.archiveProfileName must name the archive's profile", pitrarchive.TokenTargetInvalid)
 		}
 		profileName = fg.Spec.Backup.PITR.ProfileName
 	}
@@ -605,9 +658,9 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DUMP_META", Value: restorePITRDumpMetaDir + "/dump.json"},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: ident.Destination.String()},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: literalArtifactEnvValue(ident.Destination.String())},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(ident.Encryption.Mode)},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: ident.Destination.KeyPrefix},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: literalArtifactEnvValue(ident.Destination.KeyPrefix)},
 	)
 	// dump-meta writes dump.json here; pitr-download only reads it.
 	dumpMetaVol := corev1.Volume{
@@ -624,16 +677,16 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 		}
 		s3 := profile.Storage.S3
 		initEnv = append(initEnv,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: s3.Bucket},
+			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: literalArtifactEnvValue(s3.Bucket)},
 		)
 		if s3.EndpointURL != "" {
 			initEnv = append(initEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: s3.EndpointURL,
+				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: literalArtifactEnvValue(s3.EndpointURL),
 			})
 		}
 		if s3.Region != "" {
 			initEnv = append(initEnv, corev1.EnvVar{
-				Name: "BLOODRAVEN_PITR_S3_REGION", Value: s3.Region,
+				Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(s3.Region),
 			})
 		}
 		if s3.CredentialsSecret != "" {

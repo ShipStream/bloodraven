@@ -10,39 +10,45 @@ import (
 // lineageL1: the backup is on the target history (§4.5).
 func (p *planner) lineageL1() error {
 	if out := p.B.Subtract(p.lambda); !out.IsEmpty() {
+		// Timestamp mode only (latest mode has its own baseline check), so
+		// the witness is set.
 		return refuse(pitrarchive.TokenBackupNotOnLineage, "the backup holds %s, which is not in the history of %s; use a backup taken on that history, or a target on the backup's history",
-			out.bounded(1024), p.witnessName())
+			out.bounded(1024), p.w.GTID)
 	}
 	return nil
 }
 
-func (p *planner) witnessName() string {
-	if p.w == nil {
-		return "the archive head"
-	}
-	return p.w.GTID.String()
-}
-
 // lineageL2 is the injected-empty check (O2-7): a GTID of B whose archived
 // copy is empty and was written by another server than the dumped one.
+// Quarantined rows are evidence here too (never data): a quarantined copy
+// that shows a member of B empty is a history in which it had no effects
+// (review F008). An unreadable quarantined row that may hold such a copy
+// refuses, rather than leaning on the identity waiver.
 func (p *planner) lineageL2() error {
 	if p.B.IsEmpty() {
 		return nil
 	}
 	for _, r := range p.rows {
-		if r.State != RowActive || (r.Hints.Known && !r.Hints.Empty.Overlaps(p.B)) {
+		if r.Hints.Known && !r.Hints.Empty.Overlaps(p.B) {
 			continue
 		}
 		if _, err := p.fetch(r); err != nil {
-			if isUnreadable(err) {
-				return refuse(pitrarchive.TokenArchiveObjectInvalid, "cannot read %v, which may hold an empty copy of a backup transaction; quarantine the row with bloodraven pitr-quarantine if its object is lost", err)
+			if !isUnreadable(err) {
+				return err
 			}
-			return err
+			if r.State == RowQuarantined {
+				what := "it has no complete hints"
+				if r.Hints.Known {
+					what = "its hints hold empty copies of " + r.Hints.Empty.Intersect(p.B).bounded(256)
+				}
+				return refuse(pitrarchive.TokenArchiveNamespaceReuse, "cannot verify %v, a quarantined row that may hold an empty copy of a backup transaction (%s), whose effects the backup may hold; restore its object (in an archive copy, copy it again from the source archive), or use a backup that does not hold those transactions", err, what)
+			}
+			return refuse(pitrarchive.TokenArchiveObjectInvalid, "cannot read %v, which may hold an empty copy of a backup transaction; %s", err, lostObjectAdvice)
 		}
 	}
 	dumped := p.req.Dump.Stamp.ServerID
 	for _, f := range p.order {
-		if f.row.State != RowActive || !f.idx.EmptyGTIDs.Overlaps(p.B) {
+		if !f.idx.EmptyGTIDs.Overlaps(p.B) {
 			continue
 		}
 		for i, t := range f.idx.Txns {

@@ -32,6 +32,7 @@ const (
 	cleanupReasonForegroundDeletion    = "ForegroundDeletion"
 	cleanupReasonOrphanDeletion        = "OrphanDeletion"
 	cleanupReasonJobInvalid            = "CleanupJobInvalid"
+	cleanupReasonProducerStopStuck     = "ProducerStopStuck"
 )
 
 const (
@@ -361,7 +362,24 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 	default:
 		return nil, fmt.Errorf("backup Job has unknown storage type %q", env["BLOODRAVEN_STORAGE_TYPE"].value)
 	}
+	storage.PassphraseSecret = backupJobPassphrase(job)
 	return storage, nil
+}
+
+// backupJobPassphrase returns the passphrase Secret key a backup Job
+// mounts, or nil for a plaintext Job.
+func backupJobPassphrase(job *batchv1.Job) *v1alpha1.BackupArtifactPassphrase {
+	for _, vol := range job.Spec.Template.Spec.Volumes {
+		if vol.Name != "backup-passphrase" || vol.Secret == nil || vol.Secret.SecretName == "" {
+			continue
+		}
+		for _, item := range vol.Secret.Items {
+			if item.Path == backupPassphraseFileName && item.Key != "" {
+				return &v1alpha1.BackupArtifactPassphrase{Name: vol.Secret.SecretName, Key: item.Key}
+			}
+		}
+	}
+	return nil
 }
 
 // artifactIdentityProblem returns a non-empty reason when location (the

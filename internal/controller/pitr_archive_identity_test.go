@@ -10,6 +10,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -307,21 +308,30 @@ func TestPITRArchiveTrackerArchiveRefusals(t *testing.T) {
 	}
 }
 
-// §3.7: mysqlConf that would set the permanent marker is previewed.
-func TestPITRMySQLConfHistoryViolation(t *testing.T) {
+// N6, F033, F145: while PITR is enabled an option that breaks replay
+// certification is refused from each site's effective configuration (the
+// group's mysqlConf overlaid with the site's), and the refusal names the
+// site and the field it comes from.
+func TestPITRRefusedMySQLConf(t *testing.T) {
 	tests := []struct {
-		name string
-		conf map[string]string
-		site map[string]string
-		pitr bool
-		want string
+		name       string
+		conf, site map[string]string
+		pitr       bool
+		want       []string // "site: substring", sorted
 	}{
 		{name: "clean", conf: map[string]string{"max_connections": "100", "binlog_format": "ROW", "binlog-row-image": "full"}, pitr: true},
-		{name: "replicate filter", conf: map[string]string{"replicate_do_db": "orders"}, pitr: true, want: "replicate-do-db"},
-		{name: "wild filter, loose prefix", conf: map[string]string{"loose-replicate-wild-ignore-table": "a.%"}, pitr: true, want: "replicate-wild-ignore-table"},
-		{name: "binlog filter on a site", site: map[string]string{"binlog-ignore-db": "tmp"}, pitr: true, want: "binlog-ignore-db"},
-		{name: "statement format", conf: map[string]string{"binlog_format": "MIXED"}, pitr: true, want: "binlog-format=MIXED"},
-		{name: "minimal row image", conf: map[string]string{"binlog_row_image": "MINIMAL"}, pitr: true, want: "binlog-row-image=MINIMAL"},
+		{name: "replicate filter on the group hits every site", conf: map[string]string{"replicate_do_db": "orders"}, pitr: true,
+			want: []string{"iad: spec.mysqlConf sets replicate-do-db", "pdx: spec.mysqlConf sets replicate-do-db"}},
+		{name: "wild filter, loose prefix", conf: map[string]string{"loose-replicate-wild-ignore-table": "a.%"}, pitr: true,
+			want: []string{"iad: spec.mysqlConf sets loose-replicate-wild-ignore-table", "pdx: spec.mysqlConf sets loose-replicate-wild-ignore-table"}},
+		{name: "binlog filter on one site is that site's", site: map[string]string{"binlog-ignore-db": "tmp"}, pitr: true,
+			want: []string{"pdx: spec.sites[pdx].mysqlConf sets binlog-ignore-db"}},
+		{name: "statement format", conf: map[string]string{"binlog_format": "MIXED"}, pitr: true,
+			want: []string{"iad: spec.mysqlConf sets binlog-format=MIXED", "pdx: spec.mysqlConf sets binlog-format=MIXED"}},
+		{name: "site override makes the effective value safe", conf: map[string]string{"binlog_format": "MIXED"}, site: map[string]string{"binlog-format": "row"}, pitr: true,
+			want: []string{"iad: spec.mysqlConf sets binlog-format=MIXED"}},
+		{name: "site sets the unsafe value", site: map[string]string{"binlog_row_image": "MINIMAL"}, pitr: true,
+			want: []string{"pdx: spec.sites[pdx].mysqlConf sets binlog-row-image=MINIMAL"}},
 		{name: "PITR disabled", conf: map[string]string{"replicate_do_db": "orders"}, pitr: false},
 	}
 	for _, tt := range tests {
@@ -330,11 +340,179 @@ func TestPITRMySQLConfHistoryViolation(t *testing.T) {
 			fg.Spec.Backup.PITR.Enabled = tt.pitr
 			fg.Spec.MysqlConf = tt.conf
 			fg.Spec.Sites[1].MysqlConf = tt.site
-			got := pitrMySQLConfHistoryViolation(fg)
-			if (tt.want == "") != (got == "") || !strings.Contains(got, tt.want) {
-				t.Fatalf("got %q, want %q", got, tt.want)
+			if fg.Spec.Sites[0].Name != "iad" || fg.Spec.Sites[1].Name != "pdx" {
+				t.Fatalf("fixture sites %+v", fg.Spec.Sites)
+			}
+			got := pitrMySQLConfRefusalMessage(fg)
+			parts := []string{}
+			if got != "" {
+				parts = strings.Split(got, "; ")
+			}
+			if len(parts) != len(tt.want) {
+				t.Fatalf("refusals %q, want %q", got, tt.want)
+			}
+			for i, w := range tt.want {
+				if !strings.HasPrefix(parts[i], w) {
+					t.Fatalf("refusal %d %q, want prefix %q", i, parts[i], w)
+				}
+			}
+			// The render drops exactly the refused options.
+			for _, site := range fg.Spec.Sites {
+				cnf := generateMyCnf(fg, site)
+				for _, ref := range pitrRefusedMySQLConf(fg, site) {
+					if strings.Contains(cnf, "\n"+ref.key+"=") || strings.Contains(cnf, "\n"+ref.key+"\n") {
+						t.Fatalf("site %s renders refused %s:\n%s", site.Name, ref.key, cnf)
+					}
+				}
 			}
 		})
+	}
+	// Without PITR the same option is rendered as configured.
+	fg := identityFG()
+	fg.Spec.Backup.PITR.Enabled = false
+	fg.Spec.MysqlConf = map[string]string{"binlog_format": "MIXED"}
+	if cnf := generateMyCnf(fg, fg.Spec.Sites[0]); !strings.Contains(cnf, "\nbinlog-format=MIXED\n") {
+		t.Fatalf("PITR disabled, but binlog-format dropped:\n%s", cnf)
+	}
+	fg.Spec.Backup.PITR.Enabled = true
+	if cnf := generateMyCnf(fg, fg.Spec.Sites[0]); strings.Contains(cnf, "binlog-format") {
+		t.Fatalf("PITR enabled, but binlog-format rendered:\n%s", cnf)
+	}
+}
+
+// N6: the refusal is reported as PITRMysqlConfAccepted=False with a Warning
+// PITRMysqlConfRefused once per refused set, True once fixed, and the
+// condition is removed without PITR.
+func TestReconcilePITRMySQLConfCondition(t *testing.T) {
+	ctx := context.Background()
+	fg := identityFG()
+	fg.Spec.MysqlConf = map[string]string{"binlog_format": "STATEMENT"}
+	r, c := newReconciler(fg)
+	rec := r.Recorder.(*record.FakeRecorder)
+	get := func() *metav1.Condition {
+		t.Helper()
+		var cur v1alpha1.MysqlFailoverGroup
+		if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &cur); err != nil {
+			t.Fatal(err)
+		}
+		return apimeta.FindStatusCondition(cur.Status.Conditions, conditionPITRMysqlConfAccepted)
+	}
+	refusedEvents := func() int {
+		n := 0
+		for _, e := range drainRunnerEvents(rec) {
+			if strings.Contains(e, "Warning "+eventReasonPITRMysqlConfRefused) {
+				n++
+			}
+		}
+		return n
+	}
+	if err := r.reconcilePITRMySQLConfCondition(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if cond := get(); cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonPITRMysqlConfUnsafeRefused ||
+		!strings.Contains(cond.Message, "binlog-format=STATEMENT") {
+		t.Fatalf("condition %+v", cond)
+	}
+	if n := refusedEvents(); n != 1 {
+		t.Fatalf("%d refusal events, want 1", n)
+	}
+	if err := r.reconcilePITRMySQLConfCondition(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if n := refusedEvents(); n != 0 {
+		t.Fatalf("refusal event repeated for an unchanged set: %d", n)
+	}
+	fg.Spec.MysqlConf = nil
+	if err := r.reconcilePITRMySQLConfCondition(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if cond := get(); cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("condition %+v, want True", cond)
+	}
+	fg.Spec.Backup.PITR.Enabled = false
+	if err := r.reconcilePITRMySQLConfCondition(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	if cond := get(); cond != nil {
+		t.Fatalf("condition %+v kept without PITR", cond)
+	}
+}
+
+// F003: an enabled archiver that reports no archive identity block (a
+// sidecar older than archive identity) is not archiving usably: Unknown
+// while its rollout is pending, else False/SidecarOutdated on the second
+// poll, never True.
+func TestPITRArchiveTrackerOutdatedSidecar(t *testing.T) {
+	outdated := pitrObs{status: &internalmysql.ArchiverStatus{Enabled: true, StoreReady: pitrBool(true)}}
+	now := time.Now()
+	tr := newPITRArchiveTracker(nil)
+	tr.observe(now, pitrRound{iad: outdated, pdx: pitrClean()}.results())
+	if v := tr.current(); v.Status == metav1.ConditionTrue {
+		t.Fatalf("first poll certified an outdated sidecar: %+v", v)
+	}
+	tr.observe(now.Add(30*time.Second), pitrRound{iad: outdated, pdx: pitrClean()}.results())
+	if v := tr.current(); v.Status != metav1.ConditionFalse || v.Reason != reasonPITRSidecarOutdated || !strings.Contains(v.Message, "iad: ") ||
+		!strings.Contains(v.Message, "spec.sidecarImage") {
+		t.Fatalf("verdict %+v, want False/SidecarOutdated", v)
+	}
+
+	rolling := newPITRArchiveTracker(nil)
+	round := []archiverPollResult{{site: "iad", status: outdated.status, awaitingRollout: true}, {site: "pdx", status: pitrClean().status}}
+	rolling.observe(now, round)
+	rolling.observe(now.Add(30*time.Second), round)
+	if v := rolling.current(); v.Status != metav1.ConditionUnknown || v.Reason != reasonPITRAwaitingRollout {
+		t.Fatalf("verdict %+v, want Unknown/AwaitingRollout while the update is pending", v)
+	}
+	rolling.observe(now.Add(pitrArchiveRolloutBound+time.Minute), round)
+	if v := rolling.current(); v.Status != metav1.ConditionFalse || v.Reason != reasonPITRSidecarOutdated {
+		t.Fatalf("verdict %+v, want False/SidecarOutdated after the rollout bound", v)
+	}
+}
+
+// F146: every archive-identity field change is written at once, and an
+// observedTime-only change is not a write by itself.
+func TestPITRArchiveWriteNeededArchiveIdentity(t *testing.T) {
+	base := func() *v1alpha1.MysqlFailoverGroupStatus {
+		obs := metav1.NewMicroTime(time.Unix(100, 0))
+		return &v1alpha1.MysqlFailoverGroupStatus{PITR: &v1alpha1.PITRStatus{Enabled: true, ProfileName: "nightly-s3",
+			Archive: &v1alpha1.PITRArchiveObservation{Destination: "s3://b/p", ArchiveID: "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+				EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(pitrarchive.EncryptionNone), State: v1alpha1.PITRArchiveVerified,
+				KeyRevision: "k1", ObservedTime: &obs}}}
+	}
+	tests := []struct {
+		name          string
+		mutate        func(a *v1alpha1.PITRArchiveObservation)
+		wantImmediate bool
+	}{
+		{name: "destination", mutate: func(a *v1alpha1.PITRArchiveObservation) { a.Destination = "s3://b/q" }, wantImmediate: true},
+		{name: "archive ID", mutate: func(a *v1alpha1.PITRArchiveObservation) { a.ArchiveID = "ar1-bbbbbbbbbbbbbbbbbbbbbbbbbb" }, wantImmediate: true},
+		{name: "state", mutate: func(a *v1alpha1.PITRArchiveObservation) { a.State = v1alpha1.PITRArchiveAwaitingDescriptor }, wantImmediate: true},
+		{name: "reason", mutate: func(a *v1alpha1.PITRArchiveObservation) {
+			a.Reason = v1alpha1.PITRArchiveRefusalReason(pitrarchive.ReasonArchiveForeign)
+		}, wantImmediate: true},
+		{name: "key revision", mutate: func(a *v1alpha1.PITRArchiveObservation) { a.KeyRevision = "k2" }, wantImmediate: true},
+		{name: "encryption mode", mutate: func(a *v1alpha1.PITRArchiveObservation) {
+			a.EncryptionMode = v1alpha1.PITRArchiveEncryptionMode(pitrarchive.EncryptionPassphrase)
+		}, wantImmediate: true},
+		{name: "observed time only", mutate: func(a *v1alpha1.PITRArchiveObservation) {
+			later := metav1.NewMicroTime(time.Unix(200, 0))
+			a.ObservedTime = &later
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before, after := base(), base()
+			tt.mutate(after.PITR.Archive)
+			immediate, messageOnly := pitrArchiveWriteNeeded(before, after, []string{"iad", "pdx"})
+			if immediate != tt.wantImmediate || messageOnly {
+				t.Fatalf("immediate=%t messageOnly=%t, want immediate=%t", immediate, messageOnly, tt.wantImmediate)
+			}
+		})
+	}
+	before, after := base(), base()
+	after.PITR.Archive = nil
+	if immediate, _ := pitrArchiveWriteNeeded(before, after, nil); !immediate {
+		t.Fatal("archive block removal not written at once")
 	}
 }
 
@@ -347,12 +525,14 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 		return &internalmysql.ArchiverStatus{Enabled: true, DivergentRows: divergent, QuarantinedRows: quarantined}
 	}
 	tests := []struct {
-		name      string
-		from, to  string
-		pitr      bool
-		snap      *internalmysql.ArchiverStatus
-		lastGood  bool
-		wantEvent bool
+		name     string
+		from, to string
+		pitr     bool
+		snap     *internalmysql.ArchiverStatus
+		lastGood bool
+		// failedOver records an earlier failover on the group.
+		failedOver bool
+		wantEvent  bool
 	}{
 		{name: "failover to a site with divergent rows", from: "iad", to: "pdx", pitr: true, snap: rows(2, 0), wantEvent: true},
 		{name: "planned failover to a site with quarantined rows", from: "iad", to: "pdx", pitr: true, snap: rows(0, 1), wantEvent: true},
@@ -360,6 +540,7 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 		{name: "clean site", from: "iad", to: "pdx", pitr: true, snap: rows(0, 0)},
 		{name: "no promotion", from: "pdx", to: "pdx", pitr: true, snap: rows(3, 0)},
 		{name: "bootstrap", from: "", to: "pdx", pitr: true, snap: rows(3, 0)},
+		{name: "promotion after a persisted NoPrimary", from: "", to: "pdx", pitr: true, snap: rows(3, 0), failedOver: true, wantEvent: true},
 		{name: "PITR disabled", from: "iad", to: "pdx", snap: rows(3, 0)},
 		{name: "no archiver status", from: "iad", to: "pdx", pitr: true},
 	}
@@ -380,6 +561,10 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 			fg := identityFG()
 			fg.Spec.Backup.PITR.Enabled = tt.pitr
 			fg.Status.ActiveSite = tt.to
+			if tt.failedOver {
+				at := metav1.Now()
+				fg.Status.LastFailover, fg.Status.LastFailoverTarget = &at, "iad"
+			}
 			r.emitPITRArchiveReissueRisk(fg, tt.from)
 			var got []string
 			for _, e := range drainRunnerEvents(rec) {
@@ -397,42 +582,6 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 	}
 }
 
-// B3: the mysqlConf preview never hides a more specific sidecar refusal
-// (the condition must agree with status.pitr.archive.reason); it replaces
-// only True or a lower-ranked verdict, and is appended otherwise.
-func TestApplyPITRMySQLConfPreview(t *testing.T) {
-	unsafe := string(pitrarchive.ReasonArchiveUnsafeHistory)
-	tests := []struct {
-		name        string
-		in          pitrArchiveVerdict
-		detail      string
-		wantReason  string
-		wantPreview bool
-	}{
-		{name: "no preview keeps True", in: pitrArchiveVerdict{Status: metav1.ConditionTrue, Reason: "ArchiveVerified"}, wantReason: "ArchiveVerified"},
-		{name: "True is replaced", in: pitrArchiveVerdict{Status: metav1.ConditionTrue, Reason: "ArchiveVerified"}, detail: "binlog-format=MIXED", wantReason: unsafe, wantPreview: true},
-		{name: "foreign archive stays", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: string(pitrarchive.ReasonArchiveForeign), Message: "foreign"}, detail: "binlog-format=MIXED", wantReason: string(pitrarchive.ReasonArchiveForeign), wantPreview: true},
-		{name: "key mismatch stays", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: string(pitrarchive.ReasonArchiveKeyMismatch), Message: "key"}, detail: "binlog-format=MIXED", wantReason: string(pitrarchive.ReasonArchiveKeyMismatch), wantPreview: true},
-		{name: "store init failure stays", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: reasonPITRArchiveStoreInitFailed, Message: "init"}, detail: "binlog-format=MIXED", wantReason: reasonPITRArchiveStoreInitFailed, wantPreview: true},
-		{name: "unsafe history stays as reported", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: unsafe, Message: "marker"}, detail: "binlog-format=MIXED", wantReason: unsafe},
-		{name: "sidecar unreachable is outranked", in: pitrArchiveVerdict{Status: metav1.ConditionFalse, Reason: reasonPITRSidecarUnreachable, Message: "down"}, detail: "binlog-format=MIXED", wantReason: unsafe, wantPreview: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := applyPITRMySQLConfPreview(tt.in, tt.detail)
-			if got.Reason != tt.wantReason {
-				t.Fatalf("reason %q, want %q", got.Reason, tt.wantReason)
-			}
-			if has := strings.Contains(got.Message, "binlog-format=MIXED"); has != tt.wantPreview {
-				t.Fatalf("message %q, preview present=%t want %t", got.Message, has, tt.wantPreview)
-			}
-			if tt.in.Message != "" && tt.in.Reason == got.Reason && !strings.Contains(got.Message, tt.in.Message) {
-				t.Fatalf("kept refusal lost its message: %q", got.Message)
-			}
-		})
-	}
-}
-
 // C3: every Event reason #206 adds follows A-74: <Subject><PastTenseVerb>,
 // PITR as the only acronym form, and never the PointInTime prefix.
 func TestPITREventReasonsFollowNamingRule(t *testing.T) {
@@ -440,6 +589,7 @@ func TestPITREventReasonsFollowNamingRule(t *testing.T) {
 	for _, reason := range []string{
 		eventReasonPITRArchiveReissueRisk,
 		eventReasonPITRArchiveUnsafeHistory,
+		eventReasonPITRMysqlConfRefused,
 		eventReasonPITRDivergentHistoryExcluded,
 		eventReasonPITROnHistoryTransactionsExcluded,
 	} {

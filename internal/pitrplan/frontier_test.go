@@ -18,11 +18,35 @@ func TestFrontierDescendingSearchStopsEarly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.BackupNewestCommit != sec(40) || !p.BackupFrontierProven {
-		t.Fatalf("maxOct(B) = %d proven=%v", p.BackupNewestCommit, p.BackupFrontierProven)
+	// a0 was left unread on its hint, so maxOct(B) is only a lower bound
+	// (review F005): the D-52 server-clock bound applies instead.
+	if p.BackupNewestCommit != sec(40) || p.BackupFrontierProven {
+		t.Fatalf("maxOct(B) = %d proven=%v, want t(A:40), unproven", p.BackupNewestCommit, p.BackupFrontierProven)
 	}
 	if s.fetches["a/a0"] != 0 {
 		t.Errorf("a0 (hmax t(A:30) ≤ t(A:40)) was downloaded")
+	}
+	_, err = s.run(ModeTimestamp, 42.5, "", false)
+	wantToken(t, err, pitrarchive.TokenBackupAfterTarget, "proven only up to 2026-11-01T12:00:40.000000Z", "1 archived rows", "use a target at or after 2026-11-01T12:00:43.000000Z")
+}
+
+// F005: a hint that understates its row's newest member of B must not
+// prove the frontier. a1 holds A:31-40 committed at 31–40 s but hints
+// [20, 20]; the search stops before it, so a target between the job's
+// dump end and the dumped server's clock + 1 s refuses (D-52) instead of
+// certifying an empty replay that keeps A:36-40, committed after T.
+func TestFrontierUnverifiedHintIsNotProof(t *testing.T) {
+	s := newSynth(t)
+	s.file("a", "a0", 101, "", "", run("A", 1, 30, 1, 101))
+	s.file("a", "a1", 101, "A:1-30", "", run("A", 31, 40, 31, 101))
+	s.file("a", "a2", 101, "A:1-40", "", run("A", 41, 50, 41, 101))
+	s.sites["a"].Rows[1].Hints.Min, s.sites["a"].Rows[1].Hints.Max = sec(20), sec(20)
+	s.backup("A:1-40", "a", 101, 34)
+	s.dump.ServerClock.End = backupmeta.NewMicroTime(time.UnixMicro(sec(41)))
+	_, err := s.run(ModeTimestamp, 35, "", false)
+	wantToken(t, err, pitrarchive.TokenBackupAfterTarget, "proven only up to 2026-11-01T12:00:30.000000Z", "use a target at or after 2026-11-01T12:00:42.000000Z")
+	if s.fetches["a/a1"] != 0 {
+		t.Fatalf("a1 was downloaded; the case needs the search to stop on its hint")
 	}
 }
 
@@ -120,8 +144,13 @@ func TestFrontierServerClockBound(t *testing.T) {
 	_, err = s.run(ModeTimestamp, 2, "", false)
 	wantToken(t, err, pitrarchive.TokenBackupAfterTarget, "already contains A:20")
 	p, err := s.run(ModeTimestamp, 3.5, "", false)
-	if err != nil || !p.BackupFrontierProven {
-		t.Fatalf("proven frontier: %v %v", p.BackupFrontierProven, err)
+	if err != nil || p.BackupNewestCommit != sec(3) {
+		t.Fatalf("frontier %d: %v", p.BackupNewestCommit, err)
+	}
+	// r1 (hmax 12:00:00) was left unread on its hint: unproven, and the
+	// target passed the server-clock bound (12:00:02).
+	if p.BackupFrontierProven || s.fetches["a/r1"] != 0 {
+		t.Fatalf("proven=%v, r1 fetched %d times", p.BackupFrontierProven, s.fetches["a/r1"])
 	}
 }
 
@@ -133,7 +162,53 @@ func TestFrontierNoArchivedMemberOfB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.BackupNewestCommit != 0 {
-		t.Fatalf("maxOct(B) = %d, want −∞", p.BackupNewestCommit)
+	// C:1-5 are only in a1's previous GTIDs: their commit times are
+	// unknown, so the frontier is unproven (F168).
+	if p.BackupNewestCommit != 0 || p.BackupFrontierProven {
+		t.Fatalf("maxOct(B) = %d proven=%v, want −∞, unproven", p.BackupNewestCommit, p.BackupFrontierProven)
+	}
+	// A target between the job's dump end (12:00:00) and the dumped
+	// server's clock + 1 s refuses (D-52).
+	s.dump.ServerClock.End = backupmeta.NewMicroTime(time.UnixMicro(sec(2)))
+	_, err = s.run(ModeTimestamp, 2.5, "", false)
+	wantToken(t, err, pitrarchive.TokenBackupAfterTarget, "C:1-5", "use a target at or after 2026-11-01T12:00:03.000000Z")
+	if _, err := s.run(ModeTimestamp, 5.5, "", false); err != nil {
+		t.Fatalf("after the bound: %v", err)
+	}
+}
+
+// F051: a lost object holding members of B leaves maxOct(B) a lower bound
+// (D-52), with complete hints or none.
+func TestFrontierLostObject(t *testing.T) {
+	for _, hinted := range []bool{true, false} {
+		build := func() *synth {
+			s := newSynth(t)
+			lost := s.file("a", "a0", 101, "", "", run("A", 1, 30, 1, 101))
+			s.file("a", "a1", 101, "A:1-30", "", run("A", 31, 70, 31, 101))
+			s.lost[lost] = true
+			if !hinted {
+				r := &s.sites["a"].Rows[0]
+				r.Hints = Hints{Previous: r.Hints.Previous}
+			}
+			s.backup("A:1-30", "a", 101, 30.5)
+			s.dump.ServerClock.End = backupmeta.NewMicroTime(time.UnixMicro(sec(32)))
+			return s
+		}
+		s := build()
+		p, err := s.run(ModeTimestamp, 32.5, "", false)
+		// a1's previous GTIDs name A:1-30, which no readable row holds.
+		wantToken(t, err, pitrarchive.TokenBackupAfterTarget, "no longer holds every transaction of this backup (A:1-30)", "use a target at or after 2026-11-01T12:00:33.000000Z")
+		if p.BackupFrontierProven {
+			t.Fatalf("hinted=%v: frontier proven with a lost row", hinted)
+		}
+		p, err = build().run(ModeTimestamp, 40.5, "", false)
+		if !hinted {
+			// A row with no complete hints may hold the witness too.
+			wantToken(t, err, pitrarchive.TokenArchiveObjectInvalid, "cannot read a/a0", "may hold the first transaction at or after")
+			continue
+		}
+		if err != nil || p.BackupFrontierProven || p.BackupNewestCommit != 0 || !p.Replay.Equal(MustParseSet("A:31-40")) {
+			t.Fatalf("after the bound: %+v %v", p, err)
+		}
 	}
 }

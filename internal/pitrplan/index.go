@@ -104,8 +104,10 @@ func (b *IndexBuilder) HasPrevious() bool { return b.prev }
 
 // BeginTxn opens the transaction g. oct is µs; srv the event's server_id.
 func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32) error {
-	b.closeTxn()
-	if g.GNO <= 0 {
+	if err := b.closeTxn(); err != nil {
+		return err
+	}
+	if g.GNO <= 0 || g.GNO > MaxGNO {
 		return refuse(pitrarchive.TokenReplayUnsupported, "%s holds a GTID with GNO %d", b.label, g.GNO)
 	}
 	if oct <= 0 {
@@ -114,13 +116,22 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32) error {
 	if b.idx.Previous.Has(g) {
 		return refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s: %s is both in the file's Previous_gtids and among its transactions; the GTID was reissued", b.label, g)
 	}
-	if err := b.budget.Charge(TxnBytes, "transaction index of "+b.label); err != nil {
+	// The transaction record, plus (review F047) a new interval of the
+	// GTID set, and a new source identifier's map slots and spelling.
+	charge := TxnBytes
+	sid, ok := b.sids[g.SID]
+	if !ok {
+		charge += indexSourceBytes + sidBytes(g.SID)
+	}
+	if !b.idx.GTIDs.Has(g) && !b.idx.GTIDs.adjacent(g) {
+		charge += intervalBytes
+	}
+	if err := b.budget.Charge(charge, "transaction index of "+b.label); err != nil {
 		return err
 	}
 	if !b.idx.GTIDs.add(g) {
 		return refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s: %s occurs twice in one file; the GTID was reissued", b.label, g)
 	}
-	sid, ok := b.sids[g.SID]
 	if !ok {
 		sid = uint32(len(b.idx.SIDs))
 		b.sids[g.SID] = sid
@@ -153,20 +164,35 @@ func (b *IndexBuilder) MarkData() {
 	}
 }
 
-func (b *IndexBuilder) closeTxn() {
+func (b *IndexBuilder) closeTxn() error {
 	if !b.open {
-		return
+		return nil
 	}
 	b.open = false
 	t := b.idx.Txns[len(b.idx.Txns)-1]
-	if t.Empty() {
-		b.idx.EmptyGTIDs.add(GTID{b.idx.SIDs[t.SID], t.GNO})
+	if !t.Empty() {
+		return nil
 	}
+	g := GTID{b.idx.SIDs[t.SID], t.GNO}
+	var charge int64
+	if _, ok := b.idx.EmptyGTIDs[g.SID]; !ok {
+		charge += sourceBytes
+	}
+	if !b.idx.EmptyGTIDs.adjacent(g) {
+		charge += intervalBytes
+	}
+	if err := b.budget.Charge(charge, "empty GTIDs of "+b.label); err != nil {
+		return err
+	}
+	b.idx.EmptyGTIDs.add(g)
+	return nil
 }
 
 // Finish closes the file.
 func (b *IndexBuilder) Finish(digest string, size int64) (*FileIndex, error) {
-	b.closeTxn()
+	if err := b.closeTxn(); err != nil {
+		return nil, err
+	}
 	if !b.prev {
 		return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "%s has no PREVIOUS_GTIDS event", b.label)
 	}

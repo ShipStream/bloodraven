@@ -137,7 +137,9 @@ type PointInTimeVerificationSpec struct {
 	Mode string `json:"mode,omitempty"`
 
 	// Timestamp is the target instant, a whole second in the same forms as
-	// PointInTimeSpec.StopDatetime (fractional seconds are refused). Replay restores the history of the first archived
+	// PointInTimeSpec.StopDatetime (fractional seconds are refused; a
+	// stored fractional value must be corrected in the same update, as for
+	// StopDatetime). Replay restores the history of the first archived
 	// transaction committed at or after it, cut just before that
 	// transaction. Required when Mode=timestamp; ignored otherwise.
 	// +optional
@@ -305,22 +307,25 @@ type MysqlBackupVerificationStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// BinlogReplayMark records the final binlog coordinate and server-clock
-// timestamp a PITR replay caught up to. Reported by the verification
-// Job via a structured log sentinel so the reconciler can populate
-// status without shelling out to MySQL itself.
+// BinlogReplayMark summarizes how far a PITR replay reached. Its fields are
+// derived independently from the certified replay verdict, not read from
+// one final event: File is the last binlog file the replay applied,
+// Timestamp is the newest original commit time among the replayed
+// transactions (which need not be an event in File), and Position is not
+// reported.
 type BinlogReplayMark struct {
-	// File is the last binlog file applied, e.g. "mysql-bin.000412".
+	// File is the last binlog file the replay applied, e.g.
+	// "mysql-bin.000412".
 	// +optional
 	File string `json:"file,omitempty"`
 
-	// Position is the byte offset within File of the last applied
-	// event.
+	// Position is not reported by current releases and stays unset.
 	// +optional
 	Position int64 `json:"position,omitempty"`
 
-	// Timestamp is the wall-clock time of the last applied event, in
-	// RFC3339. Used to compute bloodraven_backup_verification_replay_lag_seconds.
+	// Timestamp is the newest original commit time among the replayed
+	// transactions. Used to compute
+	// bloodraven_backup_verification_replay_lag_seconds.
 	// +optional
 	Timestamp *metav1.Time `json:"timestamp,omitempty"`
 }

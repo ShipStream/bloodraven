@@ -102,13 +102,26 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 	}
 	// Audit and retention write this site's manifest, which needs a
 	// verified descriptor; a replica waiting for the writer skips them.
+	// When this scan already opened (or tried to establish) an unverified
+	// session, it is not re-opened here: that would repeat the descriptor
+	// read, the full prefix listing and every manifest read the scan just
+	// did (F203). A scan that ended before the session (a failed role
+	// probe) still opens it, so retention runs without a role.
+	if a.session != nil && !a.session.Verified() {
+		a.mu.Lock()
+		scanStart := a.lastScanAt
+		a.mu.Unlock()
+		if a.session.attemptedSince(scanStart) {
+			return
+		}
+	}
 	if a.openSession(ctx) != nil {
 		return
 	}
 	if manifest, err := a.loadManifest(ctx); err == nil {
 		if err := a.auditArchive(ctx, manifest); err != nil {
 			a.historyAuditError = err.Error()
-			a.setError(err.Error())
+			a.setMaintenanceError(err.Error())
 			a.incUploadFailures()
 			a.logger.Warn("archive binlog", "file", a.site, "error", err)
 		} else if a.historyAuditError != "" {
@@ -121,7 +134,7 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 		}
 	} else if a.historyAuditError != "" {
 		// An unreadable manifest cannot establish that the prior failure resolved.
-		a.setError(a.historyAuditError)
+		a.setMaintenanceError(a.historyAuditError)
 	}
 	a.maybeRunRetention(ctx)
 	m, err := a.loadManifest(ctx)
@@ -130,6 +143,18 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 	}
 	a.compactRetirementRecords(ctx, m)
 	a.updateManifestAggregates(m.Files)
+}
+
+// setMaintenanceError reports a maintenance failure. While this site holds
+// a history-integrity marker, the unsafe-history refusal stays the primary
+// LastError (it starts with PITRArchiveUnsafeHistory, which the controller
+// reports as ArchiveUnsafeHistory with its new-prefix remedy) and the
+// maintenance failure is appended to it, never put in its place (F076).
+func (a *BinlogArchiver) setMaintenanceError(msg string) {
+	if marker := a.currentMarker(); marker != nil {
+		msg = unsafeHistoryError(a.site, marker).Error() + "; also: " + msg
+	}
+	a.setError(msg)
 }
 
 // compactRetirementRecords forgets acknowledged records only after their local

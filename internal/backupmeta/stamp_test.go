@@ -203,3 +203,41 @@ func TestDumpMetaJSON(t *testing.T) {
 		t.Fatalf("round trip = %+v, %v", back, err)
 	}
 }
+
+// Review F138: a stamp object holds exactly one JSON value.
+func TestParseStampRefusesTrailingData(t *testing.T) {
+	b, err := testStamp().Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseStamp(append(append([]byte{}, b...), " \n\t"...)); err != nil {
+		t.Fatalf("trailing whitespace refused: %v", err)
+	}
+	for name, tail := range map[string]string{
+		"another value":       "{}",
+		"a second stamp":      string(b),
+		"garbage":             "xyz",
+		"an unterminated one": "{",
+		"a scalar":            " 1",
+	} {
+		if _, err := ParseStamp(append(append([]byte{}, b...), tail...)); !errors.Is(err, ErrStampInvalid) {
+			t.Errorf("%s after the stamp: err = %v, want ErrStampInvalid", name, err)
+		}
+	}
+}
+
+// Review F139: a location named like a stamp would collide with another
+// backup's stamp key.
+func TestCheckDumpLocation(t *testing.T) {
+	for loc, ok := range map[string]bool{
+		"backups/nightly-1":                         true,
+		"backups/nightly-1.json":                    true,
+		"backups/nightly-1.bloodraven-backup.json":  false,
+		"backups/nightly-1.bloodraven-backup.json/": false,
+		"nightly-1.bloodraven-backup.json":          false,
+	} {
+		if err := CheckDumpLocation(loc); (err == nil) != ok {
+			t.Errorf("CheckDumpLocation(%q) = %v, want ok=%t", loc, err, ok)
+		}
+	}
+}

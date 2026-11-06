@@ -13,16 +13,9 @@ import (
 
 // A real replacement stream is still the active binlog, so the archival
 // protocol has no second sealed identity to compare with the lost tail yet.
-//
-// BLOODRAVEN_PITR_REISSUE_STORE=<dir> keeps the resulting PVC-layout archive
-// for the cmd/bloodraven half of this scenario
-// (TestPITRActiveReissueMustNotReplayAbandonedTail).
 func TestActiveReissueMustNotEraseLostTailEvidence(t *testing.T) {
 	ctx := context.Background()
-	dir := os.Getenv("BLOODRAVEN_PITR_REISSUE_STORE")
-	if dir == "" {
-		dir = t.TempDir()
-	}
+	dir := t.TempDir()
 	store, err := NewArchiveStore(ctx, &PITRConfig{StorageType: "PVC", PVC: testPVCConfig(dir)})
 	if err != nil {
 		t.Fatal(err)

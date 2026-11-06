@@ -108,6 +108,26 @@ func (e *encryptedStore) PutFile(ctx context.Context, key, path string) error {
 	return e.Put(ctx, key, file, -1)
 }
 
+// errObjectUndecryptable: the object's bytes, read in full from the store,
+// do not decrypt and authenticate with the mounted key (wrong key,
+// truncation, tampering). A read error from the store is never wrapped
+// with it.
+var errObjectUndecryptable = errors.New("sidecar: object does not decrypt with the mounted key")
+
+// readErrRecorder remembers the first non-EOF error its reader returned.
+type readErrRecorder struct {
+	r   io.Reader
+	err error
+}
+
+func (r *readErrRecorder) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && r.err == nil {
+		r.err = err
+	}
+	return n, err
+}
+
 type archiveReadCloser struct {
 	io.Reader
 	close func() error
@@ -122,8 +142,17 @@ func (e *encryptedStore) Open(ctx context.Context, key string) (io.ReadCloser, e
 	if err != nil {
 		return nil, err
 	}
-	buffered := bufio.NewReader(source)
-	prefix, _ := buffered.Peek(4)
+	// Transport failures (from source) and content failures (bytes that
+	// do not decrypt with this key) are told apart: only the second is
+	// errObjectUndecryptable, so a caller never classifies an outage as
+	// foreign or legacy content (F072).
+	recorded := &readErrRecorder{r: source}
+	buffered := bufio.NewReader(recorded)
+	prefix, peekErr := buffered.Peek(4)
+	if peekErr != nil && !errors.Is(peekErr, io.EOF) {
+		_ = source.Close()
+		return nil, fmt.Errorf("read %s: %w", key, peekErr)
+	}
 	if !backupcrypto.LooksEncrypted(prefix) {
 		if e.allowPlaintext {
 			return &archiveReadCloser{Reader: buffered, close: source.Close}, nil
@@ -134,6 +163,9 @@ func (e *encryptedStore) Open(ctx context.Context, key string) (io.ReadCloser, e
 	reader, writer := io.Pipe()
 	go func() {
 		_, err := backupcrypto.Decrypt(writer, buffered, e.passphrase)
+		if err != nil && recorded.err == nil {
+			err = fmt.Errorf("%w: key=%s: %w", errObjectUndecryptable, key, err)
+		}
 		_ = source.Close()
 		_ = writer.CloseWithError(err)
 	}()

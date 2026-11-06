@@ -40,8 +40,10 @@ func TestExample1SingleSite(t *testing.T) {
 	p := w.check("ex1", query{mode: ts, stop: w.in("A:80")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "A:80", truth: pitrplan.GroundTruthOrigin,
 		lambda: "A:1-79", replay: "A:41-79", post: ptr("A:80-100"),
 		segs: []seg{{"a/a1", "A:41-70", "A:1-40"}, {"a/a2", "A:71-79", "A:1-70"}}})
-	if !p.BackupFrontierProven || p.BackupNewestCommit != w.at("A:40").UnixMicro() {
-		t.Errorf("frontier = %v %d, want proven t(A:40)", p.BackupFrontierProven, p.BackupNewestCommit)
+	// a0 is left unread on its hint (hmax t(A:30) < t(A:40)), so t(A:40)
+	// is a lower bound (review F005) and the target passed D-52 instead.
+	if p.BackupFrontierProven || p.BackupNewestCommit != w.at("A:40").UnixMicro() {
+		t.Errorf("frontier = %v %d, want unproven t(A:40)", p.BackupFrontierProven, p.BackupNewestCommit)
 	}
 	// Example 8(a): latest mode on the same archive.
 	w.check("ex8a", query{mode: pitrplan.ModeLatest}, want{outcome: pitrplan.OutcomeArchiveHead, lambda: "A:1-100",
@@ -81,7 +83,12 @@ func TestExample2PlannedFailover(t *testing.T) {
 
 // example3 is the headline failback without reclone: a short b era with no
 // b rotation, b's file never archived; a's mixed file a2 holds everything.
-func example3(t *testing.T, lag bool) *world {
+// b's bootstrap clone bridge b0 is retained only with withB0: under review
+// ruling N3 no recorded time proves that the bridge predates R_b, so while
+// it is retained R_b anchors nothing.
+func example3(t *testing.T, lag bool) *world { return example3With(t, lag, false) }
+
+func example3With(t *testing.T, lag, withB0 bool) *world {
 	w := newWorld(t)
 	w.commit("A:1-100")
 	tauB := w.pass(2 * time.Second)
@@ -94,7 +101,7 @@ func example3(t *testing.T, lag bool) *world {
 	}
 	tauA3 := w.pass(2 * time.Second)
 	w.commit("A:101-135")
-	era1Files(w, true)
+	era1Files(w, withB0)
 	if lag {
 		w.promote("b", "Bu", "A:1-100,Bu:1-3", tauB)
 	} else {
@@ -139,6 +146,14 @@ func TestExample3FailbackWithoutReclone(t *testing.T) {
 		msg: []string{"after " + anchorFrom + " (b's promotion record at " + tauB.Format(microLayout) + ", which is not provably before"}})
 	w.check("3ii lag, after the record", query{stop: w.in("Bu:10")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:10",
 		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-9", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-9", ""}}})
+
+	// With b's clone bridge b0 retained, b's history may have been replaced
+	// between R_b and Bu:36 for all the archive proves (N3): refuse.
+	w = example3With(t, false, true)
+	w.check("3ii, bridge retained", query{stop: w.in("Bu:36")}, want{token: pitrarchive.TokenStopAmbiguous,
+		msg: []string{"archived only as a replica copy on a", "the promotion records b#0 are not anchors"}})
+	w.check("3i, bridge retained", query{stop: w.in("A:80")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "A:80", truth: pitrplan.GroundTruthOrigin,
+		lambda: "A:1-79", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-79", ""}}})
 }
 
 const microLayout = "2006-01-02T15:04:05.000000Z"

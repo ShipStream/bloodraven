@@ -310,15 +310,20 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		if phase == "" {
 			phase = "read"
 		}
-		sourceMsg := fmt.Sprintf("scan %s phase incomplete (deadline); last-known-good discovered preserved", phase)
+		cause := discovered.IncompleteCause
+		if cause == "" {
+			cause = "deadline"
+		}
+		sourceMsg := fmt.Sprintf("scan %s phase incomplete (%s); last-known-good discovered preserved", phase, cause)
 		if discovered.IncompletePhase == "dump @.json" {
 			sourceMsg = fmt.Sprintf("scan dump @.json phase incomplete (deadline): read %d/%d dump @.json candidates; "+
 				"last-known-good discovered preserved",
 				discovered.CandidatesRead, discovered.CandidatesTotal)
 		}
-		logger.Info("standby discovery scan incomplete: read phase did not complete before deadline",
+		logger.Info("standby discovery scan incomplete; last-known-good discovered preserved",
 			"prefix", storePrefix,
 			"phase", phase,
+			"cause", cause,
 			"candidatesRead", discovered.CandidatesRead,
 			"candidatesTotal", discovered.CandidatesTotal)
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
@@ -415,7 +420,8 @@ func (r *MysqlStandbyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error
 // buildStoreCfg converts a MysqlStandbyCluster's source.storage into a
 // PITRConfig (which NewArchiveStore consumes) and returns:
 //   - PITRConfig for constructing the store
-//   - the logical prefix to scan
+//   - the logical prefix to scan (the dumps' prefix, beside <prefix>/binlogs)
+//   - the archive the standby expects there (destination and encryption)
 //   - the path to a temporary credentials directory (empty when not needed)
 //   - any configuration error
 //
@@ -519,10 +525,9 @@ func standbyFindStatusCondition(sc *v1alpha1.MysqlStandbyCluster, condType strin
 }
 
 // buildS3PitrCfg resolves S3 credentials from the referenced Kubernetes
-// Secret and returns (PITRS3Config, scanPrefix, tempCredsDir, error).
-// The scan prefix is s3.Prefix (the top-level prefix under which dumps and the
-// binlogs/ subdir both live). tempCredsDir is non-empty when credentials were
-// written to disk; the caller must remove it after the store is constructed.
+// Secret and returns (PITRS3Config, tempCredsDir, error). tempCredsDir is
+// non-empty when credentials were written to disk; the caller must remove
+// it after the store is constructed.
 func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, namespace string, s3 *v1alpha1.S3Storage) (*sidecar.PITRS3Config, string, error) {
 	cfg := &sidecar.PITRS3Config{
 		Bucket:      s3.Bucket,
@@ -678,6 +683,10 @@ type standbyScanResult struct {
 	// loop). It drives an accurate ScanIncomplete message so on-call triage is
 	// not misled about which read phase stalled. Empty when Incomplete is false.
 	IncompletePhase string
+	// IncompleteCause says why the scan is incomplete when it was not a
+	// context deadline/cancel ("" means deadline): a manifest listed but
+	// gone when read.
+	IncompleteCause string
 	// CandidatesRead / CandidatesTotal are operator-correlation counters: how
 	// many dump @.json candidates were read versus the total discovered when an
 	// incomplete scan was detected during the @.json fan-out. Both zero when
@@ -923,6 +932,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	// one that does not refuses the whole archive.
 	// -------------------------------------------------------------------
 	window := &standbyScanResult{}
+	var markedSites []string
 	for _, key := range keys {
 		if !strings.HasPrefix(key, manifestPrefix) || !strings.HasSuffix(key, ".json") {
 			continue
@@ -952,7 +962,20 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 			// window computed without it would overstate what is archived.
 			r.Recorder.Eventf(sc, corev1.EventTypeWarning, "ManifestParseFailed",
 				"failed to parse binlog manifest %q: %v", key, err)
-			result.ArchiveRefusal = newStandbyArchiveRefusal(fmt.Errorf("manifest %s: %w", key, err))
+			// Keep a refusal token first (legacy, newer-version or invalid
+			// v2 manifest), so it names the reason rather than
+			// ArchiveUnreadable (F043).
+			result.ArchiveRefusal = newStandbyArchiveRefusal(wrapTokenFirst("manifest "+key, err))
+			return result, nil
+		}
+		if m.ArchiveID == "" {
+			// The loader refuses a stored v2 manifest without an archive
+			// ID, so an empty one means the object listed a moment ago is
+			// gone (retention, a site's cleanup). That is not a second
+			// archive; rescan rather than publish a partial window (F162).
+			result.Incomplete = true
+			result.IncompletePhase = "manifest"
+			result.IncompleteCause = fmt.Sprintf("manifest %s was listed but is gone; rescanning", key)
 			return result, nil
 		}
 		if m.ArchiveID != desc.ArchiveID {
@@ -963,7 +986,24 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 			})
 			return result, nil
 		}
+		if m.Epoch != nil && m.Epoch.ResetReason != "" {
+			// D-35: a reset epoch refuses every replay from this archive,
+			// as pitr-download does, so no window is advertised (F044).
+			result.ArchiveRefusal = newStandbyArchiveRefusal(&pitrarchive.VerifyError{
+				Token: pitrarchive.TokenArchiveHistoryReset, ArchiveID: desc.ArchiveID, Destination: archive.dest.String(),
+				Detail:    fmt.Sprintf("site %s: %s", site, m.Epoch.ResetReason),
+				Procedure: "start a new archive prefix on the source and take a full backup",
+			})
+			return result, nil
+		}
 		window.ManifestCount++
+		if m.HistoryIntegrity != nil {
+			// D-34: a site with a history-integrity marker serves no
+			// replay, so its files are not part of the window. When every
+			// site is marked nothing is restorable (checked below).
+			markedSites = append(markedSites, site)
+			continue
+		}
 
 		for _, f := range m.Files {
 			window.ArchivedBinlogCount++
@@ -985,6 +1025,14 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		}
 	}
 
+	if window.ManifestCount > 0 && int32(len(markedSites)) == window.ManifestCount {
+		result.ArchiveRefusal = newStandbyArchiveRefusal(&pitrarchive.VerifyError{
+			Token: pitrarchive.TokenArchiveUnsafeHistory, ArchiveID: desc.ArchiveID, Destination: archive.dest.String(),
+			Detail:    fmt.Sprintf("every site's manifest carries a history-integrity marker (%s)", strings.Join(markedSites, ", ")),
+			Procedure: "fix the source's replication or binlog settings, then start a new archive prefix and take a full backup",
+		})
+		return result, nil
+	}
 	result.ManifestCount = window.ManifestCount
 	result.ArchivedBinlogCount = window.ArchivedBinlogCount
 	result.ArchivedBinlogBytes = window.ArchivedBinlogBytes

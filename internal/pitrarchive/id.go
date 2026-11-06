@@ -19,7 +19,8 @@ var archiveIDRE = regexp.MustCompile(ArchiveIDPattern)
 func ValidArchiveID(id string) bool { return archiveIDRE.MatchString(id) }
 
 // ArchiveIDDerivations lists every supported archive ID derivation (D-2),
-// oldest first. Index 0 is the one writers use to create a descriptor. A
+// newest first. Index 0 is the one writers use to create a descriptor, so
+// a new derivation is prepended, never appended. A
 // writer accepts a descriptor whose ID equals the output of any entry for
 // its own UID and destination (D-3); anything else is a copy.
 //

@@ -4,7 +4,9 @@
 //
 // Every caller that needs a profile's archive destination uses
 // DestinationFor: the PITR sidecar renderer, the restore and verification
-// builders, the standby reconciler and (#203) the bindings.
+// builders and (#203) the bindings. The standby reconciler does not: its
+// source is the standby spec's S3 storage, not a BackupProfile, so it calls
+// pitrarchive.NewS3Destination directly.
 package pitrprofile
 
 import (

@@ -666,3 +666,90 @@ func TestStandbyCluster_PassphraseUsesTrimPassphrase(t *testing.T) {
 		t.Fatalf("passphrase = %q, want %q", got, "\vkey  ")
 	}
 }
+
+// vanishingStore lists ghost keys that are gone by the time they are read.
+type vanishingStore struct {
+	*fakeStore
+	ghosts []string
+}
+
+func (v *vanishingStore) List(ctx context.Context, prefix string) ([]string, error) {
+	keys, err := v.fakeStore.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range v.ghosts {
+		if strings.HasPrefix(g, prefix) {
+			keys = append(keys, g)
+		}
+	}
+	return keys, nil
+}
+
+// F043, F044, F162: manifest refusals keep their token as the
+// SourceConfigKnown reason; a reset epoch, or a history-integrity marker
+// on every site, refuses the window every replay would refuse; a marked
+// site's files are left out of a published window; a manifest that
+// vanishes between List and Get makes the scan incomplete, not a second
+// archive.
+func TestStandbyCluster_ManifestRefusalsAndMarks(t *testing.T) {
+	const atKey, atJSON = "orders/d1/@.json", `{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100"}`
+	manifest := func(site, extra string) []byte {
+		return []byte(`{"version":2,"archiveId":"` + standbyTestArchiveID + `","site":"` + site + `","files":[{"name":"b1","remotePath":"orders/binlogs/` + site +
+			`/b1","size":7}]` + extra + `}`)
+	}
+	marker := `,"historyIntegrity":{"violation":"ReplicationFilter","detail":"Replicate_Do_DB=x","at":"2026-05-19T00:00:00Z"}`
+	tests := []struct {
+		name       string
+		manifests  map[string][]byte
+		ghost      bool
+		wantReason string
+		wantFiles  int32
+	}{
+		{name: "newer manifest version", manifests: map[string][]byte{"dc1": []byte(`{"version":3,"archiveId":"` + standbyTestArchiveID + `","site":"dc1","files":[]}`)}, wantReason: "ArchiveVersionUnsupported"},
+		{name: "legacy manifest beside a descriptor", manifests: map[string][]byte{"dc1": []byte(`{"version":1,"site":"dc1","files":[]}`)}, wantReason: "ArchiveLegacy"},
+		{name: "v2 manifest without archive ID", manifests: map[string][]byte{"dc1": []byte(`{"version":2,"site":"dc1","files":[]}`)}, wantReason: "ArchiveObjectInvalid"},
+		{name: "reset epoch", manifests: map[string][]byte{"dc1": manifest("dc1", `,"epoch":{"resetReason":"GTID namespace reused after a reclone"}`)}, wantReason: "ArchiveHistoryReset"},
+		{name: "every site marked", manifests: map[string][]byte{"dc1": manifest("dc1", marker), "dc2": manifest("dc2", marker)}, wantReason: "ArchiveUnsafeHistory"},
+		{name: "one site marked", manifests: map[string][]byte{"dc1": manifest("dc1", marker), "dc2": manifest("dc2", "")}, wantReason: "DumpFound", wantFiles: 1},
+		{name: "manifest vanished after List", manifests: map[string][]byte{"dc1": manifest("dc1", "")}, ghost: true, wantReason: "ScanIncomplete"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := minimalStandbyCR("test-sc", "default")
+			fs := &fakeStore{Objects: map[string][]byte{atKey: []byte(atJSON), "orders/binlogs/archive.json": standbyTestDescriptor()}}
+			for site, body := range tt.manifests {
+				fs.Objects["orders/binlogs/manifest-"+site+".json"] = body
+			}
+			var store sidecar.ArchiveStore = fs
+			if tt.ghost {
+				store = &vanishingStore{fakeStore: fs, ghosts: []string{"orders/binlogs/manifest-dc9.json"}}
+			}
+			r, _ := newTestReconciler(t, []client.Object{cr}, store)
+			got, _ := reconcileStandby(t, r, "test-sc", "default")
+			skc := standbyFindCondition(got, v1alpha1.StandbyConditionSourceConfigKnown)
+			if skc == nil || skc.Reason != tt.wantReason {
+				t.Fatalf("SourceConfigKnown = %+v, want reason %s", skc, tt.wantReason)
+			}
+			if strings.HasPrefix(tt.wantReason, "Archive") && !strings.HasPrefix(skc.Message, "PITR"+tt.wantReason) && !strings.Contains(skc.Message, "PITR"+tt.wantReason+":") {
+				t.Fatalf("refusal message %q does not lead with its token", skc.Message)
+			}
+			if tt.ghost {
+				if strings.Contains(skc.Message, "deadline") || !strings.Contains(skc.Message, "manifest-dc9.json") {
+					t.Fatalf("incomplete message %q, want the vanished manifest named", skc.Message)
+				}
+				return
+			}
+			d := got.Status.Discovered
+			if tt.wantReason == "DumpFound" {
+				if d == nil || d.Archive == nil || d.ArchivedBinlogCount != tt.wantFiles {
+					t.Fatalf("discovered %+v, want a window of %d files", d, tt.wantFiles)
+				}
+				return
+			}
+			if d == nil || d.Archive != nil || d.ArchivedBinlogCount != 0 {
+				t.Fatalf("refused archive, but discovered carries a window: %+v", d)
+			}
+		})
+	}
+}

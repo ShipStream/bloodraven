@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
@@ -104,6 +105,20 @@ func bruteMinJumps(p *planner, goal Set) int {
 	return -1
 }
 
+// hasForbiddenStep reports whether some archived transaction is outside
+// Λ ∪ X: a step the search must not take.
+func hasForbiddenStep(p *planner) bool {
+	allowed := p.lambda.Union(p.X)
+	for _, f := range p.order {
+		for i := 0; i < f.n(); i++ {
+			if !allowed.Has(f.gtid(i)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func checkPlanWalk(t *testing.T, p *planner, res *searchResult, goal Set) {
 	t.Helper()
 	state := p.B.Clone()
@@ -151,26 +166,7 @@ func randomHistory(t *testing.T, r *rand.Rand) (*synth, string, string, string) 
 		gnos[sid]++
 		hist = append(hist, ev{fmt.Sprintf("%s:%d", sid, gnos[sid]), uint32(101 + writer)})
 	}
-	n := len(hist)
-	for k, site := range []string{"a", "b"} {
-		cut := 0
-		for cut < n {
-			end := cut + 1 + r.Intn(n-cut)
-			prev := Set{}
-			for _, e := range hist[:cut] {
-				prev.add(MustParseSet(e.g).GTIDs()[0])
-			}
-			var txns []stx
-			for i, e := range hist[cut:end] {
-				txns = append(txns, stx{g: e.g, oct: sec(float64(cut + i)), srv: e.srv})
-			}
-			if r.Intn(3) != 0 {
-				s.file(site, fmt.Sprintf("%s%d", site, cut), uint32(101+k), prev.String(), "", txns)
-			}
-			cut = end
-		}
-	}
-	bLen := r.Intn(n)
+	bLen := r.Intn(len(hist))
 	B, lambda, X := Set{}, Set{}, Set{}
 	for i, e := range hist {
 		g := MustParseSet(e.g).GTIDs()[0]
@@ -181,16 +177,47 @@ func randomHistory(t *testing.T, r *rand.Rand) (*synth, string, string, string) 
 			X.add(g)
 		}
 	}
+	for k, site := range []string{"a", "b"} {
+		// A site's own sequence is the history with, sometimes, an errant
+		// transaction of its own inserted after the backup point: a step
+		// over it is forbidden unless X holds it (review F177).
+		seq := append([]ev(nil), hist...)
+		if r.Intn(2) == 0 {
+			at := bLen + r.Intn(len(hist)-bLen+1)
+			e := ev{fmt.Sprintf("E%d:%d", k, 1), uint32(101 + k)}
+			seq = append(seq[:at], append([]ev{e}, seq[at:]...)...)
+			if r.Intn(2) == 0 {
+				X.add(MustParseSet(e.g).GTIDs()[0])
+			}
+		}
+		n := len(seq)
+		cut := 0
+		for cut < n {
+			end := cut + 1 + r.Intn(n-cut)
+			prev := Set{}
+			for _, e := range seq[:cut] {
+				prev.add(MustParseSet(e.g).GTIDs()[0])
+			}
+			var txns []stx
+			for i, e := range seq[cut:end] {
+				txns = append(txns, stx{g: e.g, oct: sec(float64(cut + i)), srv: e.srv})
+			}
+			if r.Intn(3) != 0 {
+				s.file(site, fmt.Sprintf("%s%d", site, cut), uint32(101+k), prev.String(), "", txns)
+			}
+			cut = end
+		}
+	}
 	return s, B.String(), X.String(), lambda.String()
 }
 
 func TestSearchMatchesBruteForce(t *testing.T) {
 	r := rand.New(rand.NewSource(206))
-	planned, refused, multi := 0, 0, 0
+	planned, refused, multi, blocked := 0, 0, 0, 0
 	defer func() {
-		t.Logf("%d plans (%d multi-segment), %d refusals", planned, multi, refused)
-		if planned < 50 || refused < 20 || multi < 20 {
-			t.Errorf("the generator is not exercising the search: %d plans, %d multi-segment, %d refusals", planned, multi, refused)
+		t.Logf("%d plans (%d multi-segment), %d refusals, %d histories with a forbidden step", planned, multi, refused, blocked)
+		if planned < 50 || refused < 20 || multi < 20 || blocked < 50 {
+			t.Errorf("the generator is not exercising the search: %d plans, %d multi-segment, %d refusals, %d with a forbidden step", planned, multi, refused, blocked)
 		}
 	}()
 	for trial := 0; trial < 400; trial++ {
@@ -201,6 +228,9 @@ func TestSearchMatchesBruteForce(t *testing.T) {
 			}
 			p := searchPlanner(t, s, b, x, lambda)
 			goal := p.lambda.Subtract(p.X)
+			if !collide && hasForbiddenStep(p) {
+				blocked++
+			}
 			want := bruteMinJumps(p, goal)
 			res, err := p.search(goal)
 			searchHashOverride = nil
@@ -309,8 +339,58 @@ func TestKeyHashClosedForm(t *testing.T) {
 	if h.set(s) != sum {
 		t.Fatal("closed-form interval hash differs from the per-GTID sum")
 	}
-	big := MustParseSet("A:1-9223372036854775806")
-	_ = h.set(big) // no overflow panic
+	// Near the largest GNO the closed form (mod 2⁶⁴) still equals the
+	// per-GTID sum (review F178).
+	for _, s := range []Set{
+		MustParseSet("A:9223372036854775790-9223372036854775806"),
+		MustParseSet("A:9223372036854775800-9223372036854775806,B:4611686018427387900-4611686018427387910"),
+	} {
+		var sum uint64
+		for _, g := range s.GTIDs() {
+			sum += h.term(g.SID, g.GNO)
+		}
+		if h.set(s) != sum {
+			t.Fatalf("closed form differs from the per-GTID sum for %s", s)
+		}
+	}
+}
+
+// F060: the search's charges die with its graph, on success and on a
+// refusal alike.
+func TestSearchReleasesCharges(t *testing.T) {
+	s := newSynth(t)
+	s.file("a", "a1", 101, "", "", run("A", 1, 10, 1, 101))
+	s.file("b", "b1", 102, "", "", run("A", 1, 10, 1, 101))
+	p := searchPlanner(t, s, "A:1-2", "", "A:1-10")
+	before := p.budget.Used()
+	if _, err := p.search(p.lambda); err != nil {
+		t.Fatal(err)
+	}
+	if p.budget.Used() != before {
+		t.Fatalf("search left %d bytes charged", p.budget.Used()-before)
+	}
+	p = searchPlanner(t, s, "A:1-3,A:5", "", "A:1-10")
+	before = p.budget.Used()
+	_, err := p.search(p.lambda)
+	wantToken(t, err, pitrarchive.TokenArchiveGap)
+	if p.budget.Used() != before {
+		t.Fatalf("a refused search left %d bytes charged", p.budget.Used()-before)
+	}
+}
+
+// F061: an archived row that cannot be read is not a never-archived tail.
+func TestGapNamesUnreadableRow(t *testing.T) {
+	s := newSynth(t)
+	s.file("a", "a1", 101, "", "", run("A", 1, 10, 1, 101))
+	lost := s.file("a", "a2", 101, "A:1-10", "", run("A", 11, 20, 11, 101))
+	s.file("a", "a3", 101, "A:1-20", "", run("A", 21, 30, 21, 101))
+	s.lost[lost] = true
+	s.backup("A:1-5", "a", 101, 5.5)
+	_, err := s.run(ModeTimestamp, 26, "", false)
+	wantToken(t, err, pitrarchive.TokenArchiveGap, "A:11-20", "may be in a/a2", "whose object cannot be read")
+	if r, _ := RefusalOf(err); strings.Contains(r.Message, "never archived") {
+		t.Fatalf("lost object diagnosed as a never-archived tail: %s", r.Message)
+	}
 }
 
 // P7: a segment whose GTID set would exceed one mysqlbinlog argument is

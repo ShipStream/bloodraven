@@ -15,8 +15,10 @@ type Role string
 const (
 	// RoleWriter is a writing consumer: the site sidecar and pitr-quarantine.
 	RoleWriter Role = "Writer"
-	// RoleReader is a reading consumer: pitr-download, dump-meta and
-	// pitr-archive-check.
+	// RoleReader is a reading consumer: pitr-download (through
+	// sidecar.OpenArchiveForRead), the standby reconciler's discovery scan,
+	// and (#203) pitr-archive-check. dump-meta reads the dump stamp, not
+	// the descriptor.
 	RoleReader Role = "Reader"
 )
 
@@ -84,6 +86,7 @@ func TokenOf(err error) (Token, bool) {
 // Procedures appended to refusals. They name the remedy, not the cause.
 const (
 	procedureVersion    = "upgrade bloodraven to a release that reads this archive"
+	procedureCorrupt    = "archive.json is damaged and no release can read it; restore the original object (for example from bucket versioning or a copy) or point this profile at a new prefix"
 	procedureForeign    = "point this profile at a new prefix"
 	procedureCopy       = "this is a copy of an archive (same group, other destination, or an ID from an unsupported derivation); writers never adopt a copy; point this profile at a new prefix"
 	procedureIdentity   = "the dump stamp and the archive disagree; use the archive profile the backup was taken with"
@@ -131,7 +134,6 @@ func VerifyDescriptor(d *Descriptor, expect Expectation, passphrase []byte) erro
 		var ve *VerifyError
 		if errors.As(err, &ve) {
 			ve.Destination = expect.Destination.String()
-			ve.Procedure = procedureVersion
 		}
 		return err
 	}
@@ -176,14 +178,15 @@ func VerifyDescriptor(d *Descriptor, expect Expectation, passphrase []byte) erro
 }
 
 // ParseAndVerifyDescriptor is ParseDescriptor followed by VerifyDescriptor,
-// with the destination filled into parse refusals.
+// with the destination filled into parse refusals. The parse refusal keeps
+// the procedure ParseDescriptor chose (upgrade for a newer version,
+// repair for corruption).
 func ParseAndVerifyDescriptor(b []byte, expect Expectation, passphrase []byte) (*Descriptor, error) {
 	d, err := ParseDescriptor(b)
 	if err != nil {
 		var ve *VerifyError
 		if errors.As(err, &ve) {
 			ve.Destination = expect.Destination.String()
-			ve.Procedure = procedureVersion
 		}
 		return nil, err
 	}

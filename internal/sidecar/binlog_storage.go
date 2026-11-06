@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -289,6 +290,43 @@ func (s *s3Store) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	return buf.Bytes(), true, nil
 }
 
+// limitedGetter reads at most limit bytes of an object, for small
+// metadata objects whose size the reader does not trust (archive.json).
+type limitedGetter interface {
+	getLimited(ctx context.Context, key string, limit int64) ([]byte, bool, error)
+}
+
+var (
+	_ limitedGetter = (*s3Store)(nil)
+	_ limitedGetter = (*pvcStore)(nil)
+)
+
+// getLimited issues a ranged GET for the first limit bytes. An empty
+// object answers a range with 416 InvalidRange; it is returned as empty.
+func (s *s3Store) getLimited(ctx context.Context, key string, limit int64) ([]byte, bool, error) {
+	resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(fmt.Sprintf("bytes=0-%d", limit-1)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, false, nil
+		}
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidRange" {
+			return []byte{}, true, nil
+		}
+		return nil, false, fmt.Errorf("s3 get %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if err != nil {
+		return nil, false, fmt.Errorf("s3 read %s: %w", key, err)
+	}
+	return b, true, nil
+}
+
 func (s *s3Store) GetFile(ctx context.Context, key, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
@@ -395,6 +433,11 @@ type pvcStore struct {
 	// dirSync syncs a directory; nil means syncDir. Tests replace it to
 	// prove that every publish makes its directory entry durable.
 	dirSync func(dir string) error
+
+	// durableMu guards durable: the directories under root whose own
+	// entry in their parent this process has synced.
+	durableMu sync.Mutex
+	durable   map[string]bool
 }
 
 // syncDirectory fsyncs dir so a rename, link, unlink or mkdir in it
@@ -406,35 +449,38 @@ func (p *pvcStore) syncDirectory(dir string) error {
 	return syncDir(dir)
 }
 
-// mkdirAllDurable creates dir and any missing parents, then fsyncs the
-// parent of every directory it created, so a new directory's entry is
-// durable before an object published in it is reported as saved.
+// mkdirAllDurable creates dir and any missing parents, then makes the
+// entry of every directory between dir and root durable by syncing its
+// parent, so an object published in dir is reported as saved only once
+// its whole directory chain survives a node crash. A directory counts as
+// durable only after its parent sync succeeded in this process: a failed
+// sync is retried by the next write into it (F077), even though the
+// directory itself already exists, and a restarted process syncs each
+// chain once more.
 func (p *pvcStore) mkdirAllDurable(dir string) error {
-	var missing []string
-	for d := filepath.Clean(dir); ; {
-		if _, err := os.Stat(d); err == nil {
-			break
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-		missing = append(missing, d)
+	dir = filepath.Clean(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	root := filepath.Clean(p.root)
+	p.durableMu.Lock()
+	defer p.durableMu.Unlock()
+	// Deepest first: each directory's entry lives in its parent.
+	for d := dir; d != root; {
 		parent := filepath.Dir(d)
 		if parent == d {
 			break
 		}
-		d = parent
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	// Deepest first: each created directory's entry lives in its parent.
-	for _, d := range missing {
-		if err := p.syncDirectory(filepath.Dir(d)); err != nil {
-			return fmt.Errorf("sync %s: %w", filepath.Dir(d), err)
+		if !p.durable[d] {
+			if err := p.syncDirectory(parent); err != nil {
+				return fmt.Errorf("sync %s: %w", parent, err)
+			}
+			if p.durable == nil {
+				p.durable = map[string]bool{}
+			}
+			p.durable[d] = true
 		}
+		d = parent
 	}
 	return nil
 }
@@ -570,6 +616,26 @@ func (p *pvcStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("read %s: %w", key, err)
 	}
 	return data, true, nil
+}
+
+func (p *pvcStore) getLimited(_ context.Context, key string, limit int64) ([]byte, bool, error) {
+	src, err := p.fullPath(key)
+	if err != nil {
+		return nil, false, err
+	}
+	f, err := os.Open(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("read %s: %w", key, err)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, limit))
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s: %w", key, err)
+	}
+	return b, true, nil
 }
 
 func (p *pvcStore) Delete(_ context.Context, key string) error {

@@ -145,9 +145,10 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := pitrBackupBefore(pitrReq, backup.Status); err != nil {
-		return nil, err
-	}
+	// D-44 (a target before the dump ended) is enforced by dump-meta
+	// against the dump's own serverClock.end. status.completionTime is
+	// no bound: it includes the upload, which can end long after the
+	// dump did, so it would refuse valid targets in between (F034).
 	pitrFrags, err := buildRestorePITRFragmentsFor(fg, pitrReq)
 	if err != nil {
 		return nil, err

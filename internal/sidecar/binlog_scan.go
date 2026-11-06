@@ -194,7 +194,8 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 	fail := func(name string, err error) {
 		hadError = true
 		a.incUploadFailures()
-		a.setError(fmt.Sprintf("archive %s: %v", name, err))
+		// A manifest refusal keeps its leading PITR token (F087).
+		a.setError(wrapKeepToken("archive "+name, err).Error())
 		a.logger.Warn("archive binlog", "file", name, "error", err)
 	}
 	for _, entry := range sealed {

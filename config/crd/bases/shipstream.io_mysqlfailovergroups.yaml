@@ -693,8 +693,11 @@ spec:
                           - passphraseSecret
                           type: object
                         name:
-                          description: Name is the unique profile identifier within
-                            this failover group.
+                          description: |-
+                            Name is the unique profile identifier within this failover group, a
+                            DNS label of at most 63 characters (the bound every reference to a
+                            profile, such as pointInTime.archiveProfileName, carries).
+                          maxLength: 63
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
@@ -804,7 +807,14 @@ spec:
                                 prefix:
                                   description: |-
                                     Prefix is the object-name prefix inside the bucket. Each backup
-                                    lands under "<prefix>/<mysqlbackup-name>/".
+                                    lands under "<prefix>/<mysqlbackup-name>/" and the PITR archive under
+                                    "<prefix>/binlogs/". A leading or trailing "/" is ignored. Empty
+                                    segments ("a//b") and "." or ".." segments are refused: the dump
+                                    writer keeps a prefix as written, while the archive and every reader
+                                    (standby discovery, dump-meta) resolve it as a path, so such a
+                                    prefix would name different keys for each.
+                                  maxLength: 512
+                                  pattern: ^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$
                                   type: string
                                 region:
                                   description: Region is the AWS region. Optional
@@ -897,7 +907,9 @@ spec:
                                 timestamp:
                                   description: |-
                                     Timestamp is the target instant, a whole second in the same forms as
-                                    PointInTimeSpec.StopDatetime (fractional seconds are refused). Replay restores the history of the first archived
+                                    PointInTimeSpec.StopDatetime (fractional seconds are refused; a
+                                    stored fractional value must be corrected in the same update, as for
+                                    StopDatetime). Replay restores the history of the first archived
                                     transaction committed at or after it, cut just before that
                                     transaction. Required when Mode=timestamp; ignored otherwise.
                                   maxLength: 40
@@ -5606,6 +5618,10 @@ spec:
                           refused. Replay restores the history of the first archived
                           transaction committed at or after it (commit times are compared to
                           the microsecond), cut just before that transaction. Required.
+                          An object stored with a fractional target before this rule existed
+                          fails every update (finalizer removal included) on clusters without
+                          CRD validation ratcheting until an update also corrects the target;
+                          correct such targets before applying the CRD.
                         maxLength: 40
                         pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
                         type: string
@@ -5679,7 +5695,14 @@ spec:
                           prefix:
                             description: |-
                               Prefix is the object-name prefix inside the bucket. Each backup
-                              lands under "<prefix>/<mysqlbackup-name>/".
+                              lands under "<prefix>/<mysqlbackup-name>/" and the PITR archive under
+                              "<prefix>/binlogs/". A leading or trailing "/" is ignored. Empty
+                              segments ("a//b") and "." or ".." segments are refused: the dump
+                              writer keeps a prefix as written, while the archive and every reader
+                              (standby discovery, dump-meta) resolve it as a path, so such a
+                              prefix would name different keys for each.
+                            maxLength: 512
+                            pattern: ^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$
                             type: string
                           region:
                             description: Region is the AWS region. Optional for non-AWS
@@ -6210,6 +6233,10 @@ spec:
                           refused. Replay restores the history of the first archived
                           transaction committed at or after it (commit times are compared to
                           the microsecond), cut just before that transaction. Required.
+                          An object stored with a fractional target before this rule existed
+                          fails every update (finalizer removal included) on clusters without
+                          CRD validation ratcheting until an update also corrects the target;
+                          correct such targets before applying the CRD.
                         maxLength: 40
                         pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
                         type: string
@@ -6283,7 +6310,14 @@ spec:
                           prefix:
                             description: |-
                               Prefix is the object-name prefix inside the bucket. Each backup
-                              lands under "<prefix>/<mysqlbackup-name>/".
+                              lands under "<prefix>/<mysqlbackup-name>/" and the PITR archive under
+                              "<prefix>/binlogs/". A leading or trailing "/" is ignored. Empty
+                              segments ("a//b") and "." or ".." segments are refused: the dump
+                              writer keeps a prefix as written, while the archive and every reader
+                              (standby discovery, dump-meta) resolve it as a path, so such a
+                              prefix would name different keys for each.
+                            maxLength: 512
+                            pattern: ^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$
                             type: string
                           region:
                             description: Region is the AWS region. Optional for non-AWS
@@ -7234,7 +7268,12 @@ spec:
                         maxLength: 4096
                         type: string
                       encryptionMode:
-                        description: EncryptionMode is the archive's encryption mode.
+                        description: |-
+                          EncryptionMode is the encryption mode the group's profile configures
+                          for the archive; once a site has verified the descriptor it is the
+                          mode that site reported, which equals the descriptor's. While the
+                          archive is refused (ArchiveEncryptionMismatch, say) it is still the
+                          configured mode, not the descriptor's.
                         enum:
                         - None
                         - Passphrase
@@ -7253,7 +7292,9 @@ spec:
                         format: date-time
                         type: string
                       reason:
-                        description: Reason is set when State is Refused.
+                        description: |-
+                          Reason is set when State is Refused by a site's refusal; empty when
+                          sites verified conflicting archive IDs.
                         enum:
                         - ArchiveForeign
                         - ArchiveCopy
@@ -7672,8 +7713,9 @@ spec:
                         - ArchiveHead
                         type: string
                       replaySites:
-                        description: ReplaySites are the sites whose archived binlogs
-                          were staged, sorted.
+                        description: |-
+                          ReplaySites are the sites whose archived binlogs were staged, sorted;
+                          see ReplaySitesOmitted for the ones the verdict left out.
                         items:
                           maxLength: 63
                           pattern: ^[a-z0-9-]+$
@@ -7681,6 +7723,14 @@ spec:
                         maxItems: 16
                         type: array
                         x-kubernetes-list-type: atomic
+                      replaySitesOmitted:
+                        description: |-
+                          ReplaySitesOmitted counts further staged sites the verdict did not
+                          name: its site list is bounded, so ReplaySites is complete only when
+                          this is zero.
+                        format: int32
+                        minimum: 0
+                        type: integer
                       replayedBinlogCount:
                         description: |-
                           ReplayedBinlogCount is the number of distinct archived binlogs the
@@ -7933,8 +7983,9 @@ spec:
                         - ArchiveHead
                         type: string
                       replaySites:
-                        description: ReplaySites are the sites whose archived binlogs
-                          were staged, sorted.
+                        description: |-
+                          ReplaySites are the sites whose archived binlogs were staged, sorted;
+                          see ReplaySitesOmitted for the ones the verdict left out.
                         items:
                           maxLength: 63
                           pattern: ^[a-z0-9-]+$
@@ -7942,6 +7993,14 @@ spec:
                         maxItems: 16
                         type: array
                         x-kubernetes-list-type: atomic
+                      replaySitesOmitted:
+                        description: |-
+                          ReplaySitesOmitted counts further staged sites the verdict did not
+                          name: its site list is bounded, so ReplaySites is complete only when
+                          this is zero.
+                        format: int32
+                        minimum: 0
+                        type: integer
                       replayedBinlogCount:
                         description: |-
                           ReplayedBinlogCount is the number of distinct archived binlogs the

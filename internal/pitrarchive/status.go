@@ -46,9 +46,17 @@ type PromotionRecord struct {
 	ServerUUID   string `json:"serverUuid"`
 	ServerID     uint32 `json:"serverId"`
 	GTIDExecuted string `json:"gtidExecuted"`
-	// ObservedAt is the sidecar's clock (the mysqld pod's node clock) at
-	// the observation, truncated to the microsecond, UTC.
+	// ObservedAt is the sidecar's clock (the mysqld pod's node clock) when
+	// the role probe that read GTIDExecuted returned, truncated to the
+	// microsecond, UTC. The sidecar opens records only from probes that
+	// ran for at most a second, so the snapshot is at most that much older.
 	ObservedAt time.Time `json:"observedAt"`
+	// ReadOnlyGTIDExecuted is the gtid_executed of the read-only
+	// observation of the same server directly before this episode, when
+	// the sidecar saw one ("" otherwise: a sidecar start while writable, a
+	// failed probe in between, or a new server incarnation while writable).
+	// Recorded for diagnosis; the planner does not use it.
+	ReadOnlyGTIDExecuted string `json:"readOnlyGtidExecuted,omitempty"`
 }
 
 // HistoryViolation names a setting that makes a site's binlogs unable to

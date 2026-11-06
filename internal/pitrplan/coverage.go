@@ -76,8 +76,11 @@ type Coverage struct {
 
 	// Baseline is B, the dump's gtidExecuted.
 	Baseline string `json:"baseline"`
-	// BackupNewestCommitTime is maxOct(B) proven from bytes; null when
-	// no archived member of B was found (−∞).
+	// BackupNewestCommitTime is maxOct(B): the newest commit time of a
+	// member of B read from archived bytes; null when none was read (−∞).
+	// It is proven only when every archived row holding members of B was
+	// read; when one was pruned, lost, or left unread on its hint, it is a
+	// lower bound and the plan passed the D-52 server-clock bound instead.
 	BackupNewestCommitTime backupmeta.MicroTime `json:"backupNewestCommitTime"`
 	// Excluded is X (excludeGtids).
 	Excluded string `json:"excluded"`
@@ -87,12 +90,19 @@ type Coverage struct {
 	Replay string `json:"replay"`
 	// PostStop is Q = (∪ gtids of staged files) ∖ Λ ∖ X.
 	PostStop string `json:"postStop"`
-	// Divergent is D, which the planner proved ⊆ X.
+	// Divergent is D: in timestamp mode the archived transactions
+	// committed in (maxOct(B), T) outside Λ ∪ B, excluded ones included.
+	// A successful plan proved D ⊆ X. On a PITRArchiveDivergentHistory
+	// refusal it is the complete set the message asks to exclude (in
+	// latest mode, the unexcluded loss evidence and audit findings), which
+	// is not ⊆ X.
 	Divergent string `json:"divergent"`
 	// OnHistoryExclusions is the D-48 set: X ∩ Λ members that precede a
 	// replayed transaction.
 	OnHistoryExclusions string `json:"onHistoryExclusions"`
-	// Lost is latest mode's loss-evidence set, ⊆ X (D-37).
+	// Lost is latest mode's loss evidence (D-37): on success, the flagged
+	// transactions X excludes; on a PITRArchiveDivergentHistory refusal,
+	// every flagged transaction.
 	Lost string `json:"lost"`
 
 	// Witness is set in timestamp mode with outcome TargetCovered.

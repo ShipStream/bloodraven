@@ -39,18 +39,21 @@ func run(sid string, from, to int64, start float64, srv uint32) []stx {
 }
 
 type synth struct {
-	t       *testing.T
-	sites   map[string]*SiteManifest
-	order   []string
-	idx     map[RowRef]*FileIndex
-	lost    map[RowRef]bool
+	t     *testing.T
+	sites map[string]*SiteManifest
+	order []string
+	idx   map[RowRef]*FileIndex
+	lost  map[RowRef]bool
+	// corrupt rows fail their content integrity check (a *Refusal with
+	// ObjectInvalid, as a digest or CRC mismatch does).
+	corrupt map[RowRef]bool
 	fetches map[string]int
 	dump    backupmeta.DumpMeta
 	budget  int64
 }
 
 func newSynth(t *testing.T) *synth {
-	return &synth{t: t, sites: map[string]*SiteManifest{}, idx: map[RowRef]*FileIndex{}, lost: map[RowRef]bool{}, fetches: map[string]int{}}
+	return &synth{t: t, sites: map[string]*SiteManifest{}, idx: map[RowRef]*FileIndex{}, lost: map[RowRef]bool{}, corrupt: map[RowRef]bool{}, fetches: map[string]int{}}
 }
 
 func (s *synth) site(name string) *SiteManifest {
@@ -159,6 +162,9 @@ func (s *synth) run(mode Mode, stop float64, exclude string, partial bool) (*Pla
 		s.fetches[r.Site+"/"+r.Name]++
 		if s.lost[r] {
 			return nil, errSynthLost
+		}
+		if s.corrupt[r] {
+			return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "%s/%s (id %s): the bytes' digest does not match the row's content ID", r.Site, r.Name, r.ID)
 		}
 		idx := s.idx[r]
 		if idx == nil {

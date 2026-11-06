@@ -11,6 +11,13 @@ import (
 // frontier is the B-frontier pass (§4.3, D-44, D-49, D-52): it proves
 // maxOct(B) from bytes, then checks the dump against reissue and against
 // the target.
+//
+// The descending search stops on the next row's hinted hmax, and a hint is
+// unverified until its row is downloaded: a row whose hint understates its
+// newest member of B would hide a commit after T (review F005). So
+// maxOct(B) is proven only when every active row meeting B was downloaded;
+// a search that stopped on a hint leaves it a lower bound, and the D-52
+// server-clock bound applies.
 func (p *planner) frontier() error {
 	var rows []*Row
 	for _, r := range p.rows {
@@ -22,8 +29,10 @@ func (p *planner) frontier() error {
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Hints.hi() > rows[j].Hints.hi() })
 	missing := Set{}
 	unreadable := false
-	for _, r := range rows {
+	hinted := 0 // rows meeting B left unread on their hint
+	for k, r := range rows {
 		if p.maxOctB != math.MinInt64 && r.Hints.hi() <= p.maxOctB {
+			hinted = len(rows) - k
 			break
 		}
 		f, err := p.fetch(r)
@@ -77,9 +86,8 @@ func (p *planner) frontier() error {
 		}
 	}
 	missing = missing.normalized()
-	p.frontierMiss = missing
 	pl := p.plan
-	pl.BackupFrontierProven = missing.IsEmpty() && !unreadable
+	pl.BackupFrontierProven = missing.IsEmpty() && !unreadable && hinted == 0
 	if p.maxOctB != math.MinInt64 {
 		pl.BackupNewestCommit = p.maxOctB
 	}
@@ -87,11 +95,13 @@ func (p *planner) frontier() error {
 	// D-49 against the dumped server's own clock (P5): commit times are
 	// server clocks, so the Job's clock (@.done.json end) is no bound for
 	// them; δ covers the skew between the dumped server and B's other
-	// origins.
-	serverEnd := p.req.Dump.ServerClock.End.UnixMicro()
-	if p.maxOctB != math.MinInt64 && p.maxOctB > serverEnd+p.delta {
-		return refuse(pitrarchive.TokenArchiveNamespaceReuse, "the archive says %s (site %s, %s) committed at %s, after this dump finished (the dumped server's clock read %s at the dump's end, and the clock-skew margin is %s); the GTID was reissued (a reclone kept the server_uuid); start a new archive prefix and take a full backup",
-			p.maxOctBGTID, p.maxOctBFile.row.Site, p.maxOctBFile.row.Name, fmtMicros(p.maxOctB), p.req.Dump.ServerClock.End, time.Duration(p.delta)*time.Microsecond)
+	// origins. The newest one is named; ingest also records any other
+	// downloaded copy (p.reissue), which the closure reports.
+	if p.maxOctB != math.MinInt64 && p.maxOctB > p.serverEnd+p.delta {
+		return p.reissueRefusal(p.maxOctBGTID, p.maxOctBFile, p.maxOctB)
+	}
+	if p.reissue != nil {
+		return p.reissue
 	}
 	if p.req.Mode != ModeTimestamp {
 		return nil
@@ -112,6 +122,10 @@ func (p *planner) frontier() error {
 	if !pl.BackupFrontierProven {
 		bound := p.req.Dump.ServerClock.End.Add(time.Second)
 		if p.T < bound.UnixMicro() {
+			if missing.IsEmpty() && !unreadable {
+				return refuse(pitrarchive.TokenBackupAfterTarget, "this backup's newest commit time is proven only up to %s; %d archived rows holding its transactions were not read, and their manifest hints are unverified; the dumped server's clock read %s when the dump finished; use a target at or after %s",
+					fmtMicros(p.maxOctB), hinted, p.req.Dump.ServerClock.End, fmtMicros(bound.UnixMicro()))
+			}
 			what := missing.bounded(512)
 			if what == "" {
 				what = "an unreadable row's transactions"
@@ -121,4 +135,11 @@ func (p *planner) frontier() error {
 		}
 	}
 	return nil
+}
+
+// reissueRefusal is D-49: g ∈ B has a copy committed after the dump
+// finished (by the dumped server's clock, plus δ).
+func (p *planner) reissueRefusal(g GTID, f *file, oct int64) *Refusal {
+	return refuse(pitrarchive.TokenArchiveNamespaceReuse, "the archive says %s (site %s, %s) committed at %s, after this dump finished (the dumped server's clock read %s at the dump's end, and the clock-skew margin is %s); the GTID was reissued (a reclone kept the server_uuid); start a new archive prefix and take a full backup",
+		g, f.row.Site, f.row.Name, fmtMicros(oct), p.req.Dump.ServerClock.End, time.Duration(p.delta)*time.Microsecond)
 }

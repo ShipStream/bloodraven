@@ -29,9 +29,6 @@ func NewMicroTime(t time.Time) MicroTime {
 	return MicroTime{Time: t.UTC().Truncate(time.Microsecond)}
 }
 
-// Ptr returns a pointer to a copy of m, for optional fields.
-func (m MicroTime) Ptr() *MicroTime { return &m }
-
 // String returns MicroTimeLayout, or "" for the zero value.
 func (m MicroTime) String() string {
 	if m.IsZero() {

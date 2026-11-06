@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -38,6 +39,19 @@ func StampKey(location string) string {
 	return strings.TrimRight(location, "/") + StampSuffix
 }
 
+// CheckDumpLocation refuses a dump location whose last segment ends with
+// StampSuffix. Backup names may contain dots, so a backup named
+// "nightly-1.bloodraven-backup.json" would dump into the key that is backup
+// nightly-1's stamp (a file on a PVC), and its own stamp would be
+// "nightly-1.bloodraven-backup.json.bloodraven-backup.json" (review F139).
+func CheckDumpLocation(location string) error {
+	trimmed := strings.TrimRight(location, "/")
+	if strings.HasSuffix(trimmed, StampSuffix) {
+		return fmt.Errorf("dump location %q ends with %q, which is reserved for backup stamps; rename the backup", location, StampSuffix)
+	}
+	return nil
+}
+
 // ObjectRef names a Kubernetes object by namespace, name and UID.
 type ObjectRef struct {
 	Namespace string    `json:"namespace"`
@@ -63,10 +77,11 @@ func (f DumpFilters) Empty() bool {
 	return len(f.IncludeSchemas) == 0 && len(f.ExcludeSchemas) == 0
 }
 
-// ServerClock is the dumped server's own clock (`SELECT NOW(6)`, UTC) around
-// the dump (D-52). Start is read just before the dump; End is read on the
-// same server after mysqlsh exits successfully. A zero End means the dump
-// did not finish (PITRBackupIncomplete).
+// ServerClock is the dumped server's own clock around the dump (D-52),
+// read as `UTC_TIMESTAMP(6)`: UTC whatever the session time zone, unlike
+// NOW(6), which follows it. Start is read just before the dump; End is read
+// on the same server after mysqlsh exits successfully. A zero End means the
+// dump did not finish (PITRBackupIncomplete).
 type ServerClock struct {
 	Start MicroTime `json:"start"`
 	End   MicroTime `json:"end"`
@@ -156,13 +171,18 @@ func (s Stamp) Canonical() ([]byte, error) {
 }
 
 // ParseStamp decodes and validates a stamp. Unknown fields are refused: the
-// stamp is version 1 and its writer is this release.
+// stamp is version 1 and its writer is this release. The object must hold
+// exactly one JSON value; anything after it (another value, garbage) is
+// refused, so a damaged object is not read as its first value.
 func ParseStamp(b []byte) (Stamp, error) {
 	var s Stamp
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&s); err != nil {
 		return Stamp{}, fmt.Errorf("%w: decode: %v", ErrStampInvalid, err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return Stamp{}, fmt.Errorf("%w: data after the stamp", ErrStampInvalid)
 	}
 	if err := s.Validate(); err != nil {
 		return Stamp{}, err

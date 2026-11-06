@@ -259,7 +259,15 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 		ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
 	})
 	if err != nil {
-		return r.failVerification(ctx, v, "BuildJobFailed", err.Error())
+		// A PITR refusal (PITRBackupIdentityUnknown, PITRTargetInvalid,
+		// ...) is recorded by its catalog token, as the restore build
+		// path and Job-time refusals are (F028); anything else is an
+		// operator-side build failure.
+		reason, message := "BuildJobFailed", err.Error()
+		if tok := pitrFailureReason(message); tok != "" {
+			reason, message = tok, tokenFirstMessage(tok, message)
+		}
+		return r.failVerification(ctx, v, reason, message)
 	}
 	if err := controllerutil.SetControllerReference(v, built, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("set job owner ref: %w", err)

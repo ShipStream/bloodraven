@@ -84,7 +84,7 @@ func TestPITRArchiveFailedSeedReadDoesNotResurrectRecoveredFalse(t *testing.T) {
 func pitrRolloutServers(t *testing.T) []*internalmysql.SidecarClient {
 	t.Helper()
 	iad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"enabled":true,"storeReady":true,"consecutiveFailedScans":0}`)
+		fmt.Fprint(w, `{"enabled":true,"storeReady":true,"consecutiveFailedScans":0,"archive":{"destination":"s3://b/p","encryptionMode":"None","state":"Verified","archiveID":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
 	}))
 	t.Cleanup(iad.Close)
 	pdx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

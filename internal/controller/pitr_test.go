@@ -1,10 +1,12 @@
 package controller
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -256,16 +258,79 @@ func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
 }
 
 // TestBuildRestorePITRFragments_RequiresSourceArchive fails cleanly
-// when a PITR restore is requested but the failover group doesn't
-// archive binlogs — nothing to replay.
+// when a PITR restore names no source archive, and when a replay with no
+// archiveProfileName (a verification) runs on a group that does not
+// archive binlogs: nothing to replay (F152, F032).
 func TestBuildRestorePITRFragments_RequiresSourceArchive(t *testing.T) {
 	fg := withBackup(nil)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
 		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"},
 	}
 	_, err := buildRestorePITRFragments(fg)
-	if err == nil {
-		t.Fatalf("want error when pitr archive is not configured on source")
+	if err == nil || !strings.HasPrefix(err.Error(), string(pitrarchive.TokenTargetInvalid)+": pointInTime.archiveProfileName is required") {
+		t.Fatalf("err = %v, want the archiveProfileName refusal", err)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		verification bool
+		want         string
+		wantNot      string
+	}{
+		{name: "restore", want: "pointInTime.archiveProfileName must name the archive's profile"},
+		{name: "verification", verification: true, want: "a verification replays the group's own PITR archive", wantNot: "archiveProfileName"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildRestorePITRFragmentsFor(withBackup(nil), &pitrReplayRequest{Mode: "latest", Verification: tc.verification})
+			if err == nil || !strings.HasPrefix(err.Error(), string(pitrarchive.TokenTargetInvalid)+": ") ||
+				!strings.Contains(err.Error(), "spec.backup.pitr.enabled=false") || !strings.Contains(err.Error(), tc.want) ||
+				(tc.wantNot != "" && strings.Contains(err.Error(), tc.wantNot)) {
+				t.Fatalf("err = %v, want the PITR-disabled refusal containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// F030, F031: excludeGtids sources must be UUIDs before tags are expanded,
+// and the canonical set must fit one container env string.
+func TestCanonicalExcludeGtidsBounds(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	manyTags := func(n int) string {
+		var b strings.Builder
+		b.WriteString(u)
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, ":t%d:1", i)
+		}
+		return b.String()
+	}
+	tests := []struct {
+		name string
+		raw  string
+		want string // "" = accepted
+	}{
+		{name: "plain", raw: u + ":1-5"},
+		{name: "uppercase and multi-line", raw: strings.ToUpper(u) + ":1-5,\n" + u + ":7"},
+		{name: "tags under one UUID", raw: manyTags(10)},
+		{name: "non-UUID source", raw: strings.Repeat("a", 60000) + ":t0:1:t1:1", want: "is not a server UUID"},
+		{name: "short source", raw: "aaaa:1-5", want: "is not a server UUID"},
+		{name: "canonical expansion too large", raw: manyTags(4000), want: "over the 65536-byte limit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := canonicalExcludeGtids("pointInTime.excludeGtids", tt.raw)
+			if tt.want == "" {
+				if err != nil || got == "" || len(got) > maxExcludeGtidsEnvBytes {
+					t.Fatalf("got %q, %v", got, err)
+				}
+				return
+			}
+			if err == nil || !strings.HasPrefix(err.Error(), string(pitrarchive.TokenTargetInvalid)+": ") || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+			if len(err.Error()) > 1024 {
+				t.Fatalf("refusal message is %d bytes", len(err.Error()))
+			}
+		})
 	}
 }
 
@@ -457,5 +522,69 @@ func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
 	}
 	if req, err := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: "none", ExcludeGtids: "not a set:x-y"}); err != nil || req != nil {
 		t.Fatalf("mode none = %+v, %v; want no replay and no error", req, err)
+	}
+}
+
+// F029: kubelet expands $(VAR) and $$ in EnvVar.Value, so the archive
+// identity env is rendered literal-escaped: what the sidecar and the
+// pitr-download init container see after expansion is the destination the
+// archive ID was derived from, and the manifest prefix is its key prefix.
+func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
+	for _, prefix := range []string{"cash$$", "team/$(POD_NAMESPACE)/x", "plain"} {
+		t.Run(prefix, func(t *testing.T) {
+			fg := withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "primary"})
+			fg.UID = "uid-lion"
+			fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{
+				{Name: "primary", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3,
+					S3: &v1alpha1.S3Storage{Bucket: "lion", Prefix: prefix, EndpointURL: "https://s3.example.com"}}},
+				{Name: "other", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3,
+					S3: &v1alpha1.S3Storage{Bucket: "lion", Prefix: "elsewhere", EndpointURL: "https://s3.example.com"}}},
+			}
+			ident, ok := activePITRArchiveIdentity(fg)
+			if !ok {
+				t.Fatal("no active archive")
+			}
+			check := func(t *testing.T, env []corev1.EnvVar) {
+				t.Helper()
+				seen := map[string]backupEnvironmentValue{"POD_NAMESPACE": {value: "ns", known: true}}
+				got := map[string]string{}
+				for _, e := range env {
+					v := expandBackupEnvironment(e.Value, seen)
+					seen[e.Name] = v
+					got[e.Name] = v.value
+				}
+				dest, err := pitrarchive.ParseDestination(got["BLOODRAVEN_PITR_DESTINATION"])
+				if err != nil {
+					t.Fatalf("expanded destination %q does not parse: %v", got["BLOODRAVEN_PITR_DESTINATION"], err)
+				}
+				if dest != ident.Destination || got["BLOODRAVEN_PITR_MANIFEST_PREFIX"] != dest.KeyPrefix {
+					t.Fatalf("expanded destination %q prefix %q, want %q prefix %q", dest.String(),
+						got["BLOODRAVEN_PITR_MANIFEST_PREFIX"], ident.Destination.String(), ident.Destination.KeyPrefix)
+				}
+				if id, ok := got["BLOODRAVEN_PITR_ARCHIVE_ID"]; ok && !pitrarchive.IsDerivedArchiveID(id, fg.UID, dest) {
+					t.Fatalf("archive ID %s is not derived from the expanded destination %s", id, dest.String())
+				}
+			}
+			frags, err := buildPITRSidecarFragments(fg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(t, frags.SidecarEnv)
+
+			// A restore of another group reading this archive.
+			reader := fg.DeepCopy()
+			reader.UID = "uid-reader"
+			reader.Spec.Backup.PITR.ProfileName = "other"
+			restore, err := buildRestorePITRFragmentsFor(reader, &pitrReplayRequest{Mode: "latest", ArchiveProfileName: "primary"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(t, restore.InitContainer.Env)
+			job := &batchv1.Job{Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{*restore.InitContainer}}}}}
+			if got := renderedPITRRequest(job).Destination; got != ident.Destination.String() {
+				t.Fatalf("rendered request destination %q, want %q", got, ident.Destination.String())
+			}
+		})
 	}
 }

@@ -3,12 +3,15 @@ package pitrarchive
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 )
@@ -25,6 +28,14 @@ const (
 	CASProbeKeyPrefix = ".bloodraven-cas-probe-"
 	// AlgorithmAES256GCM is the only supported Passphrase algorithm.
 	AlgorithmAES256GCM = "AES-256-GCM"
+	// MaxDescriptorSize caps archive.json. A writer's canonical descriptor
+	// is a few hundred bytes; every reader reads at most this many bytes
+	// (plus one, to detect an oversized object) before parsing, so a
+	// corrupt or hostile multi-gigabyte object cannot exhaust memory.
+	MaxDescriptorSize = 64 << 10
+	// MaxSourceUIDLength bounds source.uid. Kubernetes UIDs are 36-byte
+	// UUIDs; the bound only keeps a corrupt descriptor out of status.
+	MaxSourceUIDLength = 128
 )
 
 // DescriptorKey returns the descriptor's store key for a key prefix.
@@ -134,6 +145,9 @@ func NewDescriptor(source Source, d Destination, enc EncryptionIdentity, passphr
 	if source.UID == "" || source.Namespace == "" || source.Name == "" {
 		return nil, fmt.Errorf("pitrarchive: descriptor source %+v is incomplete", source)
 	}
+	if err := source.ValidateNames(); err != nil {
+		return nil, fmt.Errorf("pitrarchive: descriptor %w", err)
+	}
 	if d.IsZero() {
 		return nil, fmt.Errorf("pitrarchive: descriptor destination is empty")
 	}
@@ -192,18 +206,73 @@ func IdentityEqual(a, b *Descriptor) bool {
 		a.Source == b.Source && a.Encryption == b.Encryption
 }
 
+// ValidateNames checks the source against the bounds of the API fields that
+// receive it (v1alpha1.PITRArchiveSource): the namespace is a DNS-1123
+// label (at most 63 characters) and the name a DNS-1123 subdomain (at most
+// 253), as for every Kubernetes object. A descriptor that passed with a
+// longer name could never be written to status.
+func (s Source) ValidateNames() error {
+	if errs := validation.IsDNS1123Label(s.Namespace); len(errs) > 0 {
+		return fmt.Errorf("source namespace %q is not a Kubernetes namespace name: %s", truncateForMessage(s.Namespace), strings.Join(errs, "; "))
+	}
+	if errs := validation.IsDNS1123Subdomain(s.Name); len(errs) > 0 {
+		return fmt.Errorf("source name %q is not a Kubernetes object name: %s", truncateForMessage(s.Name), strings.Join(errs, "; "))
+	}
+	if len(s.UID) > MaxSourceUIDLength {
+		return fmt.Errorf("source uid is %d bytes, longer than %d", len(s.UID), MaxSourceUIDLength)
+	}
+	return nil
+}
+
+// truncateForMessage keeps a refusal message bounded when it quotes a
+// corrupt field.
+func truncateForMessage(s string) string {
+	const max = 80
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+// ReadDescriptorBytes reads at most MaxDescriptorSize bytes of archive.json
+// from r. A larger object is refused with TokenArchiveVersionUnsupported
+// (the descriptor token, so PITRArchiveReady reports it) and the
+// corruption procedure, without buffering the rest.
+func ReadDescriptorBytes(r io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, MaxDescriptorSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > MaxDescriptorSize {
+		return nil, &VerifyError{Token: TokenArchiveVersionUnsupported, Procedure: procedureCorrupt,
+			Detail: fmt.Sprintf("archive.json is larger than %d bytes", MaxDescriptorSize)}
+	}
+	return b, nil
+}
+
 // ParseDescriptor decodes and validates descriptor bytes. Unknown fields are
 // tolerated within version 1 (forward-compatible additions); a different
 // kind or version is refused, never read best-effort. Every failure is a
-// *VerifyError with TokenArchiveVersionUnsupported.
+// *VerifyError with TokenArchiveVersionUnsupported. Its Procedure names the
+// remedy: an upgrade only for a newer version, the corruption procedure
+// for bytes no release can read (undecodable JSON, trailing data, a wrong
+// kind, a malformed or out-of-bounds field).
 func ParseDescriptor(b []byte) (*Descriptor, error) {
+	corrupt := func(format string, a ...any) error {
+		return &VerifyError{Token: TokenArchiveVersionUnsupported, Procedure: procedureCorrupt, Detail: fmt.Sprintf(format, a...)}
+	}
+	if len(b) > MaxDescriptorSize {
+		return nil, corrupt("archive.json is larger than %d bytes", MaxDescriptorSize)
+	}
 	var d Descriptor
 	dec := json.NewDecoder(bytes.NewReader(b))
 	if err := dec.Decode(&d); err != nil {
-		return nil, &VerifyError{Token: TokenArchiveVersionUnsupported, Detail: fmt.Sprintf("archive.json does not parse: %v", err)}
+		return nil, corrupt("archive.json does not parse: %v", err)
 	}
-	if dec.More() {
-		return nil, &VerifyError{Token: TokenArchiveVersionUnsupported, Detail: "archive.json has trailing data"}
+	// Exactly one JSON value: a second value, a stray '}' or any other
+	// trailing bytes are refused (Decoder.More misses a stray '}').
+	if err := dec.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
+		return nil, corrupt("archive.json has trailing data")
 	}
 	if err := d.validate(); err != nil {
 		return nil, err
@@ -211,22 +280,36 @@ func ParseDescriptor(b []byte) (*Descriptor, error) {
 	return &d, nil
 }
 
-// validate applies the structural rules ParseDescriptor enforces.
+// validate applies the structural rules ParseDescriptor enforces. Only a
+// version newer than this release's carries the upgrade procedure; every
+// other failure is corruption.
 func (d *Descriptor) validate() error {
 	fail := func(format string, a ...any) error {
-		return &VerifyError{Token: TokenArchiveVersionUnsupported, ArchiveID: d.ArchiveID, Detail: fmt.Sprintf(format, a...)}
+		return &VerifyError{Token: TokenArchiveVersionUnsupported, ArchiveID: d.ArchiveID, Procedure: procedureCorrupt, Detail: fmt.Sprintf(format, a...)}
 	}
 	switch {
 	case d.Kind != DescriptorKind:
 		return fail("archive.json kind is %q, want %q", d.Kind, DescriptorKind)
+	case d.Version > DescriptorVersion:
+		return &VerifyError{Token: TokenArchiveVersionUnsupported, ArchiveID: d.ArchiveID, Procedure: procedureVersion,
+			Detail: fmt.Sprintf("archive.json version is %d; this release reads only version %d", d.Version, DescriptorVersion)}
 	case d.Version != DescriptorVersion:
 		return fail("archive.json version is %d; this release reads only version %d", d.Version, DescriptorVersion)
 	case !ValidArchiveID(d.ArchiveID):
-		return fail("archive.json archiveID %q is malformed", d.ArchiveID)
+		return fail("archive.json archiveID %q is malformed", truncateForMessage(d.ArchiveID))
 	case d.Source.UID == "" || d.Source.Namespace == "" || d.Source.Name == "":
 		return fail("archive.json source {namespace,name,uid} is incomplete")
 	}
+	if err := d.Source.ValidateNames(); err != nil {
+		return fail("archive.json %v", err)
+	}
 	if err := d.Encryption.Identity().Validate(); err != nil {
+		if m := d.Encryption.Mode; m != EncryptionNone && m != EncryptionPassphrase {
+			// A mode this release does not know may come from a newer
+			// writer: the upgrade is the remedy.
+			return &VerifyError{Token: TokenArchiveVersionUnsupported, ArchiveID: d.ArchiveID, Procedure: procedureVersion,
+				Detail: fmt.Sprintf("archive.json %v", err)}
+		}
 		return fail("archive.json %v", err)
 	}
 	switch d.Encryption.Mode {

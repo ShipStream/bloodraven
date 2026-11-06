@@ -55,14 +55,42 @@ const (
 	// members slice header (24), first file and span flag (5), and BFS
 	// state (8).
 	classBytes = 64 + 24 + 5 + 8
-	// intervalBytes is charged per interval of a materialized set.
+	// intervalBytes is charged per interval of a materialized set: the
+	// interval and the slack of its slice's doubling growth.
 	intervalBytes = int64(unsafe.Sizeof(Interval{})) + 8
+	// sourceBytes is charged per source identifier of a materialized set
+	// (review F047): its map slot (string key and slice header, with the
+	// table's growth headroom) and the allocation rounding of its own
+	// interval array. The identifier's bytes are charged on top
+	// (sidBytes).
+	sourceBytes = 2*(16+24) + 16
+	// indexSourceBytes is charged once per distinct source identifier of
+	// a file being indexed: its GTIDs map slot (sourceBytes), its
+	// identifier string, its slot in the builder's identifier map (string
+	// key, uint32, growth headroom) and its FileIndex.SIDs entry (string
+	// header, slice doubling). EmptyGTIDs entries are charged when added.
+	indexSourceBytes = sourceBytes + 2*(16+8) + 2*16
 )
 
+// sidBytes is the charge for a source identifier's bytes: its length
+// rounded up to the allocator's 16-byte classes.
+func sidBytes(sid string) int64 { return int64(len(sid)+15) / 16 * 16 }
+
+// setBytes is the charge for a materialized set: per source identifier
+// its map slot and spelling, per interval its slot.
+func setBytes(s Set) int64 {
+	var n int64
+	for sid, ivs := range s {
+		n += sourceBytes + sidBytes(sid) + int64(len(ivs))*intervalBytes
+	}
+	return n
+}
+
 // memProbe, when set (tests), runs where the planner's largest transient
-// structures are live: at the end of the search graph build, of the BFS and
-// of the order check's graph build. TestBudgetBoundsLiveHeap measures the
-// live heap there against the charges.
+// structures are live: at the end of the search graph build, of the BFS, of
+// the order check's graph build and of the segment fill.
+// TestBudgetBoundsLiveHeap measures the live heap there against the
+// charges.
 var memProbe func()
 
 func probeMemory() {
@@ -100,7 +128,7 @@ func (b *Budget) Charge(n int64, what string) error {
 	if n < 0 {
 		return fmt.Errorf("pitrplan: negative charge %d for %s", n, what)
 	}
-	if b.used+n > b.limit {
+	if n > b.limit-b.used {
 		return refuse(pitrarchive.TokenPlanTooLarge, "planning needs more than %d bytes (%s; %d transactions indexed); choose a backup closer to the target or raise the Job's memory limit",
 			b.limit, what, b.indexed)
 	}
@@ -116,5 +144,28 @@ func (b *Budget) Release(n int64) {
 
 // chargeSet charges a materialized set.
 func (b *Budget) chargeSet(s Set, what string) error {
-	return b.Charge(int64(s.Intervals())*intervalBytes, what)
+	return b.Charge(setBytes(s), what)
+}
+
+// charges tracks what one phase charged, so the phase can return it when
+// its structures die (review F060).
+type charges struct {
+	b    *Budget
+	held int64
+}
+
+func (c *charges) charge(n int64, what string) error {
+	if err := c.b.Charge(n, what); err != nil {
+		return err
+	}
+	c.held += n
+	return nil
+}
+
+func (c *charges) chargeSet(s Set, what string) error { return c.charge(setBytes(s), what) }
+
+// release returns everything the phase charged.
+func (c *charges) release() {
+	c.b.Release(c.held)
+	c.held = 0
 }

@@ -211,7 +211,10 @@ func mapLinkError(err error) error {
 		return fmt.Errorf("%w: %v", ErrObjectExists, err)
 	}
 	// ENOTSUP and EOPNOTSUPP share a value on Linux, so this is not a switch.
-	for _, unsupported := range []syscall.Errno{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.EXDEV} {
+	// ENOSYS: the filesystem does not implement link at all. EMLINK is
+	// not here: it means this inode hit its link limit, not that the
+	// filesystem cannot link.
+	for _, unsupported := range []syscall.Errno{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.EXDEV, syscall.ENOSYS} {
 		if errno == unsupported {
 			return fmt.Errorf("%w: %v", ErrConditionalWriteUnsupported, err)
 		}
@@ -227,6 +230,10 @@ func syncDir(dir string) error {
 	defer d.Close()
 	return d.Sync()
 }
+
+// probeCleanupTimeout bounds ProbeAtomicCreate's best-effort delete of its
+// probe key.
+var probeCleanupTimeout = 10 * time.Second
 
 // ProbeAtomicCreate certifies that s enforces atomic create under prefix
 // (§3.4). It creates a random probe key twice: the first create must
@@ -253,6 +260,16 @@ func ProbeAtomicCreate(ctx context.Context, s ArchiveStore, prefix string) error
 			Procedure: "use a store that enforces conditional writes (S3 If-None-Match, or a filesystem with hard links)",
 		}
 	}
+	// Cleanup is registered before the first create: a create that
+	// published the key but then failed (a PVC link followed by a failed
+	// directory sync, an S3 timeout after the PUT landed) must not leave a
+	// probe key behind on every retry. The delete outlives a cancelled ctx
+	// but is bounded, so a stalled store cannot hold up shutdown (F206).
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), probeCleanupTimeout)
+		defer cancel()
+		_ = s.Delete(cleanupCtx, key)
+	}()
 	first := PutIfAbsent(ctx, s, key, bytes.NewReader(body), int64(len(body)))
 	switch {
 	case first == nil:
@@ -264,7 +281,6 @@ func ProbeAtomicCreate(ctx context.Context, s ArchiveStore, prefix string) error
 	default:
 		return fmt.Errorf("probe atomic create: %w", first)
 	}
-	defer func() { _ = s.Delete(context.WithoutCancel(ctx), key) }()
 	second := PutIfAbsent(ctx, s, key, bytes.NewReader(body), int64(len(body)))
 	switch {
 	case errors.Is(second, ErrObjectExists):

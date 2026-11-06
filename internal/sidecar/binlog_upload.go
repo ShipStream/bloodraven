@@ -67,6 +67,25 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 	if err != nil {
 		return err
 	}
+	// A previous attempt uploaded these exact bytes (the key is their
+	// content identity and the local file still hashes to it) but could
+	// not publish the row, for example because reuse verification against
+	// an unreadable quarantined object failed. Retry the publication only;
+	// verification still runs and still refuses (F213).
+	if pending, ok := a.session.takeUnpublished(key); ok && pending.ID == id && pending.Name == name {
+		if reader, openErr := a.store.Open(ctx, key); openErr == nil {
+			_ = reader.Close()
+			if err := a.publishBinlog(ctx, pending, replaceLegacy); err != nil {
+				a.session.noteUnpublished(key, pending)
+				return err
+			}
+			return nil
+		} else if !errors.Is(openErr, os.ErrNotExist) && !isS3NotFound(openErr) {
+			a.session.noteUnpublished(key, pending)
+			return openErr
+		}
+		// The object is gone: upload it again below.
+	}
 	// The non-seekable reader is hashed once; managed multipart retries use buffers.
 	digest := sha256.New()
 	upload := io.TeeReader(io.NewSectionReader(file, 0, before.Size()), digest)
@@ -82,7 +101,11 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 	meta.GTIDCoverage.ContentID = id
 	entry := ManifestEntry{BaseGTIDs: base, Name: name, ID: id, RemotePath: key, Size: meta.Size, FirstEventTime: meta.FirstEventTime, LastEventTime: meta.LastEventTime, PreviousGTIDs: meta.PreviousGTIDs, GTIDCoverage: meta.GTIDCoverage, ArchivedAt: time.Now().UTC()}
 
-	return a.publishBinlog(ctx, entry, replaceLegacy)
+	if err := a.publishBinlog(ctx, entry, replaceLegacy); err != nil {
+		a.session.noteUnpublished(key, entry)
+		return err
+	}
+	return nil
 }
 func stableBinlogFile(before, after os.FileInfo) bool {
 	return after != nil && os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime() == after.ModTime()

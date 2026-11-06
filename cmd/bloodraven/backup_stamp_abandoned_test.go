@@ -76,7 +76,7 @@ func TestWriteBackupStampReplacesAbandonedStamp(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, reused, err := writeBackupStamp(ctx, store, stampKey, recreated)
+			got, reused, err := writeBackupStamp(ctx, store, store, stampKey, recreated)
 			stored, parseErr := backupmeta.ParseStamp(stampBytes(t, store, stampKey))
 			if parseErr != nil {
 				t.Fatal(parseErr)
