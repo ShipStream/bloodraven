@@ -848,7 +848,7 @@ func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 			name: "a planned failover is in flight",
 			mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
 				fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-					Phase: v1alpha1.PlannedFailoverPhaseDraining, Target: "dc2",
+					Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "dc2",
 				}
 			},
 			wantMsg: "planned failover",

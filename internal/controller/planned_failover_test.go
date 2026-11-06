@@ -58,11 +58,20 @@ func TestParsePlannedFailoverAnnotation(t *testing.T) {
 	}{
 		{"pdx", "pdx", 0, ""},
 		{"pdx:maxLagWait=30s", "pdx", 30 * time.Second, ""},
-		{"  pdx :maxLagWait= 2m ", "pdx", 2 * time.Minute, ""},
-		{"pdx:maxLagWait=1h:maxLagWait=2m", "pdx", 2 * time.Minute, ""}, // last wins
+		{"  pdx:maxLagWait=2m\n", "pdx", 2 * time.Minute, ""}, // the whole value is trimmed
+		{"pdx:maxLagWait=1.5m", "pdx", 90 * time.Second, ""},
+		// A-78: <subject>(:<key>=<value>)*, values in [A-Za-z0-9._/+-], each
+		// key once, no empty pair.
+		{" pdx :maxLagWait= 2m ", "", 0, "characters outside"},
+		{"pdx:maxLagWait=1h:maxLagWait=2m", "", 0, "more than once"},
+		{"pdx::maxLagWait=2m", "", 0, "must be key=value"},
+		{"pdx:", "", 0, "must be key=value"},
+		{"pdx:=2m", "", 0, "must be key=value"},
+		{"pdx:maxLagWait=2m=3m", "", 0, "the value must match"},
 		{"", "", 0, "empty"},
 		{"pdx:foo=bar", "", 0, "unknown key"},
-		{"pdx:maxLagWait=", "", 0, "not a valid duration"},
+		{"pdx:maxLagWait=", "", 0, "the value must match"},
+		{"pdx:maxLagWait=soon", "", 0, "not a valid duration"},
 		{"pdx:maxLagWait=0s", "", 0, "must be positive"},
 		{"pdx:abcdef", "", 0, "must be key=value"},
 	}
@@ -122,8 +131,8 @@ func TestValidatePlannedFailover_UnknownSite(t *testing.T) {
 func TestValidatePlannedFailover_DROnlyTargetRejected(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx", "lhr"}, []string{"lhr"}, "iad", nil, nil)
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "lhr"}, time.Now(), false)
-	if result != PlannedFailoverReject || reason != "UnknownSite" {
-		t.Fatalf("expected UnknownSite reject for dr-only target, got result=%v reason=%q err=%v", result, reason, err)
+	if result != PlannedFailoverReject || reason != v1alpha1.PlannedFailoverReasonTargetNotPromotable {
+		t.Fatalf("expected TargetNotPromotable reject for dr-only target, got result=%v reason=%q err=%v", result, reason, err)
 	}
 	if err == nil || !strings.Contains(err.Error(), "primary-candidate") {
 		t.Errorf("err = %v, want to mention primary-candidate", err)
@@ -202,7 +211,7 @@ func TestValidatePlannedFailover_Cooldown(t *testing.T) {
 		statusAgo   time.Duration
 		annotation  *FailoverRecord
 		wantResult  PlannedFailoverValidationResult
-		wantReason  string
+		wantReason  v1alpha1.PlannedFailoverReason
 		wantErr     string
 		wantRetryAt time.Time
 	}{
@@ -270,7 +279,7 @@ func TestValidatePlannedFailover_DurableStateErrors(t *testing.T) {
 	cases := []struct {
 		name       string
 		withStatus bool
-		wantReason string
+		wantReason v1alpha1.PlannedFailoverReason
 		wantErr    string
 	}{
 		{
@@ -334,19 +343,30 @@ func TestValidatePlannedFailover_ConcurrentUpdateRejected(t *testing.T) {
 func TestValidatePlannedFailover_InFlightPlannedFailoverRejected(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag,
+		RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag,
 	}
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "ConcurrentOperation" {
 		t.Fatalf("expected ConcurrentOperation reject, got result=%v reason=%q err=%v", result, reason, err)
+	}
+	// The run itself passes the check on its own admission passes.
+	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseAdmitting
+	if result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), true); result != PlannedFailoverAccept {
+		t.Fatalf("own Admitting run refused: %v %v", result, err)
+	}
+	// A run the terminal marker ended does not block a new one.
+	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
+	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+	if result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false); result != PlannedFailoverAccept {
+		t.Fatalf("marked run blocks a new request: %v %v", result, err)
 	}
 }
 
 func TestValidatePlannedFailover_TerminalPlannedFailoverOK(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase:  v1alpha1.PlannedFailoverPhaseSucceeded,
-		Target: "pdx",
+		Phase:      v1alpha1.PlannedFailoverPhaseSucceeded,
+		TargetSite: "pdx",
 	}
 	// Terminal Succeeded must not block a fresh run. Active site is "iad",
 	// so pdx is a valid target.
@@ -375,83 +395,73 @@ func TestEffectiveMaxLagWait(t *testing.T) {
 	}
 }
 
-func TestPlannedFailoverFencesSourcePrimary(t *testing.T) {
+// syncPodLabels fences the run's source by name, only while the run owns
+// the sites and is not marked.
+func TestPlannedFailoverFencedSite(t *testing.T) {
 	cases := []struct {
 		phase v1alpha1.PlannedFailoverPhase
-		want  bool
+		want  string
 	}{
-		{v1alpha1.PlannedFailoverPhaseNone, false},
-		{v1alpha1.PlannedFailoverPhasePending, false},
-		{v1alpha1.PlannedFailoverPhaseValidating, false},
-		{v1alpha1.PlannedFailoverPhaseDraining, true},
-		{v1alpha1.PlannedFailoverPhaseWaitingForLag, true},
-		{v1alpha1.PlannedFailoverPhasePromoting, true},
-		{v1alpha1.PlannedFailoverPhaseResuming, false},
-		{v1alpha1.PlannedFailoverPhaseSucceeded, false},
-		{v1alpha1.PlannedFailoverPhaseFailed, false},
+		{v1alpha1.PlannedFailoverPhaseAdmitting, ""},
+		{v1alpha1.PlannedFailoverPhaseDeferred, ""},
+		{v1alpha1.PlannedFailoverPhaseFencing, "iad"},
+		{v1alpha1.PlannedFailoverPhaseDraining, "iad"},
+		{v1alpha1.PlannedFailoverPhaseWaitingForLag, "iad"},
+		{v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync, "iad"},
+		{v1alpha1.PlannedFailoverPhasePromotingDragonfly, "iad"},
+		{v1alpha1.PlannedFailoverPhasePromoting, "iad"},
+		{v1alpha1.PlannedFailoverPhaseRollingBack, "iad"},
+		{v1alpha1.PlannedFailoverPhasePublishing, ""},
+		{v1alpha1.PlannedFailoverPhaseSucceeded, ""},
+		{v1alpha1.PlannedFailoverPhaseFailed, ""},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.phase), func(t *testing.T) {
-			fg := &v1alpha1.MysqlFailoverGroup{
-				Status: v1alpha1.MysqlFailoverGroupStatus{
-					PlannedFailover: &v1alpha1.PlannedFailoverStatus{Phase: tc.phase},
-				},
+			fg := &v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{
+				PlannedFailover: &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: tc.phase, SourceSite: "iad", TargetSite: "pdx"},
+			}}
+			if got := plannedFailoverFencedSite(fg); got != tc.want {
+				t.Errorf("fenced site = %q, want %q", got, tc.want)
 			}
-			if got := plannedFailoverFencesSourcePrimary(fg); got != tc.want {
-				t.Errorf("phase=%q fences=%v, want %v", tc.phase, got, tc.want)
+			fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+			if got := plannedFailoverFencedSite(fg); got != "" {
+				t.Errorf("marked run fences %q", got)
 			}
 		})
 	}
-	// nil status returns false
-	if plannedFailoverFencesSourcePrimary(&v1alpha1.MysqlFailoverGroup{}) {
+	if plannedFailoverFencedSite(&v1alpha1.MysqlFailoverGroup{}) != "" {
 		t.Error("nil status should not fence")
 	}
 }
 
-func TestPlannedFailoverTransactionsLost(t *testing.T) {
-	cases := []struct {
-		name   string
-		source string
-		target string
-		want   int64
-	}{
-		{"identical", "abc:1-10", "abc:1-10", 0},
-		{"superset-target", "abc:1-10", "abc:1-15", 0},
-		{"missing-tail", "abc:1-10", "abc:1-7", 3},
-		{"disjoint-uuid", "abc:1-5", "def:1-5", 5},
-		{"empty-source", "", "abc:1-5", 0},
-		{"malformed", "not-a-gtid", "abc:1-5", 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := plannedFailoverTransactionsLost(tc.source, tc.target)
-			if got != tc.want {
-				t.Errorf("lost(%q, %q) = %d, want %d", tc.source, tc.target, got, tc.want)
+// TestPlannedFailoverPredicates_MarkerIsTerminal: a terminal marker naming
+// the run makes every predicate treat it as terminal, whatever the phase;
+// a marker naming another run, or a malformed one, changes nothing.
+func TestPlannedFailoverPredicates_MarkerIsTerminal(t *testing.T) {
+	for _, phase := range plannedEnginePhases {
+		fg := &v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{
+			PlannedFailover: &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, SourceSite: "iad", TargetSite: "pdx"},
+		}}
+		live := plannedFailoverActive(fg)
+		if !live {
+			t.Errorf("%s: unmarked run not active", phase)
+		}
+		for _, other := range []string{`{"schemaVersion":1,"runID":"run-2","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, `{"schemaVersion":1,"runID":"run-1","outcome":"Bogus","reason":"StatusStalled"}`, "garbage"} {
+			fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: other}
+			if !plannedFailoverActive(fg) {
+				t.Errorf("%s: marker %q ended the run", phase, other)
 			}
-		})
-	}
-}
-
-func TestGtidContains(t *testing.T) {
-	cases := []struct {
-		sup, sub string
-		want     bool
-	}{
-		{"abc:1-10", "abc:1-10", true},
-		{"abc:1-10", "abc:1-5", true},
-		{"abc:1-5", "abc:1-10", false},
-		{"abc:1-10", "abc:1-5,def:1-2", false},
-		{"abc:1-10,def:1-2", "abc:1-5", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.sup+" ⊇ "+tc.sub, func(t *testing.T) {
-			ok, err := gtidContains(tc.sup, tc.sub)
-			if err != nil {
-				t.Fatalf("unexpected parse err: %v", err)
-			}
-			if ok != tc.want {
-				t.Errorf("contains(%q ⊇ %q) = %v, want %v", tc.sup, tc.sub, ok, tc.want)
-			}
-		})
+		}
+		fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+		if plannedFailoverActive(fg) || plannedFailoverOwnsSites(fg) || plannedFailoverPending(fg) || plannedFailoverFencedSite(fg) != "" ||
+			plannedFailoverDragonflyStripActive(fg) || plannedDragonflyTakeoverSucceeded(fg) {
+			t.Errorf("%s: a marked run is still live to a predicate", phase)
+		}
+		if _, _, fenced := groupFenced(fg); fenced {
+			t.Errorf("%s: groupFenced on a marked run", phase)
+		}
+		if DeploymentUnstableReason(fg) == "PlannedFailover" {
+			t.Errorf("%s: a marked run keeps the deployment unstable", phase)
+		}
 	}
 }

@@ -54,7 +54,7 @@ func TestAnnotationFailoverStateRecorder_RoundTrip(t *testing.T) {
 	// status subresource would carry for the same promotion, not what the
 	// in-memory clock read.
 	stamped := time.Date(2030, 3, 4, 5, 6, 7, 891011121, time.UTC)
-	rec := NewAnnotationFailoverStateRecorder(c, nn)
+	rec := NewAnnotationFailoverStateRecorder(c, c, nn)
 	if err := rec.RecordFailoverState(context.Background(), FailoverRecord{
 		LastFailover: stamped, LastFailoverTarget: "beta",
 	}); err != nil {
@@ -92,7 +92,7 @@ func TestAnnotationRecordTiesWithStatusCopy(t *testing.T) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 
 	promotedAt := time.Date(2030, 3, 4, 5, 6, 7, 891011121, time.UTC)
-	if err := NewAnnotationFailoverStateRecorder(c, nn).RecordFailoverState(
+	if err := NewAnnotationFailoverStateRecorder(c, c, nn).RecordFailoverState(
 		context.Background(), FailoverRecord{LastFailover: promotedAt, LastFailoverTarget: "beta"},
 	); err != nil {
 		t.Fatalf("RecordFailoverState: %v", err)
@@ -579,7 +579,7 @@ func TestAnnotationFailoverStateRecorder_PatchRejected(t *testing.T) {
 			},
 		}).Build()
 
-	rec := NewAnnotationFailoverStateRecorder(c, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
+	rec := NewAnnotationFailoverStateRecorder(c, c, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
 	err := rec.RecordFailoverState(context.Background(), FailoverRecord{
 		LastFailover: time.Now(), LastFailoverTarget: "beta",
 	})
@@ -593,7 +593,7 @@ func TestAnnotationFailoverStateRecorder_PatchRejected(t *testing.T) {
 func TestAnnotationFailoverStateRecorder_MissingObject(t *testing.T) {
 	scheme := failoverStateScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	rec := NewAnnotationFailoverStateRecorder(c, types.NamespacedName{Namespace: "bloodraven", Name: "gone"})
+	rec := NewAnnotationFailoverStateRecorder(c, c, types.NamespacedName{Namespace: "bloodraven", Name: "gone"})
 	err := rec.RecordFailoverState(context.Background(), FailoverRecord{LastFailover: time.Now(), LastFailoverTarget: "beta"})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("want NotFound, got %v", err)

@@ -111,7 +111,7 @@ func (tm *TopologyManager) beginDeploymentUpdate(ctx context.Context) (func(), b
 	}
 	// A durable phase blocks API admission after a crash; the reservation covers
 	// the gap before the updater goroutine publishes that phase.
-	hold, err := tm.deploymentLeases.BeginPlanned(ctx, fg, "OrderedUpdate")
+	hold, err := tm.deploymentLeases.BeginPlanned(ctx, fg, deploymentOperationOrderedUpdate)
 	if err != nil || hold != nil {
 		return nil, false
 	}

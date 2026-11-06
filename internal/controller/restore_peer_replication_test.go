@@ -263,7 +263,7 @@ func TestReconcileInPlaceRestore_PreflightWaitsForUnreachablePeerAndUpdates(t *t
 		}, "clone of pdx"},
 		{"clone admission in progress", func(tm *TopologyManager, _ *mockMySQL) { tm.bootstrapAdmitting = "pdx" }, "clone admission of pdx"},
 		{"ordered update running", func(tm *TopologyManager, _ *mockMySQL) { tm.deploymentUpdateRunning = true }, "ordered update"},
-		{"planned failover running", func(tm *TopologyManager, _ *mockMySQL) { tm.plannedFailoverActive = true }, "planned failover"},
+		{"planned failover running", func(tm *TopologyManager, _ *mockMySQL) { holdPlannedClaimLockedForTest(tm, true) }, "planned failover"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInPlaceRestore("")

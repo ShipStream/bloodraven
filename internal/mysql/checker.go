@@ -192,35 +192,20 @@ func openCloneDB(dsn string) (*sql.DB, error) {
 }
 
 func (m *checker) CheckReadOnly(ctx context.Context) (bool, error) {
-	var readOnly int
-	err := m.db.QueryRowContext(ctx, "SELECT @@read_only").Scan(&readOnly)
-	if err != nil {
-		return false, fmt.Errorf("query read_only: %w", err)
-	}
-	return readOnly == 1, nil
+	return checkReadOnly(ctx, m.db)
 }
 
 // CheckSuperReadOnly reads @@super_read_only. It distinguishes a fence
 // (super_read_only=ON) from the read_only=ON mysqld boots with.
 func (m *checker) CheckSuperReadOnly(ctx context.Context) (bool, error) {
-	var superReadOnly int
-	if err := m.db.QueryRowContext(ctx, "SELECT @@super_read_only").Scan(&superReadOnly); err != nil {
-		return false, fmt.Errorf("query super_read_only: %w", err)
-	}
-	return superReadOnly == 1, nil
+	return checkSuperReadOnly(ctx, m.db)
 }
 
 // ReadGTIDSnapshot reads @@server_uuid and @@global.gtid_executed in one
 // statement, so the set is known to belong to the server that reported
 // the identity.
 func (m *checker) ReadGTIDSnapshot(ctx context.Context) (GTIDSnapshot, error) {
-	var snap GTIDSnapshot
-	if err := m.db.QueryRowContext(ctx, "SELECT @@server_uuid, @@global.gtid_executed").Scan(&snap.ServerUUID, &snap.GtidExecuted); err != nil {
-		return GTIDSnapshot{}, fmt.Errorf("query server_uuid and gtid_executed: %w", err)
-	}
-	snap.ServerUUID = strings.TrimSpace(snap.ServerUUID)
-	snap.GtidExecuted = strings.TrimSpace(snap.GtidExecuted)
-	return snap, nil
+	return readGTIDSnapshot(ctx, m.db)
 }
 
 // GTIDSnapshot is one server's identity and executed GTID set, read

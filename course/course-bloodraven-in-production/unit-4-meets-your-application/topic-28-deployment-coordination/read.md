@@ -80,10 +80,10 @@ the operator's clock, so keep its nodes synchronised.
 ## What a hold holds, and what it never touches
 
 An unexpired `failover-hold` does exactly one thing: it defers *planned* disruption. A planned failover
-that arrives while the hold is live lands in the `Deferred` phase you met last topic, with reason
-`DeploymentHold`, a `retryAfter` equal to the earliest hold expiry, and a message naming the blocking
-`operationId` and instance. Every renewal of the hold pushes that `retryAfter` along. When the hold is
-released or lapses, the switchover revalidates and proceeds on its own. Ordered updates and
+that arrives while the hold is live lands in the `Deferred` phase you met last topic, with `admission.deferReason`
+`DeploymentHold`, an `admission.retryTime` equal to the earliest hold expiry, and a message naming the
+blocking `operationId` and instance. Every renewal of the hold pushes that `retryTime` along. When the hold
+is released or lapses, the switchover re-enters `Admitting`, revalidates and proceeds on its own. Ordered updates and
 restore-in-place defer behind the same hold. A `migration` lease on its own defers nothing.
 
 ```widget
@@ -102,7 +102,7 @@ restore-in-place defer behind the same hold. A `migration` lease on its own defe
     {
       "aspect": "Planned failover",
       "cells": [
-        "Phase `Deferred`, reason `DeploymentHold`, `retryAfter` = earliest hold expiry. Revalidates when the hold lapses.",
+        "Phase `Deferred`, `admission.deferReason: DeploymentHold`, `admission.retryTime` = earliest hold expiry. Revalidates when the hold lapses.",
         "—"
       ]
     },

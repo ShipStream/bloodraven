@@ -50,10 +50,10 @@ func runBackup(args []string, stdout, stderr *os.File) error {
 	fs.BoolVar(&wait, "wait", false, "block until the backup reaches Succeeded or Failed")
 	fs.DurationVar(&timeout, "timeout", 2*time.Hour, "timeout for --wait")
 	fs.Usage = func() { fmt.Fprint(stderr, backupUsage) }
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlagsAndArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	positional := fs.Args()
 	if len(positional) != 1 {
 		fmt.Fprint(stderr, backupUsage)
 		return fmt.Errorf("backup requires exactly one positional argument (group name)")

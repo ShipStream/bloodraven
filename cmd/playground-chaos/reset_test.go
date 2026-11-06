@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -16,6 +17,7 @@ import (
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 )
 
@@ -167,6 +169,48 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 	if len(wipe) != len(normalize)+1 {
 		t.Fatalf("normalization fields %v must be the wipe fields %v minus encryptionAtRest", normalize, wipe)
 	}
+
+	// Every top-level status field the failover and planned-failover
+	// engines write must be cleared by both passes: a leftover
+	// plannedFailoverHold is hydrated as an automation hold on the fresh
+	// cluster (O-m2).
+	for _, f := range []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget",
+		"promotionGtidExecuted", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"} {
+		if !slices.Contains(wipe, f) || !slices.Contains(normalize, f) {
+			t.Errorf("status field %q must be cleared by both passes (wipe %v, normalize %v)", f, wipe, normalize)
+		}
+	}
+
+	// Every status field is classified: cleared, or kept for a stated
+	// reason. A new status field fails here until someone decides.
+	kept := map[string]string{
+		"topologyGeneration":  "fences deployment leases across restarts; it must only grow",
+		"restore":             "backup/restore history, not failover state",
+		"restoreInPlace":      "backup/restore history, not failover state",
+		"restoreReclones":     "backup/restore history, not failover state",
+		"restoreOfflineFence": "backup/restore history, not failover state",
+		"backupSchedules":     "backup scheduling state",
+		"lastBackupTime":      "backup scheduling state",
+		"pitr":                "backup/PITR state",
+		"encryptionAtRest":    "cleared by the wipe pass only (asserted above)",
+	}
+	statusType := reflect.TypeOf(v1alpha1.MysqlFailoverGroupStatus{})
+	all := map[string]bool{}
+	for i := 0; i < statusType.NumField(); i++ {
+		name, _, _ := strings.Cut(statusType.Field(i).Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		all[name] = true
+		if _, ok := kept[name]; !ok && !slices.Contains(wipe, name) {
+			t.Errorf("status field %q is neither cleared by the reset nor listed as kept", name)
+		}
+	}
+	for _, f := range wipe {
+		if !all[f] {
+			t.Errorf("reset clears %q, which is not a MysqlFailoverGroup status field", f)
+		}
+	}
 }
 
 // The normalization pass runs against a live encrypted cluster: it must drop
@@ -189,6 +233,14 @@ func TestClearMFGFailoverStatusKeepsEncryptionAtRest(t *testing.T) {
 		got.Status.PromotionGtidExecuted != "" || got.Status.PlannedFailover != nil {
 		t.Fatalf("failover history survived normalization: %+v", got.Status)
 	}
+	for _, a := range []string{brcontroller.PlannedFailoverAnnotation, brcontroller.PlannedFailoverTerminalAnnotation} {
+		if v, ok := got.Annotations[a]; ok {
+			t.Fatalf("annotation %s=%q survived normalization: a surviving request starts a new switchover", a, v)
+		}
+	}
+	if got.Annotations["unrelated"] != "kept" {
+		t.Fatalf("reset removed an unrelated annotation: %v", got.Annotations)
+	}
 
 	if err := r.clearMFGStatus(ctx, nil); err != nil {
 		t.Fatalf("clearMFGStatus: %v", err)
@@ -210,7 +262,13 @@ func newStatusResetter(t *testing.T) (*resetter, *v1alpha1.MysqlFailoverGroup) {
 	}
 	failedOver := metav1.NewTime(metav1.Now().Rfc3339Copy().Time)
 	mfg := &v1alpha1.MysqlFailoverGroup{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "playground"},
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "playground", Annotations: map[string]string{
+			// A Deferred request keeps its annotation; reset must drop it
+			// with the status block it belongs to.
+			brcontroller.PlannedFailoverAnnotation:         "pdx",
+			brcontroller.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"r1","outcome":"Succeeded"}`,
+			"unrelated": "kept",
+		}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite:            "iad",
 			LastFailover:          &failedOver,

@@ -104,9 +104,9 @@ func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T)
 // gate busy, neither deadlocks nor stalls the planned Dragonfly phase.
 
 func TestDragonflySnapshotUpgrade_AnnotationDuringPlannedFailoverNoDeadlock(t *testing.T) {
-	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
+	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{Dir: "s3://x/y"}
 	fg.Annotations = map[string]string{DragonflySnapshotUpgradeAnnotation: "dragonfly:new"}
 	cb, nn := newDragonflyFakeClient(fg)
@@ -137,13 +137,14 @@ func TestDragonflySnapshotUpgrade_AnnotationDuringPlannedFailoverNoDeadlock(t *t
 	if up := dragonflyUpgradeStatus(live); dragonflyUpgradeInFlight(up) {
 		t.Errorf("upgrade accepted during planned failover: %+v", up)
 	}
-	d, err = r.plannedFailoverPromotingDragonfly(context.Background(), live, nn)
+	d, err = pfDragonflyTakeoverPass(t, r, context.Background(), nn)
 	after := getFGByKey(t, c, nn).Status.PlannedFailover
 	t.Logf("planned phase after upgrade reject: requeue=%s err=%v phase=%s df=%+v", d, err, after.Phase, after.Dragonfly)
 	if after.Dragonfly != nil && after.Dragonfly.Message == plannedDragonflyGateWaitMessage {
 		t.Errorf("planned phase still blocked on the gate after the upgrade released it")
 	}
-	if after.Phase == v1alpha1.PlannedFailoverPhasePromotingDragonfly && (after.Dragonfly == nil || after.Dragonfly.PromotionMethod == "") {
+	if after.Phase == v1alpha1.PlannedFailoverPhasePromotingDragonfly && (after.Dragonfly == nil || after.Dragonfly.Takeover == nil ||
+		after.Dragonfly.Takeover.State == v1alpha1.DragonflyTakeoverIntended) {
 		t.Errorf("planned phase made no progress after the gate was released")
 	}
 }

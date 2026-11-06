@@ -1048,14 +1048,14 @@ func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, to
 	defer cancel()
 	if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "planned failover to "+target, func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		pf := mfg.Status.PlannedFailover
-		if pf == nil || pf.StartTime == nil || pf.StartTime.Time.Before(requested.Add(-2*time.Second)) {
+		if pf == nil || pf.StartTime.IsZero() || pf.StartTime.Time.Before(requested.Add(-2*time.Second)) {
 			return false, "no planned failover for this request yet", nil
 		}
-		msg := fmt.Sprintf("phase=%s target=%s reason=%q active=%s", pf.Phase, pf.Target, pf.Reason, mfg.Status.ActiveSite)
+		msg := fmt.Sprintf("phase=%s target=%s reason=%q active=%s", pf.Phase, pf.TargetSite, plannedReason(pf), mfg.Status.ActiveSite)
 		if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
-			return false, msg, fmt.Errorf("planned failover to %s failed: %s (%s)", target, pf.Reason, pf.Message)
+			return false, msg, fmt.Errorf("planned failover to %s failed: %s %s (%s)", target, plannedOutcome(pf), plannedReason(pf), pf.Message)
 		}
-		return pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded && pf.Target == target && mfg.Status.ActiveSite == target, msg, nil
+		return pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded && pf.TargetSite == target && mfg.Status.ActiveSite == target, msg, nil
 	}); err != nil {
 		return time.Time{}, err
 	}

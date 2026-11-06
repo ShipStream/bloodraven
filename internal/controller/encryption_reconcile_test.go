@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shipstream/bloodraven/internal/clock"
 	"strings"
 	"testing"
 	"time"
@@ -1692,6 +1693,10 @@ func TestReconcileEncryption_NoOpStatusWriteDoesNotEndHoldBesideLostWrite(t *tes
 			frozen := time.Now()
 			r.Now = func() time.Time { return frozen }
 			seedEscrow(t, c, fg)
+			// The repeated deferrals must reproduce the status exactly: the
+			// coverage check time comes from a fixed clock, not the wall
+			// clock, so passes that straddle a second stay no-ops.
+			r.encryptionClock = clock.NewFakeClock(time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC))
 			base := c.(client.WithWatch)
 			tm := rotationRunner(r, c)
 			nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}

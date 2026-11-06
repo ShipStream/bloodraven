@@ -2419,12 +2419,14 @@ func schemaExists(ctx context.Context, db *sql.DB, database string) (bool, error
 // instead of erroring.
 //
 // It delegates to restoreInFlight, inPlaceRestoreInFlight and
-// plannedFailoverInFlight — the
-// same classifiers the topology manager freezes on — rather than keeping a
-// private copy of which phases count as active. A private copy would drift
-// the first time a phase is added, and its disagreement with the canonical
+// plannedFailoverOwnsSites — the canonical classifiers, the first two the
+// same ones the topology manager freezes on — rather than keeping a private
+// copy of which phases count as active. A private copy would drift the
+// first time a phase is added, and its disagreement with the canonical
 // helpers would be exactly the window where a tenant runs DDL against a
-// primary the operator considers fenced.
+// primary the operator considers fenced. A planned-failover request that is
+// only waiting (or a provisional grant) leaves the source writable, so it
+// does not fence.
 func groupFenced(fg *v1alpha1.MysqlFailoverGroup) (reason, message string, fenced bool) {
 	// An initFromBackup restore (a point-in-time one proves the target's
 	// exact gtid_executed, review F004) must not see tenant DDL in the
@@ -2445,7 +2447,7 @@ func groupFenced(fg *v1alpha1.MysqlFailoverGroup) (reason, message string, fence
 		return "RestoreInProgress",
 			fmt.Sprintf("group %q is mid in-place restore (phase %s)", fg.Name, phase), true
 	}
-	if plannedFailoverInFlight(fg.Status.PlannedFailover) {
+	if plannedFailoverOwnsSites(fg) {
 		return "PlannedFailoverInProgress",
 			fmt.Sprintf("group %q is mid planned failover (phase %s)", fg.Name, fg.Status.PlannedFailover.Phase), true
 	}

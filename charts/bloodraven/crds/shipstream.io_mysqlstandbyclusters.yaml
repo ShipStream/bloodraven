@@ -2034,18 +2034,19 @@ spec:
                                   Default: 30s.
                                 type: string
                               onSyncTimeout:
-                                default: proceed
+                                default: Proceed
                                 description: |-
                                   OnSyncTimeout governs behavior when the target replica fails to
                                   reach the source's offset within MaxSyncWait, or when REPLTAKEOVER
                                   fails:
-                                    - "proceed" (default): continue with MySQL promotion, stamp
-                                      sessionsPreserved=false. Cache/session continuity is best-effort.
-                                    - "fail": abort planned failover before MySQL promotion, roll
-                                      back the source MySQL fence, leave activeSite unchanged.
+                                    - Proceed (default): continue with the MySQL promotion and record
+                                      status.plannedFailover.dragonfly.sessions=Lost. Cache/session
+                                      continuity is best-effort.
+                                    - Fail: abort the planned failover before the MySQL promotion,
+                                      roll back the source MySQL fence, leave activeSite unchanged.
                                 enum:
-                                - proceed
-                                - fail
+                                - Proceed
+                                - Fail
                                 type: string
                             type: object
                           podSecurityContext:
@@ -6059,19 +6060,18 @@ spec:
                               as a Go time.Duration. Default: 5m.
                             type: string
                           onCooldown:
-                            default: reject
+                            default: Reject
                             description: |-
-                              OnCooldown controls how the state machine reacts when the
-                              anti-flap cooldown rejects a request at Validating:
-                                - "reject" (default): stamp Failed{CooldownActive} and clear the
-                                  annotation. The admin must re-annotate after the cooldown
-                                  expires.
-                                - "defer": stamp Deferred and keep the annotation in place;
-                                  the reconciler re-tries validation at cooldown expiry and
-                                  transitions to Draining automatically.
+                              OnCooldown controls how admission reacts when the anti-flap
+                              cooldown is active:
+                                - Reject (default): the run ends Failed{NotStarted, CooldownActive}
+                                  and the request annotation is removed. The admin re-annotates
+                                  after the cooldown expires.
+                                - Defer: the run waits in Deferred{CooldownActive}, keeps the
+                                  annotation in place, and re-tries admission at cooldown expiry.
                             enum:
-                            - reject
-                            - defer
+                            - Reject
+                            - Defer
                             type: string
                         type: object
                       podAnnotations:

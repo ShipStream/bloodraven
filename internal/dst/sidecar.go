@@ -161,22 +161,22 @@ func (f *simFencer) SetSuperReadOnly(_ context.Context) error {
 	defer f.c.mu.Unlock()
 	s := f.c.byName[f.site]
 	if s.crashed {
-		f.c.event(f.site, EvSidecarFence, "", "unreachable")
+		f.c.eventBy(f.site, EvSidecarFence, "", "unreachable", ActorSidecar)
 		return errSidecarSiteDown
 	}
 	if f.c.failMuts[f.site] > 0 {
 		f.c.failMuts[f.site]--
-		f.c.event(f.site, EvSidecarFence, "", "failed")
+		f.c.eventBy(f.site, EvSidecarFence, "", "failed", ActorSidecar)
 		return errNotApplied
 	}
 	s.superReadOnly = true
 	s.readOnly = true // super_read_only=ON implies read_only=ON
 	if f.c.ambiguousMuts[f.site] > 0 {
 		f.c.ambiguousMuts[f.site]--
-		f.c.event(f.site, EvSidecarFence, "", "ambiguous")
+		f.c.eventBy(f.site, EvSidecarFence, "", "ambiguous", ActorSidecar)
 		return errAmbiguous
 	}
-	f.c.event(f.site, EvSidecarFence, "", "")
+	f.c.eventBy(f.site, EvSidecarFence, "", "", ActorSidecar)
 	return nil
 }
 
@@ -186,7 +186,7 @@ func (f *simFencer) KillConnections(_ context.Context) (int, error) {
 	if f.c.byName[f.site].crashed {
 		return 0, errSidecarSiteDown
 	}
-	f.c.event(f.site, EvSidecarKill, "", "")
+	f.c.eventBy(f.site, EvSidecarKill, "", "", ActorSidecar)
 	return 0, nil
 }
 
@@ -325,6 +325,13 @@ func (t *simTransport) serveOperator(w *simResponse, u *url.URL) error {
 			return nil
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if t.r.pl != nil && t.r.pl.noManager() {
+			// As the operator's handler when runner.Status finds no
+			// manager for the group (its start failed, or it is inside an
+			// absence window): 503 with this trial's single group.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return json.NewEncoder(w).Encode(map[string]string{"error": "no active topology managers"})
+		}
 		return json.NewEncoder(w).Encode(map[string]string{
 			"namespace":  q.Get("namespace"),
 			"group":      q.Get("group"),

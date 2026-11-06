@@ -22,6 +22,9 @@ const (
 	DragonflySnapshotUpgradeAnnotation = "bloodraven.shipstream.io/dragonfly-snapshot-upgrade"
 	dragonflyUpgradePollInterval       = 2 * time.Second
 	dragonflySaveTimeout               = 5 * time.Minute
+	// dragonflyUpgradeDeferRetry is how often a deferred snapshot-upgrade
+	// request is re-checked.
+	dragonflyUpgradeDeferRetry = 10 * time.Second
 )
 
 func dragonflyUpgradeInFlight(s *v1alpha1.DragonflyUpgradeStatus) bool {
@@ -33,10 +36,6 @@ func dragonflyUpgradeInFlight(s *v1alpha1.DragonflyUpgradeStatus) bool {
 
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	if r.Runner != nil {
-		r.Runner.SetPlannedFailoverActive(nn, dragonflyMaintenanceActive(fg))
-	}
-
 	_, hasAnnotation := fg.GetAnnotations()[DragonflySnapshotUpgradeAnnotation]
 	if !hasAnnotation && !dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg)) {
 		return 0, nil
@@ -62,6 +61,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 
 	raw, hasAnnotation := fg.GetAnnotations()[DragonflySnapshotUpgradeAnnotation]
 	cur := dragonflyUpgradeStatus(fg)
+	// The upgrade pauses only the Dragonfly manager, through its own pause
+	// source; it never touches the planned-failover claim or MySQL topology
+	// decisions. The pause follows the upgrade state read under the gate,
+	// never the informer cache: a cached in-flight upgrade that has since
+	// ended (abandoned, failed, succeeded) must not pause the manager again,
+	// and every return below, the terminal ones included, leaves the pause
+	// matching the uncached state.
+	r.setDragonflyUpgradePause(nn, dragonflyUpgradeInFlight(cur))
 	if hasAnnotation && !dragonflyUpgradeInFlight(cur) {
 		return r.acceptDragonflySnapshotUpgrade(ctx, fg, nn, raw)
 	}
@@ -75,8 +82,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 	if !dragonflyUpgradeInFlight(cur) {
 		return 0, nil
 	}
-	if why := dragonflyUpgradeSuperseded(fg, cur); why != "" {
-		return r.abandonDragonflyUpgrade(ctx, fg, cur, why)
+	why, mysqlActive := r.dragonflyUpgradeSupersededByMySQL(fg, cur)
+	if why == "" {
+		why = dragonflyUpgradeSuperseded(fg, cur)
+	}
+	if why != "" {
+		return r.abandonDragonflyUpgrade(ctx, fg, cur, why, mysqlActive)
 	}
 
 	switch cur.Phase {
@@ -92,6 +103,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 		return r.dragonflyUpgradeReattachReplicas(ctx, fg, cur)
 	default:
 		return r.failDragonflyUpgrade(ctx, fg, cur, "UnknownPhase", fmt.Sprintf("unknown phase %q", cur.Phase))
+	}
+}
+
+// setDragonflyUpgradePause sets the Dragonfly manager's upgrade pause
+// source, when a runner is wired.
+func (r *MysqlFailoverGroupReconciler) setDragonflyUpgradePause(nn types.NamespacedName, paused bool) {
+	if r.Runner != nil {
+		r.Runner.SetDragonflyUpgradePaused(nn, paused)
 	}
 }
 
@@ -139,10 +158,25 @@ func (r *MysqlFailoverGroupReconciler) acceptDragonflySnapshotUpgrade(ctx contex
 		_ = r.removeDragonflySnapshotUpgradeAnnotation(ctx, nn)
 		return 0, nil
 	}
-	if fg.Status.PlannedFailover != nil && plannedFailoverInFlight(fg.Status.PlannedFailover) {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyUpgradeRejected, "dragonfly snapshot-upgrade rejected: planned failover is running")
+	if r.plannedOwnsDragonfly(fg) {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyUpgradeRejected, "dragonfly snapshot-upgrade rejected: a planned failover run or automation hold owns the sites")
 		_ = r.removeDragonflySnapshotUpgradeAnnotation(ctx, nn)
 		return 0, nil
+	}
+	if master := effectiveDragonflyMasterSite(fg); master != "" && master != fg.Status.ActiveSite {
+		// The upgrade saves and restarts status.activeSite as the Dragonfly
+		// master and re-attaches every other site to it. While Dragonfly
+		// serves from another site (a planned takeover that failed after
+		// MySQL moved, before drift repair re-aligns Dragonfly, or a
+		// Dragonfly-only promotion), that would restart a replica and
+		// re-point the real master at it. The request is kept and retried
+		// once Dragonfly follows MySQL again.
+		log.FromContext(ctx).Info("dragonfly snapshot-upgrade deferred: the Dragonfly master differs from the MySQL active site",
+			"fg", nn.String(), "dragonflyMaster", master, "activeSite", fg.Status.ActiveSite)
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyUpgradeDeferred,
+			"dragonfly snapshot-upgrade deferred: Dragonfly master %q differs from the MySQL active site %q; retrying once they match",
+			master, fg.Status.ActiveSite)
+		return dragonflyUpgradeDeferRetry, nil
 	}
 
 	if err := r.removeDragonflySnapshotUpgradeAnnotation(ctx, nn); err != nil {
@@ -162,6 +196,7 @@ func (r *MysqlFailoverGroupReconciler) acceptDragonflySnapshotUpgrade(ctx contex
 	if err := r.setDragonflyUpgradeStatus(ctx, fg, st); err != nil {
 		return 0, err
 	}
+	r.setDragonflyUpgradePause(nn, true)
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyUpgradeStarted,
 		"dragonfly snapshot-restore upgrade accepted: %s -> %s", st.SourceImage, st.TargetImage)
 	return 1 * time.Second, nil
@@ -291,7 +326,7 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeReattachReplicas(ctx cont
 		return 0, err
 	}
 	if r.Runner != nil {
-		r.Runner.SetPlannedFailoverActive(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, false)
+		r.Runner.SetDragonflyUpgradePaused(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, false)
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyUpgradeCompleted,
 		"Dragonfly snapshot-restore upgrade completed on image %s", cur.TargetImage)
@@ -318,9 +353,47 @@ func dragonflyUpgradeSuperseded(fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.D
 	return fmt.Sprintf("active Dragonfly site moved to %q while the upgrade retained %q", df.ActiveSite, cur.ActiveSite)
 }
 
+// dragonflyUpgradeSupersededByMySQL re-derives, on every upgrade
+// reconcile, whether MySQL failed over during the upgrade (§8.3). The
+// effective MySQL authority is the registered manager's active site, which
+// reflects a promotion at once; with no manager registered it is the newer
+// of the status and out-of-band failover records. The upgrade is superseded
+// when that site is set and differs from the upgrade's retained active
+// site, and either the manager names it or the record's lastFailover is not
+// before the upgrade's start. It returns why, and the MySQL active site.
+func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeSupersededByMySQL(fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus) (why, active string) {
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	if r.Runner != nil {
+		// A registered manager that names a site decides. One that names
+		// none yet (it has not polled since a restart) falls through to the
+		// durable record, which carries an emergency failover recorded
+		// before the restart (§8.3).
+		if site, ok := r.Runner.ActiveSite(nn); ok && site != "" {
+			if site != cur.ActiveSite {
+				return fmt.Sprintf("MySQL failed over to %q during the upgrade", site), site
+			}
+			return "", ""
+		}
+	}
+	rec, _, _ := EffectiveFailoverRecord(fg, time.Now())
+	if rec.LastFailoverTarget == "" || rec.LastFailoverTarget == cur.ActiveSite || rec.LastFailover.IsZero() {
+		return "", ""
+	}
+	if cur.StartTime != nil && rec.LastFailover.Before(cur.StartTime.Time.UTC().Truncate(time.Second)) {
+		return "", ""
+	}
+	return fmt.Sprintf("MySQL failed over to %q during the upgrade", rec.LastFailoverTarget), rec.LastFailoverTarget
+}
+
 // abandonDragonflyUpgrade fails a superseded upgrade without touching the
-// routing labels: they belong to the promotion that superseded it.
-func (r *MysqlFailoverGroupReconciler) abandonDragonflyUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus, why string) (time.Duration, error) {
+// routing labels: they belong to the promotion that superseded it. It runs
+// under the group's Dragonfly gate: it stamps Failed{ActiveSiteChanged},
+// clears the upgrade pause and, when MySQL moved (mysqlActive), hands the
+// follow-up promotion to the Dragonfly manager, which revalidates it under
+// the gate against the uncached state once this reconcile releases it. A
+// lost hand-off is harmless: the upgrade is already Failed, and the
+// manager's drift tick promotes the MySQL active site.
+func (r *MysqlFailoverGroupReconciler) abandonDragonflyUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus, why, mysqlActive string) (time.Duration, error) {
 	now := metav1.Now()
 	next := copyDragonflyUpgradeStatus(cur)
 	next.Phase = v1alpha1.DragonflyUpgradePhaseFailed
@@ -331,7 +404,11 @@ func (r *MysqlFailoverGroupReconciler) abandonDragonflyUpgrade(ctx context.Conte
 		return 0, err
 	}
 	if r.Runner != nil {
-		r.Runner.SetPlannedFailoverActive(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, plannedFailoverInFlight(fg.Status.PlannedFailover))
+		nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+		r.Runner.SetDragonflyUpgradePaused(nn, false)
+		if mysqlActive != "" {
+			r.Runner.EnqueueDragonflyFollowUp(nn, mysqlActive, cur.ActiveSite)
+		}
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyUpgradeFailed, "ActiveSiteChanged: %s", next.Message)
 	return 0, nil
@@ -349,7 +426,7 @@ func (r *MysqlFailoverGroupReconciler) failDragonflyUpgrade(ctx context.Context,
 		return 0, err
 	}
 	if r.Runner != nil {
-		r.Runner.SetPlannedFailoverActive(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, false)
+		r.Runner.SetDragonflyUpgradePaused(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, false)
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyUpgradeFailed, "%s: %s", reason, msg)
 	return 0, nil

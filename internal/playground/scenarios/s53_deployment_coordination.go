@@ -96,23 +96,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 			if err := AssertHealthyBaseline(ctx, env); err != nil {
 				return err
 			}
-			dep, err := env.Kube.GetDeployment(ctx, env.Namespace, "bloodraven")
-			if err != nil {
-				return err
-			}
-			enabled := false
-			for _, container := range dep.Spec.Template.Spec.Containers {
-				for _, variable := range container.Env {
-					if variable.Name == "BLOODRAVEN_DEPLOY_API_ENABLED" && variable.Value == "true" {
-						enabled = true
-					}
-				}
-			}
-			if !enabled {
-				return fmt.Errorf("deploy API not enabled; prepare with BLOODRAVEN_SETUP_DEPLOY_API=1 ./playground/setup.sh")
-			}
-			_, err = env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Get(ctx, "mysql-playground-tls", metav1.GetOptions{})
-			return err
+			return requireDeployAPI(ctx, env)
 		},
 		Cleanup: state.cleanup,
 		Steps: []runner.Step{{Phase: runner.PhaseInject, Name: "create authorized projected-token TLS client", Do: func(ctx context.Context, env *runner.Env) error {
@@ -128,7 +112,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 				return state.observeHold(ctx, env, mode == "crash")
 			}})
 		}
-		s.Steps = append(s.Steps, observePlannedFailoverSucceeded(), verifyTransactionsLostZero())
+		s.Steps = append(s.Steps, observePlannedFailoverSucceeded(), verifyPlannedFailoverWatermark())
 	}
 	s.Steps = append(s.Steps, runner.Step{Phase: runner.PhaseVerify, Name: "verify topology and lease fencing", Do: func(ctx context.Context, env *runner.Env) error {
 		if mode == "emergency" || mode == "renew" {
@@ -334,17 +318,17 @@ func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, 
 	defer cancel()
 	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "Deferred/DeploymentHold", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		pf := mfg.Status.PlannedFailover
-		if pf == nil || pf.StartTime == nil || pf.StartTime.Time.Before(env.StartTime.Add(-2*time.Second)) {
+		if pf == nil || pf.StartTime.IsZero() || pf.StartTime.Time.Before(env.StartTime.Add(-2*time.Second)) {
 			return false, "waiting for current planned request", nil
 		}
-		if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Reason != "DeploymentHold" {
-			return false, fmt.Sprintf("phase=%s reason=%s", pf.Phase, pf.Reason), nil
+		if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
+			return false, fmt.Sprintf("phase=%s reason=%s", pf.Phase, plannedReason(pf)), nil
 		}
-		if pf.RetryAfter == nil || !strings.Contains(pf.Message, s.operation) || !strings.Contains(pf.Message, s.name) {
-			return false, "", fmt.Errorf("DeploymentHold missing retryAfter, operationId, or instance: %+v", pf)
+		if pf.Admission.RetryTime == nil || !strings.Contains(pf.Message, s.operation) || !strings.Contains(pf.Message, s.name) {
+			return false, "", fmt.Errorf("DeploymentHold missing admission.retryTime, operationId, or instance: %+v", pf)
 		}
-		if !kill && pf.RetryAfter.Time.Sub(s.expiry).Abs() > time.Second {
-			return false, "", fmt.Errorf("retryAfter=%s does not match hold expiry=%s", pf.RetryAfter, s.expiry)
+		if !kill && pf.Admission.RetryTime.Time.Sub(s.expiry).Abs() > time.Second {
+			return false, "", fmt.Errorf("admission.retryTime=%s does not match hold expiry=%s", pf.Admission.RetryTime, s.expiry)
 		}
 		return true, "hold deferred with owner and expiry", nil
 	})
@@ -384,7 +368,7 @@ func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, 
 			return false, err
 		}
 		pf := mfg.Status.PlannedFailover
-		if mfg.Status.ActiveSite != ctxFetch(env, "originalPrimary") || pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Reason != "DeploymentHold" {
+		if mfg.Status.ActiveSite != ctxFetch(env, "originalPrimary") || pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
 			return false, fmt.Errorf("planned failover advanced before hold expiry %s", s.expiry)
 		}
 		return false, nil

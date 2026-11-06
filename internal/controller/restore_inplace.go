@@ -67,6 +67,23 @@ func inPlaceRestoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 	return true
 }
 
+// plannedFailoverBlocksRestore reports whether a full-instance restore in
+// Preflight waits for the planned-failover run: one that owns the sites or
+// is Publishing, or whose Admitting run holds a provisional claim. A run
+// that owns nothing (Deferred, or Admitting without a claim) is not waited
+// for: its admission is refused while the restore is in flight (the
+// deployment admission reservation, and validation), so the two would only
+// wait for each other.
+func (r *MysqlFailoverGroupReconciler) plannedFailoverBlocksRestore(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if plannedFailoverOwnsSites(fg) {
+		return true
+	}
+	if pf, marked := plannedFailoverRun(fg); pf != nil && !marked && pf.Phase == v1alpha1.PlannedFailoverPhasePublishing {
+		return true
+	}
+	return r.plannedRunClaimHeld(client.ObjectKeyFromObject(fg))
+}
+
 func inPlaceRestoreFreezesTopology(fg *v1alpha1.MysqlFailoverGroup) bool {
 	// Preflight may wait indefinitely on a renewed deployment hold. No MySQL
 	// mutation has started, so emergency failover must remain available.
@@ -486,7 +503,28 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		return 0, nil
 	}
 	if m := r.deploymentLeaseManager(); m != nil {
-		hold, err := m.BeginPlanned(ctx, fg, "RestoreInPlace")
+		hold, err := m.BeginPlanned(ctx, fg, deploymentOperationRestoreInPlace)
+		var le *DeploymentLeaseError
+		if errors.As(err, &le) && le.Status == 423 {
+			// Another operation holds the sites (a planned failover's claim
+			// or automation hold, an ordered update), or a topology change
+			// is not persisted yet. Nothing has been fenced: wait, as the
+			// planned-failover wait below does. A reconcile error here
+			// would return before the planned-failover engine, which then
+			// could not drive the run that holds the sites or see the
+			// hold's acknowledgement.
+			wait := fmt.Sprintf("waiting for a concurrent operation to finish (%s)", le.Reason)
+			if h := PlannedHoldFrom(fg); h != nil {
+				wait = fmt.Sprintf("waiting for the automation hold of planned failover %s to be acknowledged (%s=%s)",
+					h.RunID, AcknowledgePlannedFailoverHoldAnnotation, h.RunID)
+			}
+			if cur.Message != wait {
+				next := cur.DeepCopy()
+				next.Message = wait
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 15 * time.Second, nil
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -599,7 +637,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		if err != nil {
 			wait, err = fmt.Sprintf("waiting for the topology manager: %v", err), nil
 		}
-		if wait == "" && plannedFailoverInFlight(fg.Status.PlannedFailover) {
+		if wait == "" && r.plannedFailoverBlocksRestore(fg) {
 			wait = "waiting for the planned failover to finish"
 		}
 		if wait == "" {

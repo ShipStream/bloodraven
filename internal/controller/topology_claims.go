@@ -25,33 +25,40 @@ import (
 //	Fol    old-primary recovery, recovery drain,   beginFollowerMutation
 //	       source convergence
 //	Boot   auto-clone, reclone, fresh deploy       claimBootstrap
+//	PF     planned failover                        claimPlannedFailover
 //
-// The planned failover is not a claimant here: its reconciler sets the
-// plannedFailoverActive guard from status (from Pending until the run
-// ends), and its promotion (PlannedPromote, claimPlannedPromotion) claims
-// only against rotation, a running change and a replaced manager's
-// update. Making its side a real claim is tracked in issue #235.
+// The planned-failover claim lives in the group's claim slot, shared by
+// every manager generation (planned_failover_claim.go). A Hold is what a
+// run that ended ManualRecoveryRequired leaves in the slot until a human
+// acknowledges it; it holds exactly what a running claim holds. Every
+// other claimant's helper refuses while the slot holds either.
 //
 // Held claim (rows) against claimant: R refused, W refused for now and
-// retried by the claimant on a later poll (Upd: it waits at the follower
-// mutation gate), A allowed.
+// retried by the claimant later (Upd: it waits at the follower mutation
+// gate; PF: the request stays Admitting until its admission deadline, with
+// gate attempts at most once per second), A allowed.
 //
-//	held \ claimant              Auto Upd Rot Fol Boot
-//	Auto promotion               R    R   R   R   R
-//	PlannedPromote               R    R   R   R   R
-//	promotion not yet observed   R    R   R   R   A1
-//	planned failover (guard)     R    R   R   R   R
-//	ordered update claimed       R    R   R   R   R
-//	ordered update pending       A2   A2  R   A2  A2
-//	rotation of the target       R    A3  A   A4  A4
-//	follower mutation            A5   W   A4  A   A5
-//	bootstrap (promotable site)  R    R   A4  R   R
-//	in-place restore             R    R   A4  R   R
-//	predecessor's ordered update R    R   R   R   R
-//	predecessor still promoting  R    R   R   R   R
-//	predecessor in a follower    R    R   A4  R   R
+//	held \ claimant              Auto Upd Rot Fol Boot  PF
+//	Auto promotion               R    R   R   R   R     W
+//	planned-failover claim       R    R   R   R   R     W7
+//	(incl. provisional grant)
+//	planned-failover hold        R    R   R   R   R     R12
+//	(ManualRecoveryRequired)
+//	promotion not yet observed   R    R   R   R   A1    W
+//	ordered update claimed       R    R   R   R   R     W
+//	ordered update pending       A2   A2  R   A2  A2    A2
+//	rotation of the target       R    A3  A   A4  A4    W8 / R8
+//	follower mutation            A5   W   A4  A   A5    W9
+//	bootstrap (promotable site)  R    R   A4  R   R     W
+//	bootstrap (reader)           A10  R   A4  R   R     A10
+//	in-place restore             R    R   A4  R   R     W
+//	predecessor's ordered update R    R   R   R   R     W
+//	predecessor still promoting  R    R   R   R   R     W
+//	predecessor in a follower    R    R   A4  R   R     W
 //	mutation
-//	this manager retired         R    R   R6  R   R
+//	this manager retired         R    R   R6  R   R     W11
+//	planned request waiting      A    A   A   A   A     -
+//	(Admitting/Deferred, no grant: owns nothing)
 //
 //	A1 Boot re-confirms the donor's authority before cloning, and the
 //	   fresh-deploy bootstrap starts right behind its own seed promotion.
@@ -63,6 +70,17 @@ import (
 //	   (a rotating site is not Sealed; a clone needs its recipient unsealed).
 //	A5 Both run on the poll goroutine, one after the other.
 //	R6 A retired manager is unregistered; the runner sees no manager.
+//	W7 Another run holds the claim: Wait{ClaimHeld}. The same run gets an
+//	   idempotent Granted.
+//	W8 / R8 A rotation reservation of the target waits; a durable
+//	   UnsealReason=Rotation stamp rejects (Failed{NotStarted,
+//	   KeyringRotation}). Rotation of any other site is allowed.
+//	W9 Non-blocking: tryAdmit registers a 15s entry that refuses new
+//	   follower mutations and returns at once while one is running.
+//	A10 A clone into a non-promotable reader holds off neither Auto nor PF.
+//	W11 The runner routes the claim to the current manager; the next pass
+//	   reaches the replacement.
+//	R12 A new request ends Failed{NotStarted, ManualRecoveryPending}.
 //
 // A bootstrap into a read-only reader does not hold off Auto (see
 // bootstrapBlocksCrossSite); its row is otherwise the promotable one's.
@@ -125,48 +143,10 @@ func (tm *TopologyManager) beginAutoPromotionOf(target string) (began, rotationB
 		tm.keyringRotationBlockedDirty = true
 		return false, true
 	}
-	if tm.retired || tm.plannedFailoverActive || tm.topologyFrozen || tm.promotionUnobservedLocked() || tm.bootstrapBlocksCrossSiteLocked() {
+	if tm.retired || tm.plannedClaimHeldLocked() || tm.topologyFrozen || tm.promotionUnobservedLocked() || tm.bootstrapBlocksCrossSiteLocked() {
 		return false, false
 	}
 	return tm.beginDeploymentTopologyChangeLocked(), false
-}
-
-// beginPromotionOf claims the topology-change window for a planned
-// failover's promotion of target, refusing (rotationBlocked) when target is
-// mid-keyring-rotation, durably or by reservation. The check and the claim
-// share mu with ReserveKeyringRotation, which refuses while a change is
-// claimed, so a rotation admitted before the claim stops the promotion and
-// one requested after it is refused. It refuses, too, while a replaced
-// manager's ordered update is still unwinding (beginDeploymentTopologyChange-
-// Locked): the planned failover then fails closed (see PlannedPromote).
-func (tm *TopologyManager) beginPromotionOf(target string) (began, rotationBlocked bool) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.keyringRotationBlockedLocked(target) {
-		tm.keyringRotationBlockedDirty = true
-		return false, true
-	}
-	return tm.beginDeploymentTopologyChangeLocked(), false
-}
-
-// claimPlannedPromotion takes PlannedPromote's claim, published at the
-// follower-mutation barrier so a recovery step admitted before the planned
-// failover's flag was set has finished before Execute starts. It returns
-// errHandoffNotAdmitted if ctx ends first; nothing has then been sent.
-func (tm *TopologyManager) claimPlannedPromotion(ctx context.Context, target string) error {
-	var began, rotationBlocked bool
-	if err := tm.admitTopologyHandoff(ctx, func() { began, rotationBlocked = tm.beginPromotionOf(target) }); err != nil {
-		return fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
-	}
-	switch {
-	case rotationBlocked:
-		return fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
-	case !began && tm.predecessorUpdateUnwinding():
-		return errPredecessorUpdateInFlight
-	case !began:
-		return fmt.Errorf("topology change already in progress")
-	}
-	return nil
 }
 
 // orderedUpdateClaimRefusedLocked reports whether an ordered update planned
@@ -174,7 +154,7 @@ func (tm *TopologyManager) claimPlannedPromotion(ctx context.Context, target str
 func (tm *TopologyManager) orderedUpdateClaimRefusedLocked(epoch uint64, active string) bool {
 	return tm.retired || tm.authorityEpoch != epoch || tm.activeSiteLocked() != active ||
 		tm.deploymentChanging > 0 || tm.promotionUnobservedLocked() || tm.topologyFrozen ||
-		tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) || tm.predecessorUpdateInFlight
+		tm.plannedClaimHeldLocked() || !bootstrapIdlePhase(tm.bootstrapPhase) || tm.predecessorUpdateInFlight
 }
 
 // claimOrderedUpdate claims the MySQL mutation window for an ordered update
@@ -211,14 +191,29 @@ func (tm *TopologyManager) bootstrapClaimRefusedLocked() string {
 		return "a bootstrap is already running"
 	case tm.topologyFrozen:
 		return "an in-place restore is in progress"
-	case tm.plannedFailoverActive:
-		return "a planned failover is in progress"
+	case tm.plannedClaimHeldLocked():
+		return tm.plannedClaimBlockerLocked()
 	case tm.deploymentUpdateRunning || tm.predecessorUpdateInFlight:
 		return "an ordered update is in progress"
 	case tm.deploymentChanging > 0:
 		return "a promotion is in flight"
 	}
 	return ""
+}
+
+// plannedClaimBlockerLocked says why the held planned-failover claim
+// refuses an action: a run in progress, or a standing automation hold that
+// waiting does not clear (it needs the acknowledgement). Must hold tm.mu.
+func (tm *TopologyManager) plannedClaimBlockerLocked() string {
+	held, ok := tm.plannedSlot.snapshot()
+	if ok && held.mode == claimModeHold {
+		if held.runID == "" {
+			return "automatic failover is held by a True AutomaticFailoverHeld condition that names no run; resolve the split brain, then remove the condition"
+		}
+		return fmt.Sprintf("automatic failover is held after planned failover %s; resolve the split brain, then annotate %s=%s",
+			held.runID, AcknowledgePlannedFailoverHoldAnnotation, held.runID)
+	}
+	return "a planned failover is in progress"
 }
 
 // bootstrapRefusedRestoreHold is claimBootstrap's reason when an in-place

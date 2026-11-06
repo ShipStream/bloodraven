@@ -249,6 +249,12 @@ func (c *fakeReplicaConn) QueryContext(_ context.Context, query string, args []d
 			v = 1
 		}
 		return &fakeRows{cols: []string{"@@read_only"}, rows: [][]driver.Value{{v}}}, nil
+	case "SELECT @@super_read_only":
+		v := int64(0)
+		if s.SuperReadOnly {
+			v = 1
+		}
+		return &fakeRows{cols: []string{"@@super_read_only"}, rows: [][]driver.Value{{v}}}, nil
 	}
 	return nil, fmt.Errorf("fake replica: query not modelled: %q", query)
 }

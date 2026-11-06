@@ -67,7 +67,7 @@ check(unbounded["connection"] == 0,
 planned_verdict = brdrill.verdict(brdrill.load_drill(FIX / "planned-drill.json"))
 check(planned_verdict is not None, "verdict returned None — TODO D is unimplemented")
 check(planned_verdict == "RPO 0 by construction (target GTID_EXECUTED contained "
-                         "sourceGtidAtFence before promotion)",
+                         "fence.gtidSet before promotion)",
       "unexpected planned verdict: %r" % (planned_verdict,))
 
 emergency_verdict = brdrill.verdict(brdrill.load_drill(FIX / "emergency-drill.json"))
@@ -82,5 +82,15 @@ stalled_verdict = brdrill.verdict(stalled)
 check("not established" in stalled_verdict and "WaitingForLag" in stalled_verdict,
       "a planned failover stuck in WaitingForLag must not claim RPO 0, got %r"
       % (stalled_verdict,))
+
+# The outcome, not the phase alone, carries the claim: a run that ended
+# Failed (rolled back, say) claims nothing either.
+failed = json.loads((FIX / "planned-drill.json").read_text())
+failed["status"]["plannedFailover"]["phase"] = "Failed"
+failed["status"]["plannedFailover"]["result"] = {"outcome": "RolledBack", "reason": "LagTimeout"}
+failed_verdict = brdrill.verdict(failed)
+check("not established" in failed_verdict and "Failed" in failed_verdict,
+      "a planned failover that ended Failed must not claim RPO 0, got %r"
+      % (failed_verdict,))
 
 print("PASS")

@@ -11,13 +11,13 @@
 
 **Front:** Recite the planned-failover phases in order.
 
-**Back:** `""`, `Pending`, `Deferred`, `Validating`, `Draining`, `WaitingForLag`, `WaitingForDragonflySync`, `PromotingDragonfly`, `Promoting`, `Resuming`, `Succeeded`, `Failed`.
+**Back:** `Admitting`, `Deferred`, `Fencing`, `Draining`, `WaitingForLag`, `WaitingForDragonflySync`, `PromotingDragonfly`, `Promoting`, `Publishing`, `RollingBack`, `Succeeded`, `Failed`. There is no idle phase: a group with no run has no block.
 
 ---
 
-**Front:** `status.plannedFailover.sourceGtidAtFence` — what is it?
+**Front:** `status.plannedFailover.fence.gtidSet` — what is it?
 
-**Back:** The source primary's `GTID_EXECUTED`, recorded immediately after `super_read_only=ON` took effect on it.
+**Back:** The source primary's `GTID_EXECUTED`, recorded immediately after `super_read_only=ON` took effect on it and was read back (`fence.state: Applied`).
 
 ---
 
@@ -27,9 +27,9 @@
 
 ---
 
-**Front:** What does `status.plannedFailover.transactionsLost` read after a successful planned switchover?
+**Front:** After a successful planned switchover, what shows that nothing acknowledged was lost?
 
-**Back:** 0, by construction. The field is retained for symmetry with the emergency path's data-loss accounting.
+**Back:** `result.outcome: Succeeded`, and `status.promotionGtidExecuted` equal to `status.plannedFailover.fence.gtidSet`. There is no lost-transaction counter on this path: the gate makes the number zero by construction.
 
 ---
 
@@ -47,13 +47,13 @@
 
 **Front:** `spec.plannedFailover.onCooldown` — default value and its effect.
 
-**Back:** `reject`: a cooldown hit at `Validating` stamps `Failed{CooldownActive}` and clears the annotation, so an admin must re-annotate after the cooldown expires.
+**Back:** `Reject`: a cooldown hit in admission ends the run `Failed{NotStarted, CooldownActive}` and clears the annotation, so an admin must re-annotate after the cooldown expires.
 
 ---
 
-**Front:** What changes if you set `onCooldown: defer`?
+**Front:** What changes if you set `onCooldown: Defer`?
 
-**Back:** The request enters the `Deferred` phase with `retryAfter` stamped, keeps the annotation, and validation is retried automatically at cooldown expiry.
+**Back:** The request enters `Deferred` with `admission.deferReason: CooldownActive` and `admission.retryTime` stamped, keeps the annotation, and admission is retried automatically at cooldown expiry.
 
 ---
 
@@ -63,9 +63,9 @@
 
 ---
 
-**Front:** What does entering `Draining` do to the source's `-primary` Service endpoint?
+**Front:** What happens to the source's `-primary` Service endpoint once the run fences it?
 
-**Back:** The source's role label is stripped to `fenced`, which matches neither the `-primary` nor the `-replicas` selector, so the write Service sheds its endpoint.
+**Back:** From `Fencing` on, the source's role label is stripped to `fenced`, which matches neither the `-primary` nor the `-replicas` selector, so the write Service sheds its endpoint. Established connections are left to `Draining`.
 
 ---
 

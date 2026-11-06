@@ -3,6 +3,7 @@ package component
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,18 @@ import (
 
 // ---------------------------------------------------------------------------
 // mockMySQL implements mysql.Checker with configurable behaviour.
+//
+// It models one Service address: the server behind it can be restarted
+// (respawn) or replaced (replacePod), each of which starts a new server
+// incarnation. Pooled calls reach whichever server is current; a pinned
+// Session (PinSession) captures the incarnation at pin time and fails every
+// call once it has moved, exactly as a pinned MySQL connection fails after
+// its server is gone, however the address resolves now.
+//
+// Every statement runs through stmt, which applies the per-statement
+// failure counters (failNext) and blocking calls (blockOn) before taking
+// m.mu, so a test can hold an actor inside a statement — before it applies
+// or after it applied but before it returns — while other actors act.
 // ---------------------------------------------------------------------------
 
 type mockMySQL struct {
@@ -64,6 +77,165 @@ type mockMySQL struct {
 	// onClone, when set, runs inside CloneInstance (without m.mu held), so a
 	// test can change another site's state while a clone is running.
 	onClone func()
+
+	// incarnation counts server processes behind the address (respawn and
+	// replacePod start a new one); a pinned session fails once it moves.
+	incarnation int
+	// serverUUID is @@server_uuid of the current server (the pinned
+	// session's ReadGTIDSnapshot, and the pooled one via withServerUUID).
+	serverUUID string
+	// clearChannelOnReset makes RESET REPLICA ALL remove the channel, so
+	// ShowReplicaStatus returns nil afterwards, as MySQL does. Off by
+	// default: older fixtures assert on the status after a reset.
+	clearChannelOnReset bool
+	// failNext makes the next N calls of a statement (by method name, e.g.
+	// "SetReadOnly") fail without applying.
+	failNext map[string]int
+	// blocks are the pending blocking calls per statement, FIFO.
+	blocks map[string][]*blockedCall
+	// calls counts every statement call by method name, including failed
+	// and lost ones.
+	calls map[string]int
+	// stopClearsThreads makes STOP REPLICA stop the reported threads, as
+	// MySQL does. Off by default: older fixtures assert on the status after
+	// a stop.
+	stopClearsThreads bool
+	// stmtLog records every applied mutation as "<Method>[:on|:off]", in
+	// order (exactly-once assertions).
+	stmtLog []string
+}
+
+// mutatingStmt are the statements stmtLog records by name; the read-only
+// setters record themselves with their value ("SetReadOnly:off").
+var mutatingStmt = map[string]bool{
+	"Promote": true, "StopReplica": true, "ResetReplicaAll": true,
+	"ChangeReplicationSource": true, "StartReplica": true, "KillAppConnections": true,
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+// statements returns the applied mutations so far (see stmtLog).
+func (m *mockMySQL) statements() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.stmtLog...)
+}
+
+// errMockSessionLost is what a pinned session's call sees once its server
+// is gone (go-sql-driver/mysql: "invalid connection").
+var errMockSessionLost = errors.New("invalid connection (mock: the pinned session's server is gone)")
+
+// errMockStatementFailed is a failNext failure.
+var errMockStatementFailed = errors.New("transient: i/o timeout (mock: statement not applied)")
+
+// blockedCall holds the next call of one statement inside the statement
+// until Release. Entered is closed when the call arrives.
+type blockedCall struct {
+	afterApply bool
+	entered    chan struct{}
+	release    chan struct{}
+	once       sync.Once
+}
+
+// Entered is closed once the blocked call is inside the statement.
+func (b *blockedCall) Entered() <-chan struct{} { return b.entered }
+
+// Release lets the blocked call continue. Safe to call more than once.
+func (b *blockedCall) Release() { b.once.Do(func() { close(b.release) }) }
+
+func (b *blockedCall) hold() {
+	close(b.entered)
+	<-b.release
+}
+
+// blockOn makes the next call of stmt block inside the statement: before it
+// applies (afterApply false) or after it applied and before it returns
+// (afterApply true). The block is released at test cleanup if the test did
+// not release it.
+func (m *mockMySQL) blockOn(t *testing.T, stmt string, afterApply bool) *blockedCall {
+	t.Helper()
+	b := &blockedCall{afterApply: afterApply, entered: make(chan struct{}), release: make(chan struct{})}
+	m.mu.Lock()
+	if m.blocks == nil {
+		m.blocks = map[string][]*blockedCall{}
+	}
+	m.blocks[stmt] = append(m.blocks[stmt], b)
+	m.mu.Unlock()
+	t.Cleanup(b.Release)
+	return b
+}
+
+// failNextCalls makes the next n calls of stmt fail without applying.
+func (m *mockMySQL) failNextCalls(stmt string, n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failNext == nil {
+		m.failNext = map[string]int{}
+	}
+	m.failNext[stmt] += n
+}
+
+// callCount returns how many times stmt was called.
+func (m *mockMySQL) callCount(stmt string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[stmt]
+}
+
+// stmt runs one statement: pin and failure checks, an optional block before
+// apply, apply under m.mu, and an optional block after apply. pin is the
+// pinned session's incarnation (nil for a pooled call). A replacement while
+// blocked before apply keeps the statement from applying; after apply, the
+// statement landed and its reply is lost.
+func (m *mockMySQL) stmt(name string, pin *int, apply func() error) error {
+	m.mu.Lock()
+	if m.calls == nil {
+		m.calls = map[string]int{}
+	}
+	m.calls[name]++
+	if pin != nil && *pin != m.incarnation {
+		m.mu.Unlock()
+		return errMockSessionLost
+	}
+	if m.failNext[name] > 0 {
+		m.failNext[name]--
+		m.mu.Unlock()
+		return errMockStatementFailed
+	}
+	var b *blockedCall
+	if q := m.blocks[name]; len(q) > 0 {
+		b, m.blocks[name] = q[0], q[1:]
+	}
+	m.mu.Unlock()
+
+	if b != nil && !b.afterApply {
+		b.hold()
+	}
+	m.mu.Lock()
+	if pin != nil && *pin != m.incarnation {
+		m.mu.Unlock()
+		return errMockSessionLost
+	}
+	err := apply()
+	if err == nil && mutatingStmt[name] {
+		m.stmtLog = append(m.stmtLog, name)
+	}
+	m.mu.Unlock()
+	if b != nil && b.afterApply {
+		b.hold()
+		m.mu.Lock()
+		lost := pin != nil && *pin != m.incarnation
+		m.mu.Unlock()
+		if lost {
+			return errMockSessionLost
+		}
+	}
+	return err
 }
 
 // HasUserSchemas satisfies the operator's userSchemaChecker assertion so the
@@ -78,85 +250,115 @@ func (m *mockMySQL) HasUserSchemas(_ context.Context) (bool, error) {
 	return m.gtidExecuted != "", nil
 }
 
-func (m *mockMySQL) CheckReadOnly(_ context.Context) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.readOnly, m.err
+func (m *mockMySQL) CheckReadOnly(_ context.Context) (bool, error) { return m.checkReadOnly(nil) }
+
+func (m *mockMySQL) checkReadOnly(pin *int) (ro bool, err error) {
+	err = m.stmt("CheckReadOnly", pin, func() error {
+		ro = m.readOnly
+		return m.err
+	})
+	return ro, err
 }
 
 func (m *mockMySQL) Promote(_ context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.promoted = true
-	m.readOnly = false
-	return nil
+	return m.stmt("Promote", nil, func() error {
+		m.promoted = true
+		m.readOnly = false
+		return nil
+	})
 }
 
 func (m *mockMySQL) Close() error { return nil }
 
 func (m *mockMySQL) SetSuperReadOnly(_ context.Context, on bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.superROFailN > 0 {
-		m.superROFailN--
-		return errors.New("transient: connection reset by peer")
-	}
-	m.superReadOnly = on
-	if on {
-		m.readOnly = true
-	} else {
-		m.setSuperROFalseN++
-	}
-	return nil
+	return m.setSuperReadOnly(nil, on)
 }
 
-func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	i := m.killConnectionCalls
-	m.killConnectionCalls++
-	if i < len(m.killConnectionResults) {
-		return m.killConnectionResults[i], nil
-	}
-	return 0, nil
+func (m *mockMySQL) setSuperReadOnly(pin *int, on bool) error {
+	return m.stmt("SetSuperReadOnly", pin, func() error {
+		if m.superROFailN > 0 {
+			m.superROFailN--
+			return errors.New("transient: connection reset by peer")
+		}
+		m.superReadOnly = on
+		if on {
+			m.readOnly = true
+		} else {
+			m.setSuperROFalseN++
+		}
+		m.stmtLog = append(m.stmtLog, "SetSuperReadOnly:"+onOff(on))
+		return nil
+	})
 }
 
-func (m *mockMySQL) StopReplica(_ context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.stopReplicaFailN > 0 {
-		m.stopReplicaFailN--
-		return errors.New("transient: i/o timeout")
-	}
-	m.stoppedReplica = true
-	return nil
+func (m *mockMySQL) KillAppConnections(_ context.Context) (killed int, err error) {
+	err = m.stmt("KillAppConnections", nil, func() error {
+		i := m.killConnectionCalls
+		m.killConnectionCalls++
+		if i < len(m.killConnectionResults) {
+			killed = m.killConnectionResults[i]
+		}
+		return nil
+	})
+	return killed, err
 }
 
-func (m *mockMySQL) ResetReplicaAll(_ context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.resetReplicaAll = true
-	return nil
+func (m *mockMySQL) StopReplica(_ context.Context) error { return m.stopReplica(nil) }
+
+func (m *mockMySQL) stopReplica(pin *int) error {
+	return m.stmt("StopReplica", pin, func() error {
+		if m.stopReplicaFailN > 0 {
+			m.stopReplicaFailN--
+			return errors.New("transient: i/o timeout")
+		}
+		m.stoppedReplica = true
+		if m.stopClearsThreads && m.replicaStatus != nil {
+			m.replicaStatus.IORunning = false
+			m.replicaStatus.SQLRunning = false
+		}
+		return nil
+	})
 }
 
-func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.readOnly = on
-	if !on {
-		// As in MySQL: clearing read_only clears super_read_only too.
-		m.superReadOnly = false
-		m.setReadOnlyFalseN++
-	}
-	return nil
+func (m *mockMySQL) ResetReplicaAll(_ context.Context) error { return m.resetReplica(nil) }
+
+func (m *mockMySQL) resetReplica(pin *int) error {
+	return m.stmt("ResetReplicaAll", pin, func() error {
+		m.resetReplicaAll = true
+		if m.clearChannelOnReset {
+			m.replicaStatus = nil
+		}
+		return nil
+	})
+}
+
+func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error { return m.setReadOnlyStmt(nil, on) }
+
+func (m *mockMySQL) setReadOnlyStmt(pin *int, on bool) error {
+	return m.stmt("SetReadOnly", pin, func() error {
+		m.readOnly = on
+		if !on {
+			// As in MySQL: clearing read_only clears super_read_only too.
+			m.superReadOnly = false
+			m.setReadOnlyFalseN++
+		}
+		m.stmtLog = append(m.stmtLog, "SetReadOnly:"+onOff(on))
+		return nil
+	})
 }
 
 // CheckSuperReadOnly lets the operator tell a fence (super_read_only=ON)
 // from the read_only=ON mysqld boots with.
 func (m *mockMySQL) CheckSuperReadOnly(_ context.Context) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.superReadOnly, m.err
+	return m.checkSuperReadOnly(nil)
+}
+
+func (m *mockMySQL) checkSuperReadOnly(pin *int) (sro bool, err error) {
+	err = m.stmt("CheckSuperReadOnly", pin, func() error {
+		sro = m.superReadOnly
+		return m.err
+	})
+	return sro, err
 }
 
 func (m *mockMySQL) writableGrants() int {
@@ -173,41 +375,53 @@ func (m *mockMySQL) writableGrants() int {
 // pointee, and -race flags it once bootstrap runs on its own goroutine (see
 // TestBootstrap_FailAndRetry). Copying keeps the mock's locking honest.
 func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.replicaStatus == nil {
-		return nil, nil
-	}
-	status := *m.replicaStatus
-	if m.replicaStatus.SecondsBehindSource != nil {
-		lag := *m.replicaStatus.SecondsBehindSource
-		status.SecondsBehindSource = &lag
-	}
-	return &status, nil
+	return m.showReplicaStatus(nil)
+}
+
+func (m *mockMySQL) showReplicaStatus(pin *int) (out *mysql.ReplicaStatus, err error) {
+	err = m.stmt("ShowReplicaStatus", pin, func() error {
+		if m.replicaStatus == nil {
+			return nil
+		}
+		status := *m.replicaStatus
+		if m.replicaStatus.SecondsBehindSource != nil {
+			lag := *m.replicaStatus.SecondsBehindSource
+			status.SecondsBehindSource = &lag
+		}
+		out = &status
+		return nil
+	})
+	return out, err
 }
 
 func (m *mockMySQL) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.replicationSourceSet = true
-	m.changeSourceCalls++
-	m.changeReplicationOpts = opts
-	if m.replicaStatus == nil {
-		m.replicaStatus = &mysql.ReplicaStatus{}
-	}
-	m.replicaStatus.SourceHost = opts.Host
-	return nil
+	return m.changeSource(nil, opts)
 }
 
-func (m *mockMySQL) StartReplica(_ context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.replicaStarted = true
-	if m.replicaStatus != nil {
-		m.replicaStatus.IORunning = true
-		m.replicaStatus.SQLRunning = true
-	}
-	return nil
+func (m *mockMySQL) changeSource(pin *int, opts mysql.ReplicationSourceOpts) error {
+	return m.stmt("ChangeReplicationSource", pin, func() error {
+		m.replicationSourceSet = true
+		m.changeSourceCalls++
+		m.changeReplicationOpts = opts
+		if m.replicaStatus == nil {
+			m.replicaStatus = &mysql.ReplicaStatus{}
+		}
+		m.replicaStatus.SourceHost = opts.Host
+		return nil
+	})
+}
+
+func (m *mockMySQL) StartReplica(_ context.Context) error { return m.startReplica(nil) }
+
+func (m *mockMySQL) startReplica(pin *int) error {
+	return m.stmt("StartReplica", pin, func() error {
+		m.replicaStarted = true
+		if m.replicaStatus != nil {
+			m.replicaStatus.IORunning = true
+			m.replicaStatus.SQLRunning = true
+		}
+		return nil
+	})
 }
 
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
@@ -225,19 +439,33 @@ func (m *mockMySQL) SetCloneDonorList(_ context.Context, donor string) error {
 	return nil
 }
 
-func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.gtidExecuted, nil
+func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) { return m.getGtidExecuted(nil) }
+
+func (m *mockMySQL) getGtidExecuted(pin *int) (gtid string, err error) {
+	err = m.stmt("GetGtidExecuted", pin, func() error {
+		gtid = m.gtidExecuted
+		return nil
+	})
+	return gtid, err
+}
+
+func (m *mockMySQL) readGTIDSnapshot(pin *int) (snap mysql.GTIDSnapshot, err error) {
+	err = m.stmt("ReadGTIDSnapshot", pin, func() error {
+		snap = mysql.GTIDSnapshot{ServerUUID: m.serverUUID, GtidExecuted: m.gtidExecuted}
+		return m.err
+	})
+	return snap, err
 }
 
 func (m *mockMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 	return nil, nil
 }
 
-// PinSession returns a Session over this fake's own methods.
+// PinSession pins the current server incarnation (see mockSession).
 func (m *mockMySQL) PinSession(context.Context) (mysql.Session, error) {
-	return mysql.CheckerSession(m), nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &mockSession{m: m, inc: m.incarnation}, nil
 }
 
 func (m *mockMySQL) EnsurePartialRevokes(_ context.Context) error { return nil }
@@ -304,13 +532,76 @@ func (m *mockMySQL) failNextStopReplica(n int) {
 }
 
 // respawn simulates a MySQL restart: reachable again, read_only per the
-// server config, super_read_only cleared (it is never persisted).
+// server config, super_read_only cleared (it is never persisted). It is a
+// new server incarnation, so pinned sessions from before it fail.
 func (m *mockMySQL) respawn(readOnly bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.err = nil
 	m.readOnly = readOnly
 	m.superReadOnly = false
+	m.incarnation++
+}
+
+// podReplacement describes the server a replacePod brings up.
+type podReplacement struct {
+	// serverUUID is the new server's @@server_uuid; "" keeps the current
+	// one (the same data directory on a new pod).
+	serverUUID string
+	// gtidExecuted, when non-nil, replaces the executed set (a restored or
+	// regressed data directory).
+	gtidExecuted *string
+	// noChannel boots with no replication channel configured.
+	noChannel bool
+}
+
+// replacePod replaces the server behind the address: a new incarnation
+// booted the way mysqld boots, read_only=ON and super_read_only OFF,
+// reachable, with its replica threads running when it has a channel.
+func (m *mockMySQL) replacePod(p podReplacement) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.incarnation++
+	m.err = nil
+	m.readOnly = true
+	m.superReadOnly = false
+	if p.serverUUID != "" {
+		m.serverUUID = p.serverUUID
+	}
+	if p.gtidExecuted != nil {
+		m.gtidExecuted = *p.gtidExecuted
+	}
+	switch {
+	case p.noChannel:
+		m.replicaStatus = nil
+	case m.replicaStatus != nil:
+		m.replicaStatus.IORunning = true
+		m.replicaStatus.SQLRunning = true
+	}
+}
+
+// dropConnections breaks every connection to the server without changing
+// its state (a network blip, a proxy restart): pinned sessions fail from
+// their next call, pooled calls redial.
+func (m *mockMySQL) dropConnections() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.incarnation++
+}
+
+// setRO sets read_only and super_read_only directly, as an actor outside
+// the operator would (a human, the sidecar).
+func (m *mockMySQL) setRO(ro, sro bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.readOnly, m.superReadOnly = ro, sro
+}
+
+// setServerUUID sets @@server_uuid of the current server.
+func (m *mockMySQL) setServerUUID(uuid string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.serverUUID = uuid
 }
 
 // setGtidExecuted replaces the reported GTID_EXECUTED set.
@@ -318,6 +609,150 @@ func (m *mockMySQL) setGtidExecuted(gtid string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gtidExecuted = gtid
+}
+
+// gtidWithExtras appends uuid:from-to to a GTID set: own extras when uuid is
+// the server's own, foreign extras otherwise.
+func gtidWithExtras(base, uuid string, from, to int64) string {
+	extra := fmt.Sprintf("%s:%d-%d", uuid, from, to)
+	if from == to {
+		extra = fmt.Sprintf("%s:%d", uuid, from)
+	}
+	if base == "" {
+		return extra
+	}
+	return base + "," + extra
+}
+
+// mockWithUUID adds the pooled ReadGTIDSnapshot to a mockMySQL. It is a
+// separate type because the operator type-asserts for it (the replica GTID
+// audit, the planned failover's grant probe); adding it to every mockMySQL
+// would change the audit path of every existing test.
+type mockWithUUID struct{ *mockMySQL }
+
+// withServerUUID returns m as a checker whose pooled ReadGTIDSnapshot
+// reports uuid.
+func withServerUUID(m *mockMySQL, uuid string) mockWithUUID {
+	m.setServerUUID(uuid)
+	return mockWithUUID{m}
+}
+
+func (m mockWithUUID) ReadGTIDSnapshot(_ context.Context) (mysql.GTIDSnapshot, error) {
+	return m.readGTIDSnapshot(nil)
+}
+
+// mockSession is mockMySQL's pinned Session: every call is on the server
+// incarnation pinned at PinSession and fails with errMockSessionLost once
+// the server is gone.
+type mockSession struct {
+	m      *mockMySQL
+	inc    int
+	closed bool
+}
+
+var _ mysql.Session = (*mockSession)(nil)
+
+var errMockSessionClosed = errors.New("sql: connection is already closed")
+
+func (s *mockSession) pin() (*int, error) {
+	if s.closed {
+		return nil, errMockSessionClosed
+	}
+	return &s.inc, nil
+}
+
+func (s *mockSession) StopReplica(context.Context) error {
+	pin, err := s.pin()
+	if err != nil {
+		return err
+	}
+	return s.m.stopReplica(pin)
+}
+
+func (s *mockSession) ResetReplicaAll(context.Context) error {
+	pin, err := s.pin()
+	if err != nil {
+		return err
+	}
+	return s.m.resetReplica(pin)
+}
+
+func (s *mockSession) GetGtidExecuted(context.Context) (string, error) {
+	pin, err := s.pin()
+	if err != nil {
+		return "", err
+	}
+	return s.m.getGtidExecuted(pin)
+}
+
+func (s *mockSession) SetSuperReadOnly(_ context.Context, on bool) error {
+	pin, err := s.pin()
+	if err != nil {
+		return err
+	}
+	return s.m.setSuperReadOnly(pin, on)
+}
+
+func (s *mockSession) SetReadOnly(_ context.Context, on bool) error {
+	pin, err := s.pin()
+	if err != nil {
+		return err
+	}
+	return s.m.setReadOnlyStmt(pin, on)
+}
+
+func (s *mockSession) CheckReadOnly(context.Context) (bool, error) {
+	pin, err := s.pin()
+	if err != nil {
+		return false, err
+	}
+	return s.m.checkReadOnly(pin)
+}
+
+func (s *mockSession) CheckSuperReadOnly(context.Context) (bool, error) {
+	pin, err := s.pin()
+	if err != nil {
+		return false, err
+	}
+	return s.m.checkSuperReadOnly(pin)
+}
+
+func (s *mockSession) ShowReplicaStatus(context.Context) (*mysql.ReplicaStatus, error) {
+	pin, err := s.pin()
+	if err != nil {
+		return nil, err
+	}
+	return s.m.showReplicaStatus(pin)
+}
+
+func (s *mockSession) ReadGTIDSnapshot(context.Context) (mysql.GTIDSnapshot, error) {
+	pin, err := s.pin()
+	if err != nil {
+		return mysql.GTIDSnapshot{}, err
+	}
+	return s.m.readGTIDSnapshot(pin)
+}
+
+func (s *mockSession) StartReplica(context.Context) error {
+	pin, err := s.pin()
+	if err != nil {
+		return err
+	}
+	return s.m.startReplica(pin)
+}
+
+func (s *mockSession) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {
+	pin, err := s.pin()
+	if err != nil {
+		return err
+	}
+	return s.m.changeSource(pin, opts)
+}
+
+// Close releases the connection; later calls fail.
+func (s *mockSession) Close() error {
+	s.closed = true
+	return nil
 }
 
 // ---------------------------------------------------------------------------

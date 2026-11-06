@@ -119,16 +119,17 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 				t.Helper()
 				result := reconcile()
 				pf := fg.Status.PlannedFailover
-				if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Reason != "DeploymentHold" {
+				if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil ||
+					pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold {
 					t.Fatalf("planned failover = %+v, want Deferred/DeploymentHold", pf)
 				}
-				if pf.RetryAfter == nil || !pf.RetryAfter.Time.Equal(hold.ExpiresAt) {
-					t.Fatalf("retryAfter = %v, want earliest hold expiry %v", pf.RetryAfter, hold.ExpiresAt)
+				if pf.Admission.RetryTime == nil || !pf.Admission.RetryTime.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) {
+					t.Fatalf("retryAfter = %v, want earliest hold expiry %v", pf.Admission.RetryTime, hold.ExpiresAt)
 				}
 				if !strings.Contains(pf.Message, hold.OperationID) || !strings.Contains(pf.Message, hold.Instance) {
 					t.Fatalf("hold message lacks operation/instance: %q", pf.Message)
 				}
-				if pf.Target != "dc2" || pf.SourcePrimary != "dc1" || fg.Status.ActiveSite != "dc1" {
+				if pf.TargetSite != "dc2" || pf.SourceSite != "" || fg.Status.ActiveSite != "dc1" {
 					t.Fatalf("hold changed switchover identity: status=%+v", fg.Status)
 				}
 				if fg.Annotations[controller.PlannedFailoverAnnotation] != "dc2" {
@@ -158,13 +159,13 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 				t.Fatal("expiry cleared planned-failover status instead of revalidating")
 			}
 			if unhealthy {
-				if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "TargetUnhealthy" {
+				if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Result == nil || pf.Result.Reason != v1alpha1.PlannedFailoverReasonTargetUnhealthy {
 					t.Fatalf("changed target was not revalidated: %+v", pf)
 				}
-			} else if pf.Phase != v1alpha1.PlannedFailoverPhasePending || pf.Reason != "" || result.RequeueAfter != time.Second {
-				t.Fatalf("expired holds did not resume Pending: status=%+v result=%+v", pf, result)
+			} else if pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Result != nil || result.RequeueAfter <= 0 || result.RequeueAfter > time.Second {
+				t.Fatalf("expired holds did not resume admission: status=%+v result=%+v", pf, result)
 			}
-			if pf.RetryAfter != nil || !pf.StartTime.Equal(start) {
+			if (pf.Admission != nil && pf.Admission.RetryTime != nil) || !pf.StartTime.Equal(start) {
 				t.Fatalf("expiry left retryAfter or reset startTime: %+v", pf)
 			}
 			if _, present := fg.Annotations[controller.PlannedFailoverAnnotation]; present {
@@ -198,7 +199,8 @@ func TestDeploymentCoordination_DeferredHoldAllowsEmergencyPoll(t *testing.T) {
 	if err := r.Get(ctx, request.NamespacedName, fg); err != nil {
 		t.Fatal(err)
 	}
-	if pf := fg.Status.PlannedFailover; pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Reason != "DeploymentHold" {
+	if pf := fg.Status.PlannedFailover; pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil ||
+		pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold {
 		t.Fatalf("planned failover not held before emergency: %+v", pf)
 	}
 	if !h.dc2MySQL.isReadOnly() {

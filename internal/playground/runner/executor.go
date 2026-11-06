@@ -317,8 +317,9 @@ func processAlive(pid int) bool {
 
 // waitForClusterReconverge polls the MFG until every site is in
 // {writable, read-only} (i.e. the operator has finished any in-flight
-// promotion/recovery), the cluster reports Ready=True, and optional
-// Dragonfly topology has returned to Ready. This is the cleanup gate
+// promotion/recovery), the cluster reports Ready=True, optional
+// Dragonfly topology has returned to Ready, and no planned failover is
+// mid-run or holding automation. This is the cleanup gate
 // for run-all; it must be at least as strict as the next scenario's
 // shared precheck for states that cleanup itself can leave behind.
 func waitForClusterReconverge(ctx context.Context, env *Env) error {
@@ -360,6 +361,7 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 				}
 			}
 			bad = append(bad, dragonflyReconvergeProblems(mfg)...)
+			bad = append(bad, plannedReconvergeProblems(mfg)...)
 			healthy := ready && len(bad) == 0 && mfg.Status.ActiveSite != ""
 			if healthy {
 				if healthySince.IsZero() {
@@ -379,6 +381,29 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 		},
 	)
 	return err
+}
+
+// plannedReconvergeProblems mirrors the shared precheck's planned-failover
+// gates: a run still in a non-terminal phase (its status publication may lag
+// the topology, which can already look healthy), and a standing automation
+// hold.
+func plannedReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
+	var bad []string
+	if pf := mfg.Status.PlannedFailover; pf != nil && pf.Phase != "" &&
+		pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded && pf.Phase != v1alpha1.PlannedFailoverPhaseFailed {
+		bad = append(bad, fmt.Sprintf("plannedFailover.phase=%s", pf.Phase))
+	}
+	if hold := brcontroller.PlannedHoldFrom(mfg); hold != nil {
+		bad = append(bad, fmt.Sprintf("automationHold=%s", emptyAs(hold.RunID, "<no run>")))
+	}
+	return bad
+}
+
+func emptyAs(s, alt string) string {
+	if s == "" {
+		return alt
+	}
+	return s
 }
 
 func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {

@@ -418,8 +418,11 @@ func TestReconcileDNS_NeverReplaysSupersededTarget(t *testing.T) {
 	// the emergency dc2 target (its own DNS flip is denied too).
 	site0.setReadOnly(true) // dc1 back online, replicating
 	pollN(tm, 2)
-	if _, err := tm.PlannedPromote(context.Background(), "dc1", "dc2"); err == nil {
-		t.Fatal("planned promote should report the denied DNS flip")
+	// The switchover's promotion of dc1: recorded, then its DNS flip denied.
+	site0.setReadOnly(false)
+	tm.recordFailover(context.Background(), tm.clock.Now(), "dc1", "")
+	if err := tm.applyDNS(context.Background(), "dc1", "1.1.1.1"); err == nil {
+		t.Fatal("the switchover's DNS flip should be denied")
 	}
 	site1.setReadOnly(true) // dc2 demoted by the switchover
 	pollN(tm, 2)
