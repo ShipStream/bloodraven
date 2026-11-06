@@ -691,27 +691,63 @@ Older operators project `pitr-passphrase` as root-owned mode `0400`, but PITR si
    JSON reports decimal modes: `256` is `0400`; `292` is `0444`. Without fsGroup, a non-root UID cannot read the root-owned `0400` projection. On a current sidecar `/archiver/status` names the cause in `lastError`; on an older one it is unavailable while the container crash-loops, so use logs.
 
 ### Safe remediation
-Upgrade to the operator that projects the live sidecar passphrase as `0444`, matching PITR S3 credentials. Its PITR render-version change triggers ordered updates for existing deployments. Verify the new pod's projection mode, readiness, and `/archiver/status` (`storeReady:true`) after the rollout, and that `PITRArchiveReady` returns to `True`. Backup and restore Job projections keep their separate fsGroup-based permissions. Preserve the existing passphrase; adding fsGroup to an existing MySQL PVC can trigger a recursive ownership change and is unnecessary for this fix.
+Upgrade to the operator that projects the live sidecar passphrase as `0444`, matching PITR S3 credentials. Current operators mount the binding's key snapshot (`status.pitrArchiveBindings[].encryption.keySecretName`), not the profile's Secret, with `optional: true`: a missing snapshot leaves the pod running and the archiver failing closed, reported as `PITRArchiveBindingReady=False/KeyMaterialLost` (playbook 26). Its PITR render-version change triggers ordered updates for existing deployments. Verify the new pod's projection mode, readiness, and `/archiver/status` (`storeReady:true`) after the rollout, and that `PITRArchiveReady` returns to `True`. Backup and restore Job projections keep their separate fsGroup-based permissions. Preserve the existing passphrase; adding fsGroup to an existing MySQL PVC can trigger a recursive ownership change and is unnecessary for this fix.
 
-## 26. PITR archival stops after an encryption change
+## 26. PITR archive encryption binding refused or key material lost
 
-### Symptoms
-- The sidecar still has the previous passphrase reference/key while an ordered rollout is pending, or on an older operator that omitted encryption from drift detection.
-- After rollout, `/archiver/status` and sidecar logs report a manifest-read error, missing BRV1 magic, or authentication failure; archive coverage stops advancing.
+Covers: encryption or key change refused, key mismatch, key material lost, deferred render, check Job stuck, binding limit, release.
 
-### Cause
-The sidecar loads its passphrase at startup. The deployment fingerprint includes the active PITR profile's effective encryption settings and a per-group keyed HMAC of its selected passphrase bytes in both credential modes. Updating projected Secret files alone cannot reload the store. A completed rollout applies the new settings but cannot read an archive encrypted under a different passphrase; strict readers also reject old plaintext manifests after enabling encryption.
+### Background
+`status.pitrArchiveBindings[]` holds, per archive destination the group writes (the active PITR profile) or reads (`initFromBackup.pointInTime`, PITR verifications, `archiveProfileName`), the accepted encryption identity: `id` (`pab-` + 16 hex), `destination`, `archiveID`, `source`, `encryption{mode, algorithm, keySecretName}`, `state`/`reason`, `check{jobName, jobUID}`. Read `encryption` only when `state` is `Bound`; otherwise it is the candidate under test. For `Passphrase`, `keySecretName` is an immutable operator-made **key snapshot** `mysql-<group>-pitr-key-<h10>` holding the trimmed passphrase. Sidecars (mounted `optional: true`), restore, verification and check Jobs mount the snapshot, never the user's Secret. Snapshots have no owner reference and are never pruned. Condition `PITRArchiveBindingReady` summarises the bindings; `PITRArchiveReady` still reports what the sidecars observe.
+
+A binding becomes `Bound` only by proof: a sidecar reports `Verified` for the destination with the binding's mode and exact `keyRevision` (the snapshot name, or `plaintext`), or a one-shot `pitr-archive-check` Job verifies the descriptor. Once `Bound`, pods render the binding whatever the profile now says, so an edit never changes what a pod loads.
+
+### Symptoms and meaning
+| Condition reason / Event | Meaning |
+|---|---|
+| `False/KeyChangeRefused`, Warning `PITRArchiveKeyChangeRefused` | The live passphrase of a profile in archive use (in-place rotation, alias profile with other bytes, Secret renamed while PITR was off) differs from the accepted snapshot. Pods are unchanged; archiving continues under the accepted key. |
+| `False/EncryptionChangeRefused`, Warning `PITRArchiveEncryptionChangeRefused` | Encryption added, removed or changed on such a profile (possible only while PITR was disabled; the admission rule refuses it otherwise). The render keeps the accepted identity. |
+| `True` + Warning `PITRArchiveKeySourceRemoved` | The user's Secret or key is gone. Nothing changes: pods use the snapshot. Restore it before the next rotation procedure. |
+| `False/KeyMismatch` (entry `Refused`) | Not yet Bound and the candidate key does not open the archive. For a first upgrade the message reads "recover the archive's original passphrase into Secret `<name>` key `<key>`". |
+| `False/ArchiveForeign`, `ArchiveCopy`, `ArchiveLegacy`, `ArchiveDescriptorMissing`, `ArchiveNotFound`, `ArchiveEncryptionMismatch`, `ArchiveVersionUnsupported`, `ArchiveListFailed` | The check Job or a sidecar refused the destination (playbook 37 explains each). `ArchiveForeign`/`ArchiveCopy` also come from writer eligibility: a Bound read binding of another group's archive, or of a copy, was made the write target. The previous writer render is held. |
+| `False/KeyMaterialLost`, Warning `PITRArchiveKeyMaterialLost` | A Bound entry's snapshot is missing and the live bytes do not reproduce its name, or the snapshot no longer holds the accepted key (wrong `pitr-accepted` `keyCheck`, labels or destination). mysqld keeps running (optional mount); the archiver fails closed (`PITRArchiveReady` not True). |
+| Warning `PITRArchiveKeySnapshotRecreated` | A deleted snapshot was re-created under the same name from live bytes that reproduce it; no roll. |
+| Warning `PITRArchiveKeySnapshotUnreadable` | A snapshot's `pitr-accepted` annotation is malformed. It is never used for recovery and never deleted. |
+| `Unknown/Authenticating` or `Unknown/Establishing` | A proof is pending. `Establishing` follows a check Job that found an empty prefix: the sidecar creates the descriptor and proves it. |
+| `False/BindingLimitReached`, Warning `PITRArchiveBindingLimitReached` | 16 bindings exist; a new destination gets none and nothing new renders for it. |
+| Warning `PITRArchiveBindingRefused` naming Deployments, log `pitr render deferred` | Site Deployments from before bindings existed (no decodable `bloodraven.shipstream.io/pitr-render` annotation) are not updated until a check Job authenticates the live key. |
+| Warning `PITRArchiveBindingReleaseRefused` / `PITRArchiveBindingReleaseRejected` | A release annotation names a binding still in use / is malformed or has a wrong `confirm`. |
 
 ### Diagnostic steps
-1. Compare the active PITR profile's Secret name and key with the Deployment's `pitr-passphrase` projection and `BLOODRAVEN_PITR_PASSPHRASE_FILE`. Inspect `shipstream.io/spec-hash` and the group's update status to distinguish pending rollout from archive incompatibility. Never print Secret data or an unkeyed hash of it.
-2. Read sidecar logs and probe the archiver:
+1. Bindings and condition (`scripts/triage.sh` prints both):
    ```bash
-   ./.agents/skills/bloodraven-doctor/scripts/sidecar-probe.sh -n <ns> <group> archiver
+   kubectl get mfg <group> -n <ns> -o jsonpath='{range .status.pitrArchiveBindings[*]}{.id}{"\t"}{.state}{"/"}{.reason}{"\t"}{.encryption.keySecretName}{"\t"}{.destination}{"\n"}{end}'
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="PITRArchiveBindingReady")]}{"\n"}'
    ```
-   If HTTP is unavailable, inspect current and previous startup logs as in playbook 25.
+2. Key snapshots, metadata only (never `-o yaml`; `data` is the passphrase and `pitr-accepted` is a verifier):
+   ```bash
+   kubectl get secrets -n <ns> -l app.kubernetes.io/name=mysql-pitr-key,bloodraven.shipstream.io/failover-group-uid=$(kubectl get mfg <group> -n <ns> -o jsonpath='{.metadata.uid}') \
+     -o custom-columns=NAME:.metadata.name,BINDING:.metadata.labels.bloodraven\.shipstream\.io/pitr-binding-id,DEST:.metadata.annotations.bloodraven\.shipstream\.io/pitr-destination,IMMUTABLE:.immutable
+   ```
+3. What the pods load: the Deployment's `pitr-passphrase` volume `secretName` must equal the Bound entry's `keySecretName`, and the sidecar env `BLOODRAVEN_PITR_KEY_REVISION` must equal it (or `plaintext`). `status.pitr.archive.keyRevision` is what the sidecars reported.
+4. Check Jobs (`kubectl get jobs,pods -n <ns> -l shipstream.io/failover-group=<group>,shipstream.io/resource=pitr-archive-check`): the result line is the pod's termination message `BLOODRAVEN_PITR_ARCHIVE_CHECK v=1 state=<Absent|Verified|Refused> reason=... archiveID=... destination=...`. Only the Job whose UID equals `check.jobUID` counts. A pod Pending more than 60 s, or a failure without a result line, is deleted and retried after 1 min; the entry stays `Pending/Authenticating` with the cause (image pull, quota, admission, storage egress).
+5. Operator log lines: `pitr archive binding changed` (`cause` = `proof`, `check`, `recovery`, `integrity` or `c3`), `pitr archive binding released`, `pitr render annotation ignored`, `pitr render deferred`.
 
 ### Safe remediation
-Preserve the archive and its original passphrase. Restore access to the original settings and key before attempting to use that recovery history. Do not delete the manifest, overwrite old objects, or enable plaintext fallback as a drift repair. Automatic archive migration and multiple key generations are unsupported; plan any encryption transition separately. For a stale rendered configuration, use the operator with encryption-aware drift detection and verify the normal ordered rollout completes.
+- **Key or encryption change refused (rotation).** There is no in-place rotation. Revert the profile or Secret to the accepted bytes and settings (whitespace-only edits are accepted), or follow the procedure: create a profile with a **new storage prefix** and a new passphrase Secret, switch `spec.backup.pitr.profileName`, wait for the new binding to be `Bound` (a check Job reports `Absent`, then the sidecar proves the new archive), take a full backup, and keep the old binding (and the old prefix) for as long as you need its history. A shared dump + PITR profile whose rotation was refused leaves new dumps under the new key and the archive under the old one.
+- **KeyMismatch on a not-yet-Bound entry.** Put the archive's original passphrase back into the Secret the message names; the binding is retried when the candidate changes (no timer). If the original key is lost, the archive is unreadable: switch to a new prefix.
+- **Key material lost.** Restore the snapshot Secret from a backup of it (same name, same bytes), or put the original bytes back into the user's Secret and delete the bad snapshot so the operator re-creates it under the same name. If the digest key was re-created, the old name cannot be reproduced; only a restored copy of the Secret helps. MySQL keeps serving meanwhile; only archiving is stopped.
+- **Deferred render (pre-binding Deployments).** Fix the user's Secret so it opens the archive (the check then reports `Verified` and the Deployments roll once), switch to a new prefix, or disable PITR for the profile.
+- **Check Job stuck.** Fix what the pod event names (image pull, quota, NetworkPolicy egress to the store, `s3:ListBucket`/`GetObject` for `ArchiveListFailed`).
+- **Binding limit.** Release unused bindings (below).
+- **Release** removes an unused binding and deletes its key snapshots. One id per annotation:
+  ```bash
+  kubectl annotate mfg <group> -n <ns> bloodraven.shipstream.io/release-pitr-archive-binding=<id>:confirm=<group>
+  ```
+  It is refused (`PITRArchiveBindingReleaseRefused`, annotation kept, retried every minute) while the destination is a current target, or a snapshot is named by a site Deployment's render annotation, mounted by a running pod (including an old ReplicaSet mid-roll), labelled `bloodraven.shipstream.io/pitr-key-secret` on a running Job, or held by a live verification (`hold.verification.shipstream.io/<uid>`). A malformed value or wrong `confirm` is rejected and the annotation removed. Never commit this annotation in GitOps. Releasing a binding makes its archive unreadable unless you kept the passphrase elsewhere.
+- **Group deleted.** Snapshots survive. When no archive needs them: `kubectl delete secret -n <ns> -l app.kubernetes.io/name=mysql-pitr-key,bloodraven.shipstream.io/failover-group-uid=<uid>`.
+
+Never delete a key snapshot to "unstick" a binding, never edit its data (it is immutable; replacing it by hand trips `KeyMaterialLost`), never delete `archive.json` or rewrite manifests, and never enable plaintext fallback as a repair.
 
 ## 27. PITR history after a site reclone or data rebuild
 
@@ -758,7 +794,7 @@ Preserve old manifests, objects, and encryption material. Do not delete a site m
 
 ### Diagnostic steps
 1. Inspect every successful, non-deleting backup matching the group's spec, across all profiles, including CRs without labels. Read `status.startTime` and `status.gtidExecuted`; the latter must be a trustworthy pre-dump lower bound. Completion time alone is not a replay boundary. A newer replica backup may cover fewer GTIDs than the oldest backup. Pending, Running, or unknown-phase group backups pause new retirements, including overlapping dumps with older snapshots.
-2. From the protected pod network, inspect `/pitr-cutoff?namespace=<ns>&group=<group>&profile=<profile>&coverage=gtid-v1`. A proof includes the matching `coverage` marker, `retainedGTIDs` for all backups, and `cutoffTime` from the minimum known start. Missing metadata yields no cutoff and `retentionDeferredReason`. `noRetainedBackups` and `backupInFlight` are normal Info waits. The informer-backed handler validates the active PITR group/profile, coalesces lookups and permits one uncached lookup per transport source IP per 30 seconds. Junk query keys allocate no admission state. HTTP 429 carries no cutoff, logs `fetch retention cutoff` at Warn and retries after 30 seconds. Use direct Service access preserving pod source IPs; proxy/NAT callers share a limit and forwarding headers are ignored. Safe deferrals alone are cached; positive proofs and failed lookups are not. Older requests deliberately receive no cutoff; a new sidecar also rejects time-only responses from older operators.
+2. From the protected pod network, inspect `/pitr-cutoff?namespace=<ns>&group=<group>&archive=<archiveID>&coverage=gtid-v1`. A proof includes the matching `coverage` marker, `retainedGTIDs` for all backups, and `cutoffTime` from the minimum known start. Missing metadata yields no cutoff and `retentionDeferredReason`. `noRetainedBackups` and `backupInFlight` are normal Info waits. The informer-backed handler validates the active PITR group and its rendered archive ID, coalesces lookups and permits one uncached lookup per transport source IP per 30 seconds. Junk query keys allocate no admission state. HTTP 429 carries no cutoff, logs `fetch retention cutoff` at Warn and retries after 30 seconds. Use direct Service access preserving pod source IPs; proxy/NAT callers share a limit and forwarding headers are ignored. Safe deferrals alone are cached; positive proofs and failed lookups are not. Older requests deliberately receive no cutoff; a new sidecar also rejects time-only responses from older operators.
 3. Inspect affected manifest rows' `gtidCoverage.complete` and `gtidCoverage.gtids`. Every file transaction must be contained in every backup bound. Previous GTIDs and same-name successor files do not establish coverage. Anonymous transactions, truncation, disabled checksums, and unknown events remain retained. Complete empty files and valid ZSTD payloads immediately after GTIDs are supported.
 4. The proof's `gtidCoverage.contentId` must match the row's ID or verified legacy `contentId`. Older/unbound proofs are re-inspected from streamed archived plaintext; both ID-aware and verified legacy rows must match their content ID. Each batch reads at most eight objects, with soft 64 MiB/two-second limits, persists IDs/proofs together, and retries eligible remaining work after 30 seconds with Info progress logs. Failed identities retry only after the normal interval (one hour by default); their process-local cooldown cannot delay unrelated backfill and clears on identity change/removal or sidecar restart. Actual failed attempts and incomplete unsupported coverage remain Warn. Check archive read access and the original passphrase; no full-file inspection scratch is used. Unknown/unreadable objects remain retained. Capture `support-bundle.sh`; `backups.json` contains projected backup names, profiles, phases, times, and GTID bounds without reading Secrets.
 
@@ -1095,13 +1131,13 @@ Every archive has a write-once plaintext descriptor `<prefix>/binlogs/archive.js
    ```
    Compare `source.uid` with the group's UID and `archiveID` with `status.pitr.archive.archiveID` and the sidecar's `BLOODRAVEN_PITR_ARCHIVE_ID`.
 3. For `ArchiveStoreUnsupported`, check the store's conditional-write support (AWS S3, MinIO and RustFS 1.0+ support it; active-active multi-zone buckets do not certify it).
-4. For `ArchiveKeyMismatch` / `ArchiveEncryptionMismatch`, compare the active profile's `encryption` block and Secret reference with what the archive was written with (playbook 26). Do not print the passphrase.
+4. For `ArchiveKeyMismatch` / `ArchiveEncryptionMismatch`, compare the Bound binding (`status.pitrArchiveBindings[]`, `PITRArchiveBindingReady`) and the snapshot the pods mount with what the archive was written with (playbook 26). A Bound binding is never demoted by a sidecar report: a `KeyMismatch` against it means the descriptor was replaced. Do not print the passphrase.
 
 ### Safe remediation
 - Most reasons need **a new prefix and a full backup**: change the active profile's `storage.s3.prefix` (or `pvc.subPath`), or select another profile in `spec.backup.pitr.profileName`, wait for the rollout, then take and verify a full backup. The first upload creates a new descriptor.
 - `ArchiveLegacy` after upgrading to v1.7.0: that is the procedure; keep the old prefix, backups, passphrase and a pre-v1.7.0 image for older targets.
 - `ArchiveDescriptorMissing`: restore `archive.json` from a bucket backup or, for a copy, from the source; never write a descriptor by hand (the ID and `keyCheck` are derived and a wrong one makes the archive foreign).
-- `ArchiveKeyMismatch` / `ArchiveEncryptionMismatch`: revert the profile's encryption settings to what the archive was written with, or start a new prefix. There is no in-place re-encryption.
+- `ArchiveKeyMismatch` / `ArchiveEncryptionMismatch`: with a Bound binding the pods already load the accepted key, so a profile edit cannot cause this (it shows as `PITRArchiveBindingReady=False/KeyChangeRefused` instead); the archive's descriptor was replaced. Before the binding is Bound, put the archive's original key and settings back, or start a new prefix. There is no in-place re-encryption. See playbook 26.
 - `ArchiveStoreUnsupported`: move the archive to a store that enforces conditional writes.
 - `ArchiveVersionUnsupported`: run the release that wrote the archive. For a damaged `archive.json`, restore the original object (bucket versioning, a copy of the archive) or point the profile at a new prefix; never write a descriptor by hand.
 

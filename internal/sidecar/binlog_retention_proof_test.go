@@ -33,7 +33,7 @@ func retentionProofArchiver(t *testing.T, store ArchiveStore, logger *slog.Logge
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(response) }))
 	t.Cleanup(server.Close)
 	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, logger)
-	a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
+	a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 	return a
 }
 func retentionCutoffProof() map[string]any {
@@ -216,7 +216,7 @@ func TestRetentionRetriesThrottledLookupSoon(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTooManyRequests) }))
 	defer server.Close()
 	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, newMemStore(), slog.Default())
-	a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
+	a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 	a.maybeRunRetention(context.Background())
 	next := a.lastRetentionRun.Add(a.retentionCfg.Interval)
 	if remaining := time.Until(next); remaining > 30*time.Second || remaining <= 0 {

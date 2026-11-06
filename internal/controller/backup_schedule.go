@@ -140,16 +140,9 @@ func (r *MysqlFailoverGroupReconciler) validateEncryptionSecret(ctx context.Cont
 	if !ok {
 		return fmt.Errorf("Secret %q does not contain key %q", ref.Name, key)
 	}
-	// Trim common whitespace so a trailing newline doesn't trigger the
-	// empty check (matches backupcrypto.ReadPassphraseFile semantics).
-	for len(data) > 0 {
-		c := data[len(data)-1]
-		if c == '\n' || c == '\r' || c == ' ' || c == '\t' {
-			data = data[:len(data)-1]
-			continue
-		}
-		break
-	}
+	// The one trim every consumer applies (Δ16, D-7): leading and
+	// trailing whitespace, so the length checked is the key's.
+	data = backupcrypto.TrimPassphrase(data)
 	if len(data) == 0 {
 		return fmt.Errorf("Secret %q key %q is empty", ref.Name, key)
 	}
@@ -251,6 +244,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupSchedules(ctx context.Cont
 
 	if fg.Spec.Backup != nil {
 		for _, sched := range fg.Spec.Backup.Schedules {
+			// A read-only profile (D-10, Δ23) is never backed up on a
+			// schedule: its CronJob is not rendered (and an existing one
+			// is pruned below), with one Warning per change.
+			if readOnly, why := pitrProfileReadOnly(fg, sched.ProfileName); readOnly {
+				r.noteScheduleRefused(fg, sched.Name, why)
+				continue
+			}
+			r.noteScheduleRefused(fg, sched.Name, "")
 			name := scheduleCronJobName(fg.Name, sched.Name)
 			desired[name] = struct{}{}
 			if err := r.reconcileOneSchedule(ctx, fg, sched); err != nil {
@@ -679,3 +680,27 @@ func startAfter(a, b *v1alpha1.MysqlBackup) bool {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// noteScheduleRefused emits BackupScheduleRefused when a schedule's
+// read-only refusal starts or its reason changes, and forgets it when the
+// schedule is no longer refused (why == "").
+func (r *MysqlFailoverGroupReconciler) noteScheduleRefused(fg *v1alpha1.MysqlFailoverGroup, schedule, why string) {
+	key := fg.Namespace + "/" + fg.Name + "/" + string(fg.UID) + "/" + schedule
+	r.scheduleRefusedMu.Lock()
+	defer r.scheduleRefusedMu.Unlock()
+	if why == "" {
+		delete(r.scheduleRefused, key)
+		return
+	}
+	if r.scheduleRefused[key] == why {
+		return
+	}
+	if r.scheduleRefused == nil {
+		r.scheduleRefused = map[string]string{}
+	}
+	r.scheduleRefused[key] = why
+	if r.Recorder != nil {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonBackupScheduleRefused,
+			"schedule %q is not run: %s", schedule, why)
+	}
+}

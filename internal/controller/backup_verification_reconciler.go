@@ -258,6 +258,16 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 		CredsSecretName:      credsName,
 		ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
 	})
+	// The archive's read binding is not usable yet (Δ22): a fixable state
+	// waits (requeue, message on status); an archive that can never verify,
+	// or a binding the group has no room for, fails the verification.
+	var notReady *errPITRBindingNotReady
+	if errors.As(err, &notReady) {
+		if notReady.terminal || notReady.reason == reasonPITRBindingLimitReached {
+			return r.failVerification(ctx, v, reasonPITRArchiveBindingNotReady, notReady.Error())
+		}
+		return r.waitVerification(ctx, v, notReady.Error())
+	}
 	if err != nil {
 		// A PITR refusal (PITRBackupIdentityUnknown, PITRTargetInvalid,
 		// ...) is recorded by its catalog token, as the restore build
@@ -272,6 +282,24 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if err := controllerutil.SetControllerReference(v, built, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("set job owner ref: %w", err)
 	}
+	// The PITR archive key snapshot the Job mounts is held like the
+	// backup (K9): a binding release refuses while the hold is live, and a
+	// release that won the race leaves the stamp failing NotFound, so the
+	// verification waits for the binding instead of mounting nothing.
+	keySnapshot := built.Labels[labelPITRKeySecret]
+	if keySnapshot != "" {
+		if err := r.stampPITRKeySnapshotHold(ctx, v, &fg, keySnapshot); err != nil {
+			switch {
+			case errors.Is(err, errHoldKeySnapshotGone):
+				return r.waitVerification(ctx, v, fmt.Sprintf("%s: archive key snapshot %q is gone; waiting for the archive binding",
+					reasonPITRArchiveBindingNotReady, keySnapshot))
+			case apierrors.IsConflict(err):
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			default:
+				return ctrl.Result{}, err
+			}
+		}
+	}
 	// Last uncached check: retention may have deleted the backup between
 	// the stamp and now only if it won the resourceVersion race, which
 	// leaves it Terminating or without this hold.
@@ -279,6 +307,13 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 		return ctrl.Result{}, err
 	} else if refusal != "" {
 		return r.failVerification(ctx, v, "BackupNotAvailable", refusal)
+	}
+	if keySnapshot != "" {
+		if wait, err := r.pitrKeySnapshotHoldConfirmed(ctx, v, keySnapshot); err != nil {
+			return ctrl.Result{}, err
+		} else if wait != "" {
+			return r.waitVerification(ctx, v, reasonPITRArchiveBindingNotReady+": "+wait)
+		}
 	}
 	if err := r.Create(ctx, built); err != nil {
 		return ctrl.Result{}, fmt.Errorf("create verification job: %w", err)
@@ -1025,4 +1060,19 @@ func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx contex
 		}
 	}
 	return nil
+}
+
+// waitVerification records why a verification has not launched yet and
+// requeues after pitrVerificationBindingRequeue (the read binding is not
+// ready, Δ22). The status write is skipped when the message is unchanged.
+func (r *MysqlBackupVerificationReconciler) waitVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification, message string) (ctrl.Result, error) {
+	if v.Status.Message != message {
+		patch := client.MergeFrom(v.DeepCopy())
+		v.Status.Message = message
+		v.Status.ObservedGeneration = v.Generation
+		if err := r.Status().Patch(ctx, v, patch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("patch waiting status: %w", err)
+		}
+	}
+	return ctrl.Result{RequeueAfter: pitrVerificationBindingRequeue}, nil
 }

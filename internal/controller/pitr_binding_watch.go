@@ -54,12 +54,3 @@ func pitrKeySnapshotPredicate() predicate.Predicate {
 		return obj.GetLabels()[labelAppName] == appNamePITRKeySnapshot
 	})
 }
-
-// Referenced until SetupWithManager registers them (WP-C wires them), so the
-// unused linter accepts them.
-var (
-	_ = indexVerificationGroup
-	_ = (*MysqlFailoverGroupReconciler).mapVerificationToGroup
-	_ = (*MysqlFailoverGroupReconciler).mapPITRKeySnapshotToGroup
-	_ = pitrKeySnapshotPredicate
-)

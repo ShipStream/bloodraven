@@ -43,6 +43,14 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 			t.Errorf("%s must not be in the smoke profile", id)
 		}
 	}
+	// #203's archive encryption binding scenario runs in the e2e pitr job
+	// and the full profile only (IMPL-203 Δ19).
+	if containsScenarioID(release, "69-pitr-encryption-binding-refusal") || containsScenarioID(smoke, "69-pitr-encryption-binding-refusal") {
+		t.Error("69-pitr-encryption-binding-refusal must not be in the smoke or release profile")
+	}
+	if !containsScenarioID(runner.SelectForProfile(all, runner.ProfileFull), "69-pitr-encryption-binding-refusal") {
+		t.Error("69-pitr-encryption-binding-refusal must be in the full profile")
+	}
 	for _, id := range []string{
 		"09-anti-flap-cooldown",
 		"57-hung-primary-detected-and-fenced",

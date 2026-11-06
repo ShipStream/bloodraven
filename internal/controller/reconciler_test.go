@@ -108,8 +108,9 @@ func newTestSecret() *corev1.Secret {
 func newReconciler(objs ...client.Object) (*MysqlFailoverGroupReconciler, client.Client) {
 	scheme := testScheme()
 	// Always include the test secret so the reconciler's validation passes.
-	allObjs := append([]client.Object{newTestSecret()}, objs...)
-	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...)
+	allObjs := withTestPassphraseSecrets(append([]client.Object{newTestSecret()}, objs...))
+	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...).
+		WithIndex(&v1alpha1.MysqlBackupVerification{}, verificationGroupIndex, indexVerificationGroup)
 	c := cb.Build()
 	r := &MysqlFailoverGroupReconciler{
 		Client:   c,
@@ -693,7 +694,7 @@ func TestReconcile_TerminationGracePeriod(t *testing.T) {
 
 func TestGenerateMyCnf(t *testing.T) {
 	fg := newTestFG()
-	cnf := generateMyCnf(fg)
+	cnf := generateMyCnf(fg, pitrEnabled(fg))
 
 	if !strings.HasPrefix(cnf, "[mysqld]\n") {
 		t.Error("my.cnf should start with [mysqld]")
@@ -717,7 +718,7 @@ func TestGenerateMyCnf_NoCloneDDLTimeout(t *testing.T) {
 	fg := newTestFG()
 	// clone_ddl_timeout was removed in MySQL 9.x; it should not appear in my.cnf.
 	// The CloneTimeout spec field is still used for the CLONE INSTANCE session timeout in bootstrap.go.
-	cnf := generateMyCnf(fg)
+	cnf := generateMyCnf(fg, pitrEnabled(fg))
 	if strings.Contains(cnf, "clone_ddl_timeout") {
 		t.Error("my.cnf should not contain clone_ddl_timeout (removed in MySQL 9.x)")
 	}
@@ -739,7 +740,7 @@ func TestGenerateMyCnf_StripsLogBinDisableAliases(t *testing.T) {
 			fg := newTestFG()
 			fg.Spec.MysqlConf = map[string]string{tt.key: ""}
 
-			cnf := generateMyCnf(fg)
+			cnf := generateMyCnf(fg, pitrEnabled(fg))
 			if strings.Contains(cnf, "skip-log-bin") || strings.Contains(cnf, "disable-log-bin") {
 				t.Errorf("my.cnf must not contain %s (normalized form); got:\n%s", tt.key, cnf)
 			}
@@ -777,7 +778,7 @@ func TestGenerateMyCnf_OwnsReplicaPreserveCommitOrder(t *testing.T) {
 					fg.Spec.MysqlConf = conf
 				}
 			}
-			cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+			cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0])
 			if !strings.Contains(cnf, "\nreplica-preserve-commit-order=ON\n") {
 				t.Fatalf("my.cnf must own replica-preserve-commit-order=ON; got:\n%s", cnf)
 			}
@@ -804,7 +805,7 @@ func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) 
 			fg := newTestFG()
 			fg.Spec.MysqlConf = map[string]string{tt.key: "0"}
 
-			cnf := generateMyCnf(fg)
+			cnf := generateMyCnf(fg, pitrEnabled(fg))
 			if !strings.Contains(cnf, "log-bin-trust-function-creators=0") {
 				t.Errorf("my.cnf should honor the mysqlConf override; got:\n%s", cnf)
 			}
@@ -824,7 +825,7 @@ func TestGenerateMyCnf_PITRInjectsMaxBinlogSize(t *testing.T) {
 		fg.Spec.Backup = &v1alpha1.BackupSpec{}
 	}
 	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "128M"}
-	cnf := generateMyCnf(fg)
+	cnf := generateMyCnf(fg, pitrEnabled(fg))
 	if !strings.Contains(cnf, "max-binlog-size=128M") {
 		t.Errorf("my.cnf should contain max-binlog-size=128M when PITR is enabled; got:\n%s", cnf)
 	}
@@ -836,7 +837,7 @@ func TestGenerateMyCnf_PITRDefaultMaxBinlogSize(t *testing.T) {
 		fg.Spec.Backup = &v1alpha1.BackupSpec{}
 	}
 	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p"}
-	cnf := generateMyCnf(fg)
+	cnf := generateMyCnf(fg, pitrEnabled(fg))
 	// Default when MaxBinlogSize is unset should be 100M per the PITR design.
 	if !strings.Contains(cnf, "max-binlog-size=100M") {
 		t.Errorf("my.cnf should contain default max-binlog-size=100M; got:\n%s", cnf)
@@ -847,7 +848,7 @@ func TestGenerateMyCnf_PITRDisabledLeavesDefault(t *testing.T) {
 	fg := newTestFG()
 	// With PITR off, MySQL's own default (1 GB) applies — we must not
 	// emit the knob ourselves.
-	cnf := generateMyCnf(fg)
+	cnf := generateMyCnf(fg, pitrEnabled(fg))
 	if strings.Contains(cnf, "max-binlog-size=") {
 		t.Errorf("my.cnf should not set max-binlog-size when PITR is disabled; got:\n%s", cnf)
 	}
@@ -900,7 +901,7 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 	}
 
 	// Existing Deployments are updated only through the ordered site path.
-	if err := r.reconcileDeployment(context.Background(), fg, fg.Spec.Sites[0], 101, fg.Spec.Image); err != nil {
+	if err := r.reconcileDeployment(context.Background(), fg, fg.Spec.Sites[0], 101, fg.Spec.Image, testGroupPITRRender(fg)); err != nil {
 		t.Fatalf("ordered site reconcile after cert rotation failed: %v", err)
 	}
 
@@ -918,15 +919,15 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	h1 := ComputeSpecHash(fg, site, "")
-	h2 := ComputeSpecHash(fg, site, "")
+	h1 := ComputeSpecHash(fg, site, "", testPITRRender(fg))
+	h2 := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 	if h1 != h2 {
 		t.Errorf("hash should be stable: got %s and %s", h1, h2)
 	}
 
 	// Adding TLS data should change the hash.
 	key := make([]byte, digestKeyBytes)
-	h3 := ComputeSpecHash(fg, site, secretContentDigest(key, map[string]map[string][]byte{"tls": {"tls.crt": []byte("cert")}}))
+	h3 := ComputeSpecHash(fg, site, secretContentDigest(key, map[string]map[string][]byte{"tls": {"tls.crt": []byte("cert")}}), testPITRRender(fg))
 	if h3 == h1 {
 		t.Error("hash should differ when TLS data is provided")
 	}
@@ -935,11 +936,11 @@ func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
 func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	twoSiteHash := ComputeSpecHash(fg, site, "")
+	twoSiteHash := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 
 	reader := v1alpha1.SiteSpec{Name: "reader", Role: v1alpha1.SiteRoleReadOnly}
 	fg.Spec.Sites = append(fg.Spec.Sites, reader)
-	threeSiteHash := ComputeSpecHash(fg, site, "")
+	threeSiteHash := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 	if threeSiteHash == twoSiteHash {
 		t.Fatal("adding a reader did not change an existing site's pod hash")
 	}
@@ -948,7 +949,7 @@ func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 		t.Fatalf("peer addresses = %q, want %q", got, want)
 	}
 	r, c := newReconciler(fg)
-	if err := r.reconcileDeployment(context.Background(), fg, site, 101, fg.Spec.Image); err != nil {
+	if err := r.reconcileDeployment(context.Background(), fg, site, 101, fg.Spec.Image, testGroupPITRRender(fg)); err != nil {
 		t.Fatal(err)
 	}
 	var deployment appsv1.Deployment
@@ -971,7 +972,7 @@ func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 	}
 
 	fg.Spec.Sites = fg.Spec.Sites[:2]
-	if got := ComputeSpecHash(fg, site, ""); got != twoSiteHash {
+	if got := ComputeSpecHash(fg, site, "", testPITRRender(fg)); got != twoSiteHash {
 		t.Fatalf("removing reader did not restore deterministic surviving-site hash: got %s want %s", got, twoSiteHash)
 	}
 }
@@ -1075,7 +1076,7 @@ func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 	fg.Spec.MysqlConf = map[string]string{"max_connections": "600", "sync-binlog": "0", "gtid_mode": "OFF"}
 	site := fg.Spec.Sites[0]
 	site.MysqlConf = map[string]string{"max-connections": "700", "log_bin": "/unsafe"}
-	cnf := generateMyCnf(fg, site)
+	cnf := generateMyCnf(fg, pitrEnabled(fg), site)
 	for _, want := range []string{"max-connections=700", "sync-binlog=0", "gtid-mode=ON", "log-bin=/var/lib/mysql/mysql-bin"} {
 		if !strings.Contains(cnf, want) {
 			t.Fatalf("my.cnf missing %q:\n%s", want, cnf)
@@ -1083,7 +1084,7 @@ func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 	}
 	fg2 := fg.DeepCopy()
 	fg2.Spec.MysqlConf = map[string]string{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
-	if ComputeSpecHash(fg, site, "") != ComputeSpecHash(fg2, site, "") {
+	if ComputeSpecHash(fg, site, "", testPITRRender(fg)) != ComputeSpecHash(fg2, site, "", testPITRRender(fg2)) {
 		t.Fatal("normalized equivalent MySQL settings must hash identically")
 	}
 }
@@ -1104,10 +1105,10 @@ func TestLegacyConfigMapCleanupIsReferenceDriven(t *testing.T) {
 	objects := []client.Object{fg, legacy}
 	objects = append(objects, deployments...)
 	r, c := newReconciler(objects...)
-	if err := r.reconcileSiteConfigMaps(context.Background(), fg); err != nil {
+	if err := r.reconcileSiteConfigMaps(context.Background(), fg, testPITRRender(fg)); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.cleanupLegacyConfigMap(context.Background(), fg); err != nil {
+	if err := r.cleanupLegacyConfigMap(context.Background(), fg, testPITRRender(fg)); err != nil {
 		t.Fatal(err)
 	}
 	var retained corev1.ConfigMap
@@ -1125,13 +1126,13 @@ func TestLegacyConfigMapCleanupIsReferenceDriven(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := r.cleanupLegacyConfigMap(context.Background(), fg); err != nil {
+	if err := r.cleanupLegacyConfigMap(context.Background(), fg, testPITRRender(fg)); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: legacyName, Namespace: fg.Namespace}, &retained); err == nil {
 		t.Fatal("unreferenced legacy map was retained")
 	}
-	if err := r.cleanupLegacyConfigMap(context.Background(), fg); err != nil {
+	if err := r.cleanupLegacyConfigMap(context.Background(), fg, testPITRRender(fg)); err != nil {
 		t.Fatalf("idempotent cleanup after deletion failed: %v", err)
 	}
 }
@@ -1185,7 +1186,7 @@ func TestLegacyConfigMapCleanupRetentionMatrix(t *testing.T) {
 			if tc.kind == "list-error" {
 				r.APIReader = failingListReader{Reader: c}
 			}
-			if err := r.cleanupLegacyConfigMap(context.Background(), fg); err != nil {
+			if err := r.cleanupLegacyConfigMap(context.Background(), fg, testPITRRender(fg)); err != nil {
 				t.Fatal(err)
 			}
 			var legacy corev1.ConfigMap
@@ -1280,13 +1281,13 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 func TestComputeSpecHash_IncludesCredentialData(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	h1 := ComputeSpecHash(fg, site, "")
+	h1 := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 
 	credData := map[string]map[string][]byte{
 		"op-secret": {"username": []byte("admin"), "password": []byte("pass1")},
 	}
 	key := make([]byte, digestKeyBytes)
-	h2 := ComputeSpecHash(fg, site, secretContentDigest(key, credData))
+	h2 := ComputeSpecHash(fg, site, secretContentDigest(key, credData), testPITRRender(fg))
 	if h2 == h1 {
 		t.Error("hash should differ when credential data is provided")
 	}
@@ -1294,7 +1295,7 @@ func TestComputeSpecHash_IncludesCredentialData(t *testing.T) {
 	credData2 := map[string]map[string][]byte{
 		"op-secret": {"username": []byte("admin"), "password": []byte("pass2")},
 	}
-	h3 := ComputeSpecHash(fg, site, secretContentDigest(key, credData2))
+	h3 := ComputeSpecHash(fg, site, secretContentDigest(key, credData2), testPITRRender(fg))
 	if h3 == h2 {
 		t.Error("hash should differ when password changes")
 	}
@@ -1343,18 +1344,18 @@ func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
 		}},
 	}
 	site := fg.Spec.Sites[0]
-	h1 := ComputeSpecHash(fg, site, "")
+	h1 := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 
 	fg2 := fg.DeepCopy()
 	fg2.Spec.Backup.Profiles[0].Storage.S3.Prefix = "pitr/b"
-	h2 := ComputeSpecHash(fg2, site, "")
+	h2 := ComputeSpecHash(fg2, site, "", testPITRRender(fg2))
 	if h2 == h1 {
 		t.Error("hash should differ when the PITR profile storage prefix changes")
 	}
 
 	fg3 := fg.DeepCopy()
 	fg3.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecret = "aws-creds-v2"
-	h3 := ComputeSpecHash(fg3, site, "")
+	h3 := ComputeSpecHash(fg3, site, "", testPITRRender(fg3))
 	if h3 == h1 {
 		t.Error("hash should differ when the PITR profile credentials secret changes")
 	}

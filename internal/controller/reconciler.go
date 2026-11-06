@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	k8sretry "k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -187,6 +188,16 @@ type MysqlFailoverGroupReconciler struct {
 	// primary's gtid_executed per settlement (restorePrimaryUnchanged).
 	// Guarded by restorePeerStopMu.
 	restoreGTIDReadFailures map[types.NamespacedName]restoreGTIDReadFailure
+
+	// pitrRenderLog is what logPITRRender last logged per group, so the
+	// render log lines are written on change only.
+	pitrRenderLogMu sync.Mutex
+	pitrRenderLog   map[string]pitrRenderLogState
+
+	// scheduleRefused is the read-only reason a BackupScheduleRefused
+	// Event was last emitted with, per group schedule.
+	scheduleRefusedMu sync.Mutex
+	scheduleRefused   map[string]string
 }
 
 type dragonflyRolloutKey struct {
@@ -211,10 +222,12 @@ type dragonflyRolloutState struct {
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // Secrets: read for credentials/TLS, and create/delete for the
 // encryption-at-rest keyring escrow (immutable per-site keyring
-// versions) and its per-site escrow tokens. Update is deliberately
-// absent — escrow Secrets are immutable by construction, so the
-// operator only ever mints a new version or prunes an old one.
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;delete
+// versions) and its per-site escrow tokens. Update and patch are for the
+// PITR archive key snapshots (#203): their data is immutable, but the
+// operator writes the acceptance annotation and verification holds on
+// their metadata, and deletes them only on an explicit release.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=externaldns.k8s.io,resources=dnsendpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -326,9 +339,24 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile encryption at rest: %w", err)
 	}
 
+	// PITR archive bindings (#203) settle before anything renders: the
+	// render below reads status.pitrArchiveBindings, which this pass fills
+	// in memory (and persists).
+	bindingRequeue, err := r.reconcilePITRArchiveBindings(ctx, &fg)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile pitr archive bindings: %w", err)
+	}
+
+	// The PITR render is resolved once per group (§4.6) and applied to
+	// every site, including sites being created.
+	pitrRender, err := r.resolveGroupPITRRender(ctx, &fg)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Desired per-site ConfigMaps are created before any Deployment reference
 	// changes. This ordering makes migration from the legacy shared map safe.
-	if err := r.reconcileSiteConfigMaps(ctx, &fg); err != nil {
+	if err := r.reconcileSiteConfigMaps(ctx, &fg, pitrRender.inputs); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile site configmaps: %w", err)
 	}
 
@@ -387,7 +415,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 				}
 			}
 			if !deferDeployment {
-				if err := r.reconcileDeployment(ctx, &fg, site, serverID, image); err != nil {
+				if err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender); err != nil {
 					return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
 				}
 			}
@@ -399,10 +427,10 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, fmt.Errorf("reconcile internal site service %s: %w", site.Name, err)
 		}
 	}
-	if err := r.cleanupObsoleteSiteConfigMaps(ctx, &fg); err != nil {
+	if err := r.cleanupObsoleteSiteConfigMaps(ctx, &fg, pitrRender.inputs); err != nil {
 		return ctrl.Result{}, fmt.Errorf("cleanup obsolete site configmaps: %w", err)
 	}
-	if err := r.cleanupLegacyConfigMap(ctx, &fg); err != nil {
+	if err := r.cleanupLegacyConfigMap(ctx, &fg, pitrRender.inputs); err != nil {
 		return ctrl.Result{}, fmt.Errorf("cleanup legacy configmap: %w", err)
 	}
 
@@ -427,7 +455,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// When Dragonfly is disabled, reconcileDragonflyResources actively removes
 	// any previously managed Dragonfly resources so MySQL-only deployments are
 	// unaffected.
-	deferredRequeue := time.Duration(0)
+	deferredRequeue := bindingRequeue
 	if dragonflyRequeue, err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
 	} else if dragonflyRequeue > 0 {
@@ -621,6 +649,12 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
+	// A group's PITR read targets include its verifications (§4.1),
+	// listed by this index.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.MysqlBackupVerification{},
+		verificationGroupIndex, indexVerificationGroup); err != nil {
+		return fmt.Errorf("index verifications by group: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlFailoverGroup{}).
 		Owns(&appsv1.Deployment{}).
@@ -633,6 +667,12 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&batchv1.CronJob{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToFailoverGroup)).
 		Watches(&v1alpha1.MysqlBackup{}, handler.EnqueueRequestsFromMapFunc(r.mapBackupToGroup)).
+		// PITR archive bindings (#203): a verification adds or drops a
+		// read target, and an archive key snapshot (ownerless, so Owns
+		// would see nothing) is mapped back by its group label.
+		Watches(&v1alpha1.MysqlBackupVerification{}, handler.EnqueueRequestsFromMapFunc(r.mapVerificationToGroup)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapPITRKeySnapshotToGroup),
+			builder.WithPredicates(pitrKeySnapshotPredicate())).
 		Complete(r)
 }
 
@@ -856,9 +896,12 @@ func configInitVolumeMounts(fg *v1alpha1.MysqlFailoverGroup) []corev1.VolumeMoun
 // Keeping naming and reconciliation on this shared value prevents a
 // content-addressed name from ever disagreeing with the bytes mounted by the
 // pod revision.
-func desiredSiteConfigData(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) map[string]string {
+//
+// pitr is the group's resolved PITR render: my.cnf's PITR settings follow its
+// Enabled, not the spec's (Δ33), so enabling PITR rolls the pods once.
+func desiredSiteConfigData(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, pitr pitrRenderInputs) map[string]string {
 	data := map[string]string{
-		"bloodraven.cnf": generateMyCnf(fg, site),
+		"bloodraven.cnf": generateMyCnf(fg, pitr.Enabled, site),
 	}
 	for k, v := range keyringConfigMapData(fg, fg.SiteKeyringSealed(site.Name)) {
 		data[k] = v
@@ -870,12 +913,12 @@ func desiredSiteConfigData(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSp
 // live adoption, existing pods keep referencing the old unencrypted canonical
 // ConfigMap while the ordered updater atomically switches one Deployment's
 // ConfigMap reference and keyring wiring in the same PodTemplate patch.
-func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) string {
+func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, pitr pitrRenderInputs) string {
 	base := siteConfigMapName(fg.Name, site.Name)
 	if !fg.Spec.EncryptionEnabled() {
 		return base
 	}
-	data := desiredSiteConfigData(fg, site)
+	data := desiredSiteConfigData(fg, site, pitr)
 	keys := make([]string, 0, len(data))
 	for key := range data {
 		keys = append(keys, key)
@@ -888,7 +931,7 @@ func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.Sit
 	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(h.Sum(nil))[:12])
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr pitrRenderInputs) error {
 	for _, site := range fg.Spec.Sites {
 		if keys := unsafeMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "MysqlConfIgnored",
@@ -900,18 +943,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Conte
 				"site %s: ignoring mysqlConf keys %s: they override an operator-owned setting",
 				site.Name, strings.Join(keys, ", "))
 		}
-		if err := r.reconcileSiteConfigMap(ctx, fg, site); err != nil {
+		if err := r.reconcileSiteConfigMap(ctx, fg, site, pitr); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
+func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, pitr pitrRenderInputs) error {
 	versioned := fg.Spec.EncryptionEnabled()
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      desiredSiteConfigMapName(fg, site),
+			Name:      desiredSiteConfigMapName(fg, site, pitr),
 			Namespace: fg.Namespace,
 		},
 	}
@@ -927,7 +970,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Contex
 			labelSite:          site.Name,
 			labelManagedBy:     managerName,
 		}
-		cm.Data = desiredSiteConfigData(fg, site)
+		cm.Data = desiredSiteConfigData(fg, site, pitr)
 		if versioned {
 			immutable := true
 			cm.Immutable = &immutable
@@ -1097,7 +1140,9 @@ func shadowedMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSp
 	return slices.Compact(out)
 }
 
-func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) string {
+// generateMyCnf renders a site's my.cnf. pitrOn is the group's resolved PITR
+// render's Enabled (Δ33), which decides max_binlog_size.
+func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, pitrOn bool, sites ...v1alpha1.SiteSpec) string {
 	// Base config
 	settings := map[string]string{
 		"gtid-mode":                       "ON",
@@ -1138,7 +1183,7 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 	// the CRD rather than MySQL's 1 GB default. Placed before user
 	// overrides so operators can still override via spec.mysqlConf if
 	// they want something different from what spec.backup.pitr configures.
-	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled {
+	if pitrOn && fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil {
 		maxSize := fg.Spec.Backup.PITR.MaxBinlogSize
 		if maxSize == "" {
 			maxSize = defaultPITRMaxBinlogSize
@@ -1233,7 +1278,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1a
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, serverID int32, image string) error {
+func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, serverID int32, image string, pitr groupPITRRender) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(fg.Name, site.Name),
@@ -1263,9 +1308,21 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		siteKeyringRotating(fg, site.Name),
 	)
 
-	specHash := ComputeSpecHash(fg, site, secretContentDigest(digestKey, secretInputs))
+	specHash := ComputeSpecHash(fg, site, secretContentDigest(digestKey, secretInputs), pitr.inputs)
+	pitrCanonical := pitr.inputs.Canonical()
 
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+		// §4.6 row 4d (K3): while the group's Deployments carry no
+		// decodable pitr-render annotation and no check has authenticated
+		// the candidate, an existing Deployment is not updated at all; its
+		// writer may hold another key in memory. Sites being created
+		// render the candidate (row 4a). Returning without a change makes
+		// CreateOrUpdate skip the write.
+		// An object CreateOrUpdate read back has a resourceVersion; one
+		// about to be created has none.
+		if pitr.action == pitrRenderDefer && deploy.ResourceVersion != "" {
+			return nil
+		}
 		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
 			return err
 		}
@@ -1278,6 +1335,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			deploy.Annotations = make(map[string]string)
 		}
 		deploy.Annotations[specHashAnnotation] = specHash
+		// The render this Deployment carries: the group hold's source
+		// (groupPITRHold) and the rendered identity backups stamp (K5).
+		deploy.Annotations[annotationPITRRender] = pitrCanonical
 
 		var replicas int32 = 1
 		deploy.Spec.Replicas = &replicas
@@ -1308,7 +1368,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 
 		sidecarImage := fg.Spec.SidecarImage
 
-		configMapName := desiredSiteConfigMapName(fg, site)
+		configMapName := desiredSiteConfigMapName(fg, site, pitr.inputs)
 
 		// Build the list of peer sidecar addresses. The sidecar treats
 		// "all peers unreachable" as one half of the self-fencing
@@ -1547,8 +1607,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			}, sidecarEnv...)
 		}
 
-		// PITR sidecar wiring (no-op when spec.backup.pitr.enabled=false).
-		pitrFrags, err := buildPITRSidecarFragments(fg)
+		// PITR sidecar wiring from the group's resolved render (no-op when
+		// it is disabled).
+		pitrFrags, err := buildPITRSidecarFragments(fg, pitr.inputs)
 		if err != nil {
 			return fmt.Errorf("build pitr sidecar fragments: %w", err)
 		}
@@ -1572,8 +1633,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		// not world-readable inside the pod; the escrow agent has to run
 		// as that same uid to read it. Same defaulting rule as PITR:
 		// only fill in what the user left unset.
-		if (fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled) ||
-			fg.Spec.EncryptionEnabled() {
+		if pitr.inputs.Enabled || fg.Spec.EncryptionEnabled() {
 			if sidecarSecurityContext == nil {
 				sidecarSecurityContext = &corev1.SecurityContext{}
 			}
@@ -2322,7 +2382,8 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 
 // ComputeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
 // secretDigest is secretContentDigest over specSecretInputs ("" when no Secret is referenced).
-func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, secretDigest string) string {
+// pitr is the group's resolved PITR render (resolvePITRRender).
+func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, secretDigest string, pitr pitrRenderInputs) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "deploymentPodRenderVersion=%s\n", deploymentPodRenderVersion)
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
@@ -2337,56 +2398,25 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, se
 	fmt.Fprintf(h, "podSC=%v\n", fg.Spec.PodSecurityContext)
 	fmt.Fprintf(h, "containerSC=%v\n", fg.Spec.ContainerSecurityContext)
 	fmt.Fprintf(h, "configMapRenderVersion=%s\n", configMapRenderVersion)
-	fmt.Fprintf(h, "configMapName=%s\n", desiredSiteConfigMapName(fg, site))
-	fmt.Fprintf(h, "effectiveMyCnf=%s\n", generateMyCnf(fg, site))
+	fmt.Fprintf(h, "configMapName=%s\n", desiredSiteConfigMapName(fg, site, pitr))
+	fmt.Fprintf(h, "effectiveMyCnf=%s\n", generateMyCnf(fg, pitr.Enabled, site))
 	fmt.Fprintf(h, "peerAddresses=%s\n", strings.Join(sitePeerAddresses(fg, site.Name), ","))
-	// PITR settings affect both my.cnf (max_binlog_size) and the
-	// sidecar env (archiver config). Either change must roll the pod.
-	// Hash the EFFECTIVE values (with defaults filled in) rather than
-	// the raw spec: otherwise a release that changes the default
-	// MaxBinlogSize or ArchivePollInterval in code would fail to
-	// produce a hash change and pods wouldn't roll to pick up the
-	// new value.
-	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil {
-		p := fg.Spec.Backup.PITR
-		effMaxBinlogSize := p.MaxBinlogSize
-		if effMaxBinlogSize == "" {
-			effMaxBinlogSize = defaultPITRMaxBinlogSize
+	// PITR: the group's resolved render (§4.6), canonical JSON of the
+	// archive identity and access fields every PITR env, volume and mount
+	// is built from. The profile name, the encryption selector and the
+	// backup PVC's size and storage class are not inputs (K7, Δ29): a
+	// same-prefix alias with identical bytes renders identically, and the
+	// snapshot name in the render is the content address of the key.
+	// maxBinlogSize is the effective value (default filled in), so a
+	// release that changes the default rolls the pods.
+	fmt.Fprintf(h, "pitr.render=%s\n", pitr.Canonical())
+	if pitr.Enabled {
+		effMaxBinlogSize := defaultPITRMaxBinlogSize
+		if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.MaxBinlogSize != "" {
+			effMaxBinlogSize = fg.Spec.Backup.PITR.MaxBinlogSize
 		}
-		effPollInterval := defaultPITRArchivePollInterval
-		if p.ArchivePollInterval != nil {
-			effPollInterval = p.ArchivePollInterval.Duration
-		}
-		fmt.Fprintf(h, "pitr.enabled=%t\n", p.Enabled)
-		fmt.Fprintf(h, "pitr.profile=%s\n", p.ProfileName)
-		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", effMaxBinlogSize)
-		fmt.Fprintf(h, "pitr.archivePollInterval=%s\n", effPollInterval)
 		fmt.Fprintf(h, "pitr.podRenderVersion=%s\n", pitrPodRenderVersion)
-		if p.Enabled {
-			if profile := findProfile(fg, p.ProfileName); profile != nil {
-				fmt.Fprintf(h, "pitr.profile.encryption.enabled=%t\n", profile.EncryptionEnabled())
-				if profile.EncryptionEnabled() {
-					enc := profile.Encryption
-					fmt.Fprintf(h, "pitr.profile.encryption.algorithm=%s\n", enc.AlgorithmOrDefault())
-					fmt.Fprintf(h, "pitr.profile.encryption.secret=%s\n", enc.PassphraseSecret.Name)
-					fmt.Fprintf(h, "pitr.profile.encryption.key=%s\n", enc.PassphraseSecret.PassphraseSecretKeyOrDefault())
-				}
-				fmt.Fprintf(h, "pitr.profile.storage.type=%s\n", profile.Storage.Type)
-				if s3 := profile.Storage.S3; s3 != nil {
-					fmt.Fprintf(h, "pitr.profile.s3.bucket=%s\n", s3.Bucket)
-					fmt.Fprintf(h, "pitr.profile.s3.prefix=%s\n", s3.Prefix)
-					fmt.Fprintf(h, "pitr.profile.s3.region=%s\n", s3.Region)
-					fmt.Fprintf(h, "pitr.profile.s3.endpointURL=%s\n", s3.EndpointURL)
-					fmt.Fprintf(h, "pitr.profile.s3.credentialsSecret=%s\n", s3.CredentialsSecret)
-				}
-				if pvc := profile.Storage.PVC; pvc != nil {
-					fmt.Fprintf(h, "pitr.profile.pvc.claimName=%s\n", pvc.ClaimName)
-					fmt.Fprintf(h, "pitr.profile.pvc.storageClassName=%s\n", pvc.StorageClassName)
-					fmt.Fprintf(h, "pitr.profile.pvc.size=%s\n", pvc.Size.String())
-					fmt.Fprintf(h, "pitr.profile.pvc.subPath=%s\n", pvc.SubPath)
-				}
-			}
-		}
+		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", effMaxBinlogSize)
 	}
 	// Encryption-at-rest rendering depends on the site's observed
 	// keyring phase, not just on the spec, so the hash has to include
@@ -2491,7 +2521,7 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 	}
 }
 
-func (r *MysqlFailoverGroupReconciler) cleanupLegacyConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) cleanupLegacyConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr pitrRenderInputs) error {
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		reader = r.APIReader
@@ -2499,7 +2529,7 @@ func (r *MysqlFailoverGroupReconciler) cleanupLegacyConfigMap(ctx context.Contex
 	legacy := fmt.Sprintf("mysql-%s-config", fg.Name)
 	desiredConfigs := make(map[string]string, len(fg.Spec.Sites))
 	for _, site := range fg.Spec.Sites {
-		desiredConfig := desiredSiteConfigMapName(fg, site)
+		desiredConfig := desiredSiteConfigMapName(fg, site, pitr)
 		var cm corev1.ConfigMap
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: desiredConfig}, &cm); err != nil {
 			return nil
@@ -2565,7 +2595,7 @@ func deploymentRolloutComplete(dep *appsv1.Deployment) bool {
 // revisions only after the Deployment has completed the switch to the desired
 // revision and no old pod remains. An interrupted rollout therefore preserves
 // the old pod's exact configuration and remains restartable.
-func (r *MysqlFailoverGroupReconciler) cleanupObsoleteSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) cleanupObsoleteSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr pitrRenderInputs) error {
 	if !fg.Spec.EncryptionEnabled() {
 		return nil
 	}
@@ -2585,7 +2615,7 @@ func (r *MysqlFailoverGroupReconciler) cleanupObsoleteSiteConfigMaps(ctx context
 			}
 			return err
 		}
-		desired := desiredSiteConfigMapName(fg, site)
+		desired := desiredSiteConfigMapName(fg, site, pitr)
 		if deploymentConfigMapName(&dep) != desired || !deploymentRolloutComplete(&dep) {
 			continue
 		}
@@ -2635,23 +2665,35 @@ func taintNodeSelectorString(selector map[string]string) string {
 // order; without the rollout wait, both sites' pods end up rolling in parallel
 // and the cluster briefly has no reachable MySQL.
 func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Context, fgName types.NamespacedName, siteName string) error {
+	// Uncached: the render depends on status.pitrArchiveBindings, which
+	// the group reconciler may have just written.
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
 	var fg v1alpha1.MysqlFailoverGroup
-	if err := r.Get(ctx, fgName, &fg); err != nil {
+	if err := reader.Get(ctx, fgName, &fg); err != nil {
 		return fmt.Errorf("get CR: %w", err)
 	}
 	image := fg.Spec.Image
 	if image == "" {
 		image = defaultMySQLImage
 	}
+	// The ordered updater renders from the fresh copy above, resolved
+	// against the Deployments as they are now (uncached).
+	pitrRender, err := r.resolveGroupPITRRender(ctx, &fg)
+	if err != nil {
+		return err
+	}
 	siteFound := false
 	for i, site := range fg.Spec.Sites {
 		if site.Name == siteName {
 			siteFound = true
-			if err := r.reconcileSiteConfigMap(ctx, &fg, site); err != nil {
+			if err := r.reconcileSiteConfigMap(ctx, &fg, site, pitrRender.inputs); err != nil {
 				return fmt.Errorf("reconcile site configmap: %w", err)
 			}
 			serverID := int32(101 + i)
-			if err := r.reconcileDeployment(ctx, &fg, site, serverID, image); err != nil {
+			if err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender); err != nil {
 				return err
 			}
 			break

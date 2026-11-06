@@ -62,8 +62,12 @@ func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
 				if vol == nil || vol.Secret == nil || vol.Secret.DefaultMode == nil {
 					t.Fatal("expected passphrase Secret with an explicit projection mode")
 				}
-				if vol.Secret.SecretName != "archive-key" || len(vol.Secret.Items) != 1 ||
-					vol.Secret.Items[0].Key != "selected-key" || vol.Secret.Items[0].Path != backupPassphraseFileName {
+				// The binding's immutable key snapshot, not the user's
+				// Secret, mounted optional (#203, Δ32): a missing key
+				// never keeps mysqld from starting.
+				if !strings.HasPrefix(vol.Secret.SecretName, "mysql-lion-pitr-key-") || len(vol.Secret.Items) != 1 ||
+					vol.Secret.Items[0].Key != pitrKeySnapshotDataKey || vol.Secret.Items[0].Path != backupPassphraseFileName ||
+					vol.Secret.Optional == nil || !*vol.Secret.Optional {
 					t.Fatalf("unexpected passphrase projection: %+v", vol.Secret)
 				}
 				mode := os.FileMode(*vol.Secret.DefaultMode)
@@ -115,7 +119,7 @@ func TestBuildPITRSidecarFragments_Disabled(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			frags, err := buildPITRSidecarFragments(tc.fg)
+			frags, err := buildPITRSidecarFragments(tc.fg, testPITRRender(tc.fg))
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -146,7 +150,7 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 		},
 	}
 
-	frags, err := buildPITRSidecarFragments(fg)
+	frags, err := buildPITRSidecarFragments(fg, testPITRRender(fg))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -156,7 +160,12 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_S3_BUCKET", "lion")
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_S3_REGION", "us-east-1")
 	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_S3_ENDPOINT_URL", "https://s3.example.com")
-	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_PROFILE_NAME", "primary")
+	// K7: no profile name is rendered; plaintext echoes the "plaintext"
+	// key revision (Δ2, K4).
+	if _, ok := envValue(frags.SidecarEnv, "BLOODRAVEN_PITR_PROFILE_NAME"); ok {
+		t.Error("BLOODRAVEN_PITR_PROFILE_NAME is rendered")
+	}
+	assertEnvEquals(t, frags.SidecarEnv, "BLOODRAVEN_PITR_KEY_REVISION", pitrKeyRevisionPlaintext)
 	// §3.7: the archive identity the sidecar writes and verifies.
 	dest, err := pitrarchive.NewS3Destination("lion", "dumps", "https://s3.example.com")
 	if err != nil {
@@ -237,7 +246,7 @@ func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
 		},
 	}
 
-	frags, err := buildPITRSidecarFragments(fg)
+	frags, err := buildPITRSidecarFragments(fg, testPITRRender(fg))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -361,6 +370,7 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
 		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source"},
 	}
+	bindTestPITRArchive(t, fg, "source")
 
 	frags, err := buildRestorePITRFragments(fg)
 	if err != nil {
@@ -565,7 +575,7 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 					t.Fatalf("archive ID %s is not derived from the expanded destination %s", id, dest.String())
 				}
 			}
-			frags, err := buildPITRSidecarFragments(fg)
+			frags, err := buildPITRSidecarFragments(fg, testPITRRender(fg))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -575,6 +585,8 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 			reader := fg.DeepCopy()
 			reader.UID = "uid-reader"
 			reader.Spec.Backup.PITR.ProfileName = "other"
+			reader.Status.PITRArchiveBindings = nil
+			bindTestPITRArchive(t, reader, "primary")
 			restore, err := buildRestorePITRFragmentsFor(reader, &pitrReplayRequest{Mode: "latest", ArchiveProfileName: "primary"})
 			if err != nil {
 				t.Fatal(err)

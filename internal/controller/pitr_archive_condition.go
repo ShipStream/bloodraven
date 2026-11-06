@@ -126,20 +126,21 @@ func pitrArchiveRefusal(s *internalmysql.ArchiverStatus) pitrarchive.RefusalReas
 }
 
 // pitrArchiveObservation derives status.pitr.archive from the sidecars'
-// archive reports. Only reports for the group's active destination count:
+// archive reports. Only reports for the destination the group's writers
+// render count (rendered, Δ14: a held render keeps the group on its
+// previous archive, and the observation follows it rather than the spec):
 // a pod still on an older render reports another destination, or none. A
 // refusal on any counted site wins; Verified needs every site to report
 // Verified with one archive ID. ObservedTime moves only when the
 // observation changes, so an unchanged archive does not churn status.
-func pitrArchiveObservation(fg *v1alpha1.MysqlFailoverGroup, sites []string, snaps, lastGood map[string]*internalmysql.ArchiverStatus, prev *v1alpha1.PITRArchiveObservation, now time.Time) *v1alpha1.PITRArchiveObservation {
-	ident, ok := activePITRArchiveIdentity(fg)
-	if !ok {
+func pitrArchiveObservation(rendered pitrRenderInputs, sites []string, snaps, lastGood map[string]*internalmysql.ArchiverStatus, prev *v1alpha1.PITRArchiveObservation, now time.Time) *v1alpha1.PITRArchiveObservation {
+	if !rendered.Enabled {
 		return nil
 	}
-	dest := ident.Destination.String()
+	dest := rendered.Destination
 	out := &v1alpha1.PITRArchiveObservation{
 		Destination:    dest,
-		EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(ident.Encryption.Mode),
+		EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(rendered.EncryptionMode),
 		State:          v1alpha1.PITRArchiveAwaitingDescriptor,
 	}
 	var (
@@ -706,20 +707,21 @@ func sortedCopy(in []string) []string {
 // neither replays a stale copy of the other's result. Without PITR
 // enabled both are removed; without a running poller both are left as
 // they are.
-func (r *TopologyManagerRunner) applyPITRArchiveStatus(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup) {
+func (r *TopologyManagerRunner) applyPITRArchiveStatus(ctx context.Context, nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup) {
 	if !pitrEnabled(fg) {
 		fg.Status.PITR = nil
 		removeCondition(&fg.Status.Conditions, conditionPITRArchiveReady)
 		return
 	}
-	r.populatePITRStatus(nn, fg)
+	rendered := r.renderedPITR(ctx, fg)
+	r.populatePITRStatusFor(nn, fg, rendered)
 	r.mu.RLock()
 	mt, ok := r.managers[nn]
 	r.mu.RUnlock()
 	if !ok || mt.archiver == nil {
 		return
 	}
-	mt.archiver.observeSpec(fg)
+	mt.archiver.observeSpec(fg, pitrRendersArchiver(rendered))
 	v, anchored := mt.archiver.archiveCondition()
 	if !anchored {
 		return
@@ -843,7 +845,7 @@ func (r *TopologyManagerRunner) updatePITRArchiveStatus(ctx context.Context, nn 
 		}
 		before := fresh.Status.DeepCopy()
 		prev = pitrArchiveCondition(before)
-		r.applyPITRArchiveStatus(nn, &fresh)
+		r.applyPITRArchiveStatus(ctx, nn, &fresh)
 		sites := make([]string, len(fresh.Spec.Sites))
 		for i, s := range fresh.Spec.Sites {
 			sites[i] = s.Name
@@ -874,24 +876,21 @@ func (r *TopologyManagerRunner) updatePITRArchiveStatus(ctx context.Context, nn 
 	return nil
 }
 
-// pitrSpecRendersArchiver reports whether fg's PITR spec renders an
-// enabled archiver into the sidecar. An empty or unknown profileName, or
-// a profile that cannot be rendered, renders none; its sidecars report
-// archiving disabled however long a rollout runs.
-func pitrSpecRendersArchiver(fg *v1alpha1.MysqlFailoverGroup) bool {
-	if !pitrEnabled(fg) {
-		return false
+// renderedPITR is the PITR render fg's writers run (renderedPITRInputs),
+// from the site Deployments in the runner's cached client. Without a client,
+// or when the list fails, it falls back to the render the group would
+// create now: the observation is a label for sidecar reports, never an
+// authority.
+func (r *TopologyManagerRunner) renderedPITR(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) pitrRenderInputs {
+	if r.client == nil {
+		return renderedPITRInputs(fg, nil)
 	}
-	frags, err := buildPITRSidecarFragments(fg)
+	deploys, err := listPITRSiteDeployments(ctx, r.client, fg)
 	if err != nil {
-		return false
+		r.logger.Debug("list site deployments for the PITR render failed; using the desired render", "fg", fg.Name, "error", err)
+		return renderedPITRInputs(fg, nil)
 	}
-	for _, e := range frags.SidecarEnv {
-		if e.Name == "BLOODRAVEN_PITR_ENABLED" && e.Value == "1" {
-			return true
-		}
-	}
-	return false
+	return renderedPITRInputs(fg, deploys)
 }
 
 // anchorPITRArchiveTracker anchors an unanchored tracker on the group's

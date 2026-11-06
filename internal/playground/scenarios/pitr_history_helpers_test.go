@@ -255,10 +255,26 @@ func TestPITRScenariosInPITRE2EJob(t *testing.T) {
 	for _, s := range got {
 		listed[s.ID] = true
 	}
-	for _, id := range scenariosPITR206 {
+	for _, id := range append([]string{scenarioPITR203}, scenariosPITR206...) {
 		if !listed[id] {
 			t.Errorf("the e2e pitr job does not run %s (list %q)", id, list)
 		}
+	}
+	// Δ19: 69 runs second, after the single-site baseline 31, and the job
+	// takes the hosted runner's full 360-minute cap.
+	if len(got) < 2 || got[0].ID != "31-pitr-verification-rustfs" || got[1].ID != scenarioPITR203 {
+		t.Errorf("the e2e pitr job must run 31 then %s first (list %q)", scenarioPITR203, list)
+	}
+	jobBody, _, _ := strings.Cut(job, "\n  # ")
+	if !strings.Contains(jobBody, "timeout-minutes: 360") {
+		t.Error("the e2e pitr job must set timeout-minutes: 360 (IMPL-203 Δ19)")
+	}
+	var budget time.Duration
+	for _, s := range got {
+		budget += s.Timeout
+	}
+	if budget > 300*time.Minute {
+		t.Errorf("the e2e pitr job's scenario ceilings sum to %s; with resets and setup that leaves too little of the 360m cap: split the job", budget)
 	}
 	reusable, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "_e2e.yml"))
 	if err != nil {
@@ -517,6 +533,7 @@ func TestPITRAssertResultReplayCount(t *testing.T) {
 // their composed cleanup on the 4-minute default.
 func TestPITRScenarioCleanupBudgets(t *testing.T) {
 	want := map[string]time.Duration{
+		s69ID: pitrCleanupBaseBudget,
 		s37ID: pitrCleanupBaseBudget + pitrDeleteGroupTimeout,
 		s68ID: pitrCleanupBaseBudget,
 		s70ID: pitrCleanupBaseBudget + s70RepairTimeout,
@@ -535,8 +552,9 @@ func TestPITRScenarioCleanupBudgets(t *testing.T) {
 		t.Errorf("%s is not registered", id)
 	}
 	// The base must cover at least the healthy-baseline wait plus one group
-	// deletion and one backup deletion with its artifact check.
-	if pitrCleanupBaseBudget < 6*time.Minute+runner.DefaultCleanupTimeout+5*time.Minute {
+	// deletion, one backup deletion with its artifact check, and the
+	// release of two archive bindings (#203).
+	if pitrCleanupBaseBudget < 6*time.Minute+runner.DefaultCleanupTimeout+5*time.Minute+2*pitrReleaseBindingWaitTime {
 		t.Errorf("pitrCleanupBaseBudget=%s is below its composed parts", pitrCleanupBaseBudget)
 	}
 }
@@ -764,5 +782,91 @@ func TestPITROnlyTargetLocalExtra(t *testing.T) {
 		if err != nil || ok != tc.ok {
 			t.Errorf("%s: ok=%t err=%v, want %t", tc.name, ok, err, tc.ok)
 		}
+	}
+}
+
+// TestPITRBindingIDsUnderPrefixes pins the cleanup's selection of bindings
+// to release (IMPL-203 Δ20): every entry and every snapshot under a run's
+// prefix, in any endpoint spelling, and nothing else.
+func TestPITRBindingIDsUnderPrefixes(t *testing.T) {
+	p1 := "e2e/69-pitr-encryption-binding-refusal/s69-20261106T100000Z-p1"
+	dest := func(bucket, prefix, endpoint string) string {
+		d, err := pitrarchive.NewS3Destination(bucket, prefix, endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.String()
+	}
+	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg.Status.PITRArchiveBindings = []v1alpha1.PITRArchiveBinding{
+		{ID: "pab-0000000000000001", Destination: dest(backupE2EBucket, p1, backupE2EEndpoint)},
+		{ID: "pab-0000000000000002", Destination: dest(backupE2EBucket, p1, "http://rustfs.bloodraven-playground.svc:9000")},
+		{ID: "pab-0000000000000003", Destination: dest(backupE2EBucket, p1+"-p2", backupE2EEndpoint)},
+		{ID: "pab-0000000000000004", Destination: dest("other-bucket", p1, backupE2EEndpoint)},
+		{ID: "pab-0000000000000005", Destination: "pvc://ns/claim/" + p1 + "/binlogs"},
+	}
+	snap := func(id, destination string) corev1.Secret {
+		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Labels:      map[string]string{pitrBindingIDLabel: id},
+			Annotations: map[string]string{pitrDestinationAnnotation: destination},
+		}}
+	}
+	snaps := []corev1.Secret{
+		snap("pab-0000000000000006", dest(backupE2EBucket, p1, backupE2EEndpoint)), // entry dropped
+		snap("pab-0000000000000001", dest(backupE2EBucket, p1, backupE2EEndpoint)),
+		snap("pab-0000000000000007", dest(backupE2EBucket, "e2e/other/run", backupE2EEndpoint)),
+		snap("", dest(backupE2EBucket, p1, backupE2EEndpoint)),
+	}
+	got := pitrBindingIDsUnderPrefixes(mfg, snaps, []string{p1})
+	want := []string{"pab-0000000000000001", "pab-0000000000000002", "pab-0000000000000006"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("ids under P1 = %v, want %v", got, want)
+	}
+	if got := pitrBindingIDsUnderPrefixes(mfg, nil, nil); len(got) != 0 {
+		t.Errorf("no prefix must select nothing, got %v", got)
+	}
+	if pitrReleaseValue("pab-0000000000000001", "playground") != "pab-0000000000000001:confirm=playground" {
+		t.Error("the release value must be <id>:confirm=<group>")
+	}
+	if !strings.Contains(pitrGroupSnapshotSelector("u-1"), "bloodraven.shipstream.io/failover-group-uid=u-1") ||
+		!strings.Contains(pitrGroupSnapshotSelector("u-1"), "mysql-pitr-key") || !strings.Contains(pitrGroupSnapshotSelector("u-1"), "mysql-dump-key") {
+		t.Errorf("group snapshot selector %q must cover both snapshot kinds by the group UID", pitrGroupSnapshotSelector("u-1"))
+	}
+}
+
+// TestPITRDecryptArchiveObjectUsesStashedBytes pins Δ20: archive objects
+// are decrypted with passphrases stashed before any rotation, trying each,
+// and plaintext passes through.
+func TestPITRDecryptArchiveObjectUsesStashedBytes(t *testing.T) {
+	env := &runner.Env{}
+	t.Cleanup(func() {
+		stashMu.Lock()
+		delete(stashes, env)
+		stashMu.Unlock()
+	})
+	plain := []byte(`{"files":[]}`)
+	if got, err := pitrDecryptArchiveObject(env, plain); err != nil || string(got) != string(plain) {
+		t.Fatalf("plaintext object: %q, %v", got, err)
+	}
+	p2 := []byte("second-archive-passphrase-0123456789")
+	var enc bytes.Buffer
+	if _, err := backupcrypto.Encrypt(&enc, strings.NewReader(string(plain)), p2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pitrDecryptArchiveObject(env, enc.Bytes()); err == nil {
+		t.Fatal("an encrypted object with no stashed passphrase must fail")
+	}
+	pitrStashArchivePassphrase(env, []byte("run-passphrase-0123456789abcdef\n"))
+	pitrStashArchivePassphrase(env, []byte("run-passphrase-0123456789abcdef"))
+	if n := len(pitrArchivePassphrases(env)); n != 1 {
+		t.Fatalf("a trimmed duplicate must be stashed once, got %d", n)
+	}
+	pitrStashArchivePassphrase(env, p2)
+	got, err := pitrDecryptArchiveObject(env, enc.Bytes())
+	if err != nil || string(got) != string(plain) {
+		t.Fatalf("decrypt with the second stashed passphrase: %q, %v", got, err)
+	}
+	if string(pitrArchivePassphrases(env)[0]) != "run-passphrase-0123456789abcdef" {
+		t.Error("the run passphrase must stay first")
 	}
 }

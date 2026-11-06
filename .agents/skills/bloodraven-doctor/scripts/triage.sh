@@ -145,6 +145,32 @@ if [[ -n "$PITR_ARCHIVE_ID" && "$PITR_ARCHIVE_ID" != " archiveID= encryption= de
         echo "  Per-site archive, promotionRecordedAt, historyIntegrity, divergentRows and quarantinedRows: sidecar-probe.sh -n $NAMESPACE $MFG_NAME archiver"
     fi
 fi
+# PITR archive encryption bindings (#203): the identity (mode, key snapshot)
+# accepted for each archive destination the group writes or reads. Only
+# names are printed; the key snapshots' data is never read.
+PITR_BINDING=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="PITRArchiveBindingReady")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
+if [[ -n "$PITR_BINDING" ]]; then
+    echo "PITRArchiveBindingReady: $PITR_BINDING"
+    # Match on "<status> <reason>" only; the message is free text.
+    case "${PITR_BINDING%%:*}" in
+        *KeyChangeRefused*|*EncryptionChangeRefused*)
+            echo "  A passphrase or encryption change on a profile in archive use was refused; pods still use the accepted key snapshot. See playbook 26 (rotation = new prefix)." ;;
+        *KeyMaterialLost*)
+            echo "  An accepted key snapshot is missing or does not hold the accepted key; mysqld keeps running, the archiver fails closed. See playbook 26 (key material lost)." ;;
+        *BindingLimitReached*)
+            echo "  16 bindings exist; release unused ones by id. See playbook 26 (binding limit)." ;;
+        *KeyMismatch*|*Archive[A-Z]*)
+            echo "  A binding was refused (wrong key, foreign, copy, legacy or missing archive); nothing new renders for it. See playbook 26." ;;
+        *Authenticating*|*Establishing*)
+            echo "  A binding is being proven (sidecar report or pitr-archive-check Job). A check Job pending > 60 s is retried; see playbook 26 (check Job stuck)." ;;
+    esac
+fi
+PITR_BINDINGS=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.pitrArchiveBindings[*]}{.id}{"\t"}{.state}{"/"}{.reason}{"\t"}{.encryption.mode}{"\t"}{.encryption.keySecretName}{"\t"}{.archiveID}{"\t"}{.destination}{"\n"}{end}' 2>/dev/null || true)
+if [[ -n "$PITR_BINDINGS" ]]; then
+    echo "PITR archive bindings (status.pitrArchiveBindings; read encryption only when state is Bound):"
+    printf '  %s\t%s\t%s\t%s\t%s\t%s\n' "ID" "STATE/REASON" "MODE" "KEY_SECRET" "ARCHIVE_ID" "DESTINATION"
+    printf '%s\n' "$PITR_BINDINGS" | sed 's/^/  /'
+fi
 RESTORE_FENCE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreOfflineFence.site}{" priorOfflineMode="}{.status.restoreOfflineFence.priorOfflineMode}{" sessionsEvicted="}{.status.restoreOfflineFence.sessionsEvicted}' 2>/dev/null || true)
 if [[ -n "$RESTORE_FENCE" && "$RESTORE_FENCE" != " priorOfflineMode= sessionsEvicted=" ]]; then
     echo "Restore offline_mode fence: $RESTORE_FENCE (applications without CONNECTION_ADMIN cannot connect to that site)"
@@ -198,7 +224,7 @@ MANAGER_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedOb
     | grep -E 'TopologyManagerStart(ed|Failed)' || true)
 PITR_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.name=$MFG_NAME" --sort-by=.lastTimestamp \
     -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
-    | grep -E 'PITRArchive(ReissueRiskDetected|UnsafeHistoryDetected)|PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PointInTimePartial' || true)
+    | grep -E 'PITRArchive(ReissueRiskDetected|UnsafeHistoryDetected)|PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PointInTimePartial|PITRArchive(EncryptionChangeRefused|KeyChangeRefused|BindingRefused|KeySourceRemoved|KeySnapshotRecreated|KeyMaterialLost|KeySnapshotUnreadable|BindingReleaseRefused|BindingReleaseRejected|BindingLimitReached)|BackupScheduleRefused' || true)
 if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "Topology manager start history for $MFG_NAME. History only, not current state, in either direction:"
     echo "  - Warnings are throttled to one per 5 minutes, so a group that recovered and then broke again can still show TopologyManagerStarted last."
@@ -219,7 +245,7 @@ for verification in $(kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "s
     fi
 done
 if [[ -n "$PITR_EVENTS" ]]; then
-    echo "PITR warnings for $MFG_NAME and its verifications (PITRArchiveReissueRiskDetected: playbook 39; PITRArchiveUnsafeHistoryDetected: playbook 38; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PointInTimePartial: playbooks 32 and 40):"
+    echo "PITR warnings for $MFG_NAME and its verifications (PITRArchiveReissueRiskDetected: playbook 39; PITRArchiveUnsafeHistoryDetected: playbook 38; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PointInTimePartial: playbooks 32 and 40; PITRArchive*Refused/KeyMaterialLost/KeySourceRemoved/BindingLimitReached/BackupScheduleRefused: playbook 26):"
     echo "$PITR_EVENTS"
 fi
 

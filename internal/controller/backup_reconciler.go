@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
@@ -86,6 +87,7 @@ func (r *MysqlBackupReconciler) clock() time.Time {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
 
 func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("mysqlbackup", req.NamespacedName)
@@ -234,6 +236,41 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return r.pendBackup(ctx, &backup, "NoHealthySource", err.Error())
 		}
 
+		// A read-only profile (D-10, Δ23: the initFromBackup archive
+		// before the restore succeeded, or an archive another group
+		// created) is never written by a backup.
+		if readOnly, why := pitrProfileReadOnly(&fg, profile.Name); readOnly {
+			return r.failBackup(ctx, &backup, backupReasonProfileReadOnly, why)
+		}
+
+		// The stamp names the archive the group's writers render (K5):
+		// while the site Deployments disagree (a roll in progress) the
+		// backup waits rather than pin an archive nobody writes.
+		deploys, err := listPITRSiteDeployments(ctx, r.apiReader(), &fg)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		archiveID, agree, why := renderedWriterArchiveID(&fg, deploys)
+		if !agree {
+			return r.pendBackup(ctx, &backup, backupReasonPITRArchiveRolloutPending, why)
+		}
+
+		// An encrypted backup gets its own immutable dump-key snapshot
+		// before its Job (I-17): the Job mounts the snapshot, so a later
+		// edit of the profile's Secret never changes the key this
+		// backup's artifacts are encrypted with or read back with.
+		dumpKey := ""
+		if profile.EncryptionEnabled() {
+			name, reason, message, err := r.ensureDumpKeySnapshot(ctx, &fg, &backup, profile)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if reason != "" {
+				return r.pendBackup(ctx, &backup, reason, message)
+			}
+			dumpKey = name
+		}
+
 		// Ensure derived creds Secret (parses the group's DSN into
 		// user/password) before creating the Job that mounts it.
 		credsName := backupCredsSecretName(backup.Name)
@@ -249,6 +286,8 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			SourceSite:           sourceSite,
 			CredsSecretName:      credsName,
 			ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
+			DumpKeySecretName:    dumpKey,
+			PITRArchiveID:        archiveID,
 		})
 		if err != nil {
 			return r.failBackup(ctx, &backup, "BuildJobFailed", err.Error())
@@ -631,7 +670,7 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		condition := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionBackupMetadataComplete)
 		if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded || condition != nil && condition.Reason == "DestinationUnavailable" {
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
-				"no recorded artifact destination (producing Job %q); skipping cleanup", backupJobName(backup.Name))
+				"no recorded artifact destination (producing Job %q); skipping cleanup%s", backupJobName(backup.Name), dumpKeyKeptNote(backup))
 			return true, 0, nil
 		}
 		if backup.UID == "" {
@@ -648,6 +687,15 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 				// Its pods may outlive it; wait for them all the same.
 				if wait, err := r.stopAbandonedProducer(ctx, backup, nil); err != nil || wait > 0 {
 					return false, wait, err
+				}
+				// With no Job ever recorded no artifact can exist, so the
+				// dump-key snapshot made before the Job goes too (Δ24).
+				// A Job that ran and is gone keeps it: its artifacts may
+				// still be somewhere.
+				if backup.Status.JobName == "" {
+					if err := r.deleteDumpKeySnapshot(ctx, backup); err != nil {
+						return false, 0, err
+					}
 				}
 				return true, 0, nil
 			}
@@ -701,7 +749,7 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
-				"failover group %q gone; cannot clean up artifact at %q", fgKey.Name, location)
+				"failover group %q gone; cannot clean up artifact at %q%s", fgKey.Name, location, dumpKeyKeptNote(backup))
 			return true, 0, nil
 		}
 		return false, 0, fmt.Errorf("get failover group: %w", err)
@@ -710,8 +758,8 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	profile := findProfile(&fg, backup.Spec.ProfileName)
 	if profile == nil {
 		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
-			"profile %q gone from group %q; cannot clean up artifact at %q",
-			backup.Spec.ProfileName, fg.Name, location)
+			"profile %q gone from group %q; cannot clean up artifact at %q%s",
+			backup.Spec.ProfileName, fg.Name, location, dumpKeyKeptNote(backup))
 		return true, 0, nil
 	}
 
@@ -804,7 +852,14 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		}
 		if abandoned {
 			in.Abandoned = true
-			in.Passphrase = abandonedCleanupPassphrase(backup, profile, storage, producer)
+			passphrase, missing, err := r.abandonedCleanupPassphrase(ctx, backup, profile, storage, producer)
+			if err != nil {
+				return false, 0, err
+			}
+			if missing != "" {
+				return block(backupReasonPassphraseSecretMissing, missing, 5*time.Minute)
+			}
+			in.Passphrase = passphrase
 		}
 		built, err := buildCleanupJob(in)
 		switch {
@@ -862,6 +917,11 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupSucceeded",
 				"artifact cleanup succeeded for %q", backup.Status.Location)
 		}
+		// The artifacts are gone, so the key that decrypts them goes too
+		// (Δ24), right before the finalizer is removed.
+		if err := r.deleteDumpKeySnapshot(ctx, backup); err != nil {
+			return false, 0, err
+		}
 		return true, 0, nil
 	case v1alpha1.BackupPhaseFailed:
 		if abandoned {
@@ -912,8 +972,8 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 // once no dump objects remain at the location.
 func (r *MysqlBackupReconciler) skipAbandonedCleanup(backup *v1alpha1.MysqlBackup, location, why string) (bool, time.Duration, error) {
 	r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
-		"cannot clean up what the unfinished backup left at %q (%s); a backup re-created with this name replaces its backup stamp once no dump objects remain there, otherwise delete %q and %q by hand",
-		location, why, location, backupmeta.StampKey(location))
+		"cannot clean up what the unfinished backup left at %q (%s); a backup re-created with this name replaces its backup stamp once no dump objects remain there, otherwise delete %q and %q by hand%s",
+		location, why, location, backupmeta.StampKey(location), dumpKeyKeptNote(backup))
 	return true, 0, nil
 }
 
@@ -997,12 +1057,15 @@ func stuckProducerPods(pods []corev1.Pod, backupDeleted *metav1.Time, now time.T
 }
 
 // abandonedCleanupPassphrase is the passphrase Secret an abandoned cleanup
-// needs to read an encrypted backup's stamp: the producing Job's own
-// mount when the Job is still there, else the one recorded in
-// status.artifactStorage when the Job launched (F025: a Job stopped by the
-// deletion is gone by the time cleanup starts, and the profile may name
-// another Secret since), else the profile's. nil for a plaintext backup.
-func abandonedCleanupPassphrase(backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) *corev1.SecretVolumeSource {
+// needs to read an encrypted backup's stamp (Δ17): the producing Job's own
+// mount when the Job is still there (its dump-key snapshot), else the one
+// recorded in status.artifactStorage when the Job launched (F025: a Job
+// stopped by the deletion is gone by the time cleanup starts), which must
+// exist: a missing one is reported as missing (the second return names
+// it), never replaced by the profile's live Secret, whose bytes may differ
+// (#203). Only a backup with no attribution at all falls back to the
+// profile's Secret. nil for a plaintext backup.
+func (r *MysqlBackupReconciler) abandonedCleanupPassphrase(ctx context.Context, backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) (*corev1.SecretVolumeSource, string, error) {
 	encrypted := backup.Status.Encrypted
 	recorded := (*v1alpha1.BackupArtifactPassphrase)(nil)
 	if storage != nil {
@@ -1014,21 +1077,29 @@ func abandonedCleanupPassphrase(backup *v1alpha1.MysqlBackup, profile *v1alpha1.
 		}
 		for _, vol := range producer.Spec.Template.Spec.Volumes {
 			if vol.Name == "backup-passphrase" && vol.Secret != nil {
-				return vol.Secret.DeepCopy()
+				return vol.Secret.DeepCopy(), "", nil
 			}
 		}
 	}
 	if recorded != nil {
-		return passphraseVolumeSource(recorded.Name, recorded.Key)
+		var s corev1.Secret
+		err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: recorded.Name}, &s)
+		switch {
+		case apierrors.IsNotFound(err):
+			return nil, fmt.Sprintf("the recorded dump passphrase Secret %q is gone; restore it to clean up the encrypted artifact", recorded.Name), nil
+		case err != nil:
+			return nil, "", fmt.Errorf("get recorded passphrase secret %s: %w", recorded.Name, err)
+		}
+		return passphraseVolumeSource(recorded.Name, recorded.Key), "", nil
 	}
 	if !encrypted {
-		return nil
+		return nil, "", nil
 	}
 	if profile == nil || profile.Encryption == nil || profile.Encryption.PassphraseSecret.Name == "" {
 		// buildCleanupJob refuses: the stamp cannot be read.
-		return &corev1.SecretVolumeSource{}
+		return &corev1.SecretVolumeSource{}, "", nil
 	}
-	return passphraseVolumeSource(profile.Encryption.PassphraseSecret.Name, profile.Encryption.PassphraseSecret.PassphraseSecretKeyOrDefault())
+	return passphraseVolumeSource(profile.Encryption.PassphraseSecret.Name, profile.Encryption.PassphraseSecret.PassphraseSecretKeyOrDefault()), "", nil
 }
 
 func passphraseVolumeSource(name, key string) *corev1.SecretVolumeSource {
@@ -1820,4 +1891,128 @@ func siteStateString(s *v1alpha1.SiteStatus) string {
 		return "nil"
 	}
 	return fmt.Sprintf("%s/%s", s.Name, s.State)
+}
+
+// dumpKeySnapshotName is backup's dump-key snapshot (I-17):
+// "mysqlbackup-<name>-dump-key-<uid[:8]>", DNS-truncated. The UID suffix
+// keeps a same-name successor from ever meeting a kept predecessor's
+// snapshot.
+func dumpKeySnapshotName(backup *v1alpha1.MysqlBackup) string {
+	uid := string(backup.UID)
+	if len(uid) > 8 {
+		uid = uid[:8]
+	}
+	return truncateDNS1123("mysqlbackup-" + backup.Name + "-dump-key-" + uid)
+}
+
+// ensureDumpKeySnapshot returns backup's immutable dump-key snapshot,
+// creating it from the profile's live passphrase (trimmed, D-7) when it
+// does not exist (§4.7, K2). An existing snapshot labelled with this
+// backup's UID is adopted as is: its bytes are never compared with the
+// live Secret, so an edit between snapshot and Job creation changes
+// nothing (row 50). It carries no owner reference (Δ24): the finalizer
+// deletes it once the backup's artifacts are gone. A non-empty reason is a
+// pend: the live Secret or key is missing or empty
+// (PassphraseSecretMissing), or the name is held by another object
+// (DumpKeySnapshotConflict).
+func (r *MysqlBackupReconciler) ensureDumpKeySnapshot(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile) (name, reason, message string, err error) {
+	name = dumpKeySnapshotName(backup)
+	key := types.NamespacedName{Namespace: backup.Namespace, Name: name}
+	adopt := func(s *corev1.Secret) (string, string, string, error) {
+		if s.Labels[labelMysqlBackupUID] != string(backup.UID) || s.Labels[labelAppName] != appNameDumpKeySnapshot {
+			return "", backupReasonDumpKeySnapshotConflict,
+				fmt.Sprintf("Secret %s exists but is not this backup's dump-key snapshot (label %s=%q); delete or rename it", name, labelMysqlBackupUID, s.Labels[labelMysqlBackupUID]), nil
+		}
+		return name, "", "", nil
+	}
+	var existing corev1.Secret
+	switch err := r.apiReader().Get(ctx, key, &existing); {
+	case err == nil:
+		return adopt(&existing)
+	case !apierrors.IsNotFound(err):
+		return "", "", "", fmt.Errorf("get dump-key snapshot %s: %w", name, err)
+	}
+
+	ref := profile.Encryption.PassphraseSecret
+	secretKey := ref.PassphraseSecretKeyOrDefault()
+	var live corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: ref.Name}, &live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", backupReasonPassphraseSecretMissing,
+				fmt.Sprintf("profile %q encryption.passphraseSecret Secret %q not found", profile.Name, ref.Name), nil
+		}
+		return "", "", "", fmt.Errorf("get passphrase secret %s: %w", ref.Name, err)
+	}
+	passphrase := backupcrypto.TrimPassphrase(live.Data[secretKey])
+	if len(passphrase) == 0 {
+		return "", backupReasonPassphraseSecretMissing,
+			fmt.Sprintf("profile %q encryption.passphraseSecret Secret %q key %q is missing or empty", profile.Name, ref.Name, secretKey), nil
+	}
+	immutable := true
+	snap := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: backup.Namespace,
+			Labels: map[string]string{
+				labelAppName:          appNameDumpKeySnapshot,
+				labelManagedBy:        managerName,
+				labelFailoverGroup:    fg.Name,
+				labelFailoverGroupUID: string(fg.UID),
+				labelMysqlBackup:      backup.Name,
+				labelMysqlBackupUID:   string(backup.UID),
+			},
+		},
+		Immutable: &immutable,
+		Type:      corev1.SecretTypeOpaque,
+		Data:      map[string][]byte{pitrKeySnapshotDataKey: append([]byte(nil), passphrase...)},
+	}
+	if err := r.Create(ctx, snap); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", "", "", fmt.Errorf("create dump-key snapshot %s: %w", name, err)
+		}
+		if err := r.apiReader().Get(ctx, key, &existing); err != nil {
+			return "", "", "", fmt.Errorf("get dump-key snapshot %s: %w", name, err)
+		}
+		return adopt(&existing)
+	}
+	return name, "", "", nil
+}
+
+// deleteDumpKeySnapshot deletes backup's dump-key snapshot once its
+// artifacts are confirmed gone (Δ24). Only a Secret labelled with this
+// backup's UID is deleted, with a UID precondition; NotFound is done.
+func (r *MysqlBackupReconciler) deleteDumpKeySnapshot(ctx context.Context, backup *v1alpha1.MysqlBackup) error {
+	if backup.UID == "" {
+		return nil
+	}
+	var snap corev1.Secret
+	err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: dumpKeySnapshotName(backup)}, &snap)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("get dump-key snapshot: %w", err)
+	}
+	if snap.Labels[labelMysqlBackupUID] != string(backup.UID) || snap.Labels[labelAppName] != appNameDumpKeySnapshot {
+		return nil
+	}
+	uid := snap.UID
+	if err := r.Delete(ctx, &snap, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete dump-key snapshot %s: %w", snap.Name, err)
+	}
+	return nil
+}
+
+// dumpKeyKeptNote is the clause a skipped cleanup's Event adds when the
+// backup recorded a dump-key snapshot: the snapshot stays, because the
+// artifacts it decrypts may still exist.
+func dumpKeyKeptNote(backup *v1alpha1.MysqlBackup) string {
+	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecret == nil {
+		return ""
+	}
+	name := backup.Status.ArtifactStorage.PassphraseSecret.Name
+	if name != dumpKeySnapshotName(backup) {
+		return ""
+	}
+	return fmt.Sprintf("; the dump-key snapshot Secret %q is kept (delete it once the artifacts are gone)", name)
 }

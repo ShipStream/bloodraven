@@ -240,6 +240,9 @@ func TestVerificationSource_StorageInputMatchesSnapshot(t *testing.T) {
 				a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 				a.Status.StorageType = storage
 				a.Status.Encrypted = encrypted
+				if encrypted {
+					recordTestDumpKey(a)
+				}
 				if storage == v1alpha1.BackupStoragePVC {
 					fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: storage, PVC: &v1alpha1.PVCStorage{ClaimName: "backups"}}
 					a.Status.Location = "/backups/prod_backups/db dumps/a/"

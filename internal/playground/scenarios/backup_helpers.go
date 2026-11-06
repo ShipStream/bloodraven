@@ -117,13 +117,14 @@ func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string,
 	if _, err := rand.Read(passphrase); err != nil {
 		return "", fmt.Errorf("generate backup passphrase: %w", err)
 	}
+	text := hex.EncodeToString(passphrase)
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
 			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
 		},
 		StringData: map[string]string{
-			backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault(): hex.EncodeToString(passphrase),
+			backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault(): text,
 		},
 	}
 	created, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Create(ctx, sec, metav1.CreateOptions{})
@@ -136,6 +137,9 @@ func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string,
 	if err := ctxStash(ctx, env, backupPassphraseSecretUIDKey, string(created.UID)); err != nil {
 		return "", err
 	}
+	// Archive objects are decrypted with these bytes, never with the live
+	// Secret, which a scenario may rotate (s69).
+	pitrStashArchivePassphrase(env, []byte(text))
 	return name, nil
 }
 
@@ -265,27 +269,32 @@ func backupProfileRolloutReady(mfg *v1alpha1.MysqlFailoverGroup, pitr bool) bool
 }
 
 func createMysqlBackup(ctx context.Context, env *runner.Env, name, scenarioID string) error {
+	return createMysqlBackupForProfile(ctx, env, name, scenarioID, backupE2EProfile)
+}
+
+// createMysqlBackupForProfile creates a manual MysqlBackup of profile.
+func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, scenarioID, profile string) error {
 	b := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
 				"shipstream.io/failover-group":                  env.FG,
-				"shipstream.io/backup-profile":                  backupE2EProfile,
+				"shipstream.io/backup-profile":                  profile,
 				"chaos.playground.bloodraven.io/scenario":       scenarioID,
 				"chaos.playground.bloodraven.io/created-by-e2e": "true",
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: env.FG},
-			ProfileName:      backupE2EProfile,
+			ProfileName:      profile,
 			TriggeredBy:      "chaos/" + scenarioID,
 		},
 	}
 	if err := env.Kube.Controller.Create(ctx, b); err != nil {
 		return fmt.Errorf("create MysqlBackup %s: %w", name, err)
 	}
-	env.Capture.Note(fmt.Sprintf("created MysqlBackup %s", name))
+	env.Capture.Note(fmt.Sprintf("created MysqlBackup %s of profile %s", name, profile))
 	return nil
 }
 

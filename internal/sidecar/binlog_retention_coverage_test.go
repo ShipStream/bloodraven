@@ -70,7 +70,7 @@ func TestRetentionRequiresGTIDCoverageInEveryBackup(t *testing.T) {
 				t.Fatal(err)
 			}
 			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
-			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
+			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 			a.maybeRunRetention(ctx)
 			for i, row := range rows {
 				_, exists, err := store.Get(ctx, "binlogs/iad/"+row["name"].(string))
@@ -189,7 +189,7 @@ func TestRetentionBackfillsCoverageWithoutAliasingIncarnations(t *testing.T) {
 	}))
 	defer srv.Close()
 	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
-	a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
+	a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 	a.maybeRunRetention(ctx)
 	m, err := loadManifest(ctx, store, "binlogs", "iad")
 	if err != nil {
@@ -277,7 +277,7 @@ func TestRetentionKeepsUnverifiableArchivedCoverage(t *testing.T) {
 			}))
 			defer srv.Close()
 			a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
-			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
+			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 			a.maybeRunRetention(ctx)
 			_, exists, err := store.Get(ctx, key)
 			if err != nil || !exists {

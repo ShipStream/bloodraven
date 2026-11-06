@@ -58,7 +58,8 @@ func TestBackupStampKeyAgreesForSlashedS3Prefix(t *testing.T) {
 				mb := backupCR("snap", fg.Name, profile.Name)
 				mb.UID = "snap-uid"
 				job, err := BuildBackupJob(BackupJobInputs{
-					FailoverGroup: fg, Profile: profile, Backup: mb,
+					DumpKeySecretName: testDumpKeySecret,
+					FailoverGroup:     fg, Profile: profile, Backup: mb,
 					SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts",
 				})
 				if err != nil {

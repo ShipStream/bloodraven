@@ -25,6 +25,7 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -680,6 +681,15 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 
 	sourceMeta := r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
 	built, err := r.buildRestoreJob(ctx, fg, targetSite, credsName)
+	// The archive's read binding is not usable yet (Δ22): a fixable state
+	// (Pending, KeyMismatch, EncryptionMismatch, ListFailed, the binding
+	// limit) waits in Pending, naming it; an archive that can never verify
+	// fails with PITRArchiveBindingNotReady below.
+	var notReady *errPITRBindingNotReady
+	if errors.As(err, &notReady) && !notReady.terminal {
+		r.setRestorePending(ctx, fg, targetSite, notReady.Error())
+		return pitrVerificationBindingRequeue, nil
+	}
 	if err != nil {
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreBuildFailed", "%s", err.Error())
 		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
@@ -1059,18 +1069,32 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 
 		if ref.Status.Encrypted {
+			// The dump is decrypted with an explicit decryption Secret,
+			// else the key the backup recorded (its dump-key snapshot),
+			// never the profile's live Secret (Δ17, #203): that may hold
+			// other bytes since the backup ran.
 			switch {
 			case in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "":
 				ref := in.Decryption.PassphraseSecret
 				passphraseRef = &ref
-			case profile != nil && profile.EncryptionEnabled():
-				ref := profile.Encryption.PassphraseSecret
-				passphraseRef = &ref
+			case ref.Status.ArtifactStorage != nil && ref.Status.ArtifactStorage.PassphraseSecret != nil:
+				recorded := ref.Status.ArtifactStorage.PassphraseSecret
+				var key corev1.Secret
+				if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: recorded.Name}, &key); err != nil {
+					if !apierrors.IsNotFound(err) {
+						return nil, fmt.Errorf("get recorded passphrase secret %s: %w", recorded.Name, err)
+					}
+					return nil, fmt.Errorf(
+						"%s: %s.source.mysqlBackupRef=%q is encrypted and the Secret %q it recorded as its dump key is gone; "+
+							"restore that Secret or set %s.decryption.passphraseSecret",
+						pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, recorded.Name, fp)
+				}
+				passphraseRef = &v1alpha1.PassphraseSecretRef{Name: recorded.Name, Key: recorded.Key}
 			default:
 				return nil, fmt.Errorf(
-					"%s.source.mysqlBackupRef=%q is encrypted but no passphrase is available; "+
-						"set %s.decryption.passphraseSecret or restore the profile's encryption.passphraseSecret",
-					fp, ref.Name, fp)
+					"%s: %s.source.mysqlBackupRef=%q is encrypted but recorded no dump key; "+
+						"set %s.decryption.passphraseSecret",
+					pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, fp)
 			}
 			if profileS3 != nil {
 				decryptSourceKind = "S3"
@@ -1253,6 +1277,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		labelSite:          targetSite,
 		labelManagedBy:     managerName,
 		labelResourceKind:  "restore",
+	}
+	if pitrFrags.KeySecretName != "" {
+		// Correlation label (Δ18): a release of this archive's binding
+		// sees the Job and refuses while it runs.
+		labels[labelPITRKeySecret] = pitrFrags.KeySecretName
 	}
 
 	env := []corev1.EnvVar{

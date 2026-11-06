@@ -215,6 +215,11 @@ jobs:
       # Keep in step with controller-runtime and k8s.io/api in go.mod.
       SETUP_ENVTEST_VERSION: v0.25.2
       ENVTEST_K8S: "1.37"
+      # The oldest supported Kubernetes version (A-115). The CRD admission
+      # tests (CEL cost budget, transition rule, list-map, status bounds)
+      # also run against it, because CEL and list-map behaviour differ
+      # between versions.
+      ENVTEST_K8S_FLOOR: "1.31.0"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -233,7 +238,7 @@ jobs:
           path: |
             ${{ runner.temp }}/envtest-bin
             ${{ runner.temp }}/envtest-tools
-          key: envtest-${{ runner.os }}-${{ runner.arch }}-${{ env.SETUP_ENVTEST_VERSION }}-k${{ env.ENVTEST_K8S }}-${{ steps.envtest-key.outputs.week }}
+          key: envtest-${{ runner.os }}-${{ runner.arch }}-${{ env.SETUP_ENVTEST_VERSION }}-k${{ env.ENVTEST_K8S }}-k${{ env.ENVTEST_K8S_FLOOR }}-${{ steps.envtest-key.outputs.week }}
           # Exact weekly keys keep old patch directories from accumulating.
       - name: Install setup-envtest
         run: '[ -x "$RUNNER_TEMP/envtest-tools/setup-envtest" ] || GOBIN="$RUNNER_TEMP/envtest-tools" go install sigs.k8s.io/controller-runtime/tools/setup-envtest@"$SETUP_ENVTEST_VERSION"'
@@ -242,6 +247,11 @@ jobs:
           KUBEBUILDER_ASSETS=$("$RUNNER_TEMP/envtest-tools/setup-envtest" use "${ENVTEST_K8S}.x" --bin-dir "$RUNNER_TEMP/envtest-bin" -p path)
           export KUBEBUILDER_ASSETS
           make test-envtest
+      - name: Run CRD admission envtests on the supported floor
+        run: |
+          KUBEBUILDER_ASSETS=$("$RUNNER_TEMP/envtest-tools/setup-envtest" use "${ENVTEST_K8S_FLOOR}" --bin-dir "$RUNNER_TEMP/envtest-bin" -p path)
+          export KUBEBUILDER_ASSETS
+          go test -race -tags envtest ./test/envtest -run 'TestPITRBinding(CEL|Status|SSA)' -v
       - name: Save envtest cache (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.envtest-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6

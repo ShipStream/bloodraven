@@ -55,7 +55,7 @@ func cutoffTestClient(t *testing.T, backups ...client.Object) client.Client {
 func readCutoff(t *testing.T, handler http.Handler) (int, map[string]any) {
 	t.Helper()
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&profile=p&coverage=gtid-v1", nil))
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pitr-cutoff?namespace=ns&group=fg&archive="+cutoffTestArchive+"&coverage=gtid-v1", nil))
 	var result map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestPITRRunningBackupKeepsReplayWindowThroughCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := sidecar.ArchiveIdentity{Source: pitrarchive.Source{Namespace: "ns", Name: "fg", UID: "fg-uid"}, Destination: dest,
+	identity := sidecar.ArchiveIdentity{Source: pitrarchive.Source{Namespace: "ns", Name: "fg", UID: cutoffTestUID}, Destination: dest,
 		Encryption: pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}}
 	desc, err := pitrarchive.NewDescriptor(identity.Source, dest, identity.Encryption, nil, "iad", start)
 	if err != nil {
@@ -161,7 +161,7 @@ func TestPITRRunningBackupKeepsReplayWindowThroughCompletion(t *testing.T) {
 		defer mysql.Close()
 		observed := &retentionMaintenanceStore{ArchiveStore: store, cancel: cancel}
 		a := sidecar.NewBinlogArchiver(&sidecar.PITRConfig{StorageType: "PVC", ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), PollInterval: time.Hour, Archive: identity}, "iad", retentionReplica{mysql}, observed, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
+		a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", cutoffTestArchive, time.Hour)
 		done := make(chan struct{})
 		go func() { defer close(done); a.Run(runCtx) }()
 		select {

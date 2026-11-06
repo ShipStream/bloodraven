@@ -311,7 +311,7 @@ func TestFinalize_AbandonedEarlyReleaseStopsProducerFirst(t *testing.T) {
 func TestFinalize_AbandonedRecoversDestinationFromFailedProducer(t *testing.T) {
 	f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
 	ctx := context.Background()
-	producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
+	producer, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
 		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 	if err != nil {
 		t.Fatal(err)
@@ -356,7 +356,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		profile := fg.Spec.Backup.Profiles[0]
 		profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "secret-a", Key: "pp"}}
 		mb := backupCR("art", "lion", profile.Name)
-		job, err := BuildBackupJob(BackupJobInputs{FailoverGroup: fg, Profile: profile, Backup: mb,
+		job, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: fg, Profile: profile, Backup: mb,
 			SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 		if err != nil {
 			t.Fatal(err)
@@ -365,11 +365,13 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := storage.PassphraseSecret; got == nil || got.Name != "secret-a" || got.Key != "pp" {
+		// The Job mounts the backup's dump-key snapshot, never the
+		// profile's Secret (#203), and records it.
+		if got := storage.PassphraseSecret; got == nil || got.Name != testDumpKeySecret || got.Key != pitrKeySnapshotDataKey {
 			t.Fatalf("passphrase not recorded: %+v", got)
 		}
 		profile.Encryption = nil
-		plain, err := BuildBackupJob(BackupJobInputs{FailoverGroup: fg, Profile: profile, Backup: mb,
+		plain, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: fg, Profile: profile, Backup: mb,
 			SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 		if err != nil {
 			t.Fatal(err)
@@ -396,6 +398,10 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		}
 		f.producerJob(t, "", corev1.Volume{Name: "backup-passphrase", VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{SecretName: "secret-a", Items: []corev1.KeyToPath{{Key: "pp", Path: backupPassphraseFileName}}}}})
+		// The recorded Secret must exist (Δ17).
+		if err := f.c.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "secret-a"}, Data: map[string][]byte{"pp": []byte("k")}}); err != nil {
+			t.Fatal(err)
+		}
 		f.finalize(t) // stops the producer
 		f.finalize(t)
 		job, ok := f.cleanupJob(t)

@@ -124,7 +124,7 @@ func newRetentionRetryFixture(t *testing.T, legacy bool) (*retentionFaultStore, 
 	cfg := &PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), BinlogIndex: "mysql-bin.index"}
 	factory := func() *BinlogArchiver {
 		a := newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
-		a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
+		a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 		return a
 	}
 	return store, factory, status, entries, keys

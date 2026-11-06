@@ -714,6 +714,7 @@ func TestPITRArchiveProfileSeparatesPrefixes(t *testing.T) {
 	source.Storage.S3.Prefix = "source-group"
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
 	fg.Spec.Backup.PITR = nil
+	bindAllTestPITRArchives(fg)
 	req := &pitrReplayRequest{Mode: "timestamp", Stop: outcomeStopCanonical, ArchiveProfileName: "source-archive"}
 	frags, err := buildRestorePITRFragmentsFor(fg, req)
 	if err != nil {

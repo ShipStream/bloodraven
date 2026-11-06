@@ -493,6 +493,10 @@ func s31Cleanup(ctx context.Context, env *runner.Env) error {
 		return ready && mfg.Status.ActiveSite != "" && mfg.Status.UpdatePhase == "" && pitrRestored, fmt.Sprintf("ready=%v active=%q updatePhase=%q pitrRestored=%v wantPITR=%v wantProfile=%q pitr=%v", ready, mfg.Status.ActiveSite, mfg.Status.UpdatePhase, pitrRestored, wantPITR, wantProfile, mfg.Status.PITR), nil
 	}); err != nil {
 		errs = append(errs, err)
+	} else if prefix := ctxFetch(env, "backupPrefix"); prefix != "" {
+		// The archive binding outlives the profile (#203): release it so
+		// it does not count against the group's binding limit.
+		pitrReleaseBindings(ctx, env, []string{prefix})
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("s31 cleanup: %v", errs)

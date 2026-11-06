@@ -21,14 +21,14 @@ type pitrLookupResult struct {
 // resolvePITRCutoff computes the binlog retention cutoff. holdReader is an
 // uncached reader used only to decide whether a backup being deleted is
 // still read by a verification.
-func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, namespace, group, profile string) (map[string]any, error) {
+func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, namespace, group, archive string) (map[string]any, error) {
 	var list v1alpha1.MysqlBackupList
 	// Specs are authoritative: labels and the PITR profile do not delimit which
 	// group backups may later be used as PITR restore sources.
 	if err := reader.List(ctx, &list, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
-	resp := map[string]any{"namespace": namespace, "group": group, "profile": profile, "coverage": sidecar.PITRGTIDCoverageProtocol}
+	resp := map[string]any{"namespace": namespace, "group": group, "archive": archive, "coverage": sidecar.PITRGTIDCoverageProtocol}
 	var cutoff *time.Time
 	var retained []string
 	unknown, inFlight := false, false

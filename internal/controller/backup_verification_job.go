@@ -153,22 +153,24 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	if pitrFrags.KeySecretName != "" {
+		// Correlation label (Δ18); the verification also holds the
+		// snapshot (K9) before this Job is created.
+		labels[labelPITRKeySecret] = pitrFrags.KeySecretName
+	}
+	// An encrypted backup is decrypted only with the key it recorded (its
+	// dump-key snapshot, status.artifactStorage.passphraseSecret), never
+	// the profile's live Secret (Δ17).
+	dumpKey, err := verificationDumpKey(backup)
+	if err != nil {
+		return nil, err
+	}
 	// dump-meta reads the verified backup's identity first (§4.2). It
-	// decrypts with the same key decrypt-download uses: the profile's.
+	// decrypts with the same key decrypt-download uses.
 	var dumpMeta *corev1.Container
 	var dumpMetaVolumes []corev1.Volume
 	if pitrReq != nil {
-		var key *v1alpha1.PassphraseSecretRef
-		if backup.Status.Encrypted {
-			if !in.Profile.EncryptionEnabled() {
-				return nil, fmt.Errorf(
-					"verification job: backup %q is encrypted but profile %q has no encryption.passphraseSecret; "+
-						"restore the encryption field to verify this backup",
-					backup.Name, in.Profile.Name)
-			}
-			ref := in.Profile.Encryption.PassphraseSecret
-			key = &ref
-		}
+		key := dumpKey
 		profile := in.Profile
 		src, err := pitrDumpSourceForBackup(fg, backup, &profile, key)
 		if err != nil {
@@ -367,13 +369,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// of truth — verification doesn't have its own decryption field
 	// by design, because "verify what your profile produced" is
 	// exactly the scope where the profile's passphrase is authoritative.
-	if backup.Status.Encrypted {
-		if !in.Profile.EncryptionEnabled() {
-			return nil, fmt.Errorf(
-				"verification job: backup %q is encrypted but profile %q has no encryption.passphraseSecret; "+
-					"restore the encryption field to verify this backup",
-				backup.Name, in.Profile.Name)
-		}
+	if dumpKey != nil {
 		if operatorImageFromEnv == "" {
 			return nil, fmt.Errorf("verification job: operator image is not configured (SetOperatorImageDefaults); required for encrypted verification")
 		}
@@ -385,7 +381,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			Name:         "restore-decrypted",
 			VolumeSource: corev1.VolumeSource{EmptyDir: stagingEmptyDirSource(fg.Spec.Backup)},
 		})
-		passRef := in.Profile.Encryption.PassphraseSecret
+		passRef := *dumpKey
 		volumes = append(volumes, corev1.Volume{
 			Name: "backup-passphrase",
 			VolumeSource: corev1.VolumeSource{
@@ -651,7 +647,9 @@ func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrRep
 	if in == nil {
 		return nil, nil
 	}
-	req := &pitrReplayRequest{Verification: true}
+	// archiveProfileName reads a retained archive (after a prefix switch);
+	// empty means the group's active PITR profile (Δ28).
+	req := &pitrReplayRequest{Verification: true, ArchiveProfileName: in.ArchiveProfileName}
 	switch in.Mode {
 	case "", "none":
 		return nil, nil
@@ -703,4 +701,21 @@ func verificationLoadOptions() *v1alpha1.LoadOptions {
 // updateGtidSet:"replace" with skipBinlog:true.
 func marshalVerificationLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
 	return marshalDumpGtidBaselineLoadOptions(l)
+}
+
+// verificationDumpKey is the passphrase Secret key a verification decrypts
+// backup's dump with: the one the backup recorded (Δ17). nil for a
+// plaintext backup; an encrypted backup that recorded none is refused with
+// PITRBackupDumpKeyMissing.
+func verificationDumpKey(backup *v1alpha1.MysqlBackup) (*v1alpha1.PassphraseSecretRef, error) {
+	if !backup.Status.Encrypted {
+		return nil, nil
+	}
+	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecret == nil ||
+		backup.Status.ArtifactStorage.PassphraseSecret.Name == "" {
+		return nil, fmt.Errorf("%s: verification job: backup %q is encrypted but recorded no dump key (status.artifactStorage.passphraseSecret)",
+			pitrarchive.TokenBackupDumpKeyMissing, backup.Name)
+	}
+	recorded := backup.Status.ArtifactStorage.PassphraseSecret
+	return &v1alpha1.PassphraseSecretRef{Name: recorded.Name, Key: recorded.Key}, nil
 }

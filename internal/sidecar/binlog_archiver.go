@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -139,7 +140,9 @@ type retentionClientConfig struct {
 	BloodravenAddress string
 	Namespace         string
 	FailoverGroup     string
-	ProfileName       string
+	// ArchiveID is the archive this pod writes (BLOODRAVEN_PITR_ARCHIVE_ID).
+	// The operator only answers for an archive the group itself creates.
+	ArchiveID string
 	// Interval between retention sweeps. Defaults to 1h to avoid
 	// putting pressure on the operator aux endpoint + repeatedly
 	// listing S3.
@@ -275,7 +278,7 @@ func (a *BinlogArchiver) observeManifest(m *Manifest) {
 // archiver. When unset, the archiver still uploads but never prunes
 // (useful for tests and single-profile deployments where retention
 // isn't wanted).
-func (a *BinlogArchiver) SetRetentionClient(bloodravenAddr, namespace, group, profile string, interval time.Duration) {
+func (a *BinlogArchiver) SetRetentionClient(bloodravenAddr, namespace, group, archiveID string, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
@@ -283,7 +286,7 @@ func (a *BinlogArchiver) SetRetentionClient(bloodravenAddr, namespace, group, pr
 		BloodravenAddress: bloodravenAddr,
 		Namespace:         namespace,
 		FailoverGroup:     group,
-		ProfileName:       profile,
+		ArchiveID:         archiveID,
 		Interval:          interval,
 	}
 }
@@ -731,6 +734,18 @@ func fileCoveredByBackups(coverage *BinlogGTIDCoverage, backups []internalmysql.
 	return true
 }
 
+// retentionCutoffURL is the operator's /pitr-cutoff query for this pod's
+// group and archive.
+func (a *BinlogArchiver) retentionCutoffURL() string {
+	q := url.Values{}
+	q.Set("namespace", a.retentionCfg.Namespace)
+	q.Set("group", a.retentionCfg.FailoverGroup)
+	q.Set("archive", a.retentionCfg.ArchiveID)
+	q.Set("coverage", PITRGTIDCoverageProtocol)
+	u := url.URL{Scheme: "http", Host: a.retentionCfg.BloodravenAddress, Path: "/pitr-cutoff", RawQuery: q.Encode()}
+	return u.String()
+}
+
 // fetchRetentionCutoff calls the operator's aux HTTP endpoint. Returns
 // an empty proof when the peer lacks the coverage protocol or backup bounds.
 // Transport and malformed-metadata errors defer the entire sweep.
@@ -740,12 +755,7 @@ func (a *BinlogArchiver) fetchRetentionCutoff(ctx context.Context) (retentionCov
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	url := fmt.Sprintf("http://%s/pitr-cutoff?namespace=%s&group=%s&profile=%s&coverage=%s",
-		a.retentionCfg.BloodravenAddress,
-		a.retentionCfg.Namespace,
-		a.retentionCfg.FailoverGroup,
-		a.retentionCfg.ProfileName, PITRGTIDCoverageProtocol)
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, a.retentionCutoffURL(), nil)
 	if err != nil {
 		return retentionCoverageProof{}, err
 	}

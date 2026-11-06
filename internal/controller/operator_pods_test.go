@@ -46,6 +46,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 
 	seed := successfulBackup("seed", fg.Name, encProfile.Name)
 	seed.Status.Encrypted = true
+	recordTestDumpKey(seed)
 	seed.Status.EncryptionAlgorithm = "AES-256-GCM"
 
 	var pods []renderedPod
@@ -63,7 +64,8 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 			Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: p.Name},
 		}
 		job, err := BuildBackupJob(BackupJobInputs{
-			FailoverGroup: fg, Profile: p, Backup: mb, SourceSite: "pdx",
+			DumpKeySecretName: testDumpKeySecret,
+			FailoverGroup:     fg, Profile: p, Backup: mb, SourceSite: "pdx",
 			CredsSecretName: "creds", ScriptsConfigMapName: "scripts",
 		})
 		addJob("backup/"+p.Name, job, err)

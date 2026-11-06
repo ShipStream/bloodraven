@@ -149,9 +149,13 @@ func secretContentDigest(key []byte, secrets map[string]map[string][]byte) strin
 }
 
 // specSecretInputs collects the Secret contents a site's pod template
-// depends on: TLS, the active PITR passphrase in either credential mode,
-// and every referenced credential Secret in credentials mode. A Secret
-// that does not exist yet is skipped.
+// consumes (Δ15, K10, O10): the TLS Secret's ca.crt, tls.crt and tls.key,
+// and in credentials mode the role Secrets' username and password plus the
+// operator Secret's MYSQL_ROOT_PASSWORD (credentialRoleSecretNames). Nothing
+// else of those Secrets enters the digest, so a passphrase kept in a shared
+// TLS or credentials Secret does not roll the pods; the PITR archive key
+// is a content-addressed snapshot named in the render instead (#203). A
+// Secret that does not exist yet is skipped.
 func specSecretInputs(ctx context.Context, r client.Reader, fg *v1alpha1.MysqlFailoverGroup) (map[string]map[string][]byte, error) {
 	secrets := make(map[string]map[string][]byte)
 	if fg.Spec.TLS != nil {
@@ -159,30 +163,16 @@ func specSecretInputs(ctx context.Context, r client.Reader, fg *v1alpha1.MysqlFa
 		err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}, &s)
 		switch {
 		case err == nil:
-			secrets["tls"] = s.Data
+			secrets["tls"] = pickSecretKeys(s.Data, mysqlTLSConsumedKeys)
 		case !apierrors.IsNotFound(err):
 			return nil, fmt.Errorf("get TLS secret %s: %w", fg.Spec.TLS.SecretName, err)
 		}
 	}
-	if backup := fg.Spec.Backup; backup != nil && backup.PITR != nil && backup.PITR.Enabled {
-		if profile := findProfile(fg, backup.PITR.ProfileName); profile.EncryptionEnabled() {
-			ref := profile.Encryption.PassphraseSecret
-			var s corev1.Secret
-			err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &s)
-			switch {
-			case err == nil:
-				key := ref.PassphraseSecretKeyOrDefault()
-				secrets["pitr.passphrase"] = map[string][]byte{key: s.Data[key]}
-			case !apierrors.IsNotFound(err):
-				return nil, fmt.Errorf("get PITR passphrase secret %s: %w", ref.Name, err)
-			}
-		}
-	}
 	if fg.Spec.UsesCredentials() {
-		for _, name := range fg.Spec.AllReferencedSecretNames() {
+		for name, keys := range credentialRoleSecretNames(fg) {
 			var s corev1.Secret
 			if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
-				secrets["cred."+name] = s.Data
+				secrets["cred."+name] = pickSecretKeys(s.Data, keys)
 			}
 		}
 	}

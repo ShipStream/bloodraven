@@ -54,9 +54,9 @@ func mustLicenseToken(t *testing.T, priv ed25519.PrivateKey, kid string, claims 
 func TestComputeSpecHashIgnoresLicense(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	before := ComputeSpecHash(fg, site, "")
+	before := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 	fg.Spec.License = "eyJhbGciOiJFZERTQSJ9.e30.sig"
-	after := ComputeSpecHash(fg, site, "")
+	after := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 	if before != after {
 		t.Fatal("spec.license must not change the deployment hash")
 	}

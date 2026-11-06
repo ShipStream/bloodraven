@@ -380,8 +380,9 @@ const pitrArchivePrefixKind = "archivePrefix"
 // dropping the marker schema, restoring spec.backup, the 6-minute
 // healthy-baseline wait, deleting the archive prefixes, and the executor's
 // reconverge wait (F071). pitrCleanupBudget adds a scenario's own extra
-// cleanup steps.
-const pitrCleanupBaseBudget = 25 * time.Minute
+// cleanup steps. The release of the run's archive bindings (#203) waits
+// at most pitrReleaseBindingWaitTime per binding; a run makes one or two.
+const pitrCleanupBaseBudget = 29 * time.Minute
 
 func pitrCleanupBudget(extra time.Duration) time.Duration {
 	return pitrCleanupBaseBudget + extra
@@ -389,8 +390,10 @@ func pitrCleanupBudget(extra time.Duration) time.Duration {
 
 // pitrDeleteOwnedGroup deletes a group this run created (it carries this
 // run's pitrRunAnnotation) with a UID precondition and waits until it is
-// gone; its Deployments, Services and PVCs are owned by it. A group of the
-// same name without this run's annotation is left in place (F190).
+// gone; its Deployments, Services and PVCs are owned by it. Its archive and
+// dump key snapshots are not (#203), so they are then deleted by its UID
+// label. A group of the same name without this run's annotation is left in
+// place (F190).
 func pitrDeleteOwnedGroup(ctx context.Context, env *runner.Env, name string) error {
 	var mfg v1alpha1.MysqlFailoverGroup
 	if err := env.Kube.Controller.Get(ctx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &mfg); err != nil {
@@ -413,7 +416,8 @@ func pitrDeleteOwnedGroup(ctx context.Context, env *runner.Env, name string) err
 		err := env.Kube.Controller.Get(waitCtx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &v1alpha1.MysqlFailoverGroup{})
 		if apierrors.IsNotFound(err) {
 			env.Capture.Note("deleted failover group " + name)
-			return nil
+			// Its key snapshots have no owner and survive it (#203).
+			return pitrDeleteGroupKeySnapshots(ctx, env, string(uid))
 		}
 		select {
 		case <-waitCtx.Done():
@@ -473,8 +477,8 @@ func pitrDeleteArchivePrefixes(ctx context.Context, env *runner.Env) error {
 }
 
 // pitrCleanup removes what a PITR scenario created, waits for a healthy
-// baseline with the original backup spec, then deletes the run's archive
-// prefixes.
+// baseline with the original backup spec, releases the run's archive
+// bindings (pitrReleaseBindings), then deletes the run's archive prefixes.
 func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...string) error {
 	var errs []error
 	for _, g := range groups {
@@ -523,8 +527,14 @@ func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...stri
 		return done, fmt.Sprintf("ready=%v active=%q pitrRestored=%v cooldown=%q", ready, mfg.Status.ActiveSite, pitrRestored, cooldown), nil
 	}); err != nil {
 		errs = append(errs, err)
-	} else if err := pitrDeleteArchivePrefixes(ctx, env); err != nil {
-		errs = append(errs, err)
+	} else {
+		// Release the run's archive bindings while no target, render or
+		// pod uses them any more (#203, IMPL-203 Δ20), then delete the
+		// objects they named.
+		pitrReleaseBindings(ctx, env, pitrTrackedCRs(env, pitrArchivePrefixKind))
+		if err := pitrDeleteArchivePrefixes(ctx, env); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }

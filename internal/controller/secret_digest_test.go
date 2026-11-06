@@ -110,14 +110,14 @@ func TestDeploymentSpecHashNeedsDigestKey(t *testing.T) {
 	if len(inputs) == 0 {
 		t.Fatal("expected the TLS Secret among the spec hash inputs")
 	}
-	if published == ComputeSpecHash(fg, site, secretContentDigest(make([]byte, digestKeyBytes), inputs)) {
+	if published == ComputeSpecHash(fg, site, secretContentDigest(make([]byte, digestKeyBytes), inputs), testPITRRender(fg)) {
 		t.Fatal("published spec-hash is reproducible without the group's digest key")
 	}
 	key, err := readDigestKey(ctx, c, fg)
 	if err != nil {
 		t.Fatalf("read digest key: %v", err)
 	}
-	if published != ComputeSpecHash(fg, site, secretContentDigest(key, inputs)) {
+	if published != ComputeSpecHash(fg, site, secretContentDigest(key, inputs), testPITRRender(fg)) {
 		t.Fatal("published spec-hash does not match the keyed computation")
 	}
 }

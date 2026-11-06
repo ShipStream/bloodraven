@@ -265,7 +265,7 @@ func TestEncryptionChaos_PartialAdoptionKeepsBothSitesRestartable(t *testing.T) 
 
 	// Roll exactly one site, then stall — this is what a WaitReplica
 	// timeout on the second follower leaves behind.
-	if err := r.reconcileDeployment(ctx, &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage); err != nil {
+	if err := r.reconcileDeployment(ctx, &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage, testGroupPITRRender(&refreshed)); err != nil {
 		t.Fatalf("ordered update of dc1: %v", err)
 	}
 
@@ -274,7 +274,7 @@ func TestEncryptionChaos_PartialAdoptionKeepsBothSitesRestartable(t *testing.T) 
 
 	// The stalled site's live ConfigMap must survive garbage collection
 	// for as long as its pod may still restart against it.
-	if err := r.cleanupObsoleteSiteConfigMaps(ctx, &refreshed); err != nil {
+	if err := r.cleanupObsoleteSiteConfigMaps(ctx, &refreshed, testPITRRender(&refreshed)); err != nil {
 		t.Fatalf("cleanup during a stalled adoption: %v", err)
 	}
 	var stalledConfig corev1.ConfigMap
@@ -285,7 +285,7 @@ func TestEncryptionChaos_PartialAdoptionKeepsBothSitesRestartable(t *testing.T) 
 	}
 
 	// Resuming the update finishes the job rather than needing a reset.
-	if err := r.reconcileDeployment(ctx, &refreshed, refreshed.Spec.Sites[1], 101, defaultMySQLImage); err != nil {
+	if err := r.reconcileDeployment(ctx, &refreshed, refreshed.Spec.Sites[1], 101, defaultMySQLImage, testGroupPITRRender(&refreshed)); err != nil {
 		t.Fatalf("resumed ordered update of dc2: %v", err)
 	}
 	assertSiteRestartable(t, r, c, &refreshed, "dc2", true)
@@ -784,7 +784,7 @@ func TestEncryptionChaos_StaleKeyringProjectionIsRepaired(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: "lion", Namespace: "shared-lion"}, &refreshed); err != nil {
 		t.Fatalf("refresh group: %v", err)
 	}
-	if err := r.reconcileDeployment(ctx, &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage); err != nil {
+	if err := r.reconcileDeployment(ctx, &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage, testGroupPITRRender(&refreshed)); err != nil {
 		t.Fatalf("ordered update apply: %v", err)
 	}
 
