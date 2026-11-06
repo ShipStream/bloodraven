@@ -317,9 +317,12 @@ func TestFixR1_PublishingRestartKeepsWarnings(t *testing.T) {
 
 // ---------- O-M3 (engine) ----------
 
-// The facade's fence memo makes the run's fence attributable: a run that
-// sent a SET whose readback was lost, and then ends SourceLeftFenced,
-// names its source for the topology manager's re-assert.
+// The facade's fence memo makes the run's fence attributable (proof.Sent
+// sets setSent). A later FenceNotSent, though, means the source no longer
+// holds that fence (boot read-only after a restart, or a replaced server:
+// the facade attributes a standing super_read_only before it reports
+// FenceNotSent), so since the ultra review's K143 such an end carries
+// FenceNotAttributable and names nothing, in-process as after a restart.
 func TestFixR1_FacadeFenceMemoIsFenceSent(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseFencing)
 	calls := 0
@@ -334,8 +337,14 @@ func TestFixR1_FacadeFenceMemoIsFenceSent(t *testing.T) {
 		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, Sent: true}, nil
 	}
 	h.stepUntil(5, func(fg *v1alpha1.MysqlFailoverGroup) bool { return plannedFailoverTerminal(fg.Status.PlannedFailover) })
-	if !slices.Contains(h.topo.named, "source:iad") {
-		t.Fatalf("named = %v; the run's own (memo-attributed) fence must be named for re-assert", h.topo.named)
+	if !h.e.runMemo("run-1").fence.setSent {
+		t.Fatal("proof.Sent did not reach the engine's memo")
+	}
+	if slices.Contains(h.topo.named, "source:iad") {
+		t.Fatalf("named = %v; a source that no longer holds the run's fence is not named", h.topo.named)
+	}
+	if r := h.pf().Result; !slices.Contains(r.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
+		t.Fatalf("result = %+v, want FenceNotAttributable", r)
 	}
 }
 

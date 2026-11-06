@@ -8,10 +8,13 @@ import (
 )
 
 // leaseAdmissionGuard wraps each planned-failover admission pass with the
-// deployment lease manager's admission reservation: a standing
-// failover-hold lease defers the request (Deferred{DeploymentHold}), and
-// while the pass runs no lease can be granted past it. The engine persists
-// its phase before the release.
+// deployment lease manager's admission reservation, and while the pass
+// runs no lease can be granted past it; the engine persists its phase
+// before the release. A standing failover-hold lease defers a new or
+// Deferred request (Deferred{DeploymentHold}), but ends an Admitting run
+// NotStarted{ConcurrentOperation}: an admitted run is not put back to
+// waiting without a deadline. A refused reservation is an admission wait
+// (see plannedAdmissionWaitReason).
 type leaseAdmissionGuard struct {
 	r *MysqlFailoverGroupReconciler
 }
@@ -30,7 +33,7 @@ func (g leaseAdmissionGuard) BeginPlanned(ctx context.Context, fg *v1alpha1.Mysq
 	if m == nil {
 		return nil, func() {}, nil
 	}
-	hold, err := m.BeginPlanned(ctx, fg, "PlannedFailover")
+	hold, err := m.BeginPlanned(ctx, fg, deploymentOperationPlannedFailover)
 	if err != nil || hold != nil {
 		return hold, func() {}, err
 	}

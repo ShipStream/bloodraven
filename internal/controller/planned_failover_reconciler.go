@@ -10,10 +10,14 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
@@ -35,11 +39,96 @@ func plannedFailoverTerminal(s *v1alpha1.PlannedFailoverStatus) bool {
 // due. A positive duration asks for a requeue.
 func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	e := r.plannedFailoverEngine()
-	if !plannedFailoverPassDue(fg) && !e.topo.PlannedClaimHeld(nn) {
+	if !plannedFailoverPassDue(fg) && !r.plannedClaimHeld(nn) {
 		return 0, nil
 	}
-	return e.Step(ctx, nn)
+	return r.plannedFailoverEngine().Step(ctx, nn)
+}
+
+// reconcilePlannedFailoverInFlight runs one engine pass for a reconcile
+// that returns before its regular planned-failover step: for a run already
+// in flight, a hold, a terminal marker, a durable deadline annotation, or a
+// held claim, never to admit a new request. ran reports whether a pass ran.
+func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailoverInFlight(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, bool, error) {
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	if !plannedFailoverInFlightDue(fg) && !r.plannedClaimHeld(nn) {
+		return 0, false, nil
+	}
+	d, err := r.plannedFailoverEngine().step(ctx, nn, false)
+	return d, true, err
+}
+
+// plannedFailoverPassRuns reports whether reconcilePlannedFailover runs a
+// pass for fg.
+func (r *MysqlFailoverGroupReconciler) plannedFailoverPassRuns(fg *v1alpha1.MysqlFailoverGroup) bool {
+	return plannedFailoverPassDue(fg) || r.plannedClaimHeld(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
+}
+
+// plannedFailoverHoldsReconcile reports whether a planned failover holds
+// up the rest of the reconcile: a run that owns the sites or is
+// Publishing, or a Run-mode claim (a run's, or its provisional grant).
+// A run that owns nothing (Admitting or Deferred without a claim) and an
+// automation hold do not.
+func (r *MysqlFailoverGroupReconciler) plannedFailoverHoldsReconcile(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if plannedFailoverOwnsSites(fg) {
+		return true
+	}
+	if pf, marked := plannedFailoverRun(fg); pf != nil && !marked && pf.Phase == v1alpha1.PlannedFailoverPhasePublishing {
+		return true
+	}
+	return r.plannedRunClaimHeld(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
+}
+
+// plannedPostPassView returns the group as the planned-failover pass left
+// it, read uncached, for the label syncs that follow the pass: the cached
+// object still shows the phase before the pass, so the source's role
+// label would otherwise follow a newly recorded fence only on a later
+// reconcile. fg itself is returned when no pass ran or the read fails.
+func (r *MysqlFailoverGroupReconciler) plannedPostPassView(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, ran bool) *v1alpha1.MysqlFailoverGroup {
+	if !ran {
+		return fg
+	}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	var fresh v1alpha1.MysqlFailoverGroup
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil || fresh.UID != fg.UID {
+		return fg
+	}
+	return &fresh
+}
+
+// drivePlannedFailoverOnEarlyReturn runs the in-flight planned-failover
+// pass for a Reconcile that returned before its regular planned-failover
+// step, and merges the pass's requeue into the result. While a run owns
+// the sites (or a Run-mode claim is held), an error of the earlier step is
+// logged and the reconcile requeues on the run's cadence instead of the
+// controller's exponential backoff, which would starve the run's deadlines.
+func (r *MysqlFailoverGroupReconciler) drivePlannedFailoverOnEarlyReturn(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
+	result ctrl.Result, err error) (ctrl.Result, error) {
+	pfRequeue, ran, pfErr := r.reconcilePlannedFailoverInFlight(ctx, fg)
+	if !ran {
+		return result, err
+	}
+	logger := log.FromContext(ctx)
+	if pfErr != nil {
+		if err == nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile planned failover: %w", pfErr)
+		}
+		logger.Error(pfErr, "planned failover: pass on an early-returning reconcile failed")
+		return result, err
+	}
+	if err != nil {
+		if pfRequeue > 0 && r.plannedFailoverHoldsReconcile(fg) {
+			logger.Error(err, "reconcile failed while a planned failover is in flight; retrying on the planned-failover cadence",
+				"requeueAfter", pfRequeue.String())
+			return ctrl.Result{RequeueAfter: pfRequeue}, nil
+		}
+		return result, err
+	}
+	result.RequeueAfter = minPositiveDuration(result.RequeueAfter, pfRequeue)
+	return result, nil
 }
 
 // StepPlannedFailoverForTest runs one planned-failover engine pass for nn,
@@ -55,9 +144,19 @@ func (r *MysqlFailoverGroupReconciler) StepPlannedFailoverForTest(ctx context.Co
 // annotation, or an automation hold. The engine re-reads uncached; the cache
 // only lets a quiet group skip the read.
 func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if _, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]; ok {
+		return true
+	}
+	return plannedFailoverInFlightDue(fg)
+}
+
+// plannedFailoverInFlightDue is plannedFailoverPassDue without a new
+// request: an acknowledgement, a non-terminal block, a terminal marker, a
+// durable deadline annotation, or an automation hold.
+func plannedFailoverInFlightDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 	a := fg.GetAnnotations()
-	for _, k := range []string{PlannedFailoverAnnotation, AcknowledgePlannedFailoverHoldAnnotation, PlannedFailoverTerminalAnnotation,
-		PlannedFailoverStallSinceAnnotation, PlannedFailoverManagerAbsentSinceAnnotation} {
+	for _, k := range []string{AcknowledgePlannedFailoverHoldAnnotation, PlannedFailoverTerminalAnnotation,
+		PlannedFailoverStallSinceAnnotation, PlannedFailoverManagerAbsentSinceAnnotation, PlannedFailoverConfirmedAnnotation} {
 		if _, ok := a[k]; ok {
 			return true
 		}
@@ -69,9 +168,20 @@ func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 }
 
 // plannedClaimHeld reports whether the group's planned-failover claim slot
-// is held (a run, a provisional grant, or a hold).
+// is held (a run, a provisional grant, or a hold). Every reconcile-side
+// claim question goes through the engine's topology facade (K164), the
+// runner's facade in production, so an injected facade answers them all.
 func (r *MysqlFailoverGroupReconciler) plannedClaimHeld(nn types.NamespacedName) bool {
-	return r.Runner != nil && r.Runner.PlannedClaimHeld(nn)
+	return r.plannedTopologyFacade().PlannedClaimHeld(nn)
+}
+
+// plannedTopologyFacade is the facade the engine uses (the same one
+// plannedFailoverEngine wires in); asking it does not build the engine.
+func (r *MysqlFailoverGroupReconciler) plannedTopologyFacade() PlannedFailoverTopology {
+	if r.PlannedTopology != nil {
+		return r.PlannedTopology
+	}
+	return productionPlannedTopology(r.Runner)
 }
 
 // plannedOwnsDragonfly reports whether a planned failover owns fg's
@@ -85,7 +195,7 @@ func (r *MysqlFailoverGroupReconciler) plannedOwnsDragonfly(fg *v1alpha1.MysqlFa
 	if r.Runner == nil {
 		return plannedFailoverOwnsDragonfly(fg, false)
 	}
-	held := r.Runner.PlannedClaimHeld(nn)
+	held := r.plannedClaimHeld(nn)
 	if r.Runner.Snapshot(nn).Current != nil {
 		return held
 	}
@@ -95,7 +205,7 @@ func (r *MysqlFailoverGroupReconciler) plannedOwnsDragonfly(fg *v1alpha1.MysqlFa
 // plannedRunClaimHeld reports whether the group's slot holds a Run-mode
 // claim (a run or its provisional grant); a hold does not count.
 func (r *MysqlFailoverGroupReconciler) plannedRunClaimHeld(nn types.NamespacedName) bool {
-	_, ok := r.plannedFailoverEngine().topo.HeldRunClaim(nn)
+	_, ok := r.plannedTopologyFacade().HeldRunClaim(nn)
 	return ok
 }
 

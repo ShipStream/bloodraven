@@ -91,6 +91,22 @@ type DeploymentLeaseManager struct {
 	plannedClaimHeld atomic.Pointer[func(types.NamespacedName) bool]
 }
 
+// Deployment-lease refusal reasons that the planned-failover engine maps
+// to admission wait reasons (plannedAdmissionWaitReason).
+const (
+	deploymentReasonConcurrentOperation        = "ConcurrentOperation"
+	deploymentReasonTopologyPersistencePending = "TopologyPersistencePending"
+)
+
+// The operations that take BeginPlanned's admission reservation. A refusal
+// while another one holds the reservation carries the holder's name as
+// its reason.
+const (
+	deploymentOperationPlannedFailover = "PlannedFailover"
+	deploymentOperationRestoreInPlace  = "RestoreInPlace"
+	deploymentOperationOrderedUpdate   = "OrderedUpdate"
+)
+
 func NewDeploymentLeaseManager(c client.Client, reader client.Reader, recorder record.EventRecorder) *DeploymentLeaseManager {
 	if reader == nil {
 		reader = c
@@ -119,15 +135,16 @@ func (m *DeploymentLeaseManager) claimHeld(fg *v1alpha1.MysqlFailoverGroup) bool
 }
 
 // UnstableReason is DeploymentUnstableReason plus the planned-failover
-// claim slot: a held claim is "PlannedFailover" even before status shows a
-// run.
+// claim slot and the durable automation hold: a held claim is
+// "PlannedFailover" even before status shows a run, and a durable hold is
+// too before the slot has been hydrated from it.
 func (m *DeploymentLeaseManager) UnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 	reason := DeploymentUnstableReason(fg)
 	switch reason {
 	case "DeploymentRevocationPending", "Initializing", "NoPrimary", "PlannedFailover":
 		return reason
 	}
-	if m.claimHeld(fg) {
+	if m.claimHeld(fg) || PlannedHoldFrom(fg) != nil {
 		return "PlannedFailover"
 	}
 	return reason
@@ -462,7 +479,7 @@ func (m *DeploymentLeaseManager) gate(fg *v1alpha1.MysqlFailoverGroup) error {
 func (m *DeploymentLeaseManager) topologyGate(fg *v1alpha1.MysqlFailoverGroup) error {
 	nn := client.ObjectKeyFromObject(fg)
 	if _, pending := m.pending.Load(nn); pending {
-		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: "TopologyPersistencePending", RetryAfterSeconds: 1}
+		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: deploymentReasonTopologyPersistencePending, RetryAfterSeconds: 1}
 	}
 	if uid, observed := m.observed.Load(nn); m.requireTopology.Load() && (!observed || uid != fg.UID) {
 		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: "TopologyNotObserved", RetryAfterSeconds: 1}
@@ -766,15 +783,17 @@ func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1alpha1.
 		return hold, err
 	}
 	// Another operation is refused while a planned-failover run owns the
-	// sites, holds a (possibly provisional) claim, or a hold stands.
-	if (operation != "PlannedFailover" && (plannedFailoverOwnsSites(fg) || m.claimHeld(fg))) ||
-		(operation != "RestoreInPlace" && inPlaceRestoreInFlight(fg)) ||
-		(operation != "OrderedUpdate" && fg.Status.UpdatePhase != "") {
-		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: "ConcurrentOperation", RetryAfterSeconds: 1}
+	// sites, holds a (possibly provisional) claim, or a hold stands: the
+	// durable hold counts on its own, so a hold is refused before the
+	// claim slot has been hydrated from it (after a restart).
+	if (operation != deploymentOperationPlannedFailover && (plannedFailoverOwnsSites(fg) || m.claimHeld(fg) || PlannedHoldFrom(fg) != nil)) ||
+		(operation != deploymentOperationRestoreInPlace && inPlaceRestoreInFlight(fg)) ||
+		(operation != deploymentOperationOrderedUpdate && fg.Status.UpdatePhase != "") {
+		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: deploymentReasonConcurrentOperation, RetryAfterSeconds: 1}
 	}
 	nn := client.ObjectKeyFromObject(fg)
 	if _, pending := m.pending.Load(nn); pending {
-		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: "TopologyPersistencePending", RetryAfterSeconds: 1}
+		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: deploymentReasonTopologyPersistencePending, RetryAfterSeconds: 1}
 	}
 	if m.planned[nn] != "" {
 		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: m.planned[nn]}
