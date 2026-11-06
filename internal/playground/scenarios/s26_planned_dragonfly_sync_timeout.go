@@ -189,21 +189,28 @@ func observeS26PlannedFailoverSucceeded() runner.Step {
 	}
 }
 
+// verifyS26MysqlActiveSiteFlipped waits for status.activeSite to name the
+// target, as s25's verify does. status.activeSite is the debounced
+// observation: the target counts as writable only after recoveryThreshold
+// consecutive writable polls, so a status write in that window publishes
+// activeSite="" even beside a Succeeded record. Reading it once right
+// after Succeeded failed the full-profile run (#235) although the group
+// converged on the target seconds later.
 func verifyS26MysqlActiveSiteFlipped() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
 		Name:  "MySQL status.activeSite flipped to target",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			target := ctxFetch(env, "s26Target")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
-			if err != nil {
-				return err
-			}
-			if mfg.Status.ActiveSite != target {
-				return fmt.Errorf("status.activeSite=%q want %q (Dragonfly degradation must NOT block MySQL failover)",
-					mfg.Status.ActiveSite, target)
-			}
-			return nil
+			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
+				fmt.Sprintf("status.activeSite==%s after the planned failover (Dragonfly degradation must NOT block MySQL failover)", target),
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					return mfg.Status.ActiveSite == target, fmt.Sprintf("status.activeSite=%q", mfg.Status.ActiveSite), nil
+				},
+			)
+			return err
 		},
 	}
 }
