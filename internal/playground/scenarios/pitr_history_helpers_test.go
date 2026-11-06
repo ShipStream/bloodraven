@@ -637,3 +637,24 @@ func TestPITRDecryptObjectReadsEncryptedManifest(t *testing.T) {
 		t.Fatal("wrong passphrase decrypted")
 	}
 }
+
+func TestPITRSiteReplicating(t *testing.T) {
+	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg.Status.Sites = []v1alpha1.SiteStatus{
+		{Name: "iad", State: "writable"},
+		{Name: "pdx", State: "read-only"},
+	}
+	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
+		t.Fatal("a read-only site that is not replicating counted as replicating")
+	}
+	mfg.Status.Sites[1].Replicating = true
+	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
+		t.Fatal("a replicating read-only site was not accepted")
+	}
+	if ok, _, _ := pitrSiteReplicating(mfg, "iad"); ok {
+		t.Fatal("the writable site counted as a replicating target")
+	}
+	if ok, _, _ := pitrSiteReplicating(mfg, "sfo"); ok {
+		t.Fatal("a site missing from status counted as replicating")
+	}
+}

@@ -941,6 +941,12 @@ func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, to
 	if err := pitrWaitCooldown(ctx, env); err != nil {
 		return time.Time{}, err
 	}
+	// The operator refuses a target that is not replicating
+	// (TargetUnhealthy). After the previous failover the old primary
+	// resumes replication asynchronously, so wait for status to say so.
+	if err := pitrWaitSiteReplicating(ctx, env, target); err != nil {
+		return time.Time{}, err
+	}
 	requested, err := pitrSiteNow(ctx, env, target)
 	if err != nil {
 		return time.Time{}, err
@@ -969,6 +975,31 @@ func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, to
 	}
 	env.Capture.Note(fmt.Sprintf("planned failover to %s succeeded; promotion recorded at %s", target, recorded.Format(time.RFC3339Nano)))
 	return recorded, nil
+}
+
+// pitrWaitSiteReplicating waits until status reports site as a read-only
+// replica that is replicating, which a planned failover requires of its
+// target.
+func pitrWaitSiteReplicating(ctx context.Context, env *runner.Env, site string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, site+" replicating", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		return pitrSiteReplicating(mfg, site)
+	})
+	return err
+}
+
+// pitrSiteReplicating reports whether status shows site replicating as a
+// read-only replica.
+func pitrSiteReplicating(mfg *v1alpha1.MysqlFailoverGroup, site string) (bool, string, error) {
+	for _, st := range mfg.Status.Sites {
+		if st.Name != site {
+			continue
+		}
+		msg := fmt.Sprintf("state=%s replicating=%t lastSeen=%v", st.State, st.Replicating, st.LastSeen)
+		return st.State == "read-only" && st.Replicating, msg, nil
+	}
+	return false, "site not in status", nil
 }
 
 // pitrWaitPromotionRecorded waits until site's archiver is the primary on
