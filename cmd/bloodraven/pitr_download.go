@@ -53,7 +53,6 @@ import (
 //	BLOODRAVEN_PITR_MANIFEST_PREFIX    its key prefix (must agree)
 //	BLOODRAVEN_PITR_ENCRYPTION_MODE    None or Passphrase, from the archive profile
 //	BLOODRAVEN_PITR_PASSPHRASE_FILE    the archive key when Passphrase
-//	BLOODRAVEN_PITR_CLOCK_SKEW_MARGIN  δ (Go duration, default 5s; D-50)
 //	BLOODRAVEN_PITR_MEMORY_LIMIT_BYTES the container's memory limit (optional; else the cgroup's)
 //	BLOODRAVEN_PITR_PLAN_MEMORY_BYTES  the planner budget (default 60% of the memory limit, or 512 MiB; D-42)
 //	BLOODRAVEN_PITR_STAGING_LIMIT_BYTES the staging emptyDir's sizeLimit (optional)
@@ -159,16 +158,6 @@ func pitrDownloadRequestFromEnv(getenv func(string) string) (pitrDownloadRequest
 	req.dumpMetaPath = getenv("BLOODRAVEN_PITR_DUMP_META")
 	req.outDir = getenv("BLOODRAVEN_PITR_OUTPUT_DIR")
 	req.delta = pitrplan.DefaultClockSkewMargin
-	if v := getenv("BLOODRAVEN_PITR_CLOCK_SKEW_MARGIN"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil || d < 0 {
-			return req, fmt.Errorf("BLOODRAVEN_PITR_CLOCK_SKEW_MARGIN=%q: a non-negative duration", v)
-		}
-		if d == 0 {
-			d = time.Microsecond // 0 would mean "default" to the planner
-		}
-		req.delta = d
-	}
 	limit, err := pitrMemoryLimit(getenv, pitrCgroupMemoryFiles)
 	if err != nil {
 		return req, err

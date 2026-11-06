@@ -208,7 +208,6 @@ func TestPITRDownloadRequestFromEnv(t *testing.T) {
 		"unknown mode":           {"BLOODRAVEN_PITR_MODE": "head"},
 		"bad excludeGtids":       {"BLOODRAVEN_PITR_EXCLUDE_GTIDS": "nope"},
 		"bad allowPartial":       {"BLOODRAVEN_PITR_ALLOW_PARTIAL": "yes"},
-		"bad clock margin":       {"BLOODRAVEN_PITR_CLOCK_SKEW_MARGIN": "-1s"},
 		"missing dump meta path": {"BLOODRAVEN_PITR_DUMP_META": ""},
 	} {
 		m := map[string]string{}
