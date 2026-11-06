@@ -1066,7 +1066,7 @@ Decide by `result.reason` and `result.warnings`:
 1. **Another site is writable** (`ForeignWritable`, or a rollback that found a writable peer): that site is the primary. Never unfence the source; old-primary recovery repoints it as a replica. If you are not sure which site holds the newest data, escalate.
 2. **`SourceLost`**: the source was unreachable; emergency failover takes over once the run releases its claim. Restore connectivity; nothing to unfence.
 3. **An attributable fence** (no `FenceNotAttributable` warning; for example `StatusStalled`, `ManagerUnavailable`, or a rollback that could not confirm the unfence within 30s), every site reachable, and `status.lastFailoverTarget` empty or the source: the topology manager re-asserts the source on its own, rate-limited by `failoverCooldown`. Wait for the re-assert. With a peer unreachable, the normal unreachable-plus-read-only promotion path decides.
-4. **Manual cases**: `FenceNotAttributable`, `LegacyRunRefused`, `AuthorityChanged` before `fence.state` was `Applied`, or `status.lastFailoverTarget` naming a site other than the source. The fence is not the run's to clear, and nothing in the operator will lift it. With explicit approval, after confirming no site is writable, unfence the site with the most complete GTID set (`SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF;`), or re-annotate a planned failover to a healthy target.
+4. **Manual cases**: `FenceNotAttributable`, `LegacyRunRefused`, `UnknownSite` (the source or target was removed from `spec.sites` mid-run; nothing was named), `AuthorityChanged` before `fence.state` was `Applied`, or `status.lastFailoverTarget` naming a site other than the source. The fence is not the run's to clear, and nothing in the operator will lift it. With explicit approval, after confirming no site is writable, unfence the site with the most complete GTID set (`SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF;`), or re-annotate a planned failover to a healthy target.
 5. Verify `status.activeSite`, DNS and an application write.
 
 Do not:
@@ -1075,12 +1075,12 @@ Do not:
 
 ## 38. Automation held after a planned failover (`AutomaticFailoverHeld`)
 
-A planned failover may have written to its target and could not explain what it found (a foreign writable site, transactions outside the fenced set, a writable target with a replication channel, a replaced server after a possible write). It ended `ManualRecoveryRequired` and holds automation for the group instead of letting split-brain resolution pick a winner, which could fence the only holder of acknowledged writes.
+A planned failover may have written to its target and could not explain what it found (a foreign writable site, transactions outside the fenced set, a writable target with a replication channel, a replaced server after a possible write or after the run's failover record was durable). A target found replaced by a restarted operator before the run's record was durable, with the source still holding the fenced set under the run's fence and every other promotable site read-only, rolls back (`TargetChanged`) instead of holding. It ended `ManualRecoveryRequired` and holds automation for the group instead of letting split-brain resolution pick a winner, which could fence the only holder of acknowledged writes.
 
 ### Symptoms
 - Condition `AutomaticFailoverHeld=True`, reason `PlannedFailoverManualRecovery`; `kubectl bloodraven status` summary ends `+held`.
 - Warning Events `PlannedFailoverManualRecoveryRequired`, then `PlannedFailoverHoldPending` every 10 minutes.
-- Operator log `planned failover: automation held pending acknowledgement` and, every poll, `cross-site action deferred: planned failover in progress`.
+- Operator log `planned failover: automation held pending acknowledgement` (once per hold, not per pass) and, every poll, `cross-site action deferred: planned failover in progress`. Backups, schedules, verification, keyring work and pod labels keep reconciling during the hold.
 - New planned-failover requests end `NotStarted/ManualRecoveryPending`.
 
 ### Diagnostic steps

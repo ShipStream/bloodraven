@@ -46,11 +46,11 @@ type pfFakeTopology struct {
 	record     func(ref PlannedRunRef) error
 	dns        func(ref PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error)
 	rollback   func(ref PlannedRunRef) (RollbackResult, error)
-	needsProof bool              // the next mutating call returns errReproveRequired
+	needsProof bool // the next mutating call returns errReproveRequired
 	// probeUnguarded makes ProbeLag a plain read, as in production (the
 	// facade's ProbeLag needs no claim).
 	probeUnguarded bool
-	authority  *PlannedAuthority // ManagerAuthority's answer; nil: no manager
+	authority      *PlannedAuthority // ManagerAuthority's answer; nil: no manager
 	// onCtx, when set, sees the ctx of every ProbeLag and Promote call (the
 	// pass bound the engine applied).
 	onCtx func(op string, ctx context.Context)

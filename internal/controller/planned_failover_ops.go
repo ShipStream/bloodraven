@@ -1587,12 +1587,12 @@ func (tm *TopologyManager) replacedTargetRollbackSafe(ctx context.Context, p *ru
 	if err != nil || !have.Contains(F) {
 		return false
 	}
-	for _, pr := range tm.plannedProbeSites(ctx, ref.Source) {
-		if pr.err == nil && !pr.readOnly {
-			return false
-		}
-	}
-	return true
+	// The target was just read read-only on its pinned session. Every other
+	// promotable peer must positively read read-only: an unreadable
+	// primary-candidate or dr-only site may be the writable one (strict
+	// evidence, as §4.1), so the conservative hold stands.
+	peers := classifyPlannedPeers(tm.plannedProbeSites(ctx, ref.Source, ref.Target))
+	return len(peers.writable) == 0 && len(peers.unreadable) == 0
 }
 
 func mergeWarnings(a, b []v1alpha1.PlannedFailoverWarning) []v1alpha1.PlannedFailoverWarning {

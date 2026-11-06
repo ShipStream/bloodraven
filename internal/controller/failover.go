@@ -152,7 +152,7 @@ func (h promoteHooks) send(ctx context.Context, s promoteMemoStage, stmt func(co
 		h.before(s)
 	}
 	var err error
-	if false {
+	if h.statementTimeout > 0 {
 		stmtCtx, cancel := context.WithTimeout(ctx, h.statementTimeout)
 		err = stmt(stmtCtx)
 		cancel()

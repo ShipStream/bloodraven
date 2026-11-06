@@ -49,6 +49,15 @@ func TestReconcile_StandingHoldStillReconcilesBackups(t *testing.T) {
 	topo.setHeld("run-1", true)
 	r.PlannedTopology = topo
 	r.plannedClock = clock.NewFakeClock(time.Now())
+	// The runner's slot holds the hold too, so the "any claim held" check
+	// the early return used before the fix would see it.
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	runner := &TopologyManagerRunner{logger: slog.Default()}
+	runner.Slot(nn).toHold("run-1")
+	r.Runner = runner
+	if !r.plannedClaimHeld(nn) {
+		t.Fatal("setup: the runner's slot does not report the hold")
+	}
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}})
 	if err != nil {
@@ -443,6 +452,26 @@ func TestFixR1_DragonflyTakeoverDeadline(t *testing.T) {
 			}
 		})
 	}
+	// Past the deadline, a takeover an earlier attempt already made (its
+	// result write lost) is finished, never failed: the fail policy must not
+	// roll MySQL back beside a Dragonfly target holding the master role.
+	t.Run("earlier takeover finished", func(t *testing.T) {
+		probe := pfDFTakeoverFixture("fail", time.Now())
+		late := time.Now().Add(-plannedDragonflyTakeoverDeadline(probe.Status.PlannedFailover) - 5*time.Second)
+		fg := pfDFTakeoverFixture("fail", late)
+		r, _, _ := pfDFReconciler(t, fg, makeDragonflyPod(fg.Name, "iad", "master", true), makeDragonflyPod(fg.Name, "pdx", "replica", true))
+		target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}}
+		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target,
+			pfDFIad: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}})
+		pfDFPass(t, r, fgNN(fg))
+		pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+		if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
+			t.Fatalf("block = %s %+v, want Promoting with the earlier takeover Succeeded", pf.Phase, pf.Dragonfly.Takeover)
+		}
+		if target.takeovers != 0 {
+			t.Fatalf("REPLTAKEOVER sent %d times past the takeover deadline", target.takeovers)
+		}
+	})
 	e := &PlannedFailoverEngine{runs: map[string]*plannedRunMemo{}}
 	pf := pfDFTakeoverFixture("proceed", time.Now()).Status.PlannedFailover
 	if got, want := e.passBound(pf), defaultDragonflyGateWait+plannedDragonflyMaxSyncWait(pf)+plannedDragonflyTakeoverSlack+plannedPassOrdinary; got != want {
@@ -823,6 +852,7 @@ func TestFixR1_ReplacedTargetRollbackSafe(t *testing.T) {
 	}{
 		{"safe", func(*opsFixture) {}, true},
 		{"writable peer", func(f *opsFixture) { f.third.ro, f.third.sro = false, false }, false},
+		{"unreadable promotable peer", func(f *opsFixture) { f.third.down = true }, false},
 		{"source lacks F", func(f *opsFixture) { f.src.gtid = opsUUIDA + ":1-9" }, false},
 		{"fence not the run's", func(f *opsFixture) { f.src.uuid = opsUUIDC }, false},
 	} {

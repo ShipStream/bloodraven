@@ -575,3 +575,102 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 	pf := h.pf()
 	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonManagerUnavailable)
 }
+
+// TestDSTPF_ConfirmedRunReleasesBeforePublishing pins DST-4 (actors-on DST
+// seed 2252 at the time): the run confirmed dc2 and recorded the promotion,
+// an external writer then made the old source dc1 writable, and a status
+// outage kept the Publishing write from landing. The claim was held until
+// Publishing committed, so the topology manager's split-brain fence of dc1
+// was refused ("cross-site action deferred: planned failover in progress")
+// and two sites stayed writable for as long as status writes failed. The
+// claim is now released right after the record and DNS (Publishing is
+// bookkeeping): the manager fences dc1 within its debounce while the
+// Publishing write is still failing, and the run still ends Succeeded.
+func TestDSTPF_ConfirmedRunReleasesBeforePublishing(t *testing.T) {
+	h := newPFHarness(t, pfOpts{})
+	h.request("dc2")
+	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePromoting))
+	h.store.DenyStatus(1 << 20) // the Publishing write cannot land
+	for range 4 {
+		h.pass()
+	}
+	if h.tgt.isReadOnly() {
+		t.Fatal("setup: the target was not promoted")
+	}
+	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
+		t.Fatalf("setup: the Publishing write landed: %+v", pf)
+	}
+	if run, _, ok := h.held(); ok {
+		t.Fatalf("the claim of %s is still held with only the Publishing write left", run)
+	}
+	h.src.setRO(false, false) // an external writer: two writable sites
+	fenced := false
+	for range 10 {
+		h.tick()
+		h.pass()
+		if h.src.isSuperReadOnly() {
+			fenced = true
+			break
+		}
+	}
+	if !fenced {
+		t.Fatalf("dc1 stayed writable beside the promoted dc2 while the Publishing write stalled; dc1 statements %v",
+			h.src.statements())
+	}
+	if h.tgt.isReadOnly() {
+		t.Fatal("the split-brain fence fenced the promoted target")
+	}
+	h.store.ClearFaults()
+	pf := h.runUntil(40, terminal)
+	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+}
+
+// TestDSTPF_RetiredManagerHandoffReachesReplacement pins DST-1 (actors-on
+// DST seeds 1945, 196, 180 at the time): an ordered update started on
+// manager A hands the primary off to dc2 after A was replaced. The handoff
+// was recorded only in A's memory: A's status writes are dropped (it is not
+// the current manager) and its out-of-band flush was denied, so the
+// replacement B never learned of it and, when dc2 then failed, promoted dc1
+// inside the failover cooldown. The record is now carried into B under the
+// timestamp-monotonic rule, at registration (the runner passes the retiring
+// managers as Predecessors) and again once A's update workers exit (the
+// runner's retire goroutine). B refuses the emergency promotion inside the
+// cooldown and persists the handoff with its own next status write.
+func TestDSTPF_RetiredManagerHandoffReachesReplacement(t *testing.T) {
+	h := newPFHarness(t, pfOpts{updater: true, cooldown: 10 * time.Minute})
+	b := h.startHandoffBlockedInFence(t)
+	h.stateDenied = true // the out-of-band store is down for the whole window
+	old := h.tm
+	old.RetireForSim()
+	h.tm = h.newManager()
+	w := h.wiring(h.reg.slot)
+	w.RetiringUpdateInFlight = old.OrderedUpdateClaimedForSim()
+	w.RetiringBusy = func() bool { return old.ChangingSitesForSim() }
+	w.Predecessors = []*controller.TopologyManager{old} // as registerManagerWith
+	controller.WireRegisteredManager(h.tm, w)
+	h.setCurrent(h.tm)
+	b.Release()
+	h.waitIdle(t) // the handoff to dc2 finishes on the retired manager
+	if h.src.isPromoted() || h.tgt.isReadOnly() {
+		t.Fatalf("setup: the handoff did not move the primary to dc2 (dc1 ro=%v, dc2 ro=%v)", h.src.isReadOnly(), h.tgt.isReadOnly())
+	}
+	// As retireManagerLocked's goroutine once the old workers have exited.
+	if !controller.CarryRetiredFailoverRecord(h.tm, old) {
+		t.Fatal("the retired manager's handoff record was not carried into the replacement")
+	}
+	h.tm.SetPredecessorUpdateInFlightForSim(false)
+	for range 3 {
+		h.tick()
+	}
+	h.tgt.setError(errors.New("dc2 down"))
+	for range 15 {
+		h.tick()
+	}
+	if !h.src.isReadOnly() {
+		t.Fatalf("the replacement made dc1 writable %s after the handoff, inside the 10m cooldown; dc1 statements %v",
+			15*time.Second, h.src.statements())
+	}
+	if got := h.store.Object().Status.LastFailoverTarget; got != "dc2" {
+		t.Fatalf("status.lastFailoverTarget = %q, want the carried handoff target dc2", got)
+	}
+}
