@@ -668,7 +668,7 @@ func TestRestoreReclone_WaitsForOfflineFenceRelease(t *testing.T) {
 	if d, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil || d <= 0 {
 		t.Fatalf("requeue %s err %v, want a wait", d, err)
 	}
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("a reclone was requested under the fence: %q", got)
 	}
 }
@@ -700,7 +700,7 @@ func TestReconcile_ReleasesRestoreFenceBeforeReclones(t *testing.T) {
 	if mocks["dc1"].offlineMode || fresh.Status.RestoreOfflineFence != nil {
 		t.Fatalf("offline_mode=%v fence %+v, want released by Reconcile", mocks["dc1"].offlineMode, fresh.Status.RestoreOfflineFence)
 	}
-	if got := fresh.GetAnnotations()[RecloneAnnotation]; !strings.HasPrefix(got, "dc2") {
+	if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; !strings.HasPrefix(got, "dc2") {
 		t.Fatalf("reclone annotation = %q, want dc2 requested in the same pass, after the release", got)
 	}
 }

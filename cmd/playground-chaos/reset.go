@@ -34,9 +34,11 @@ const (
 	operatorDeployment          = "bloodraven"
 	mysqlSelector               = "app.kubernetes.io/name=mysql"
 	operatorSelector            = "app.kubernetes.io/name=bloodraven"
-	readonlyTaintKey            = "shipstream.io/db-readonly-playground"
 	resetBaselineStableDuration = 20 * time.Second
 )
+
+// readonlyTaintKey is the read-only taint key of the playground group.
+var readonlyTaintKey = v1alpha1.ReadOnlyTaintKey("playground")
 
 type resetter struct {
 	k          *pgkube.Client
@@ -382,10 +384,9 @@ func mfgStatusFieldsToClear(keepEncryption bool) []string {
 // Key snapshots the operator makes (#203). They have no owner reference, so
 // nothing else removes them from a reused playground.
 const (
-	keySnapshotSelector   = "app.kubernetes.io/name in (mysql-pitr-key,mysql-dump-key)"
-	keySnapshotAppLabel   = "app.kubernetes.io/name"
-	dumpKeySnapshotApp    = "mysql-dump-key"
-	dumpKeyBackupUIDLabel = "bloodraven.shipstream.io/mysqlbackup-uid"
+	keySnapshotSelector = "app.kubernetes.io/name in (mysql-pitr-key,mysql-dump-key)"
+	keySnapshotAppLabel = "app.kubernetes.io/name"
+	dumpKeySnapshotApp  = "mysql-dump-key"
 )
 
 // staleKeySnapshots selects the key snapshots a wipe deletes: every archive
@@ -396,7 +397,7 @@ const (
 func staleKeySnapshots(secrets []corev1.Secret, liveBackups map[types.UID]bool) []corev1.Secret {
 	var out []corev1.Secret
 	for _, s := range secrets {
-		if s.Labels[keySnapshotAppLabel] == dumpKeySnapshotApp && liveBackups[types.UID(s.Labels[dumpKeyBackupUIDLabel])] {
+		if s.Labels[keySnapshotAppLabel] == dumpKeySnapshotApp && liveBackups[types.UID(s.Labels[v1alpha1.MysqlBackupUIDLabel])] {
 			continue
 		}
 		out = append(out, s)
@@ -496,7 +497,7 @@ func (r *resetter) clearMFGStatusFields(ctx context.Context, names []string) err
 // has consumed it.
 func (r *resetter) clearPlannedFailoverRequest(ctx context.Context) error {
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{
-		brcontroller.PlannedFailoverAnnotation: nil}}})
+		v1alpha1.PlannedFailoverAnnotation: nil}}})
 	if err != nil {
 		return err
 	}

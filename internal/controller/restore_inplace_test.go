@@ -280,10 +280,10 @@ func primaryFencedPod(fgName, site string) *corev1.Pod {
 			Name:      resourceName(fgName, site) + "-abc",
 			Namespace: "ns",
 			Labels: map[string]string{
-				labelAppName:  "mysql",
-				labelInstance: fgName,
-				labelSite:     site,
-				labelRole:     "fenced",
+				labelAppName:       "mysql",
+				labelInstance:      fgName,
+				v1alpha1.SiteLabel: site,
+				v1alpha1.RoleLabel: "fenced",
 			},
 		},
 	}
@@ -494,7 +494,7 @@ func TestReconcileInPlaceRestore_PerSchema_CreatesJobWithDropAndSkipBinlogFalse(
 	}
 	// Newly created Jobs must be stamped with the request's confirm token
 	// so a later reconcile can tell them apart from a leftover Job.
-	if got := job.Annotations[restoreInPlaceConfirmAnnotation]; got != fg.Spec.RestoreInPlace.Confirm {
+	if got := job.Annotations[v1alpha1.RestoreInPlaceConfirmAnnotation]; got != fg.Spec.RestoreInPlace.Confirm {
 		t.Errorf("created Job confirm annotation = %q, want %q", got, fg.Spec.RestoreInPlace.Confirm)
 	}
 }
@@ -514,12 +514,12 @@ func TestInPlaceRestoreJobIsForConfirm(t *testing.T) {
 		t.Error("unannotated job must be treated as stale")
 	}
 	// An older confirm is stale.
-	j.Annotations = map[string]string{restoreInPlaceConfirmAnnotation: "2026-04-17T13:00:00Z"}
+	j.Annotations = map[string]string{v1alpha1.RestoreInPlaceConfirmAnnotation: "2026-04-17T13:00:00Z"}
 	if inPlaceRestoreJobIsForConfirm(j, confirm) {
 		t.Error("older-confirm job must be treated as stale")
 	}
 	// Exact match is this request's Job.
-	j.Annotations[restoreInPlaceConfirmAnnotation] = confirm
+	j.Annotations[v1alpha1.RestoreInPlaceConfirmAnnotation] = confirm
 	if !inPlaceRestoreJobIsForConfirm(j, confirm) {
 		t.Error("matching-confirm job must be honored")
 	}
@@ -536,7 +536,7 @@ func inPlaceRestoreJobObj(fg *v1alpha1.MysqlFailoverGroup, confirm string, faile
 		},
 	}
 	if confirm != "" {
-		job.Annotations = map[string]string{restoreInPlaceConfirmAnnotation: confirm}
+		job.Annotations = map[string]string{v1alpha1.RestoreInPlaceConfirmAnnotation: confirm}
 	}
 	if failed {
 		job.Status.Conditions = []batchv1.JobCondition{{
@@ -595,7 +595,7 @@ func TestReconcileInPlaceRestore_StaleJobNotInherited(t *testing.T) {
 	if err := c.Get(context.Background(), jobKey, &created); err != nil {
 		t.Fatalf("clean Job not created on reconcile #2: %v", err)
 	}
-	if got := created.Annotations[restoreInPlaceConfirmAnnotation]; got != fg.Spec.RestoreInPlace.Confirm {
+	if got := created.Annotations[v1alpha1.RestoreInPlaceConfirmAnnotation]; got != fg.Spec.RestoreInPlace.Confirm {
 		t.Errorf("recreated Job confirm annotation = %q, want %q", got, fg.Spec.RestoreInPlace.Confirm)
 	}
 	if fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceRestoring || fg.Status.RestoreInPlace.JobName != created.Name {
@@ -676,7 +676,7 @@ func TestReconcileInPlaceRestore_RunningJobSurvivesConfirmChange(t *testing.T) {
 		Name: inPlaceRestoreJobName(fg.Name, site), Namespace: fg.Namespace}, &live); err != nil {
 		t.Fatalf("a RUNNING restore Job must not be deleted when confirm changes: %v", err)
 	}
-	if got := live.Annotations[restoreInPlaceConfirmAnnotation]; got != accepted {
+	if got := live.Annotations[v1alpha1.RestoreInPlaceConfirmAnnotation]; got != accepted {
 		t.Errorf("the in-flight Job must keep running under its own confirm; annotation=%q want %q", got, accepted)
 	}
 	if fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceRestoring {
@@ -1032,7 +1032,7 @@ func TestReconcileInPlaceRestore_PerSchema_ResumingSkipsRecloneAnnotation(t *tes
 	if fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceSucceeded {
 		t.Errorf("want Succeeded, got %s", fresh.Status.RestoreInPlace.Phase)
 	}
-	if got := fresh.GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Errorf("per-schema should not set reclone annotation, got %q", got)
 	}
 }

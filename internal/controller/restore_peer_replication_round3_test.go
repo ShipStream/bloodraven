@@ -97,7 +97,7 @@ func TestConfirmBumpDuringSettlement_DoesNotStallReconcile(t *testing.T) {
 	const confirmB = "2026-04-18T10:00:00Z"
 	fg := jobLostFG(time.Now())
 	fg.Spec.RestoreInPlace.Confirm = confirmB
-	fg.SetAnnotations(map[string]string{PlannedFailoverAnnotation: "pdx"})
+	fg.SetAnnotations(map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx"})
 	r, c := newReconciler(fg, dsnSecret(), restorePod(corev1.PodRunning))
 	r.Recorder = record.NewFakeRecorder(200)
 	_, mocks := withFenceRunner(r, c, fg)

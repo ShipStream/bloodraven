@@ -197,7 +197,7 @@ func mdbCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
 			Name:       mdbName,
 			Namespace:  mdbNamespace,
 			Generation: 1,
-			Finalizers: []string{controller.MysqlDatabaseFinalizer},
+			Finalizers: []string{v1alpha1.MysqlDatabaseFinalizer},
 		},
 		Spec: v1alpha1.MysqlDatabaseSpec{
 			GroupRef:     v1alpha1.LocalGroupRef{Name: mdbGroupName},

@@ -196,7 +196,7 @@ func TestPlannedFailoverDragonfly_HappyPath(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(targetPod), &gotTarget); err != nil {
 		t.Fatal(err)
 	}
-	if gotTarget.Labels[labelDragonflyRole] != "master" || gotTarget.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+	if gotTarget.Labels[v1alpha1.DragonflyRoleLabel] != "master" || gotTarget.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 		t.Errorf("target labels = %v", gotTarget.Labels)
 	}
 	if len(source.clientKillTypes) == 0 || source.clientKillTypes[0] != "NORMAL" {
@@ -290,7 +290,7 @@ func TestPlannedFailoverDragonfly_StripFailsProceeds(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, under client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name {
-					if _, has := pod.Labels[labelDragonflyTraffic]; !has {
+					if _, has := pod.Labels[v1alpha1.DragonflyTrafficLabel]; !has {
 						return errors.New("simulated strip-patch failure")
 					}
 				}
@@ -315,7 +315,7 @@ func TestPlannedFailoverDragonfly_StripFailsProceeds(t *testing.T) {
 	got := fetchFG(t, r, fgNN(fg))
 	pf := got.Status.PlannedFailover
 	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed ||
-		pf.Dragonfly.Reason != ReasonDragonflyPromotionFailed || !strings.Contains(pf.Dragonfly.Message, "strip source traffic label") {
+		pf.Dragonfly.Reason != v1alpha1.EventDragonflyPromotionFailed || !strings.Contains(pf.Dragonfly.Message, "strip source traffic label") {
 		t.Fatalf("block = %+v %+v", pf.Phase, pf.Dragonfly)
 	}
 	if effectiveDragonflyMasterSite(got) != "iad" {
@@ -345,7 +345,7 @@ func TestPlannedFailoverDragonfly_TakeoverFailsFailRollsBack(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sourcePod), &gotSource); err != nil {
 		t.Fatal(err)
 	}
-	if gotSource.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+	if gotSource.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 		t.Errorf("source traffic label not restored after a failed takeover: %v", gotSource.Labels)
 	}
 }
@@ -391,7 +391,7 @@ func TestPlannedFailoverDragonflyPredicates(t *testing.T) {
 	}
 	pf.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	pf.Dragonfly.Takeover.State = v1alpha1.DragonflyTakeoverIntended
-	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if plannedFailoverDragonflyStripActive(fg) || plannedFailoverSourceSite(fg) != "" {
 		t.Error("a marked run still strips the source")
 	}

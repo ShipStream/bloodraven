@@ -38,7 +38,7 @@ func readBindingVerification(t *testing.T, state v1alpha1.PITRArchiveBindingStat
 
 func archiveSnapshot(fgUID string) *corev1.Secret {
 	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: testArchiveSnapshot,
-		Labels: map[string]string{labelAppName: appNamePITRKeySnapshot, labelFailoverGroupUID: fgUID, labelFailoverGroup: "lion"}},
+		Labels: map[string]string{labelAppName: appNamePITRKeySnapshot, v1alpha1.FailoverGroupUIDLabel: fgUID, v1alpha1.FailoverGroupLabel: "lion"}},
 		Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("k")}}
 }
 
@@ -60,12 +60,12 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		reason v1alpha1.PITRArchiveBindingReason
 		fail   bool
 	}{
-		{v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingKeyMismatch, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveListFailed, false},
-		{v1alpha1.PITRArchiveBindingBound, pitrBindingKeyMaterialLost, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveNotFound, true},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveLegacy, true},
+		{v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonKeyMismatch, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveListFailed, false},
+		{v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveNotFound, true},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveLegacy, true},
 	} {
 		t.Run(string(tc.state)+"/"+string(tc.reason), func(t *testing.T) {
 			SetOperatorImageDefaults("bloodraven:test", "bloodraven")
@@ -78,12 +78,12 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 				t.Fatal("a Job was created on a binding that is not ready")
 			}
 			if tc.fail {
-				if got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != reasonPITRArchiveBindingNotReady {
-					t.Fatalf("phase %s reason %q, want Failed/%s", got.Status.Phase, verifiedReason(got), reasonPITRArchiveBindingNotReady)
+				if got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(v1alpha1.PITRTokenArchiveBindingNotReady) {
+					t.Fatalf("phase %s reason %q, want Failed/%s", got.Status.Phase, verifiedReason(got), string(v1alpha1.PITRTokenArchiveBindingNotReady))
 				}
 				return
 			}
-			if verificationTerminal(got.Status.Phase) || !strings.HasPrefix(got.Status.Message, reasonPITRArchiveBindingNotReady) {
+			if verificationTerminal(got.Status.Phase) || !strings.HasPrefix(got.Status.Message, string(v1alpha1.PITRTokenArchiveBindingNotReady)) {
 				t.Fatalf("phase %s message %q, want a wait naming the binding", got.Status.Phase, got.Status.Message)
 			}
 		})
@@ -96,14 +96,14 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		for i := 0; i < pitrArchiveBindingsMax; i++ {
 			fg.Status.PITRArchiveBindings = append(fg.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "pab-000000000000000" + string(rune('a'+i%6)),
-				State: v1alpha1.PITRArchiveBindingBound, Reason: pitrBindingBound})
+				State: v1alpha1.PITRArchiveBindingBound, Reason: v1alpha1.PITRArchiveBindingReasonBound})
 		}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		v := verifyCR("verify-limit", "lion", "nightly-s3")
 		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
 		r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
 		reconcileVerifUntilStable(t, r, v.Name)
-		if got := getVerification(t, c, v); got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != reasonPITRArchiveBindingNotReady {
+		if got := getVerification(t, c, v); got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(v1alpha1.PITRTokenArchiveBindingNotReady) {
 			t.Fatalf("phase %s reason %q", got.Status.Phase, verifiedReason(got))
 		}
 	})
@@ -117,9 +117,9 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		fg := fgWithEncryptedBackup()
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		for i := 0; i < pitrArchiveBindingsMax; i++ {
-			state, reason := v1alpha1.PITRArchiveBindingBound, pitrBindingBound
+			state, reason := v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound
 			if i == 0 {
-				state, reason = v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating
+				state, reason = v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating
 			}
 			fg.Status.PITRArchiveBindings = append(fg.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "pab-000000000000000" + string(rune('a'+i%6)),
 				State: state, Reason: reason})
@@ -146,14 +146,14 @@ func TestVerificationHoldsArchiveKeySnapshot(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("stamped, labelled, released", func(t *testing.T) {
-		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, pitrBindingBound, archiveSnapshot("lion-uid"))
+		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, archiveSnapshot("lion-uid"))
 		reconcileVerifUntilStable(t, r, v.Name)
 		var job batchv1.Job
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: verificationJobName(v.Name)}, &job); err != nil {
 			t.Fatal(err)
 		}
-		if job.Labels[labelPITRKeySecret] != testArchiveSnapshot {
-			t.Fatalf("Job label %s = %q", labelPITRKeySecret, job.Labels[labelPITRKeySecret])
+		if job.Labels[v1alpha1.PITRKeySecretLabel] != testArchiveSnapshot {
+			t.Fatalf("Job label %s = %q", v1alpha1.PITRKeySecretLabel, job.Labels[v1alpha1.PITRKeySecretLabel])
 		}
 		if vol := findVolume(job.Spec.Template.Spec.Volumes, "pitr-passphrase"); vol == nil || vol.Secret.SecretName != testArchiveSnapshot ||
 			vol.Secret.Optional != nil || vol.Secret.Items[0].Key != pitrKeySnapshotDataKey {
@@ -184,7 +184,7 @@ func TestVerificationHoldsArchiveKeySnapshot(t *testing.T) {
 	})
 
 	t.Run("row 28a: snapshot released first, verification waits", func(t *testing.T) {
-		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, pitrBindingBound)
+		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
 		reconcileVerifUntilStable(t, r, v.Name)
 		var job batchv1.Job
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: verificationJobName(v.Name)}, &job); err == nil {
@@ -197,7 +197,7 @@ func TestVerificationHoldsArchiveKeySnapshot(t *testing.T) {
 	})
 
 	t.Run("another group's Secret of that name is not stamped", func(t *testing.T) {
-		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, pitrBindingBound, archiveSnapshot("other-uid"))
+		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, archiveSnapshot("other-uid"))
 		for i := 0; i < 6; i++ {
 			_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(v)})
 		}
@@ -280,11 +280,11 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 		fail   bool
 		bound  bool
 	}{
-		{state: v1alpha1.PITRArchiveBindingPending, reason: pitrBindingAuthenticating},
-		{state: v1alpha1.PITRArchiveBindingRefused, reason: pitrBindingKeyMismatch},
-		{state: v1alpha1.PITRArchiveBindingRefused, reason: pitrBindingArchiveDescriptorMissing, fail: true},
-		{state: v1alpha1.PITRArchiveBindingRefused, reason: pitrBindingArchiveVersionUnsupported, fail: true},
-		{state: v1alpha1.PITRArchiveBindingBound, reason: pitrBindingBound, bound: true},
+		{state: v1alpha1.PITRArchiveBindingPending, reason: v1alpha1.PITRArchiveBindingReasonAuthenticating},
+		{state: v1alpha1.PITRArchiveBindingRefused, reason: v1alpha1.PITRArchiveBindingReasonKeyMismatch},
+		{state: v1alpha1.PITRArchiveBindingRefused, reason: v1alpha1.PITRArchiveBindingReasonArchiveDescriptorMissing, fail: true},
+		{state: v1alpha1.PITRArchiveBindingRefused, reason: v1alpha1.PITRArchiveBindingReasonArchiveVersionUnsupported, fail: true},
+		{state: v1alpha1.PITRArchiveBindingBound, reason: v1alpha1.PITRArchiveBindingReasonBound, bound: true},
 	} {
 		t.Run(string(tc.state)+"/"+string(tc.reason), func(t *testing.T) {
 			fg := fgInitFromMysqlBackup()
@@ -314,22 +314,22 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 				if jobErr != nil {
 					t.Fatal(jobErr)
 				}
-				if job.Labels[labelPITRKeySecret] != e.Encryption.KeySecretName {
-					t.Fatalf("restore Job label %q, want %q", job.Labels[labelPITRKeySecret], e.Encryption.KeySecretName)
+				if job.Labels[v1alpha1.PITRKeySecretLabel] != e.Encryption.KeySecretName {
+					t.Fatalf("restore Job label %q, want %q", job.Labels[v1alpha1.PITRKeySecretLabel], e.Encryption.KeySecretName)
 				}
 				if vol := findVolume(job.Spec.Template.Spec.Volumes, "pitr-passphrase"); vol == nil || vol.Secret.SecretName != e.Encryption.KeySecretName || vol.Secret.Optional != nil {
 					t.Fatalf("restore mounts %+v, want the required snapshot", vol)
 				}
 			case tc.fail:
-				if got.Status.Restore == nil || got.Status.Restore.Phase != v1alpha1.BackupPhaseFailed || got.Status.Restore.Reason != reasonPITRArchiveBindingNotReady {
-					t.Fatalf("restore %+v, want Failed/%s", got.Status.Restore, reasonPITRArchiveBindingNotReady)
+				if got.Status.Restore == nil || got.Status.Restore.Phase != v1alpha1.BackupPhaseFailed || got.Status.Restore.Reason != string(v1alpha1.PITRTokenArchiveBindingNotReady) {
+					t.Fatalf("restore %+v, want Failed/%s", got.Status.Restore, string(v1alpha1.PITRTokenArchiveBindingNotReady))
 				}
 			default:
 				if jobErr == nil {
 					t.Fatal("a restore Job was created on a binding that is not ready")
 				}
 				if got.Status.Restore == nil || got.Status.Restore.Phase != v1alpha1.BackupPhasePending ||
-					!strings.HasPrefix(got.Status.Restore.Message, reasonPITRArchiveBindingNotReady) {
+					!strings.HasPrefix(got.Status.Restore.Message, string(v1alpha1.PITRTokenArchiveBindingNotReady)) {
 					t.Fatalf("restore %+v, want Pending naming the binding", got.Status.Restore)
 				}
 			}

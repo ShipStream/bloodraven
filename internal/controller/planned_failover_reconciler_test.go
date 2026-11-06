@@ -30,7 +30,7 @@ func plannedFailoverFG(annotationValue string) *v1alpha1.MysqlFailoverGroup {
 	}
 	if annotationValue != "" {
 		fg.SetAnnotations(map[string]string{
-			PlannedFailoverAnnotation: annotationValue,
+			v1alpha1.PlannedFailoverAnnotation: annotationValue,
 		})
 	}
 	return fg
@@ -110,7 +110,7 @@ func TestReconcilePlannedFailover_AcceptStampsAdmitting(t *testing.T) {
 		pf.Settings.DrainTimeout.Duration != defaultPlannedFailoverDrainTimeout || pf.Admission == nil || pf.Admission.DeadlineTime == nil {
 		t.Fatalf("admitting record = %+v", pf)
 	}
-	if _, ok := got.Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("annotation not removed after the Admitting write")
 	}
 	select {
@@ -157,7 +157,7 @@ func TestReconcilePlannedFailover_RejectUnknownSite(t *testing.T) {
 		pf.Result.Reason != v1alpha1.PlannedFailoverReasonUnknownSite {
 		t.Fatalf("block = %+v", pf)
 	}
-	if _, ok := got.Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("rejected annotation not removed")
 	}
 }
@@ -188,7 +188,7 @@ func TestReconcilePlannedFailover_StaleAnnotationDuringRunCleared(t *testing.T) 
 	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := fetchFG(t, r, fgNN(fg)).Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := fetchFG(t, r, fgNN(fg)).Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("stale annotation kept during a run")
 	}
 	ev := <-r.Recorder.(*record.FakeRecorder).Events
@@ -209,7 +209,7 @@ func TestReconcilePlannedFailover_DeferredAnnotationEditedToActiveIsSkipped(t *t
 	if pf := got.Status.PlannedFailover; pf.Result == nil || pf.Result.Reason != v1alpha1.PlannedFailoverReasonAlreadyActive {
 		t.Fatalf("block = %+v", pf)
 	}
-	if _, ok := got.Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("annotation kept")
 	}
 }

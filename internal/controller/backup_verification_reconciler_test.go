@@ -86,8 +86,8 @@ func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: "ns", UID: types.UID("uid-" + name),
 			Labels: map[string]string{
-				labelFailoverGroup: fg,
-				labelBackupProfile: profile,
+				v1alpha1.FailoverGroupLabel: fg,
+				v1alpha1.BackupProfileLabel: profile,
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
@@ -443,8 +443,8 @@ func TestVerificationReconciler_ConcurrentRun_SecondBlocked(t *testing.T) {
 	earlier := verifyCR("verify-first", "lion", "nightly-s3")
 	earlier.CreationTimestamp = metav1.NewTime(time.Now().Add(-1 * time.Minute))
 	earlier.Labels = map[string]string{
-		labelFailoverGroup: "lion",
-		labelBackupProfile: "nightly-s3",
+		v1alpha1.FailoverGroupLabel: "lion",
+		v1alpha1.BackupProfileLabel: "nightly-s3",
 	}
 	earlier.Status.Phase = v1alpha1.VerificationPhaseRestoring
 
@@ -488,8 +488,8 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 		name := "old-" + string(rune('a'+i))
 		c := verifyCR(name, "lion", "nightly-s3")
 		c.Labels = map[string]string{
-			labelFailoverGroup: "lion",
-			labelBackupProfile: "nightly-s3",
+			v1alpha1.FailoverGroupLabel: "lion",
+			v1alpha1.BackupProfileLabel: "nightly-s3",
 		}
 		c.Status.Phase = v1alpha1.VerificationPhaseSucceeded
 		ct := metav1.NewTime(time.Now().Add(time.Duration(-i) * time.Hour))
@@ -499,8 +499,8 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 	// Trigger CR (the fresh one to reconcile).
 	trigger := verifyCR("trigger", "lion", "nightly-s3")
 	trigger.Labels = map[string]string{
-		labelFailoverGroup: "lion",
-		labelBackupProfile: "nightly-s3",
+		v1alpha1.FailoverGroupLabel: "lion",
+		v1alpha1.BackupProfileLabel: "nightly-s3",
 	}
 	trigger.Status.Phase = v1alpha1.VerificationPhaseSucceeded
 	ct := metav1.NewTime(time.Now().Add(time.Hour))
@@ -851,7 +851,7 @@ func TestVerificationReconciler_PITRBuildRefusalKeepsToken(t *testing.T) {
 			if err := c.Get(context.Background(), types.NamespacedName{Name: "verify-pitr", Namespace: "ns"}, &got); err != nil {
 				t.Fatal(err)
 			}
-			cond := apimeta.FindStatusCondition(got.Status.Conditions, ConditionVerified)
+			cond := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionVerified)
 			if got.Status.Phase != v1alpha1.VerificationPhaseFailed || cond == nil || cond.Reason != tc.want ||
 				!strings.HasPrefix(cond.Message, tc.want+": ") {
 				t.Fatalf("phase %s condition %+v, want Verified=False/%s token first", got.Status.Phase, cond, tc.want)

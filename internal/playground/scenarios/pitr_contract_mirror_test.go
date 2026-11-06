@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // controllerStringConsts reads the untyped string constants declared in the
@@ -58,7 +60,8 @@ func controllerStringConsts(t *testing.T) map[string]string {
 }
 
 // TestPITRPlaygroundContractMirrors pins U65: every playground mirror of an
-// operator #203 contract string equals the operator's declaration, so a
+// operator #203 contract string that api/v1alpha1 does not export equals the
+// operator's declaration, so a
 // renamed label, annotation or selector fails here instead of silently
 // matching nothing in s69's assertions (for example "no check Job ran").
 func TestPITRPlaygroundContractMirrors(t *testing.T) {
@@ -74,13 +77,7 @@ func TestPITRPlaygroundContractMirrors(t *testing.T) {
 		"app label":                {pitrSnapshotAppLabel, get("labelAppName")},
 		"archive key snapshot app": {pitrKeySnapshotApp, get("appNamePITRKeySnapshot")},
 		"dump key snapshot app":    {pitrDumpKeySnapshotApp, get("appNameDumpKeySnapshot")},
-		"group UID label":          {pitrGroupUIDLabel, get("labelFailoverGroupUID")},
-		"binding ID label":         {pitrBindingIDLabel, get("labelPITRBindingID")},
-		"destination annotation":   {pitrDestinationAnnotation, get("annotationPITRDestination")},
-		"accepted annotation":      {pitrAcceptedAnnotation, get("annotationPITRAccepted")},
-		"render annotation":        {pitrRenderAnnotation, get("annotationPITRRender")},
-		"check Job selector":       {pitrCheckJobSelector, get("labelAppName") + "=" + get("appNameBackupJob") + "," + get("labelResourceKind") + "=" + get("resourcePITRArchiveCheck")},
-		"binding Ready condition":  {pitrBindingReadyCondition, get("conditionPITRArchiveBindingReady")},
+		"check Job selector":       {pitrCheckJobSelector, get("labelAppName") + "=" + get("appNameBackupJob") + "," + v1alpha1.ResourceLabel + "=" + get("resourcePITRArchiveCheck")},
 		"snapshot passphrase key":  {pitrSnapshotPassphraseKey, get("pitrKeySnapshotDataKey")},
 	}
 	for name, tc := range cases {

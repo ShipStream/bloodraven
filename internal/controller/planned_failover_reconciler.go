@@ -161,7 +161,7 @@ func (r *MysqlFailoverGroupReconciler) StepPlannedFailoverForTest(ctx context.Co
 // annotation, or an automation hold. The engine re-reads uncached; the cache
 // only lets a quiet group skip the read.
 func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
-	if _, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		return true
 	}
 	return plannedFailoverInFlightDue(fg)
@@ -172,8 +172,8 @@ func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 // durable deadline annotation, or an automation hold.
 func plannedFailoverInFlightDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 	a := fg.GetAnnotations()
-	for _, k := range []string{AcknowledgePlannedFailoverHoldAnnotation, PlannedFailoverTerminalAnnotation,
-		PlannedFailoverStallSinceAnnotation, PlannedFailoverManagerAbsentSinceAnnotation, PlannedFailoverConfirmedAnnotation} {
+	for _, k := range []string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation,
+		v1alpha1.PlannedFailoverStallSinceAnnotation, v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation, v1alpha1.PlannedFailoverConfirmedAnnotation} {
 		if _, ok := a[k]; ok {
 			return true
 		}

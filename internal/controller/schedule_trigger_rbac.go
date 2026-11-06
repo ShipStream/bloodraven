@@ -86,9 +86,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileScheduleTriggerRBAC(ctx context.
 		c = uncachedGetClient{Client: r.Client, reader: r.APIReader}
 	}
 	labels := map[string]string{
-		labelInstance:      fg.Name,
-		labelFailoverGroup: fg.Name,
-		labelManagedBy:     managerName,
+		labelInstance:               fg.Name,
+		v1alpha1.FailoverGroupLabel: fg.Name,
+		labelManagedBy:              managerName,
 	}
 	mutate := func(obj client.Object, set func()) controllerutil.MutateFn {
 		return func() error {

@@ -226,7 +226,7 @@ func TestReconcile_CreatesDeployments(t *testing.T) {
 
 		// Verify per-group taint toleration key
 		tolerations := deploy.Spec.Template.Spec.Tolerations
-		expectedKey := platform.TaintKeyForGroup("lion")
+		expectedKey := v1alpha1.ReadOnlyTaintKey("lion")
 		found := false
 		for _, tol := range tolerations {
 			if tol.Key == expectedKey && tol.Operator == corev1.TolerationOpExists && tol.Effect == "" {
@@ -286,8 +286,8 @@ func TestReconcile_PrimaryServiceSelector(t *testing.T) {
 		t.Fatalf("primary service not found: %v", err)
 	}
 
-	if svc.Spec.Selector[labelRole] != "primary" {
-		t.Errorf("primary service selector role: expected 'primary', got %q", svc.Spec.Selector[labelRole])
+	if svc.Spec.Selector[v1alpha1.RoleLabel] != "primary" {
+		t.Errorf("primary service selector role: expected 'primary', got %q", svc.Spec.Selector[v1alpha1.RoleLabel])
 	}
 }
 
@@ -309,11 +309,11 @@ func TestReconcile_ReplicasServiceSelector(t *testing.T) {
 		t.Fatalf("replicas service not found: %v", err)
 	}
 
-	if svc.Spec.Selector[labelRole] != "replica" {
-		t.Errorf("replicas service selector role: expected 'replica', got %q", svc.Spec.Selector[labelRole])
+	if svc.Spec.Selector[v1alpha1.RoleLabel] != "replica" {
+		t.Errorf("replicas service selector role: expected 'replica', got %q", svc.Spec.Selector[v1alpha1.RoleLabel])
 	}
-	if svc.Spec.Selector[labelHealthy] != "yes" {
-		t.Errorf("replicas service selector healthy: expected 'yes', got %q", svc.Spec.Selector[labelHealthy])
+	if svc.Spec.Selector[v1alpha1.HealthyLabel] != "yes" {
+		t.Errorf("replicas service selector healthy: expected 'yes', got %q", svc.Spec.Selector[v1alpha1.HealthyLabel])
 	}
 }
 
@@ -504,19 +504,19 @@ func TestReconcile_AddsFinalizer(t *testing.T) {
 
 	found := false
 	for _, f := range updated.Finalizers {
-		if f == finalizerName {
+		if f == v1alpha1.FailoverGroupFinalizer {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected finalizer %q to be present, got finalizers: %v", finalizerName, updated.Finalizers)
+		t.Errorf("expected finalizer %q to be present, got finalizers: %v", v1alpha1.FailoverGroupFinalizer, updated.Finalizers)
 	}
 }
 
 func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 	fg := newTestFG()
-	fg.Finalizers = []string{finalizerName}
+	fg.Finalizers = []string{v1alpha1.FailoverGroupFinalizer}
 	now := metav1.Now()
 	fg.DeletionTimestamp = &now
 
@@ -555,7 +555,7 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 	err = c.Get(context.Background(), nn, &fetched)
 	if err == nil {
 		for _, f := range fetched.Finalizers {
-			if f == finalizerName {
+			if f == v1alpha1.FailoverGroupFinalizer {
 				t.Error("finalizer should have been removed after graceful shutdown")
 			}
 		}
@@ -582,7 +582,7 @@ func TestReconcile_DeletionWithoutFinalizer(t *testing.T) {
 
 func TestReconcile_DeletionWithNilTainter(t *testing.T) {
 	fg := newTestFG()
-	fg.Finalizers = []string{finalizerName}
+	fg.Finalizers = []string{v1alpha1.FailoverGroupFinalizer}
 	now := metav1.Now()
 	fg.DeletionTimestamp = &now
 
@@ -606,7 +606,7 @@ func TestReconcile_DeletionWithNilTainter(t *testing.T) {
 	err = c.Get(context.Background(), nn, &fetched2)
 	if err == nil {
 		for _, f := range fetched2.Finalizers {
-			if f == finalizerName {
+			if f == v1alpha1.FailoverGroupFinalizer {
 				t.Error("finalizer should have been removed")
 			}
 		}
@@ -882,7 +882,7 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 	}, &deploy); err != nil {
 		t.Fatalf("deployment not found: %v", err)
 	}
-	hashBefore := deploy.Spec.Template.Annotations[specHashAnnotation]
+	hashBefore := deploy.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation]
 	if hashBefore == "" {
 		t.Fatal("expected spec-hash annotation to be set")
 	}
@@ -909,7 +909,7 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 	}, &deploy); err != nil {
 		t.Fatalf("deployment not found after re-reconcile: %v", err)
 	}
-	hashAfter := deploy.Spec.Template.Annotations[specHashAnnotation]
+	hashAfter := deploy.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation]
 	if hashAfter == hashBefore {
 		t.Error("expected spec-hash to change after TLS certificate rotation")
 	}
@@ -998,7 +998,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-reader", Namespace: fg.Namespace}, &external); err != nil {
 		t.Fatal(err)
 	}
-	if external.Spec.Selector[labelHealthy] != "yes" || len(external.Spec.Ports) != 1 || external.Spec.Ports[0].Name != "mysql" {
+	if external.Spec.Selector[v1alpha1.HealthyLabel] != "yes" || len(external.Spec.Ports) != 1 || external.Spec.Ports[0].Name != "mysql" {
 		t.Fatalf("reader service = %#v", external.Spec)
 	}
 	if external.Spec.Ports[0].NodePort != 31001 || external.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
@@ -1011,7 +1011,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-reader-internal", Namespace: fg.Namespace}, &internal); err != nil {
 		t.Fatal(err)
 	}
-	if internal.Spec.Type != corev1.ServiceTypeClusterIP || !internal.Spec.PublishNotReadyAddresses || internal.Spec.Selector[labelHealthy] != "" || len(internal.Spec.Ports) != 2 {
+	if internal.Spec.Type != corev1.ServiceTypeClusterIP || !internal.Spec.PublishNotReadyAddresses || internal.Spec.Selector[v1alpha1.HealthyLabel] != "" || len(internal.Spec.Ports) != 2 {
 		t.Fatalf("internal service = %#v", internal.Spec)
 	}
 }
@@ -1251,10 +1251,10 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 			fg := base()
 			tc.configure(fg)
 			primaryPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: fg.Name, labelSite: "dc1", labelRole: "primary", labelHealthy: "yes",
+				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc1", v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: "yes",
 			}}}
 			readerPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "reader-pod", Namespace: fg.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: fg.Name, labelSite: "reader", labelRole: "replica", labelHealthy: "yes",
+				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "reader", v1alpha1.RoleLabel: "replica", v1alpha1.HealthyLabel: "yes",
 			}}}
 			r, c := newReconciler(fg, primaryPod, readerPod)
 			if err := r.syncPodLabels(context.Background(), fg); err != nil {
@@ -1267,11 +1267,11 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 			if err := c.Get(context.Background(), types.NamespacedName{Name: readerPod.Name, Namespace: fg.Namespace}, &gotReader); err != nil {
 				t.Fatal(err)
 			}
-			if (gotPrimary.Labels[labelRole] == "primary") != tc.wantPrimary {
-				t.Fatalf("primary role label = %q, wantPrimary=%t", gotPrimary.Labels[labelRole], tc.wantPrimary)
+			if (gotPrimary.Labels[v1alpha1.RoleLabel] == "primary") != tc.wantPrimary {
+				t.Fatalf("primary role label = %q, wantPrimary=%t", gotPrimary.Labels[v1alpha1.RoleLabel], tc.wantPrimary)
 			}
-			if (gotReader.Labels[labelHealthy] == "yes") != tc.wantReaderYes {
-				t.Fatalf("reader healthy label = %q, wantHealthy=%t", gotReader.Labels[labelHealthy], tc.wantReaderYes)
+			if (gotReader.Labels[v1alpha1.HealthyLabel] == "yes") != tc.wantReaderYes {
+				t.Fatalf("reader healthy label = %q, wantHealthy=%t", gotReader.Labels[v1alpha1.HealthyLabel], tc.wantReaderYes)
 			}
 		})
 	}
@@ -1643,7 +1643,7 @@ func TestReconcile_DefersDeploymentUpdateWhenManagerRunning(t *testing.T) {
 		if len(d.Spec.Template.Spec.Containers) == 0 {
 			t.Fatalf("deployment %s has no containers", site)
 		}
-		return d.Annotations[specHashAnnotation], d.Spec.Template.Spec.Containers[0].Image
+		return d.Annotations[v1alpha1.SpecHashAnnotation], d.Spec.Template.Spec.Containers[0].Image
 	}
 
 	hashDC1Before, imgDC1Before := captureSite("dc1")
@@ -1873,7 +1873,7 @@ func TestReconcile_HashlessLegacyDeploymentsQueueOrderedDrift(t *testing.T) {
 		if err := c.Get(ctx, types.NamespacedName{Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace}, &deployment); err != nil {
 			t.Fatal(err)
 		}
-		if got := deployment.Annotations[specHashAnnotation]; got != "" {
+		if got := deployment.Annotations[v1alpha1.SpecHashAnnotation]; got != "" {
 			t.Fatalf("hashless deployment %s was bulk-patched with hash %q", site.Name, got)
 		}
 		if got := deployment.Spec.Template.Spec.Containers[0].Image; got != "mysql:legacy" {
@@ -2030,7 +2030,7 @@ func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
 		{Name: "dc2", State: "read-only", Replicating: true},
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
-		labelAppName: "mysql", labelInstance: fg.Name, labelSite: "dc1", labelRole: "replica",
+		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc1", v1alpha1.RoleLabel: "replica",
 	}}}
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
@@ -2054,7 +2054,7 @@ func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Labels[labelRole] != "primary" {
-		t.Fatalf("active site pod role label = %q, want primary despite the backup step failing", got.Labels[labelRole])
+	if got.Labels[v1alpha1.RoleLabel] != "primary" {
+		t.Fatalf("active site pod role label = %q, want primary despite the backup step failing", got.Labels[v1alpha1.RoleLabel])
 	}
 }

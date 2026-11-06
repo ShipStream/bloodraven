@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -17,12 +18,12 @@ type UpdatePhase string
 
 const (
 	UpdatePhaseNone             UpdatePhase = ""
-	UpdatePhaseUpdateReplica    UpdatePhase = "UpdateReplica"
-	UpdatePhaseWaitReplica      UpdatePhase = "WaitReplica"
-	UpdatePhaseFailover         UpdatePhase = "Failover"
-	UpdatePhaseUpdateOldPrimary UpdatePhase = "UpdateOldPrimary"
-	UpdatePhaseWaitOldPrimary   UpdatePhase = "WaitOldPrimary"
-	UpdatePhaseComplete         UpdatePhase = "Complete"
+	UpdatePhaseUpdateReplica    UpdatePhase = v1alpha1.ReasonUpdateReplica
+	UpdatePhaseWaitReplica      UpdatePhase = v1alpha1.ReasonWaitReplica
+	UpdatePhaseFailover         UpdatePhase = v1alpha1.ReasonFailover
+	UpdatePhaseUpdateOldPrimary UpdatePhase = v1alpha1.ReasonUpdateOldPrimary
+	UpdatePhaseWaitOldPrimary   UpdatePhase = v1alpha1.ReasonWaitOldPrimary
+	UpdatePhaseComplete         UpdatePhase = v1alpha1.ReasonComplete
 )
 
 // UpdateController manages ordered rolling updates for a MysqlFailoverGroup.

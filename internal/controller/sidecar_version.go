@@ -59,7 +59,7 @@ func (r *MysqlFailoverGroupReconciler) warnOnSidecarVersionSkew(ctx context.Cont
 	if r.Recorder == nil {
 		return
 	}
-	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "SidecarVersionSkew",
+	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSidecarVersionSkew,
 		"spec.sidecarImage is tagged %q but the operator is running %q. "+
 			"The operator and sidecar share a rendering contract and are only "+
 			"supported at matching releases.%s",

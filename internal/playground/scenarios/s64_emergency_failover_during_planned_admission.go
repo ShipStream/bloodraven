@@ -249,7 +249,7 @@ func s64WaitLeasesRevoked(ctx context.Context, env *runner.Env, state *deploySce
 	state.leasesRevoked = true
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	_, err := waitForMFGEvent(waitCtx, env, env.StartTime, "DeploymentLeaseRevoked", "")
+	_, err := waitForMFGEvent(waitCtx, env, env.StartTime, v1alpha1.EventDeploymentLeaseRevoked, "")
 	return err
 }
 

@@ -3,7 +3,7 @@ package controller
 import (
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/shipstream/bloodraven/internal/platform"
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // operatorBinaryPath is where the operator image installs the bloodraven
@@ -30,7 +30,7 @@ func operatorCommand(args ...string) []string {
 // not tolerated, matching the MySQL Deployment.
 func groupReadOnlyTolerations(group string) []corev1.Toleration {
 	return []corev1.Toleration{{
-		Key:      platform.TaintKeyForGroup(group),
+		Key:      v1alpha1.ReadOnlyTaintKey(group),
 		Operator: corev1.TolerationOpExists,
 	}}
 }

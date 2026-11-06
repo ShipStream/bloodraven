@@ -22,7 +22,7 @@ func fgWithDragonflySnapshotUpgrade() *v1alpha1.MysqlFailoverGroup {
 	})
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
-	fg.Annotations = map[string]string{DragonflySnapshotUpgradeAnnotation: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"}
+	fg.Annotations = map[string]string{v1alpha1.DragonflySnapshotUpgradeAnnotation: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"}
 	return fg
 }
 
@@ -46,7 +46,7 @@ func TestDragonflySnapshotUpgrade_AcceptClearsAnnotationAndStampsStatus(t *testi
 	if got.Spec.Dragonfly.Image != "docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0" {
 		t.Fatalf("spec.dragonfly.image changed before upgrade success: %q", got.Spec.Dragonfly.Image)
 	}
-	if _, ok := got.Annotations[DragonflySnapshotUpgradeAnnotation]; ok {
+	if _, ok := got.Annotations[v1alpha1.DragonflySnapshotUpgradeAnnotation]; ok {
 		t.Fatal("upgrade annotation was not removed")
 	}
 	if got.Status.Dragonfly == nil || got.Status.Dragonfly.Upgrade == nil {
@@ -125,10 +125,10 @@ func TestDragonflySnapshotUpgrade_SaveThenUpdateActive(t *testing.T) {
 
 func dragonflyPodForTest(fg *v1alpha1.MysqlFailoverGroup, site, image string, ready bool) *corev1.Pod {
 	labels := dragonflyCommonLabels(fg.Name, site)
-	labels[labelDragonflyRole] = "replica"
-	labels[labelDragonflyTraffic] = dragonflyTrafficEnabled
+	labels[v1alpha1.DragonflyRoleLabel] = "replica"
+	labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 	if site == fg.Status.ActiveSite {
-		labels[labelDragonflyRole] = "master"
+		labels[v1alpha1.DragonflyRoleLabel] = "master"
 	}
 	status := corev1.PodStatus{}
 	if ready {

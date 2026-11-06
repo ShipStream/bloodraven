@@ -170,7 +170,7 @@ func annotateDragonflySnapshotUpgrade() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			image := ctxFetch(env, "s29TargetImage")
 			env.Capture.Note(fmt.Sprintf("request Dragonfly snapshot upgrade to %s", image))
-			return env.Kube.AnnotateMFG(ctx, env.Namespace, "bloodraven.shipstream.io/dragonfly-snapshot-upgrade", image)
+			return env.Kube.AnnotateMFG(ctx, env.Namespace, v1alpha1.DragonflySnapshotUpgradeAnnotation, image)
 		},
 	}
 }

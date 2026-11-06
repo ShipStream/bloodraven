@@ -30,10 +30,10 @@ func (r *MysqlFailoverGroupReconciler) mapVerificationToGroup(_ context.Context,
 // label, so a predecessor's snapshot only causes a no-op reconcile.
 func (r *MysqlFailoverGroupReconciler) mapPITRKeySnapshotToGroup(_ context.Context, obj client.Object) []reconcile.Request {
 	l := obj.GetLabels()
-	if l[labelAppName] != appNamePITRKeySnapshot || l[labelFailoverGroup] == "" {
+	if l[labelAppName] != appNamePITRKeySnapshot || l[v1alpha1.FailoverGroupLabel] == "" {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: l[labelFailoverGroup]}}}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: l[v1alpha1.FailoverGroupLabel]}}}
 }
 
 // pitrKeySnapshotPredicate admits only archive key snapshots

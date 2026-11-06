@@ -252,7 +252,7 @@ func TestEncryptionChaos_PartialAdoptionKeepsBothSitesRestartable(t *testing.T) 
 		IssuerRef:  v1alpha1.IssuerRef{Name: "ca", Kind: "Issuer"},
 	}
 	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
-	live.Annotations = map[string]string{AdoptEncryptionAnnotation: "confirm"}
+	live.Annotations = map[string]string{v1alpha1.AdoptEncryptionAnnotation: "confirm"}
 	if err := c.Update(ctx, &live); err != nil {
 		t.Fatalf("enable encryption: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 	if fg.SiteKeyringSealed("dc1") {
 		t.Fatal("a site that failed to escrow must not be sealed by the failure itself")
 	}
-	cond := findCondition(fg.Status.Conditions, conditionEncryptionReady)
+	cond := findCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Errorf("EncryptionAtRestReady = %+v, want False so the alert fires", cond)
 	}
@@ -860,7 +860,7 @@ func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 			ctx := context.Background()
 			fg := sealedGroupWithActive("dc1")
 			tc.mutate(fg)
-			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 			r, c := encReconciler(t, scriptedKeyring(nil), fg)
 			store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
 			for _, s := range []string{"dc1", "dc2"} {
@@ -932,7 +932,7 @@ func TestEncryptionChaos_DisableRetainsEscrowAndReEnableResumes(t *testing.T) {
 	// with it, the lifecycle restarts from the retained versions.
 	fg.Spec.EncryptionAtRest.Enabled = true
 	fg.Status.ActiveSite = "dc1"
-	fg.Annotations = map[string]string{AdoptEncryptionAnnotation: "confirm"}
+	fg.Annotations = map[string]string{v1alpha1.AdoptEncryptionAnnotation: "confirm"}
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}

@@ -24,7 +24,7 @@ func TestDeploymentUnstableReason_ReplicaAuditDivergence(t *testing.T) {
 	count := int64(221)
 	block := func(fg *v1alpha1.MysqlFailoverGroup, site int, detectedBy string) {
 		s := &fg.Status.Sites[site]
-		s.RecoveryState = recoveryStateBlocked
+		s.RecoveryState = v1alpha1.RecoveryStateBlocked
 		s.DivergentGtid = issue202ErrantGTID
 		s.DivergentTransactionCount = &count
 		s.DivergenceDetectedBy = detectedBy
@@ -60,7 +60,7 @@ func TestDeploymentUnstableReason_ReplicaAuditDivergence(t *testing.T) {
 		{"replica audit block alongside recovery in progress", func(fg *v1alpha1.MysqlFailoverGroup) {
 			block(fg, 1, divergenceDetectedByAudit)
 			conditions(fg)
-			fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: "read-only", Replicating: true, RecoveryState: recoveryStateInProgress})
+			fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: "read-only", Replicating: true, RecoveryState: v1alpha1.RecoveryStateInProgress})
 			fg.Spec.Sites = append(fg.Spec.Sites, fg.Spec.Sites[1])
 			fg.Spec.Sites[2].Name = "ord"
 		}, false},
@@ -95,21 +95,21 @@ func TestDeploymentUnstableReason_ReplicaAuditDivergence(t *testing.T) {
 func TestDeploymentUnstableReason_NamesTheGatingRecoveryState(t *testing.T) {
 	m, fg, _ := deploymentLeaseFixture(t)
 	count := int64(221)
-	fg.Status.Sites[1].RecoveryState = recoveryStateBlocked
+	fg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateBlocked
 	fg.Status.Sites[1].DivergentGtid = issue202ErrantGTID
 	fg.Status.Sites[1].DivergentTransactionCount = &count
 	fg.Status.Sites[1].DivergenceDetectedBy = divergenceDetectedByAudit
 	fg.Spec.Sites = append(fg.Spec.Sites, fg.Spec.Sites[1])
 	fg.Spec.Sites[2].Name = "ord"
-	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: "read-only", Replicating: true, RecoveryState: recoveryStateInProgress})
+	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: "read-only", Replicating: true, RecoveryState: v1alpha1.RecoveryStateInProgress})
 	fg.Status.Conditions = append(fg.Status.Conditions,
 		metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()},
 		metav1.Condition{Type: "RecoveryPending", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()})
 	if err := m.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if got := DeploymentUnstableReason(fg); got != recoveryStateInProgress {
-		t.Fatalf("DeploymentUnstableReason = %q, want %q (the site whose recovery gates)", got, recoveryStateInProgress)
+	if got := DeploymentUnstableReason(fg); got != v1alpha1.RecoveryStateInProgress {
+		t.Fatalf("DeploymentUnstableReason = %q, want %q (the site whose recovery gates)", got, v1alpha1.RecoveryStateInProgress)
 	}
 }
 
@@ -143,7 +143,7 @@ func TestDeploymentGate_OldPrimaryBlockSurvivesReattachAndAudit(t *testing.T) {
 		clk.Advance(time.Second)
 		tm.Poll(context.Background())
 	}
-	if rec := recoveryOf(tm, "pdx"); rec.state != recoveryStateBlocked || rec.detectedBy != divergenceDetectedByRecovery {
+	if rec := recoveryOf(tm, "pdx"); rec.state != v1alpha1.RecoveryStateBlocked || rec.detectedBy != divergenceDetectedByRecovery {
 		t.Fatalf("setup: recovery = %+v, want an OldPrimaryRecovery block", rec)
 	}
 
@@ -161,7 +161,7 @@ func TestDeploymentGate_OldPrimaryBlockSurvivesReattachAndAudit(t *testing.T) {
 		t.Fatal("setup: the audit never compared the reattached site")
 	}
 	rec := recoveryOf(tm, "pdx")
-	if rec.state != recoveryStateBlocked || rec.divergentCount != 221 {
+	if rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentCount != 221 {
 		t.Fatalf("recovery = %+v, want the block kept", rec)
 	}
 	if rec.detectedBy != divergenceDetectedByRecovery {

@@ -116,7 +116,7 @@ func s10ObserveBootstrapStarted() runner.Step {
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"Bootstrapping condition Status=True",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					c := findCondition(mfg.Status.Conditions, "Bootstrapping")
+					c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
 					if c == nil {
 						return false, "no Bootstrapping condition yet", nil
 					}
@@ -148,15 +148,15 @@ func s10ObserveBootstrapDone() runner.Step {
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"Bootstrapping done",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					c := findCondition(mfg.Status.Conditions, "Bootstrapping")
+					c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
 					if c == nil {
 						return false, "no Bootstrapping condition yet", nil
 					}
 					msg := fmt.Sprintf("status=%s reason=%s message=%q", c.Status, c.Reason, c.Message)
-					if c.Reason == "Failed" {
+					if c.Reason == v1alpha1.ReasonFailed {
 						return false, msg, fmt.Errorf("bootstrap failed: %s", c.Message)
 					}
-					if c.Status == metav1.ConditionFalse && c.Reason == "Done" {
+					if c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonDone {
 						return true, msg, nil
 					}
 					return false, msg, nil

@@ -323,7 +323,7 @@ func cleanupPodFor(job *batchv1.Job, phase corev1.PodPhase, code int32, message 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: job.Name + "-pod", Namespace: job.Namespace,
-			Labels:          map[string]string{"batch.kubernetes.io/job-name": job.Name, labelMysqlBackup: job.Labels[labelMysqlBackup], labelResourceKind: "backup-cleanup"},
+			Labels:          map[string]string{"batch.kubernetes.io/job-name": job.Name, v1alpha1.MysqlBackupLabel: job.Labels[v1alpha1.MysqlBackupLabel], v1alpha1.ResourceLabel: "backup-cleanup"},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: boolPtr(true)}},
 		},
 		Status: corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{{
@@ -338,7 +338,7 @@ func cleanupCondition(t *testing.T, f *cleanupFixture) *metav1.Condition {
 	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	return apiMeta.FindStatusCondition(f.mb.Status.Conditions, ConditionArtifactCleanup)
+	return apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
 }
 
 func countEvents(rec *record.FakeRecorder, needle string) int {
@@ -362,18 +362,18 @@ func TestFinalize_FailedCleanupIsRecordedOnceAndRetried(t *testing.T) {
 		wantWait    time.Duration
 	}{
 		{name: "refusal waits 30m", ago: time.Minute, code: backupmeta.CleanupExitRejected,
-			message: "BLOODRAVEN_CLEANUP_FAILED: init S3 store: bad creds", wantReason: cleanupReasonRejected, wantWait: cleanupRetryAfterRejection - time.Minute},
+			message: "BLOODRAVEN_CLEANUP_FAILED: init S3 store: bad creds", wantReason: v1alpha1.ReasonCleanupRejected, wantWait: cleanupRetryAfterRejection - time.Minute},
 		{name: "transient waits 5m", ago: time.Minute, code: backupmeta.CleanupExitTransient,
-			message: "BLOODRAVEN_CLEANUP_FAILED: list: timeout", wantReason: cleanupReasonFailed, wantWait: cleanupRetryAfterFailure - time.Minute},
+			message: "BLOODRAVEN_CLEANUP_FAILED: list: timeout", wantReason: v1alpha1.ReasonCleanupFailed, wantWait: cleanupRetryAfterFailure - time.Minute},
 		{name: "transient past its delay is replaced", ago: 6 * time.Minute, code: backupmeta.CleanupExitTransient,
-			message: "BLOODRAVEN_CLEANUP_FAILED: list: timeout", wantReason: cleanupReasonFailed, wantDeleted: true},
-		{name: "no pod left (deadline, eviction) counts as transient", ago: time.Minute, code: -1, wantReason: cleanupReasonFailed, wantWait: cleanupRetryAfterFailure - time.Minute},
+			message: "BLOODRAVEN_CLEANUP_FAILED: list: timeout", wantReason: v1alpha1.ReasonCleanupFailed, wantDeleted: true},
+		{name: "no pod left (deadline, eviction) counts as transient", ago: time.Minute, code: -1, wantReason: v1alpha1.ReasonCleanupFailed, wantWait: cleanupRetryAfterFailure - time.Minute},
 		// cleanup.py exited 2 when util.rmdump was missing; 2 is also a Go
 		// panic, so it is an unclassified (transient) failure now.
 		{name: "legacy cleanup.py rmdump failure long ago is replaced", ago: 48 * time.Hour, code: 2,
-			message: "", wantReason: cleanupReasonFailed, wantDeleted: true},
+			message: "", wantReason: v1alpha1.ReasonCleanupFailed, wantDeleted: true},
 		{name: "crash (exit 2) is not a refusal", ago: time.Minute, code: 2,
-			message: "", wantReason: cleanupReasonFailed, wantWait: cleanupRetryAfterFailure - time.Minute},
+			message: "", wantReason: v1alpha1.ReasonCleanupFailed, wantWait: cleanupRetryAfterFailure - time.Minute},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -495,14 +495,14 @@ func TestFinalize_BlockedCleanup(t *testing.T) {
 			setup: func(t *testing.T, f *cleanupFixture) {
 				f.mb.Status.ArtifactStorage = nil
 			},
-			wantReason: cleanupReasonDestinationUnverified,
+			wantReason: v1alpha1.ReasonDestinationUnverified,
 		},
 		{
 			name: "snapshot without a location and no producing Job",
 			setup: func(t *testing.T, f *cleanupFixture) {
 				f.mb.Status.ArtifactStorage.Location = ""
 			},
-			wantReason: cleanupReasonDestinationUnverified,
+			wantReason: v1alpha1.ReasonDestinationUnverified,
 		},
 		{
 			name: "producing Job owned by another object",
@@ -518,35 +518,35 @@ func TestFinalize_BlockedCleanup(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantReason: cleanupReasonDestinationUnverified,
+			wantReason: v1alpha1.ReasonDestinationUnverified,
 		},
 		{
 			name: "recorded destination cannot become a Job",
 			setup: func(t *testing.T, f *cleanupFixture) {
 				f.mb.Status.ArtifactStorage.Bucket = ""
 			},
-			wantReason: cleanupReasonJobInvalid,
+			wantReason: v1alpha1.ReasonCleanupJobInvalid,
 		},
 		{
 			name: "same name under another prefix, producer gone",
 			setup: func(t *testing.T, f *cleanupFixture) {
 				f.mb.Status.Location = "team-b/art"
 			},
-			wantReason: cleanupReasonDestinationMismatch,
+			wantReason: v1alpha1.ReasonDestinationMismatch,
 		},
 		{
 			name: "location is not this backup's artifact",
 			setup: func(t *testing.T, f *cleanupFixture) {
 				f.mb.Status.Location = "lion"
 			},
-			wantReason: cleanupReasonDestinationMismatch,
+			wantReason: v1alpha1.ReasonDestinationMismatch,
 		},
 		{
 			name: "operator image unset",
 			setup: func(t *testing.T, f *cleanupFixture) {
 				SetOperatorImageDefaults("", "")
 			},
-			wantReason: cleanupReasonOperatorImageUnset,
+			wantReason: v1alpha1.ReasonOperatorImageUnset,
 		},
 		{
 			name: "profile lost its S3 credentials",
@@ -556,7 +556,7 @@ func TestFinalize_BlockedCleanup(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantReason: cleanupReasonCredentialsMissing,
+			wantReason: v1alpha1.ReasonCredentialsUnavailable,
 		},
 		{
 			name: "foreign cleanup Job with our name",
@@ -567,7 +567,7 @@ func TestFinalize_BlockedCleanup(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantReason: cleanupReasonJobConflict,
+			wantReason: v1alpha1.ReasonCleanupJobConflict,
 		},
 	}
 	for _, tc := range tests {
@@ -655,8 +655,8 @@ func TestFinalize_WaitsOutGarbageCollectorPropagation(t *testing.T) {
 	for _, tc := range []struct {
 		finalizer, reason string
 	}{
-		{metav1.FinalizerDeleteDependents, cleanupReasonForegroundDeletion},
-		{metav1.FinalizerOrphanDependents, cleanupReasonOrphanDeletion},
+		{metav1.FinalizerDeleteDependents, v1alpha1.ReasonForegroundDeletion},
+		{metav1.FinalizerOrphanDependents, v1alpha1.ReasonOrphanDeletion},
 	} {
 		t.Run(tc.finalizer, func(t *testing.T) {
 			f := newCleanupFixture(t)
@@ -676,7 +676,7 @@ func TestFinalize_WaitsOutGarbageCollectorPropagation(t *testing.T) {
 			if cond := cleanupCondition(t, f); cond == nil || cond.Reason != tc.reason {
 				t.Fatalf("condition %+v, want %s", cond, tc.reason)
 			}
-			f.mb.Finalizers = []string{mysqlBackupFinalizer}
+			f.mb.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 			if err := f.c.Update(context.Background(), f.mb); err != nil {
 				t.Fatal(err)
 			}
@@ -703,7 +703,7 @@ func TestFinalize_ReportsPodStuckCreating(t *testing.T) {
 	}
 	f.finalize(t)
 	cond := cleanupCondition(t, f)
-	if cond == nil || cond.Reason != cleanupReasonPending || !strings.Contains(cond.Message, "still ContainerCreating since ") ||
+	if cond == nil || cond.Reason != v1alpha1.ReasonCleanupPending || !strings.Contains(cond.Message, "still ContainerCreating since ") ||
 		!strings.Contains(cond.Message, "FailedMount") {
 		t.Fatalf("condition %+v", cond)
 	}
@@ -826,8 +826,8 @@ func TestFinalize_StripsDeadHoldsKeepsLiveOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.mb.Annotations = map[string]string{
-		annotationVerificationHoldPrefix + "uid-gone": "gone",
-		annotationVerificationHoldPrefix + "uid-live": "live",
+		v1alpha1.VerificationHoldAnnotationPrefix + "uid-gone": "gone",
+		v1alpha1.VerificationHoldAnnotationPrefix + "uid-live": "live",
 	}
 	if err := f.c.Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
@@ -838,10 +838,10 @@ func TestFinalize_StripsDeadHoldsKeepsLiveOnes(t *testing.T) {
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	if _, kept := f.mb.Annotations[annotationVerificationHoldPrefix+"uid-gone"]; kept {
+	if _, kept := f.mb.Annotations[v1alpha1.VerificationHoldAnnotationPrefix+"uid-gone"]; kept {
 		t.Fatal("dead hold not removed")
 	}
-	if f.mb.Annotations[annotationVerificationHoldPrefix+"uid-live"] != "live" {
+	if f.mb.Annotations[v1alpha1.VerificationHoldAnnotationPrefix+"uid-live"] != "live" {
 		t.Fatal("live hold removed")
 	}
 	if !BackupHasVerificationHold(f.mb) {
@@ -899,7 +899,7 @@ func TestFinalize_ReportsContainerThatCannotStart(t *testing.T) {
 		t.Fatal("released while cleanup has not run")
 	}
 	cond := cleanupCondition(t, f)
-	if cond == nil || cond.Reason != cleanupReasonPending || !strings.Contains(cond.Message, "ImagePullBackOff") {
+	if cond == nil || cond.Reason != v1alpha1.ReasonCleanupPending || !strings.Contains(cond.Message, "ImagePullBackOff") {
 		t.Fatalf("condition %+v", cond)
 	}
 }
@@ -908,7 +908,7 @@ func TestFinalize_LegacyCleanupJobName(t *testing.T) {
 	ctx := context.Background()
 	legacyJob := func(f *cleanupFixture, ownerUID types.UID) *batchv1.Job {
 		return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: legacyCleanupJobName(f.mb.Name), Namespace: "ns", UID: "legacy-uid",
-			Labels:          map[string]string{labelMysqlBackup: f.mb.Name, labelResourceKind: "backup-cleanup"},
+			Labels:          map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup-cleanup"},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: "shipstream.io/v1alpha1", Kind: "MysqlBackup", Name: f.mb.Name, UID: ownerUID, Controller: boolPtr(true)}}},
 			Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
 				LastTransitionTime: metav1.NewTime(time.Now().Add(-48 * time.Hour))}}}}
@@ -958,7 +958,7 @@ func TestFinalize_FailureRecordedOnceFromStaleCache(t *testing.T) {
 	job, _ := f.cleanupJob(t)
 	f.failCleanupJob(t, job, time.Minute, backupmeta.CleanupExitTransient, "")
 	stale := job.DeepCopy() // what a lagging cache would still return
-	counter := bmetrics.BackupArtifactCleanupFailuresTotal.WithLabelValues("lion", "nightly-s3", cleanupReasonFailed)
+	counter := bmetrics.BackupArtifactCleanupFailuresTotal.WithLabelValues("lion", "nightly-s3", v1alpha1.ReasonCleanupFailed)
 	before := testutil.ToFloat64(counter)
 	f.finalize(t)
 	if _, _, err := f.r.retryFailedCleanup(context.Background(), f.mb, stale); err != nil {
@@ -973,8 +973,8 @@ func TestReconcile_DoesNotAdoptAnotherBackupsJob(t *testing.T) {
 	fg := fgWithBackup()
 	mb := backupCR("art-cleanup", "lion", "nightly-s3")
 	mb.UID = "uid-art-cleanup"
-	mb.Finalizers = []string{mysqlBackupFinalizer}
-	mb.Labels = map[string]string{labelFailoverGroup: "lion", labelBackupProfile: "nightly-s3", labelManagedBy: managerName}
+	mb.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	mb.Labels = map[string]string{v1alpha1.FailoverGroupLabel: "lion", v1alpha1.BackupProfileLabel: "nightly-s3", labelManagedBy: managerName}
 	mb.OwnerReferences = []metav1.OwnerReference{{APIVersion: "shipstream.io/v1alpha1", Kind: "MysqlFailoverGroup", Name: "lion", UID: "fg", Controller: boolPtr(true)}}
 	// The legacy cleanup Job of backup "art" has this backup's Job name.
 	foreign := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: backupJobName(mb.Name), Namespace: "ns",
@@ -992,7 +992,7 @@ func TestReconcile_DoesNotAdoptAnotherBackupsJob(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 		t.Fatal(err)
 	}
-	ready := apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
+	ready := apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
 	if mb.Status.Phase != v1alpha1.BackupPhasePending || ready == nil || ready.Reason != "BackupJobConflict" || mb.Status.JobName != "" {
 		t.Fatalf("want Pending/BackupJobConflict without adopting the Job, got %+v", mb.Status)
 	}
@@ -1028,8 +1028,8 @@ func TestRepairTerminalAttribution_RestoresLostIdentity(t *testing.T) {
 	if err := controllerutil.SetControllerReference(f.mb, producer, f.r.Scheme); err != nil {
 		t.Fatal(err)
 	}
-	producer.Annotations[BackupJobFailoverGroupUIDAnnotation] = "fg-uid"
-	producer.Annotations[BackupJobPITRArchiveIDAnnotation] = "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	producer.Annotations[v1alpha1.BackupJobFailoverGroupUIDAnnotation] = "fg-uid"
+	producer.Annotations[v1alpha1.BackupJobPITRArchiveIDAnnotation] = "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"
 	producer.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 	if err := f.c.Create(ctx, producer); err != nil {
 		t.Fatal(err)

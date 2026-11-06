@@ -20,7 +20,6 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -855,7 +854,7 @@ func TestPITRWithdrawRelease(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			mfg := testBaselineMFG(false)
 			if c.current != "" {
-				mfg.Annotations = map[string]string{brcontroller.ReleasePITRArchiveBindingAnnotation: c.current}
+				mfg.Annotations = map[string]string{v1alpha1.ReleasePITRArchiveBindingAnnotation: c.current}
 			}
 			env := testScenarioEnv(t, mfg)
 			env.Capture = &runner.Capture{}
@@ -884,7 +883,7 @@ func TestPITRWithdrawRelease(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if left := got.Annotations[brcontroller.ReleasePITRArchiveBindingAnnotation]; left != c.wantLeft {
+			if left := got.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]; left != c.wantLeft {
 				t.Errorf("release annotation=%q, want %q", left, c.wantLeft)
 			}
 		})
@@ -904,7 +903,7 @@ func TestPITRSnapshotsUnderPrefixes(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := func(name, dest string) corev1.Secret {
-		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{pitrDestinationAnnotation: dest}}}
+		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{v1alpha1.PITRDestinationAnnotation: dest}}}
 	}
 	got := pitrSnapshotsUnderPrefixes([]corev1.Secret{snap("k-b", in), snap("k-x", out), snap("k-a", in), snap("k-none", "")}, []string{mine})
 	if strings.Join(got, ",") != "k-a,k-b" {
@@ -992,8 +991,8 @@ func TestPITRBindingIDsUnderPrefixes(t *testing.T) {
 	}
 	snap := func(id, destination string) corev1.Secret {
 		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-			Labels:      map[string]string{pitrBindingIDLabel: id},
-			Annotations: map[string]string{pitrDestinationAnnotation: destination},
+			Labels:      map[string]string{v1alpha1.PITRBindingIDLabel: id},
+			Annotations: map[string]string{v1alpha1.PITRDestinationAnnotation: destination},
 		}}
 	}
 	snaps := []corev1.Secret{

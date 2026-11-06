@@ -489,7 +489,7 @@ type restorePITRFragments struct {
 	PodVolumes []corev1.Volume
 	// KeySecretName is the read binding's archive key snapshot the init
 	// container mounts ("" for a plaintext archive). Callers label the Job
-	// with it (labelPITRKeySecret, Δ18) and a verification holds it (K9).
+	// with it (v1alpha1.PITRKeySecretLabel, Δ18) and a verification holds it (K9).
 	KeySecretName string
 }
 

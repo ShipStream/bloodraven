@@ -75,8 +75,8 @@ func TestReconcileBackupSchedules_PrunesOrphanCronJobs(t *testing.T) {
 			Name:      scheduleCronJobName("lion", "gone"),
 			Namespace: "ns",
 			Labels: map[string]string{
-				labelFailoverGroup: "lion",
-				labelResourceKind:  "backup-schedule",
+				v1alpha1.FailoverGroupLabel: "lion",
+				v1alpha1.ResourceLabel:      "backup-schedule",
 			},
 		},
 		Spec: batchv1.CronJobSpec{

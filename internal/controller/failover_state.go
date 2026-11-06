@@ -16,31 +16,6 @@ import (
 )
 
 const (
-	// LastFailoverAnnotation and LastFailoverTargetAnnotation carry the
-	// anti-flap record on the failover group's OBJECT metadata, alongside
-	// the copy in status.lastFailover / status.lastFailoverTarget.
-	//
-	// The duplication is the point. status is a subresource: writes to it
-	// travel a separate API path with its own RBAC rule
-	// (mysqlfailovergroups/status) and its own admission plugins, so a
-	// status-write outage can persist while ordinary object writes succeed.
-	// When that outage overlaps an operator restart, the restarted process
-	// rehydrates a stale cooldown and can promote inside the window the
-	// previous process intended to enforce — the CooldownViolated(restart)
-	// class the deterministic simulator surfaces. These annotations are the
-	// second, independently-failing durable path that closes it.
-	//
-	// Format: RFC3339 UTC at SECOND precision, and the target site name
-	// verbatim. Both are written together on every promotion.
-	//
-	// The precision is deliberately matched to metav1.Time, which is what
-	// status.lastFailover serializes as. Storing nanoseconds here would make
-	// the annotation strictly newer than the status copy of the very same
-	// promotion, so every restart would "fall back" to the out-of-band path
-	// and log the warning that is supposed to mean status writes are
-	// failing. Matching precision makes the common case an exact tie.
-	LastFailoverAnnotation       = "bloodraven.shipstream.io/last-failover"
-	LastFailoverTargetAnnotation = "bloodraven.shipstream.io/last-failover-target"
 
 	// FailoverClockSkewGrace bounds how far either durable timestamp may be
 	// ahead of the reader's clock. A larger jump is unsafe to install because
@@ -212,10 +187,10 @@ func (s *annotationFailoverStateRecorder) RecordFailoverState(ctx context.Contex
 		for k, v := range cur.GetAnnotations() {
 			ann[k] = v
 		}
-		delete(ann, LastFailoverAnnotation)
-		delete(ann, LastFailoverTargetAnnotation)
-		delete(ann, PromotionGtidExecutedAnnotation)
-		delete(ann, PromotionGtidExecutedForAnnotation)
+		delete(ann, v1alpha1.LastFailoverAnnotation)
+		delete(ann, v1alpha1.LastFailoverTargetAnnotation)
+		delete(ann, v1alpha1.PromotionGtidExecutedAnnotation)
+		delete(ann, v1alpha1.PromotionGtidExecutedForAnnotation)
 		for k, v := range encoded {
 			ann[k] = v
 		}
@@ -240,12 +215,12 @@ func FailoverRecordAnnotations(rec FailoverRecord) (map[string]string, error) {
 		return nil, fmt.Errorf("failover-state record has timestamp %s without a target", rec.LastFailover.UTC().Format(time.RFC3339Nano))
 	}
 	out := map[string]string{
-		LastFailoverAnnotation:       failoverStampFormat(rec.LastFailover),
-		LastFailoverTargetAnnotation: rec.LastFailoverTarget,
+		v1alpha1.LastFailoverAnnotation:       failoverStampFormat(rec.LastFailover),
+		v1alpha1.LastFailoverTargetAnnotation: rec.LastFailoverTarget,
 	}
 	if w := rec.encodableWatermark(); w != "" {
-		out[PromotionGtidExecutedAnnotation] = w
-		out[PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(rec.LastFailover, rec.LastFailoverTarget)
+		out[v1alpha1.PromotionGtidExecutedAnnotation] = w
+		out[v1alpha1.PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(rec.LastFailover, rec.LastFailoverTarget)
 	}
 	return out, nil
 }
@@ -276,27 +251,27 @@ func FailoverRecordFromAnnotations(annotations map[string]string) (FailoverRecor
 	if len(annotations) == 0 {
 		return rec, nil
 	}
-	rec.LastFailoverTarget = annotations[LastFailoverTargetAnnotation]
-	raw := annotations[LastFailoverAnnotation]
+	rec.LastFailoverTarget = annotations[v1alpha1.LastFailoverTargetAnnotation]
+	raw := annotations[v1alpha1.LastFailoverAnnotation]
 	if raw == "" {
 		if rec.LastFailoverTarget != "" {
-			return FailoverRecord{}, fmt.Errorf("%s annotation is set without %s", LastFailoverTargetAnnotation, LastFailoverAnnotation)
+			return FailoverRecord{}, fmt.Errorf("%s annotation is set without %s", v1alpha1.LastFailoverTargetAnnotation, v1alpha1.LastFailoverAnnotation)
 		}
 		return rec, nil
 	}
 	if rec.LastFailoverTarget == "" {
-		return FailoverRecord{}, fmt.Errorf("%s annotation is set without %s", LastFailoverAnnotation, LastFailoverTargetAnnotation)
+		return FailoverRecord{}, fmt.Errorf("%s annotation is set without %s", v1alpha1.LastFailoverAnnotation, v1alpha1.LastFailoverTargetAnnotation)
 	}
 	t, err := time.Parse(time.RFC3339Nano, raw)
 	if err != nil {
-		return FailoverRecord{}, fmt.Errorf("parse %s annotation %q: %w", LastFailoverAnnotation, raw, err)
+		return FailoverRecord{}, fmt.Errorf("parse %s annotation %q: %w", v1alpha1.LastFailoverAnnotation, raw, err)
 	}
 	rec.LastFailover = t.UTC().Truncate(time.Second)
 	// The watermark counts only when its binding names this event (K095):
 	// a writer that knows only the two failover keys can advance them
 	// beside an older event's watermark.
-	if annotations[PromotionGtidExecutedForAnnotation] == failoverWatermarkBinding(rec.LastFailover, rec.LastFailoverTarget) {
-		rec.PromotionGtidExecuted = annotations[PromotionGtidExecutedAnnotation]
+	if annotations[v1alpha1.PromotionGtidExecutedForAnnotation] == failoverWatermarkBinding(rec.LastFailover, rec.LastFailoverTarget) {
+		rec.PromotionGtidExecuted = annotations[v1alpha1.PromotionGtidExecutedAnnotation]
 	}
 	return rec, nil
 }
@@ -347,7 +322,7 @@ func EffectiveFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (Fa
 	}
 	if oobErr == nil && !oobRecord.LastFailover.IsZero() && oobRecord.LastFailover.After(limit) {
 		readErr.Annotations = fmt.Errorf("%s annotation %s is more than %s ahead of local time %s",
-			LastFailoverAnnotation, oobRecord.LastFailover.Format(time.RFC3339), FailoverClockSkewGrace, now.UTC().Format(time.RFC3339))
+			v1alpha1.LastFailoverAnnotation, oobRecord.LastFailover.Format(time.RFC3339), FailoverClockSkewGrace, now.UTC().Format(time.RFC3339))
 		oobRecord = FailoverRecord{}
 	}
 	if statusRecord.LastFailoverTarget != "" && !failoverTargetInSpec(fg, statusRecord.LastFailoverTarget) {
@@ -357,7 +332,7 @@ func EffectiveFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (Fa
 	}
 	if oobErr == nil && oobRecord.LastFailoverTarget != "" && !failoverTargetInSpec(fg, oobRecord.LastFailoverTarget) {
 		readErr.Annotations = errors.Join(readErr.Annotations,
-			fmt.Errorf("%s annotation target %q is not present in spec.sites", LastFailoverTargetAnnotation, oobRecord.LastFailoverTarget))
+			fmt.Errorf("%s annotation target %q is not present in spec.sites", v1alpha1.LastFailoverTargetAnnotation, oobRecord.LastFailoverTarget))
 		oobRecord = FailoverRecord{}
 	}
 
@@ -407,11 +382,11 @@ func NewerFailoverRecord(a, b FailoverRecord) FailoverRecord {
 // plannedFailoverInternalAnnotations are the planned failover's
 // operator-internal and acknowledgement annotations.
 var plannedFailoverInternalAnnotations = []string{
-	PlannedFailoverStatusFenceAnnotation,
-	PlannedFailoverTerminalAnnotation,
-	AcknowledgePlannedFailoverHoldAnnotation,
-	PlannedFailoverStallSinceAnnotation,
-	PlannedFailoverManagerAbsentSinceAnnotation,
+	v1alpha1.PlannedFailoverStatusFenceAnnotation,
+	v1alpha1.PlannedFailoverTerminalAnnotation,
+	v1alpha1.AcknowledgePlannedFailoverHoldAnnotation,
+	v1alpha1.PlannedFailoverStallSinceAnnotation,
+	v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation,
 }
 
 // ClearPlannedFailoverAnnotations deletes the planned failover's internal

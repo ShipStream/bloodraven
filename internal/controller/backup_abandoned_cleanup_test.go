@@ -43,7 +43,7 @@ func (f *cleanupFixture) producerJob(t *testing.T, terminal batchv1.JobCondition
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: backupJobName(f.mb.Name), Namespace: f.mb.Namespace, UID: "producer-uid",
-			Labels: map[string]string{labelMysqlBackup: f.mb.Name, labelResourceKind: "backup"},
+			Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "MysqlBackup",
 				Name: f.mb.Name, UID: f.mb.UID, Controller: boolPtr(true)}},
 		},
@@ -140,7 +140,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 		f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
 		producer := f.producerJob(t, "")
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dump-pod", Namespace: "ns",
-			Labels: map[string]string{labelMysqlBackup: f.mb.Name, labelResourceKind: "backup"}},
+			Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"}},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 		if err := f.c.Create(context.Background(), pod); err != nil {
 			t.Fatal(err)
@@ -232,7 +232,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 func (f *cleanupFixture) runningProducerPod(t *testing.T, mutate func(*corev1.Pod)) *corev1.Pod {
 	t.Helper()
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dump-pod", Namespace: "ns",
-		Labels: map[string]string{labelMysqlBackup: f.mb.Name, labelResourceKind: "backup"}},
+		Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 	if mutate != nil {
 		mutate(pod)
@@ -446,8 +446,8 @@ func TestFinalize_AbandonedReportsStuckProducer(t *testing.T) {
 	if done || requeue != 30*time.Second {
 		t.Fatalf("done=%v requeue=%s, want a held deletion", done, requeue)
 	}
-	cond := apiMeta.FindStatusCondition(f.mb.Status.Conditions, ConditionArtifactCleanup)
-	if cond == nil || cond.Reason != cleanupReasonProducerStopStuck || !strings.Contains(cond.Message, "dump-pod") ||
+	cond := apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
+	if cond == nil || cond.Reason != v1alpha1.ReasonProducerStopStuck || !strings.Contains(cond.Message, "dump-pod") ||
 		!strings.Contains(cond.Message, "--force") {
 		t.Fatalf("condition %+v", cond)
 	}

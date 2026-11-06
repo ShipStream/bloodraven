@@ -28,25 +28,8 @@ import (
 const (
 	dragonflyAppName = "dragonfly"
 
-	// labelDragonflyRole identifies the operator-assigned Dragonfly role
-	// on a pod. Values: "master", "replica". The active Service AND-gates
-	// this with labelDragonflyTraffic, so the role label alone is not
-	// enough to attract client traffic.
-	labelDragonflyRole = "shipstream.io/dragonfly-role"
-
-	// labelDragonflyTraffic gates whether a pod is eligible for the
-	// active app-facing Service. Default value "enabled" is set by the
-	// StatefulSet template; the planned-failover sequence transiently
-	// removes it from the source pod before issuing REPLTAKEOVER so the
-	// Service atomically sheds the old endpoint without depending on
-	// label-flip ordering. Restored once the new master is in place.
-	//
-	// Only "enabled" is recognized by the active-Service selector;
-	// "disabled" or absent both shed traffic.
-	labelDragonflyTraffic = "shipstream.io/dragonfly-traffic"
-
 	// dragonflyTrafficEnabled is the only meaningful value of
-	// labelDragonflyTraffic. Centralized so we don't repeat the literal.
+	// v1alpha1.DragonflyTrafficLabel. Centralized so we don't repeat the literal.
 	dragonflyTrafficEnabled = "enabled"
 
 	dragonflyDefaultPort      = int32(6379)
@@ -87,11 +70,11 @@ func dragonflyActiveServiceName(fgName string) string {
 // distinct app.kubernetes.io/name so client tooling can list them.
 func dragonflyCommonLabels(fgName, siteName string) map[string]string {
 	return map[string]string{
-		labelAppName:       dragonflyAppName,
-		labelInstance:      fgName,
-		labelFailoverGroup: fgName,
-		labelSite:          siteName,
-		labelManagedBy:     managerName,
+		labelAppName:                dragonflyAppName,
+		labelInstance:               fgName,
+		v1alpha1.FailoverGroupLabel: fgName,
+		v1alpha1.SiteLabel:          siteName,
+		labelManagedBy:              managerName,
 	}
 }
 
@@ -203,9 +186,9 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 	if sts.Spec.Selector == nil {
 		sts.Spec.Selector = &metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				labelAppName:  dragonflyAppName,
-				labelInstance: fg.Name,
-				labelSite:     site.Name,
+				labelAppName:       dragonflyAppName,
+				labelInstance:      fg.Name,
+				v1alpha1.SiteLabel: site.Name,
 			},
 		}
 	}
@@ -219,8 +202,8 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 	for k, v := range labels {
 		podLabels[k] = v
 	}
-	podLabels[labelDragonflyRole] = "replica"
-	podLabels[labelDragonflyTraffic] = dragonflyTrafficEnabled
+	podLabels[v1alpha1.DragonflyRoleLabel] = "replica"
+	podLabels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 
 	sts.Spec.Replicas = &replicas
 	sts.Spec.ServiceName = dragonflySiteServiceName(fg.Name, site.Name)
@@ -450,9 +433,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySiteService(ctx context
 			// service name from outside the StatefulSet.
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
-				labelAppName:  dragonflyAppName,
-				labelInstance: fg.Name,
-				labelSite:     site.Name,
+				labelAppName:       dragonflyAppName,
+				labelInstance:      fg.Name,
+				v1alpha1.SiteLabel: site.Name,
 			},
 			Ports: []corev1.ServicePort{
 				{Name: "client", Port: port, TargetPort: intstr.FromInt32(port), Protocol: corev1.ProtocolTCP},
@@ -485,10 +468,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 			return err
 		}
 		svc.Labels = map[string]string{
-			labelAppName:       dragonflyAppName,
-			labelInstance:      fg.Name,
-			labelFailoverGroup: fg.Name,
-			labelManagedBy:     managerName,
+			labelAppName:                dragonflyAppName,
+			labelInstance:               fg.Name,
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			labelManagedBy:              managerName,
 		}
 		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
 		svc.Spec = corev1.ServiceSpec{
@@ -500,10 +483,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 			// old and new master would match the selector during a
 			// REPLTAKEOVER.
 			Selector: map[string]string{
-				labelAppName:          dragonflyAppName,
-				labelInstance:         fg.Name,
-				labelDragonflyRole:    "master",
-				labelDragonflyTraffic: dragonflyTrafficEnabled,
+				labelAppName:                   dragonflyAppName,
+				labelInstance:                  fg.Name,
+				v1alpha1.DragonflyRoleLabel:    "master",
+				v1alpha1.DragonflyTrafficLabel: dragonflyTrafficEnabled,
 			},
 			Ports: []corev1.ServicePort{
 				{Name: "client", Port: port, TargetPort: intstr.FromInt32(port), Protocol: corev1.ProtocolTCP},
@@ -526,19 +509,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context
 			return err
 		}
 		pdb.Labels = map[string]string{
-			labelAppName:       dragonflyAppName,
-			labelInstance:      fg.Name,
-			labelFailoverGroup: fg.Name,
-			labelSite:          site.Name,
-			labelManagedBy:     managerName,
+			labelAppName:                dragonflyAppName,
+			labelInstance:               fg.Name,
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			v1alpha1.SiteLabel:          site.Name,
+			labelManagedBy:              managerName,
 		}
 		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
 			MinAvailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					labelAppName:  dragonflyAppName,
-					labelInstance: fg.Name,
-					labelSite:     site.Name,
+					labelAppName:       dragonflyAppName,
+					labelInstance:      fg.Name,
+					v1alpha1.SiteLabel: site.Name,
 				},
 			},
 		}

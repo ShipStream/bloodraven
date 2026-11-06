@@ -260,7 +260,7 @@ func TestUltraK085_TerminalMarkerNamesLenientHoldMarker(t *testing.T) {
 	// and holds the slot.
 	f := newOpsFixture(t, "")
 	fg := newTestFG()
-	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: lenient}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: lenient}
 	e, _, _ := holdUltraEngine(t, f, fg)
 	holdUltraStep(t, e, fg)
 	if v, ok := f.reg.slot.View(); !ok || v.Mode != "Hold" || v.RunID != "run-1" {

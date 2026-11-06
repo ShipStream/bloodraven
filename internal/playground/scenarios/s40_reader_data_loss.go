@@ -435,7 +435,7 @@ func s40AssertServiceTopology(ctx context.Context, env *runner.Env, reader, expe
 	if internalPorts["mysql"] != 3306 || internalPorts["sidecar"] != 8080 || len(internalPorts) != 2 {
 		return fmt.Errorf("internal Service ports=%v, want mysql:3306 and sidecar:8080", internalPorts)
 	}
-	if _, gated := internalService.Spec.Selector["shipstream.io/healthy"]; gated {
+	if _, gated := internalService.Spec.Selector[v1alpha1.HealthyLabel]; gated {
 		return fmt.Errorf("internal Service must not select shipstream.io/healthy")
 	}
 	return nil

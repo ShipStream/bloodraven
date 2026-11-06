@@ -34,14 +34,6 @@ func onHistoryExclusionsMessage(res *v1alpha1.PointInTimeResult) string {
 	return fmt.Sprintf("excluded %s precedes replayed transactions on the target history; their GTIDs were skipped but later row images may carry their effects; the result is not certified for them", set)
 }
 
-// Event reasons #206 adds follow A-74 (proposals/20): <Subject><PastTenseVerb>
-// with PITR as the only acronym. PointInTimePartial predates #206 and is
-// renamed by WS-E (E12) together with status.restore.reason.
-const (
-	eventReasonPITRDivergentHistoryExcluded      = "PITRDivergentHistoryExcluded"
-	eventReasonPITROnHistoryTransactionsExcluded = "PITROnHistoryTransactionsExcluded"
-)
-
 // emitPointInTimeEvents records the Warnings a certified replay result
 // carries (§7.2) on obj, a MysqlFailoverGroup or a MysqlBackupVerification.
 // Callers emit them once, after the status write that records res.
@@ -50,13 +42,13 @@ func emitPointInTimeEvents(rec record.EventRecorder, obj runtime.Object, res *v1
 		return
 	}
 	if res.Outcome == v1alpha1.PointInTimePartial {
-		rec.Eventf(obj, corev1.EventTypeWarning, "PointInTimePartial", "%s", pointInTimePartialMessage(res))
+		rec.Eventf(obj, corev1.EventTypeWarning, v1alpha1.EventPointInTimePartial, "%s", pointInTimePartialMessage(res))
 	}
 	if res.ExcludedDivergentTransactionCount > 0 {
-		rec.Eventf(obj, corev1.EventTypeWarning, eventReasonPITRDivergentHistoryExcluded,
+		rec.Eventf(obj, corev1.EventTypeWarning, v1alpha1.EventPITRDivergentHistoryExcluded,
 			"replay excluded %d transactions committed before the target that are outside the target history", res.ExcludedDivergentTransactionCount)
 	}
 	if res.OnHistoryExclusionCount > 0 {
-		rec.Eventf(obj, corev1.EventTypeWarning, eventReasonPITROnHistoryTransactionsExcluded, "%s", onHistoryExclusionsMessage(res))
+		rec.Eventf(obj, corev1.EventTypeWarning, v1alpha1.EventPITROnHistoryTransactionsExcluded, "%s", onHistoryExclusionsMessage(res))
 	}
 }

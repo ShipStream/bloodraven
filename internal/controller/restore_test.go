@@ -58,8 +58,8 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "seed", Namespace: "ns",
 			Labels: map[string]string{
-				labelFailoverGroup: "lion",
-				labelBackupProfile: "nightly-s3",
+				v1alpha1.FailoverGroupLabel: "lion",
+				v1alpha1.BackupProfileLabel: "nightly-s3",
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{

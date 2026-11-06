@@ -49,7 +49,7 @@ func concurrentEncryptionWriter(nn types.NamespacedName, desired *v1alpha1.Encry
 				}
 				latest.Status.EncryptionAtRest = desired.DeepCopy()
 				setCondition(&latest.Status.Conditions, metav1.Condition{
-					Type:               conditionEncryptionReady,
+					Type:               v1alpha1.ConditionEncryptionAtRestReady,
 					Status:             metav1.ConditionTrue,
 					Reason:             "AllSitesSealed",
 					LastTransitionTime: metav1.Now(),
@@ -128,9 +128,9 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 	if !after.SiteKeyringSealed("dc1") {
 		t.Error("dc1 would be re-rendered unsealed after a topology poll")
 	}
-	cond := findCondition(after.Status.Conditions, conditionEncryptionReady)
+	cond := findCondition(after.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
-		t.Errorf("%s = %+v, want the concurrently-written True", conditionEncryptionReady, cond)
+		t.Errorf("%s = %+v, want the concurrently-written True", v1alpha1.ConditionEncryptionAtRestReady, cond)
 	}
 }
 

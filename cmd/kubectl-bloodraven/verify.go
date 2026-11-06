@@ -138,8 +138,8 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 			GenerateName: generateNameWithInfix(group, profile, "verify"),
 			Namespace:    ns,
 			Labels: map[string]string{
-				"shipstream.io/failover-group": group,
-				"shipstream.io/backup-profile": profile,
+				v1alpha1.FailoverGroupLabel:    group,
+				v1alpha1.BackupProfileLabel:    profile,
 				"app.kubernetes.io/managed-by": "bloodraven",
 			},
 		},

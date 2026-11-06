@@ -153,12 +153,6 @@ func initRestoreSeedSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	return fg.Status.ActiveSite
 }
 
-// Ready condition reasons while spec.initFromBackup has not succeeded.
-const (
-	readyReasonInitRestoreInProgress = "InitFromBackupInProgress"
-	readyReasonInitRestoreFailed     = "InitFromBackupFailed"
-)
-
 // initRestoreRecovery is the recovery procedure for a failed
 // initFromBackup restore, shared by the RestoreFailed Event and the Ready
 // condition so both say the same thing.
@@ -180,16 +174,16 @@ func initRestoreReadyCondition(fg *v1alpha1.MysqlFailoverGroup) (reason, message
 			detail = rs.Reason + ": " + detail
 		}
 		if rs.JobName == "" {
-			return readyReasonInitRestoreFailed, fmt.Sprintf(
+			return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf(
 				"initFromBackup restore failed before its Job was created: %s. The group stays out of service (no DNS record, no Service endpoints); the operator retries building the Job on each reconcile once the cause is fixed.", detail)
 		}
-		return readyReasonInitRestoreFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery)
+		return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery)
 	}
 	phase := "Pending"
 	if rs != nil && rs.Phase != "" {
 		phase = string(rs.Phase)
 	}
-	return readyReasonInitRestoreInProgress, fmt.Sprintf(
+	return v1alpha1.ReasonInitFromBackupInProgress, fmt.Sprintf(
 		"initFromBackup restore has not succeeded (phase %s); applications are kept off the group (no DNS record, no Service endpoints) until it does", phase)
 }
 
@@ -622,7 +616,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		if meta.pitrPartial() {
 			return 0, nil
 		}
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreSucceeded",
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreSucceeded,
 			"restore Job %s completed: %s", job.Name, message)
 		return 0, nil
 	}
@@ -630,7 +624,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	if !patched {
 		return 15 * time.Second, nil
 	}
-	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreFailed",
+	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreFailed,
 		"restore Job %s failed: %s. %s", job.Name, rs.Message, initRestoreRecovery)
 	// No automatic retry. Operator must delete the Job to re-trigger.
 	return 0, nil
@@ -642,7 +636,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite string, ready bool, wait string, refuse bool) (time.Duration, error) {
 	if !ready {
 		if refuse {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreTargetUnavailable",
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreTargetUnavailable,
 				"refusing to run restore: active site %q is not writable / not ready",
 				fg.Status.ActiveSite)
 		}
@@ -691,7 +685,7 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 		return pitrReadBindingRequeue, nil
 	}
 	if err != nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreBuildFailed", "%s", err.Error())
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreBuildFailed, "%s", err.Error())
 		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
 			Phase:      v1alpha1.BackupPhaseFailed,
 			Reason:     pitrFailureReason(err.Error()),
@@ -717,7 +711,7 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 	}
 	applyRestoreMetadataToStatus(running, sourceMeta)
 	r.setRestoreStatus(ctx, fg, running)
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreStarted",
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreStarted,
 		"created restore Job %s targeting site %s", built.Name, targetSite)
 	return 15 * time.Second, nil
 }
@@ -823,9 +817,9 @@ func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Cont
 		if derived.Labels == nil {
 			derived.Labels = map[string]string{}
 		}
-		derived.Labels[labelFailoverGroup] = fg.Name
+		derived.Labels[v1alpha1.FailoverGroupLabel] = fg.Name
 		derived.Labels[labelManagedBy] = managerName
-		derived.Labels[labelResourceKind] = "restore"
+		derived.Labels[v1alpha1.ResourceLabel] = "restore"
 		derived.Type = corev1.SecretTypeOpaque
 		derived.Data = map[string][]byte{
 			"MYSQL_USER":     []byte(user),
@@ -1271,17 +1265,17 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	extraMounts = append(extraMounts, pitrFrags.MainMounts...)
 
 	labels := map[string]string{
-		labelAppName:       "mysql-restore",
-		labelInstance:      fg.Name,
-		labelFailoverGroup: fg.Name,
-		labelSite:          targetSite,
-		labelManagedBy:     managerName,
-		labelResourceKind:  "restore",
+		labelAppName:                "mysql-restore",
+		labelInstance:               fg.Name,
+		v1alpha1.FailoverGroupLabel: fg.Name,
+		v1alpha1.SiteLabel:          targetSite,
+		labelManagedBy:              managerName,
+		v1alpha1.ResourceLabel:      "restore",
 	}
 	if pitrFrags.KeySecretName != "" {
 		// Correlation label (Δ18): a release of this archive's binding
 		// sees the Job and refuses while it runs.
-		labels[labelPITRKeySecret] = pitrFrags.KeySecretName
+		labels[v1alpha1.PITRKeySecretLabel] = pitrFrags.KeySecretName
 	}
 
 	env := []corev1.EnvVar{

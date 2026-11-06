@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
 func fastPlannedWait(t *testing.T) {
@@ -47,9 +46,9 @@ func patchAnnotation(t *testing.T, cl client.Client, set bool) {
 		if fg.Annotations == nil {
 			fg.Annotations = map[string]string{}
 		}
-		fg.Annotations[PlannedFailoverAnnotation] = "pdx"
+		fg.Annotations[v1alpha1.PlannedFailoverAnnotation] = "pdx"
 	} else {
-		delete(fg.Annotations, PlannedFailoverAnnotation)
+		delete(fg.Annotations, v1alpha1.PlannedFailoverAnnotation)
 	}
 	if err := cl.Update(context.Background(), &fg); err != nil {
 		t.Error(err)
@@ -125,7 +124,7 @@ func TestWaitForPlannedFailover_IgnoresPreviousRun(t *testing.T) {
 	// The previous run's terminal marker is not this request's result.
 	t.Run("previous marker ignored", func(t *testing.T) {
 		fg := baselineFixture(v1alpha1.PlannedFailoverPhasePromoting, "")
-		fg.Annotations = map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-0","outcome":"Succeeded"}`}
+		fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-0","outcome":"Succeeded"}`}
 		cl := waitClient(t, fg).Build()
 		b := newPlannedWaitBaseline(ctx, cl, fg, "pdx")
 		patchAnnotation(t, cl, true)

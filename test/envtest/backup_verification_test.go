@@ -388,7 +388,7 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	}
 	var seenVerified bool
 	for _, c := range terminal.Status.Conditions {
-		if c.Type == controller.ConditionVerified {
+		if c.Type == v1alpha1.ConditionVerified {
 			seenVerified = true
 			if c.Status != metav1.ConditionTrue {
 				t.Errorf("Verified condition status: want True, got %s", c.Status)
@@ -444,7 +444,7 @@ func TestEnvtest_Verification_BackupNotFound_FailsWithReason(t *testing.T) {
 	}
 	var reason string
 	for _, c := range terminal.Status.Conditions {
-		if c.Type == controller.ConditionVerified {
+		if c.Type == v1alpha1.ConditionVerified {
 			reason = c.Reason
 		}
 	}

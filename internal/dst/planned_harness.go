@@ -133,7 +133,7 @@ func (pl *plannedHarness) tickAcks(p int) {
 		if a.padded {
 			v = " " + v + "\n"
 		}
-		if err := pl.store.PatchAnnotations("holdAck", map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: v}); err == nil {
+		if err := pl.store.PatchAnnotations("holdAck", map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: v}); err == nil {
 			pl.counts["holdAcks"]++
 		}
 	}
@@ -775,7 +775,7 @@ func (pl *plannedHarness) fireRestart() {
 // the run's durable stall-since time is a stallMarker2m, otherwise (the 10s
 // released-run deadline) a stallMarkerReleased.
 func (pl *plannedHarness) noteCommit(before, after *v1alpha1.MysqlFailoverGroup) {
-	key := controller.PlannedFailoverTerminalAnnotation
+	key := v1alpha1.PlannedFailoverTerminalAnnotation
 	v := after.GetAnnotations()[key]
 	if v == "" || v == before.GetAnnotations()[key] {
 		return
@@ -784,7 +784,7 @@ func (pl *plannedHarness) noteCommit(before, after *v1alpha1.MysqlFailoverGroup)
 	if !ok {
 		return
 	}
-	id, since, ok := parseDeadlineStart(before.GetAnnotations()[controller.PlannedFailoverStallSinceAnnotation])
+	id, since, ok := parseDeadlineStart(before.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation])
 	if !ok || id != m.RunID {
 		return
 	}
@@ -1194,7 +1194,7 @@ func (pl *plannedHarness) stalledClaimWithinDeadline() bool {
 	if obj == nil {
 		return false
 	}
-	run, since, ok := parseDeadlineStart(obj.GetAnnotations()[controller.PlannedFailoverStallSinceAnnotation])
+	run, since, ok := parseDeadlineStart(obj.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation])
 	if !ok || run != id {
 		return false
 	}

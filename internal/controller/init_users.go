@@ -28,10 +28,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileInitUsersConfigMap(ctx context.C
 			return err
 		}
 		cm.Labels = map[string]string{
-			labelAppName:       "mysql",
-			labelInstance:      fg.Name,
-			labelFailoverGroup: fg.Name,
-			labelManagedBy:     managerName,
+			labelAppName:                "mysql",
+			labelInstance:               fg.Name,
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			labelManagedBy:              managerName,
 		}
 		cm.Data = map[string]string{
 			"01-bloodraven-users.sh": generateInitUsersScript(fg),

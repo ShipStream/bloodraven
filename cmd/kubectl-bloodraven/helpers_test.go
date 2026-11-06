@@ -10,7 +10,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
 func TestShortDuration(t *testing.T) {
@@ -146,7 +145,7 @@ func TestPlannedFailoverSummary(t *testing.T) {
 	}
 	fg.Status.Conditions = nil
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
-	fg.Annotations = map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if got := plannedFailoverSummary(fg); got != "Ended(SourceLeftFenced:StatusStalled)" {
 		t.Errorf("marked planned failover -> %q, want Ended(SourceLeftFenced:StatusStalled)", got)
 	}

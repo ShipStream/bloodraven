@@ -51,7 +51,7 @@ func legacyMergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, sn
 		}
 		st.Sites[i].DivergenceDetectedBy = ""
 		st.Sites[i].DivergenceComparedTo = ""
-		if s.RecoveryState == recoveryStateBlocked {
+		if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 			st.Sites[i].DivergenceDetectedBy = s.DivergenceDetectedBy
 			st.Sites[i].DivergenceComparedTo = s.DivergenceComparedTo
 		}
@@ -118,7 +118,7 @@ func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 			Name: "pdx", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, LastSeen: t0,
 			Replication:        &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: &lag, ExecutedGtidSet: "uuid1:1-20"},
 			ReplicationHealthy: true, SourceHost: "iad", SourceConvergenceState: sourceConvergenceConverged,
-			RecoveryState: recoveryStateBlocked, DivergentGtid: "uuid2:1-3", DivergentTxnCount: 3,
+			RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: "uuid2:1-3", DivergentTxnCount: 3,
 			DivergenceDetectedBy: divergenceDetectedByAudit, DivergenceComparedTo: "iad",
 		},
 	}
@@ -140,7 +140,7 @@ func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 			LastFailover: t0, LastFailoverTarget: "pdx",
 		},
 		"recovery in progress without count": {
-			TopologyGeneration: 9, Sites: []SiteSnapshot{{Name: "iad", RecoveryState: recoveryStateInProgress, DivergentGtid: "uuid2:1", DivergenceDetectedBy: "x", DivergenceComparedTo: "y"}},
+			TopologyGeneration: 9, Sites: []SiteSnapshot{{Name: "iad", RecoveryState: v1alpha1.RecoveryStateInProgress, DivergentGtid: "uuid2:1", DivergenceDetectedBy: "x", DivergenceComparedTo: "y"}},
 		},
 	}
 

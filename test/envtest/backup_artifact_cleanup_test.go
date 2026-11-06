@@ -89,7 +89,7 @@ func TestEnvtest_ArtifactCleanupRetriesFailedJob(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	cond := apiMeta.FindStatusCondition(backup.Status.Conditions, controller.ConditionArtifactCleanup)
+	cond := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
 	if cond == nil || cond.Reason != "CleanupFailed" {
 		t.Fatalf("ArtifactCleanup condition = %+v", cond)
 	}

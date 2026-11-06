@@ -64,8 +64,8 @@ func TestDumpKeySnapshotCreatedBeforeJob(t *testing.T) {
 	if string(snap.Data[pitrKeySnapshotDataKey]) != testPassphrase {
 		t.Fatalf("snapshot bytes %q, want the trimmed live bytes", snap.Data[pitrKeySnapshotDataKey])
 	}
-	for k, v := range map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: string(mb.UID),
-		labelFailoverGroupUID: string(fg.UID), labelFailoverGroup: fg.Name, labelMysqlBackup: mb.Name} {
+	for k, v := range map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(mb.UID),
+		v1alpha1.FailoverGroupUIDLabel: string(fg.UID), v1alpha1.FailoverGroupLabel: fg.Name, v1alpha1.MysqlBackupLabel: mb.Name} {
 		if snap.Labels[k] != v {
 			t.Fatalf("label %s = %q, want %q", k, snap.Labels[k], v)
 		}
@@ -96,14 +96,14 @@ func TestDumpKeySnapshotAdoptConflictMissing(t *testing.T) {
 	}{
 		{name: "row 50: adopted without a byte comparison", existing: func(mb *v1alpha1.MysqlBackup) *corev1.Secret {
 			return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: mb.Namespace, Name: dumpKeySnapshotName(mb),
-				Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: string(mb.UID)}},
+				Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(mb.UID)}},
 				Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("bytes-at-snapshot-time")}}
 		}},
 		{name: "another backup's Secret", existing: func(mb *v1alpha1.MysqlBackup) *corev1.Secret {
 			return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: mb.Namespace, Name: dumpKeySnapshotName(mb),
-				Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: "someone-else"}}}
-		}, wantReason: backupReasonDumpKeySnapshotConflict},
-		{name: "live Secret missing", dropSecret: true, wantReason: backupReasonPassphraseSecretMissing},
+				Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: "someone-else"}}}
+		}, wantReason: v1alpha1.ReasonDumpKeySnapshotConflict},
+		{name: "live Secret missing", dropSecret: true, wantReason: v1alpha1.ReasonPassphraseSecretMissing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var extra []client.Object
@@ -178,8 +178,8 @@ func TestBackupWaitsForPITRRollout(t *testing.T) {
 	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, dsnSecret()}, deps...)...)
 	reconcileUntilStable(t, r, mb.Name)
 	got := getBackup(t, c, mb)
-	if got.Status.Phase != v1alpha1.BackupPhasePending || !strings.Contains(conditionReasons(got.Status.Conditions), backupReasonPITRArchiveRolloutPending) {
-		t.Fatalf("phase %s conditions %v, want Pending/%s", got.Status.Phase, got.Status.Conditions, backupReasonPITRArchiveRolloutPending)
+	if got.Status.Phase != v1alpha1.BackupPhasePending || !strings.Contains(conditionReasons(got.Status.Conditions), v1alpha1.ReasonPITRArchiveRolloutPending) {
+		t.Fatalf("phase %s conditions %v, want Pending/%s", got.Status.Phase, got.Status.Conditions, v1alpha1.ReasonPITRArchiveRolloutPending)
 	}
 
 	// Once they agree, the stamp names the rendered archive.
@@ -187,7 +187,7 @@ func TestBackupWaitsForPITRRollout(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: resourceName(fg.Name, fg.Spec.Sites[1].Name)}, &d); err != nil {
 		t.Fatal(err)
 	}
-	d.Annotations[annotationPITRRender] = render.Canonical()
+	d.Annotations[v1alpha1.PITRRenderAnnotation] = render.Canonical()
 	if err := c.Update(context.Background(), &d); err != nil {
 		t.Fatal(err)
 	}
@@ -209,8 +209,8 @@ func TestBackupOfReadOnlyProfileFails(t *testing.T) {
 	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
 	reconcileUntilStable(t, r, mb.Name)
 	got := getBackup(t, c, mb)
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(conditionReasons(got.Status.Conditions), backupReasonProfileReadOnly) {
-		t.Fatalf("phase %s conditions %v, want Failed/%s", got.Status.Phase, got.Status.Conditions, backupReasonProfileReadOnly)
+	if got.Status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(conditionReasons(got.Status.Conditions), v1alpha1.ReasonProfileReadOnly) {
+		t.Fatalf("phase %s conditions %v, want Failed/%s", got.Status.Phase, got.Status.Conditions, v1alpha1.ReasonProfileReadOnly)
 	}
 }
 
@@ -220,7 +220,7 @@ func TestDumpKeySnapshotDeletedOnlyAfterCleanup(t *testing.T) {
 	ctx := context.Background()
 	snapFor := func(mb *v1alpha1.MysqlBackup) *corev1.Secret {
 		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: mb.Namespace, Name: dumpKeySnapshotName(mb),
-			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: string(mb.UID)}}}
+			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(mb.UID)}}}
 	}
 	exists := func(t *testing.T, c client.Client, mb *v1alpha1.MysqlBackup) bool {
 		var s corev1.Secret
@@ -281,7 +281,7 @@ func TestDumpKeySnapshotDeletedOnlyAfterCleanup(t *testing.T) {
 	t.Run("another backup's same-name Secret is never deleted", func(t *testing.T) {
 		f := newCleanupFixture(t)
 		s := snapFor(f.mb)
-		s.Labels[labelMysqlBackupUID] = "predecessor"
+		s.Labels[v1alpha1.MysqlBackupUIDLabel] = "predecessor"
 		if err := f.c.Create(ctx, s); err != nil {
 			t.Fatal(err)
 		}
@@ -400,7 +400,7 @@ func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 			if got.Status.PITRArchiveID != "" {
 				t.Fatalf("stamped archive %q, want none", got.Status.PITRArchiveID)
 			}
-			if countEvents(rec, eventReasonPITRArchiveNotStamped) != 1 {
+			if countEvents(rec, v1alpha1.EventPITRArchiveNotStamped) != 1 {
 				t.Fatal("no PITRArchiveNotStamped Event")
 			}
 		})

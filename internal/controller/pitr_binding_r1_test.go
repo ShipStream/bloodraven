@@ -32,7 +32,7 @@ func (e *pbtEnv) siteRender(site string) pitrRenderInputs {
 	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: pbtNS, Name: "mysql-" + pbtName + "-" + site}, &d); err != nil {
 		e.t.Fatal(err)
 	}
-	in, err := parsePITRRender(d.Annotations[annotationPITRRender])
+	in, err := parsePITRRender(d.Annotations[v1alpha1.PITRRenderAnnotation])
 	if err != nil {
 		e.t.Fatalf("site %s render: %v", site, err)
 	}
@@ -203,7 +203,7 @@ func TestPITRBindingReleaseWaitsForInFlightRender(t *testing.T) {
 		if fg.Annotations == nil {
 			fg.Annotations = map[string]string{}
 		}
-		fg.Annotations[ReleasePITRArchiveBindingAnnotation] = entryA.ID + ":confirm=" + pbtName
+		fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = entryA.ID + ":confirm=" + pbtName
 	})
 	e.pass()
 	close(proceed)
@@ -256,7 +256,7 @@ func TestPITRBindingReleaseCrashAfterStatusWrite(t *testing.T) {
 	if _, ok := e.releaseAnnotation(); ok {
 		t.Fatal("the annotation outlived the finished release")
 	}
-	e.expectEvents(eventReasonPITRArchiveBindingReleased)
+	e.expectEvents(v1alpha1.EventPITRArchiveBindingReleased)
 }
 
 // F-A: pass N binds an entry by its check Job's verdict, writes Bound and
@@ -272,7 +272,7 @@ func TestPITRBindingStaleCachedPassDoesNotDemoteBound(t *testing.T) {
 	e.deploy("iad", "")
 	e.deploy("pdx", "")
 	e.pass()
-	entry := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating)
+	entry := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
 	if entry.Check == nil {
 		t.Fatalf("no check Job started: %+v", entry)
 	}
@@ -280,7 +280,7 @@ func TestPITRBindingStaleCachedPassDoesNotDemoteBound(t *testing.T) {
 	e.verdict(entry, PITRArchiveCheckResult{State: PITRArchiveCheckStateVerified,
 		ArchiveID: pitrarchive.CreateArchiveID(pbtUID, e.dest(a)), Source: v1alpha1.PITRArchiveSource{Namespace: pbtNS, Name: pbtName, UID: pbtUID}})
 	e.pass()
-	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, pitrBindingBound)
+	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
 	if len(e.jobs()) != 0 {
 		t.Fatal("fixture: the consumed check Job was not deleted")
 	}
@@ -291,7 +291,7 @@ func TestPITRBindingStaleCachedPassDoesNotDemoteBound(t *testing.T) {
 	if !errors.Is(err, errPITRBindingStatusMoved) {
 		t.Fatalf("stale pass = %v, want errPITRBindingStatusMoved", err)
 	}
-	got := e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, pitrBindingBound)
+	got := e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
 	if got.Check != nil {
 		t.Fatalf("the stale pass wrote a check: %+v", got)
 	}
@@ -299,13 +299,13 @@ func TestPITRBindingStaleCachedPassDoesNotDemoteBound(t *testing.T) {
 		t.Fatal("the stale pass started a duplicate check Job")
 	}
 	for _, ev := range e.events() {
-		if strings.Contains(ev, eventReasonPITRArchiveBound) {
-			t.Fatalf("the stale pass emitted a second %s: %q", eventReasonPITRArchiveBound, ev)
+		if strings.Contains(ev, v1alpha1.EventPITRArchiveBound) {
+			t.Fatalf("the stale pass emitted a second %s: %q", v1alpha1.EventPITRArchiveBound, ev)
 		}
 	}
 	// The next pass, from the stored state, is a no-op.
 	e.pass()
-	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, pitrBindingBound)
+	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
 }
 
 // G3: a plaintext check runs against empty prefix p2 while the writer runs
@@ -333,14 +333,14 @@ func TestPITRBindingSupersededCandidateDoesNotWedge(t *testing.T) {
 
 			e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b" })
 			e.pass()
-			entryB := e.expectEntry(b, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating)
+			entryB := e.expectEntry(b, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
 			if entryB.Check == nil || entryB.Encryption.Mode != v1alpha1.PITRArchiveEncryptionNone {
 				t.Fatalf("no plaintext check: %+v", entryB)
 			}
 			e.verdict(entryB, PITRArchiveCheckResult{State: PITRArchiveCheckStateAbsent})
 			if consumeFirst {
 				e.pass()
-				e.expectEntry(b, v1alpha1.PITRArchiveBindingPending, pitrBindingEstablishing)
+				e.expectEntry(b, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonEstablishing)
 			}
 			e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b2" })
 
@@ -353,7 +353,7 @@ func TestPITRBindingSupersededCandidateDoesNotWedge(t *testing.T) {
 			for i := 0; i < 3; i++ {
 				e.pass()
 			}
-			got := e.expectEntry(b2, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating)
+			got := e.expectEntry(b2, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
 			if got.Encryption.Mode != v1alpha1.PITRArchiveEncryptionPassphrase || got.Encryption.KeySecretName != e.snapName(b2, "k2") {
 				t.Fatalf("entry candidate %+v, want the encrypted alias's key", got.Encryption)
 			}
@@ -366,7 +366,7 @@ func TestPITRBindingSupersededCandidateDoesNotWedge(t *testing.T) {
 			// The encrypted candidate's own Absent now establishes it.
 			e.verdict(got, PITRArchiveCheckResult{State: PITRArchiveCheckStateAbsent})
 			e.pass()
-			est := e.expectEntry(b2, v1alpha1.PITRArchiveBindingPending, pitrBindingEstablishing)
+			est := e.expectEntry(b2, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonEstablishing)
 			if in, _ := resolvePITRRender(e.fg(), e.deploysList()); !in.Enabled || in.KeySecretName != est.Encryption.KeySecretName {
 				t.Fatalf("render once established = %+v, want the encrypted candidate", in)
 			}
@@ -394,12 +394,12 @@ func TestPITRBindingCheckVerdictDestinationDigest(t *testing.T) {
 	e.deploy("iad", "")
 	e.deploy("pdx", "")
 	e.pass()
-	entry := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating)
+	entry := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
 	e.verdict(entry, PITRArchiveCheckResult{State: PITRArchiveCheckStateVerified,
 		ArchiveID: pitrarchive.CreateArchiveID(pbtUID, e.dest(a)), Source: v1alpha1.PITRArchiveSource{Namespace: pbtNS, Name: pbtName, UID: pbtUID},
 		DestinationDigest: PITRArchiveCheckDestinationDigest("s3://archive-bucket/elsewhere/binlogs")})
 	e.pass()
-	got := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating)
+	got := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
 	if !strings.Contains(got.Message, "names another destination") {
 		t.Fatalf("message %q", got.Message)
 	}
@@ -419,11 +419,11 @@ func TestPITRBindingSpellingOnlyStorageEditRefused(t *testing.T) {
 		{name: "prefix slash, other Secret", edit: func(p *v1alpha1.BackupProfile) {
 			p.Storage.S3.Prefix = "/" + p.Storage.S3.Prefix + "/"
 			p.Encryption.PassphraseSecret.Name = "pass-x"
-		}, reason: reasonPITRKeyChangeRefused},
+		}, reason: v1alpha1.ReasonKeyChangeRefused},
 		{name: "endpoint case and port, encryption removed", edit: func(p *v1alpha1.BackupProfile) {
 			p.Storage.S3.EndpointURL = "https://S3.Example.Test:443/"
 			p.Encryption = nil
-		}, reason: reasonPITREncryptionChangeRefused},
+		}, reason: v1alpha1.ReasonEncryptionChangeRefused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := pbtProfile("a", "p1", "pass-a")

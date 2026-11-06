@@ -139,23 +139,13 @@ func inPlaceRestoreJobName(fgName, siteName string) string {
 	return truncateDNS1123(fmt.Sprintf("mysql-%s-%s-inplace-restore", fgName, siteName))
 }
 
-// restoreInPlaceConfirmAnnotation records the spec.restoreInPlace.confirm
-// token an in-place restore Job was created for. The Job name is fixed
-// (inPlaceRestoreJobName), so it survives across re-arms and even across a
-// playground reset; this annotation lets the reconciler tell a Job that
-// belongs to the current confirmed request apart from a leftover terminal
-// Job from a prior attempt that merely shares the name. Without it a fresh
-// confirmed request would read the stale Job's terminal phase (and its
-// stale backup path) and be marked Failed without ever running.
-const restoreInPlaceConfirmAnnotation = "bloodraven.shipstream.io/restore-confirm"
-
 // inPlaceRestoreJobConfirm returns the confirm token a Job was created for,
 // or "" when it carries none (a Job from before this annotation existed).
 func inPlaceRestoreJobConfirm(job *batchv1.Job) string {
 	if job == nil {
 		return ""
 	}
-	return job.GetAnnotations()[restoreInPlaceConfirmAnnotation]
+	return job.GetAnnotations()[v1alpha1.RestoreInPlaceConfirmAnnotation]
 }
 
 // inPlaceRestoreJobIsForConfirm reports whether job was created for the
@@ -353,7 +343,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 			// Invalid new confirm: leave the terminal status alone but
 			// surface the error on the CR events so the user knows
 			// why the re-arm did not take.
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceRejected",
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceRejected,
 				"invalid spec.restoreInPlace.confirm: %v", err)
 			return 0, nil
 		}
@@ -428,7 +418,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 		}
 		applyRestoreMetadataToInPlaceStatus(next, r.restoreSourceMetadata(ctx, fg, spec.Source))
 		r.setInPlaceRestoreStatus(ctx, fg, next)
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceStarted",
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceStarted,
 			"starting in-place restore (scope=%s, confirm=%s)", scope, spec.Confirm)
 		return 5 * time.Second, nil
 	}
@@ -445,7 +435,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 			if advances, err := confirmAdvances(spec.Confirm, cur.RunConfirm); err != nil || !advances {
 				r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
 					fmt.Sprintf("cancelled: spec.restoreInPlace.confirm changed from %s to %s, which does not advance past it, before the restore Job was created; nothing was restored",
-						cur.RunConfirm, spec.Confirm), "RestoreInPlaceCancelled")
+						cur.RunConfirm, spec.Confirm), v1alpha1.EventRestoreInPlaceCancelled)
 				return 0, nil
 			}
 		}
@@ -481,7 +471,7 @@ func (r *MysqlFailoverGroupReconciler) noteWaitingForPreviousQueue(fg *v1alpha1.
 	r.restoreSettleNoted[nn] = key
 	r.restorePeerStopMu.Unlock()
 	if !seen {
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceWaitingForPreviousQueue",
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceWaitingForPreviousQueue,
 			"in-place restore confirm=%s waits until the reclone queue of the previous restore (confirm=%s) is settled: "+
 				"its Job's pods may still be running, or the primary is briefly unreadable (at most ten minutes)", requested, previous)
 	}
@@ -499,7 +489,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 	// below, which could otherwise hold the rejection back indefinitely.
 	// Nothing has been fenced yet, so the confirm is not consumed.
 	if err := validateInPlaceRestoreSpec(spec); err != nil {
-		r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed, err.Error(), "RestoreInPlaceRejected")
+		r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed, err.Error(), v1alpha1.EventRestoreInPlaceRejected)
 		return 0, nil
 	}
 	if m := r.deploymentLeaseManager(); m != nil {
@@ -516,7 +506,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 			wait := fmt.Sprintf("waiting for a concurrent operation to finish (%s)", le.Reason)
 			if h := PlannedHoldFrom(fg); h != nil {
 				wait = fmt.Sprintf("waiting for the automation hold of planned failover %s to be acknowledged (%s=%s)",
-					h.RunID, AcknowledgePlannedFailoverHoldAnnotation, h.RunID)
+					h.RunID, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, h.RunID)
 			}
 			if cur.Message != wait {
 				next := cur.DeepCopy()
@@ -815,7 +805,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		if specScope, _ := inPlaceRestoreScope(spec); specScope != cur.Scope && cur.Scope != "" {
 			r.stampTerminalFailure(ctx, fg, target, cur.Scope, cur.ConfirmTokenUsed,
 				fmt.Sprintf("spec.restoreInPlace scope changed from %s to %s after the restore was accepted; nothing was restored. Bump confirm to restore with the new scope",
-					cur.Scope, specScope), "RestoreInPlaceRejected")
+					cur.Scope, specScope), v1alpha1.EventRestoreInPlaceRejected)
 			return 0, nil
 		}
 		// A confirm bumped before the Job exists re-authorizes this run:
@@ -834,7 +824,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 				next.Message = fmt.Sprintf("spec.restoreInPlace.confirm changed from %s to %s before the restore Job was created; the Job runs under %s",
 					cur.RunConfirm, spec.Confirm, spec.Confirm)
 				r.setInPlaceRestoreStatus(ctx, fg, next)
-				r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceConfirmRebound", "%s", next.Message)
+				r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceConfirmRebound, "%s", next.Message)
 				return 2 * time.Second, nil
 			}
 		}
@@ -843,10 +833,10 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		if !jobExists {
 			// Nothing has executed: a clean terminal for this confirm.
 			r.stampTerminalFailure(ctx, fg, target, cur.Scope, inPlaceRunConfirm(cur, spec),
-				fmt.Sprintf("ensure restore creds: %v", err), "RestoreInPlaceBuildFailed")
+				fmt.Sprintf("ensure restore creds: %v", err), v1alpha1.EventRestoreInPlaceBuildFailed)
 			return 0, nil
 		}
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceCredsRefreshFailed",
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceCredsRefreshFailed,
 			"could not refresh restore credentials Secret %s while restore Job %s exists: %v",
 			credsName, job.Name, err)
 	}
@@ -854,7 +844,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	if !jobExists {
 		built, err := r.buildInPlaceRestoreJob(ctx, fg, target, credsName, isFullInstance, schema)
 		if err != nil {
-			r.stampTerminalFailure(ctx, fg, target, cur.Scope, inPlaceRunConfirm(cur, spec), err.Error(), "RestoreInPlaceBuildFailed")
+			r.stampTerminalFailure(ctx, fg, target, cur.Scope, inPlaceRunConfirm(cur, spec), err.Error(), v1alpha1.EventRestoreInPlaceBuildFailed)
 			return 0, nil
 		}
 		if err := controllerutil.SetControllerReference(fg, built, r.Scheme); err != nil {
@@ -900,7 +890,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		next.RunConfirm = inPlaceRestoreJobConfirm(built)
 		applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 		r.setInPlaceRestoreStatus(ctx, fg, next)
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceJobCreated",
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceJobCreated,
 			"created in-place restore Job %s targeting site %s (scope=%s)",
 			built.Name, target, cur.Scope)
 		return 15 * time.Second, nil
@@ -920,7 +910,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		// the pod part-way through and race a second loader over the wreckage,
 		// so we wait for it to terminate no matter whose it is.
 		if phase == "" {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceJobBusy",
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceJobBusy,
 				"in-place restore Job %s from an earlier request is still running; waiting for it to finish before starting confirm=%s",
 				job.Name, specConfirm)
 			return 15 * time.Second, nil
@@ -940,7 +930,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 			if err := r.Delete(ctx, &job, &client.DeleteOptions{PropagationPolicy: &bg}); err != nil && !apierrors.IsNotFound(err) {
 				return 0, fmt.Errorf("delete stale in-place restore job %s: %w", job.Name, err)
 			}
-			r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceStaleJobRemoved",
+			r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceStaleJobRemoved,
 				"removed stale in-place restore Job %s from a prior request before starting confirm=%s",
 				job.Name, spec.Confirm)
 		}
@@ -956,7 +946,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 			waitMsg := fmt.Sprintf("spec.restoreInPlace was removed; holding the fence until restore Job %s (confirm=%s) finishes",
 				job.Name, acceptedConfirm)
 			if cur.Message != waitMsg {
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceSpecRemoved",
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceSpecRemoved,
 					"%s: a running restore Job is never interrupted", waitMsg)
 				next := cur.DeepCopy()
 				next.JobName, next.Message = job.Name, waitMsg
@@ -971,7 +961,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 				waitMsg = fmt.Sprintf("in-flight restore Job %s is running under confirm=%s; confirm=%s does not advance past it and starts nothing",
 					job.Name, acceptedConfirm, spec.Confirm)
 			}
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceConfirmDeferred",
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceConfirmDeferred,
 				"spec.restoreInPlace.confirm=%s changed while the restore Job %s (confirm=%s) is running, which is never interrupted: %s",
 				spec.Confirm, job.Name, acceptedConfirm, waitMsg)
 			if cur.Message != waitMsg {
@@ -1010,7 +1000,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		if jobStart == nil {
 			jobStart = &now
 		}
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceLoaded",
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceLoaded,
 			"in-place restore Job %s completed: %s", job.Name, message)
 		next := &v1alpha1.RestoreInPlaceStatus{
 			Phase:      v1alpha1.RestoreInPlaceResuming,
@@ -1040,9 +1030,9 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	// says right now) so the terminal Failed holds and the destructive restore
 	// is not silently re-armed on the same confirm; the user must bump confirm
 	// to a strictly newer timestamp to retry.
-	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceFailed",
+	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceFailed,
 		"in-place restore Job %s failed: %s", job.Name, message)
-	r.stampTerminalFailure(ctx, fg, target, cur.Scope, acceptedConfirm, message, "RestoreInPlaceFailed")
+	r.stampTerminalFailure(ctx, fg, target, cur.Scope, acceptedConfirm, message, v1alpha1.EventRestoreInPlaceFailed)
 	// Even on failure we unfence so the cluster is not indefinitely
 	// stuck read-only. stampTerminalFailure triggers the runner to
 	// clear the topologyFrozen flag on next sync.
@@ -1093,7 +1083,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *
 	}
 	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 	r.setInPlaceRestoreStatus(ctx, fg, next)
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceSucceeded",
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceSucceeded,
 		"in-place restore complete (scope=%s, site=%s)", cur.Scope, target)
 	return 0, nil
 }
@@ -1203,7 +1193,7 @@ func (r *MysqlFailoverGroupReconciler) rejectInPlaceRestore(ctx context.Context,
 	if prev != nil && prev.Phase == v1alpha1.RestoreInPlaceFailed && prev.ConfirmTokenUsed == keepConfirm && prev.Message == msg {
 		return
 	}
-	r.stampTerminalFailure(ctx, fg, target, scope, keepConfirm, msg, "RestoreInPlaceRejected")
+	r.stampTerminalFailure(ctx, fg, target, scope, keepConfirm, msg, v1alpha1.EventRestoreInPlaceRejected)
 }
 
 // errPreviousRestoreFence holds Preflight while an earlier restore's
@@ -1349,7 +1339,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestoreWithoutSpec(ctx co
 	// Preflight, Fencing, or Restoring before the Job was created.
 	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
 		fmt.Sprintf("cancelled: spec.restoreInPlace was removed in phase %s, before the restore Job started; nothing was restored", cur.Phase),
-		"RestoreInPlaceCancelled")
+		v1alpha1.EventRestoreInPlaceCancelled)
 	return 0, nil
 }
 
@@ -1399,7 +1389,7 @@ func (r *MysqlFailoverGroupReconciler) stampInPlaceJobLost(ctx context.Context, 
 	}
 	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, confirm,
 		fmt.Sprintf("%srestore Job %s no longer exists; the restore outcome is unknown. Check the target's data before using it", why, jobName),
-		"RestoreInPlaceJobLost")
+		v1alpha1.EventRestoreInPlaceJobLost)
 }
 
 // inPlaceRunJob returns the Job under the run's fixed name (nil when there
@@ -1518,7 +1508,7 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 	if job.Annotations == nil {
 		job.Annotations = map[string]string{}
 	}
-	job.Annotations[restoreInPlaceConfirmAnnotation] = confirm
+	job.Annotations[v1alpha1.RestoreInPlaceConfirmAnnotation] = confirm
 	return job, nil
 }
 
@@ -1534,9 +1524,9 @@ func (r *MysqlFailoverGroupReconciler) primaryPodLabelFenced(ctx context.Context
 	if err := r.List(ctx, pods,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
-			labelAppName:  "mysql",
-			labelInstance: fg.Name,
-			labelSite:     fg.Status.ActiveSite,
+			labelAppName:       "mysql",
+			labelInstance:      fg.Name,
+			v1alpha1.SiteLabel: fg.Status.ActiveSite,
 		},
 	); err != nil {
 		return false
@@ -1545,7 +1535,7 @@ func (r *MysqlFailoverGroupReconciler) primaryPodLabelFenced(ctx context.Context
 		return false
 	}
 	for i := range pods.Items {
-		role := pods.Items[i].Labels[labelRole]
+		role := pods.Items[i].Labels[v1alpha1.RoleLabel]
 		if role == "primary" {
 			return false
 		}

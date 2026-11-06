@@ -73,7 +73,7 @@ func TestInPlaceRestoreGuards_FollowAcceptedRun(t *testing.T) {
 func runningInPlaceJob(fg *v1alpha1.MysqlFailoverGroup, site, confirm string, created time.Time) *batchv1.Job {
 	return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Name: inPlaceRestoreJobName(fg.Name, site), Namespace: fg.Namespace,
-		Annotations:       map[string]string{restoreInPlaceConfirmAnnotation: confirm},
+		Annotations:       map[string]string{v1alpha1.RestoreInPlaceConfirmAnnotation: confirm},
 		CreationTimestamp: metav1.NewTime(created),
 	}}
 }
@@ -140,8 +140,8 @@ func TestReconcileInPlaceRestore_SpecRemovedMidJobHoldsUntilJobFinishes(t *testi
 	if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &gotPod); err != nil {
 		t.Fatal(err)
 	}
-	if gotPod.Labels[labelRole] != "fenced" {
-		t.Fatalf("primary pod role = %q, want fenced while the Job runs", gotPod.Labels[labelRole])
+	if gotPod.Labels[v1alpha1.RoleLabel] != "fenced" {
+		t.Fatalf("primary pod role = %q, want fenced while the Job runs", gotPod.Labels[v1alpha1.RoleLabel])
 	}
 	if !strings.Contains(strings.Join(drainEvents(rec), "\n"), "RestoreInPlaceSpecRemoved") {
 		t.Error("want a RestoreInPlaceSpecRemoved event")
@@ -751,7 +751,7 @@ func TestReconcileInPlaceRestore_UnrecordedLostJobHoldsSupersededQueue(t *testin
 	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesHeld || q.ConfirmToken != testRestoreConfirm {
 		t.Fatalf("queue = %+v, want A's queue held", q)
 	}
-	if got := fresh.GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("recloned from the primary of a restore whose Job may have run: annotation %q", got)
 	}
 }

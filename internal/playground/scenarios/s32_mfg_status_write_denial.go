@@ -235,7 +235,7 @@ func precheckHealthyWithOperatorRole(ctx context.Context, env *runner.Env) error
 
 func readyOf(mfg *v1alpha1.MysqlFailoverGroup) string {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == "Ready" {
+		if c.Type == v1alpha1.ConditionReady {
 			return string(c.Status)
 		}
 	}

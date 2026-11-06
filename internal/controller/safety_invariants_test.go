@@ -310,8 +310,8 @@ func TestInvariant_CooldownSurvivesOperatorRestart(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1"}, {Name: "dc2"}}},
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			LastFailoverAnnotation:       start.Add(-30 * time.Minute).Format(time.RFC3339),
-			LastFailoverTargetAnnotation: "dc2",
+			v1alpha1.LastFailoverAnnotation:       start.Add(-30 * time.Minute).Format(time.RFC3339),
+			v1alpha1.LastFailoverTargetAnnotation: "dc2",
 		}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{LastFailover: &statusStamp, LastFailoverTarget: "dc1"},
 	}

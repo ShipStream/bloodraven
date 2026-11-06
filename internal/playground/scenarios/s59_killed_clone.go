@@ -171,7 +171,7 @@ func s59KillReclone(st *s59State) runner.Step {
 			}
 			st.recloneAt = time.Now()
 			value := fmt.Sprintf("%s:confirm=%s", st.candidate, env.FG)
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("annotate reclone: %w", err)
 			}
 			env.Capture.Note("requested reclone-site=" + value)
@@ -378,16 +378,16 @@ func s59RepairCandidate(st *s59State) runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "candidate re-cloned, group healthy",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					boot := findCondition(mfg.Status.Conditions, "Bootstrapping")
+					boot := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
 					bootState := "<missing>"
 					if boot != nil {
 						bootState = boot.Reason
 					}
 					// A failed bootstrap reports Status=True, Reason=Failed.
-					if !requested && time.Since(start) > time.Minute && boot != nil && boot.Reason == "Failed" {
+					if !requested && time.Since(start) > time.Minute && boot != nil && boot.Reason == v1alpha1.ReasonFailed {
 						value := fmt.Sprintf("%s:confirm=%s", st.candidate, env.FG)
 						if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-							"bloodraven.shipstream.io/reclone-site", value); err != nil {
+							v1alpha1.RecloneAnnotation, value); err != nil {
 							return false, "", fmt.Errorf("annotate repair reclone: %w", err)
 						}
 						requested = true
@@ -396,7 +396,7 @@ func s59RepairCandidate(st *s59State) runner.Step {
 					if err := AssertHealthyBaseline(ctx, env); err != nil {
 						return false, "boot=" + bootState + " " + err.Error(), nil
 					}
-					return boot == nil || boot.Reason != "Failed", "boot=" + bootState, nil
+					return boot == nil || boot.Reason != v1alpha1.ReasonFailed, "boot=" + bootState, nil
 				})
 			if err != nil {
 				return err

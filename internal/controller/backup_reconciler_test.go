@@ -623,8 +623,8 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 	if got.Status.SourceSite != "pdx" {
 		t.Errorf("want source pdx, got %s", got.Status.SourceSite)
 	}
-	if job.Labels[labelSite] != "pdx" {
-		t.Errorf("want Job source-site label pdx, got %q", job.Labels[labelSite])
+	if job.Labels[v1alpha1.SiteLabel] != "pdx" {
+		t.Errorf("want Job source-site label pdx, got %q", job.Labels[v1alpha1.SiteLabel])
 	}
 	// Phase 2: capture the active-site MySQL image tag for
 	// version-pinned verification.
@@ -664,7 +664,7 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 		ActiveSiteAtStart: "iad",
 		StartTime:         &metav1.Time{Time: time.Now().Add(-time.Minute)},
 		Conditions: []metav1.Condition{{
-			Type:   ConditionBackupJobCreated,
+			Type:   v1alpha1.ConditionJobCreated,
 			Status: metav1.ConditionTrue,
 			Reason: "Created",
 		}},
@@ -687,7 +687,7 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 		t.Fatalf("pending status still has Job fields: job=%q source=%q activeAtStart=%q startTime=%v",
 			got.Status.JobName, got.Status.SourceSite, got.Status.ActiveSiteAtStart, got.Status.StartTime)
 	}
-	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionBackupJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
+	if cond := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Fatalf("JobCreated condition=%v, want False", cond)
 	}
 	rec, ok := r.Recorder.(*record.FakeRecorder)
@@ -757,7 +757,7 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 		ActiveSiteAtStart: "iad",
 		StartTime:         &metav1.Time{Time: time.Now().Add(-time.Hour)},
 		Conditions: []metav1.Condition{{
-			Type:   ConditionBackupJobCreated,
+			Type:   v1alpha1.ConditionJobCreated,
 			Status: metav1.ConditionTrue,
 			Reason: "Created",
 		}},
@@ -775,14 +775,14 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 	if !strings.Contains(got.Status.Message, "pending for") {
 		t.Fatalf("message=%q, want pending-duration suffix", got.Status.Message)
 	}
-	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionBackupReady); cond == nil || cond.Reason != "NoHealthySource" {
+	if cond := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady); cond == nil || cond.Reason != "NoHealthySource" {
 		t.Fatalf("Ready condition=%v, want Reason=NoHealthySource", cond)
 	}
 	if got.Status.JobName != "" || got.Status.SourceSite != "" || got.Status.ActiveSiteAtStart != "" || got.Status.StartTime != nil {
 		t.Fatalf("failed pre-launch status still has Job fields: job=%q source=%q activeAtStart=%q startTime=%v",
 			got.Status.JobName, got.Status.SourceSite, got.Status.ActiveSiteAtStart, got.Status.StartTime)
 	}
-	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionBackupJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
+	if cond := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Fatalf("JobCreated condition=%v, want False after pre-launch deadline fail", cond)
 	}
 }

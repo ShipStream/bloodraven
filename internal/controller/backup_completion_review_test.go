@@ -67,7 +67,7 @@ func TestBackupMetadataReview_UnrecoverableHistoricalDestination(t *testing.T) {
 					t.Fatalf("unrecoverable artifact wedged deletion: err=%v finalizers=%v", err, got.Finalizers)
 				}
 			} else {
-				condition := apiMeta.FindStatusCondition(got.Status.Conditions, ConditionBackupMetadataComplete)
+				condition := apiMeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionMetadataComplete)
 				if err != nil || retentionReads == 0 || condition == nil || condition.Reason != "DestinationUnavailable" {
 					t.Fatalf("repair did not record the outcome and run retention: reads=%d err=%v status=%+v", retentionReads, err, got.Status)
 				}
@@ -98,7 +98,7 @@ func TestBackupMetadataReview_ReadyConditionPreservedDuringCleanup(t *testing.T)
 			if phase == v1alpha1.BackupPhaseSucceeded {
 				status = metav1.ConditionTrue
 			}
-			original := metav1.Condition{Type: ConditionBackupReady, Status: status, Reason: "Original", Message: "original Job readiness message", LastTransitionTime: metav1.Now()}
+			original := metav1.Condition{Type: v1alpha1.ConditionReady, Status: status, Reason: "Original", Message: "original Job readiness message", LastTransitionTime: metav1.Now()}
 			mb.Status.Conditions = append(mb.Status.Conditions, original)
 			if err := c.Status().Update(context.Background(), mb); err != nil {
 				t.Fatal(err)
@@ -106,14 +106,14 @@ func TestBackupMetadataReview_ReadyConditionPreservedDuringCleanup(t *testing.T)
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 				t.Fatal(err)
 			}
-			original = *apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
+			original = *apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
 			if done, _, err := r.finalize(context.Background(), mb); err != nil || done {
 				t.Fatalf("expected artifact cleanup in progress: done=%v err=%v", done, err)
 			}
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 				t.Fatal(err)
 			}
-			got := apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
+			got := apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
 			if !reflect.DeepEqual(got, &original) || mb.Status.Phase != phase {
 				t.Fatalf("cleanup changed readiness: got %+v want %+v phase=%s", got, original, mb.Status.Phase)
 			}
@@ -205,7 +205,7 @@ func TestBackupMetadataReview_RuntimeExpandedDestinations(t *testing.T) {
 					if mb.Status.Location != want {
 						t.Fatalf("recorded raw env template: got %q want runtime %q", mb.Status.Location, want)
 					}
-					if logs && !apiMeta.IsStatusConditionTrue(mb.Status.Conditions, ConditionBackupMetadataComplete) {
+					if logs && !apiMeta.IsStatusConditionTrue(mb.Status.Conditions, v1alpha1.ConditionMetadataComplete) {
 						t.Fatalf("valid runtime sentinel was rejected: %+v", mb.Status.Conditions)
 					}
 				})
@@ -233,7 +233,7 @@ func TestBackupMetadataReview_UnknownRuntimeDependency(t *testing.T) {
 				if historical {
 					mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
 					mb.Status.Location = "$(RUNTIME_PREFIX)/metadata"
-					mb.Status.Conditions = append(mb.Status.Conditions, metav1.Condition{Type: ConditionBackupMetadataComplete, Status: metav1.ConditionFalse, Reason: "SentinelUnavailable", Message: "previous Job fallback", LastTransitionTime: metav1.Now()})
+					mb.Status.Conditions = append(mb.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionMetadataComplete, Status: metav1.ConditionFalse, Reason: "SentinelUnavailable", Message: "previous Job fallback", LastTransitionTime: metav1.Now()})
 					if err := c.Status().Update(ctx, mb); err != nil {
 						t.Fatal(err)
 					}
@@ -251,10 +251,10 @@ func TestBackupMetadataReview_UnknownRuntimeDependency(t *testing.T) {
 					t.Fatal(err)
 				}
 				if logs {
-					if mb.Status.Location != "runtime-prefix/metadata" || !apiMeta.IsStatusConditionTrue(mb.Status.Conditions, ConditionBackupMetadataComplete) {
+					if mb.Status.Location != "runtime-prefix/metadata" || !apiMeta.IsStatusConditionTrue(mb.Status.Conditions, v1alpha1.ConditionMetadataComplete) {
 						t.Fatalf("valid producer location was not retained: %+v", mb.Status)
 					}
-				} else if mb.Status.Location != "" || !apiMeta.IsStatusConditionFalse(mb.Status.Conditions, ConditionBackupReady) {
+				} else if mb.Status.Location != "" || !apiMeta.IsStatusConditionFalse(mb.Status.Conditions, v1alpha1.ConditionReady) {
 					t.Fatalf("unknown template was claimed as a destination: %+v", mb.Status)
 				}
 			})
@@ -275,7 +275,7 @@ func TestBackupMetadataReview_RepairsPersistedUnexpandedTemplate(t *testing.T) {
 	}
 	mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
 	mb.Status.Location = "$(BLOODRAVEN_STORAGE_TYPE)/metadata"
-	mb.Status.Conditions = append(mb.Status.Conditions, metav1.Condition{Type: ConditionBackupMetadataComplete, Status: metav1.ConditionFalse, Reason: "SentinelMissing", Message: "previous Job fallback", LastTransitionTime: metav1.Now()})
+	mb.Status.Conditions = append(mb.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionMetadataComplete, Status: metav1.ConditionFalse, Reason: "SentinelMissing", Message: "previous Job fallback", LastTransitionTime: metav1.Now()})
 	if err := c.Status().Update(ctx, mb); err != nil {
 		t.Fatal(err)
 	}

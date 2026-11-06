@@ -59,15 +59,6 @@ const (
 	// container installs the bloodraven binary on plaintext Jobs, so the
 	// mysqlsh container can add serverClock.end after the dump.
 	backupStampToolMountPath = "/run/bloodraven/tools"
-
-	// BackupJobFailoverGroupUIDAnnotation pins the source group's UID on
-	// the backup Job; the reconciler recovers status.failoverGroupUID
-	// from it (F21: the Job is created before the status patch).
-	BackupJobFailoverGroupUIDAnnotation = "bloodraven.shipstream.io/failover-group-uid"
-	// BackupJobPITRArchiveIDAnnotation pins the source group's active
-	// PITR archive ID ("" when PITR is disabled), recovered into
-	// status.pitrArchiveID.
-	BackupJobPITRArchiveIDAnnotation = "bloodraven.shipstream.io/pitr-archive-id"
 )
 
 // BackupJobInputs bundles the resolved inputs for BuildBackupJob. Keeping
@@ -162,17 +153,17 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	// Labels applied to both Job and pod so listings/queries work.
 	labels := map[string]string{
-		labelAppName:       "mysql-backup",
-		labelInstance:      fg.Name,
-		labelFailoverGroup: fg.Name,
-		labelSite:          in.SourceSite,
-		labelMysqlBackup:   backup.Name,
-		labelBackupProfile: in.Profile.Name,
-		labelManagedBy:     managerName,
-		labelResourceKind:  "backup",
+		labelAppName:                "mysql-backup",
+		labelInstance:               fg.Name,
+		v1alpha1.FailoverGroupLabel: fg.Name,
+		v1alpha1.SiteLabel:          in.SourceSite,
+		v1alpha1.MysqlBackupLabel:   backup.Name,
+		v1alpha1.BackupProfileLabel: in.Profile.Name,
+		labelManagedBy:              managerName,
+		v1alpha1.ResourceLabel:      "backup",
 	}
 	if encrypted {
-		labels[labelBackupEncrypted] = "true"
+		labels[v1alpha1.BackupEncryptedLabel] = "true"
 	}
 
 	// --- Shared base envVars / storage / credentials volumes -----------
@@ -566,8 +557,8 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	}
 
 	annotations := map[string]string{
-		BackupJobFailoverGroupUIDAnnotation: string(stamp.Source.UID),
-		BackupJobPITRArchiveIDAnnotation:    stamp.PITRArchiveID,
+		v1alpha1.BackupJobFailoverGroupUIDAnnotation: string(stamp.Source.UID),
+		v1alpha1.BackupJobPITRArchiveIDAnnotation:    stamp.PITRArchiveID,
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -651,7 +642,7 @@ func backupJobIdentity(job *batchv1.Job) (types.UID, string) {
 	if job == nil {
 		return "", ""
 	}
-	return types.UID(job.Annotations[BackupJobFailoverGroupUIDAnnotation]), job.Annotations[BackupJobPITRArchiveIDAnnotation]
+	return types.UID(job.Annotations[v1alpha1.BackupJobFailoverGroupUIDAnnotation]), job.Annotations[v1alpha1.BackupJobPITRArchiveIDAnnotation]
 }
 
 // mergeSecurityContexts returns the hardened pod- and container-level

@@ -82,8 +82,8 @@ func TestPITRArchiveMessageOnlyChangesAreRateLimited(t *testing.T) {
 	step(0, s3err("A1"), pitrClean())
 	step(30*time.Second, s3err("A2"), pitrClean())
 	cond, _ := pitrCondition(t, c, nn)
-	if cond == nil || cond.Reason != reasonPITRArchiverError {
-		t.Fatalf("condition = %+v, want False/%s", cond, reasonPITRArchiverError)
+	if cond == nil || cond.Reason != v1alpha1.ReasonArchiverError {
+		t.Fatalf("condition = %+v, want False/%s", cond, v1alpha1.ReasonArchiverError)
 	}
 	written := rv()
 

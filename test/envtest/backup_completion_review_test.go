@@ -60,7 +60,7 @@ func TestEnvtest_UnrecoverableHistoricalBackupCanBeDeleted(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, controller.ConditionBackupMetadataComplete)
+	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionMetadataComplete)
 	if condition == nil || condition.Reason != "DestinationUnavailable" {
 		t.Fatalf("missing durable repair outcome: %+v", backup.Status)
 	}

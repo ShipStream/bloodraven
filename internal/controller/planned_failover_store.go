@@ -170,7 +170,7 @@ func (s *apiPlannedFailoverStore) settleOnce(ctx context.Context, nn types.Names
 	if fenced.Annotations == nil {
 		fenced.Annotations = map[string]string{}
 	}
-	fenced.Annotations[PlannedFailoverStatusFenceAnnotation] = nextStatusFenceValue(cur.Annotations[PlannedFailoverStatusFenceAnnotation], s.clk.Now())
+	fenced.Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] = nextStatusFenceValue(cur.Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation], s.clk.Now())
 	patch := client.MergeFromWithOptions(cur.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	switch err := s.client.Patch(actx, fenced, patch); {
 	case err == nil && (fenced.ResourceVersion == "" || fenced.ResourceVersion == baseRV):
@@ -250,15 +250,15 @@ var errTerminalMarkerHeld = errors.New("planned failover: the terminal marker ho
 // It never replaces another run's ManualRecoveryRequired marker, which may
 // be that hold's only durable evidence (K166): NotCommitted.
 func (s *apiPlannedFailoverStore) WriteTerminalMarker(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, m TerminalMarker) (WriteOutcome, error) {
-	if cur, ok := ParseTerminalMarker(base.GetAnnotations()[PlannedFailoverTerminalAnnotation]); ok && cur.RunID != m.RunID &&
+	if cur, ok := ParseTerminalMarker(base.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok && cur.RunID != m.RunID &&
 		cur.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
 		return WriteNotCommitted, errTerminalMarkerHeld
 	}
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		if a[PlannedFailoverTerminalAnnotation] == m.String() {
+		if a[v1alpha1.PlannedFailoverTerminalAnnotation] == m.String() {
 			return false
 		}
-		a[PlannedFailoverTerminalAnnotation] = m.String()
+		a[v1alpha1.PlannedFailoverTerminalAnnotation] = m.String()
 		return true
 	})
 }
@@ -266,14 +266,14 @@ func (s *apiPlannedFailoverStore) WriteTerminalMarker(ctx context.Context, base 
 // ClearTerminalMarker removes the marker only if it names runID.
 func (s *apiPlannedFailoverStore) ClearTerminalMarker(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) (WriteOutcome, error) {
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		v, ok := a[PlannedFailoverTerminalAnnotation]
+		v, ok := a[v1alpha1.PlannedFailoverTerminalAnnotation]
 		if !ok {
 			return false
 		}
 		if !TerminalMarkerNames(v, runID) {
 			return false
 		}
-		delete(a, PlannedFailoverTerminalAnnotation)
+		delete(a, v1alpha1.PlannedFailoverTerminalAnnotation)
 		return true
 	})
 }
@@ -281,10 +281,10 @@ func (s *apiPlannedFailoverStore) ClearTerminalMarker(ctx context.Context, base 
 // ConsumeRequest removes the planned-failover request annotation.
 func (s *apiPlannedFailoverStore) ConsumeRequest(ctx context.Context, base *v1alpha1.MysqlFailoverGroup) (WriteOutcome, error) {
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		if _, ok := a[PlannedFailoverAnnotation]; !ok {
+		if _, ok := a[v1alpha1.PlannedFailoverAnnotation]; !ok {
 			return false
 		}
-		delete(a, PlannedFailoverAnnotation)
+		delete(a, v1alpha1.PlannedFailoverAnnotation)
 		return true
 	})
 }
@@ -368,11 +368,11 @@ func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1alpha1.
 // DeleteHoldAck removes the acknowledgement annotation if it names runID.
 func (s *apiPlannedFailoverStore) DeleteHoldAck(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) (WriteOutcome, error) {
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		v, ok := a[AcknowledgePlannedFailoverHoldAnnotation]
+		v, ok := a[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]
 		if !ok || strings.TrimSpace(v) != runID {
 			return false
 		}
-		delete(a, AcknowledgePlannedFailoverHoldAnnotation)
+		delete(a, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation)
 		return true
 	})
 }

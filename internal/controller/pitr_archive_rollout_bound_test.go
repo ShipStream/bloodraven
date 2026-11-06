@@ -28,7 +28,7 @@ import (
 // Warning, whether its first round misses a site or is clean.
 func TestPITRArchiveFailedSeedReadDoesNotResurrectRecoveredFalse(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	persistedFalse := &metav1.Condition{Type: conditionPITRArchiveReady, Status: cFalse, Reason: reasonPITRArchiveStoreInitFailed,
+	persistedFalse := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1alpha1.ReasonArchiveStoreInitFailed,
 		Message: "iad: archive store init: boom", ObservedGeneration: 3, LastTransitionTime: metav1.NewTime(t0.Add(-time.Hour))}
 	clean := pitrRound{iad: pitrClean(), pdx: pitrClean()}
 	for _, first := range []string{"missed", "clean"} {
@@ -111,8 +111,8 @@ func TestPITRArchiveInvalidProfileIsNotMaskedByBlockedRollout(t *testing.T) {
 		p.round(context.Background())
 	}
 	cond, _ := pitrCondition(t, c, nn)
-	if cond == nil || cond.Status != cFalse || cond.Reason != reasonPITRArchiverDisabled {
-		t.Fatalf("condition = %+v, want False/%s for a profile that cannot render", cond, reasonPITRArchiverDisabled)
+	if cond == nil || cond.Status != cFalse || cond.Reason != v1alpha1.ReasonArchiverDisabled {
+		t.Fatalf("condition = %+v, want False/%s for a profile that cannot render", cond, v1alpha1.ReasonArchiverDisabled)
 	}
 	if w, _ := countPITREvents(drainEventsPITR(rec)); w != 1 {
 		t.Fatalf("%d Warnings, want 1", w)
@@ -134,10 +134,10 @@ func TestPITRArchiveBlockedRolloutBecomesDisabledAfterBound(t *testing.T) {
 		p.round(context.Background())
 		cond, _ := pitrCondition(t, c, nn)
 		switch {
-		case d < 30*time.Minute && (cond == nil || cond.Reason != reasonPITRAwaitingRollout):
-			t.Fatalf("t+%v: %+v, want Unknown/%s within the bound", d, cond, reasonPITRAwaitingRollout)
-		case d >= 30*time.Minute && (cond == nil || cond.Status != cFalse || cond.Reason != reasonPITRArchiverDisabled):
-			t.Fatalf("t+%v: %+v, want False/%s after the bound", d, cond, reasonPITRArchiverDisabled)
+		case d < 30*time.Minute && (cond == nil || cond.Reason != v1alpha1.ReasonAwaitingRollout):
+			t.Fatalf("t+%v: %+v, want Unknown/%s within the bound", d, cond, v1alpha1.ReasonAwaitingRollout)
+		case d >= 30*time.Minute && (cond == nil || cond.Status != cFalse || cond.Reason != v1alpha1.ReasonArchiverDisabled):
+			t.Fatalf("t+%v: %+v, want False/%s after the bound", d, cond, v1alpha1.ReasonArchiverDisabled)
 		}
 	}
 	cond, _ := pitrCondition(t, c, nn)
@@ -221,9 +221,9 @@ func TestPITRArchiveNewestCoverageAdvancesDuringLongSilence(t *testing.T) {
 // itself observed.
 func TestPITRArchiveStaleFetchedFalseIsDroppedOnRefetch(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	persistedTrue := &metav1.Condition{Type: conditionPITRArchiveReady, Status: cTrue, Reason: reasonPITRArchiving,
+	persistedTrue := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cTrue, Reason: v1alpha1.ReasonArchiving,
 		Message: pitrArchiveArchivingText, ObservedGeneration: 3, LastTransitionTime: metav1.NewTime(t0.Add(-time.Hour))}
-	staleFalse := metav1.Condition{Type: conditionPITRArchiveReady, Status: cFalse, Reason: reasonPITRArchiveStoreInitFailed,
+	staleFalse := metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1alpha1.ReasonArchiveStoreInitFailed,
 		Message: "iad: archive store init: boom", ObservedGeneration: 3, LastTransitionTime: metav1.NewTime(t0.Add(-2 * time.Hour))}
 	fg := pitrArchiveFG(persistedTrue)
 	fg.UID = "uid-1"

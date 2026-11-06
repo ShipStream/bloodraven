@@ -269,9 +269,9 @@ func TestNoBareOperatorBinaryCommand(t *testing.T) {
 func TestOperatorPodsTolerateOwnGroupReadOnlyTaint(t *testing.T) {
 	fg, pods := renderOperatorPods(t)
 
-	own := corev1.Taint{Key: platform.TaintKeyForGroup(fg.Name), Value: platform.TaintValue, Effect: corev1.TaintEffectNoExecute}
-	other := corev1.Taint{Key: platform.TaintKeyForGroup(fg.Name + "-other"), Value: platform.TaintValue, Effect: corev1.TaintEffectNoExecute}
-	legacy := corev1.Taint{Key: platform.LegacyTaintKey, Value: platform.TaintValue, Effect: corev1.TaintEffectNoExecute}
+	own := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Name), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
+	other := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Name + "-other"), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
+	legacy := corev1.Taint{Key: platform.LegacyTaintKey, Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
 
 	if len(pods) != 10 {
 		t.Fatalf("rendered %d pod templates, want 10", len(pods))

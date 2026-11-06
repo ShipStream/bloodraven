@@ -27,10 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const deploymentLeaseData = "bloodraven.shipstream.io/deployment-lease"
-
-const RevokeDeploymentLeasesAnnotation = "bloodraven.shipstream.io/revoke-deployment-leases"
-
 // DeploymentLeaseView is the public, secret-free lease representation.
 type DeploymentLeaseView struct {
 	Kind               string    `json:"kind"`
@@ -91,20 +87,13 @@ type DeploymentLeaseManager struct {
 	plannedClaimHeld atomic.Pointer[func(types.NamespacedName) bool]
 }
 
-// Deployment-lease refusal reasons that the planned-failover engine maps
-// to admission wait reasons (plannedAdmissionWaitReason).
-const (
-	deploymentReasonConcurrentOperation        = "ConcurrentOperation"
-	deploymentReasonTopologyPersistencePending = "TopologyPersistencePending"
-)
-
 // The operations that take BeginPlanned's admission reservation. A refusal
 // while another one holds the reservation carries the holder's name as
-// its reason.
+// its reason, so each name is the unstableReason the operation reports.
 const (
-	deploymentOperationPlannedFailover = "PlannedFailover"
-	deploymentOperationRestoreInPlace  = "RestoreInPlace"
-	deploymentOperationOrderedUpdate   = "OrderedUpdate"
+	deploymentOperationPlannedFailover = v1alpha1.UnstableReasonPlannedFailover
+	deploymentOperationRestoreInPlace  = v1alpha1.UnstableReasonRestoreInPlace
+	deploymentOperationOrderedUpdate   = v1alpha1.UnstableReasonOrderedUpdate
 )
 
 func NewDeploymentLeaseManager(c client.Client, reader client.Reader, recorder record.EventRecorder) *DeploymentLeaseManager {
@@ -141,11 +130,11 @@ func (m *DeploymentLeaseManager) claimHeld(fg *v1alpha1.MysqlFailoverGroup) bool
 func (m *DeploymentLeaseManager) UnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 	reason := DeploymentUnstableReason(fg)
 	switch reason {
-	case "DeploymentRevocationPending", "Initializing", "NoPrimary", "PlannedFailover":
+	case v1alpha1.UnstableReasonDeploymentRevocationPending, v1alpha1.UnstableReasonInitializing, v1alpha1.UnstableReasonNoPrimary, v1alpha1.UnstableReasonPlannedFailover:
 		return reason
 	}
 	if m.claimHeld(fg) || PlannedHoldFrom(fg) != nil {
-		return "PlannedFailover"
+		return v1alpha1.UnstableReasonPlannedFailover
 	}
 	return reason
 }
@@ -181,7 +170,7 @@ func (m *DeploymentLeaseManager) read(ctx context.Context, fg *v1alpha1.MysqlFai
 		return nil, nil, fmt.Errorf("deployment Lease belongs to another group UID")
 	}
 	var r deploymentLeaseRecord
-	if err := json.Unmarshal([]byte(l.Annotations[deploymentLeaseData]), &r); err != nil {
+	if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &r); err != nil {
 		return nil, nil, fmt.Errorf("invalid deployment Lease: %w", err)
 	}
 	return l, &r, nil
@@ -200,12 +189,12 @@ func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1alpha1.MysqlFa
 	if l.Annotations == nil {
 		l.Annotations = make(map[string]string)
 	}
-	l.Annotations[deploymentLeaseData] = string(b)
+	l.Annotations[v1alpha1.DeploymentLeaseAnnotation] = string(b)
 	if l.Labels == nil {
 		l.Labels = make(map[string]string)
 	}
-	l.Labels["bloodraven.shipstream.io/deployment-kind"] = r.Kind
-	l.Labels["bloodraven.shipstream.io/deployment-state"] = r.State
+	l.Labels[v1alpha1.DeploymentKindLabel] = r.Kind
+	l.Labels[v1alpha1.DeploymentStateLabel] = r.State
 	l.Spec.HolderIdentity = &r.OperationID
 	now := metav1.NewMicroTime(m.now())
 	l.Spec.RenewTime = &now
@@ -243,10 +232,10 @@ func (m *DeploymentLeaseManager) current(ctx context.Context, fg *v1alpha1.Mysql
 		reason := ""
 		if m.now().After(r.ExpiresAt) {
 			r.State = "expired"
-		} else if _, pending := fg.Annotations[RevokeDeploymentLeasesAnnotation]; pending {
-			reason = "operator_revoked"
+		} else if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
+			reason = v1alpha1.DeploymentLeaseRevokedByOperator
 		} else if r.TopologyGeneration != fg.Status.TopologyGeneration {
-			reason = "topology_changed"
+			reason = v1alpha1.DeploymentLeaseRevokedTopologyChanged
 		}
 		if reason != "" {
 			r.State, r.Reason = "revoked", reason
@@ -276,8 +265,8 @@ func (m *DeploymentLeaseManager) current(ctx context.Context, fg *v1alpha1.Mysql
 func (m *DeploymentLeaseManager) currentHolds(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) ([]DeploymentLeaseView, error) {
 	var leases coordinationv1.LeaseList
 	if err := m.reader.List(ctx, &leases, client.InNamespace(fg.Namespace), client.MatchingLabels{
-		"bloodraven.shipstream.io/deployment-kind":  "failover-hold",
-		"bloodraven.shipstream.io/deployment-state": "active",
+		v1alpha1.DeploymentKindLabel:  "failover-hold",
+		v1alpha1.DeploymentStateLabel: "active",
 	}); err != nil {
 		return nil, err
 	}
@@ -289,7 +278,7 @@ func (m *DeploymentLeaseManager) currentHolds(ctx context.Context, fg *v1alpha1.
 			continue
 		}
 		var record deploymentLeaseRecord
-		if err := json.Unmarshal([]byte(l.Annotations[deploymentLeaseData]), &record); err != nil {
+		if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &record); err != nil {
 			return nil, err
 		}
 		_, r, err := m.current(ctx, fg, "failover-hold", record.OperationID)
@@ -315,43 +304,45 @@ func (m *DeploymentLeaseManager) currentHolds(ctx context.Context, fg *v1alpha1.
 func (m *DeploymentLeaseManager) revocation(fg *v1alpha1.MysqlFailoverGroup, r *deploymentLeaseRecord) {
 	metrics.DeployLeaseRevocationsTotal.WithLabelValues(fg.Name, r.Kind, r.Reason).Inc()
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, "DeploymentLeaseRevoked", "%s lease for operation %s instance %s revoked: %s", r.Kind, r.OperationID, r.Instance, r.Reason)
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDeploymentLeaseRevoked, "%s lease for operation %s instance %s revoked: %s", r.Kind, r.OperationID, r.Instance, r.Reason)
 	}
 }
 
 // DeploymentUnstableReason mirrors the companion API stability contract.
 func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
-	if _, pending := fg.Annotations[RevokeDeploymentLeasesAnnotation]; pending {
-		return "DeploymentRevocationPending"
+	if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
+		return v1alpha1.UnstableReasonDeploymentRevocationPending
 	}
 	if fg.Status.ActiveSite == "" {
-		if c := apimeta.FindStatusCondition(fg.Status.Conditions, "Ready"); c != nil && c.Reason == "Initializing" {
-			return "Initializing"
+		if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionReady); c != nil && c.Reason == v1alpha1.ReasonInitializing {
+			return v1alpha1.UnstableReasonInitializing
 		}
-		return "NoPrimary"
+		return v1alpha1.UnstableReasonNoPrimary
 	}
 	if plannedFailoverActive(fg) {
-		return "PlannedFailover"
+		return v1alpha1.UnstableReasonPlannedFailover
 	}
 	if fg.Status.UpdatePhase != "" {
-		return "OrderedUpdate"
+		return v1alpha1.UnstableReasonOrderedUpdate
 	}
 	if restoreInFlight(fg) || (fg.Status.Restore != nil && fg.Status.Restore.Phase != "" && fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded && fg.Status.Restore.Phase != v1alpha1.BackupPhaseFailed) {
-		return "Restore"
+		return v1alpha1.UnstableReasonRestore
 	}
 	if d := fg.Status.Dragonfly; d != nil && d.Upgrade != nil && d.Upgrade.Phase != "" && d.Upgrade.Phase != v1alpha1.DragonflyUpgradePhaseSucceeded && d.Upgrade.Phase != v1alpha1.DragonflyUpgradePhaseFailed {
-		return "DragonflyUpgrade"
+		return v1alpha1.UnstableReasonDragonflyUpgrade
 	}
-	if d := fg.Status.Dragonfly; d != nil && d.Phase != "" && d.Phase != v1alpha1.DragonflyPhaseDisabled && d.Phase != v1alpha1.DragonflyPhaseReady {
-		return "Dragonfly" + string(d.Phase)
+	if d := fg.Status.Dragonfly; d != nil {
+		if reason, ok := dragonflyUnstableReasons[d.Phase]; ok {
+			return reason
+		}
 	}
 	if s := fg.Status.RestoreInPlace; s != nil && s.Phase != v1alpha1.RestoreInPlaceSucceeded && s.Phase != v1alpha1.RestoreInPlaceFailed && s.Phase != "" {
-		return "RestoreInPlace"
+		return v1alpha1.UnstableReasonRestoreInPlace
 	}
 	auditOnly := divergenceIsReplicaAuditOnly(fg)
-	for _, name := range []string{"Degraded", "RecoveryPending", "Bootstrapping"} {
+	for _, name := range []string{v1alpha1.ConditionDegraded, v1alpha1.ConditionRecoveryPending, v1alpha1.ConditionBootstrapping} {
 		if c := apimeta.FindStatusCondition(fg.Status.Conditions, name); c != nil && c.Status == metav1.ConditionTrue {
-			if name == "Degraded" && c.Reason == "ReplicationLagging" {
+			if name == v1alpha1.ConditionDegraded && c.Reason == v1alpha1.ReasonReplicationLagging {
 				continue
 			}
 			// A replica-audit divergence report is an integrity warning
@@ -360,13 +351,13 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 			// hide is still checked below (Ready, per-site replication and
 			// source convergence). A returning old primary's report still
 			// gates, as it always has.
-			if c.Reason == "DivergentTransactions" && (name == "Degraded" || auditOnly) {
+			if c.Reason == v1alpha1.ReasonDivergentTransactions && (name == v1alpha1.ConditionDegraded || auditOnly) {
 				continue
 			}
 			// RecoveryPending summarizes one site. When it names a
 			// replica's divergence but another site's recovery is what
 			// gates, report that site's state instead.
-			if name == "RecoveryPending" && c.Reason == "DivergentTransactions" {
+			if name == v1alpha1.ConditionRecoveryPending && c.Reason == v1alpha1.ReasonDivergentTransactions {
 				if reason := gatingRecoveryState(fg); reason != "" {
 					return reason
 				}
@@ -377,8 +368,8 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 			return name
 		}
 	}
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, "Ready"); c == nil || c.Status != metav1.ConditionTrue {
-		return "NotReady"
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionReady); c == nil || c.Status != metav1.ConditionTrue {
+		return v1alpha1.UnstableReasonNotReady
 	}
 	for _, configured := range fg.Spec.Sites {
 		found := false
@@ -389,32 +380,48 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 			}
 		}
 		if !found {
-			return "SiteNotObserved"
+			return v1alpha1.UnstableReasonSiteNotObserved
 		}
 	}
 	for _, s := range fg.Status.Sites {
 		if s.Name == fg.Status.ActiveSite && s.State != "writable" {
-			return "NoPrimary"
+			return v1alpha1.UnstableReasonNoPrimary
 		}
 		if s.Name != fg.Status.ActiveSite && s.State != "read-only" {
-			return "SiteNotReady"
+			return v1alpha1.UnstableReasonSiteNotReady
 		}
 		if s.Name != fg.Status.ActiveSite && restoreReclonePending(fg, s.Name) {
 			// Held out of failover and replication until its
 			// post-restore reclone.
-			return "RestoreReclonePending"
+			return v1alpha1.UnstableReasonRestoreReclonePending
 		}
-		if s.RecoveryState != "" && !(s.RecoveryState == recoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit) {
+		if s.RecoveryState != "" && !(s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit) {
 			return s.RecoveryState
 		}
-		if s.SourceConvergenceState == v1alpha1.SourceConvergencePending || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
-			return "SourceConvergence" + string(s.SourceConvergenceState)
+		if reason, ok := sourceConvergenceUnstableReasons[s.SourceConvergenceState]; ok {
+			return reason
 		}
 		if s.Name != fg.Status.ActiveSite && !s.Replicating {
-			return "ReplicationNotRunning"
+			return v1alpha1.UnstableReasonReplicationNotRunning
 		}
 	}
 	return ""
+}
+
+// dragonflyUnstableReasons maps each Dragonfly phase that makes the group
+// unstable to its unstableReason. Disabled and Ready do not.
+var dragonflyUnstableReasons = map[v1alpha1.DragonflyPhase]string{
+	v1alpha1.DragonflyPhaseReconciling:            v1alpha1.UnstableReasonDragonflyReconciling,
+	v1alpha1.DragonflyPhaseConfiguringReplication: v1alpha1.UnstableReasonDragonflyConfiguringReplication,
+	v1alpha1.DragonflyPhaseDegraded:               v1alpha1.UnstableReasonDragonflyDegraded,
+	v1alpha1.DragonflyPhasePromoting:              v1alpha1.UnstableReasonDragonflyPromoting,
+}
+
+// sourceConvergenceUnstableReasons maps each source-convergence state that
+// makes the group unstable to its unstableReason. Converged does not.
+var sourceConvergenceUnstableReasons = map[v1alpha1.SourceConvergenceState]string{
+	v1alpha1.SourceConvergencePending: v1alpha1.UnstableReasonSourceConvergencePending,
+	v1alpha1.SourceConvergenceBlocked: v1alpha1.UnstableReasonSourceConvergenceBlocked,
 }
 
 // divergenceIsReplicaAuditOnly reports whether every site in recovery
@@ -426,7 +433,7 @@ func divergenceIsReplicaAuditOnly(fg *v1alpha1.MysqlFailoverGroup) bool {
 		if s.RecoveryState == "" {
 			continue
 		}
-		if s.RecoveryState != recoveryStateBlocked || s.DivergenceDetectedBy != divergenceDetectedByAudit {
+		if s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.DivergenceDetectedBy != divergenceDetectedByAudit {
 			return false
 		}
 	}
@@ -441,9 +448,9 @@ func gatingRecoveryState(fg *v1alpha1.MysqlFailoverGroup) string {
 	for _, s := range fg.Status.Sites {
 		switch {
 		case s.RecoveryState == "":
-		case s.RecoveryState == recoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit:
-		case s.RecoveryState == recoveryStateBlocked:
-			return "DivergentTransactions"
+		case s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit:
+		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
+			return v1alpha1.ReasonDivergentTransactions
 		default:
 			return s.RecoveryState
 		}
@@ -464,8 +471,8 @@ func (m *DeploymentLeaseManager) fresh(ctx context.Context, fg *v1alpha1.MysqlFa
 
 func (m *DeploymentLeaseManager) gate(fg *v1alpha1.MysqlFailoverGroup) error {
 	nn := client.ObjectKeyFromObject(fg)
-	if _, pending := fg.Annotations[RevokeDeploymentLeasesAnnotation]; pending {
-		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: "DeploymentRevocationPending", RetryAfterSeconds: 1}
+	if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
+		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonDeploymentRevocationPending, RetryAfterSeconds: 1}
 	}
 	if err := m.topologyGate(fg); err != nil {
 		return err
@@ -479,10 +486,10 @@ func (m *DeploymentLeaseManager) gate(fg *v1alpha1.MysqlFailoverGroup) error {
 func (m *DeploymentLeaseManager) topologyGate(fg *v1alpha1.MysqlFailoverGroup) error {
 	nn := client.ObjectKeyFromObject(fg)
 	if _, pending := m.pending.Load(nn); pending {
-		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: deploymentReasonTopologyPersistencePending, RetryAfterSeconds: 1}
+		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonTopologyPersistencePending, RetryAfterSeconds: 1}
 	}
 	if uid, observed := m.observed.Load(nn); m.requireTopology.Load() && (!observed || uid != fg.UID) {
-		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: "TopologyNotObserved", RetryAfterSeconds: 1}
+		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonTopologyNotObserved, RetryAfterSeconds: 1}
 	}
 	return nil
 }
@@ -676,17 +683,17 @@ func (m *DeploymentLeaseManager) validateWrite(ctx context.Context, fg *v1alpha1
 	if err != nil {
 		return err
 	}
-	if _, pending := fresh.Annotations[RevokeDeploymentLeasesAnnotation]; pending {
+	if _, pending := fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
 		if _, _, err := m.current(ctx, fresh, kind, operation); err != nil {
 			return err
 		}
-		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: "operator_revoked", TopologyGeneration: fresh.Status.TopologyGeneration}
+		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: v1alpha1.DeploymentLeaseRevokedByOperator, TopologyGeneration: fresh.Status.TopologyGeneration}
 	}
 	if fresh.Status.TopologyGeneration != fg.Status.TopologyGeneration {
 		if _, _, err := m.current(ctx, fresh, kind, operation); err != nil {
 			return err
 		}
-		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: "topology_changed", TopologyGeneration: fresh.Status.TopologyGeneration}
+		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: v1alpha1.DeploymentLeaseRevokedTopologyChanged, TopologyGeneration: fresh.Status.TopologyGeneration}
 	}
 	if grant {
 		if reason := m.UnstableReason(fresh); reason != "" {
@@ -742,7 +749,7 @@ func (m *DeploymentLeaseManager) Snapshot(ctx context.Context, fg *v1alpha1.Mysq
 			return fresh, views, nil
 		}
 	}
-	return nil, nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: "TopologyObservationChanged", RetryAfterSeconds: 1}
+	return nil, nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonTopologyObservationChanged, RetryAfterSeconds: 1}
 }
 
 func (m *DeploymentLeaseManager) Hold(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (*DeploymentLeaseView, error) {
@@ -775,7 +782,7 @@ func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1alpha1.
 	if err != nil {
 		return nil, err
 	}
-	if _, pending := fg.Annotations[RevokeDeploymentLeasesAnnotation]; pending {
+	if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
 		return nil, m.gate(fg)
 	}
 	hold, err := m.hold(ctx, fg)
@@ -789,11 +796,11 @@ func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1alpha1.
 	if (operation != deploymentOperationPlannedFailover && (plannedFailoverOwnsSites(fg) || m.claimHeld(fg) || PlannedHoldFrom(fg) != nil)) ||
 		(operation != deploymentOperationRestoreInPlace && inPlaceRestoreInFlight(fg)) ||
 		(operation != deploymentOperationOrderedUpdate && fg.Status.UpdatePhase != "") {
-		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: deploymentReasonConcurrentOperation, RetryAfterSeconds: 1}
+		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonConcurrentOperation, RetryAfterSeconds: 1}
 	}
 	nn := client.ObjectKeyFromObject(fg)
 	if _, pending := m.pending.Load(nn); pending {
-		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: deploymentReasonTopologyPersistencePending, RetryAfterSeconds: 1}
+		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonTopologyPersistencePending, RetryAfterSeconds: 1}
 	}
 	if m.planned[nn] != "" {
 		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: m.planned[nn]}
@@ -841,7 +848,7 @@ func (m *DeploymentLeaseManager) TopologyPersisted(ctx context.Context, fg *v1al
 }
 
 func (m *DeploymentLeaseManager) Revoke(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, reason string) error {
-	if reason != "topology_changed" && reason != "operator_revoked" {
+	if reason != v1alpha1.DeploymentLeaseRevokedTopologyChanged && reason != v1alpha1.DeploymentLeaseRevokedByOperator {
 		return fmt.Errorf("invalid revocation reason")
 	}
 	m.mu.Lock()
@@ -862,27 +869,27 @@ func (m *DeploymentLeaseManager) reconcileRevocation(ctx context.Context, fg *v1
 	if err != nil {
 		return err
 	}
-	request, pending := fresh.Annotations[RevokeDeploymentLeasesAnnotation]
+	request, pending := fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]
 	if !pending {
 		// The informer can still carry a completed request, including after
 		// an annotation removal committed but its response was lost.
 		*fg = *fresh
 		return nil
 	}
-	if err := m.revoke(ctx, fresh, "operator_revoked"); err != nil {
+	if err := m.revoke(ctx, fresh, v1alpha1.DeploymentLeaseRevokedByOperator); err != nil {
 		return err
 	}
 	fresh, err = m.fresh(ctx, fresh)
 	if err != nil {
 		return err
 	}
-	current, pending := fresh.Annotations[RevokeDeploymentLeasesAnnotation]
+	current, pending := fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]
 	if pending {
 		if current != request {
 			return fmt.Errorf("deployment lease revocation request changed")
 		}
 		patch := client.MergeFromWithOptions(fresh.DeepCopy(), client.MergeFromWithOptimisticLock{})
-		delete(fresh.Annotations, RevokeDeploymentLeasesAnnotation)
+		delete(fresh.Annotations, v1alpha1.RevokeDeploymentLeasesAnnotation)
 		if err := m.client.Patch(ctx, fresh, patch); err != nil {
 			return err
 		}

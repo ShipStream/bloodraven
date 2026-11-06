@@ -94,7 +94,7 @@ func TestPITRArchiveReissueRiskBothWriterOrderings(t *testing.T) {
 			}
 			var got []string
 			for _, e := range drainRunnerEvents(rec) {
-				if strings.Contains(e, eventReasonPITRArchiveReissueRisk) {
+				if strings.Contains(e, v1alpha1.EventPITRArchiveReissueRiskDetected) {
 					got = append(got, e)
 				}
 			}
@@ -157,7 +157,7 @@ func TestPITRArchiveReissueRiskAfterPersistedNoPrimary(t *testing.T) {
 			}
 			n := 0
 			for _, e := range drainRunnerEvents(rec) {
-				if strings.Contains(e, eventReasonPITRArchiveReissueRisk) {
+				if strings.Contains(e, v1alpha1.EventPITRArchiveReissueRiskDetected) {
 					n++
 				}
 			}

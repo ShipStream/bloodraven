@@ -374,7 +374,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 		m.logger.Info("dragonfly/mysql active-site drift: promoting Dragonfly replica to match MySQL",
 			"oldSource", oldSource, "target", target, "mysqlActiveSite", fg.Status.ActiveSite, "fg", m.fgKey.String())
 		if m.recorder != nil {
-			m.recorder.Eventf(&fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
+			m.recorder.Eventf(&fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionStarted,
 				"mysql active site %q differs from Dragonfly master %q; promoting Dragonfly replica %q",
 				fg.Status.ActiveSite, oldSource, target)
 		}
@@ -384,7 +384,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 	if target, oldSource, ok := m.dragonflyOnlyPromotionCandidate(&fg, snap); ok {
 		m.logger.Info("dragonfly-only emergency: active master unreachable; promoting replica", "oldSource", oldSource, "target", target, "fg", m.fgKey.String())
 		if m.recorder != nil {
-			m.recorder.Eventf(&fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
+			m.recorder.Eventf(&fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionStarted,
 				"dragonfly-only emergency: active master %q unreachable; promoting replica %q",
 				oldSource, target)
 		}
@@ -760,7 +760,7 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 	if next != nil && !*next {
 		m.logger.Warn("dragonfly: REPLTAKEOVER not advertised", "fg", m.fgKey.String())
 		if m.recorder != nil {
-			m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyReplTakeoverUnsupported,
+			m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyReplTakeoverUnsupported,
 				"Dragonfly does not advertise REPLTAKEOVER; emergency promotion will fall back to REPLICAOF NO ONE (session continuity not guaranteed)")
 		}
 		return
@@ -768,7 +768,7 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 	if prev != nil && !*prev && next != nil && *next {
 		m.logger.Info("dragonfly: REPLTAKEOVER capability restored", "fg", m.fgKey.String())
 		if m.recorder != nil {
-			m.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyReplTakeoverSupported,
+			m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyReplTakeoverSupported,
 				"Dragonfly now advertises REPLTAKEOVER")
 		}
 	}
@@ -977,7 +977,7 @@ func (m *DragonflyManager) attemptStaleMasterReconfigure(ctx context.Context, fg
 	}
 	m.logger.Info("stale-master reconfigure: REPLICAOF applied", "site", siteName, "host", masterHost, "port", masterPort)
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyOldSiteReconfigured,
+		m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyOldSiteReconfigured,
 			"stale Dragonfly master on site %q auto-reconfigured as replica of %s:%d (connected_slaves=0, master_repl_offset=0 — provably never accepted writes)",
 			siteName, masterHost, masterPort)
 	}
@@ -1359,7 +1359,7 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 		m.logger.Warn("dragonfly emergency: target unreachable; skipping promotion", "site", target, "error", err, "fg", fgKey)
 		metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "failed").Inc()
 		if m.recorder != nil {
-			m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+			m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed,
 				"emergency: target Dragonfly %q unreachable; cache continuity unavailable", target)
 		}
 		m.stampPromotionWithin(ctx, target, false)
@@ -1392,7 +1392,7 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 			m.logger.Info("dragonfly emergency: REPLTAKEOVER succeeded", "site", target, "fg", fgKey)
 			metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "success").Inc()
 			if m.recorder != nil {
-				m.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionCompleted,
+				m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionCompleted,
 					"emergency: target Dragonfly %q promoted via REPLTAKEOVER (best-effort)", target)
 			}
 			m.finishDragonflyPromotion(ctx, fg, target, oldSource, password)
@@ -1462,7 +1462,7 @@ func (m *DragonflyManager) resolveUnconfirmedPromotion(ctx context.Context, fg *
 	m.logger.Warn("dragonfly emergency: promotion failed; target not observed as master", "site", target, "role", role, "cause", cause, "fg", fgKey)
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "failed").Inc()
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed,
 			"emergency: target Dragonfly %q failed to promote (%s); observed role %s", target, cause, role)
 	}
 	m.restoreSourceTraffic(ctx, fg, oldSource)
@@ -1476,9 +1476,9 @@ func (m *DragonflyManager) resolveUnconfirmedPromotion(ctx context.Context, fg *
 func (m *DragonflyManager) recordSessionsLostPromotion(fg *v1alpha1.MysqlFailoverGroup, target, what string) {
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "sessions_lost").Inc()
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionCompleted,
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionCompleted,
 			"emergency: target Dragonfly %q %s", target, what)
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflySessionsLost,
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflySessionsLost,
 			"emergency: target Dragonfly %q %s", target, what)
 	}
 }
@@ -1576,7 +1576,7 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 	if err := m.setRoleLabel(ctx, fg, oldSource, "replica"); err != nil {
 		m.logger.Warn("emergency: stamp old source role=replica failed; leaving traffic stripped to avoid split-brain", "site", oldSource, "error", err)
 		if m.recorder != nil {
-			m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+			m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed,
 				"emergency: demote of old source %q failed (%v); source kept out of active Service to avoid split-brain. Manual intervention required.",
 				oldSource, err)
 		}
@@ -1743,7 +1743,7 @@ func (m *DragonflyManager) recordStaleMaster(fg *v1alpha1.MysqlFailoverGroup, si
 		// connected_slaves=0 AND master_repl_offset=0; this Event fires
 		// on every detection regardless of whether the auto-rejoin gate
 		// passed.
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyStaleMasterDetected,
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyStaleMasterDetected,
 			"stale Dragonfly master detected on site %q (active=%q); auto-rejoin attempted only when connected_slaves=0 AND master_repl_offset=0",
 			siteName, fg.Status.ActiveSite)
 	}

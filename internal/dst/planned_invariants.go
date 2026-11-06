@@ -400,7 +400,7 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 		m.violate("PlannedMutationWithoutRun", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
 			"the planned path sent %s %s to %s with no run recorded", e.Kind, e.Detail, e.Site))
 		return
-	case r.marked || markerRunID(m.cur.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) == r.id:
+	case r.marked || markerRunID(m.cur.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]) == r.id:
 		m.violate("MarkedRunResumed", r.id, fmt.Sprintf("run %s sent %s %s to %s after its terminal marker",
 			r.id, e.Kind, e.Detail, e.Site))
 		return
@@ -558,7 +558,7 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 			r.fenceSet = *pf.Fence.GtidSet
 		}
 	}
-	if markerRunID(after.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) == r.id {
+	if markerRunID(after.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]) == r.id {
 		r.marked = true
 	}
 	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && r.promotingGen < 0 {
@@ -596,7 +596,7 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 // ManualRecoveryRequired marker is a hold on its own (PlannedHoldFrom), so
 // its justification is judged then too (K077).
 func (m *plannedMonitor) onMarker(before, after *v1alpha1.MysqlFailoverGroup) {
-	key := controller.PlannedFailoverTerminalAnnotation
+	key := v1alpha1.PlannedFailoverTerminalAnnotation
 	v := after.GetAnnotations()[key]
 	if v == "" || v == before.GetAnnotations()[key] {
 		return
@@ -1093,7 +1093,7 @@ func (m *plannedMonitor) checkEnd(endPoll int) []Violation {
 	// A request annotation nobody consumed after heal and settle never
 	// produced a run, so no run entry can report it (K182).
 	if m.cur != nil {
-		if v, ok := m.cur.GetAnnotations()[controller.PlannedFailoverAnnotation]; ok {
+		if v, ok := m.cur.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 			m.violate("PlannedRunStuck", "request", fmt.Sprintf(
 				"the planned-failover request %q is still unconsumed after heal and settle", v))
 		}

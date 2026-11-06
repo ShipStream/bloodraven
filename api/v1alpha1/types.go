@@ -754,6 +754,12 @@ const (
 	SourceConvergenceBlocked   SourceConvergenceState = "Blocked"
 )
 
+// status.sites[].recoveryState values. Empty means no recovery is needed.
+const (
+	RecoveryStateInProgress = "RecoveryInProgress"
+	RecoveryStateBlocked    = "RecoveryBlocked"
+)
+
 func init() {
 	SchemeBuilder.Register(&MysqlFailoverGroup{}, &MysqlFailoverGroupList{})
 }

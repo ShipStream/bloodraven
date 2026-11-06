@@ -26,19 +26,6 @@ import (
 )
 
 const (
-	// PlannedFailoverAnnotation triggers a graceful, cooldown-respecting
-	// switchover to the named primary-candidate site. The engine removes
-	// it once the request is decided: accepted (Admitting), rejected, or
-	// skipped. A request that is deferred (onCooldown=Defer, a deployment
-	// hold), or that waits in Admitting before its validation, keeps it
-	// until then; removing it cancels a deferred run. The
-	// annotation value is either a bare site name or a site followed by
-	// key=value overrides separated by ':'.
-	//
-	// Examples:
-	//   bloodraven.shipstream.io/planned-failover=pdx
-	//   bloodraven.shipstream.io/planned-failover=pdx:maxLagWait=30s
-	PlannedFailoverAnnotation = "bloodraven.shipstream.io/planned-failover"
 
 	// defaultPlannedFailoverMaxLagWait is the fallback maxLagWait when
 	// neither spec.plannedFailover.maxLagWait nor the annotation

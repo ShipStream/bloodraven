@@ -133,41 +133,41 @@ func TestFailoverRecordFromAnnotations(t *testing.T) {
 		{name: "unrelated keys only", annotations: map[string]string{"a": "b"}},
 		{
 			name:        "target only",
-			annotations: map[string]string{LastFailoverTargetAnnotation: "beta"},
+			annotations: map[string]string{v1alpha1.LastFailoverTargetAnnotation: "beta"},
 			wantErr:     true,
 		},
 		{
 			name:        "timestamp only",
-			annotations: map[string]string{LastFailoverAnnotation: stamp.Format(time.RFC3339Nano)},
+			annotations: map[string]string{v1alpha1.LastFailoverAnnotation: stamp.Format(time.RFC3339Nano)},
 			wantErr:     true,
 		},
 		{
 			name: "full record",
 			annotations: map[string]string{
-				LastFailoverAnnotation:       stamp.Format(time.RFC3339Nano),
-				LastFailoverTargetAnnotation: "gamma",
+				v1alpha1.LastFailoverAnnotation:       stamp.Format(time.RFC3339Nano),
+				v1alpha1.LastFailoverTargetAnnotation: "gamma",
 			},
 			want: FailoverRecord{LastFailover: stamp, LastFailoverTarget: "gamma"},
 		},
 		{
 			name: "non-UTC timestamp normalizes to UTC",
 			annotations: map[string]string{
-				LastFailoverAnnotation:       stamp.In(time.FixedZone("x", 3600)).Format(time.RFC3339Nano),
-				LastFailoverTargetAnnotation: "gamma",
+				v1alpha1.LastFailoverAnnotation:       stamp.In(time.FixedZone("x", 3600)).Format(time.RFC3339Nano),
+				v1alpha1.LastFailoverTargetAnnotation: "gamma",
 			},
 			want: FailoverRecord{LastFailover: stamp, LastFailoverTarget: "gamma"},
 		},
 		{
 			name: "sub-second timestamp normalizes to status precision",
 			annotations: map[string]string{
-				LastFailoverAnnotation:       stamp.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
-				LastFailoverTargetAnnotation: "gamma",
+				v1alpha1.LastFailoverAnnotation:       stamp.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
+				v1alpha1.LastFailoverTargetAnnotation: "gamma",
 			},
 			want: FailoverRecord{LastFailover: stamp, LastFailoverTarget: "gamma"},
 		},
 		{
 			name:        "corrupt timestamp is an error",
-			annotations: map[string]string{LastFailoverAnnotation: "not-a-time"},
+			annotations: map[string]string{v1alpha1.LastFailoverAnnotation: "not-a-time"},
 			wantErr:     true,
 		},
 	}
@@ -224,8 +224,8 @@ func TestEffectiveFailoverRecord(t *testing.T) {
 			LastFailoverTarget: "alpha",
 		},
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
-			LastFailoverTargetAnnotation: "beta",
+			v1alpha1.LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
+			v1alpha1.LastFailoverTargetAnnotation: "beta",
 		}},
 	}
 
@@ -234,15 +234,15 @@ func TestEffectiveFailoverRecord(t *testing.T) {
 		t.Fatalf("newer annotation: rec=%+v fromAnnotations=%v err=%v", rec, fromAnnotations, err)
 	}
 
-	fg.Annotations = map[string]string{LastFailoverAnnotation: now.Format(time.RFC3339)}
+	fg.Annotations = map[string]string{v1alpha1.LastFailoverAnnotation: now.Format(time.RFC3339)}
 	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
 	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
 		t.Fatalf("unpaired annotation fallback: rec=%+v fromAnnotations=%v err=%v", rec, fromAnnotations, err)
 	}
 
 	fg.Annotations = map[string]string{
-		LastFailoverAnnotation:       now.Add(24 * time.Hour).Format(time.RFC3339),
-		LastFailoverTargetAnnotation: "beta",
+		v1alpha1.LastFailoverAnnotation:       now.Add(24 * time.Hour).Format(time.RFC3339),
+		v1alpha1.LastFailoverTargetAnnotation: "beta",
 	}
 	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
 	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
@@ -250,8 +250,8 @@ func TestEffectiveFailoverRecord(t *testing.T) {
 	}
 
 	fg.Annotations = map[string]string{
-		LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
-		LastFailoverTargetAnnotation: "not-in-spec",
+		v1alpha1.LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
+		v1alpha1.LastFailoverTargetAnnotation: "not-in-spec",
 	}
 	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
 	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
@@ -603,8 +603,8 @@ func TestAnnotationFailoverStateRecorder_MissingObject(t *testing.T) {
 func TestClearFailoverStateDeletesOnlyOwnedAnnotations(t *testing.T) {
 	scheme := failoverStateScheme(t)
 	fg := failoverStateFG()
-	fg.Annotations[LastFailoverAnnotation] = "2030-01-01T00:00:00Z"
-	fg.Annotations[LastFailoverTargetAnnotation] = "beta"
+	fg.Annotations[v1alpha1.LastFailoverAnnotation] = "2030-01-01T00:00:00Z"
+	fg.Annotations[v1alpha1.LastFailoverTargetAnnotation] = "beta"
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fg).Build()
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 
@@ -615,11 +615,11 @@ func TestClearFailoverStateDeletesOnlyOwnedAnnotations(t *testing.T) {
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
-	if _, ok := got.Annotations[LastFailoverAnnotation]; ok {
-		t.Errorf("%s survived clear", LastFailoverAnnotation)
+	if _, ok := got.Annotations[v1alpha1.LastFailoverAnnotation]; ok {
+		t.Errorf("%s survived clear", v1alpha1.LastFailoverAnnotation)
 	}
-	if _, ok := got.Annotations[LastFailoverTargetAnnotation]; ok {
-		t.Errorf("%s survived clear", LastFailoverTargetAnnotation)
+	if _, ok := got.Annotations[v1alpha1.LastFailoverTargetAnnotation]; ok {
+		t.Errorf("%s survived clear", v1alpha1.LastFailoverTargetAnnotation)
 	}
 	if got.Annotations["unrelated.example.com/keep-me"] != "yes" {
 		t.Errorf("clear clobbered unrelated annotations: %v", got.Annotations)

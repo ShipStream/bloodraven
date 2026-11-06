@@ -212,7 +212,7 @@ func TestBackupJobEncryption(t *testing.T) {
 		{name: "unrelated-container", container: backupJobContainerName, algorithm: "AES-256-GCM"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelBackupEncrypted: tc.label}}}
+			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{v1alpha1.BackupEncryptedLabel: tc.label}}}
 			job.Spec.Template.Spec.Containers = []corev1.Container{{Name: tc.container, Env: []corev1.EnvVar{{Name: "BLOODRAVEN_ENCRYPTION_ALGORITHM", Value: tc.algorithm}}}}
 			encrypted, algorithm := backupJobEncryption(job)
 			if encrypted != tc.wantEncrypted || algorithm != tc.wantAlgorithm {
@@ -227,7 +227,7 @@ func TestMysqlBackupReconciler_PreservesAttributionWithoutOwnedJob(t *testing.T)
 		t.Run(fmt.Sprintf("foreign-job-%v", foreignJob), func(t *testing.T) {
 			mb := backupCR("retained", "lion", "nightly-s3")
 			mb.UID = types.UID("retained-uid")
-			mb.Finalizers = []string{mysqlBackupFinalizer}
+			mb.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 			mb.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, Encrypted: true, EncryptionAlgorithm: "AES-256-GCM"}
 			objects := []client.Object{mb}
 			if foreignJob {

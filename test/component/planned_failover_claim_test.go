@@ -405,7 +405,7 @@ func pfOwnsSites(obj *v1alpha1.MysqlFailoverGroup) bool {
 	if pf == nil || pf.RunID == "" || pf.Result != nil {
 		return false
 	}
-	if m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]); ok && m.RunID == pf.RunID {
+	if m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok && m.RunID == pf.RunID {
 		return false
 	}
 	switch pf.Phase {
@@ -1514,7 +1514,7 @@ func TestPF_OversizedWatermarkKeepsClaimOnStall(t *testing.T) {
 	if id, _, ok := h.held(); !ok || id != h.pf().RunID {
 		t.Fatal("an oversized-watermark run released its claim on a status stall")
 	}
-	if strings.Contains(h.store.Object().GetAnnotations()[controller.PlannedFailoverTerminalAnnotation], h.pf().RunID) {
+	if strings.Contains(h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation], h.pf().RunID) {
 		t.Fatal("an oversized-watermark run ended with a terminal marker")
 	}
 }
@@ -1685,7 +1685,7 @@ func TestPF_StatusStallWritesTerminalMarker(t *testing.T) {
 		h.clk.Advance(15 * time.Second)
 		h.pass()
 	}
-	marker := h.store.Object().GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]
+	marker := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]
 	if m, ok := controller.ParseTerminalMarker(marker); !ok || m.RunID != pf.RunID {
 		t.Fatalf("no terminal marker for %s after the stall deadline: %q", pf.RunID, marker)
 	}
@@ -1720,7 +1720,7 @@ func TestPF_LateStatusCommitFencedByMarker(t *testing.T) {
 		h.clk.Advance(15 * time.Second)
 		h.pass()
 	}
-	if m := h.store.Object().GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]; m == "" {
+	if m := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]; m == "" {
 		t.Fatal("setup: no terminal marker")
 	}
 	h.clk.Advance(10 * time.Minute)

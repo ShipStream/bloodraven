@@ -17,17 +17,6 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// annotationVerificationHoldPrefix marks a MysqlBackup that a
-// MysqlBackupVerification is reading. The full key is the prefix plus the
-// verification's UID; the value is its name. Retention and the artifact
-// cleanup finalizer leave a backup alone while any hold on it is live.
-//
-// The hold lives on the held object so that taking it and deleting the
-// backup are ordered by the backup's resourceVersion: the verification
-// stamps it with an optimistic lock, and retention deletes with a
-// resourceVersion precondition, so exactly one of them wins.
-const annotationVerificationHoldPrefix = "hold.verification.shipstream.io/"
-
 var (
 	errHoldBackupGone        = errors.New("backup is gone")
 	errHoldBackupReplaced    = errors.New("backup was replaced by another object with the same name")
@@ -35,7 +24,7 @@ var (
 )
 
 func verificationHoldKey(v *v1alpha1.MysqlBackupVerification) string {
-	return annotationVerificationHoldPrefix + string(v.UID)
+	return v1alpha1.VerificationHoldAnnotationPrefix + string(v.UID)
 }
 
 // BackupHasVerificationHold reports whether any verification hold is
@@ -43,7 +32,7 @@ func verificationHoldKey(v *v1alpha1.MysqlBackupVerification) string {
 // binlog coverage of a backup that is being deleted while it is read.
 func BackupHasVerificationHold(b *v1alpha1.MysqlBackup) bool {
 	for key := range b.Annotations {
-		if strings.HasPrefix(key, annotationVerificationHoldPrefix) {
+		if strings.HasPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix) {
 			return true
 		}
 	}
@@ -70,7 +59,7 @@ func verificationExecutionStopped(ctx context.Context, reader client.Reader, nam
 		return false, nil
 	}
 	var pods corev1.PodList
-	if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{labelMysqlBackupVerification: name}); err != nil {
+	if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{v1alpha1.MysqlBackupVerificationLabel: name}); err != nil {
 		return false, fmt.Errorf("list verification pods: %w", err)
 	}
 	for i := range pods.Items {
@@ -178,7 +167,7 @@ func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backu
 	// refuses them), so it is a prospective reader of nothing else.
 	pickable := backup.DeletionTimestamp.IsZero() && backup.Status.Phase == v1alpha1.BackupPhaseSucceeded
 	for key, name := range backup.Annotations {
-		uid, ok := strings.CutPrefix(key, annotationVerificationHoldPrefix)
+		uid, ok := strings.CutPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix)
 		if !ok {
 			continue
 		}
@@ -228,7 +217,7 @@ func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backu
 func deadHoldKeys(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]string, error) {
 	var dead []string
 	for key, name := range backup.Annotations {
-		uid, ok := strings.CutPrefix(key, annotationVerificationHoldPrefix)
+		uid, ok := strings.CutPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix)
 		if !ok {
 			continue
 		}
@@ -437,7 +426,7 @@ func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *
 			"namespace", fresh.Namespace, "backup", fresh.Name, "backupUID", string(fresh.UID),
 			"fg", fresh.Spec.FailoverGroupRef.Name, "profile", fresh.Spec.ProfileName,
 			"verifications", readerNames(readers), "verificationUIDs", readerUIDs(readers))
-		r.Recorder.Eventf(&fresh, corev1.EventTypeNormal, "RetentionDeferred",
+		r.Recorder.Eventf(&fresh, corev1.EventTypeNormal, v1alpha1.EventRetentionDeferred,
 			"retention keeps this backup while verification %s may be reading it", strings.Join(readerNames(readers), ", "))
 		return nil
 	}
@@ -472,7 +461,7 @@ func (r *MysqlBackupVerificationReconciler) stampPITRKeySnapshotHold(ctx context
 		}
 		return fmt.Errorf("get PITR key snapshot: %w", err)
 	}
-	if snap.Labels[labelAppName] != appNamePITRKeySnapshot || snap.Labels[labelFailoverGroupUID] != string(fg.UID) {
+	if snap.Labels[labelAppName] != appNamePITRKeySnapshot || snap.Labels[v1alpha1.FailoverGroupUIDLabel] != string(fg.UID) {
 		return fmt.Errorf("Secret %s is not an archive key snapshot of group %s", name, fg.Name)
 	}
 	if !snap.DeletionTimestamp.IsZero() {

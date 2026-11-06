@@ -238,15 +238,15 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 	profile := target.profile
 
 	labels := map[string]string{
-		labelAppName:       appNameBackupJob,
-		labelInstance:      fg.Name,
-		labelFailoverGroup: fg.Name,
-		labelManagedBy:     managerName,
-		labelResourceKind:  resourcePITRArchiveCheck,
-		labelPITRBindingID: entry.ID,
+		labelAppName:                appNameBackupJob,
+		labelInstance:               fg.Name,
+		v1alpha1.FailoverGroupLabel: fg.Name,
+		labelManagedBy:              managerName,
+		v1alpha1.ResourceLabel:      resourcePITRArchiveCheck,
+		v1alpha1.PITRBindingIDLabel: entry.ID,
 	}
 	if candidate != "" {
-		labels[labelPITRKeySecret] = candidate
+		labels[v1alpha1.PITRKeySecretLabel] = candidate
 	}
 
 	env := []corev1.EnvVar{
@@ -399,7 +399,7 @@ func pitrCheckRetryWait(fg *v1alpha1.MysqlFailoverGroup, id string, now time.Tim
 // cache never deletes a Job a fresher status records, U12), and the Job is
 // created on a later pass. job is nil while a leftover is being replaced.
 // A candidate snapshot is read uncached and its UID recorded on the Job
-// (annotationPITRCheckedSnapshotUID).
+// (v1alpha1.PITRKeySecretUIDAnnotation).
 func (r *MysqlFailoverGroupReconciler) ensurePITRArchiveCheck(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, target *pitrBindingTarget, candidate string) (job, leftover *batchv1.Job, err error) {
 	name := pitrCheckJobName(fg.Name, entry.ID, candidate)
 	var existing batchv1.Job
@@ -426,7 +426,7 @@ func (r *MysqlFailoverGroupReconciler) ensurePITRArchiveCheck(ctx context.Contex
 		if built.Annotations == nil {
 			built.Annotations = map[string]string{}
 		}
-		built.Annotations[annotationPITRCheckedSnapshotUID] = string(snap.UID)
+		built.Annotations[v1alpha1.PITRKeySecretUIDAnnotation] = string(snap.UID)
 	}
 	if err := r.Create(ctx, built); err != nil {
 		if apierrors.IsAlreadyExists(err) {

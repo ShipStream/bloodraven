@@ -821,7 +821,7 @@ func TestOwnsSites_Domain(t *testing.T) {
 				obj := &v1alpha1.MysqlFailoverGroup{}
 				obj.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: runID, Phase: phase}
 				if marked {
-					obj.SetAnnotations(map[string]string{controller.PlannedFailoverTerminalAnnotation: controller.TerminalMarker{
+					obj.SetAnnotations(map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: controller.TerminalMarker{
 						RunID: runID, Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced}.String()})
 				}
 				want := owning[phase] && runID != "" && !marked

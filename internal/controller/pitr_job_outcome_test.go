@@ -570,7 +570,7 @@ func outcomeVerification(t *testing.T, mode string) (*MysqlBackupVerificationRec
 
 func verifiedReason(v *v1alpha1.MysqlBackupVerification) string {
 	for _, cond := range v.Status.Conditions {
-		if cond.Type == ConditionVerified {
+		if cond.Type == v1alpha1.ConditionVerified {
 			return cond.Reason
 		}
 	}
@@ -609,7 +609,7 @@ func TestPITRVerificationVerdictOutcomes(t *testing.T) {
 			if tc.podFailed {
 				phase = corev1.PodFailed
 			}
-			pod := jobPodFor(job, "verify-pod", phase, map[string]string{labelMysqlBackupVerification: v.Name})
+			pod := jobPodFor(job, "verify-pod", phase, map[string]string{v1alpha1.MysqlBackupVerificationLabel: v.Name})
 			initCode, mainCode := int32(0), int32(0)
 			if tc.init != "" {
 				initCode = 2

@@ -201,7 +201,7 @@ func s37VerifyBetweenEras() runner.Step {
 			if _, err := pitrVerifyRefused(ctx, env, s37ID, s37DBName, "t2-early", pitrExpectation{
 				Backup: "b1", Mode: "timestamp", Fence: f2,
 				Markers: []string{"baseline", "M1", "M1b", "M2"},
-			}, "PITRTargetNotCovered"); err != nil {
+			}, string(v1alpha1.PITRTokenTargetNotCovered)); err != nil {
 				return err
 			}
 			flushed, err := pitrFetchFence(env, "A-flush")
@@ -510,7 +510,7 @@ func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...stri
 	waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
 	if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR scenario cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		ready := conditionTrue(mfg.Status.Conditions, "Ready")
+		ready := conditionTrue(mfg.Status.Conditions, v1alpha1.ConditionReady)
 		wantPITR, wantProfile, err := originalPITRExpected(env)
 		if err != nil {
 			return false, "", err

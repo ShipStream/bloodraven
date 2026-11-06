@@ -565,7 +565,7 @@ func TestDeployAPIUnstableAndFreshSnapshot(t *testing.T) {
 // live phase.
 func TestPlannedFailoverOperationProjection(t *testing.T) {
 	marker := func(runID string, outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) map[string]string {
-		return map[string]string{controller.PlannedFailoverTerminalAnnotation: controller.TerminalMarker{RunID: runID, Outcome: outcome, Reason: reason}.String()}
+		return map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: controller.TerminalMarker{RunID: runID, Outcome: outcome, Reason: reason}.String()}
 	}
 	waited := &v1alpha1.PlannedFailoverAdmission{WaitReason: v1alpha1.PlannedFailoverWaitPeerUnreadable}
 	for name, tc := range map[string]struct {

@@ -68,9 +68,9 @@ func succeededBackup(name string, ns string, fgName, profile string, completed m
 			Name:      name,
 			Namespace: ns,
 			Labels: map[string]string{
-				labelFailoverGroup: fgName,
-				labelBackupProfile: profile,
-				labelManagedBy:     managerName,
+				v1alpha1.FailoverGroupLabel: fgName,
+				v1alpha1.BackupProfileLabel: profile,
+				labelManagedBy:              managerName,
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
@@ -185,8 +185,8 @@ func TestEnsureBackupLabels_StampsMissing(t *testing.T) {
 	if !ensureBackupLabels(b) {
 		t.Error("first call should report changes")
 	}
-	if b.Labels[labelFailoverGroup] != "lion" ||
-		b.Labels[labelBackupProfile] != "nightly" ||
+	if b.Labels[v1alpha1.FailoverGroupLabel] != "lion" ||
+		b.Labels[v1alpha1.BackupProfileLabel] != "nightly" ||
 		b.Labels[labelManagedBy] != managerName {
 		t.Errorf("labels not stamped: %+v", b.Labels)
 	}
@@ -569,8 +569,8 @@ func TestMaybeScheduleRetry_CreatesRetryCRWhenBackoffElapsed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "lion-nightly-r1", Namespace: "ns", UID: "failed-backup-uid",
 			Labels: map[string]string{
-				labelFailoverGroup:  "lion",
-				labelBackupSchedule: sched.Name,
+				v1alpha1.FailoverGroupLabel:  "lion",
+				v1alpha1.BackupScheduleLabel: sched.Name,
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
@@ -605,7 +605,7 @@ func TestMaybeScheduleRetry_NoRetryWhenMaxAttemptsReached(t *testing.T) {
 	failed := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "lion-nightly-r2", Namespace: "ns",
-			Labels: map[string]string{labelBackupSchedule: sched.Name, labelFailoverGroup: "lion"},
+			Labels: map[string]string{v1alpha1.BackupScheduleLabel: sched.Name, v1alpha1.FailoverGroupLabel: "lion"},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
@@ -639,7 +639,7 @@ func TestMaybeScheduleRetry_ReturnsWaitWhenBackoffPending(t *testing.T) {
 	failed := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "lion-nightly-r1", Namespace: "ns",
-			Labels: map[string]string{labelBackupSchedule: sched.Name, labelFailoverGroup: "lion"},
+			Labels: map[string]string{v1alpha1.BackupScheduleLabel: sched.Name, v1alpha1.FailoverGroupLabel: "lion"},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
@@ -686,8 +686,8 @@ func TestMysqlBackupReconciler_StampsLabels(t *testing.T) {
 	reconcileUntilStable(t, r, "bare-adhoc")
 	var got v1alpha1.MysqlBackup
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "bare-adhoc", Namespace: "ns"}, &got)
-	if got.Labels[labelFailoverGroup] != "lion" ||
-		got.Labels[labelBackupProfile] != "nightly-s3" ||
+	if got.Labels[v1alpha1.FailoverGroupLabel] != "lion" ||
+		got.Labels[v1alpha1.BackupProfileLabel] != "nightly-s3" ||
 		got.Labels[labelManagedBy] != managerName {
 		t.Errorf("labels not stamped: %+v", got.Labels)
 	}

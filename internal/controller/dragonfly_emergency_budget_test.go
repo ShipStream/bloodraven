@@ -367,8 +367,8 @@ func writableEndpoints(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailover
 	}
 	var out []string
 	for _, p := range pods.Items {
-		if p.Labels[labelDragonflyRole] == "master" && p.Labels[labelDragonflyTraffic] == dragonflyTrafficEnabled {
-			out = append(out, p.Labels[labelSite])
+		if p.Labels[v1alpha1.DragonflyRoleLabel] == "master" && p.Labels[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
+			out = append(out, p.Labels[v1alpha1.SiteLabel])
 		}
 	}
 	slices.Sort(out)
@@ -429,7 +429,7 @@ func TestTryEmergencyPromote_UnconfirmedTakeoverObservedAsMasterIsRecorded(t *te
 	}
 	sawLost := false
 	for _, ev := range drainEventsCh(rec.Events, 16, 50*time.Millisecond) {
-		sawLost = sawLost || strings.Contains(ev, ReasonDragonflySessionsLost)
+		sawLost = sawLost || strings.Contains(ev, v1alpha1.EventDragonflySessionsLost)
 	}
 	if !sawLost {
 		t.Error("no SessionsLost event for a promotion whose sessions may not have survived")

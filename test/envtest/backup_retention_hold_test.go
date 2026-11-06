@@ -160,7 +160,7 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 	if err := k8sClient.Get(ctx, bKey, backup); err != nil {
 		t.Fatal(err)
 	}
-	if cond := apiMeta.FindStatusCondition(backup.Status.Conditions, controller.ConditionArtifactCleanup); cond == nil || cond.Reason != "HeldByVerification" {
+	if cond := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup); cond == nil || cond.Reason != "HeldByVerification" {
 		t.Fatalf("ArtifactCleanup condition = %+v", cond)
 	}
 

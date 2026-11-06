@@ -34,7 +34,7 @@ func TestDeploymentLeaseRevocationReconcilesBeforeEarlyReturn(t *testing.T) {
 	}
 	migration = grantDeploymentLease(t, m, fg, "migration", "op2", 120)
 	hold2 := grantDeploymentLease(t, m, fg, "failover-hold", "op2", 120)
-	fg.Annotations = map[string]string{RevokeDeploymentLeasesAnnotation: "request1", "unrelated": "keep"}
+	fg.Annotations = map[string]string{v1alpha1.RevokeDeploymentLeasesAnnotation: "request1", "unrelated": "keep"}
 	if err := m.client.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestDeploymentLeaseRevocationReconcilesBeforeEarlyReturn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, pending := fresh.Annotations[RevokeDeploymentLeasesAnnotation]; pending || fresh.Annotations["unrelated"] != "keep" {
+	if _, pending := fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending || fresh.Annotations["unrelated"] != "keep" {
 		t.Fatalf("annotations = %v", fresh.Annotations)
 	}
 	for _, lease := range []DeploymentLeaseResult{migration, hold, hold2} {
@@ -69,7 +69,7 @@ func TestDeploymentLeaseRevocationPartialFailureClosesAdmission(t *testing.T) {
 	ctx := context.Background()
 	migration := grantDeploymentLease(t, m, fg, "migration", "op1", 120)
 	hold := grantDeploymentLease(t, m, fg, "failover-hold", "op1", 120)
-	fg.Annotations = map[string]string{RevokeDeploymentLeasesAnnotation: "request1"}
+	fg.Annotations = map[string]string{v1alpha1.RevokeDeploymentLeasesAnnotation: "request1"}
 	if err := m.client.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestDeploymentLeaseRevocationPartialFailureClosesAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.Annotations[RevokeDeploymentLeasesAnnotation] != "request1" {
+	if fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation] != "request1" {
 		t.Fatal("request lost on partial revocation")
 	}
 	_, err = m.Renew(ctx, fg, "failover-hold", "op1", "tenant", "tenant-ns", "deployer", hold.Token, 30)
@@ -121,7 +121,7 @@ func TestDeploymentLeaseRevocationCleanupRetryDoesNotRevokeNewLeases(t *testing.
 			m, fg, now := deploymentLeaseFixture(t)
 			ctx := context.Background()
 			grantDeploymentLease(t, m, fg, "migration", "op1", 120)
-			fg.Annotations = map[string]string{RevokeDeploymentLeasesAnnotation: "request1"}
+			fg.Annotations = map[string]string{v1alpha1.RevokeDeploymentLeasesAnnotation: "request1"}
 			if err := m.client.Update(ctx, fg); err != nil {
 				t.Fatal(err)
 			}
@@ -187,7 +187,7 @@ func TestDeploymentLeaseRevocationDuringWrite(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				fresh.Annotations = map[string]string{RevokeDeploymentLeasesAnnotation: "request1"}
+				fresh.Annotations = map[string]string{v1alpha1.RevokeDeploymentLeasesAnnotation: "request1"}
 				return c.Update(ctx, fresh)
 			}
 			requested := false
@@ -281,7 +281,7 @@ func TestDeploymentLeaseRevocationCleanupPreservesChangedRequest(t *testing.T) {
 	m, fg, _ := deploymentLeaseFixture(t)
 	ctx := context.Background()
 	grantDeploymentLease(t, m, fg, "migration", "op1", 120)
-	fg.Annotations = map[string]string{RevokeDeploymentLeasesAnnotation: "request1"}
+	fg.Annotations = map[string]string{v1alpha1.RevokeDeploymentLeasesAnnotation: "request1"}
 	if err := m.client.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestDeploymentLeaseRevocationCleanupPreservesChangedRequest(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			fresh.Annotations[RevokeDeploymentLeasesAnnotation] = "request2"
+			fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation] = "request2"
 			if err := c.Update(ctx, fresh); err != nil {
 				return err
 			}
@@ -309,7 +309,7 @@ func TestDeploymentLeaseRevocationCleanupPreservesChangedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.Annotations[RevokeDeploymentLeasesAnnotation] != "request2" {
+	if fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation] != "request2" {
 		t.Fatal("cleanup removed a replacement request")
 	}
 	if _, err := r.Reconcile(ctx, req); err != nil {

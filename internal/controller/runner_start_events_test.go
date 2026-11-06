@@ -98,7 +98,7 @@ func countReason(events []string, eventType, reason string) int {
 }
 
 func startFailureWarnings(events []string) int {
-	return countReason(events, corev1.EventTypeWarning, ReasonTopologyManagerStartFailed)
+	return countReason(events, corev1.EventTypeWarning, v1alpha1.EventTopologyManagerStartFailed)
 }
 
 func (h *startEventHarness) startFailureTracked(nn types.NamespacedName) bool {
@@ -120,7 +120,7 @@ func TestStartFailureEvent_NeverStartedWarnsAfterOneResync(t *testing.T) {
 	}
 	ev := h.sync()
 	if startFailureWarnings(ev) != 1 || len(ev) != 1 {
-		t.Fatalf("second failure: want one %s Warning, got %v", ReasonTopologyManagerStartFailed, ev)
+		t.Fatalf("second failure: want one %s Warning, got %v", v1alpha1.EventTopologyManagerStartFailed, ev)
 	}
 	if !strings.Contains(ev[0], "no topology manager is running") || !strings.Contains(ev[0], "missing 'dsn' key") {
 		t.Fatalf("Warning message lacks the impact or the cause: %q", ev[0])
@@ -219,8 +219,8 @@ func TestStartFailureEvent_RecoveryAnnouncedAndFloorSurvives(t *testing.T) {
 
 	h.fixSecret()
 	ev := h.sync()
-	if countReason(ev, corev1.EventTypeNormal, ReasonTopologyManagerStarted) != 1 {
-		t.Fatalf("recovery: want one Normal %s, got %v", ReasonTopologyManagerStarted, ev)
+	if countReason(ev, corev1.EventTypeNormal, v1alpha1.EventTopologyManagerStarted) != 1 {
+		t.Fatalf("recovery: want one Normal %s, got %v", v1alpha1.EventTopologyManagerStarted, ev)
 	}
 	if !strings.Contains(ev[0], "after 2 failed attempts") {
 		t.Fatalf("recovery message lacks the attempt count: %q", ev[0])

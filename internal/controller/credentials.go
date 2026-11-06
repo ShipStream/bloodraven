@@ -21,14 +21,6 @@ import (
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
-const credentialHashAnnotation = "shipstream.io/credential-hash"
-
-// systemSchemaRestrictionAnnotation records the credential hash for which
-// appSystemSchemaRevoke last succeeded. The restriction is tracked apart
-// from credentialHashAnnotation because it can wait on a site that is
-// down; retrying it must not re-run every role's ALTER USER and GRANT.
-const systemSchemaRestrictionAnnotation = "shipstream.io/system-schema-restriction"
-
 // credentialGrantsVersion is mixed into the credential hash so a change to
 // the role grant sets re-runs credential reconciliation once on upgrade,
 // even when no Secret changed. Bump it whenever a role's grants change.
@@ -112,9 +104,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 
 	// Check if credentials have changed since last reconciliation, and
 	// whether the app role's mysql schema restriction still has to land.
-	rolesCurrent := fg.Annotations[credentialHashAnnotation] == currentHash
+	rolesCurrent := fg.Annotations[v1alpha1.CredentialHashAnnotation] == currentHash
 	restrictionCurrent := fg.Spec.Credentials.AppSecret == "" ||
-		fg.Annotations[systemSchemaRestrictionAnnotation] == currentHash
+		fg.Annotations[v1alpha1.SystemSchemaRestrictionAnnotation] == currentHash
 	if rolesCurrent && restrictionCurrent {
 		return nil
 	}
@@ -156,7 +148,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 			}
 			logger.Info("reconciled MySQL user", "role", role.name)
 		}
-		if err := r.setCredentialAnnotation(ctx, fg, credentialHashAnnotation, currentHash); err != nil {
+		if err := r.setCredentialAnnotation(ctx, fg, v1alpha1.CredentialHashAnnotation, currentHash); err != nil {
 			return err
 		}
 	}
@@ -175,7 +167,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 	if err := restrictSystemSchema(ctx, db, roles, ensure); err != nil {
 		return err
 	}
-	return r.setCredentialAnnotation(ctx, fg, systemSchemaRestrictionAnnotation, currentHash)
+	return r.setCredentialAnnotation(ctx, fg, v1alpha1.SystemSchemaRestrictionAnnotation, currentHash)
 }
 
 // tenantClaimedUsernames returns the MySQL usernames owned by live

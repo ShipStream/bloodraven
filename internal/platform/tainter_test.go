@@ -13,6 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
@@ -81,7 +83,7 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 	node1Out, _ := client.CoreV1().Nodes().Get(ctx, "node1", metav1.GetOptions{})
 	count := 0
 	for _, taint := range node1Out.Spec.Taints {
-		if taint.Key == TaintKeyForGroup("orders") {
+		if taint.Key == v1alpha1.ReadOnlyTaintKey("orders") {
 			count++
 		}
 	}
@@ -186,7 +188,7 @@ func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
 		},
 		Spec: corev1.NodeSpec{
 			Taints: []corev1.Taint{
-				{Key: TaintKeyForGroup("orders"), Value: "old", Effect: corev1.TaintEffectNoSchedule},
+				{Key: v1alpha1.ReadOnlyTaintKey("orders"), Value: "old", Effect: corev1.TaintEffectNoSchedule},
 			},
 		},
 	}
@@ -204,7 +206,7 @@ func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
 	if len(out.Spec.Taints) != 1 {
 		t.Fatalf("expected exactly 1 taint, got %v", out.Spec.Taints)
 	}
-	if taint := out.Spec.Taints[0]; taint.Key != TaintKeyForGroup("orders") || taint.Value != TaintValue || taint.Effect != corev1.TaintEffectNoExecute {
+	if taint := out.Spec.Taints[0]; taint.Key != v1alpha1.ReadOnlyTaintKey("orders") || taint.Value != v1alpha1.ReadOnlyTaintValue || taint.Effect != corev1.TaintEffectNoExecute {
 		t.Fatalf("expected canonical NoExecute taint, got %v", taint)
 	}
 }
@@ -220,8 +222,8 @@ func TestNodeTainter_RemovesLegacyTaint(t *testing.T) {
 		},
 		Spec: corev1.NodeSpec{
 			Taints: []corev1.Taint{
-				{Key: LegacyTaintKey, Value: TaintValue, Effect: corev1.TaintEffectNoExecute},
-				{Key: TaintKeyForGroup("orders"), Value: TaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: LegacyTaintKey, Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: v1alpha1.ReadOnlyTaintKey("orders"), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
 			},
 		},
 	}
@@ -237,7 +239,7 @@ func TestNodeTainter_RemovesLegacyTaint(t *testing.T) {
 
 	out, _ := client.CoreV1().Nodes().Get(context.Background(), "node1", metav1.GetOptions{})
 	for _, taint := range out.Spec.Taints {
-		if taint.Key == LegacyTaintKey || taint.Key == TaintKeyForGroup("orders") {
+		if taint.Key == LegacyTaintKey || taint.Key == v1alpha1.ReadOnlyTaintKey("orders") {
 			t.Fatalf("expected readonly taints removed, got %v", out.Spec.Taints)
 		}
 	}
@@ -281,7 +283,7 @@ func installPatchReactor(client *fake.Clientset) {
 }
 
 func hasTaintForGroup(taints []corev1.Taint, group string) bool {
-	key := TaintKeyForGroup(group)
+	key := v1alpha1.ReadOnlyTaintKey(group)
 	for _, t := range taints {
 		if t.Key == key && t.Effect == corev1.TaintEffectNoExecute {
 			return true

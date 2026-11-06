@@ -332,13 +332,13 @@ func verifyRecloneAcceptedMatching() runner.Step {
 			value := site + ":" + prefix
 			env.Capture.Note(fmt.Sprintf("submitting reclone-site=%s (gtid prefix from %q)", value, gtid))
 			before := time.Now()
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("set reclone annotation: %w", err)
 			}
 			// Expect a RecloneRequested event within the operator's
 			// sync interval (~30s, plus some slack).
 			eventCtx, eventCancel := context.WithTimeout(ctx, 60*time.Second)
-			ev, err := waitForMFGEvent(eventCtx, env, before, "RecloneRequested", "")
+			ev, err := waitForMFGEvent(eventCtx, env, before, v1alpha1.EventRecloneRequested, "")
 			eventCancel()
 			if err != nil {
 				return fmt.Errorf("waiting for RecloneRequested event: %w", err)
@@ -369,15 +369,15 @@ func verifyRecloneAcceptedMatching() runner.Step {
 							divergent = append(divergent, s.Name)
 						}
 					}
-					boot := findCondition(mfg.Status.Conditions, "Bootstrapping")
+					boot := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
 					bootState := "<missing>"
 					bootDone := false
 					if boot != nil {
 						bootState = fmt.Sprintf("%s/%s", boot.Status, boot.Reason)
-						if boot.Status == metav1.ConditionFalse && boot.Reason == "Failed" {
+						if boot.Status == metav1.ConditionFalse && boot.Reason == v1alpha1.ReasonFailed {
 							return false, bootState, fmt.Errorf("reclone bootstrap failed: %s", boot.Message)
 						}
-						bootDone = boot.Status == metav1.ConditionFalse && boot.Reason == "Done"
+						bootDone = boot.Status == metav1.ConditionFalse && boot.Reason == v1alpha1.ReasonDone
 					}
 					clean := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0 && len(divergent) == 0 && bootDone
 					now := time.Now()
@@ -410,12 +410,12 @@ func verifyRecloneAcceptedMatching() runner.Step {
 func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expectedSnippet string) error {
 	env.Capture.Note(fmt.Sprintf("submitting reclone-site=%q (expecting rejection: %q)", value, expectedSnippet))
 	before := time.Now()
-	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 		return fmt.Errorf("set reclone annotation: %w", err)
 	}
 	// Operator sync ticker is 30s; allow 60s of slack.
 	evCtx, evCancel := context.WithTimeout(ctx, 60*time.Second)
-	ev, err := waitForMFGEvent(evCtx, env, before, "RecloneRejected", expectedSnippet)
+	ev, err := waitForMFGEvent(evCtx, env, before, v1alpha1.EventRecloneRejected, expectedSnippet)
 	evCancel()
 	if err != nil {
 		return fmt.Errorf("waiting for RecloneRejected event with %q: %w", expectedSnippet, err)
@@ -430,7 +430,7 @@ func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expec
 	for {
 		mfg, err := env.Kube.GetMFGNamed(clearCtx, env.Namespace, env.FG)
 		if err == nil {
-			if _, present := mfg.GetAnnotations()["bloodraven.shipstream.io/reclone-site"]; !present {
+			if _, present := mfg.GetAnnotations()[v1alpha1.RecloneAnnotation]; !present {
 				return nil
 			}
 		}

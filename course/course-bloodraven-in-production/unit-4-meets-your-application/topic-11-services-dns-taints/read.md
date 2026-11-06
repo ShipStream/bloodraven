@@ -95,7 +95,7 @@ the DNS target stays stale — a perfect failover and an unreachable database at
 ## The taint
 
 ```widget
-{"type":"anatomy","title":"The taint Bloodraven applies to a demoted site's nodes","parts":[{"text":"shipstream.io/db-readonly-","label":"key prefix","note":"Fixed constant TaintKeyPrefix. Namespaced to ShipStream so it cannot collide with your own taints."},{"text":"playground","label":"group suffix","note":"The failover group name. Two groups on one node taint independently — this is why the key is per-group."},{"text":"=true","label":"value","note":"Constant TaintValue. It never varies, so a toleration on the key alone with operator Exists is the normal way to tolerate it."},{"text":":NoExecute","label":"effect","note":"Not NoSchedule. This one reaches pods that are already running on the node."}]}
+{"type":"anatomy","title":"The taint Bloodraven applies to a demoted site's nodes","parts":[{"text":"shipstream.io/db-readonly-","label":"key prefix","note":"Fixed prefix of ReadOnlyTaintKey. Namespaced to ShipStream so it cannot collide with your own taints."},{"text":"playground","label":"group suffix","note":"The failover group name. Two groups on one node taint independently — this is why the key is per-group."},{"text":"=true","label":"value","note":"Constant ReadOnlyTaintValue. It never varies, so a toleration on the key alone with operator Exists is the normal way to tolerate it."},{"text":":NoExecute","label":"effect","note":"Not NoSchedule. This one reaches pods that are already running on the node."}]}
 ```
 
 Recall from Unit 2: the taint is a pure function of a per-site state transition,

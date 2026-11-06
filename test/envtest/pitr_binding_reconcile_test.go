@@ -354,12 +354,12 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 		fg.Annotations = map[string]string{}
 	}
 	id := h.binding("a").ID
-	fg.Annotations[controller.ReleasePITRArchiveBindingAnnotation] = id + ":confirm=lion"
+	fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = id + ":confirm=lion"
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	h.reconcile(1)
-	if h.binding("a") == nil || h.fg().Annotations[controller.ReleasePITRArchiveBindingAnnotation] == "" {
+	if h.binding("a") == nil || h.fg().Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] == "" {
 		t.Fatal("a release of an in-use binding was not refused")
 	}
 
@@ -379,7 +379,7 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: snapshot}, &snap); err == nil {
 		t.Fatal("released snapshot not deleted")
 	}
-	if h.fg().Annotations[controller.ReleasePITRArchiveBindingAnnotation] != "" {
+	if h.fg().Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] != "" {
 		t.Fatal("release annotation kept after the release")
 	}
 }

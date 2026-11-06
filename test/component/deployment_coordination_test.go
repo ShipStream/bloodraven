@@ -99,7 +99,7 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 			r, leases, fg, clk := deploymentCoordinationFixture(t)
 			later := grantCoordinationHold(t, leases, fg, "operation-long", "instance-long", 90)
 			earlier := grantCoordinationHold(t, leases, fg, "operation-short", "instance-short", 30)
-			fg.Annotations = map[string]string{controller.PlannedFailoverAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
 			if err := r.Update(ctx, fg); err != nil {
 				t.Fatal(err)
 			}
@@ -132,7 +132,7 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 				if pf.TargetSite != "dc2" || pf.SourceSite != "" || fg.Status.ActiveSite != "dc1" {
 					t.Fatalf("hold changed switchover identity: status=%+v", fg.Status)
 				}
-				if fg.Annotations[controller.PlannedFailoverAnnotation] != "dc2" {
+				if fg.Annotations[v1alpha1.PlannedFailoverAnnotation] != "dc2" {
 					t.Fatal("hold consumed annotation needed for automatic retry")
 				}
 				if want := max(time.Second, hold.ExpiresAt.Sub(clk.Now())+time.Nanosecond); result.RequeueAfter != want {
@@ -168,7 +168,7 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 			if (pf.Admission != nil && pf.Admission.RetryTime != nil) || !pf.StartTime.Equal(start) {
 				t.Fatalf("expiry left retryAfter or reset startTime: %+v", pf)
 			}
-			if _, present := fg.Annotations[controller.PlannedFailoverAnnotation]; present {
+			if _, present := fg.Annotations[v1alpha1.PlannedFailoverAnnotation]; present {
 				t.Fatal("revalidated request retained annotation")
 			}
 			if hold, err := leases.Hold(ctx, fg); err != nil || hold != nil {
@@ -185,7 +185,7 @@ func TestDeploymentCoordination_DeferredHoldAllowsEmergencyPoll(t *testing.T) {
 	h := newTestHarness(t)
 	h.pollN(2)
 	r.Runner.SetManagerForTest(client.ObjectKeyFromObject(fg), h.tm)
-	fg.Annotations = map[string]string{controller.PlannedFailoverAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
 	if err := r.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}

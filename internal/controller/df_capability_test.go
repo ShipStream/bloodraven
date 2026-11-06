@@ -60,8 +60,8 @@ func TestDragonflyManager_Tick_MissingReplTakeover(t *testing.T) {
 	}
 
 	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
-	if !eventsContain(events, ReasonDragonflyReplTakeoverUnsupported) {
-		t.Errorf("expected %s event, got %v", ReasonDragonflyReplTakeoverUnsupported, events)
+	if !eventsContain(events, v1alpha1.EventDragonflyReplTakeoverUnsupported) {
+		t.Errorf("expected %s event, got %v", v1alpha1.EventDragonflyReplTakeoverUnsupported, events)
 	}
 }
 
@@ -99,7 +99,7 @@ func TestDragonflyManager_Tick_PresentReplTakeoverNoWarning(t *testing.T) {
 		t.Fatalf("ReplTakeoverSupported = %+v, want true", got.Status.Dragonfly)
 	}
 	events := drainEventsCh(rec.Events, 4, 50*time.Millisecond)
-	if eventsContain(events, ReasonDragonflyReplTakeoverUnsupported) {
+	if eventsContain(events, v1alpha1.EventDragonflyReplTakeoverUnsupported) {
 		t.Errorf("unexpected unsupported event on a capable image: %v", events)
 	}
 }
@@ -210,11 +210,11 @@ func TestDragonflyManager_TryEmergencyPromote_FallbackIsLoud(t *testing.T) {
 	}
 
 	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
-	if !eventsContain(events, ReasonDragonflySessionsLost) {
-		t.Errorf("expected %s, got %v", ReasonDragonflySessionsLost, events)
+	if !eventsContain(events, v1alpha1.EventDragonflySessionsLost) {
+		t.Errorf("expected %s, got %v", v1alpha1.EventDragonflySessionsLost, events)
 	}
-	if !eventsContain(events, ReasonDragonflyPromotionCompleted) {
-		t.Errorf("expected %s to remain for contract, got %v", ReasonDragonflyPromotionCompleted, events)
+	if !eventsContain(events, v1alpha1.EventDragonflyPromotionCompleted) {
+		t.Errorf("expected %s to remain for contract, got %v", v1alpha1.EventDragonflyPromotionCompleted, events)
 	}
 	if !eventsContain(events, "REPLICAOF NO ONE") {
 		t.Errorf("expected fallback wording, got %v", events)

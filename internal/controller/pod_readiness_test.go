@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 const (
@@ -30,7 +32,7 @@ func readinessDeployment(generation, observed int64, replicas, updated, total in
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
-				labelAppName: "mysql", labelInstance: "lion", labelSite: "dc2",
+				labelAppName: "mysql", labelInstance: "lion", v1alpha1.SiteLabel: "dc2",
 			}},
 		},
 		Status: appsv1.DeploymentStatus{ObservedGeneration: observed, UpdatedReplicas: updated, Replicas: total, AvailableReplicas: total},
@@ -73,7 +75,7 @@ func readinessPod(name, hash string, edits ...func(*corev1.Pod)) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: readinessNS,
 			Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: "lion", labelSite: "dc2",
+				labelAppName: "mysql", labelInstance: "lion", v1alpha1.SiteLabel: "dc2",
 				appsv1.DefaultDeploymentUniqueLabelKey: hash,
 			},
 			OwnerReferences: []metav1.OwnerReference{{

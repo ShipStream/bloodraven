@@ -167,7 +167,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	if fg.Status.UpdatePhase != "" {
 		fmt.Fprintf(out, "  Update phase: %s\n", fg.Status.UpdatePhase)
 	}
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, "Updating"); c != nil && c.Reason == brcontroller.ReasonOrderedUpdateStalled {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating); c != nil && c.Reason == v1alpha1.ReasonOrderedUpdateStalled {
 		fmt.Fprintf(out, "  Update stalled: %s\n", c.Message)
 	}
 

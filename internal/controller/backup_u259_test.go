@@ -36,7 +36,7 @@ func encryptedAbandonedFixture(t *testing.T, withKey bool) *cleanupFixture {
 	}
 	if withKey {
 		snap := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: f.mb.Namespace, Name: dumpKeySnapshotName(f.mb),
-			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: string(f.mb.UID)}},
+			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(f.mb.UID)}},
 			Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("k")}}
 		if err := f.c.Create(ctx, snap); err != nil {
 			t.Fatal(err)
@@ -101,9 +101,9 @@ func TestFinalize_AbandonedRecordedKeyMissingBlocks(t *testing.T) {
 	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	c := apiMeta.FindStatusCondition(f.mb.Status.Conditions, ConditionArtifactCleanup)
-	if c == nil || c.Reason != backupReasonPassphraseSecretMissing {
-		t.Fatalf("condition %+v, want %s", c, backupReasonPassphraseSecretMissing)
+	c := apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
+	if c == nil || c.Reason != v1alpha1.ReasonPassphraseSecretMissing {
+		t.Fatalf("condition %+v, want %s", c, v1alpha1.ReasonPassphraseSecretMissing)
 	}
 	// Restoring the Secret lets the cleanup run.
 	if err := f.c.Create(context.Background(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: f.mb.Namespace, Name: dumpKeySnapshotName(f.mb)},

@@ -13,10 +13,6 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// RecloneAnnotation must match internal/controller/reconciler.go's
-// RecloneAnnotation constant.
-const RecloneAnnotation = "bloodraven.shipstream.io/reclone-site"
-
 // minRecloneGtidPrefix mirrors internal/controller/reclone.go's
 // constant. The operator rejects divergent-GTID prefixes shorter than
 // this; we mirror the value here so the plugin fails fast (with a
@@ -141,12 +137,12 @@ func runReclone(args []string, stdout, stderr *os.File) error {
 	if patched.Annotations == nil {
 		patched.Annotations = map[string]string{}
 	}
-	patched.Annotations[RecloneAnnotation] = value
+	patched.Annotations[v1alpha1.RecloneAnnotation] = value
 	if err := cl.Patch(ctx, patched, client.MergeFrom(&fg)); err != nil {
 		return fmt.Errorf("annotate failover group: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, RecloneAnnotation, value)
+	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1alpha1.RecloneAnnotation, value)
 	fmt.Fprintln(stdout, "Watch progress with: kubectl bloodraven status", group, "-n", ns)
 	return nil
 }

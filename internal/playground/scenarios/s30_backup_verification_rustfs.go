@@ -258,7 +258,7 @@ func s30WaitVerificationSucceeded(v s30Variant) runner.Step {
 			if vr.Status.SanityCheck == nil || !vr.Status.SanityCheck.Ran || vr.Status.SanityCheck.ResultRow != "2" {
 				return fmt.Errorf("verification sanity=%v, want ran=true resultRow=2", vr.Status.SanityCheck)
 			}
-			if !conditionTrue(vr.Status.Conditions, "Verified") {
+			if !conditionTrue(vr.Status.Conditions, v1alpha1.ConditionVerified) {
 				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(vr.Status.Conditions))
 			}
 			env.Capture.Note("verification succeeded: " + verificationStatusSummary(vr))
@@ -286,7 +286,7 @@ func s30Cleanup(ctx context.Context, env *runner.Env, v s30Variant) error {
 	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s30 cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		ready := false
 		for _, c := range mfg.Status.Conditions {
-			if c.Type == "Ready" {
+			if c.Type == v1alpha1.ConditionReady {
 				ready = c.Status == metav1.ConditionTrue
 			}
 		}

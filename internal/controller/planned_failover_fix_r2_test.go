@@ -111,13 +111,13 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 		assertWaiting(t, h, "")
 		// The request stays until the Admitting run's validation decides
 		// it, so a cooldown deferral can still retain it (ultra K050).
-		if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; !ok {
+		if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; !ok {
 			t.Error("request annotation consumed before the Admitting run validated it")
 		}
 		h.setStatus(publishedPDX)
 		h.step()
 		assertAlreadyActive(t, h)
-		if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; ok {
+		if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 			t.Error("request annotation kept after the run ended")
 		}
 	})

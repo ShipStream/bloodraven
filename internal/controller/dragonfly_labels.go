@@ -84,17 +84,17 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 		if err := r.List(ctx, pods,
 			client.InNamespace(fg.Namespace),
 			client.MatchingLabels{
-				labelAppName:  dragonflyAppName,
-				labelInstance: fg.Name,
-				labelSite:     site.Name,
+				labelAppName:       dragonflyAppName,
+				labelInstance:      fg.Name,
+				v1alpha1.SiteLabel: site.Name,
 			},
 		); err != nil {
 			return fmt.Errorf("list dragonfly pods for site %s: %w", site.Name, err)
 		}
 		for i := range pods.Items {
 			pod := &pods.Items[i]
-			needRole := pod.Labels[labelDragonflyRole] != desiredRole
-			needTraffic := !stripActiveOnSource && pod.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled
+			needRole := pod.Labels[v1alpha1.DragonflyRoleLabel] != desiredRole
+			needTraffic := !stripActiveOnSource && pod.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled
 			if !needRole && !needTraffic {
 				continue
 			}
@@ -108,11 +108,11 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 				if fresh.Labels == nil {
 					fresh.Labels = map[string]string{}
 				}
-				if fresh.Labels[labelDragonflyRole] != desiredRole {
-					fresh.Labels[labelDragonflyRole] = desiredRole
+				if fresh.Labels[v1alpha1.DragonflyRoleLabel] != desiredRole {
+					fresh.Labels[v1alpha1.DragonflyRoleLabel] = desiredRole
 				}
-				if !stripActiveOnSource && fresh.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
-					fresh.Labels[labelDragonflyTraffic] = dragonflyTrafficEnabled
+				if !stripActiveOnSource && fresh.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+					fresh.Labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 				}
 				return r.Update(ctx, &fresh)
 			}); err != nil {
@@ -155,7 +155,7 @@ func setDragonflyTrafficOnSite(ctx context.Context, c client.Client, fg *v1alpha
 	logger := log.FromContext(ctx)
 	for i := range pods {
 		pod := &pods[i]
-		current, has := pod.Labels[labelDragonflyTraffic]
+		current, has := pod.Labels[v1alpha1.DragonflyTrafficLabel]
 		if set {
 			if has && current == dragonflyTrafficEnabled {
 				continue
@@ -174,9 +174,9 @@ func setDragonflyTrafficOnSite(ctx context.Context, c client.Client, fg *v1alpha
 				fresh.Labels = map[string]string{}
 			}
 			if set {
-				fresh.Labels[labelDragonflyTraffic] = dragonflyTrafficEnabled
+				fresh.Labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 			} else {
-				delete(fresh.Labels, labelDragonflyTraffic)
+				delete(fresh.Labels, v1alpha1.DragonflyTrafficLabel)
 			}
 			return c.Update(ctx, &fresh)
 		}); err != nil {
@@ -196,7 +196,7 @@ func setDragonflyRoleOnSite(ctx context.Context, c client.Client, fg *v1alpha1.M
 	logger := log.FromContext(ctx)
 	for i := range pods {
 		pod := &pods[i]
-		if pod.Labels[labelDragonflyRole] == role {
+		if pod.Labels[v1alpha1.DragonflyRoleLabel] == role {
 			continue
 		}
 		podName := pod.Name
@@ -209,7 +209,7 @@ func setDragonflyRoleOnSite(ctx context.Context, c client.Client, fg *v1alpha1.M
 			if fresh.Labels == nil {
 				fresh.Labels = map[string]string{}
 			}
-			fresh.Labels[labelDragonflyRole] = role
+			fresh.Labels[v1alpha1.DragonflyRoleLabel] = role
 			return c.Update(ctx, &fresh)
 		}); err != nil {
 			return fmt.Errorf("update dragonfly role label on pod %s: %w", podName, err)
@@ -227,9 +227,9 @@ func listDragonflyPodsForSite(ctx context.Context, c client.Client, fg *v1alpha1
 	if err := c.List(ctx, pods,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
-			labelAppName:  dragonflyAppName,
-			labelInstance: fg.Name,
-			labelSite:     siteName,
+			labelAppName:       dragonflyAppName,
+			labelInstance:      fg.Name,
+			v1alpha1.SiteLabel: siteName,
 		},
 	); err != nil {
 		return nil, fmt.Errorf("list dragonfly pods for site %s: %w", siteName, err)

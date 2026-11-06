@@ -652,7 +652,7 @@ func TestDragonflyManager_RequestSkipsTargetPromotedAfterIt(t *testing.T) {
 		t.Errorf("duplicate request re-ran the promotion (%d target dials)", dials)
 	}
 	for _, ev := range drainEventsCh(rec.Events, 4, 50*time.Millisecond) {
-		if strings.Contains(ev, ReasonDragonflySessionsLost) {
+		if strings.Contains(ev, v1alpha1.EventDragonflySessionsLost) {
 			t.Errorf("duplicate request reported sessions lost: %q", ev)
 		}
 	}
@@ -892,7 +892,7 @@ func TestDragonflyManager_TickPublicationCannotOverwritePromotion(t *testing.T) 
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(target), &pod); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Labels[labelDragonflyRole] != "master" {
+	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
 		t.Errorf("label sweep removed the sole master from the active Service: %v", pod.Labels)
 	}
 }
@@ -992,7 +992,7 @@ func TestDragonflyManager_StopTimeoutKeepsReplacementOut(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: makeDragonflyPod(fg.Name, "dc1", "", false).Name}, &pod); err != nil {
 		t.Fatalf("replacement owner's dc1 master: %v", err)
 	}
-	if pod.Labels[labelDragonflyRole] != "master" {
+	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
 		t.Errorf("replacement did not label dc1 master: %v", pod.Labels)
 	}
 }
@@ -1108,7 +1108,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: makeDragonflyPod(fg.Name, "dc1", "", false).Name}, &pod); err != nil {
 		t.Fatalf("planned dc1 master: %v", err)
 	}
-	if pod.Labels[labelDragonflyRole] != "master" {
+	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
 		t.Errorf("planned failover did not label dc1 master: %v", pod.Labels)
 	}
 }

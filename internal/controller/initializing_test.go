@@ -221,7 +221,7 @@ func TestUpdateCRStatus_InitializingIsUnknownNotNoPrimary(t *testing.T) {
 		Sites: []SiteSnapshot{
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateUnknown, PendingWritable: true},
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly,
-				RecoveryState: recoveryStateBlocked, DivergentGtid: convergenceTestGTID, DivergentTxnCount: 10,
+				RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: convergenceTestGTID, DivergentTxnCount: 10,
 				DivergenceDetectedBy: divergenceDetectedByAudit, DivergenceComparedTo: "dc1"},
 		},
 		DegradedReason: "Initializing",

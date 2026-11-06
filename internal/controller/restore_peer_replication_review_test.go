@@ -392,7 +392,7 @@ func TestInitiateRecovery_HeldSiteNotMarkedInProgress(t *testing.T) {
 	tm.mu.RLock()
 	rec := tm.recovery["dc2"]
 	tm.mu.RUnlock()
-	if rec != nil && rec.state == recoveryStateInProgress {
+	if rec != nil && rec.state == v1alpha1.RecoveryStateInProgress {
 		t.Fatal("a held site was marked RecoveryInProgress")
 	}
 }

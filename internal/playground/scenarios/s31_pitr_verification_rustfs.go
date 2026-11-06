@@ -100,7 +100,7 @@ func s31WaitArchiverReady() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR spec rollout", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-				ready := conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
+				ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
 				pitrSpec := mfg.Spec.Backup != nil && mfg.Spec.Backup.PITR != nil && mfg.Spec.Backup.PITR.Enabled && mfg.Spec.Backup.PITR.ProfileName == backupE2EProfile
 				return pitrSpec && ready && mfg.Status.UpdatePhase == "" && mfg.Status.ActiveSite != "", fmt.Sprintf("pitrSpec=%v ready=%v updatePhase=%q active=%q", pitrSpec, ready, mfg.Status.UpdatePhase, mfg.Status.ActiveSite), nil
 			})
@@ -463,7 +463,7 @@ func s31WaitVerificationSucceeded() runner.Step {
 			if v.Status.ReplayedThroughBinlog == nil {
 				return fmt.Errorf("verification replay mark is nil for PITR run")
 			}
-			if !conditionTrue(v.Status.Conditions, "Verified") {
+			if !conditionTrue(v.Status.Conditions, v1alpha1.ConditionVerified) {
 				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(v.Status.Conditions))
 			}
 			env.Capture.Note("PITR verification succeeded: " + verificationStatusSummary(v))
@@ -486,7 +486,7 @@ func s31Cleanup(ctx context.Context, env *runner.Env) error {
 	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s31 cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		ready := false
 		for _, c := range mfg.Status.Conditions {
-			if c.Type == "Ready" {
+			if c.Type == v1alpha1.ConditionReady {
 				ready = c.Status == metav1.ConditionTrue
 			}
 		}

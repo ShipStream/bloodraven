@@ -134,7 +134,7 @@ func TestRestoreReclone_ConsumerAcceptsRestoreRequest(t *testing.T) {
 			if fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceSucceeded {
 				t.Fatalf("phase = %s, want Succeeded (reclones are asynchronous)", fresh.Status.RestoreInPlace.Phase)
 			}
-			raw := fresh.GetAnnotations()[RecloneAnnotation]
+			raw := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]
 			if raw == "" {
 				t.Fatal("no reclone request was written for the peer")
 			}
@@ -224,7 +224,7 @@ func TestRestoreReclone_ArmedWhenRestoreIsAccepted(t *testing.T) {
 			if q == nil || q.Phase != v1alpha1.RestoreReclonesArmed || q.ConfirmToken != fg.Spec.RestoreInPlace.Confirm || !slices.Equal(q.Pending, tc.want) {
 				t.Fatalf("queue = %+v, want Armed %v for confirm %s", q, tc.want, fg.Spec.RestoreInPlace.Confirm)
 			}
-			if fresh.GetAnnotations()[RecloneAnnotation] != "" {
+			if fresh.GetAnnotations()[v1alpha1.RecloneAnnotation] != "" {
 				t.Error("nothing may be recloned before the restore succeeds")
 			}
 		})
@@ -243,7 +243,7 @@ func TestRestoreReclone_DrainsEveryPeerOneAtATime(t *testing.T) {
 			t.Fatalf("%s: want a requeue while the reclone runs, got %s", site, d)
 		}
 		fresh := getFG(t, c, fg)
-		if got := fresh.GetAnnotations()[RecloneAnnotation]; got != site+":confirm=lion" {
+		if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; got != site+":confirm=lion" {
 			t.Fatalf("reclone annotation = %q, want %s:confirm=lion", got, site)
 		}
 		if fresh.Status.RestoreReclones.Requested != site {
@@ -251,7 +251,7 @@ func TestRestoreReclone_DrainsEveryPeerOneAtATime(t *testing.T) {
 		}
 		// A second pass while the clone runs changes nothing.
 		reconcileRestoreStep(t, r, fg)
-		if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != site+":confirm=lion" {
+		if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != site+":confirm=lion" {
 			t.Fatalf("annotation changed while the reclone of %s runs: %q", site, got)
 		}
 		finishReclone(t, c, rec, fg, site, RecloneOutcome{Owner: testRestoreConfirm})
@@ -289,7 +289,7 @@ func TestRestoreReclone_FailedCloneDoesNotBlockOtherPeers(t *testing.T) {
 	}
 
 	reconcileRestoreStep(t, r, fg)
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "sea:confirm=lion" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "sea:confirm=lion" {
 		t.Fatalf("the next queued site must be requested while pdx backs off, got annotation %q", got)
 	}
 	finishReclone(t, c, rec, fg, "sea", RecloneOutcome{Owner: testRestoreConfirm})
@@ -297,7 +297,7 @@ func TestRestoreReclone_FailedCloneDoesNotBlockOtherPeers(t *testing.T) {
 	if d := reconcileRestoreStep(t, r, fg); d <= 0 || d > restoreRecloneRetryBackoff {
 		t.Errorf("want a backoff requeue while only pdx is left, got %s", d)
 	}
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("retried pdx inside its backoff: annotation %q", got)
 	}
 
@@ -306,7 +306,7 @@ func TestRestoreReclone_FailedCloneDoesNotBlockOtherPeers(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconcileRestoreStep(t, r, fg)
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "pdx:confirm=lion" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "pdx:confirm=lion" {
 		t.Fatalf("after the backoff the failed site is requested again, got annotation %q", got)
 	}
 	finishReclone(t, c, rec, fg, "pdx", RecloneOutcome{Owner: testRestoreConfirm})
@@ -326,7 +326,7 @@ func TestRestoreReclone_StalledRequestMovesOn(t *testing.T) {
 		managers: map[types.NamespacedName]*managedTopology{nn: {tm: tm}}}
 
 	reconcileRestoreStep(t, r, fg)
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "pdx:confirm=lion" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "pdx:confirm=lion" {
 		t.Fatalf("annotation = %q, want pdx requested", got)
 	}
 	reconcileRestoreStep(t, r, fg)
@@ -354,7 +354,7 @@ func TestRestoreReclone_StalledRequestMovesOn(t *testing.T) {
 		t.Fatalf("queue = %+v, want the stalled pdx request failed", q)
 	}
 	reconcileRestoreStep(t, r, fg)
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "sea:confirm=lion" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "sea:confirm=lion" {
 		t.Fatalf("annotation = %q, want sea requested after pdx stalled", got)
 	}
 }
@@ -418,21 +418,21 @@ func TestRestoreReclone_ForeignCloneDoesNotCompleteSite(t *testing.T) {
 		t.Fatalf("a foreign clone must leave pdx queued without a failure, got %+v", q)
 	}
 	reconcileRestoreStep(t, r, fg)
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "pdx:confirm=lion" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "pdx:confirm=lion" {
 		t.Fatalf("pdx should be requested again at once, annotation %q", got)
 	}
 }
 
 func TestRestoreReclone_NeverOverwritesAnotherRequest(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
-	fg.Annotations = map[string]string{RecloneAnnotation: "sea:confirm=lion"}
+	fg.Annotations = map[string]string{v1alpha1.RecloneAnnotation: "sea:confirm=lion"}
 	r, c := newReconciler(fg, dsnSecret())
 
 	if d := reconcileRestoreStep(t, r, fg); d <= 0 {
 		t.Errorf("want a requeue while another request is pending, got %s", d)
 	}
 	fresh := getFG(t, c, fg)
-	if got := fresh.GetAnnotations()[RecloneAnnotation]; got != "sea:confirm=lion" {
+	if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "sea:confirm=lion" {
 		t.Fatalf("the administrator's request was overwritten: %q", got)
 	}
 	if fresh.Status.RestoreReclones.Requested != "" {
@@ -469,7 +469,7 @@ func TestRestoreReclone_DiscardedWhenRestoreFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh := getFG(t, c, fg)
-	if fresh.Status.RestoreReclones != nil || fresh.GetAnnotations()[RecloneAnnotation] != "" {
+	if fresh.Status.RestoreReclones != nil || fresh.GetAnnotations()[v1alpha1.RecloneAnnotation] != "" {
 		t.Fatalf("queue must be discarded without recloning, got %+v annotations %v", fresh.Status.RestoreReclones, fresh.GetAnnotations())
 	}
 	if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreReclonesDiscarded") {
@@ -520,7 +520,7 @@ func TestRestoreReclone_AbandonedWhenQueuedSiteBecomesPrimary(t *testing.T) {
 	r, c := newReconciler(fg, dsnSecret())
 	reconcileRestoreStep(t, r, fg)
 	fresh := getFG(t, c, fg)
-	if fresh.Status.RestoreReclones != nil || fresh.GetAnnotations()[RecloneAnnotation] != "" {
+	if fresh.Status.RestoreReclones != nil || fresh.GetAnnotations()[v1alpha1.RecloneAnnotation] != "" {
 		t.Fatalf("queue must be abandoned, got %+v", fresh.Status.RestoreReclones)
 	}
 	if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreReclonesAbandoned") {
@@ -577,7 +577,7 @@ func TestRestoreReclone_NoRequestDuringPlannedFailover(t *testing.T) {
 	if d := reconcileRestoreStep(t, r, fg); d <= 0 {
 		t.Errorf("want a requeue, got %s", d)
 	}
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("a reclone was requested during a planned failover: %q", got)
 	}
 }
@@ -644,7 +644,7 @@ func TestRestoreReclone_ExecutedFailedSecondRestoreHoldsEarlierQueue(t *testing.
 				}
 			}
 			fresh := getFG(t, c, fg)
-			if got := fresh.GetAnnotations()[RecloneAnnotation]; got != "" {
+			if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 				t.Fatalf("a peer was recloned from the primary of a failed restore: annotation %q", got)
 			}
 			q := fresh.Status.RestoreReclones
@@ -668,7 +668,7 @@ func TestRestoreReclone_HeldQueueResumesWhenSetToDraining(t *testing.T) {
 	fg.Status.RestoreReclones.Phase = v1alpha1.RestoreReclonesHeld
 	r, c := newReconciler(fg, dsnSecret())
 	reconcileRestoreStep(t, r, fg)
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("held queue requested %q", got)
 	}
 	*fg = *getFG(t, c, fg)
@@ -677,7 +677,7 @@ func TestRestoreReclone_HeldQueueResumesWhenSetToDraining(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconcileRestoreStep(t, r, fg)
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "pdx:confirm=lion" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "pdx:confirm=lion" {
 		t.Fatalf("annotation = %q, want pdx requested once the queue drains again", got)
 	}
 }
@@ -706,8 +706,8 @@ func TestRestoreReclone_HeldQueueSurvivesAnotherFailedRestore(t *testing.T) {
 		}
 	}
 	fresh := getFG(t, c, fg)
-	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesHeld || fresh.GetAnnotations()[RecloneAnnotation] != "" {
-		t.Fatalf("queue = %+v annotation %q, want still held and nothing requested", q, fresh.GetAnnotations()[RecloneAnnotation])
+	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesHeld || fresh.GetAnnotations()[v1alpha1.RecloneAnnotation] != "" {
+		t.Fatalf("queue = %+v annotation %q, want still held and nothing requested", q, fresh.GetAnnotations()[v1alpha1.RecloneAnnotation])
 	}
 }
 
@@ -801,7 +801,7 @@ func TestSyncPodLabels_QueuedRecloneSiteServesNoReads(t *testing.T) {
 				}
 			}
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc2-pod", Namespace: fg.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: fg.Name, labelSite: "dc2", labelRole: "replica", labelHealthy: "yes",
+				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc2", v1alpha1.RoleLabel: "replica", v1alpha1.HealthyLabel: "yes",
 			}}}
 			r, c := newReconciler(fg, pod)
 			if err := r.syncPodLabels(context.Background(), fg); err != nil {
@@ -811,8 +811,8 @@ func TestSyncPodLabels_QueuedRecloneSiteServesNoReads(t *testing.T) {
 			if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: fg.Namespace}, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Labels[labelHealthy] != tc.wantHealthy {
-				t.Fatalf("healthy label = %q, want %q", got.Labels[labelHealthy], tc.wantHealthy)
+			if got.Labels[v1alpha1.HealthyLabel] != tc.wantHealthy {
+				t.Fatalf("healthy label = %q, want %q", got.Labels[v1alpha1.HealthyLabel], tc.wantHealthy)
 			}
 		})
 	}
@@ -917,7 +917,7 @@ func TestRestoreReclone_SiteRemovedFromSpecLeavesQueue(t *testing.T) {
 	if q := fresh.Status.RestoreReclones; q == nil || !slices.Equal(q.Pending, []string{"pdx"}) {
 		t.Fatalf("queue = %+v, want only pdx", q)
 	}
-	if got := fresh.GetAnnotations()[RecloneAnnotation]; got != "pdx:confirm=lion" {
+	if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "pdx:confirm=lion" {
 		t.Fatalf("annotation = %q, want pdx requested", got)
 	}
 }
@@ -1023,7 +1023,7 @@ func TestRestoreReclone_NewRestoreWithdrawsOutstandingRequest(t *testing.T) {
 	tm.mu.RLock()
 	pending := tm.reclonePendingSite
 	tm.mu.RUnlock()
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "pdx:confirm=lion" || pending != "pdx" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "pdx:confirm=lion" || pending != "pdx" {
 		t.Fatalf("annotation %q, manager request %q: want restore A's pdx request outstanding", got, pending)
 	}
 
@@ -1041,7 +1041,7 @@ func TestRestoreReclone_NewRestoreWithdrawsOutstandingRequest(t *testing.T) {
 	tm.mu.RLock()
 	pending = tm.reclonePendingSite
 	tm.mu.RUnlock()
-	if got := fg.GetAnnotations()[RecloneAnnotation]; got != "" || pending != "" {
+	if got := fg.GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" || pending != "" {
 		t.Fatalf("after restore B was accepted: annotation %q, manager request %q; want restore A's request withdrawn", got, pending)
 	}
 	q := fg.Status.RestoreReclones
@@ -1092,7 +1092,7 @@ func TestRestoreReclone_NewRestoreWaitsForRunningClone(t *testing.T) {
 func TestRestoreReclone_HeldQueueRefusesOutstandingRequest(t *testing.T) {
 	fg := fgDrainingRestore("pdx")
 	fg.Status.RestoreReclones.Phase = v1alpha1.RestoreReclonesHeld
-	fg.Annotations = map[string]string{RecloneAnnotation: "pdx:confirm=lion"}
+	fg.Annotations = map[string]string{v1alpha1.RecloneAnnotation: "pdx:confirm=lion"}
 	r, c := newReconciler(fg, dsnSecret())
 	rec := r.Recorder.(*record.FakeRecorder)
 	tm, mocks := reclonesTopologyManager(t, r, c, fg)
@@ -1106,7 +1106,7 @@ func TestRestoreReclone_HeldQueueRefusesOutstandingRequest(t *testing.T) {
 	if pending != "" {
 		t.Fatalf("the topology manager accepted a reclone of held site %s", pending)
 	}
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("annotation %q kept; want the refused request removed", got)
 	}
 	if !strings.Contains(strings.Join(drainEvents(rec), "\n"), "RecloneRejected") {

@@ -617,7 +617,7 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
 	h.setCurrent(nil)
 	h.pass()
-	start := h.store.Object().GetAnnotations()[controller.PlannedFailoverManagerAbsentSinceAnnotation]
+	start := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]
 	if start == "" {
 		t.Fatal("no manager-absent-since annotation")
 	}
@@ -627,7 +627,7 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 		if pf := h.pf(); pf.Result != nil {
 			break
 		}
-		if got := h.store.Object().GetAnnotations()[controller.PlannedFailoverManagerAbsentSinceAnnotation]; got != start {
+		if got := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]; got != start {
 			t.Fatalf("the absent-since start moved: %q → %q", start, got)
 		}
 	}

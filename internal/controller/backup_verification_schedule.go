@@ -27,7 +27,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileVerificationSchedules(ctx contex
 				continue
 			}
 			if profile.Verification.Schedule == "" {
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "VerificationScheduleInvalid",
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventVerificationScheduleInvalid,
 					"profile %q has verification.enabled=true but verification.schedule is empty", profile.Name)
 				continue
 			}
@@ -44,8 +44,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileVerificationSchedules(ctx contex
 	if err := r.List(ctx, &existing,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
-			labelFailoverGroup: fg.Name,
-			labelResourceKind:  verificationResourceKindCJ,
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			v1alpha1.ResourceLabel:      verificationResourceKindCJ,
 		},
 	); err != nil {
 		return fmt.Errorf("list verification cronjobs: %w", err)
@@ -91,13 +91,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx cont
 			return err
 		}
 		labels := map[string]string{
-			labelAppName:              "mysql-verify",
-			labelInstance:             fg.Name,
-			labelFailoverGroup:        fg.Name,
-			labelBackupProfile:        profile.Name,
-			labelVerificationSchedule: profile.Name,
-			labelResourceKind:         verificationResourceKindCJ,
-			labelManagedBy:            managerName,
+			labelAppName:                       "mysql-verify",
+			labelInstance:                      fg.Name,
+			v1alpha1.FailoverGroupLabel:        fg.Name,
+			v1alpha1.BackupProfileLabel:        profile.Name,
+			v1alpha1.VerificationScheduleLabel: profile.Name,
+			v1alpha1.ResourceLabel:             verificationResourceKindCJ,
+			labelManagedBy:                     managerName,
 		}
 		cj.Labels = labels
 

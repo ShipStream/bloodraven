@@ -345,7 +345,7 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	m, fg, now := deploymentLeaseFixture(t)
 	grantDeploymentLease(t, m, fg, "migration", "op1", 120)
 	hold := grantDeploymentLease(t, m, fg, "failover-hold", "op1", 30)
-	fg.Annotations = map[string]string{PlannedFailoverAnnotation: "pdx"}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx"}
 	if err := m.client.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}

@@ -54,7 +54,7 @@ func mdbTestCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase 
 			Name:       "tenant-acme",
 			Namespace:  mdbTestNamespace,
 			Generation: 1,
-			Finalizers: []string{MysqlDatabaseFinalizer},
+			Finalizers: []string{v1alpha1.MysqlDatabaseFinalizer},
 		},
 		Spec: v1alpha1.MysqlDatabaseSpec{
 			GroupRef:     v1alpha1.LocalGroupRef{Name: "main"},
@@ -131,7 +131,7 @@ func getMdb(t *testing.T, c client.Client) *v1alpha1.MysqlDatabase {
 
 func readyCondition(mdb *v1alpha1.MysqlDatabase) *metav1.Condition {
 	for i := range mdb.Status.Conditions {
-		if mdb.Status.Conditions[i].Type == ConditionDatabaseReady {
+		if mdb.Status.Conditions[i].Type == v1alpha1.ConditionReady {
 			return &mdb.Status.Conditions[i]
 		}
 	}
@@ -462,7 +462,7 @@ func TestMysqlDatabaseDeleteRetainNeverTouchesMySQL(t *testing.T) {
 			// goes away, so a NotFound here is the success signal.
 			var out v1alpha1.MysqlDatabase
 			err := c.Get(context.Background(), mdbRequest().NamespacedName, &out)
-			if err == nil && controllerutil.ContainsFinalizer(&out, MysqlDatabaseFinalizer) {
+			if err == nil && controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
 				t.Fatal("finalizer still present; Retain must release immediately")
 			}
 
@@ -489,7 +489,7 @@ func TestMysqlDatabaseDeleteWithoutGroupReleases(t *testing.T) {
 
 	var out v1alpha1.MysqlDatabase
 	err := c.Get(context.Background(), mdbRequest().NamespacedName, &out)
-	if err == nil && controllerutil.ContainsFinalizer(&out, MysqlDatabaseFinalizer) {
+	if err == nil && controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer still present; a vanished group must not wedge deletion")
 	}
 	assertEventContains(t, rec, "DatabaseCleanupSkipped")
@@ -520,7 +520,7 @@ func TestMysqlDatabaseDeleteWithoutAppliedDDLReleases(t *testing.T) {
 
 	var out v1alpha1.MysqlDatabase
 	err := c.Get(context.Background(), mdbRequest().NamespacedName, &out)
-	if err == nil && controllerutil.ContainsFinalizer(&out, MysqlDatabaseFinalizer) {
+	if err == nil && controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer still present; a never-applied CR must release without dropping anything")
 	}
 	assertEventContains(t, rec, "DatabaseDropSkipped")
@@ -547,7 +547,7 @@ func TestMysqlDatabaseDeleteDefersWithoutActiveSite(t *testing.T) {
 	assertPendingRequeue(t, res.RequeueAfter)
 
 	out := getMdb(t, c)
-	if !controllerutil.ContainsFinalizer(out, MysqlDatabaseFinalizer) {
+	if !controllerutil.ContainsFinalizer(out, v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer released without performing the requested DROP")
 	}
 	assertEventContains(t, rec, "DatabaseDropDeferred")
@@ -564,7 +564,7 @@ func TestMysqlDatabaseAddsFinalizerOnFirstReconcile(t *testing.T) {
 	if !res.Requeue {
 		t.Fatal("expected a requeue after adding the finalizer")
 	}
-	if !controllerutil.ContainsFinalizer(getMdb(t, c), MysqlDatabaseFinalizer) {
+	if !controllerutil.ContainsFinalizer(getMdb(t, c), v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer was not added")
 	}
 }
@@ -950,7 +950,7 @@ func TestMysqlDatabaseConflictLoserDeleteDropsNothing(t *testing.T) {
 	}
 	var out v1alpha1.MysqlDatabase
 	if err := c.Get(context.Background(), mdbRequest().NamespacedName, &out); err == nil &&
-		controllerutil.ContainsFinalizer(&out, MysqlDatabaseFinalizer) {
+		controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("conflict loser's finalizer did not release")
 	}
 	assertEventContains(t, rec, "DatabaseDropSkipped")
@@ -1171,7 +1171,7 @@ func TestMysqlDatabaseConnectFailureKeepsWriteAheadClean(t *testing.T) {
 	}
 	var out v1alpha1.MysqlDatabase
 	if err := c.Get(context.Background(), mdbRequest().NamespacedName, &out); err == nil &&
-		controllerutil.ContainsFinalizer(&out, MysqlDatabaseFinalizer) {
+		controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer not released")
 	}
 }

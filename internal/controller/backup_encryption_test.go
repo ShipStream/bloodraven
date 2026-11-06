@@ -137,7 +137,7 @@ func TestBuildBackupJob_EncryptedS3_ShapeChanges(t *testing.T) {
 	}
 
 	// Labels should carry the encrypted marker.
-	if got := job.Labels[labelBackupEncrypted]; got != "true" {
+	if got := job.Labels[v1alpha1.BackupEncryptedLabel]; got != "true" {
 		t.Errorf("encrypted label: got %q want true", got)
 	}
 }

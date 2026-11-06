@@ -435,7 +435,7 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 	if err := k8sClient.Get(ctx, nn, &afterFinalizer); err != nil {
 		t.Fatalf("get after finalizer reconcile: %v", err)
 	}
-	if !controllerutil.ContainsFinalizer(&afterFinalizer, controller.MysqlDatabaseFinalizer) {
+	if !controllerutil.ContainsFinalizer(&afterFinalizer, v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer was not added")
 	}
 

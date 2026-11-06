@@ -11,11 +11,6 @@ import (
 // failover-group / backup-profile / managed-by labels declared on backup
 // resources are reused.
 const (
-	labelMysqlBackupVerification = "shipstream.io/mysqlbackup-verification"
-	labelVerificationSchedule    = "shipstream.io/verification-schedule"
-
-	mysqlBackupVerificationFinalizer = "shipstream.io/mysqlbackup-verification"
-
 	verificationResourceKindCR  = "backup-verification"
 	verificationResourceKindCJ  = "backup-verification-schedule"
 	verificationResourceKindPod = "backup-verification-pod"
@@ -55,9 +50,9 @@ func verificationScheduleCronJobName(fgName, profileName string) string {
 // anything changed so the caller can decide whether to issue an Update.
 func ensureVerificationLabels(v *v1alpha1.MysqlBackupVerification) bool {
 	desired := map[string]string{
-		labelFailoverGroup: v.Spec.FailoverGroupRef.Name,
-		labelBackupProfile: v.Spec.ProfileName,
-		labelManagedBy:     managerName,
+		v1alpha1.FailoverGroupLabel: v.Spec.FailoverGroupRef.Name,
+		v1alpha1.BackupProfileLabel: v.Spec.ProfileName,
+		labelManagedBy:              managerName,
 	}
 	changed := false
 	if v.Labels == nil {

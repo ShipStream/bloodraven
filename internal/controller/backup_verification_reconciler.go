@@ -31,12 +31,6 @@ import (
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
-// Condition types on MysqlBackupVerification.status.conditions.
-const (
-	ConditionVerified           = "Verified"
-	ConditionResourcesCleanedUp = "ResourcesCleanedUp"
-)
-
 // defaultVerificationKeepSuccessful / KeepFailures are the retention
 // caps applied when a profile's Verification.RetentionPolicy is not
 // set. Failed runs are kept separately because they're what operators
@@ -93,7 +87,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// finalizer. Releasing earlier would let retention or artifact
 	// cleanup delete the backup under a still-running pod.
 	if !v.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&v, mysqlBackupVerificationFinalizer) {
+		if controllerutil.ContainsFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer) {
 			if _, err := r.cleanupEphemeral(ctx, &v, true); err != nil {
 				return ctrl.Result{RequeueAfter: 15 * time.Second}, fmt.Errorf("cleanup on delete: %w", err)
 			}
@@ -106,7 +100,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 			} else if !released || !stopped {
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
-			controllerutil.RemoveFinalizer(&v, mysqlBackupVerificationFinalizer)
+			controllerutil.RemoveFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer)
 			if err := r.Update(ctx, &v); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 			}
@@ -115,8 +109,8 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	// Stamp finalizer + labels on first encounter.
-	if !controllerutil.ContainsFinalizer(&v, mysqlBackupVerificationFinalizer) {
-		controllerutil.AddFinalizer(&v, mysqlBackupVerificationFinalizer)
+	if !controllerutil.ContainsFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer) {
+		controllerutil.AddFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer)
 		_ = ensureVerificationLabels(&v)
 		if err := r.Update(ctx, &v); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
@@ -158,7 +152,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	fgKey := types.NamespacedName{Namespace: v.Namespace, Name: v.Spec.FailoverGroupRef.Name}
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.failVerification(ctx, v, "GroupNotFound",
+			return r.failVerification(ctx, v, v1alpha1.ReasonGroupNotFound,
 				fmt.Sprintf("MysqlFailoverGroup %q not found", fgKey.Name))
 		}
 		return ctrl.Result{}, fmt.Errorf("get failover group: %w", err)
@@ -185,7 +179,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	// Resolve the named profile.
 	profile := findProfile(&fg, v.Spec.ProfileName)
 	if profile == nil {
-		return r.failVerification(ctx, v, "ProfileNotFound",
+		return r.failVerification(ctx, v, v1alpha1.ReasonProfileNotFound,
 			fmt.Sprintf("profile %q not found on MysqlFailoverGroup %q", v.Spec.ProfileName, fg.Name))
 	}
 
@@ -195,14 +189,14 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if blocked, err := r.findBlockingVerification(ctx, v); err != nil {
 		return ctrl.Result{}, fmt.Errorf("check concurrent verifications: %w", err)
 	} else if blocked != "" {
-		return r.failVerification(ctx, v, "BlockedByActiveVerification",
+		return r.failVerification(ctx, v, v1alpha1.ReasonBlockedByActiveVerification,
 			fmt.Sprintf("another verification %q for (group=%s, profile=%s) is still running",
 				blocked, v.Spec.FailoverGroupRef.Name, v.Spec.ProfileName))
 	}
 
 	backup, err := r.resolvePinnedVerificationBackup(ctx, v)
 	if err != nil {
-		return r.failVerification(ctx, v, "BackupNotAvailable", err.Error())
+		return r.failVerification(ctx, v, v1alpha1.ReasonBackupNotAvailable, err.Error())
 	}
 	if v.Status.BackupRef == nil {
 		patch := client.MergeFrom(v.DeepCopy())
@@ -217,7 +211,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if err := r.stampVerificationHold(ctx, v, false); err != nil {
 		switch {
 		case errors.Is(err, errHoldBackupGone), errors.Is(err, errHoldBackupReplaced), errors.Is(err, errHoldBackupTerminating):
-			return r.failVerification(ctx, v, "BackupNotAvailable",
+			return r.failVerification(ctx, v, v1alpha1.ReasonBackupNotAvailable,
 				fmt.Sprintf("pinned backup %q: %v", v.Status.BackupRef.Name, err))
 		case apierrors.IsConflict(err):
 			return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -264,8 +258,8 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	// or a binding the group has no room for, fails the verification.
 	var notReady *errPITRBindingNotReady
 	if errors.As(err, &notReady) {
-		if notReady.terminal || notReady.reason == reasonPITRBindingLimitReached {
-			return r.failVerification(ctx, v, reasonPITRArchiveBindingNotReady, notReady.Error())
+		if notReady.terminal || notReady.reason == v1alpha1.ReasonBindingLimitReached {
+			return r.failVerification(ctx, v, string(v1alpha1.PITRTokenArchiveBindingNotReady), notReady.Error())
 		}
 		return r.waitVerification(ctx, v, notReady.Error())
 	}
@@ -274,7 +268,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 		// ...) is recorded by its catalog token, as the restore build
 		// path and Job-time refusals are (F028); anything else is an
 		// operator-side build failure.
-		reason, message := "BuildJobFailed", err.Error()
+		reason, message := v1alpha1.ReasonBuildJobFailed, err.Error()
 		if tok := pitrFailureReason(message); tok != "" {
 			reason, message = tok, tokenFirstMessage(tok, message)
 		}
@@ -295,13 +289,13 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	// backup (K9): a binding release refuses while the hold is live, and a
 	// release that won the race leaves the stamp failing NotFound, so the
 	// verification waits for the binding instead of mounting nothing.
-	keySnapshot := built.Labels[labelPITRKeySecret]
+	keySnapshot := built.Labels[v1alpha1.PITRKeySecretLabel]
 	if keySnapshot != "" {
 		if err := r.stampPITRKeySnapshotHold(ctx, v, &fg, keySnapshot); err != nil {
 			switch {
 			case errors.Is(err, errHoldKeySnapshotGone):
 				return r.waitVerification(ctx, v, fmt.Sprintf("%s: archive key snapshot %q is gone; waiting for the archive binding",
-					reasonPITRArchiveBindingNotReady, keySnapshot))
+					string(v1alpha1.PITRTokenArchiveBindingNotReady), keySnapshot))
 			case apierrors.IsConflict(err):
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			default:
@@ -315,19 +309,19 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if refusal, err := r.launchHoldConfirmed(ctx, v); err != nil {
 		return ctrl.Result{}, err
 	} else if refusal != "" {
-		return r.failVerification(ctx, v, "BackupNotAvailable", refusal)
+		return r.failVerification(ctx, v, v1alpha1.ReasonBackupNotAvailable, refusal)
 	}
 	if keySnapshot != "" {
 		if wait, err := r.pitrKeySnapshotHoldConfirmed(ctx, v, keySnapshot); err != nil {
 			return ctrl.Result{}, err
 		} else if wait != "" {
-			return r.waitVerification(ctx, v, reasonPITRArchiveBindingNotReady+": "+wait)
+			return r.waitVerification(ctx, v, string(v1alpha1.PITRTokenArchiveBindingNotReady)+": "+wait)
 		}
 	}
 	if err := r.Create(ctx, built); err != nil {
 		return ctrl.Result{}, fmt.Errorf("create verification job: %w", err)
 	}
-	r.Recorder.Eventf(v, corev1.EventTypeNormal, "VerificationStarted",
+	r.Recorder.Eventf(v, corev1.EventTypeNormal, v1alpha1.EventVerificationStarted,
 		"created verification Job %s (backup=%s, profile=%s)", built.Name, backup.Name, profile.Name)
 
 	patch := client.MergeFrom(v.DeepCopy())
@@ -345,7 +339,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	logger := log.FromContext(ctx)
 	ref, err := verificationJobSource(v, job)
 	if err != nil {
-		return r.failVerification(ctx, v, "BackupIdentityMismatch", err.Error())
+		return r.failVerification(ctx, v, v1alpha1.ReasonBackupIdentityMismatch, err.Error())
 	}
 	if err := r.pinVerificationJobSource(ctx, v, job, ref); err != nil {
 		return ctrl.Result{}, err
@@ -423,12 +417,12 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 			message = detail
 		}
 	}
-	reason := "Succeeded"
+	reason := v1alpha1.ReasonSucceeded
 	if phase == v1alpha1.BackupPhaseSucceeded {
 		next.Phase = v1alpha1.VerificationPhaseSucceeded
 	} else {
 		next.Phase = v1alpha1.VerificationPhaseFailed
-		reason = "Failed"
+		reason = v1alpha1.ReasonFailed
 		// Attribute the failure to the sanity-check phase when verify.sh
 		// says that's where it stopped. Operators get a distinct reason they
 		// can filter on (SanityCheckFailed vs the generic RestoreFailed)
@@ -437,9 +431,9 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		case pitrFailureReason(message) != "":
 			reason = pitrFailureReason(message)
 		case strings.HasPrefix(message, "SanityCheckTimeout"), sentinels.Sanity != nil && strings.EqualFold(sentinels.Sanity.Error, "timeout"):
-			reason = "SanityCheckTimeout"
+			reason = v1alpha1.ReasonSanityCheckTimeout
 		case strings.HasPrefix(message, "SanityCheckFailed"), sentinels.Sanity != nil && sentinels.Sanity.Error != "":
-			reason = "SanityCheckFailed"
+			reason = v1alpha1.ReasonSanityCheckFailed
 		}
 	}
 	conditionStatus := metav1.ConditionTrue
@@ -447,7 +441,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		conditionStatus = metav1.ConditionFalse
 	}
 	setCondition(&next.Conditions, metav1.Condition{
-		Type:               ConditionVerified,
+		Type:               v1alpha1.ConditionVerified,
 		Status:             conditionStatus,
 		ObservedGeneration: v.Generation,
 		LastTransitionTime: completion,
@@ -482,20 +476,20 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	}
 
 	execution := v.DeepCopy()
-	if group := job.Spec.Template.Labels[labelFailoverGroup]; group != "" {
+	if group := job.Spec.Template.Labels[v1alpha1.FailoverGroupLabel]; group != "" {
 		execution.Spec.FailoverGroupRef.Name = group
 	}
-	if profile := job.Spec.Template.Labels[labelBackupProfile]; profile != "" {
+	if profile := job.Spec.Template.Labels[v1alpha1.BackupProfileLabel]; profile != "" {
 		execution.Spec.ProfileName = profile
 	}
 	r.emitTerminalMetrics(execution, verificationJobPITRMode(job))
 
 	if next.Phase == v1alpha1.VerificationPhaseSucceeded {
 		emitPointInTimeEvents(r.Recorder, v, next.PointInTime)
-		r.Recorder.Eventf(v, corev1.EventTypeNormal, "VerificationSucceeded",
+		r.Recorder.Eventf(v, corev1.EventTypeNormal, v1alpha1.EventVerificationSucceeded,
 			"verification %s succeeded: %s", v.Name, message)
 	} else {
-		r.Recorder.Eventf(v, corev1.EventTypeWarning, "VerificationFailed",
+		r.Recorder.Eventf(v, corev1.EventTypeWarning, v1alpha1.EventVerificationFailed,
 			"verification %s failed: %s", v.Name, message)
 	}
 
@@ -556,8 +550,8 @@ func (r *MysqlBackupVerificationReconciler) resolveBackup(ctx context.Context, v
 	if err := r.List(ctx, &list,
 		client.InNamespace(v.Namespace),
 		client.MatchingLabels{
-			labelFailoverGroup: v.Spec.FailoverGroupRef.Name,
-			labelBackupProfile: v.Spec.ProfileName,
+			v1alpha1.FailoverGroupLabel: v.Spec.FailoverGroupRef.Name,
+			v1alpha1.BackupProfileLabel: v.Spec.ProfileName,
 		},
 	); err != nil {
 		return nil, fmt.Errorf("list backups: %w", err)
@@ -690,8 +684,8 @@ func (r *MysqlBackupVerificationReconciler) ensureVerificationCredsSecret(ctx co
 		if derived.Labels == nil {
 			derived.Labels = map[string]string{}
 		}
-		derived.Labels[labelFailoverGroup] = fg.Name
-		derived.Labels[labelMysqlBackupVerification] = v.Name
+		derived.Labels[v1alpha1.FailoverGroupLabel] = fg.Name
+		derived.Labels[v1alpha1.MysqlBackupVerificationLabel] = v.Name
 		derived.Labels[labelManagedBy] = managerName
 		derived.Type = corev1.SecretTypeOpaque
 		derived.Data = map[string][]byte{
@@ -716,7 +710,7 @@ func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context
 	v.Status.Message = message
 	v.Status.ObservedGeneration = v.Generation
 	setCondition(&v.Status.Conditions, metav1.Condition{
-		Type:               ConditionVerified,
+		Type:               v1alpha1.ConditionVerified,
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: v.Generation,
 		LastTransitionTime: now,
@@ -808,15 +802,15 @@ func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context
 	// Best-effort status patch recording cleanup. Separate from the
 	// main terminal status so an error here doesn't undo the
 	// Succeeded/Failed transition.
-	if !hasCondition(v.Status.Conditions, ConditionResourcesCleanedUp) {
+	if !hasCondition(v.Status.Conditions, v1alpha1.ConditionResourcesCleanedUp) {
 		now := metav1.Now()
 		patch := client.MergeFrom(v.DeepCopy())
 		setCondition(&v.Status.Conditions, metav1.Condition{
-			Type:               ConditionResourcesCleanedUp,
+			Type:               v1alpha1.ConditionResourcesCleanedUp,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: v.Generation,
 			LastTransitionTime: now,
-			Reason:             "CleanedUp",
+			Reason:             v1alpha1.ReasonCleanedUp,
 			Message:            "ephemeral resources deleted",
 		})
 		if err := r.Status().Patch(ctx, v, patch); err != nil && !apierrors.IsNotFound(err) {
@@ -916,7 +910,7 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
-		client.MatchingLabels{labelMysqlBackupVerification: v.Name},
+		client.MatchingLabels{v1alpha1.MysqlBackupVerificationLabel: v.Name},
 	); err != nil {
 		return out
 	}

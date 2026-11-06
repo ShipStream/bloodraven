@@ -194,7 +194,7 @@ func s05ObserveSafeConvergence() runner.Step {
 					sort.Strings(readOnly)
 					ready := "<none>"
 					for _, c := range mfg.Status.Conditions {
-						if c.Type == "Ready" {
+						if c.Type == v1alpha1.ConditionReady {
 							ready = string(c.Status)
 							break
 						}

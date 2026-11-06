@@ -133,7 +133,7 @@ func TestAnnotatePlannedFailover_ConflictRebaselines(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKeyFromObject(fg), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Annotations[PlannedFailoverAnnotation] != "pdx" {
+	if got.Annotations[v1alpha1.PlannedFailoverAnnotation] != "pdx" {
 		t.Fatalf("annotations = %v", got.Annotations)
 	}
 }

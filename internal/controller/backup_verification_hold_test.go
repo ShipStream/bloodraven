@@ -60,7 +60,7 @@ func holdJob(verification string, condition batchv1.JobConditionType) *batchv1.J
 func holdPod(verification string, phase corev1.PodPhase) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: verification + "-pod-" + strings.ToLower(string(phase)), Namespace: "ns",
-			Labels: map[string]string{labelMysqlBackupVerification: verification}},
+			Labels: map[string]string{v1alpha1.MysqlBackupVerificationLabel: verification}},
 		Status: corev1.PodStatus{Phase: phase},
 	}
 }
@@ -194,7 +194,7 @@ func TestResolveBackup_SkipsTerminatingBackups(t *testing.T) {
 	newer.Status.CompletionTime = &metav1.Time{Time: older.Status.CompletionTime.Add(time.Hour)}
 	now := metav1.Now()
 	newer.DeletionTimestamp = &now
-	newer.Finalizers = []string{mysqlBackupFinalizer}
+	newer.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 
 	latest := verifyCR("latest", fg.Name, "nightly-s3")
 	explicit := verifyCR("explicit", fg.Name, "nightly-s3")
@@ -271,7 +271,7 @@ func TestVerificationHold_RefusesTerminatingBackupAtLaunch(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	now := metav1.Now()
 	b.DeletionTimestamp = &now
-	b.Finalizers = []string{mysqlBackupFinalizer}
+	b.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 	v := verifyCR("late", fg.Name, "nightly-s3")
 	v.Spec.BackupRef = &corev1.LocalObjectReference{Name: b.Name}
 	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
@@ -279,7 +279,7 @@ func TestVerificationHold_RefusesTerminatingBackupAtLaunch(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
 	}
-	cond := apiMeta.FindStatusCondition(v.Status.Conditions, ConditionVerified)
+	cond := apiMeta.FindStatusCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
 	if v.Status.Phase != v1alpha1.VerificationPhaseFailed || cond == nil || cond.Reason != "BackupNotAvailable" {
 		t.Fatalf("status %+v, want Failed/BackupNotAvailable", v.Status)
 	}
@@ -346,7 +346,7 @@ func TestFinalize_DefersWhileVerificationReads(t *testing.T) {
 		t.Fatal("cleanup started while a verification reads the artifact")
 	}
 	cond := cleanupCondition(t, f)
-	if cond == nil || cond.Reason != cleanupReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
+	if cond == nil || cond.Reason != v1alpha1.ReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
 		t.Fatalf("condition %+v", cond)
 	}
 	if n := countEvents(f.rec, "ArtifactCleanupDeferred"); n != 1 {
@@ -514,7 +514,7 @@ func TestArtifactReaders_UnpinnedIgnoresUnpickableBackups(t *testing.T) {
 		{name: "terminating", mutate: func(b *v1alpha1.MysqlBackup) {
 			now := metav1.Now()
 			b.DeletionTimestamp = &now
-			b.Finalizers = []string{mysqlBackupFinalizer}
+			b.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 		}},
 		{name: "failed", mutate: func(b *v1alpha1.MysqlBackup) { b.Status.Phase = v1alpha1.BackupPhaseFailed }},
 	} {

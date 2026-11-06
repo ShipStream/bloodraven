@@ -22,49 +22,11 @@ import (
 )
 
 const (
-	// labelKeyringVersion carries the escrow version as a label so the
-	// operator can list a site's keyring Secrets without parsing names.
-	labelKeyringVersion = "shipstream.io/keyring-version"
-
-	// annotationKeyringDigest records the digest of the escrowed bytes.
-	// Purely informational — the operator always recomputes the digest
-	// from the Secret's contents rather than trusting the annotation.
-	annotationKeyringDigest = "shipstream.io/keyring-digest"
-
-	// RotateKeyringAnnotation is set by an admin to trigger an InnoDB
-	// master-key rotation on one site:
-	//
-	//	kubectl annotate mysqlfailovergroup orders \
-	//	  bloodraven.shipstream.io/rotate-keyring=pdx
-	//
-	// The operator refuses to rotate the active primary. Rotation
-	// necessarily runs with a writable keyring, and the only window in
-	// which a keyring can be lost is that one; keeping it off the
-	// primary means a lost keyring is always recoverable by re-cloning
-	// the affected site from a healthy peer. Rotate the replicas, run a
-	// planned failover, then rotate the ex-primary.
-	RotateKeyringAnnotation = "bloodraven.shipstream.io/rotate-keyring"
-
-	// AdoptEncryptionAnnotation acknowledges that encryption is being
-	// turned on for a failover group that already holds data, and that
-	// the pre-existing tablespaces will stay plaintext until they are
-	// rebuilt:
-	//
-	//	kubectl annotate mysqlfailovergroup orders \
-	//	  bloodraven.shipstream.io/encryption-adopt=confirm
-	//
-	// status.encryptionAtRest.sites[].coverage.unencryptedTablespaces
-	// reports how much data is still in the clear.
-	AdoptEncryptionAnnotation = "bloodraven.shipstream.io/encryption-adopt"
 
 	// maxKeyringBytes bounds what the escrow endpoint will accept. A
 	// file keyring holding master keys is well under 1 KiB; the cap
 	// exists so a misbehaving sidecar cannot push a Secret-sized blob.
 	maxKeyringBytes = 256 * 1024
-
-	// conditionEncryptionReady is the condition type summarizing the
-	// encryption subsystem.
-	conditionEncryptionReady = "EncryptionAtRestReady"
 )
 
 // -------------------------------------------------------------------
@@ -95,10 +57,10 @@ func (s *keyringEscrowStore) listVersions(ctx context.Context, fg *v1alpha1.Mysq
 	if err := s.client.List(ctx, &list,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
-			labelFailoverGroup: fg.Name,
-			labelSite:          site,
-			labelManagedBy:     managerName,
-			labelAppName:       "mysql-keyring",
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			v1alpha1.SiteLabel:          site,
+			labelManagedBy:              managerName,
+			labelAppName:                "mysql-keyring",
 		},
 	); err != nil {
 		return nil, fmt.Errorf("list keyring secrets for site %s: %w", site, err)
@@ -114,7 +76,7 @@ func (s *keyringEscrowStore) listVersions(ctx context.Context, fg *v1alpha1.Mysq
 			// one corrupt Secret cannot wedge the whole site.
 			continue
 		}
-		v, err := strconv.ParseInt(sec.Labels[labelKeyringVersion], 10, 32)
+		v, err := strconv.ParseInt(sec.Labels[v1alpha1.KeyringVersionLabel], 10, 32)
 		if err != nil {
 			continue
 		}
@@ -168,15 +130,15 @@ func (s *keyringEscrowStore) put(ctx context.Context, fg *v1alpha1.MysqlFailover
 			Name:      v1alpha1.KeyringSecretName(fg.Name, site, next),
 			Namespace: fg.Namespace,
 			Labels: map[string]string{
-				labelAppName:        "mysql-keyring",
-				labelInstance:       fg.Name,
-				labelFailoverGroup:  fg.Name,
-				labelSite:           site,
-				labelManagedBy:      managerName,
-				labelKeyringVersion: strconv.FormatInt(int64(next), 10),
+				labelAppName:                 "mysql-keyring",
+				labelInstance:                fg.Name,
+				v1alpha1.FailoverGroupLabel:  fg.Name,
+				v1alpha1.SiteLabel:           site,
+				labelManagedBy:               managerName,
+				v1alpha1.KeyringVersionLabel: strconv.FormatInt(int64(next), 10),
 			},
 			Annotations: map[string]string{
-				annotationKeyringDigest: digest,
+				v1alpha1.KeyringDigestAnnotation: digest,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -269,11 +231,11 @@ func (r *MysqlFailoverGroupReconciler) ensureEscrowToken(ctx context.Context, fg
 			Name:      name,
 			Namespace: fg.Namespace,
 			Labels: map[string]string{
-				labelAppName:       "mysql-keyring-token",
-				labelInstance:      fg.Name,
-				labelFailoverGroup: fg.Name,
-				labelSite:          site,
-				labelManagedBy:     managerName,
+				labelAppName:                "mysql-keyring-token",
+				labelInstance:               fg.Name,
+				v1alpha1.FailoverGroupLabel: fg.Name,
+				v1alpha1.SiteLabel:          site,
+				labelManagedBy:              managerName,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,

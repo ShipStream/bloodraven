@@ -108,7 +108,7 @@ func TestDragonflySnapshotUpgrade_AnnotationDuringPlannedFailoverNoDeadlock(t *t
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{Dir: "s3://x/y"}
-	fg.Annotations = map[string]string{DragonflySnapshotUpgradeAnnotation: "dragonfly:new"}
+	fg.Annotations = map[string]string{v1alpha1.DragonflySnapshotUpgradeAnnotation: "dragonfly:new"}
 	cb, nn := newDragonflyFakeClient(fg)
 	c := cb.Build()
 	runner := &TopologyManagerRunner{}
@@ -131,7 +131,7 @@ func TestDragonflySnapshotUpgrade_AnnotationDuringPlannedFailoverNoDeadlock(t *t
 		t.Fatalf("upgrade after release = (%s, %v), want reject and 0", d, err)
 	}
 	live := getFGByKey(t, c, nn)
-	if _, still := live.Annotations[DragonflySnapshotUpgradeAnnotation]; still {
+	if _, still := live.Annotations[v1alpha1.DragonflySnapshotUpgradeAnnotation]; still {
 		t.Error("annotation not removed")
 	}
 	if up := dragonflyUpgradeStatus(live); dragonflyUpgradeInFlight(up) {

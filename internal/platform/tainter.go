@@ -13,23 +13,19 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	k8sretry "k8s.io/client-go/util/retry"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-const (
-	LegacyTaintKey = "shipstream.io/db-readonly"
-	TaintKeyPrefix = "shipstream.io/db-readonly-"
-	TaintValue     = "true"
-)
-
-func TaintKeyForGroup(group string) string {
-	return TaintKeyPrefix + group
-}
+// LegacyTaintKey is the unscoped read-only taint key of earlier releases.
+// SetTaint still removes it.
+const LegacyTaintKey = "shipstream.io/db-readonly"
 
 // NodeTainter manages node taints for failover group site failover.
 // The selector parameter is a Kubernetes label selector string, usually
 // produced from spec.sites[].taintNodeSelector.
 // The group parameter is the failover group name, used to derive the
-// per-group taint key (e.g. "shipstream.io/db-readonly-orders").
+// per-group taint key (v1alpha1.ReadOnlyTaintKey).
 type NodeTainter interface {
 	SetTaint(ctx context.Context, selector string, group string, taint bool) error
 }
@@ -48,7 +44,7 @@ func (t *nodeTainter) SetTaint(ctx context.Context, selector string, group strin
 		return fmt.Errorf("refusing to update node taints for empty selector")
 	}
 
-	taintKey := TaintKeyForGroup(group)
+	taintKey := v1alpha1.ReadOnlyTaintKey(group)
 	nodes, err := t.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -75,7 +71,7 @@ func (t *nodeTainter) SetTaint(ctx context.Context, selector string, group strin
 func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, taintKey string, apply bool) error {
 	desiredTaint := corev1.Taint{
 		Key:    taintKey,
-		Value:  TaintValue,
+		Value:  v1alpha1.ReadOnlyTaintValue,
 		Effect: corev1.TaintEffectNoExecute,
 	}
 

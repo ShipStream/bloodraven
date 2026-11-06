@@ -96,10 +96,10 @@ func TestRestore_WatermarkFromNewerOOBRecord(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := newTestFG()
 			fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted = &older, "dc1", opsUUIDA+":1-10"
-			fg.Annotations = map[string]string{LastFailoverAnnotation: failoverStampFormat(newer), LastFailoverTargetAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1alpha1.LastFailoverAnnotation: failoverStampFormat(newer), v1alpha1.LastFailoverTargetAnnotation: "dc2"}
 			if tc.oobWater != "" {
-				fg.Annotations[PromotionGtidExecutedAnnotation] = tc.oobWater
-				fg.Annotations[PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(newer, "dc2")
+				fg.Annotations[v1alpha1.PromotionGtidExecutedAnnotation] = tc.oobWater
+				fg.Annotations[v1alpha1.PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(newer, "dc2")
 			}
 			tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
 			c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg).Build()

@@ -141,7 +141,7 @@ func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
 	}
 	value := fmt.Sprintf("%s:%s", divergent, gtid[:8])
 	env.Capture.Note(fmt.Sprintf("cleanup: submitting reclone-site=%s to clear divergence", value))
-	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 		return fmt.Errorf("cleanup: set reclone annotation: %w", err)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)

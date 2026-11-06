@@ -149,7 +149,7 @@ func verifyNoSelfFenceAcrossSites() runner.Step {
 
 func ensureMFGReady(mfg *v1alpha1.MysqlFailoverGroup) error {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == "Ready" {
+		if c.Type == v1alpha1.ConditionReady {
 			if c.Status != "True" {
 				return fmt.Errorf("Ready condition is %q (reason=%s message=%q)", c.Status, c.Reason, c.Message)
 			}

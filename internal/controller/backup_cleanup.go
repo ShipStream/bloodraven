@@ -14,33 +14,9 @@ import (
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 )
 
-// ConditionArtifactCleanup reports why a deleted MysqlBackup's artifact has
-// not been removed yet. It is only written while the CR is Terminating.
-const ConditionArtifactCleanup = "ArtifactCleanup"
-
-// ArtifactCleanup condition reasons.
-const (
-	cleanupReasonFailed                = "CleanupFailed"
-	cleanupReasonRejected              = "CleanupRejected"
-	cleanupReasonDestinationUnverified = "DestinationUnverified"
-	cleanupReasonDestinationMismatch   = "DestinationMismatch"
-	cleanupReasonCredentialsMissing    = "CredentialsUnavailable"
-	cleanupReasonOperatorImageUnset    = "OperatorImageUnset"
-	cleanupReasonJobConflict           = "CleanupJobConflict"
-	cleanupReasonHeldByVerification    = "HeldByVerification"
-	cleanupReasonPending               = "CleanupPending"
-	cleanupReasonForegroundDeletion    = "ForegroundDeletion"
-	cleanupReasonOrphanDeletion        = "OrphanDeletion"
-	cleanupReasonJobInvalid            = "CleanupJobInvalid"
-	cleanupReasonProducerStopStuck     = "ProducerStopStuck"
-)
-
 const (
 	// cleanupContainerName is the cleanup Job's only container.
 	cleanupContainerName = "artifact-cleanup"
-	// annotationCleanupFailureRecorded marks a failed cleanup Job whose
-	// failure event and metric have been emitted, so each Job counts once.
-	annotationCleanupFailureRecorded = "shipstream.io/cleanup-failure-recorded"
 	// cleanupRetryAfterFailure and cleanupRetryAfterRejection delay a fresh
 	// cleanup Job after a failed one, measured from the Job's failure time.
 	// Retries never stop: credentials rotated inside the same Secret, IAM
@@ -122,15 +98,15 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 	}
 
 	labels := map[string]string{
-		labelAppName:       "mysql-backup",
-		labelInstance:      fg.Name,
-		labelFailoverGroup: fg.Name,
-		labelMysqlBackup:   backup.Name,
-		labelManagedBy:     managerName,
-		labelResourceKind:  "backup-cleanup",
+		labelAppName:                "mysql-backup",
+		labelInstance:               fg.Name,
+		v1alpha1.FailoverGroupLabel: fg.Name,
+		v1alpha1.MysqlBackupLabel:   backup.Name,
+		labelManagedBy:              managerName,
+		v1alpha1.ResourceLabel:      "backup-cleanup",
 	}
 	if profile != nil {
-		labels[labelBackupProfile] = profile.Name
+		labels[v1alpha1.BackupProfileLabel] = profile.Name
 	}
 
 	// Recorded values are already resolved paths; escape them so kubelet's

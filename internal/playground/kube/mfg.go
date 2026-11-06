@@ -148,7 +148,7 @@ func SiteState(mfg *v1alpha1.MysqlFailoverGroup, site string) string {
 // "Unknown" if no Ready condition has been written yet.
 func ReadyCondition(mfg *v1alpha1.MysqlFailoverGroup) string {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == "Ready" {
+		if c.Type == v1alpha1.ConditionReady {
 			return string(c.Status)
 		}
 	}

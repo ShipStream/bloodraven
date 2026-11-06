@@ -17,7 +17,6 @@ import (
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 )
 
@@ -261,7 +260,7 @@ func TestClearMFGFailoverStatusKeepsEncryptionAtRest(t *testing.T) {
 		got.Status.PromotionGtidExecuted != "" || got.Status.PlannedFailover != nil {
 		t.Fatalf("failover history survived normalization: %+v", got.Status)
 	}
-	for _, a := range []string{brcontroller.PlannedFailoverAnnotation, brcontroller.PlannedFailoverTerminalAnnotation} {
+	for _, a := range []string{v1alpha1.PlannedFailoverAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation} {
 		if v, ok := got.Annotations[a]; ok {
 			t.Fatalf("annotation %s=%q survived normalization: a surviving request starts a new switchover", a, v)
 		}
@@ -293,8 +292,8 @@ func newStatusResetter(t *testing.T) (*resetter, *v1alpha1.MysqlFailoverGroup) {
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "playground", Annotations: map[string]string{
 			// A Deferred request keeps its annotation; reset must drop it
 			// with the status block it belongs to.
-			brcontroller.PlannedFailoverAnnotation:         "pdx",
-			brcontroller.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"r1","outcome":"Succeeded"}`,
+			v1alpha1.PlannedFailoverAnnotation:         "pdx",
+			v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"r1","outcome":"Succeeded"}`,
 			"unrelated": "kept",
 		}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{

@@ -707,13 +707,13 @@ func (r *TopologyManagerRunner) RefreshInitRestoreReadiness(nn types.NamespacedN
 // Initializing (which keeps its Unknown), gets its first verdict from the
 // topology manager's own first write and is not stale.
 func initRestoreReadyStale(fg *v1alpha1.MysqlFailoverGroup) bool {
-	ready := apimeta.FindStatusCondition(fg.Status.Conditions, "Ready")
-	if ready == nil || ready.Reason == "Initializing" {
+	ready := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionReady)
+	if ready == nil || ready.Reason == v1alpha1.ReasonInitializing {
 		return false
 	}
 	reason, message := initRestoreReadyCondition(fg)
 	if reason == "" {
-		return ready.Reason == readyReasonInitRestoreInProgress || ready.Reason == readyReasonInitRestoreFailed
+		return ready.Reason == v1alpha1.ReasonInitFromBackupInProgress || ready.Reason == v1alpha1.ReasonInitFromBackupFailed
 	}
 	return ready.Status != metav1.ConditionFalse || ready.Reason != reason || ready.Message != message
 }
@@ -724,7 +724,7 @@ func initRestoreReadyStale(fg *v1alpha1.MysqlFailoverGroup) bool {
 // annotation is cleared so the admin can retry with a fixed value
 // rather than receive one rejection event per reconcile.
 func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, tm *TopologyManager) {
-	raw := fg.GetAnnotations()[RecloneAnnotation]
+	raw := fg.GetAnnotations()[v1alpha1.RecloneAnnotation]
 	if raw == "" {
 		return
 	}
@@ -732,7 +732,7 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 	if err := validateRecloneRequest(fg, req); err != nil {
 		r.logger.Warn("reclone annotation rejected", "fg", nn, "value", raw, "error", err.Error())
 		if r.recorder != nil {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", "%s", err.Error())
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRecloneRejected, "%s", err.Error())
 		}
 		// Clear the annotation so the admin sees a single rejection and
 		// can re-apply with the correct value. Leaving it would spam
@@ -749,7 +749,7 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 			"Once the primary's data is good, set status.restoreReclones.phase to Draining instead", req.Site, fg.Status.RestoreReclones.Phase)
 		r.logger.Warn("reclone annotation rejected", "fg", nn, "value", raw, "error", msg)
 		if r.recorder != nil {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", "%s", msg)
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRecloneRejected, "%s", msg)
 		}
 		tm.cancelPendingReclone(req.Site)
 		r.removeRecloneAnnotation(ctx, nn)
@@ -763,10 +763,10 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 	}
 	if tm.SetRecloneSiteFor(req.Site, owner) && r.recorder != nil {
 		if owner != "" {
-			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRecloneRequested,
 				"in-place restore (confirm=%s) requested CLONE INSTANCE of site %q", owner, req.Site)
 		} else {
-			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRecloneRequested,
 				"admin requested CLONE INSTANCE of site %q", req.Site)
 		}
 	}
@@ -789,13 +789,13 @@ func (r *TopologyManagerRunner) removeRecloneAnnotationForSite(ctx context.Conte
 		if annotations == nil {
 			return nil
 		}
-		if _, ok := annotations[RecloneAnnotation]; !ok {
+		if _, ok := annotations[v1alpha1.RecloneAnnotation]; !ok {
 			return nil
 		}
-		if expectedSite != "" && parseRecloneAnnotation(annotations[RecloneAnnotation]).Site != expectedSite {
+		if expectedSite != "" && parseRecloneAnnotation(annotations[v1alpha1.RecloneAnnotation]).Site != expectedSite {
 			return fmt.Errorf("reclone annotation changed before start")
 		}
-		delete(annotations, RecloneAnnotation)
+		delete(annotations, v1alpha1.RecloneAnnotation)
 		fresh.SetAnnotations(annotations)
 		return r.client.Update(ctx, &fresh)
 	})
@@ -900,8 +900,8 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 		// missing or edited one the site's writer would count as a
 		// disagreement (backup stamps, retention) forever, even when the
 		// hash matches.
-		if deploy.Annotations[specHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
-			deploy.Annotations[annotationPITRRender] != pitr.Canonical() {
+		if deploy.Annotations[v1alpha1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
+			deploy.Annotations[v1alpha1.PITRRenderAnnotation] != pitr.Canonical() {
 			driftSites = append(driftSites, site.Name)
 		}
 	}
@@ -1076,10 +1076,10 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		if site.SourceConvergenceState != "" || site.SourceHost != "" {
 			tm.SetSourceConvergence(site.Name, site.SourceHost, SourceConvergenceState(site.SourceConvergenceState), site.SourceConvergenceReason)
 		}
-		if site.RecoveryState != recoveryStateBlocked && site.RecoveryState != recoveryStateInProgress && site.DivergentGtid == "" {
+		if site.RecoveryState != v1alpha1.RecoveryStateBlocked && site.RecoveryState != v1alpha1.RecoveryStateInProgress && site.DivergentGtid == "" {
 			continue
 		}
-		if site.RecoveryState == recoveryStateInProgress {
+		if site.RecoveryState == v1alpha1.RecoveryStateInProgress {
 			tm.SetRecoveryInProgress(site.Name)
 			r.logger.Info("restored recovery in-progress state from CR status", "fg", nn, "site", site.Name)
 			continue
@@ -1773,7 +1773,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	now := metav1.Now()
 	reason := degradedReason(snap)
 	readyStatus := conditionBool(hasWritable && replicationHealthy)
-	readyReason := "TopologyPolled"
+	readyReason := v1alpha1.ReasonTopologyPolled
 	readyMessage := "At least one site is writable and replication is healthy"
 	if !hasWritable {
 		readyMessage = "No site is writable"
@@ -1804,7 +1804,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		}
 	}
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
+		Type:               v1alpha1.ConditionReady,
 		Status:             readyStatus,
 		ObservedGeneration: freshFG.Generation,
 		LastTransitionTime: now,
@@ -1812,7 +1812,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		Message:            readyMessage,
 	})
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
-		Type:               "Degraded",
+		Type:               v1alpha1.ConditionDegraded,
 		Status:             degradedStatus,
 		ObservedGeneration: freshFG.Generation,
 		LastTransitionTime: now,
@@ -1839,9 +1839,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// writable primary is excluded.
 		if reason == "Healthy" && s.State == state.StateReadOnly && s.SourceConvergenceState != sourceConvergenceConverged {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: "Degraded", Status: metav1.ConditionTrue,
+				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
 				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason:  "ReplicationSourceMismatch",
+				Reason:  v1alpha1.ReasonReplicationSourceMismatch,
 				Message: fmt.Sprintf("Replication source on %s is not the active primary", s.Name),
 			})
 		}
@@ -1852,33 +1852,33 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		siteName := s.Name
 		if !repl.IORunning || !repl.SQLRunning {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type:               "Degraded",
+				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
 				ObservedGeneration: freshFG.Generation,
 				LastTransitionTime: now,
-				Reason:             "ReplicationBroken",
+				Reason:             v1alpha1.ReasonReplicationBroken,
 				Message:            fmt.Sprintf("Replication IO/SQL thread not running on %s", siteName),
 			})
 		}
-		degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, "Degraded")
+		degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, v1alpha1.ConditionDegraded)
 		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds &&
-			(degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason == "ReplicationLagging") {
+			(degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason == v1alpha1.ReasonReplicationLagging) {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type:               "Degraded",
+				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
 				ObservedGeneration: freshFG.Generation,
 				LastTransitionTime: now,
-				Reason:             "ReplicationLagging",
+				Reason:             v1alpha1.ReasonReplicationLagging,
 				Message:            fmt.Sprintf("Replication lag on %s is %ds (threshold %ds)", siteName, *repl.SecondsBehindSource, maxLagSeconds),
 			})
 		}
 		if repl.LastError != "" {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type:               "Degraded",
+				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
 				ObservedGeneration: freshFG.Generation,
 				LastTransitionTime: now,
-				Reason:             "ReplicationError",
+				Reason:             v1alpha1.ReasonReplicationError,
 				Message:            fmt.Sprintf("Replication error on %s: %s", siteName, repl.LastError),
 			})
 		}
@@ -1893,11 +1893,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// the topology is classified, and True keeps the deployment API
 	// refusing leases while peers are held.
 	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == "Healthy" || reason == "Initializing") {
-		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, "Degraded"); degraded == nil || degraded.Status != metav1.ConditionTrue {
+		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, v1alpha1.ConditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: "Degraded", Status: metav1.ConditionTrue,
+				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
 				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason: "RestoreReclonePending",
+				Reason: v1alpha1.ReasonRestoreReclonePending,
 				Message: fmt.Sprintf("%s await their post-restore reclone (status.restoreReclones phase %s); their replication is stopped until then",
 					strings.Join(q.Pending, ", "), q.Phase),
 			})
@@ -1913,9 +1913,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	if reason == "Healthy" || reason == "Initializing" {
 		if msg := divergenceDegradedMessage(snap); msg != "" {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: "Degraded", Status: metav1.ConditionTrue,
+				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
 				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason:  "DivergentTransactions",
+				Reason:  v1alpha1.ReasonDivergentTransactions,
 				Message: msg,
 			})
 		}
@@ -1926,7 +1926,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	newDivergentPromotion := false
 	if note := snap.DivergentPromotion; note != nil {
 		msg := divergentPromotionMessage(*note)
-		existing := apimeta.FindStatusCondition(freshFG.Status.Conditions, divergentPromotionCondition)
+		existing := apimeta.FindStatusCondition(freshFG.Status.Conditions, v1alpha1.ConditionDivergentPromotion)
 		if existing == nil || !strings.Contains(existing.Message, msg) {
 			newDivergentPromotion = true
 			// Earlier promotions an administrator has not reviewed (and
@@ -1936,9 +1936,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				combined = appendDivergentPromotion(existing.Message, msg)
 			}
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: divergentPromotionCondition, Status: metav1.ConditionTrue,
+				Type: v1alpha1.ConditionDivergentPromotion, Status: metav1.ConditionTrue,
 				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason:  "DivergentSitePromoted",
+				Reason:  v1alpha1.ReasonDivergentSitePromoted,
 				Message: combined,
 			})
 		}
@@ -1950,7 +1950,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Update phase tracking (status.updatePhase itself is merged above).
 	if snap.UpdatePhase != "" {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Updating",
+			Type:               v1alpha1.ConditionUpdating,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
@@ -1959,55 +1959,55 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		})
 	} else if snap.UpdateStalled != "" {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Updating",
+			Type:               v1alpha1.ConditionUpdating,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
-			Reason:             ReasonOrderedUpdateStalled,
+			Reason:             v1alpha1.ReasonOrderedUpdateStalled,
 			Message:            orderedUpdateStalledMessage(snap.UpdateStalled),
 		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Updating",
+			Type:               v1alpha1.ConditionUpdating,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
-			Reason:             "NotUpdating",
+			Reason:             v1alpha1.ReasonNotUpdating,
 			Message:            "No update in progress",
 		})
 	}
 
 	// RecoveryPending condition.
-	if snap.RecoveryState == recoveryStateInProgress {
+	if snap.RecoveryState == v1alpha1.RecoveryStateInProgress {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "RecoveryPending",
+			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
-			Reason:             "RecoveryInProgress",
+			Reason:             v1alpha1.ReasonRecoveryInProgress,
 			Message:            fmt.Sprintf("Old primary %s is being reconfigured as a replica", snap.RecoverySite),
 		})
-	} else if snap.RecoveryState == recoveryStateBlocked {
+	} else if snap.RecoveryState == v1alpha1.RecoveryStateBlocked {
 		msg := fmt.Sprintf("Old primary %s has %d divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=%s to recover", snap.RecoverySite, snap.DivergentTxnCount, snap.RecoverySite)
 		if snap.DivergenceDetectedBy == divergenceDetectedByAudit {
 			msg = fmt.Sprintf("Replica %s has %d transactions the primary%s lacks — reclone it (kubectl bloodraven reclone %s %s) or make the primary contain them",
 				snap.RecoverySite, snap.DivergentTxnCount, comparedToSuffix(snap.DivergenceComparedTo), freshFG.Name, snap.RecoverySite)
 		}
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "RecoveryPending",
+			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
-			Reason:             "DivergentTransactions",
+			Reason:             v1alpha1.ReasonDivergentTransactions,
 			Message:            msg,
 		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "RecoveryPending",
+			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
-			Reason:             "NoRecoveryPending",
+			Reason:             v1alpha1.ReasonNoRecoveryPending,
 			Message:            "No old primary recovery pending",
 		})
 	}
@@ -2095,7 +2095,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// that raced this write is not undone.
 		var liveDivergentPromotion *metav1.Condition
 		if !newDivergentPromotion {
-			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, divergentPromotionCondition); c != nil {
+			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionDivergentPromotion); c != nil {
 				cp := *c
 				liveDivergentPromotion = &cp
 			}
@@ -2113,7 +2113,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			if liveDivergentPromotion != nil {
 				setCondition(&fresh.Status.Conditions, *liveDivergentPromotion)
 			} else {
-				removeCondition(&fresh.Status.Conditions, divergentPromotionCondition)
+				removeCondition(&fresh.Status.Conditions, v1alpha1.ConditionDivergentPromotion)
 			}
 		}
 		fresh.Status.PlannedFailover = planned
@@ -2139,7 +2139,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		if pitrArchivePrev != nil {
 			setCondition(&fresh.Status.Conditions, *pitrArchivePrev)
 		} else {
-			removeCondition(&fresh.Status.Conditions, conditionPITRArchiveReady)
+			removeCondition(&fresh.Status.Conditions, v1alpha1.ConditionPITRArchiveReady)
 		}
 		r.applyPITRArchiveStatus(ctx, nn, &fresh)
 		if err := r.client.Status().Update(ctx, &fresh); err != nil {
@@ -2163,7 +2163,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 	r.ackDivergentPromotion(nn, snap)
 	if newDivergentPromotion && r.recorder != nil {
-		r.recorder.Eventf(&freshFG, corev1.EventTypeWarning, "DivergentSitePromoted", "%s", divergentPromotionMessage(*snap.DivergentPromotion))
+		r.recorder.Eventf(&freshFG, corev1.EventTypeWarning, v1alpha1.ReasonDivergentSitePromoted, "%s", divergentPromotionMessage(*snap.DivergentPromotion))
 	}
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
 	r.emitPITRArchiveReissueRisk(&freshFG, persistedActiveFrom)
@@ -2217,7 +2217,7 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 		}
 		st.Sites[i].DivergenceDetectedBy = ""
 		st.Sites[i].DivergenceComparedTo = ""
-		if s.RecoveryState == recoveryStateBlocked {
+		if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 			st.Sites[i].DivergenceDetectedBy = s.DivergenceDetectedBy
 			st.Sites[i].DivergenceComparedTo = s.DivergenceComparedTo
 		}
@@ -2436,7 +2436,7 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 
 	// Failover executed: new failover target differs from previously persisted target.
 	if snap.LastFailoverTarget != "" && snap.LastFailoverTarget != existingStatus.LastFailoverTarget {
-		r.recorder.Eventf(fg, corev1.EventTypeNormal, "FailoverExecuted",
+		r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventFailoverExecuted,
 			"Failover completed: %s promoted as new primary", snap.LastFailoverTarget)
 	}
 
@@ -2457,7 +2457,7 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		}
 	}
 	recoveryActive := func(st string) bool {
-		return st == recoveryStateInProgress || st == recoveryStateBlocked
+		return st == v1alpha1.RecoveryStateInProgress || st == v1alpha1.RecoveryStateBlocked
 	}
 	for _, s := range snap.Sites {
 		// Data loss detected: RecoveryBlocked appeared where it wasn't before,
@@ -2476,20 +2476,20 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		// while another appeared) or a comparison against another primary;
 		// both are new evidence. A field the old status never recorded
 		// (written before provenance existed) is not.
-		evidenceChanged := oldState[s.Name] == recoveryStateBlocked &&
+		evidenceChanged := oldState[s.Name] == v1alpha1.RecoveryStateBlocked &&
 			((oldSet[s.Name] != "" && oldSet[s.Name] != s.DivergentGtid) ||
 				(oldComparedTo[s.Name] != "" && s.DivergenceComparedTo != "" && oldComparedTo[s.Name] != s.DivergenceComparedTo))
-		if s.RecoveryState == recoveryStateBlocked &&
-			(oldState[s.Name] != recoveryStateBlocked || countChanged || evidenceChanged) {
+		if s.RecoveryState == v1alpha1.RecoveryStateBlocked &&
+			(oldState[s.Name] != v1alpha1.RecoveryStateBlocked || countChanged || evidenceChanged) {
 			if s.DivergenceDetectedBy == divergenceDetectedByAudit {
 				// A replica, usually replicating normally, holds history
 				// the primary lacks; "did not replicate before failover"
 				// would send the reader to the wrong playbook.
-				r.recorder.Eventf(fg, corev1.EventTypeWarning, "DivergentReplicaDetected",
+				r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDivergentReplicaDetected,
 					"%d transactions on %s are missing from the primary%s (%s); ordered updates and planned failovers will not promote it. Reclone it or make the primary contain them",
 					s.DivergentTxnCount, s.Name, comparedToSuffix(s.DivergenceComparedTo), truncateGtidHint(s.DivergentGtid))
 			} else {
-				r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
+				r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDataLossDetected,
 					"%d divergent transactions on %s did not replicate before failover",
 					s.DivergentTxnCount, s.Name)
 			}
@@ -2499,20 +2499,16 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		// re-assert) is not a recovery completion — the site did not rejoin
 		// as a replica — so no Normal event is emitted for it.
 		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable {
-			if oldState[s.Name] == recoveryStateBlocked && oldDetectedBy[s.Name] == divergenceDetectedByAudit {
-				r.recorder.Eventf(fg, corev1.EventTypeNormal, "DivergenceResolved",
+			if oldState[s.Name] == v1alpha1.RecoveryStateBlocked && oldDetectedBy[s.Name] == divergenceDetectedByAudit {
+				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDivergenceResolved,
 					"Replica %s no longer holds transactions the primary lacks", s.Name)
 			} else {
-				r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
+				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRecoveryComplete,
 					"Old primary %s recovered and is now replicating", s.Name)
 			}
 		}
 	}
 }
-
-// eventReasonPITRArchiveReissueRisk warns that a promoted site may reissue
-// GTIDs the archive already holds (D-46).
-const eventReasonPITRArchiveReissueRisk = "PITRArchiveReissueRiskDetected"
 
 // emitPITRArchiveReissueRisk fires when a status write persisted an
 // active-site change (a failover, a planned failover or a re-promotion) to a
@@ -2546,7 +2542,7 @@ func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFai
 	if !ok || rows == 0 {
 		return
 	}
-	r.recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveReissueRisk,
+	r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveReissueRiskDetected,
 		"site %s was promoted while its archive manifest holds %d divergent/quarantined rows. If %s was recloned after a lossy failover, it reissues the lost GTIDs, and every restore from this archive refuses PITRArchiveHistoryReset. Start a new archive prefix and take a full backup.",
 		promoted, rows, promoted)
 }
@@ -2571,11 +2567,6 @@ func (r *TopologyManagerRunner) pitrArchiveSuspectRows(nn types.NamespacedName, 
 	return s.DivergentRows + s.QuarantinedRows, true
 }
 
-// ReasonOrderedUpdateStalled is the Updating condition reason, and the
-// Warning Event reason, for an ordered update stopped on a site whose pod
-// is not Ready.
-const ReasonOrderedUpdateStalled = "OrderedUpdateStalled"
-
 func orderedUpdateStalledMessage(stall string) string {
 	return fmt.Sprintf("Ordered update stalled: %s. No other site is rolled and the active site is not handed off until that pod has been Ready for %s; the update retries every %s",
 		stall, podStableFor, orderedUpdateStallRetry)
@@ -2592,14 +2583,14 @@ func (r *TopologyManagerRunner) emitOrderedUpdateStallEvent(fg *v1alpha1.MysqlFa
 	if r.recorder == nil {
 		return
 	}
-	cur := apimeta.FindStatusCondition(fg.Status.Conditions, "Updating")
-	if cur == nil || cur.Reason != ReasonOrderedUpdateStalled {
+	cur := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating)
+	if cur == nil || cur.Reason != v1alpha1.ReasonOrderedUpdateStalled {
 		return
 	}
-	if prev := apimeta.FindStatusCondition(existingStatus.Conditions, "Updating"); prev != nil && prev.Reason == cur.Reason && prev.Message == cur.Message {
+	if prev := apimeta.FindStatusCondition(existingStatus.Conditions, v1alpha1.ConditionUpdating); prev != nil && prev.Reason == cur.Reason && prev.Message == cur.Message {
 		return
 	}
-	r.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonOrderedUpdateStalled, "%s", cur.Message)
+	r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.ReasonOrderedUpdateStalled, "%s", cur.Message)
 }
 
 // emitKeyringPromotionEvents fires Warning Events when the promotion
@@ -2620,14 +2611,14 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 	}
 	if !stringSlicesEqual(snap.KeyringPromotionSkipped, mt.lastKeyringPromotionSkipped) {
 		for _, site := range snap.KeyringPromotionSkipped {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringPromotionSkipped",
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringPromotionSkipped,
 				"skipping promotion candidate %s: site is mid-keyring-rotation (UnsealReason=Rotation)", site)
 		}
 		mt.lastKeyringPromotionSkipped = append([]string(nil), snap.KeyringPromotionSkipped...)
 	}
 	if !stringSlicesEqual(snap.KeyringPromotionRefused, mt.lastKeyringPromotionRefused) {
 		if len(snap.KeyringPromotionRefused) > 0 {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringPromotionRefused",
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringPromotionRefused,
 				"promotion refused: %s mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted",
 				strings.Join(snap.KeyringPromotionRefused, ", "))
 		}
@@ -2635,7 +2626,7 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 	}
 	if !stringSlicesEqual(snap.RestoreReclonePromotionRefused, mt.lastRestoreReclonePromotionRefused) {
 		if len(snap.RestoreReclonePromotionRefused) > 0 {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "PromotionRefusedPendingReclone",
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPromotionRefusedPendingReclone,
 				"automatic promotion refused: %s not yet recloned after the in-place restore and hold pre-restore data; "+
 					"bring the primary back, or accept that data by removing status.restoreReclones "+
 					"(kubectl patch mfg <group> --subresource=status --type=json -p '[{\"op\":\"remove\",\"path\":\"/status/restoreReclones\"}]')",
@@ -2645,7 +2636,7 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 	}
 	if snap.BootstrapRefusedRestoreHold != mt.lastBootstrapRefusedRestoreHold {
 		if snap.BootstrapRefusedRestoreHold != "" {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "BootstrapRefusedRestoreHold",
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBootstrapRefusedRestoreHold,
 				"refused to clone into %s: an in-place restore holds it (status.restoreReclones is Armed or Held, or the topology is frozen); "+
 					"its data and stopped replication are kept until the restore queue is resolved",
 				snap.BootstrapRefusedRestoreHold)
@@ -2686,7 +2677,7 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 
 	switch newReason {
 	case "SplitBrain":
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, "SplitBrainDetected",
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSplitBrainDetected,
 			"Both sites are writable: %s", snap.Alert)
 	case "NoPrimary":
 		if strings.Contains(snap.Alert, "UnsealReason=Rotation") || strings.Contains(snap.Alert, "pending post-restore reclone") {
@@ -2696,14 +2687,14 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 			// primary + one rotating or not-yet-recloned replica).
 			break
 		}
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, "NoPrimaryDetected",
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventNoPrimaryDetected,
 			"Both sites are read-only: %s", snap.Alert)
 	case "TotalLoss":
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, "TotalLossDetected",
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventTotalLossDetected,
 			"Both sites are unreachable: %s", snap.Alert)
 	case "Healthy":
 		if oldReason != "" {
-			r.recorder.Event(fg, corev1.EventTypeNormal, "SiteRecovered",
+			r.recorder.Event(fg, corev1.EventTypeNormal, v1alpha1.EventSiteRecovered,
 				"Degraded condition cleared, topology is healthy")
 		}
 	}
@@ -2720,7 +2711,7 @@ func degradedReason(snap TopologySnapshot) string {
 		return snap.DegradedReason
 	}
 	if snap.Alert == "" {
-		return "Healthy"
+		return v1alpha1.ReasonHealthy
 	}
 	var writable, readOnly, unreachable, coreSites int
 	for _, s := range snap.Sites {
@@ -2738,17 +2729,17 @@ func degradedReason(snap TopologySnapshot) string {
 		}
 	}
 	if coreSites == 0 {
-		return "Alert"
+		return v1alpha1.ReasonAlert
 	}
 	switch {
 	case writable > 1:
-		return "SplitBrain"
+		return v1alpha1.ReasonSplitBrain
 	case unreachable == coreSites:
-		return "TotalLoss"
+		return v1alpha1.ReasonTotalLoss
 	case writable == 0 && readOnly > 0:
-		return "NoPrimary"
+		return v1alpha1.ReasonNoPrimary
 	}
-	return "Alert"
+	return v1alpha1.ReasonAlert
 }
 
 // initializingMessage names the primary-candidates not yet classified since
@@ -2772,17 +2763,12 @@ func initializingMessage(snap TopologySnapshot) string {
 	return "Classifying sites after operator start: " + strings.Join(parts, "; ")
 }
 
-// divergentPromotionCondition records that a site holding transactions its
-// former primary lacked was promoted. Set by the operator, removed only by
-// an administrator.
-const divergentPromotionCondition = "DivergentPromotion"
-
 // divergenceDegradedMessage describes every site carrying a divergence
 // block, or returns "" when none does.
 func divergenceDegradedMessage(snap TopologySnapshot) string {
 	var parts []string
 	for _, s := range snap.Sites {
-		if s.RecoveryState != recoveryStateBlocked {
+		if s.RecoveryState != v1alpha1.RecoveryStateBlocked {
 			continue
 		}
 		parts = append(parts, fmt.Sprintf("%s holds %d transactions the primary%s lacks (%s)",
@@ -2865,16 +2851,16 @@ func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64,
 	switch phase {
 	case "":
 		setCondition(conditions, metav1.Condition{
-			Type:               "Bootstrapping",
+			Type:               v1alpha1.ConditionBootstrapping,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: generation,
 			LastTransitionTime: now,
-			Reason:             "NotBootstrapping",
+			Reason:             v1alpha1.ReasonNotBootstrapping,
 			Message:            "No bootstrap in progress",
 		})
 	case string(BootstrapPhaseDone):
 		setCondition(conditions, metav1.Condition{
-			Type:               "Bootstrapping",
+			Type:               v1alpha1.ConditionBootstrapping,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: generation,
 			LastTransitionTime: now,
@@ -2887,16 +2873,16 @@ func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64,
 			msg = fmt.Sprintf("%s failed: %s", label, errMsg)
 		}
 		setCondition(conditions, metav1.Condition{
-			Type:               "Bootstrapping",
+			Type:               v1alpha1.ConditionBootstrapping,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: generation,
 			LastTransitionTime: now,
-			Reason:             "Failed",
+			Reason:             v1alpha1.ReasonFailed,
 			Message:            msg,
 		})
 	default:
 		setCondition(conditions, metav1.Condition{
-			Type:               "Bootstrapping",
+			Type:               v1alpha1.ConditionBootstrapping,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: generation,
 			LastTransitionTime: now,
@@ -2964,7 +2950,7 @@ func conditionBool(v bool) metav1.ConditionStatus {
 // copy, which would undo a concurrent reconciler write.
 // AutomaticFailoverHeld is the planned-failover automation hold: a runner
 // status write must never drop it.
-var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady, conditionPITRMysqlConfAccepted, conditionPITRArchiveBindingReady, v1alpha1.ConditionAutomaticFailoverHeld}
+var reconcilerOwnedConditions = []string{v1alpha1.ConditionEncryptionAtRestReady, v1alpha1.ConditionS3CredentialsReady, v1alpha1.ConditionPITRMysqlConfAccepted, v1alpha1.ConditionPITRArchiveBindingReady, v1alpha1.ConditionAutomaticFailoverHeld}
 
 // setCondition sets or updates a condition in the slice, preserving LastTransitionTime
 // if the status has not changed.

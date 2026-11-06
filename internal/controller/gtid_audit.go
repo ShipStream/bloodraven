@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -273,7 +274,7 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 	}
 	tm.stampGTIDAuditLocked(follower.name)
 	rec := tm.recovery[follower.name]
-	wasBlocked := rec != nil && rec.state == recoveryStateBlocked
+	wasBlocked := rec != nil && rec.state == v1alpha1.RecoveryStateBlocked
 
 	if extra.IsEmpty() {
 		if !wasBlocked {
@@ -306,7 +307,7 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 		rec = &siteRecovery{}
 		tm.recovery[follower.name] = rec
 	}
-	rec.state = recoveryStateBlocked
+	rec.state = v1alpha1.RecoveryStateBlocked
 	rec.divergentGtid = set
 	rec.divergentCount = count
 	rec.detectedBy = detectedBy

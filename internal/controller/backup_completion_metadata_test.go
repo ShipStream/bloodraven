@@ -68,7 +68,7 @@ func backupJobPod(name string, mb *v1alpha1.MysqlBackup, job *batchv1.Job, phase
 			Name:      name,
 			Namespace: mb.Namespace,
 			Labels: map[string]string{
-				labelMysqlBackup:               mb.Name,
+				v1alpha1.MysqlBackupLabel:      mb.Name,
 				"batch.kubernetes.io/job-name": job.Name,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
@@ -280,7 +280,7 @@ func TestMysqlBackupReconciler_CompletionFallbackUsesJob(t *testing.T) {
 				t.Fatal(err)
 			}
 			condition := apiMeta.FindStatusCondition(mb.Status.Conditions, "MetadataComplete")
-			ready := apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
+			ready := apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
 			if mb.Status.Phase != v1alpha1.BackupPhaseSucceeded || mb.Status.Location != location || mb.Status.StorageType != v1alpha1.BackupStorageS3 || condition == nil || condition.Reason != tc.reason || ready == nil || ready.Status != metav1.ConditionTrue || (result.RequeueAfter > 0) != tc.requeue {
 				t.Fatalf("incorrect completion fallback: result=%+v status=%+v", result, mb.Status)
 			}
@@ -410,7 +410,7 @@ func TestMysqlBackupReconciler_UnknownDestinationNeverBecomesReady(t *testing.T)
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 		t.Fatal(err)
 	}
-	ready := apiMeta.FindStatusCondition(mb.Status.Conditions, ConditionBackupReady)
+	ready := apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
 	if mb.Status.Phase == v1alpha1.BackupPhaseSucceeded || ready == nil || ready.Status != metav1.ConditionFalse {
 		t.Fatalf("unknown artifact became usable: %+v", mb.Status)
 	}
@@ -534,7 +534,7 @@ func TestFinalize_DoesNotAdoptCleanupPodLog(t *testing.T) {
 	}
 	now := metav1.Now()
 	mb.Status.Phase, mb.Status.Location, mb.Status.CompletionTime = v1alpha1.BackupPhaseSucceeded, location, &now
-	setCondition(&mb.Status.Conditions, metav1.Condition{Type: ConditionBackupMetadataComplete, Status: metav1.ConditionFalse,
+	setCondition(&mb.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionMetadataComplete, Status: metav1.ConditionFalse,
 		Reason: "SentinelUnavailable", Message: "logs not read yet", LastTransitionTime: now})
 	if err := c.Status().Update(ctx, mb); err != nil {
 		t.Fatal(err)

@@ -21,10 +21,13 @@ const (
 	s20InventoryGroup         = "inventory"
 	s20InventoryGroupLabel    = "shipstream.io/failover-group.inventory"
 	s20InventorySiteLabel     = "shipstream.io/site.inventory"
-	s20PlaygroundReadOnly     = "shipstream.io/db-readonly-playground"
-	s20InventoryReadOnly      = "shipstream.io/db-readonly-inventory"
 	s20InventoryCanaryName    = "inventory-shared-node-canary"
 	s20PostFailoverWaitWindow = 60 * time.Second
+)
+
+var (
+	s20PlaygroundReadOnly = v1alpha1.ReadOnlyTaintKey("playground")
+	s20InventoryReadOnly  = v1alpha1.ReadOnlyTaintKey(s20InventoryGroup)
 )
 
 // scenario20SharedNodeSelectorIsolation locks down the per-failover-

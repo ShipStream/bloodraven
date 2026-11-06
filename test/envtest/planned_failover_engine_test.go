@@ -183,7 +183,7 @@ func pfEnvStepUntil(t *testing.T, r *controller.MysqlFailoverGroupReconciler, nn
 // record committed, revisions strictly increasing, and the failover record
 // written with the terminal record.
 func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-e2e", map[string]string{controller.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-e2e", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
 	topo := &pfEnvTopology{}
 	r := pfEnvReconciler(topo)
 	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
@@ -194,7 +194,7 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Revision != 1 {
 		t.Fatalf("admitting record = %+v", pf)
 	}
-	if _, ok := fg.Annotations[controller.PlannedFailoverAnnotation]; ok {
+	if _, ok := fg.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("annotation kept after the Admitting record committed")
 	}
 	runID, rev := pf.RunID, pf.Revision
@@ -385,7 +385,7 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 
 	// A legacy terminal block is history: a new request replaces it.
 	fg := get(finished)
-	fg.Annotations = map[string]string{controller.PlannedFailoverAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
 	if err := c.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestEnvtest_PlannedFailoverStatusFence_NoOpTrapAndLateCommit(t *testing.T) 
 	if noop.ResourceVersion != base.ResourceVersion {
 		t.Fatalf("a no-op status update moved resourceVersion %s → %s; the fence must change bytes", base.ResourceVersion, noop.ResourceVersion)
 	}
-	for _, key := range []string{controller.PlannedFailoverStatusFenceAnnotation, controller.PlannedFailoverTerminalAnnotation} {
+	for _, key := range []string{v1alpha1.PlannedFailoverStatusFenceAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation} {
 		cur := pfEnvGet(t, nn)
 		fenced := cur.DeepCopy()
 		if fenced.Annotations == nil {
@@ -431,7 +431,7 @@ func TestEnvtest_PlannedFailoverStatusFence_NoOpTrapAndLateCommit(t *testing.T) 
 // §10.5: the hold condition survives a runner status write, and the
 // acknowledgement clears it, releases the slot and deletes itself.
 func TestEnvtest_PlannedFailover_HoldSurvivesRunnerWriteAndAck(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-hold", map[string]string{controller.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-hold", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
 	topo := &pfEnvTopology{promote: func() controller.PromoteOutcome {
 		return controller.PromoteOutcome{Kind: controller.PromoteInconsistent, Reason: v1alpha1.PlannedFailoverReasonForeignWritable, MayHaveWritten: true}
 	}}
@@ -459,12 +459,12 @@ func TestEnvtest_PlannedFailover_HoldSurvivesRunnerWriteAndAck(t *testing.T) {
 	}
 
 	fg = pfEnvGet(t, nn)
-	fg.Annotations = map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: pf.RunID}
+	fg.Annotations = map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: pf.RunID}
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	pfEnvStepUntil(t, r, nn, 5, func(fg *v1alpha1.MysqlFailoverGroup) bool {
-		_, ack := fg.Annotations[controller.AcknowledgePlannedFailoverHoldAnnotation]
+		_, ack := fg.Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]
 		return !ack
 	})
 	fg = pfEnvGet(t, nn)
@@ -503,7 +503,7 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 		if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
 			t.Fatal(err)
 		}
-		got := pfEnvGet(t, nn).Annotations[controller.PlannedFailoverManagerAbsentSinceAnnotation]
+		got := pfEnvGet(t, nn).Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]
 		if got == "" {
 			t.Fatal("no manager-absent-since annotation")
 		}
@@ -519,7 +519,7 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
 		t.Fatal(err)
 	}
-	if v, ok := pfEnvGet(t, nn).Annotations[controller.PlannedFailoverManagerAbsentSinceAnnotation]; ok {
+	if v, ok := pfEnvGet(t, nn).Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]; ok {
 		t.Errorf("absent-since kept once a manager answered: %q", v)
 	}
 }

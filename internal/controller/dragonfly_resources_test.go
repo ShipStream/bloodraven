@@ -15,7 +15,6 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
-	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 // fgWithDragonfly returns a baseline failover group with Dragonfly enabled
@@ -63,7 +62,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 			t.Errorf("%s: nodeSelector zone = %q, want lion-%s", siteName, got, siteName)
 		}
 		// Tolerates the failover group's db-readonly taint.
-		taintKey := platform.TaintKeyForGroup(fg.Name)
+		taintKey := v1alpha1.ReadOnlyTaintKey(fg.Name)
 		found := false
 		for _, tol := range sts.Spec.Template.Spec.Tolerations {
 			if tol.Key == taintKey && tol.Operator == corev1.TolerationOpExists {
@@ -75,7 +74,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 			t.Errorf("%s: missing toleration for taint %q", siteName, taintKey)
 		}
 		// Pod label includes operator-assigned dragonfly-role=replica.
-		if got := sts.Spec.Template.ObjectMeta.Labels[labelDragonflyRole]; got != "replica" {
+		if got := sts.Spec.Template.ObjectMeta.Labels[v1alpha1.DragonflyRoleLabel]; got != "replica" {
 			t.Errorf("%s: dragonfly-role label = %q, want replica", siteName, got)
 		}
 		// Owner reference back to the failover group.
@@ -113,7 +112,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 		if got := pdb.Spec.Selector.MatchLabels[labelInstance]; got != fg.Name {
 			t.Errorf("dragonfly PDB %s selector instance=%q, want %q", siteName, got, fg.Name)
 		}
-		if got := pdb.Spec.Selector.MatchLabels[labelSite]; got != siteName {
+		if got := pdb.Spec.Selector.MatchLabels[v1alpha1.SiteLabel]; got != siteName {
 			t.Errorf("dragonfly PDB %s selector site=%q, want %q", siteName, got, siteName)
 		}
 	}
@@ -278,9 +277,9 @@ func TestReconcileDragonflySiteService(t *testing.T) {
 		t.Fatalf("site service not created: %v", err)
 	}
 	wantSel := map[string]string{
-		labelAppName:  dragonflyAppName,
-		labelInstance: "lion",
-		labelSite:     "dc1",
+		labelAppName:       dragonflyAppName,
+		labelInstance:      "lion",
+		v1alpha1.SiteLabel: "dc1",
 	}
 	for k, v := range wantSel {
 		if got := svc.Spec.Selector[k]; got != v {
@@ -289,7 +288,7 @@ func TestReconcileDragonflySiteService(t *testing.T) {
 	}
 	// Selector must NOT carry dragonfly-role: per-site Service is for
 	// debugging and replication wiring, not for app traffic.
-	if _, ok := svc.Spec.Selector[labelDragonflyRole]; ok {
+	if _, ok := svc.Spec.Selector[v1alpha1.DragonflyRoleLabel]; ok {
 		t.Errorf("site Service selector unexpectedly includes dragonfly-role")
 	}
 }
@@ -307,16 +306,16 @@ func TestReconcileDragonflyActiveService_SelectsMasterRoleAndTraffic(t *testing.
 	// Selector AND-gates role=master AND traffic=enabled. Both labels
 	// must be present so that removing the traffic label sheds an
 	// endpoint atomically without depending on role-flip ordering.
-	if got := svc.Spec.Selector[labelDragonflyRole]; got != "master" {
+	if got := svc.Spec.Selector[v1alpha1.DragonflyRoleLabel]; got != "master" {
 		t.Errorf("active service selector dragonfly-role = %q, want master", got)
 	}
-	if got := svc.Spec.Selector[labelDragonflyTraffic]; got != dragonflyTrafficEnabled {
+	if got := svc.Spec.Selector[v1alpha1.DragonflyTrafficLabel]; got != dragonflyTrafficEnabled {
 		t.Errorf("active service selector dragonfly-traffic = %q, want %q", got, dragonflyTrafficEnabled)
 	}
 	// Selector does NOT pin a specific site (the active site is
 	// determined by which pod carries the master label).
-	if _, ok := svc.Spec.Selector[labelSite]; ok {
-		t.Errorf("active service selector unexpectedly pins labelSite")
+	if _, ok := svc.Spec.Selector[v1alpha1.SiteLabel]; ok {
+		t.Errorf("active service selector unexpectedly pins v1alpha1.SiteLabel")
 	}
 }
 
@@ -330,7 +329,7 @@ func TestReconcileDragonflyStatefulSet_PodTemplateSeedsTrafficEnabled(t *testing
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "lion-dragonfly-dc1", Namespace: "shared-lion"}, &sts); err != nil {
 		t.Fatalf("statefulset not created: %v", err)
 	}
-	if got := sts.Spec.Template.ObjectMeta.Labels[labelDragonflyTraffic]; got != dragonflyTrafficEnabled {
+	if got := sts.Spec.Template.ObjectMeta.Labels[v1alpha1.DragonflyTrafficLabel]; got != dragonflyTrafficEnabled {
 		t.Errorf("pod template traffic label = %q, want %q", got, dragonflyTrafficEnabled)
 	}
 }

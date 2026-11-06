@@ -121,13 +121,13 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	image := backupImage(fg)
 
 	labels := map[string]string{
-		labelAppName:                 "mysql-verify",
-		labelInstance:                fg.Name,
-		labelFailoverGroup:           fg.Name,
-		labelBackupProfile:           in.Profile.Name,
-		labelMysqlBackupVerification: v.Name,
-		labelManagedBy:               managerName,
-		labelResourceKind:            verificationResourceKindCR,
+		labelAppName:                          "mysql-verify",
+		labelInstance:                         fg.Name,
+		v1alpha1.FailoverGroupLabel:           fg.Name,
+		v1alpha1.BackupProfileLabel:           in.Profile.Name,
+		v1alpha1.MysqlBackupVerificationLabel: v.Name,
+		labelManagedBy:                        managerName,
+		v1alpha1.ResourceLabel:                verificationResourceKindCR,
 	}
 
 	loadOptsJSON, err := marshalVerificationLoadOptions(verificationLoadOptions())
@@ -156,7 +156,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if pitrFrags.KeySecretName != "" {
 		// Correlation label (Δ18); the verification also holds the
 		// snapshot (K9) before this Job is created.
-		labels[labelPITRKeySecret] = pitrFrags.KeySecretName
+		labels[v1alpha1.PITRKeySecretLabel] = pitrFrags.KeySecretName
 	}
 	// An encrypted backup is decrypted only with the key it recorded (its
 	// dump-key snapshot, status.artifactStorage.passphraseSecret), never
@@ -560,7 +560,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			ActiveDeadlineSeconds: &activeDeadline,
 			BackoffLimit:          &backoff,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{annotationVerificationBackup: string(sourceSnapshot)}},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{v1alpha1.VerificationBackupAnnotation: string(sourceSnapshot)}},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,

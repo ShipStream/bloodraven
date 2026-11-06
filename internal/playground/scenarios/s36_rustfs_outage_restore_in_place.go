@@ -20,10 +20,9 @@ func init() {
 }
 
 const (
-	s36ID          = "36-rustfs-outage-during-restore-in-place"
-	s36RestoreDB   = "chaos_s36_restore"
-	s36SafeDB      = "chaos_s36_safe"
-	s36RecloneAnno = "bloodraven.shipstream.io/reclone-site"
+	s36ID        = "36-rustfs-outage-during-restore-in-place"
+	s36RestoreDB = "chaos_s36_restore"
+	s36SafeDB    = "chaos_s36_safe"
 )
 
 // scenario36RustFSOutageRestoreInPlace exercises a per-schema in-place restore
@@ -449,8 +448,8 @@ func s36VerifySafety() runner.Step {
 			if mfg.Status.ActiveSite != activeAtRestore {
 				return fmt.Errorf("status.activeSite changed %q -> %q during a frozen in-place restore", activeAtRestore, mfg.Status.ActiveSite)
 			}
-			if _, ok := mfg.Annotations[s36RecloneAnno]; ok {
-				return fmt.Errorf("unexpected reclone annotation set for a per-schema restore: %q", mfg.Annotations[s36RecloneAnno])
+			if _, ok := mfg.Annotations[v1alpha1.RecloneAnnotation]; ok {
+				return fmt.Errorf("unexpected reclone annotation set for a per-schema restore: %q", mfg.Annotations[v1alpha1.RecloneAnnotation])
 			}
 			writable := 0
 			for _, s := range mfg.Status.Sites {

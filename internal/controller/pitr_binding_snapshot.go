@@ -93,12 +93,12 @@ var errPITRSnapshotNameHeld = errors.New("snapshot name is held by another objec
 // pitrKeySnapshotLabels are an archive key snapshot's labels.
 func pitrKeySnapshotLabels(fg *v1alpha1.MysqlFailoverGroup, destination string) map[string]string {
 	return map[string]string{
-		labelAppName:          appNamePITRKeySnapshot,
-		labelInstance:         fg.Name,
-		labelFailoverGroup:    fg.Name,
-		labelManagedBy:        managerName,
-		labelFailoverGroupUID: string(fg.UID),
-		labelPITRBindingID:    pitrBindingIDFromString(destination),
+		labelAppName:                   appNamePITRKeySnapshot,
+		labelInstance:                  fg.Name,
+		v1alpha1.FailoverGroupLabel:    fg.Name,
+		labelManagedBy:                 managerName,
+		v1alpha1.FailoverGroupUIDLabel: string(fg.UID),
+		v1alpha1.PITRBindingIDLabel:    pitrBindingIDFromString(destination),
 	}
 }
 
@@ -106,9 +106,9 @@ func pitrKeySnapshotLabels(fg *v1alpha1.MysqlFailoverGroup, destination string) 
 // bytes: immutable, no owner reference (Δ31), labelled and annotated with
 // its destination. acceptance, when set, is written with it (C3 re-create).
 func newPITRKeySnapshot(fg *v1alpha1.MysqlFailoverGroup, name, destination string, trimmed []byte, acceptance string) *corev1.Secret {
-	ann := map[string]string{annotationPITRDestination: destination}
+	ann := map[string]string{v1alpha1.PITRDestinationAnnotation: destination}
 	if acceptance != "" {
-		ann[annotationPITRAccepted] = acceptance
+		ann[v1alpha1.PITRAcceptedAnnotation] = acceptance
 	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -154,8 +154,8 @@ func (r *MysqlFailoverGroupReconciler) ensurePITRKeySnapshot(ctx context.Context
 // destination (labels and the destination annotation).
 func pitrSnapshotOf(fg *v1alpha1.MysqlFailoverGroup, s *corev1.Secret, destination string) bool {
 	return s.Labels[labelAppName] == appNamePITRKeySnapshot &&
-		s.Labels[labelFailoverGroupUID] == string(fg.UID) &&
-		s.Annotations[annotationPITRDestination] == destination
+		s.Labels[v1alpha1.FailoverGroupUIDLabel] == string(fg.UID) &&
+		s.Annotations[v1alpha1.PITRDestinationAnnotation] == destination
 }
 
 // listPITRKeySnapshots lists fg's archive key snapshots (cached) by the
@@ -164,7 +164,7 @@ func pitrSnapshotOf(fg *v1alpha1.MysqlFailoverGroup, s *corev1.Secret, destinati
 func (r *MysqlFailoverGroupReconciler) listPITRKeySnapshots(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) ([]corev1.Secret, error) {
 	var list corev1.SecretList
 	if err := r.List(ctx, &list, client.InNamespace(fg.Namespace), client.MatchingLabels{
-		labelAppName: appNamePITRKeySnapshot, labelFailoverGroupUID: string(fg.UID),
+		labelAppName: appNamePITRKeySnapshot, v1alpha1.FailoverGroupUIDLabel: string(fg.UID),
 	}); err != nil {
 		return nil, fmt.Errorf("list pitr key snapshots: %w", err)
 	}
@@ -255,7 +255,7 @@ func (r *MysqlFailoverGroupReconciler) acceptPITRKeySnapshot(ctx context.Context
 	if snap.Annotations == nil {
 		snap.Annotations = map[string]string{}
 	}
-	snap.Annotations[annotationPITRAccepted] = raw
+	snap.Annotations[v1alpha1.PITRAcceptedAnnotation] = raw
 	if err := r.Patch(ctx, &snap, patch); err != nil {
 		return fmt.Errorf("annotate pitr key snapshot %s: %w", snap.Name, err)
 	}
@@ -296,7 +296,7 @@ func recoverPITRBindings(fg *v1alpha1.MysqlFailoverGroup, entries []v1alpha1.PIT
 			unreadable = append(unreadable, pitrSnapshotNote{secret: s.Name, detail: "it does not hold the key its acceptance records"})
 			continue
 		}
-		if s.Labels[labelFailoverGroupUID] != string(fg.UID) || s.Labels[labelPITRBindingID] != pitrBindingIDFromString(a.Destination) {
+		if s.Labels[v1alpha1.FailoverGroupUIDLabel] != string(fg.UID) || s.Labels[v1alpha1.PITRBindingIDLabel] != pitrBindingIDFromString(a.Destination) {
 			continue
 		}
 		if prev, ok := best[a.Destination]; !ok || a.AcceptedAt.After(prev.a.AcceptedAt) ||
@@ -331,7 +331,7 @@ func recoverPITRBindings(fg *v1alpha1.MysqlFailoverGroup, entries []v1alpha1.PIT
 		e := v1alpha1.PITRArchiveBinding{
 			ID: pitrBindingIDFromString(d), Destination: d, ArchiveID: f.a.ArchiveID, Source: &src,
 			Encryption: v1alpha1.PITRArchiveBindingEncryption{Mode: f.a.Mode, Algorithm: f.a.Algorithm, KeySecretName: f.name},
-			State:      v1alpha1.PITRArchiveBindingBound, Reason: pitrBindingBound,
+			State:      v1alpha1.PITRArchiveBindingBound, Reason: v1alpha1.PITRArchiveBindingReasonBound,
 			Message:            fmt.Sprintf("rebuilt from the acceptance of key snapshot %s", f.name),
 			LastTransitionTime: &metav1.Time{Time: now},
 		}
@@ -390,10 +390,10 @@ func (r *MysqlFailoverGroupReconciler) checkPITRKeySnapshotIntegrity(ctx context
 // pitrSnapshotIntegrityProblem explains why s does not hold entry's
 // accepted key, or "".
 func pitrSnapshotIntegrityProblem(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, s *corev1.Secret) string {
-	if s.Labels[labelFailoverGroupUID] != string(fg.UID) {
+	if s.Labels[v1alpha1.FailoverGroupUIDLabel] != string(fg.UID) {
 		return fmt.Sprintf("Secret %s does not carry this group's UID label", s.Name)
 	}
-	if s.Annotations[annotationPITRDestination] != entry.Destination {
+	if s.Annotations[v1alpha1.PITRDestinationAnnotation] != entry.Destination {
 		return fmt.Sprintf("Secret %s is not a snapshot for %s", s.Name, entry.Destination)
 	}
 	a, err := verifyPITRAcceptance(s)
@@ -471,7 +471,7 @@ func (r *MysqlFailoverGroupReconciler) pitrKeySnapshotInUse(ctx context.Context,
 		case sr.Err == nil && names[sr.Inputs.KeySecretName]:
 			return fmt.Sprintf("Deployment %s renders key snapshot %s", sr.Deployment, sr.Inputs.KeySecretName), nil
 		case sr.Err != nil && !errors.Is(sr.Err, errPITRRenderAbsent):
-			return fmt.Sprintf("Deployment %s carries a %s annotation that does not decode (%v), so what it renders cannot be told; repair or remove it", sr.Deployment, annotationPITRRender, sr.Err), nil
+			return fmt.Sprintf("Deployment %s carries a %s annotation that does not decode (%v), so what it renders cannot be told; repair or remove it", sr.Deployment, v1alpha1.PITRRenderAnnotation, sr.Err), nil
 		}
 	}
 	if len(names) == 0 {
@@ -502,7 +502,7 @@ func (r *MysqlFailoverGroupReconciler) pitrKeySnapshotInUse(ctx context.Context,
 	}
 	for name := range names {
 		var jobs batchv1.JobList
-		if err := reader.List(ctx, &jobs, client.InNamespace(fg.Namespace), client.MatchingLabels{labelPITRKeySecret: name}); err != nil {
+		if err := reader.List(ctx, &jobs, client.InNamespace(fg.Namespace), client.MatchingLabels{v1alpha1.PITRKeySecretLabel: name}); err != nil {
 			return "", fmt.Errorf("list jobs: %w", err)
 		}
 		for i := range jobs.Items {
@@ -513,7 +513,7 @@ func (r *MysqlFailoverGroupReconciler) pitrKeySnapshotInUse(ctx context.Context,
 	}
 	for _, s := range snaps {
 		for key, holder := range s.Annotations {
-			uid, ok := strings.CutPrefix(key, annotationVerificationHoldPrefix)
+			uid, ok := strings.CutPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix)
 			if !ok {
 				continue
 			}
@@ -615,7 +615,7 @@ type pitrReleaseOutcome struct {
 // first means a render after the lock no longer finds the binding to
 // mount. The caller removes the annotation after its own status write.
 func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, base []v1alpha1.PITRArchiveBinding, mbvs []v1alpha1.MysqlBackupVerification, targets []pitrBindingTarget) (*pitrReleaseOutcome, error) {
-	value, ok := fg.Annotations[ReleasePITRArchiveBindingAnnotation]
+	value, ok := fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]
 	if !ok {
 		return nil, nil
 	}
@@ -662,13 +662,13 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 	}
 	var list corev1.SecretList
 	if err := reader.List(ctx, &list, client.InNamespace(fg.Namespace), client.MatchingLabels{
-		labelAppName: appNamePITRKeySnapshot, labelFailoverGroupUID: string(fg.UID), labelPITRBindingID: id,
+		labelAppName: appNamePITRKeySnapshot, v1alpha1.FailoverGroupUIDLabel: string(fg.UID), v1alpha1.PITRBindingIDLabel: id,
 	}); err != nil {
 		return nil, fmt.Errorf("list pitr key snapshots of %s: %w", id, err)
 	}
 	if out.destination == "" {
 		for _, s := range list.Items {
-			if d := s.Annotations[annotationPITRDestination]; d != "" {
+			if d := s.Annotations[v1alpha1.PITRDestinationAnnotation]; d != "" {
 				out.destination = d
 				break
 			}
@@ -743,7 +743,7 @@ func pitrBindingsEqual(a, b []v1alpha1.PITRArchiveBinding) bool {
 // the release's status write and its snapshot deletions, or a snapshot
 // deleted by hand, finishes the release on the next pass).
 func pitrReleasePending(fg *v1alpha1.MysqlFailoverGroup) string {
-	value, ok := fg.Annotations[ReleasePITRArchiveBindingAnnotation]
+	value, ok := fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]
 	if !ok {
 		return ""
 	}
@@ -767,14 +767,14 @@ func (r *MysqlFailoverGroupReconciler) removePITRReleaseAnnotation(ctx context.C
 		}
 		return fmt.Errorf("get group to remove the release annotation: %w", err)
 	}
-	if got, ok := fresh.Annotations[ReleasePITRArchiveBindingAnnotation]; fresh.UID != fg.UID || !ok || got != value {
+	if got, ok := fresh.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]; fresh.UID != fg.UID || !ok || got != value {
 		return nil
 	}
 	patch := client.MergeFromWithOptions(fresh.DeepCopy(), client.MergeFromWithOptimisticLock{})
-	delete(fresh.Annotations, ReleasePITRArchiveBindingAnnotation)
+	delete(fresh.Annotations, v1alpha1.ReleasePITRArchiveBindingAnnotation)
 	if err := r.Patch(ctx, &fresh, patch); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		return fmt.Errorf("remove release annotation: %w", err)
 	}
-	delete(fg.Annotations, ReleasePITRArchiveBindingAnnotation)
+	delete(fg.Annotations, v1alpha1.ReleasePITRArchiveBindingAnnotation)
 	return nil
 }

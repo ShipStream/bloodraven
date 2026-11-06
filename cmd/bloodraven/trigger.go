@@ -64,12 +64,12 @@ func runTriggerBackup(args []string) {
 	}
 
 	labels := map[string]string{
-		"shipstream.io/failover-group":  *group,
-		"shipstream.io/backup-profile":  *profile,
-		"app.kubernetes.io/managed-by":  "bloodraven",
+		v1alpha1.FailoverGroupLabel:    *group,
+		v1alpha1.BackupProfileLabel:    *profile,
+		"app.kubernetes.io/managed-by": "bloodraven",
 	}
 	if *schedule != "" {
-		labels["shipstream.io/backup-schedule"] = *schedule
+		labels[v1alpha1.BackupScheduleLabel] = *schedule
 	}
 
 	backup := &v1alpha1.MysqlBackup{

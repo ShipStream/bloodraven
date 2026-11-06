@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -211,7 +212,7 @@ func (tm *TopologyManager) plannedClaimBlockerLocked() string {
 			return "automatic failover is held by a True AutomaticFailoverHeld condition that names no run; resolve the split brain, then remove the condition"
 		}
 		return fmt.Sprintf("automatic failover is held after planned failover %s; resolve the split brain, then annotate %s=%s",
-			held.runID, AcknowledgePlannedFailoverHoldAnnotation, held.runID)
+			held.runID, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, held.runID)
 	}
 	return "a planned failover is in progress"
 }

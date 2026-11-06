@@ -116,8 +116,8 @@ func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1alpha1
 			GenerateName: backupGenerateName(group, profile),
 			Namespace:    ns,
 			Labels: map[string]string{
-				"shipstream.io/failover-group": group,
-				"shipstream.io/backup-profile": profile,
+				v1alpha1.FailoverGroupLabel:    group,
+				v1alpha1.BackupProfileLabel:    profile,
 				"app.kubernetes.io/managed-by": "bloodraven",
 			},
 		},

@@ -329,12 +329,12 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.DeploymentLeaseView, reason string) map[string]any {
-	ready := apimeta.IsStatusConditionTrue(fg.Status.Conditions, "Ready")
+	ready := apimeta.IsStatusConditionTrue(fg.Status.Conditions, v1alpha1.ConditionReady)
 	degraded := ""
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, "Degraded"); c != nil && c.Status == metav1.ConditionTrue {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionDegraded); c != nil && c.Status == metav1.ConditionTrue {
 		degraded = c.Reason
 	}
-	replicating, recovery, lag := true, apimeta.IsStatusConditionTrue(fg.Status.Conditions, "RecoveryPending"), int64(0)
+	replicating, recovery, lag := true, apimeta.IsStatusConditionTrue(fg.Status.Conditions, v1alpha1.ConditionRecoveryPending), int64(0)
 	for _, s := range fg.Status.Sites {
 		if s.Name != fg.Status.ActiveSite {
 			replicating = replicating && s.Replicating
@@ -373,7 +373,7 @@ func plannedFailoverOperation(fg *v1alpha1.MysqlFailoverGroup) map[string]string
 	if p == nil {
 		return out
 	}
-	if m, ok := controller.ParseTerminalMarker(fg.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]); ok && p.RunID != "" && m.RunID == p.RunID {
+	if m, ok := controller.ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok && p.RunID != "" && m.RunID == p.RunID {
 		out["phase"] = string(v1alpha1.PlannedFailoverPhaseFailed)
 		if m.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
 			out["phase"] = string(v1alpha1.PlannedFailoverPhaseSucceeded)

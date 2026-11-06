@@ -252,8 +252,8 @@ func TestValidatePlannedFailover_Cooldown(t *testing.T) {
 			fg.Status.LastFailoverTarget = "iad"
 			if tc.annotation != nil {
 				fg.Annotations = map[string]string{
-					LastFailoverAnnotation:       tc.annotation.LastFailover.Format(time.RFC3339),
-					LastFailoverTargetAnnotation: tc.annotation.LastFailoverTarget,
+					v1alpha1.LastFailoverAnnotation:       tc.annotation.LastFailover.Format(time.RFC3339),
+					v1alpha1.LastFailoverTargetAnnotation: tc.annotation.LastFailoverTarget,
 				}
 			}
 
@@ -299,8 +299,8 @@ func TestValidatePlannedFailover_DurableStateErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 			fg.Annotations = map[string]string{
-				LastFailoverAnnotation:       "not-a-timestamp",
-				LastFailoverTargetAnnotation: "iad",
+				v1alpha1.LastFailoverAnnotation:       "not-a-timestamp",
+				v1alpha1.LastFailoverTargetAnnotation: "iad",
 			}
 			if tc.withStatus {
 				last := metav1.NewTime(now.Add(-time.Minute))
@@ -356,7 +356,7 @@ func TestValidatePlannedFailover_InFlightPlannedFailoverRejected(t *testing.T) {
 	}
 	// A run the terminal marker ended does not block a new one.
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
-	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false); result != PlannedFailoverAccept {
 		t.Fatalf("marked run blocks a new request: %v %v", result, err)
 	}
@@ -423,7 +423,7 @@ func TestPlannedFailoverFencedSite(t *testing.T) {
 			if got := plannedFailoverFencedSite(fg); got != tc.want {
 				t.Errorf("fenced site = %q, want %q", got, tc.want)
 			}
-			fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 			if got := plannedFailoverFencedSite(fg); got != "" {
 				t.Errorf("marked run fences %q", got)
 			}
@@ -447,12 +447,12 @@ func TestPlannedFailoverPredicates_MarkerIsTerminal(t *testing.T) {
 			t.Errorf("%s: unmarked run not active", phase)
 		}
 		for _, other := range []string{`{"schemaVersion":1,"runID":"run-2","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, `{"schemaVersion":1,"runID":"run-1","outcome":"Bogus","reason":"StatusStalled"}`, "garbage"} {
-			fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: other}
+			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: other}
 			if !plannedFailoverActive(fg) {
 				t.Errorf("%s: marker %q ended the run", phase, other)
 			}
 		}
-		fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+		fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 		if plannedFailoverActive(fg) || plannedFailoverOwnsSites(fg) || plannedFailoverPending(fg) || plannedFailoverFencedSite(fg) != "" ||
 			plannedFailoverDragonflyStripActive(fg) || plannedDragonflyTakeoverSucceeded(fg) {
 			t.Errorf("%s: a marked run is still live to a predicate", phase)

@@ -19,12 +19,6 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// PlannedFailoverAnnotation must match
-// internal/controller/planned_failover.go's PlannedFailoverAnnotation
-// constant. Duplicated here rather than imported so the plugin doesn't
-// pull in the entire controller package.
-const PlannedFailoverAnnotation = "bloodraven.shipstream.io/planned-failover"
-
 const promoteUsage = `Trigger a planned (graceful) failover via annotation.
 
 Usage:
@@ -106,7 +100,7 @@ func runPromote(args []string, stdout, stderr *os.File) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, PlannedFailoverAnnotation, value)
+	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1alpha1.PlannedFailoverAnnotation, value)
 
 	if !wait {
 		fmt.Fprintln(stdout, "Watch progress with: kubectl bloodraven status", group, "-n", ns)
@@ -147,7 +141,7 @@ func annotatePlannedFailover(ctx context.Context, cl client.Client, ns, group, s
 		if patched.Annotations == nil {
 			patched.Annotations = map[string]string{}
 		}
-		patched.Annotations[PlannedFailoverAnnotation] = value
+		patched.Annotations[v1alpha1.PlannedFailoverAnnotation] = value
 		err := cl.Patch(ctx, patched, client.MergeFromWithOptions(&fg, client.MergeFromWithOptimisticLock{}))
 		switch {
 		case err == nil:
@@ -402,7 +396,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 		}
 		consecutiveErrors = 0
 		pf := fg.Status.PlannedFailover
-		_, pending := fg.Annotations[PlannedFailoverAnnotation]
+		_, pending := fg.Annotations[v1alpha1.PlannedFailoverAnnotation]
 		_, _, marked := plannedTerminalMarker(&fg)
 		switch {
 		case legacy:

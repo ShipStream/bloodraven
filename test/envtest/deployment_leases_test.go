@@ -105,7 +105,7 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 				if lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds != 1 {
 					t.Fatalf("%s: terminal duration must be 1", lease.Name)
 				}
-				if record.State != tc.state || record.Reason != tc.reason || !record.ExpiresAt.Equal(expiresAt) || record.TopologyGeneration != 7 || lease.Labels["bloodraven.shipstream.io/deployment-state"] != tc.state {
+				if record.State != tc.state || record.Reason != tc.reason || !record.ExpiresAt.Equal(expiresAt) || record.TopologyGeneration != 7 || lease.Labels[v1alpha1.DeploymentStateLabel] != tc.state {
 					t.Fatalf("%s: terminal record = %+v", lease.Name, record)
 				}
 			}

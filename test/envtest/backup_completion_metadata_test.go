@@ -113,7 +113,7 @@ func TestEnvtest_BackupCompletionMetadataRecoversAfterRestart(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, controller.ConditionBackupMetadataComplete)
+	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionMetadataComplete)
 	if backup.Status.Location != location || backup.Status.SizeBytes != 42 || backup.Status.GtidExecuted != "uuid:my_tag:1-3" || condition == nil || condition.Status != metav1.ConditionTrue || !backup.Status.CompletionTime.Equal(completion) {
 		t.Fatalf("completion metadata was not durably recovered: %+v", backup.Status)
 	}

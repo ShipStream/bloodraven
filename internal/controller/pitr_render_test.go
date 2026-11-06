@@ -98,7 +98,7 @@ func bindTestPITRArchive(t testing.TB, fg *v1alpha1.MysqlFailoverGroup, profileN
 		Source:      &v1alpha1.PITRArchiveSource{Namespace: fg.Namespace, Name: fg.Name, UID: fg.UID},
 		Encryption:  pitrBindingEncryptionFor(pitrprofile.EncryptionIdentityFor(profile), snapshot),
 		State:       v1alpha1.PITRArchiveBindingBound,
-		Reason:      pitrBindingBound,
+		Reason:      v1alpha1.PITRArchiveBindingReasonBound,
 	})
 	return &fg.Status.PITRArchiveBindings[len(fg.Status.PITRArchiveBindings)-1]
 }
@@ -142,9 +142,9 @@ func siteDeploy(fg *v1alpha1.MysqlFailoverGroup, site string, render any) appsv1
 	d := appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName(fg.Name, site), Namespace: fg.Namespace, Labels: commonLabels(fg.Name, site)}}
 	switch r := render.(type) {
 	case pitrRenderInputs:
-		d.Annotations = map[string]string{annotationPITRRender: r.Canonical()}
+		d.Annotations = map[string]string{v1alpha1.PITRRenderAnnotation: r.Canonical()}
 	case string:
-		d.Annotations = map[string]string{annotationPITRRender: r}
+		d.Annotations = map[string]string{v1alpha1.PITRRenderAnnotation: r}
 	}
 	return d
 }
@@ -214,7 +214,7 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 	}{
 		{name: "row 1: PITR disabled", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
 			fg.Spec.Backup.PITR.Enabled = false
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 			return nil
 		}},
 		{name: "row 1: active profile missing", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
@@ -222,18 +222,18 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 			return nil
 		}},
 		{name: "row 2: Bound and eligible renders the binding", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 			return nil
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "rows 2/5/6: Bound renders the binding under encryption, selector and alias drift", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret.Name = "renamed"
 			fg.Spec.Backup.PITR.ProfileName = "a2"
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", "garbage")}
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "row 2: Bound plaintext binding under an encryption edit (EncryptionChangeRefused)", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
 			fg.Spec.Backup.Profiles[0].Encryption = nil
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "")
 			fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "key-a"}}
 			return nil
 		}, enabled: true, dest: "a", key: "", check: func(t *testing.T, _ *v1alpha1.MysqlFailoverGroup, in pitrRenderInputs) {
@@ -242,15 +242,15 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 			}
 		}},
 		{name: "rows 18/19: Bound/KeyMaterialLost still renders the binding", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingKeyMaterialLost, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost, snapA)
 			return nil
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "rows 3/42: Bound foreign archive made the write target keeps H", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			old := setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapC)
+			old := setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapC)
 			_ = old
 			h := bound(fg) // a's render while c... compute H from a bound a
 			_ = h
-			ea := setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+			ea := setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 			ea.Source = &v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "other", UID: "other-uid"}
 			fg2 := fg.DeepCopy()
 			fg2.Spec.Backup.PITR.ProfileName = "c"
@@ -258,21 +258,21 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", held), siteDeploy(fg, "dc2", held)}
 		}, enabled: true, dest: "c", key: snapC},
 		{name: "row 43: Bound copy (archive ID not derived here) keeps H", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapC)
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapC)
 			fg2 := fg.DeepCopy()
 			fg2.Spec.Backup.PITR.ProfileName = "c"
 			held := bound(fg2)
-			ea := setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+			ea := setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 			ea.ArchiveID = pitrarchive.CreateArchiveID(fg.UID, destOf(t, fg, "c"))
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", held)}
 		}, enabled: true, dest: "c", key: snapC},
 		{name: "row 3: Bound not eligible, no hold → disabled", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			ea := setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+			ea := setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 			ea.Source.UID = "other-uid"
 			return nil
 		}},
 		{name: "rows 4a/37: fresh group renders the candidate optimistically", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, snapA)
 			return nil
 		}, enabled: true, dest: "a", key: snapA, check: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, in pitrRenderInputs) {
 			if in.ArchiveID != pitrarchive.CreateArchiveID(fg.UID, destOf(t, fg, "a")) {
@@ -280,7 +280,7 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 			}
 		}},
 		{name: "rows 4a/46: H disabled (PITR just enabled) renders the candidate", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, snapA)
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", pitrRenderDisabled()), siteDeploy(fg, "dc2", pitrRenderDisabled())}
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "rows 4a/47: encrypted, no candidate snapshot → disabled", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
@@ -291,19 +291,19 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 			return nil
 		}, enabled: true, dest: "a", key: ""},
 		{name: "rows 4b/23: Establishing renders the candidate over a running writer", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapC)
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapC)
 			fg2 := fg.DeepCopy()
 			fg2.Spec.Backup.PITR.ProfileName = "c"
 			held := bound(fg2)
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingPending, pitrBindingEstablishing, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonEstablishing, snapA)
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", held)}
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "rows 4c/24/30: refused switch keeps H's identity", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapC)
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapC)
 			fg2 := fg.DeepCopy()
 			fg2.Spec.Backup.PITR.ProfileName = "c"
 			held := bound(fg2)
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveLegacy, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveLegacy, snapA)
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", held), siteDeploy(fg, "dc2", held)}
 		}, enabled: true, dest: "c", key: snapC, check: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, in pitrRenderInputs) {
 			// K13: H's destination differs from the active profile's, so
@@ -324,29 +324,29 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 			}
 		}},
 		{name: "row 45: a site being created renders H like the others", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapC)
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapC)
 			fg2 := fg.DeepCopy()
 			fg2.Spec.Backup.PITR.ProfileName = "c"
 			held := bound(fg2)
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, pitrBindingKeyMismatch, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonKeyMismatch, snapA)
 			// Only dc2 exists; dc1 (the active site) is being re-created.
 			fg.Status.ActiveSite = "dc1"
 			return []appsv1.Deployment{siteDeploy(fg, "dc2", held)}
 		}, enabled: true, dest: "c", key: snapC},
 		{name: "rows 4d/38/38a: pre-#203 Deployments defer; new sites render the candidate", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, pitrBindingKeyMismatch, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonKeyMismatch, snapA)
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", nil), siteDeploy(fg, "dc2", `{"schemaVersion":2}`)}
 		}, action: pitrRenderDefer, enabled: true, dest: "a", key: snapA},
 		{name: "row 4d → row 2 once Verified", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", nil)}
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "rows 12/13 (4a): no writer, refused candidate renders optimistically (the sidecar refuses)", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveCopy, snapA)
+			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveCopy, snapA)
 			return nil
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "row 22: PITR disabled while Bound", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
-			held := setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+			held := setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 			_ = held
 			fg.Spec.Backup.PITR.Enabled = false
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", bound(fg))}
@@ -413,7 +413,7 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 func TestPITRRenderHashRows(t *testing.T) {
 	const snapA = "mysql-lion-pitr-key-aaaaaaaaaa"
 	fg := renderFG()
-	setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, snapA)
+	setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
 	site := fg.Spec.Sites[0]
 	base := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 	alias := fg.DeepCopy()
@@ -452,7 +452,7 @@ func TestReconcileDeploymentDeferLeavesDeploymentUntouched(t *testing.T) {
 	fg := renderFG()
 	fg.Spec.Backup.Profiles[0].Encryption = nil
 	existing := siteDeploy(fg, "dc1", nil)
-	existing.Annotations = map[string]string{specHashAnnotation: "pre-203"}
+	existing.Annotations = map[string]string{v1alpha1.SpecHashAnnotation: "pre-203"}
 	existing.Spec.Template.Spec.Containers = []corev1.Container{{Name: "mysql", Image: "mysql:old"}}
 	r, c := newReconciler(fg, &existing)
 	render := groupPITRRender{inputs: testPITRRender(fg), action: pitrRenderDefer}
@@ -465,15 +465,15 @@ func TestReconcileDeploymentDeferLeavesDeploymentUntouched(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: existing.Name}, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Annotations[specHashAnnotation] != "pre-203" || got.Annotations[annotationPITRRender] != "" || got.Spec.Template.Spec.Containers[0].Image != "mysql:old" {
+	if got.Annotations[v1alpha1.SpecHashAnnotation] != "pre-203" || got.Annotations[v1alpha1.PITRRenderAnnotation] != "" || got.Spec.Template.Spec.Containers[0].Image != "mysql:old" {
 		t.Fatalf("deferred Deployment was updated: %v %v", got.Annotations, got.Spec.Template.Spec.Containers)
 	}
 	var created appsv1.Deployment
 	if err := c.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: resourceName(fg.Name, "dc2")}, &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Annotations[annotationPITRRender] != render.inputs.Canonical() {
-		t.Fatalf("new site annotation %q, want the candidate %q", created.Annotations[annotationPITRRender], render.inputs.Canonical())
+	if created.Annotations[v1alpha1.PITRRenderAnnotation] != render.inputs.Canonical() {
+		t.Fatalf("new site annotation %q, want the candidate %q", created.Annotations[v1alpha1.PITRRenderAnnotation], render.inputs.Canonical())
 	}
 }
 
@@ -488,16 +488,16 @@ func TestPITRReadBindingAndRetentionGate(t *testing.T) {
 		ready    bool
 		terminal bool
 	}{
-		{v1alpha1.PITRArchiveBindingBound, pitrBindingBound, true, false},
-		{v1alpha1.PITRArchiveBindingBound, pitrBindingKeyMaterialLost, false, false},
-		{v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, false, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingKeyMismatch, false, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveEncryptionMismatch, false, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveListFailed, false, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveNotFound, false, true},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveLegacy, false, true},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveDescriptorMissing, false, true},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveVersionUnsupported, false, true},
+		{v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, true, false},
+		{v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost, false, false},
+		{v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, false, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonKeyMismatch, false, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveEncryptionMismatch, false, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveListFailed, false, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveNotFound, false, true},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveLegacy, false, true},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveDescriptorMissing, false, true},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveVersionUnsupported, false, true},
 	} {
 		g := fg.DeepCopy()
 		setBinding(t, g, "c", tc.state, tc.reason, "mysql-lion-pitr-key-cccccccccc")
@@ -506,7 +506,7 @@ func TestPITRReadBindingAndRetentionGate(t *testing.T) {
 		if (err == nil) != tc.ready {
 			t.Fatalf("%s/%s: err = %v", tc.state, tc.reason, err)
 		}
-		if err != nil && (!errors.As(err, &nr) || nr.terminal != tc.terminal || !strings.HasPrefix(err.Error(), reasonPITRArchiveBindingNotReady)) {
+		if err != nil && (!errors.As(err, &nr) || nr.terminal != tc.terminal || !strings.HasPrefix(err.Error(), string(v1alpha1.PITRTokenArchiveBindingNotReady))) {
 			t.Fatalf("%s/%s: err = %v, terminal want %t", tc.state, tc.reason, err, tc.terminal)
 		}
 	}
@@ -515,17 +515,17 @@ func TestPITRReadBindingAndRetentionGate(t *testing.T) {
 		full.Status.PITRArchiveBindings = append(full.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "x", State: v1alpha1.PITRArchiveBindingBound})
 	}
 	var nr *errPITRBindingNotReady
-	if _, err := pitrReadBinding(full, "c"); !errors.As(err, &nr) || nr.reason != reasonPITRBindingLimitReached || nr.terminal {
+	if _, err := pitrReadBinding(full, "c"); !errors.As(err, &nr) || nr.reason != v1alpha1.ReasonBindingLimitReached || nr.terminal {
 		t.Fatalf("full list: %v", err)
 	}
 	// U10: one unused non-Bound entry frees a slot on the next pass.
 	full.Status.PITRArchiveBindings[3].State = v1alpha1.PITRArchiveBindingPending
-	if _, err := pitrReadBinding(full, "c"); !errors.As(err, &nr) || nr.reason == reasonPITRBindingLimitReached || nr.terminal {
+	if _, err := pitrReadBinding(full, "c"); !errors.As(err, &nr) || nr.reason == v1alpha1.ReasonBindingLimitReached || nr.terminal {
 		t.Fatalf("list full of a discardable entry: %v", err)
 	}
 
 	g := fg.DeepCopy()
-	setBinding(t, g, "a", v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "")
+	setBinding(t, g, "a", v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, "")
 	own := pitrarchive.CreateArchiveID(g.UID, destOf(t, g, "a"))
 	if !PITRRetentionArchiveAllowed(g, own) {
 		t.Fatal("own archive refused")
@@ -546,21 +546,21 @@ func TestPITRProfileReadOnly(t *testing.T) {
 		want  bool
 	}{
 		{"own bound archive", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "")
 		}, false},
 		{"no binding", func(*testing.T, *v1alpha1.MysqlFailoverGroup) {}, false},
 		{"foreign source", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
-			e := setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
+			e := setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "")
 			e.Source.UID = "other"
 		}, true},
 		{"refused foreign", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveForeign, "")
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveForeign, "")
 		}, true},
 		{"refused copy", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveCopy, "")
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveCopy, "")
 		}, true},
 		{"refused key mismatch is not read-only", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingRefused, pitrBindingKeyMismatch, "")
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonKeyMismatch, "")
 		}, false},
 		{"initFromBackup archive before success", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{PointInTime: &v1alpha1.PointInTimeSpec{ArchiveProfileName: "c"}}
@@ -568,7 +568,7 @@ func TestPITRProfileReadOnly(t *testing.T) {
 		{"initFromBackup archive after success with its binding", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{PointInTime: &v1alpha1.PointInTimeSpec{ArchiveProfileName: "c"}}
 			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded}
-			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "")
 		}, false},
 		// U19: the restore read another group's plaintext archive; its
 		// binding was lost with the status and is not rebuilt (no
@@ -594,12 +594,12 @@ func TestPITRProfileReadOnly(t *testing.T) {
 func TestRenderedWriterArchiveID(t *testing.T) {
 	fg := renderFG()
 	fg.Spec.Backup.Profiles[0].Encryption = nil
-	setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
+	setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "")
 	a := testPITRRender(fg)
 	fg2 := fg.DeepCopy()
 	fg2.Spec.Backup.Profiles[2].Encryption = nil
 	fg2.Spec.Backup.PITR.ProfileName = "c"
-	setBinding(t, fg2, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
+	setBinding(t, fg2, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "")
 	c := testPITRRender(fg2)
 	for _, tc := range []struct {
 		name   string

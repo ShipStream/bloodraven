@@ -14,8 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const annotationVerificationBackup = "shipstream.io/verification-backup"
-
 func verificationBackupSnapshot(backup *v1alpha1.MysqlBackup) *v1alpha1.VerificationBackupRef {
 	return &v1alpha1.VerificationBackupRef{
 		Name: backup.Name, UID: string(backup.UID),
@@ -123,7 +121,7 @@ func verificationJobSource(v *v1alpha1.MysqlBackupVerification, job *batchv1.Job
 		return nil, fmt.Errorf("verification Job is not owned by this verification")
 	}
 	ref := v.Status.BackupRef
-	if encoded, exists := job.Spec.Template.Annotations[annotationVerificationBackup]; exists {
+	if encoded, exists := job.Spec.Template.Annotations[v1alpha1.VerificationBackupAnnotation]; exists {
 		var recorded v1alpha1.VerificationBackupRef
 		if err := json.Unmarshal([]byte(encoded), &recorded); err != nil {
 			return nil, fmt.Errorf("decode verification Job source snapshot: %w", err)

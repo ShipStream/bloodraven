@@ -326,7 +326,7 @@ func TestSyncPodLabels_StaleCacheKeepsQueuedSiteOutOfReaderServices(t *testing.T
 				authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"dc2"}}
 			}
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mysql-lion-dc2-x", Namespace: cached.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: cached.Name, labelSite: "dc2", labelRole: "replica", labelHealthy: "no"}}}
+				labelAppName: "mysql", labelInstance: cached.Name, v1alpha1.SiteLabel: "dc2", v1alpha1.RoleLabel: "replica", v1alpha1.HealthyLabel: "no"}}}
 			r, c := newReconciler(cached, pod)
 			r.APIReader = fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
 			if err := r.syncPodLabels(context.Background(), getFG(t, c, cached)); err != nil {
@@ -336,8 +336,8 @@ func TestSyncPodLabels_StaleCacheKeepsQueuedSiteOutOfReaderServices(t *testing.T
 			if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Labels[labelHealthy] != tc.wantHealthy {
-				t.Fatalf("healthy = %q, want %q", got.Labels[labelHealthy], tc.wantHealthy)
+			if got.Labels[v1alpha1.HealthyLabel] != tc.wantHealthy {
+				t.Fatalf("healthy = %q, want %q", got.Labels[v1alpha1.HealthyLabel], tc.wantHealthy)
 			}
 		})
 	}

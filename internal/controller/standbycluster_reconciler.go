@@ -180,10 +180,10 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		msg := fmt.Sprintf("transport %q is not supported; only ObjectStore is implemented", sc.Spec.Transport)
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 			bucketReadable: metav1.ConditionFalse,
-			bucketReason:   "ConfigError",
+			bucketReason:   v1alpha1.ReasonConfigError,
 			bucketMsg:      msg,
 			sourceKnown:    metav1.ConditionFalse,
-			sourceReason:   "ConfigError",
+			sourceReason:   v1alpha1.ReasonConfigError,
 			sourceMsg:      "transport not ObjectStore",
 		}, interval, nil)
 	}
@@ -200,14 +200,14 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 	if configErr != nil {
 		logger.Error(configErr, "cannot resolve storage backend")
-		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, "ConfigError",
+		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, v1alpha1.ReasonConfigError,
 			"cannot resolve storage backend: %v", configErr)
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 			bucketReadable: metav1.ConditionFalse,
-			bucketReason:   "ConfigError",
+			bucketReason:   v1alpha1.ReasonConfigError,
 			bucketMsg:      configErr.Error(),
 			sourceKnown:    metav1.ConditionFalse,
-			sourceReason:   "ConfigError",
+			sourceReason:   v1alpha1.ReasonConfigError,
 			sourceMsg:      "storage backend unresolvable",
 		}, interval, nil)
 	}
@@ -227,14 +227,14 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 	if err != nil {
 		logger.Error(err, "failed to construct archive store")
-		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, "AuthFailed",
+		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, v1alpha1.ReasonAuthFailed,
 			"failed to construct archive store: %v", err)
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 			bucketReadable: metav1.ConditionFalse,
-			bucketReason:   "AuthFailed",
+			bucketReason:   v1alpha1.ReasonAuthFailed,
 			bucketMsg:      fmt.Sprintf("failed to construct archive store: %v", err),
 			sourceKnown:    metav1.ConditionFalse,
-			sourceReason:   "AuthFailed",
+			sourceReason:   v1alpha1.ReasonAuthFailed,
 			sourceMsg:      "store construction failed",
 		}, interval, nil)
 	}
@@ -263,17 +263,17 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 			}
 			return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 				bucketReadable: metav1.ConditionFalse,
-				bucketReason:   "ScanIncomplete",
+				bucketReason:   v1alpha1.ReasonScanIncomplete,
 				bucketMsg:      bucketMsg,
 				sourceKnown:    metav1.ConditionFalse,
-				sourceReason:   "ScanIncomplete",
+				sourceReason:   v1alpha1.ReasonScanIncomplete,
 				sourceMsg:      "bucket scan did not complete before deadline; last-known-good discovered preserved",
 			}, interval, nil)
 		}
 
 		// scanErr here means a fatal List failure (not a metadata parse error).
 		logger.Error(scanErr, "bucket list failed", "prefix", storePrefix)
-		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, "ListFailed",
+		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, v1alpha1.ReasonListFailed,
 			"failed to list bucket at prefix %q: %v", storePrefix, scanErr)
 
 		// R-2: surface staleness on the BucketReadable=False condition; preserve
@@ -287,10 +287,10 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 			bucketReadable: metav1.ConditionFalse,
-			bucketReason:   "ListFailed",
+			bucketReason:   v1alpha1.ReasonListFailed,
 			bucketMsg:      bucketMsg,
 			sourceKnown:    metav1.ConditionFalse,
-			sourceReason:   "ListFailed",
+			sourceReason:   v1alpha1.ReasonListFailed,
 			sourceMsg:      "bucket not readable",
 		}, interval, nil)
 	}
@@ -328,10 +328,10 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 			"candidatesTotal", discovered.CandidatesTotal)
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 			bucketReadable: metav1.ConditionTrue,
-			bucketReason:   "ListSucceeded",
+			bucketReason:   v1alpha1.ReasonListSucceeded,
 			bucketMsg:      "",
 			sourceKnown:    metav1.ConditionFalse,
-			sourceReason:   "ScanIncomplete",
+			sourceReason:   v1alpha1.ReasonScanIncomplete,
 			sourceMsg:      sourceMsg,
 		}, interval, nil)
 	}
@@ -340,7 +340,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	// discovered.MetadataErr. Handle that here before stamping conditions.
 	if discovered.MetadataErr != nil {
 		logger.Error(discovered.MetadataErr, "dump @.json unreadable", "dump", discovered.DumpName)
-		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, "MetadataParseFailed",
+		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, v1alpha1.EventMetadataParseFailed,
 			"failed to parse @.json for dump %q: %v", discovered.DumpName, discovered.MetadataErr)
 		// Log a partial-scan line so operators can correlate.
 		logger.Info("partial scan completed",
@@ -349,10 +349,10 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 			"manifestCount", discovered.ManifestCount)
 		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 			bucketReadable: metav1.ConditionTrue,
-			bucketReason:   "ListSucceeded",
+			bucketReason:   v1alpha1.ReasonListSucceeded,
 			bucketMsg:      "",
 			sourceKnown:    metav1.ConditionFalse,
-			sourceReason:   "MetadataUnreadable",
+			sourceReason:   v1alpha1.ReasonMetadataUnreadable,
 			sourceMsg: fmt.Sprintf("dump %q found but @.json is unreadable: %v",
 				discovered.DumpName, discovered.MetadataErr),
 		}, interval, nil)
@@ -361,7 +361,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	// ---------------------------------------------------------------
 	// Steps 4–7: Stamp status, set conditions, requeue
 	// ---------------------------------------------------------------
-	sourceReason := "DumpFound"
+	sourceReason := v1alpha1.ReasonDumpFound
 	sourceMsg := ""
 	sourceKnown := metav1.ConditionTrue
 	if refusal := discovered.ArchiveRefusal; refusal != nil {
@@ -370,15 +370,15 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		sourceReason = refusal.reason
 		sourceMsg = refusal.message
 		if prev := standbyFindStatusCondition(&sc, v1alpha1.StandbyConditionSourceConfigKnown); prev == nil || prev.Reason != refusal.reason {
-			r.Recorder.Eventf(&sc, corev1.EventTypeWarning, "PITRArchiveRefused", "%s", refusal.message)
+			r.Recorder.Eventf(&sc, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveRefused, "%s", refusal.message)
 		}
 	} else if discovered.DumpName == "" {
 		sourceKnown = metav1.ConditionFalse
-		sourceReason = "NoDumpFound"
+		sourceReason = v1alpha1.ReasonNoDumpFound
 		sourceMsg = fmt.Sprintf("no dump found under prefix %q (no @.json objects)", storePrefix)
 	} else if discovered.ManifestCount == 0 {
 		sourceKnown = metav1.ConditionFalse
-		sourceReason = "NoBinlogManifests"
+		sourceReason = v1alpha1.ReasonNoBinlogManifests
 		// Not a misconfiguration: the dump was found, but no PITR binlog
 		// archive exists yet (dump-only source, or a brand-new source whose
 		// first manifest has not been uploaded). Recovery is limited to the
@@ -390,7 +390,7 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
 		bucketReadable: metav1.ConditionTrue,
-		bucketReason:   "ListSucceeded",
+		bucketReason:   v1alpha1.ReasonListSucceeded,
 		bucketMsg:      "",
 		sourceKnown:    sourceKnown,
 		sourceReason:   sourceReason,
@@ -505,12 +505,33 @@ type standbyArchiveRefusal struct {
 	message string
 }
 
+// standbyArchiveRefusalReasons maps each refusal token the standby's
+// read of the source archive can return (the descriptor read, the manifest
+// loads and the scan's own identity, reset-epoch and history checks) to its
+// SourceConfigKnown reason: the token without its "PITR" prefix. Any other
+// token, or none, is ArchiveUnreadable. ArchiveNotFound never reaches it: a
+// prefix without an archive is a dump-only source.
+var standbyArchiveRefusalReasons = map[pitrarchive.Token]string{
+	pitrarchive.TokenArchiveListFailed:         v1alpha1.ReasonArchiveListFailed,
+	pitrarchive.TokenArchiveLegacy:             string(v1alpha1.PITRArchiveRefusalReasonArchiveLegacy),
+	pitrarchive.TokenArchiveDescriptorMissing:  string(v1alpha1.PITRArchiveRefusalReasonArchiveDescriptorMissing),
+	pitrarchive.TokenArchiveVersionUnsupported: string(v1alpha1.PITRArchiveRefusalReasonArchiveVersionUnsupported),
+	pitrarchive.TokenArchiveObjectInvalid:      v1alpha1.ReasonArchiveObjectInvalid,
+	pitrarchive.TokenArchiveIdentityMismatch:   v1alpha1.ReasonArchiveIdentityMismatch,
+	pitrarchive.TokenArchiveEncryptionMismatch: string(v1alpha1.PITRArchiveRefusalReasonArchiveEncryptionMismatch),
+	pitrarchive.TokenArchiveKeyMismatch:        string(v1alpha1.PITRArchiveRefusalReasonArchiveKeyMismatch),
+	pitrarchive.TokenArchiveHistoryReset:       v1alpha1.ReasonArchiveHistoryReset,
+	pitrarchive.TokenArchiveUnsafeHistory:      string(v1alpha1.PITRArchiveRefusalReasonArchiveUnsafeHistory),
+}
+
 func newStandbyArchiveRefusal(err error) *standbyArchiveRefusal {
-	reason := "ArchiveUnreadable"
-	if tok, ok := pitrarchive.TokenOf(err); ok {
-		reason = strings.TrimPrefix(string(tok), "PITR")
-	} else if tok, ok := pitrarchive.ParseToken(err.Error()); ok {
-		reason = strings.TrimPrefix(string(tok), "PITR")
+	tok, ok := pitrarchive.TokenOf(err)
+	if !ok {
+		tok, _ = pitrarchive.ParseToken(err.Error())
+	}
+	reason, ok := standbyArchiveRefusalReasons[tok]
+	if !ok {
+		reason = v1alpha1.ReasonArchiveUnreadable
 	}
 	return &standbyArchiveRefusal{reason: reason, message: err.Error()}
 }
@@ -960,7 +981,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 			// R-4: emit a Warning event so corruption is visible in the event
 			// stream. An unreadable manifest also refuses the archive: a
 			// window computed without it would overstate what is archived.
-			r.Recorder.Eventf(sc, corev1.EventTypeWarning, "ManifestParseFailed",
+			r.Recorder.Eventf(sc, corev1.EventTypeWarning, v1alpha1.EventManifestParseFailed,
 				"failed to parse binlog manifest %q: %v", key, err)
 			// Keep a refusal token first (legacy, newer-version or invalid
 			// v2 manifest), so it names the reason rather than
@@ -1334,7 +1355,7 @@ func (r *MysqlStandbyClusterReconciler) stampConditionsAndRequeue(
 			// R-5 (BucketScanned event): emit only on a state transition
 			// (DumpName changed, ArchivedBinlogCount changed, or BucketReadable
 			// changed from False to True).
-			r.Recorder.Eventf(sc, corev1.EventTypeNormal, "BucketScanned",
+			r.Recorder.Eventf(sc, corev1.EventTypeNormal, v1alpha1.EventBucketScanned,
 				"scanned prefix: dump=%q manifests=%d binlogs=%d",
 				discovered.DumpName, discovered.ManifestCount, discovered.ArchivedBinlogCount)
 		}

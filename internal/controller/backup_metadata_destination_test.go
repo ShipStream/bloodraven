@@ -191,13 +191,13 @@ func TestBackupMetadata_LegacyProducerLocationPreserved(t *testing.T) {
 			}
 			mb.Status.Phase, mb.Status.Location = v1alpha1.BackupPhaseSucceeded, literal
 			mb.Status.CompletionTime = job.Status.CompletionTime
-			mb.Status.Conditions = []metav1.Condition{{Type: ConditionBackupReady, Status: metav1.ConditionTrue, Reason: "Succeeded", Message: "original producer reported success", LastTransitionTime: metav1.Now()}}
+			mb.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Succeeded", Message: "original producer reported success", LastTransitionTime: metav1.Now()}}
 			if reason != "" {
 				status := metav1.ConditionFalse
 				if reason == "Collected" {
 					status = metav1.ConditionTrue
 				}
-				mb.Status.Conditions = append(mb.Status.Conditions, metav1.Condition{Type: ConditionBackupMetadataComplete, Status: status, Reason: reason, Message: "previous collection", LastTransitionTime: metav1.Now()})
+				mb.Status.Conditions = append(mb.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionMetadataComplete, Status: status, Reason: reason, Message: "previous collection", LastTransitionTime: metav1.Now()})
 			}
 			if err := c.Status().Update(ctx, mb); err != nil {
 				t.Fatal(err)

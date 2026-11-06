@@ -99,7 +99,7 @@ func TestEngine_SucceededWriteMergesManagerAuthority(t *testing.T) {
 func TestPlannedFailover_EngineOverRealFacadeSucceeds(t *testing.T) {
 	f := newOpsFixture(t, "")
 	fg := newTestFG()
-	fg.Annotations = map[string]string{PlannedFailoverAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}, {Name: "dc2", State: "read-only", Replicating: true}}
 	faults := &pfFaults{}

@@ -108,7 +108,7 @@ func TestBuildBackupJob_BackupStamp(t *testing.T) {
 				t.Fatal("the Job, not the operator, sets serverClock and createdAt")
 			}
 			for _, obj := range []map[string]string{job.Annotations, job.Spec.Template.Annotations} {
-				if obj[BackupJobFailoverGroupUIDAnnotation] != "fg-uid" || obj[BackupJobPITRArchiveIDAnnotation] != want.PITRArchiveID {
+				if obj[v1alpha1.BackupJobFailoverGroupUIDAnnotation] != "fg-uid" || obj[v1alpha1.BackupJobPITRArchiveIDAnnotation] != want.PITRArchiveID {
 					t.Fatalf("identity annotations: %v", obj)
 				}
 			}
@@ -218,7 +218,7 @@ func TestBackupJobIdentity(t *testing.T) {
 		t.Fatal("nil Job has no identity")
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-		BackupJobFailoverGroupUIDAnnotation: "u", BackupJobPITRArchiveIDAnnotation: "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+		v1alpha1.BackupJobFailoverGroupUIDAnnotation: "u", v1alpha1.BackupJobPITRArchiveIDAnnotation: "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}}}
 	if uid, id := backupJobIdentity(job); uid != "u" || id != "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("got %q %q", uid, id)
@@ -299,7 +299,7 @@ func TestPITRArchiveTrackerArchiveRefusals(t *testing.T) {
 		{name: "legacy", iad: refused(pitrarchive.ReasonArchiveLegacy), pdx: pitrClean(), want: "ArchiveLegacy"},
 		{name: "marker", iad: marked, pdx: pitrClean(), want: "ArchiveUnsafeHistory"},
 		{name: "token in lastError", iad: tokenOnly, pdx: pitrClean(), want: "ArchiveStoreUnsupported"},
-		{name: "store init outranks", iad: refused(pitrarchive.ReasonArchiveCopy), pdx: pitrInitFailed("boom"), want: reasonPITRArchiveStoreInitFailed},
+		{name: "store init outranks", iad: refused(pitrarchive.ReasonArchiveCopy), pdx: pitrInitFailed("boom"), want: v1alpha1.ReasonArchiveStoreInitFailed},
 		{name: "outranks an archiver error", iad: refused(pitrarchive.ReasonArchiveKeyMismatch), pdx: pitrRunError("x"), want: "ArchiveKeyMismatch"},
 	}
 	for _, tt := range tests {
@@ -400,12 +400,12 @@ func TestReconcilePITRMySQLConfCondition(t *testing.T) {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &cur); err != nil {
 			t.Fatal(err)
 		}
-		return apimeta.FindStatusCondition(cur.Status.Conditions, conditionPITRMysqlConfAccepted)
+		return apimeta.FindStatusCondition(cur.Status.Conditions, v1alpha1.ConditionPITRMysqlConfAccepted)
 	}
 	refusedEvents := func() int {
 		n := 0
 		for _, e := range drainRunnerEvents(rec) {
-			if strings.Contains(e, "Warning "+eventReasonPITRMysqlConfRefused) {
+			if strings.Contains(e, "Warning "+v1alpha1.EventPITRMysqlConfRefused) {
 				n++
 			}
 		}
@@ -414,7 +414,7 @@ func TestReconcilePITRMySQLConfCondition(t *testing.T) {
 	if err := r.reconcilePITRMySQLConfCondition(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	if cond := get(); cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonPITRMysqlConfUnsafeRefused ||
+	if cond := get(); cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1.ReasonPITRUnsafeSettingRefused ||
 		!strings.Contains(cond.Message, "binlog-format=STATEMENT") {
 		t.Fatalf("condition %+v", cond)
 	}
@@ -456,7 +456,7 @@ func TestPITRArchiveTrackerOutdatedSidecar(t *testing.T) {
 		t.Fatalf("first poll certified an outdated sidecar: %+v", v)
 	}
 	tr.observe(now.Add(30*time.Second), pitrRound{iad: outdated, pdx: pitrClean()}.results())
-	if v := tr.current(); v.Status != metav1.ConditionFalse || v.Reason != reasonPITRSidecarOutdated || !strings.Contains(v.Message, "iad: ") ||
+	if v := tr.current(); v.Status != metav1.ConditionFalse || v.Reason != v1alpha1.ReasonSidecarOutdated || !strings.Contains(v.Message, "iad: ") ||
 		!strings.Contains(v.Message, "spec.sidecarImage") {
 		t.Fatalf("verdict %+v, want False/SidecarOutdated", v)
 	}
@@ -465,11 +465,11 @@ func TestPITRArchiveTrackerOutdatedSidecar(t *testing.T) {
 	round := []archiverPollResult{{site: "iad", status: outdated.status, awaitingRollout: true}, {site: "pdx", status: pitrClean().status}}
 	rolling.observe(now, round)
 	rolling.observe(now.Add(30*time.Second), round)
-	if v := rolling.current(); v.Status != metav1.ConditionUnknown || v.Reason != reasonPITRAwaitingRollout {
+	if v := rolling.current(); v.Status != metav1.ConditionUnknown || v.Reason != v1alpha1.ReasonAwaitingRollout {
 		t.Fatalf("verdict %+v, want Unknown/AwaitingRollout while the update is pending", v)
 	}
 	rolling.observe(now.Add(pitrArchiveRolloutBound+time.Minute), round)
-	if v := rolling.current(); v.Status != metav1.ConditionFalse || v.Reason != reasonPITRSidecarOutdated {
+	if v := rolling.current(); v.Status != metav1.ConditionFalse || v.Reason != v1alpha1.ReasonSidecarOutdated {
 		t.Fatalf("verdict %+v, want False/SidecarOutdated after the rollout bound", v)
 	}
 }
@@ -573,7 +573,7 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 			r.emitPITRArchiveReissueRisk(fg, tt.from)
 			var got []string
 			for _, e := range drainRunnerEvents(rec) {
-				if strings.Contains(e, eventReasonPITRArchiveReissueRisk) {
+				if strings.Contains(e, v1alpha1.EventPITRArchiveReissueRiskDetected) {
 					got = append(got, e)
 				}
 			}
@@ -592,11 +592,11 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 func TestPITREventReasonsFollowNamingRule(t *testing.T) {
 	rule := regexp.MustCompile(`^PITR[A-Z][A-Za-z]*(Detected|Excluded|Refused|Skipped|Truncated)$`)
 	for _, reason := range []string{
-		eventReasonPITRArchiveReissueRisk,
-		eventReasonPITRArchiveUnsafeHistory,
-		eventReasonPITRMysqlConfRefused,
-		eventReasonPITRDivergentHistoryExcluded,
-		eventReasonPITROnHistoryTransactionsExcluded,
+		v1alpha1.EventPITRArchiveReissueRiskDetected,
+		v1alpha1.EventPITRArchiveUnsafeHistoryDetected,
+		v1alpha1.EventPITRMysqlConfRefused,
+		v1alpha1.EventPITRDivergentHistoryExcluded,
+		v1alpha1.EventPITROnHistoryTransactionsExcluded,
 	} {
 		if !rule.MatchString(reason) {
 			t.Errorf("Event reason %q breaks A-74's <Subject><PastTenseVerb> rule", reason)
@@ -612,10 +612,10 @@ func TestPITRArchiveObservationFollowsHeldRender(t *testing.T) {
 	fg.Spec.Backup.Profiles[2].Encryption = nil
 	held := fg.DeepCopy()
 	held.Spec.Backup.PITR.ProfileName = "c"
-	setBinding(t, held, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
+	setBinding(t, held, "c", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "")
 	hold := testPITRRender(held)
 	fg.Status.PITRArchiveBindings = held.Status.PITRArchiveBindings
-	setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveLegacy, "mysql-lion-pitr-key-aaaaaaaaaa")
+	setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveLegacy, "mysql-lion-pitr-key-aaaaaaaaaa")
 	deploys := []appsv1.Deployment{siteDeploy(fg, "dc1", hold), siteDeploy(fg, "dc2", hold)}
 	rendered := renderedPITRInputs(fg, deploys)
 	if rendered.Destination != hold.Destination {

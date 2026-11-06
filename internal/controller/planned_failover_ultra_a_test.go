@@ -59,7 +59,7 @@ func ultraASetRecord(t *testing.T, h *pfEngineHarness, at time.Time, target stri
 // authority change, in the confirmed tail and in the re-proof alike.
 func TestUltraA_K009_InvalidCopyBesideUnchangedWinner(t *testing.T) {
 	old := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	bad := map[string]string{LastFailoverAnnotation: "not-a-time", LastFailoverTargetAnnotation: "iad"}
+	bad := map[string]string{v1alpha1.LastFailoverAnnotation: "not-a-time", v1alpha1.LastFailoverTargetAnnotation: "iad"}
 
 	t.Run("predicate", func(t *testing.T) {
 		fg := plannedFailoverFG("")
@@ -82,7 +82,7 @@ func TestUltraA_K009_InvalidCopyBesideUnchangedWinner(t *testing.T) {
 		// A removed site in one copy, the valid baseline in the other.
 		fg = plannedFailoverFG("")
 		fg.Status.LastFailover, fg.Status.LastFailoverTarget = &ts, "iad"
-		fg.SetAnnotations(map[string]string{LastFailoverAnnotation: old.Add(-time.Hour).Format(time.RFC3339), LastFailoverTargetAnnotation: "gone"})
+		fg.SetAnnotations(map[string]string{v1alpha1.LastFailoverAnnotation: old.Add(-time.Hour).Format(time.RFC3339), v1alpha1.LastFailoverTargetAnnotation: "gone"})
 		if !plannedRecordUnchanged(fg, pf, old.Add(time.Hour)) {
 			t.Fatal("a copy naming a removed site beside the unchanged winner reported as changed")
 		}
@@ -116,7 +116,7 @@ func TestUltraA_K009_InvalidCopyBesideUnchangedWinner(t *testing.T) {
 		fg := opsGroup(pf)
 		ts := metav1.NewTime(old)
 		fg.Status.LastFailover, fg.Status.LastFailoverTarget = &ts, "dc1"
-		fg.SetAnnotations(map[string]string{LastFailoverAnnotation: "not-a-time", LastFailoverTargetAnnotation: "dc1"})
+		fg.SetAnnotations(map[string]string{v1alpha1.LastFailoverAnnotation: "not-a-time", v1alpha1.LastFailoverTargetAnnotation: "dc1"})
 		res, err := f.topo.Reprove(context.Background(), f.ref, fg)
 		if err != nil || res.Hold != nil {
 			t.Fatalf("Reprove = %+v, %v; an invalid copy beside the unchanged winner must not hold", res, err)
@@ -155,12 +155,12 @@ func TestUltraA_K015_FencedSourceEvidenceIsNotReplaced(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG(""))
 	h.setBlock(ultraASourceLeftFenced(h.clk.Now().Add(-time.Minute)))
 	setSite(h, "read-only")
-	h.setAnnotation(PlannedFailoverAnnotation, "pdx")
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	h.step()
 	if pf := h.pf(); pf.RunID != "run-1" || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
 		t.Fatalf("block = %+v; the fenced-source evidence was replaced", pf)
 	}
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the refused request was not consumed")
 	}
 	if h.sink.eventCount(v1alpha1.EventPlannedFailoverRejected) != 1 {
@@ -173,7 +173,7 @@ func TestUltraA_K015_FencedSourceEvidenceIsNotReplaced(t *testing.T) {
 
 	// Healed (the source is writable again): the request is admitted.
 	setSite(h, "writable")
-	h.setAnnotation(PlannedFailoverAnnotation, "pdx")
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	h.step()
 	if pf := h.pf(); pf.RunID == "run-1" {
 		t.Fatalf("block = %+v; a healed fence must not block new requests", pf)
@@ -184,7 +184,7 @@ func TestUltraA_K015_FencedSourceEvidenceIsNotReplaced(t *testing.T) {
 	g.setBlock(ultraASourceLeftFenced(g.clk.Now().Add(-time.Hour)))
 	setSite(g, "read-only")
 	ultraASetRecord(t, g, g.clk.Now().Add(-10*time.Minute), "pdx", nil)
-	g.setAnnotation(PlannedFailoverAnnotation, "pdx")
+	g.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	g.step()
 	if pf := g.pf(); pf.RunID == "run-1" {
 		t.Fatalf("block = %+v; a later failover record supersedes the fenced-source evidence", pf)
@@ -305,7 +305,7 @@ func TestUltraA_K057_EarlyRequeueStillDrivesPendingRun(t *testing.T) {
 	// Nor when something else makes the pass run (a stale stall-since
 	// annotation of a finished run).
 	h := plannedFailoverFG("pdx")
-	h.Annotations[PlannedFailoverStallSinceAnnotation] = FormatDeadlineStart("run-0", time.Now().Add(-time.Hour))
+	h.Annotations[v1alpha1.PlannedFailoverStallSinceAnnotation] = FormatDeadlineStart("run-0", time.Now().Add(-time.Hour))
 	r3, _, _, _ := ultraAReconciler(t, interceptor.Funcs{}, h)
 	if _, err := ultraAReconcile(r3, h); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -349,7 +349,7 @@ func TestUltraA_K080_LabelsFollowFenceOnSameReconcile(t *testing.T) {
 	fg := plannedFailoverFG("")
 	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseAdmitting, time.Now())
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mysql-lion-iad-0", Namespace: fg.Namespace,
-		Labels: map[string]string{labelAppName: "mysql", labelInstance: fg.Name, labelSite: "iad", labelRole: "primary"}}}
+		Labels: map[string]string{labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "iad", v1alpha1.RoleLabel: "primary"}}}
 	r, c, _, _ := ultraAReconciler(t, interceptor.Funcs{}, newTestSecret(), fg, pod)
 	if _, err := ultraAReconcile(r, fg); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -361,8 +361,8 @@ func TestUltraA_K080_LabelsFollowFenceOnSameReconcile(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Labels[labelRole] != "fenced" {
-		t.Fatalf("source role label = %q, want fenced on the reconcile that recorded the fence", got.Labels[labelRole])
+	if got.Labels[v1alpha1.RoleLabel] != "fenced" {
+		t.Fatalf("source role label = %q, want fenced on the reconcile that recorded the fence", got.Labels[v1alpha1.RoleLabel])
 	}
 }
 
@@ -430,7 +430,7 @@ func TestUltraA_K003_RestorePreflightWaitsOnHoldAndAckProceeds(t *testing.T) {
 	if cur.Annotations == nil {
 		cur.Annotations = map[string]string{}
 	}
-	cur.Annotations[AcknowledgePlannedFailoverHoldAnnotation] = "run-1"
+	cur.Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation] = "run-1"
 	if err := r.Update(context.Background(), cur); err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +518,7 @@ func TestUltraA_K066_EmptySiteWithOverridesIsRejected(t *testing.T) {
 	if pf := h.pf(); pf != nil {
 		t.Fatalf("block = %+v; no run may be built for an annotation with no site", pf)
 	}
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the malformed request was not consumed")
 	}
 	if h.sink.eventCount(v1alpha1.EventPlannedFailoverRejected) != 1 {
@@ -578,11 +578,11 @@ func (s *ultraACtxStore) WriteTerminalMarker(ctx context.Context, base *v1alpha1
 func TestUltraA_K012_ExhaustedConflictsCountTowardStall(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseDraining)
 	h.faults.statusDefault = pfWriteConflict
-	for i := 0; i < 400 && h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation] == ""; i++ {
+	for i := 0; i < 400 && h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation] == ""; i++ {
 		h.step()
 		h.clk.Advance(time.Second)
 	}
-	m, ok := ParseTerminalMarker(h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
 	if !ok || m.RunID != "run-1" || m.Reason != v1alpha1.PlannedFailoverReasonStatusStalled {
 		t.Fatalf("marker = %+v (%v); conflicting status writes must end the run by the stall marker", m, ok)
 	}
@@ -605,12 +605,12 @@ func TestUltraA_K013_StallBookkeepingSurvivesExpiredPass(t *testing.T) {
 		}
 	}
 	pass()
-	if _, ok := parseDeadlineStart(h.fg().GetAnnotations()[PlannedFailoverStallSinceAnnotation], "run-1"); !ok {
+	if _, ok := parseDeadlineStart(h.fg().GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation], "run-1"); !ok {
 		t.Fatal("the stall start was not recorded after a write that used up the pass")
 	}
 	h.clk.Advance(plannedFailoverStatusStallDeadline + time.Second)
 	pass()
-	if m, ok := ParseTerminalMarker(h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]); !ok || m.RunID != "run-1" {
+	if m, ok := ParseTerminalMarker(h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); !ok || m.RunID != "run-1" {
 		t.Fatalf("marker = %+v (%v); the stall deadline did not end the run", m, ok)
 	}
 }
@@ -678,11 +678,11 @@ func TestUltraA_K034_StalePendingTerminalDoesNotOverride(t *testing.T) {
 	}
 	confirmed = true
 	h.faults.statusDenied = true
-	for i := 0; i < 60 && h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation] == ""; i++ {
+	for i := 0; i < 60 && h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation] == ""; i++ {
 		h.step()
 		h.clk.Advance(time.Second)
 	}
-	m, ok := ParseTerminalMarker(h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
 	if !ok || m.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("marker = %+v (%v); a confirmed, recorded promotion must end Succeeded", m, ok)
 	}
@@ -707,7 +707,7 @@ func TestUltraA_K014_ReleasedRunSurvivesReplacedRecordAcrossRestart(t *testing.T
 	if run, _ := h.topo.held(); run != "" {
 		t.Fatalf("claim still held by %q after the confirmed tail", run)
 	}
-	if _, ok := parseDeadlineStart(h.fg().GetAnnotations()[PlannedFailoverConfirmedAnnotation], "run-1"); !ok {
+	if _, ok := parseDeadlineStart(h.fg().GetAnnotations()[v1alpha1.PlannedFailoverConfirmedAnnotation], "run-1"); !ok {
 		t.Fatal("the confirmation was not recorded before the release")
 	}
 	// A later emergency failover replaces the run's record; then the
@@ -729,7 +729,7 @@ func TestUltraA_K014_ReleasedRunSurvivesReplacedRecordAcrossRestart(t *testing.T
 	if h.topo.count("reprove") != 0 || h.topo.count("ensure") != 0 {
 		t.Fatalf("calls = %v; the released run must not re-establish its claim", h.topo.calls)
 	}
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverConfirmedAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverConfirmedAnnotation]; ok {
 		t.Fatal("the confirmation annotation outlived the finished run")
 	}
 	if h.fg().Status.PlannedFailoverHold != nil {
@@ -744,14 +744,14 @@ func TestUltraA_J002_StaleRunAnnotationsAreCleared(t *testing.T) {
 	pf := ultraASourceLeftFenced(h.clk.Now())
 	pf.Result.Outcome, pf.Phase = v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverPhaseFailed
 	h.setBlock(pf)
-	h.setAnnotation(PlannedFailoverManagerAbsentSinceAnnotation, FormatDeadlineStart("run-1", h.clk.Now()))
-	h.setAnnotation(PlannedFailoverStallSinceAnnotation, FormatDeadlineStart("run-0", h.clk.Now()))
+	h.setAnnotation(v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation, FormatDeadlineStart("run-1", h.clk.Now()))
+	h.setAnnotation(v1alpha1.PlannedFailoverStallSinceAnnotation, FormatDeadlineStart("run-0", h.clk.Now()))
 	if !plannedFailoverPassDue(h.fg()) {
 		t.Fatal("setup: the stale annotations keep a pass due")
 	}
 	h.step()
 	a := h.fg().GetAnnotations()
-	for _, k := range []string{PlannedFailoverManagerAbsentSinceAnnotation, PlannedFailoverStallSinceAnnotation} {
+	for _, k := range []string{v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation, v1alpha1.PlannedFailoverStallSinceAnnotation} {
 		if _, ok := a[k]; ok {
 			t.Fatalf("%s survived the pass", k)
 		}
@@ -792,7 +792,7 @@ func TestUltraA_K025_HoldListsObservedSites(t *testing.T) {
 
 	// Rebuilt from the marker by a process that never saw the run.
 	g := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
-	g.setAnnotation(PlannedFailoverTerminalAnnotation, TerminalMarker{RunID: "run-1",
+	g.setAnnotation(v1alpha1.PlannedFailoverTerminalAnnotation, TerminalMarker{RunID: "run-1",
 		Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1alpha1.PlannedFailoverReasonForeignWritable}.String())
 	g.stepUntil(5, func(fg *v1alpha1.MysqlFailoverGroup) bool { return plannedFailoverTerminal(fg.Status.PlannedFailover) })
 	hold = g.fg().Status.PlannedFailoverHold
@@ -808,7 +808,7 @@ func TestUltraA_K025_HoldListsObservedSites(t *testing.T) {
 // rejection), never an invisible, unbounded queue. K145: the wait reason
 // tells an in-place restore from an ordered update.
 func TestUltraA_K048_ReservationRefusalIsABoundedWait(t *testing.T) {
-	refusal := fixR1Admission{err: &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: deploymentReasonConcurrentOperation}}
+	refusal := fixR1Admission{err: &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonConcurrentOperation}}
 
 	fg := plannedFailoverFG("pdx")
 	fg.Status.UpdatePhase = "UpdatingReplica"
@@ -825,7 +825,7 @@ func TestUltraA_K048_ReservationRefusalIsABoundedWait(t *testing.T) {
 	if r := h.pf().Result; r == nil || r.Reason != v1alpha1.PlannedFailoverReasonAdmissionTimeout {
 		t.Fatalf("result = %+v, want AdmissionTimeout once the wait outlives its deadline", r)
 	}
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the request outlived its run")
 	}
 
@@ -915,7 +915,7 @@ func TestUltraA_K050_UnsettledRequestDefersOnCooldown(t *testing.T) {
 	if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil || pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferCooldownActive {
 		t.Fatalf("block = %+v, want Deferred{CooldownActive}", pf)
 	}
-	if h.fg().GetAnnotations()[PlannedFailoverAnnotation] != "dr" {
+	if h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation] != "dr" {
 		t.Fatal("the deferred request was not retained for its retry")
 	}
 }
@@ -925,13 +925,13 @@ func TestUltraA_K050_UnsettledRequestDefersOnCooldown(t *testing.T) {
 func TestUltraA_K074_ConsumeOnlyTheEvaluatedRequest(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG("pdx"))
 	evaluated := h.fg()
-	h.setAnnotation(PlannedFailoverAnnotation, "iad") // replaced after the pass read "pdx"
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "iad") // replaced after the pass read "pdx"
 	h.e.consumeRequest(context.Background(), evaluated, "accepted")
-	if got := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; got != "iad" {
+	if got := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; got != "iad" {
 		t.Fatalf("annotation = %q; a request the pass never evaluated was consumed", got)
 	}
 	h.e.consumeRequest(context.Background(), h.fg(), "accepted")
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the evaluated request was not consumed")
 	}
 }
@@ -940,16 +940,16 @@ func TestUltraA_K074_ConsumeOnlyTheEvaluatedRequest(t *testing.T) {
 // removed silently in a later phase, without a rejection Warning.
 func TestUltraA_K099_OwnRequestConsumedSilentlyPastAdmission(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseDraining)
-	h.setAnnotation(PlannedFailoverAnnotation, "pdx")
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	h.step()
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the run's own request was not consumed")
 	}
 	if n := h.sink.eventCount(v1alpha1.EventPlannedFailoverRejected); n != 0 {
 		t.Fatalf("events = %v; the run's own request must not be refused", h.sink.events)
 	}
 	// Another request is still refused.
-	h.setAnnotation(PlannedFailoverAnnotation, "iad")
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "iad")
 	h.step()
 	if n := h.sink.eventCount(v1alpha1.EventPlannedFailoverRejected); n != 1 {
 		t.Fatalf("events = %v; a different request must be refused", h.sink.events)
@@ -1062,11 +1062,11 @@ func ultraAHeldTerminal(now time.Time) *v1alpha1.PlannedFailoverStatus {
 func TestUltraA_K069_MarkerHoldRefusesRequests(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG(""))
 	h.setBlock(ultraAHeldTerminal(h.clk.Now()))
-	h.setAnnotation(PlannedFailoverTerminalAnnotation, TerminalMarker{RunID: "run-1",
+	h.setAnnotation(v1alpha1.PlannedFailoverTerminalAnnotation, TerminalMarker{RunID: "run-1",
 		Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1alpha1.PlannedFailoverReasonForeignWritable}.String())
-	h.setAnnotation(PlannedFailoverAnnotation, "pdx")
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	h.step()
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("a request beside a marker hold was neither refused nor consumed")
 	}
 	if h.sink.eventCount(v1alpha1.EventPlannedFailoverRejected) != 1 {
@@ -1112,9 +1112,9 @@ func TestUltraA_K155_HoldPersistedCadence(t *testing.T) {
 	}
 	// Acknowledge: the cadence starts over for a later hold.
 	h.topo.setHeld("run-1", true)
-	h.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-1")
+	h.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-1")
 	h.stepUntil(6, func(fg *v1alpha1.MysqlFailoverGroup) bool {
-		_, acked := fg.GetAnnotations()[AcknowledgePlannedFailoverHoldAnnotation]
+		_, acked := fg.GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]
 		return PlannedHoldFrom(fg) == nil && !acked
 	})
 	if !h.e.groupMemo(h.nn).holdPendingAt.IsZero() {
@@ -1287,15 +1287,15 @@ func TestUltraA_K149_NewRequestSeesPublishedFailover(t *testing.T) {
 func TestUltraA_K150_RemovedMarkerStillLandsTerminalRecord(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseDraining)
 	h.faults.statusDenied = true
-	for i := 0; i < 400 && h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation] == ""; i++ {
+	for i := 0; i < 400 && h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation] == ""; i++ {
 		h.step()
 		h.clk.Advance(time.Second)
 	}
-	if h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation] == "" {
+	if h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation] == "" {
 		t.Fatal("setup: no marker")
 	}
-	h.setAnnotation(PlannedFailoverTerminalAnnotation, "") // removed by hand
-	h.topo.setHeld("run-1", false)                         // hydrated back
+	h.setAnnotation(v1alpha1.PlannedFailoverTerminalAnnotation, "") // removed by hand
+	h.topo.setHeld("run-1", false)                                  // hydrated back
 	h.faults.statusDenied = false
 	h.step()
 	pf := h.pf()
@@ -1348,7 +1348,7 @@ func TestUltraA_K152_ConfirmedPromotionSurvivesManagerAbsence(t *testing.T) {
 func TestUltraA_K035_AckWithoutHoldIsNotASuccess(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG(""))
 	h.topo.setHeld("run-other", true) // the durable records were removed by hand
-	h.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-1")
+	h.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-1")
 	h.step()
 	if h.sink.eventCount(v1alpha1.EventPlannedFailoverHoldAcknowledged) != 0 ||
 		h.sink.eventCount(v1alpha1.EventPlannedFailoverHoldAcknowledgementIgnored) != 1 {
@@ -1357,13 +1357,13 @@ func TestUltraA_K035_AckWithoutHoldIsNotASuccess(t *testing.T) {
 	if run, hold := h.topo.held(); run != "run-other" || !hold {
 		t.Fatalf("slot = %q/%v; another run's hold was touched", run, hold)
 	}
-	if _, ok := h.fg().GetAnnotations()[AcknowledgePlannedFailoverHoldAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Fatal("the ignored acknowledgement was not removed")
 	}
 
 	// A stray acknowledgement with nothing held.
 	g := newPFEngineHarness(t, plannedFailoverFG(""))
-	g.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-9")
+	g.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-9")
 	g.step()
 	if g.sink.eventCount(v1alpha1.EventPlannedFailoverHoldAcknowledged) != 0 {
 		t.Fatalf("events = %v; a stray acknowledgement reported success", g.sink.events)
@@ -1379,9 +1379,9 @@ func TestUltraA_K035_AckWithoutHoldIsNotASuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	k.topo.setHeld("run-1", true)
-	k.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-1")
+	k.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-1")
 	k.stepUntil(6, func(fg *v1alpha1.MysqlFailoverGroup) bool {
-		_, acked := fg.GetAnnotations()[AcknowledgePlannedFailoverHoldAnnotation]
+		_, acked := fg.GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]
 		return !acked
 	})
 	if k.sink.eventCount(v1alpha1.EventPlannedFailoverHoldAcknowledged) != 1 {
@@ -1397,13 +1397,13 @@ func TestUltraA_K166_MarkerNeverReplacesAnotherRunsHold(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG(""))
 	hold := TerminalMarker{RunID: "run-b", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
 		Reason: v1alpha1.PlannedFailoverReasonForeignWritable}
-	h.setAnnotation(PlannedFailoverTerminalAnnotation, hold.String())
+	h.setAnnotation(v1alpha1.PlannedFailoverTerminalAnnotation, hold.String())
 	out, err := h.e.store.WriteTerminalMarker(context.Background(), h.fg(), TerminalMarker{RunID: "run-a",
 		Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled})
 	if out == WriteCommitted || err == nil {
 		t.Fatalf("WriteTerminalMarker = %s, %v; it replaced another run's hold", out, err)
 	}
-	if got := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; got != hold.String() {
+	if got := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]; got != hold.String() {
 		t.Fatalf("marker = %s", got)
 	}
 	// The hold's own run, and a non-hold marker, are still written.
@@ -1442,7 +1442,7 @@ func TestUltraA_K026_MemosArePruned(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG("nowhere"))
 	h.step() // NotStarted{UnknownSite}: a finished run
 	first := h.pf().RunID
-	h.setAnnotation(PlannedFailoverAnnotation, "nowhere")
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "nowhere")
 	h.step() // a second finished run replaces it
 	h.step()
 	h.e.mu.Lock()

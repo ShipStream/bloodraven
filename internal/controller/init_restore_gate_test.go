@@ -50,7 +50,7 @@ func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup 
 // shows up as an endpoint.
 func sitePod(fg *v1alpha1.MysqlFailoverGroup, site string) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: site + "-pod", Namespace: fg.Namespace, Labels: map[string]string{
-		labelAppName: "mysql", labelInstance: fg.Name, labelSite: site, labelRole: "primary", labelHealthy: "yes",
+		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: site, v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: "yes",
 	}}}
 }
 
@@ -188,8 +188,8 @@ func TestUpdateCRStatus_ReadyFalseUntilInitRestoreSucceeds(t *testing.T) {
 		wantReason string
 		wantText   string
 	}{
-		{v1alpha1.BackupPhaseRunning, metav1.ConditionFalse, readyReasonInitRestoreInProgress, "applications are kept off the group"},
-		{v1alpha1.BackupPhaseFailed, metav1.ConditionFalse, readyReasonInitRestoreFailed, "delete the restore Job"},
+		{v1alpha1.BackupPhaseRunning, metav1.ConditionFalse, v1alpha1.ReasonInitFromBackupInProgress, "applications are kept off the group"},
+		{v1alpha1.BackupPhaseFailed, metav1.ConditionFalse, v1alpha1.ReasonInitFromBackupFailed, "delete the restore Job"},
 		{v1alpha1.BackupPhaseSucceeded, metav1.ConditionTrue, "TopologyPolled", ""},
 	} {
 		t.Run(string(tc.phase), func(t *testing.T) {

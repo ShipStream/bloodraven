@@ -109,7 +109,7 @@ func TestReconcileRestoreJob_JobSucceeded_EmitsMetricsOnce(t *testing.T) {
 	fg.Spec.Sites[1].Name = "pdx"
 	fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = fggroup
 	seed := succeededSeedBackup()
-	seed.Labels[labelFailoverGroup] = fggroup
+	seed.Labels[v1alpha1.FailoverGroupLabel] = fggroup
 	seed.Spec.FailoverGroupRef.Name = fggroup
 	seed.Status.Location = fggroup + "/seed/"
 	seed.Status.SizeBytes = 2048
@@ -176,7 +176,7 @@ func TestReconcileRestoreJob_JobFailed_DoesNotEmitSuccessMetrics(t *testing.T) {
 	fg.Spec.Sites[1].Name = "pdx"
 	fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = fggroup
 	seed := succeededSeedBackup()
-	seed.Labels[labelFailoverGroup] = fggroup
+	seed.Labels[v1alpha1.FailoverGroupLabel] = fggroup
 	seed.Spec.FailoverGroupRef.Name = fggroup
 	seed.Status.Location = fggroup + "/seed/"
 	seed.Status.SizeBytes = 4096

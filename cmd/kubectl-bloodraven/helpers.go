@@ -142,7 +142,7 @@ func plannedTerminalMarker(fg *v1alpha1.MysqlFailoverGroup) (v1alpha1.PlannedFai
 	if pf == nil || pf.RunID == "" {
 		return "", "", false
 	}
-	m, ok := brcontroller.ParseTerminalMarker(fg.Annotations[brcontroller.PlannedFailoverTerminalAnnotation])
+	m, ok := brcontroller.ParseTerminalMarker(fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation])
 	if !ok || m.RunID != pf.RunID {
 		return "", "", false
 	}
@@ -193,7 +193,7 @@ func siteCountSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 // readyString extracts the Ready condition value, defaulting to "-".
 func readyString(fg *v1alpha1.MysqlFailoverGroup) string {
 	for _, c := range fg.Status.Conditions {
-		if c.Type == "Ready" {
+		if c.Type == v1alpha1.ConditionReady {
 			return string(c.Status)
 		}
 	}

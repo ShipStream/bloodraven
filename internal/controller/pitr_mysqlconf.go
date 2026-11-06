@@ -16,19 +16,7 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// conditionPITRMysqlConfAccepted reports whether spec.mysqlConf sets an
-// option that breaks PITR replay certification (D-34) while
-// spec.backup.pitr.enabled is true. Such an option is refused: it is left
-// out of the rendered my.cnf, so the server keeps MySQL's safe default
-// (ROW, FULL, no filter) and the sidecar's permanent history-integrity
-// marker is reserved for changes made outside the operator (N6). Present
-// only while PITR is enabled.
-const conditionPITRMysqlConfAccepted = "PITRMysqlConfAccepted"
-
 const (
-	reasonPITRMysqlConfAccepted        = "Accepted"
-	reasonPITRMysqlConfUnsafeRefused   = "PITRUnsafeSettingRefused"
-	eventReasonPITRMysqlConfRefused    = "PITRMysqlConfRefused"
 	pitrMysqlConfAcceptedText          = "spec.mysqlConf sets no option that breaks PITR replay"
 	pitrMysqlConfRefusedMessagePreface = "not rendered while spec.backup.pitr.enabled is true (the archiver would otherwise set the permanent history-integrity marker for the prefix); remove the setting: "
 )
@@ -122,16 +110,16 @@ func (r *MysqlFailoverGroupReconciler) reconcilePITRMySQLConfCondition(ctx conte
 	var cond *metav1.Condition
 	if pitrEnabled(fg) {
 		cond = &metav1.Condition{
-			Type:               conditionPITRMysqlConfAccepted,
+			Type:               v1alpha1.ConditionPITRMysqlConfAccepted,
 			Status:             metav1.ConditionTrue,
-			Reason:             reasonPITRMysqlConfAccepted,
+			Reason:             v1alpha1.ReasonAccepted,
 			Message:            pitrMysqlConfAcceptedText,
 			ObservedGeneration: fg.Generation,
 			LastTransitionTime: metav1.Now(),
 		}
 		if refused := pitrMySQLConfRefusalMessage(fg); refused != "" {
 			cond.Status = metav1.ConditionFalse
-			cond.Reason = reasonPITRMysqlConfUnsafeRefused
+			cond.Reason = v1alpha1.ReasonPITRUnsafeSettingRefused
 			cond.Message = pitrMysqlConfRefusedMessagePreface + refused
 		}
 	}
@@ -147,13 +135,13 @@ func (r *MysqlFailoverGroupReconciler) reconcilePITRMySQLConfCondition(ctx conte
 		}
 		before := fresh.Status.DeepCopy()
 		previous = nil
-		if c := apimeta.FindStatusCondition(before.Conditions, conditionPITRMysqlConfAccepted); c != nil {
+		if c := apimeta.FindStatusCondition(before.Conditions, v1alpha1.ConditionPITRMysqlConfAccepted); c != nil {
 			previous = c.DeepCopy()
 		}
 		if cond != nil {
 			setCondition(&fresh.Status.Conditions, *cond)
 		} else {
-			removeCondition(&fresh.Status.Conditions, conditionPITRMysqlConfAccepted)
+			removeCondition(&fresh.Status.Conditions, v1alpha1.ConditionPITRMysqlConfAccepted)
 		}
 		if equality.Semantic.DeepEqual(before, &fresh.Status) {
 			return nil
@@ -169,7 +157,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePITRMySQLConfCondition(ctx conte
 	}
 	if written != nil && r.Recorder != nil && cond != nil && cond.Status == metav1.ConditionFalse &&
 		(previous == nil || previous.Status != metav1.ConditionFalse || previous.Message != cond.Message) {
-		r.Recorder.Event(written, corev1.EventTypeWarning, eventReasonPITRMysqlConfRefused, cond.Message)
+		r.Recorder.Event(written, corev1.EventTypeWarning, v1alpha1.EventPITRMysqlConfRefused, cond.Message)
 	}
 	return nil
 }

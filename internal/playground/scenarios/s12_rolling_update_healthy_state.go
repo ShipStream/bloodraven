@@ -204,7 +204,7 @@ func s12VerifyClusterHealthy() runner.Step {
 			if err != nil {
 				return err
 			}
-			c := findCondition(mfg.Status.Conditions, "Ready")
+			c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady)
 			if c == nil || string(c.Status) != "True" {
 				status := "<missing>"
 				if c != nil {

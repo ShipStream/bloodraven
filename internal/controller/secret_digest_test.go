@@ -101,7 +101,7 @@ func TestDeploymentSpecHashNeedsDigestKey(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: resourceName(fg.Name, site.Name)}, &deploy); err != nil {
 		t.Fatalf("get deployment: %v", err)
 	}
-	published := deploy.Annotations[specHashAnnotation]
+	published := deploy.Annotations[v1alpha1.SpecHashAnnotation]
 
 	inputs, err := specSecretInputs(ctx, c, fg)
 	if err != nil {

@@ -347,11 +347,11 @@ func s70Era(ctx context.Context, env *runner.Env, site string, id int, phase str
 // PITRArchiveDivergentHistory and print exactly L (as a GTID set), not just
 // a set of a's UUID.
 func s70VerifyRefusedNamingL(ctx context.Context, env *runner.Env, label string, e pitrExpectation, lost string) error {
-	v, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, label, e, "PITRArchiveDivergentHistory", strings.SplitN(lost, ":", 2)[0])
+	v, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, label, e, string(v1alpha1.PITRTokenArchiveDivergentHistory), strings.SplitN(lost, ":", 2)[0])
 	if err != nil {
 		return err
 	}
-	cond := findCondition(v.Status.Conditions, "Verified")
+	cond := findCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
 	if err := refusalNamesExactly(cond.Message, lost); err != nil {
 		return fmt.Errorf("verification %s: %w", v.Name, err)
 	}
@@ -437,7 +437,7 @@ func s70RecloneAndFailback() runner.Step {
 			}
 			evCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
-			ev, err := waitForMFGEvent(evCtx, env, requested, "PITRArchiveReissueRiskDetected", "site "+a)
+			ev, err := waitForMFGEvent(evCtx, env, requested, v1alpha1.EventPITRArchiveReissueRiskDetected, "site "+a)
 			if err != nil {
 				return err
 			}
@@ -536,7 +536,7 @@ func s70VerifyHistoryReset() runner.Step {
 			}
 			_, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, "reset", pitrExpectation{
 				Backup: "b2", Mode: "latest", Markers: []string{"baseline"},
-			}, "PITRArchiveHistoryReset")
+			}, string(v1alpha1.PITRTokenArchiveHistoryReset))
 			return err
 		},
 	}

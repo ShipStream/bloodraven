@@ -389,7 +389,7 @@ func (r *MysqlFailoverGroupReconciler) enforceRestoreOfflineFence(ctx context.Co
 		}
 		if msg != "" {
 			r.noteRestorePrivilegeCheck(fg, fg.Spec.RestoreInPlace, true)
-			r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed, msg, "RestoreInPlaceRejected")
+			r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed, msg, v1alpha1.EventRestoreInPlaceRejected)
 			return "", errInPlaceRunEnded
 		}
 		if waitErr != nil {
@@ -436,7 +436,7 @@ func (r *MysqlFailoverGroupReconciler) enforceRestoreOfflineFence(ctx context.Co
 		// offline_mode already refuses these accounts unless they hold
 		// CONNECTION_ADMIN, and an account that does could reconnect
 		// anyway; waiting for them would only hold the primary fenced.
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreOfflineFenceSessionsKept",
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreOfflineFenceSessionsKept,
 			"could not kill the sessions of SYSTEM_USER account(s) %s on %s (the operator account lacks SYSTEM_USER); "+
 				"they stay connected during the restore", strings.Join(protected, ", "), q.Site)
 	}
@@ -453,7 +453,7 @@ func (r *MysqlFailoverGroupReconciler) enforceRestoreOfflineFence(ctx context.Co
 	}); err != nil {
 		return "", err
 	}
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreOfflineFenceApplied",
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreOfflineFenceApplied,
 		"offline_mode is ON on %s and no application session from before the fence remains; starting the restore", q.Site)
 	return "", nil
 }
@@ -492,7 +492,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreOfflineFence(ctx context.
 	} else {
 		if err := r.Runner.ReleaseRestoreOfflineFence(ctx, client.ObjectKeyFromObject(fg), q.Site, fenceOwner(q), q.PriorOfflineMode); err != nil {
 			log.FromContext(ctx).Error(err, "release restore offline_mode fence", "fg", fg.Name, "site", q.Site)
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreOfflineFenceReleaseFailed",
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreOfflineFenceReleaseFailed,
 				"could not restore offline_mode on %s after the in-place restore: %v; retrying", q.Site, err)
 			return 15 * time.Second, nil
 		}
@@ -512,7 +512,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreOfflineFence(ctx context.
 		if restoreOff {
 			state = "OFF"
 		}
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreOfflineFenceReleased",
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreOfflineFenceReleased,
 			"in-place restore finished; offline_mode on %s is %s", q.Site, state)
 	}
 	return 0, nil

@@ -248,13 +248,13 @@ func s68VerifyCycle2Gap() runner.Step {
 			v, err := pitrVerifyRefused(ctx, env, s68ID, s68DBName, "c2-gap", pitrExpectation{
 				Backup: "b1", Mode: "timestamp", Fence: f,
 				Markers: []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b", "M4", "M5"},
-			}, "PITRArchiveGap", ctxFetch(env, "uuidB"), "unarchived tail")
+			}, string(v1alpha1.PITRTokenArchiveGap), ctxFetch(env, "uuidB"), "unarchived tail")
 			if err != nil {
 				return err
 			}
 			// The refusal must name b's unarchived tail itself, not just
 			// some interval of b's UUID (F192).
-			if err := refusalNamesExactly(findCondition(v.Status.Conditions, "Verified").Message, ctxFetch(env, "tailB")); err != nil {
+			if err := refusalNamesExactly(findCondition(v.Status.Conditions, v1alpha1.ConditionVerified).Message, ctxFetch(env, "tailB")); err != nil {
 				return fmt.Errorf("verification %s: %w", v.Name, err)
 			}
 			return nil

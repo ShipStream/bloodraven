@@ -248,7 +248,7 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 	if live.Annotations == nil {
 		live.Annotations = map[string]string{}
 	}
-	live.Annotations[AdoptEncryptionAnnotation] = "confirm"
+	live.Annotations[v1alpha1.AdoptEncryptionAnnotation] = "confirm"
 	if err := c.Update(context.Background(), &live); err != nil {
 		t.Fatalf("enable encryption: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestReconcile_MovedEncryptionBaselineRendersNothing(t *testing.T) {
 			ctx := context.Background()
 			fg := encTestFG()
 			fg.Spec.UpdateStrategy = "Recreate"
-			fg.Finalizers = []string{finalizerName}
+			fg.Finalizers = []string{v1alpha1.FailoverGroupFinalizer}
 			fg.Status.ActiveSite = "dc1"
 			dc1 := v1alpha1.SiteEncryptionStatus{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest}

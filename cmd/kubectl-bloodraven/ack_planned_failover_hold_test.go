@@ -18,7 +18,7 @@ func TestPlannedHoldAckValue(t *testing.T) {
 	}
 	markerOnly := func() *v1alpha1.MysqlFailoverGroup {
 		fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orders",
-			Annotations: map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: brcontroller.TerminalMarker{
+			Annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: brcontroller.TerminalMarker{
 				RunID: "run-2", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}.String()}}}
 		return fg
 	}

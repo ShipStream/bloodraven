@@ -290,8 +290,8 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				"shipstream.io/failover-group":                  env.FG,
-				"shipstream.io/backup-profile":                  profile,
+				v1alpha1.FailoverGroupLabel:                     env.FG,
+				v1alpha1.BackupProfileLabel:                     profile,
 				"chaos.playground.bloodraven.io/scenario":       scenarioID,
 				"chaos.playground.bloodraven.io/created-by-e2e": "true",
 			},
@@ -316,8 +316,8 @@ func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, b
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				"shipstream.io/failover-group":                  env.FG,
-				"shipstream.io/backup-profile":                  backupE2EProfile,
+				v1alpha1.FailoverGroupLabel:                     env.FG,
+				v1alpha1.BackupProfileLabel:                     backupE2EProfile,
 				"chaos.playground.bloodraven.io/scenario":       scenarioID,
 				"chaos.playground.bloodraven.io/created-by-e2e": "true",
 			},
@@ -580,7 +580,7 @@ func deleteAndWait(ctx context.Context, env *runner.Env, obj ctrlclient.Object, 
 				// the operator's reason, then unstick the CR so later
 				// scenarios start clean.
 				cause := "no ArtifactCleanup condition"
-				if c := apimeta.FindStatusCondition(backup.Status.Conditions, "ArtifactCleanup"); c != nil {
+				if c := apimeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup); c != nil {
 					cause = c.Reason + ": " + c.Message
 				}
 				if err := forceRemoveFinalizers(ctx, env, fresh, kind, name); err != nil {

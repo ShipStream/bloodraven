@@ -91,8 +91,8 @@ func TestUltraK095_WatermarkBoundToItsEvent(t *testing.T) {
 		t.Fatalf("own watermark not read back: %+v, %v", rec, err)
 	}
 	// A two-key writer advances the event and leaves the watermark.
-	ann[LastFailoverAnnotation] = failoverStampFormat(t1.Add(time.Hour))
-	ann[LastFailoverTargetAnnotation] = "dc2"
+	ann[v1alpha1.LastFailoverAnnotation] = failoverStampFormat(t1.Add(time.Hour))
+	ann[v1alpha1.LastFailoverTargetAnnotation] = "dc2"
 	rec, err = FailoverRecordFromAnnotations(ann)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestUltraK095_WatermarkBoundToItsEvent(t *testing.T) {
 		t.Fatalf("record = %+v; want the newer event with no watermark", rec)
 	}
 	// A watermark with no binding at all is no watermark either.
-	delete(ann, PromotionGtidExecutedForAnnotation)
+	delete(ann, v1alpha1.PromotionGtidExecutedForAnnotation)
 	if rec, _ := FailoverRecordFromAnnotations(ann); rec.PromotionGtidExecuted != "" {
 		t.Fatalf("an unbound watermark was read: %+v", rec)
 	}

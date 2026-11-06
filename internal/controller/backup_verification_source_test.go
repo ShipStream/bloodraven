@@ -126,7 +126,7 @@ func TestVerificationSource_RejectsMissingOrReplacedPinBeforeLaunch(t *testing.T
 			if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 				t.Fatal(err)
 			}
-			condition := apiMeta.FindStatusCondition(v.Status.Conditions, ConditionVerified)
+			condition := apiMeta.FindStatusCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
 			if v.Status.Phase != v1alpha1.VerificationPhaseFailed || v.Status.BackupRef.UID != string(a.UID) || condition == nil || condition.Reason != "BackupNotAvailable" {
 				t.Fatalf("unavailable pin was replaced: %+v", v.Status)
 			}
@@ -188,10 +188,10 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 				t.Fatal(err)
 			}
 			if strings.Contains(mode, "legacy") {
-				delete(job.Spec.Template.Annotations, annotationVerificationBackup)
+				delete(job.Spec.Template.Annotations, v1alpha1.VerificationBackupAnnotation)
 			}
 			if mode == "invalid-snapshot" {
-				job.Spec.Template.Annotations[annotationVerificationBackup] = "invalid JSON"
+				job.Spec.Template.Annotations[v1alpha1.VerificationBackupAnnotation] = "invalid JSON"
 			}
 			if err := c.Update(ctx, &job); err != nil {
 				t.Fatal(err)
@@ -216,7 +216,7 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 				t.Fatal(err)
 			}
 			if mode == "mismatched-legacy" || mode == "invalid-snapshot" {
-				condition := apiMeta.FindStatusCondition(v.Status.Conditions, ConditionVerified)
+				condition := apiMeta.FindStatusCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
 				if v.Status.Phase != v1alpha1.VerificationPhaseFailed || condition == nil || condition.Reason != "BackupIdentityMismatch" {
 					t.Fatalf("unprovable execution source was certified: %+v", v.Status)
 				}

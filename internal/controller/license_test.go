@@ -125,7 +125,7 @@ func TestObserveLicenseTransitions(t *testing.T) {
 	}
 
 	r.observeLicense(fg)
-	if got := drainFakeEvents(rec); licenseEventCount(got, eventLicenseInvalid)+licenseEventCount(got, eventLicenseVerified) != 0 {
+	if got := drainFakeEvents(rec); licenseEventCount(got, v1alpha1.EventLicenseInvalid)+licenseEventCount(got, v1alpha1.EventLicenseVerified) != 0 {
 		t.Fatalf("community must not emit license events: %v", got)
 	}
 
@@ -133,14 +133,14 @@ func TestObserveLicenseTransitions(t *testing.T) {
 	r.observeLicense(fg)
 	r.observeLicense(fg)
 	events := drainFakeEvents(rec)
-	if licenseEventCount(events, eventLicenseInvalid) != 1 {
+	if licenseEventCount(events, v1alpha1.EventLicenseInvalid) != 1 {
 		t.Fatalf("invalid token should event once, got %v", events)
 	}
 
 	fg.Spec.License = good
 	r.observeLicense(fg)
 	events = drainFakeEvents(rec)
-	if licenseEventCount(events, eventLicenseVerified) != 1 {
+	if licenseEventCount(events, v1alpha1.EventLicenseVerified) != 1 {
 		t.Fatalf("valid token should event once, got %v", events)
 	}
 	if !strings.Contains(logBuf.String(), msgLicenseVerified) {
@@ -153,7 +153,7 @@ func TestObserveLicenseTransitions(t *testing.T) {
 	fg.Spec.License = "bad-token"
 	r.observeLicense(fg)
 	events = drainFakeEvents(rec)
-	if licenseEventCount(events, eventLicenseInvalid) != 1 {
+	if licenseEventCount(events, v1alpha1.EventLicenseInvalid) != 1 {
 		t.Fatalf("recreation should warn again, got %v", events)
 	}
 }

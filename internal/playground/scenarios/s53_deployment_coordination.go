@@ -145,7 +145,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if mode == "emergency" || mode == "renew" {
-			if _, err := waitForMFGEvent(waitCtx, env, env.StartTime, "DeploymentLeaseRevoked", ""); err != nil {
+			if _, err := waitForMFGEvent(waitCtx, env, env.StartTime, v1alpha1.EventDeploymentLeaseRevoked, ""); err != nil {
 				return err
 			}
 		}
@@ -248,7 +248,7 @@ func deploymentClientPod(meta metav1.ObjectMeta, operation, group, mode string) 
 	return &corev1.Pod{ObjectMeta: meta, Spec: corev1.PodSpec{
 		ServiceAccountName: meta.Name, AutomountServiceAccountToken: &no, RestartPolicy: corev1.RestartPolicyNever,
 		ActiveDeadlineSeconds: &deadline,
-		Tolerations:           []corev1.Toleration{{Key: "shipstream.io/db-readonly-" + group, Operator: corev1.TolerationOpExists}},
+		Tolerations:           []corev1.Toleration{{Key: v1alpha1.ReadOnlyTaintKey(group), Operator: corev1.TolerationOpExists}},
 		Containers: []corev1.Container{{Name: "client", Image: "python:3.13-alpine", Command: []string{"python", "-u", "-c", deployClientScript},
 			Env: []corev1.EnvVar{{Name: "DEPLOY_URL", Value: "https://bloodraven." + meta.Namespace + ".svc.cluster.local:8443/deploy/v1/groups/" + group},
 				{Name: "OPERATION_ID", Value: operation}, {Name: "INSTANCE", Value: meta.Name}, {Name: "MODE", Value: mode}},
