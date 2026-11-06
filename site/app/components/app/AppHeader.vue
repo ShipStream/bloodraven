@@ -22,6 +22,7 @@ const links = [
   { label: 'Docs', to: '/docs' },
   { label: 'Playground', to: '/docs/get-started/playground' },
   { label: 'Course', to: '/courses/', target: '_blank' as const },
+  { label: 'Compare', to: '/compare' },
   { label: 'Pricing', to: '/pricing' },
 ]
 

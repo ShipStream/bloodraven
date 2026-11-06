@@ -252,6 +252,14 @@ jobs:
         with:
           draft: false
 
+  # A release published with GITHUB_TOKEN fires no `release` event, so call
+  # the site deploy directly. It builds bloodraven.dev from the latest release.
+  deploy-site:
+    name: Deploy site
+    needs: [publish-release]
+    uses: ./.github/workflows/deploy-site.yml
+    secrets: inherit
+
   # Post-release full E2E — runs the complete release-profile suite (real
   # MySQL pods/PVCs/DNS/taints, emergency + planned failover, self-fencing,
   # network partition, PVC loss/re-bootstrap, old-primary recovery, state
