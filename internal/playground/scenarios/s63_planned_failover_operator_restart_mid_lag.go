@@ -89,7 +89,7 @@ const (
 // target still read-only (no emergency promotion of a fenced group's only
 // candidate), the source still fenced, and its topology manager logging the
 // cross-site deferral. Restarting the SQL thread must then complete the same
-// run with exactly one PlannedFailoverClaimGranted Event, exactly one RESET
+// run with its claim granted once (claimTime unchanged), exactly one RESET
 // REPLICA ALL on the target (counted from the MySQL general log, which
 // catches a recovery path that re-pointed the stopped replica behind the
 // claim's back) and both server-uuid records present and matching the live
