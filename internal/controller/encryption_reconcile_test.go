@@ -1686,6 +1686,11 @@ func TestReconcileEncryption_NoOpStatusWriteDoesNotEndHoldBesideLostWrite(t *tes
 			r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
 				"dc1": liveKeyring(digest, true), "dc2": liveKeyring(digest, true),
 			}), fg)
+			// Pin the clock: the coverage sample stamps LastCheckTime, and a
+			// pass that straddles a second boundary would otherwise not
+			// reproduce the persisted status, so it would not be a no-op.
+			frozen := time.Now()
+			r.Now = func() time.Time { return frozen }
 			seedEscrow(t, c, fg)
 			base := c.(client.WithWatch)
 			tm := rotationRunner(r, c)

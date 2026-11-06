@@ -161,7 +161,8 @@ type MysqlFailoverGroupReconciler struct {
 	// license.ProductionKey.
 	LicenseKeys license.KeyLookup
 
-	// Now overrides time.Now for license verification tests.
+	// Now overrides time.Now for tests: license verification and the
+	// encryption coverage LastCheckTime stamp.
 	Now func() time.Time
 
 	licenseMu  sync.Mutex
