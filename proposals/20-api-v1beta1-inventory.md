@@ -9,6 +9,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - Scope: Namespaced; plural `mysqlfailovergroups`; shortNames: `mfg`, `mfgs`; categories: bloodraven, mysql
 - Versions: v1alpha1 (storage); subresources: status
 - Printer columns: Active (`.status.activeSite`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Age (`.metadata.creationTimestamp`)
+- Root CEL: `!has(oldSelf.spec.backup) || !has(self.spec.backup) || !has(oldSelf.spec.backup.pitr) || !has(self.spec.backup.pitr) || !(has(oldSelf.spec.backup.pitr.enabled) && oldSelf.spec.backup.pitr.enabled) || !(has(self.spec.backup.pitr.enabled) && self.spec.backup.pitr.enabled) || !has(oldSelf.spec.backup.pitr.profileName) || !has(self.spec.backup.pitr.profileName) || oldSelf.spec.backup.pitr.profileName != self.spec.backup.pitr.profileName || !has(oldSelf.spec.backup.profiles) || !has(self.spec.backup.profiles) || self.spec.backup.profiles.all(p, p.name != self.spec.backup.pitr.profileName || oldSelf.spec.backup.profiles.all(o, o.name != p.name || !(o.storage.type == p.storage.type && has(o.storage.s3) == has(p.storage.s3) && (!has(o.storage.s3) || (o.storage.s3.bucket == p.storage.s3.bucket && (has(o.storage.s3.prefix) ? o.storage.s3.prefix : '') == (has(p.storage.s3.prefix) ? p.storage.s3.prefix : '') && (has(o.storage.s3.endpointURL) ? o.storage.s3.endpointURL : '') == (has(p.storage.s3.endpointURL) ? p.storage.s3.endpointURL : ''))) && has(o.storage.pvc) == has(p.storage.pvc) && (!has(o.storage.pvc) || ((has(o.storage.pvc.claimName) ? o.storage.pvc.claimName : '') == (has(p.storage.pvc.claimName) ? p.storage.pvc.claimName : '') && (has(o.storage.pvc.subPath) ? o.storage.pvc.subPath : '') == (has(p.storage.pvc.subPath) ? p.storage.pvc.subPath : '')))) || (has(o.encryption) == has(p.encryption) && (!has(o.encryption) || ((has(o.encryption.algorithm) ? o.encryption.algorithm : 'AES-256-GCM') == (has(p.encryption.algorithm) ? p.encryption.algorithm : 'AES-256-GCM') && o.encryption.passphraseSecret.name == p.encryption.passphraseSecret.name && (has(o.encryption.passphraseSecret.key) ? o.encryption.passphraseSecret.key : 'passphrase') == (has(p.encryption.passphraseSecret.key) ? p.encryption.passphraseSecret.key : 'passphrase'))))))`
 - `spec` CEL: `(has(self.secretName) && self.secretName != "" && !has(self.credentials)) || ((!has(self.secretName) || self.secretName == "") && has(self.credentials))`
 - `spec` CEL: `self.sites.all(x, self.sites.filter(y, y.name == x.name).size() == 1)`
 - `spec` CEL: `self.sites.filter(s, s.role == 'primary-candidate').size() >= 2`
@@ -20,7 +21,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)`
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))`
 
-### MysqlFailoverGroup `spec` (262 fields)
+### MysqlFailoverGroup `spec` (259 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -36,9 +37,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.pitr.archivePollInterval` | string |  | `"60s"` |  |
 | `spec.backup.pitr.enabled` | boolean |  | `false` |  |
 | `spec.backup.pitr.maxBinlogSize` | string |  | `"100M"` |  |
-| `spec.backup.pitr.profileName` | string |  |  | minLength=1 |
+| `spec.backup.pitr.profileName` | string |  |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `spec.backup.podSecurityContext` | corev1.PodSecurityContext |  |  |  |
-| `spec.backup.profiles` | []object |  |  |  |
+| `spec.backup.profiles` | []object |  |  | maxItems=32; listType=map keys=name |
 | `spec.backup.profiles[].dump` | object |  |  |  |
 | `spec.backup.profiles[].dump.bytesPerChunk` | string |  | `"64M"` |  |
 | `spec.backup.profiles[].dump.compression` | string |  | `"zstd"` | enum: `none`, `gzip`, `zstd` |
@@ -50,9 +51,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].encryption` | object |  |  |  |
 | `spec.backup.profiles[].encryption.algorithm` | string |  | `"AES-256-GCM"` | enum: `AES-256-GCM` |
 | `spec.backup.profiles[].encryption.passphraseSecret` | object | yes |  |  |
-| `spec.backup.profiles[].encryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1 |
-| `spec.backup.profiles[].encryption.passphraseSecret.name` | string | yes |  | minLength=1 |
-| `spec.backup.profiles[].name` | string | yes |  | minLength=1; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `spec.backup.profiles[].encryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1; maxLength=253 |
+| `spec.backup.profiles[].encryption.passphraseSecret.name` | string | yes |  | minLength=1; maxLength=253 |
+| `spec.backup.profiles[].name` | string | yes |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `spec.backup.profiles[].retention` | integer (int32) |  | `7` | minimum=0 |
 | `spec.backup.profiles[].retentionPolicy` | object |  |  |  |
 | `spec.backup.profiles[].retentionPolicy.count` | integer (int32) |  |  | minimum=0 |
@@ -61,15 +62,15 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].retentionPolicy.minKeep` | integer (int32) |  | `1` | minimum=0 |
 | `spec.backup.profiles[].storage` | object | yes |  | CEL: `(self.type == 'S3' && has(self.s3) && !has(self.pvc)) \|\| (self.type == 'PVC' && has(self.pvc) && !has(self.s3))` |
 | `spec.backup.profiles[].storage.pvc` | object |  |  |  |
-| `spec.backup.profiles[].storage.pvc.claimName` | string |  |  |  |
+| `spec.backup.profiles[].storage.pvc.claimName` | string |  |  | maxLength=253; CEL: `bytes(self).size() <= 253` |
 | `spec.backup.profiles[].storage.pvc.size` | int-or-string |  |  | pattern=`^(\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$` |
 | `spec.backup.profiles[].storage.pvc.storageClassName` | string |  |  |  |
-| `spec.backup.profiles[].storage.pvc.subPath` | string |  |  | pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$` |
+| `spec.backup.profiles[].storage.pvc.subPath` | string |  |  | maxLength=512; pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.backup.profiles[].storage.s3` | object |  |  |  |
-| `spec.backup.profiles[].storage.s3.bucket` | string | yes |  | minLength=1 |
+| `spec.backup.profiles[].storage.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
 | `spec.backup.profiles[].storage.s3.credentialsSecret` | string | yes |  | minLength=1 |
-| `spec.backup.profiles[].storage.s3.endpointURL` | string |  |  | pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$` |
-| `spec.backup.profiles[].storage.s3.prefix` | string |  |  |  |
+| `spec.backup.profiles[].storage.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
+| `spec.backup.profiles[].storage.s3.prefix` | string |  |  | maxLength=512; pattern=`^/?(([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*)?/?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.backup.profiles[].storage.s3.region` | string |  |  |  |
 | `spec.backup.profiles[].storage.s3.storageClass` | string |  |  |  |
 | `spec.backup.profiles[].storage.type` | string | yes |  | enum: `S3`, `PVC` |
@@ -79,9 +80,10 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].verification.failedJobsHistoryLimit` | integer (int32) |  | `3` | minimum=0 |
 | `spec.backup.profiles[].verification.keepOnFailure` | boolean |  | `true` |  |
 | `spec.backup.profiles[].verification.pointInTime` | object |  |  |  |
+| `spec.backup.profiles[].verification.pointInTime.archiveProfileName` | string |  |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `spec.backup.profiles[].verification.pointInTime.excludeGtids` | string |  |  | maxLength=131072 |
 | `spec.backup.profiles[].verification.pointInTime.mode` | string |  | `"none"` | enum: `none`, `latest`, `timestamp` |
-| `spec.backup.profiles[].verification.pointInTime.sites` | []string |  |  | listType=set; items minLength=1; items maxLength=253; items pattern=`^[a-z0-9-]+$` |
-| `spec.backup.profiles[].verification.pointInTime.timestamp` | string |  |  |  |
+| `spec.backup.profiles[].verification.pointInTime.timestamp` | string |  |  | maxLength=40; pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z\|[+-]([01][0-9]\|2[0-3]):[0-5][0-9])?$` |
 | `spec.backup.profiles[].verification.retentionPolicy` | object |  |  |  |
 | `spec.backup.profiles[].verification.retentionPolicy.keepFailures` | integer (int32) |  | `10` | minimum=0 |
 | `spec.backup.profiles[].verification.retentionPolicy.keepSuccessful` | integer (int32) |  | `30` | minimum=0 |
@@ -139,7 +141,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.dragonfly.maxMemoryMb` | integer (int32) |  |  | minimum=0 |
 | `spec.dragonfly.plannedFailover` | object |  |  |  |
 | `spec.dragonfly.plannedFailover.maxSyncWait` | string |  | `"30s"` |  |
-| `spec.dragonfly.plannedFailover.onSyncTimeout` | string |  | `"proceed"` | enum: `proceed`, `fail` |
+| `spec.dragonfly.plannedFailover.onSyncTimeout` | string |  | `"Proceed"` | enum: `Proceed`, `Fail` |
 | `spec.dragonfly.podSecurityContext` | corev1.PodSecurityContext |  |  |  |
 | `spec.dragonfly.port` | integer (int32) |  | `6379` | minimum=1; maximum=65535 |
 | `spec.dragonfly.proactorThreads` | integer (int32) |  |  | minimum=0 |
@@ -171,11 +173,11 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.failoverCooldown` | string |  | `"5m"` |  |
 | `spec.failureThreshold` | integer (int32) |  | `3` | minimum=1 |
 | `spec.image` | string |  | `"mysql:9.7"` |  |
-| `spec.initFromBackup` | object |  |  |  |
+| `spec.initFromBackup` | object |  |  | CEL: `!has(self.pointInTime) \|\| has(self.pointInTime.archiveProfileName)` |
 | `spec.initFromBackup.decryption` | object |  |  |  |
 | `spec.initFromBackup.decryption.passphraseSecret` | object | yes |  |  |
-| `spec.initFromBackup.decryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1 |
-| `spec.initFromBackup.decryption.passphraseSecret.name` | string | yes |  | minLength=1 |
+| `spec.initFromBackup.decryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1; maxLength=253 |
+| `spec.initFromBackup.decryption.passphraseSecret.name` | string | yes |  | minLength=1; maxLength=253 |
 | `spec.initFromBackup.loadOptions` | object |  |  |  |
 | `spec.initFromBackup.loadOptions.excludeSchemas` | []string |  |  |  |
 | `spec.initFromBackup.loadOptions.includeSchemas` | []string |  |  |  |
@@ -185,11 +187,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.initFromBackup.loadOptions.threads` | integer (int32) |  | `4` | minimum=1 |
 | `spec.initFromBackup.pointInTime` | object |  |  |  |
 | `spec.initFromBackup.pointInTime.allowPartial` | boolean |  | `false` |  |
-| `spec.initFromBackup.pointInTime.allowUnverifiedCrossSite` | boolean |  | `false` |  |
-| `spec.initFromBackup.pointInTime.archiveProfileName` | string |  |  | minLength=1 |
-| `spec.initFromBackup.pointInTime.excludeGtids` | string |  |  |  |
-| `spec.initFromBackup.pointInTime.sites` | []string |  |  | listType=set; items minLength=1; items maxLength=253; items pattern=`^[a-z0-9-]+$` |
-| `spec.initFromBackup.pointInTime.stopDatetime` | string | yes |  | minLength=1 |
+| `spec.initFromBackup.pointInTime.archiveProfileName` | string |  |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `spec.initFromBackup.pointInTime.excludeGtids` | string |  |  | maxLength=131072 |
+| `spec.initFromBackup.pointInTime.stopDatetime` | string | yes |  | maxLength=40; pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z\|[+-]([01][0-9]\|2[0-3]):[0-5][0-9])?$` |
 | `spec.initFromBackup.source` | object | yes |  | CEL: `(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1` |
 | `spec.initFromBackup.source.mysqlBackupRef` | object |  |  | mapType=atomic |
 | `spec.initFromBackup.source.mysqlBackupRef.name` | string |  | `""` |  |
@@ -197,10 +197,10 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.initFromBackup.source.pvc.claimName` | string | yes |  | minLength=1 |
 | `spec.initFromBackup.source.pvc.subPath` | string |  |  | pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$` |
 | `spec.initFromBackup.source.s3` | object |  |  |  |
-| `spec.initFromBackup.source.s3.bucket` | string | yes |  | minLength=1 |
+| `spec.initFromBackup.source.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
 | `spec.initFromBackup.source.s3.credentialsSecret` | string | yes |  | minLength=1 |
-| `spec.initFromBackup.source.s3.endpointURL` | string |  |  | pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$` |
-| `spec.initFromBackup.source.s3.prefix` | string |  |  |  |
+| `spec.initFromBackup.source.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
+| `spec.initFromBackup.source.s3.prefix` | string |  |  | maxLength=512; pattern=`^/?(([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*)?/?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.initFromBackup.source.s3.region` | string |  |  |  |
 | `spec.initFromBackup.source.s3.storageClass` | string |  |  |  |
 | `spec.license` | string |  |  |  |
@@ -208,7 +208,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.plannedFailover` | object |  |  |  |
 | `spec.plannedFailover.drainTimeout` | string |  | `"30s"` |  |
 | `spec.plannedFailover.maxLagWait` | string |  | `"5m"` |  |
-| `spec.plannedFailover.onCooldown` | string |  | `"reject"` | enum: `reject`, `defer` |
+| `spec.plannedFailover.onCooldown` | string |  | `"Reject"` | enum: `Reject`, `Defer` |
 | `spec.podAnnotations` | map[string]string |  |  |  |
 | `spec.podLabels` | map[string]string |  |  |  |
 | `spec.podSecurityContext` | corev1.PodSecurityContext |  |  |  |
@@ -221,8 +221,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.restoreInPlace.confirm` | string | yes |  | minLength=1 |
 | `spec.restoreInPlace.decryption` | object |  |  |  |
 | `spec.restoreInPlace.decryption.passphraseSecret` | object | yes |  |  |
-| `spec.restoreInPlace.decryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1 |
-| `spec.restoreInPlace.decryption.passphraseSecret.name` | string | yes |  | minLength=1 |
+| `spec.restoreInPlace.decryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1; maxLength=253 |
+| `spec.restoreInPlace.decryption.passphraseSecret.name` | string | yes |  | minLength=1; maxLength=253 |
 | `spec.restoreInPlace.loadOptions` | object |  |  |  |
 | `spec.restoreInPlace.loadOptions.excludeSchemas` | []string |  |  |  |
 | `spec.restoreInPlace.loadOptions.includeSchemas` | []string |  |  |  |
@@ -232,11 +232,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.restoreInPlace.loadOptions.threads` | integer (int32) |  | `4` | minimum=1 |
 | `spec.restoreInPlace.pointInTime` | object |  |  |  |
 | `spec.restoreInPlace.pointInTime.allowPartial` | boolean |  | `false` |  |
-| `spec.restoreInPlace.pointInTime.allowUnverifiedCrossSite` | boolean |  | `false` |  |
-| `spec.restoreInPlace.pointInTime.archiveProfileName` | string |  |  | minLength=1 |
-| `spec.restoreInPlace.pointInTime.excludeGtids` | string |  |  |  |
-| `spec.restoreInPlace.pointInTime.sites` | []string |  |  | listType=set; items minLength=1; items maxLength=253; items pattern=`^[a-z0-9-]+$` |
-| `spec.restoreInPlace.pointInTime.stopDatetime` | string | yes |  | minLength=1 |
+| `spec.restoreInPlace.pointInTime.archiveProfileName` | string |  |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `spec.restoreInPlace.pointInTime.excludeGtids` | string |  |  | maxLength=131072 |
+| `spec.restoreInPlace.pointInTime.stopDatetime` | string | yes |  | maxLength=40; pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z\|[+-]([01][0-9]\|2[0-3]):[0-5][0-9])?$` |
 | `spec.restoreInPlace.source` | object | yes |  | CEL: `(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1` |
 | `spec.restoreInPlace.source.mysqlBackupRef` | object |  |  | mapType=atomic |
 | `spec.restoreInPlace.source.mysqlBackupRef.name` | string |  | `""` |  |
@@ -244,10 +242,10 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.restoreInPlace.source.pvc.claimName` | string | yes |  | minLength=1 |
 | `spec.restoreInPlace.source.pvc.subPath` | string |  |  | pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$` |
 | `spec.restoreInPlace.source.s3` | object |  |  |  |
-| `spec.restoreInPlace.source.s3.bucket` | string | yes |  | minLength=1 |
+| `spec.restoreInPlace.source.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
 | `spec.restoreInPlace.source.s3.credentialsSecret` | string | yes |  | minLength=1 |
-| `spec.restoreInPlace.source.s3.endpointURL` | string |  |  | pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$` |
-| `spec.restoreInPlace.source.s3.prefix` | string |  |  |  |
+| `spec.restoreInPlace.source.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
+| `spec.restoreInPlace.source.s3.prefix` | string |  |  | maxLength=512; pattern=`^/?(([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*)?/?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.restoreInPlace.source.s3.region` | string |  |  |  |
 | `spec.restoreInPlace.source.s3.storageClass` | string |  |  |  |
 | `spec.secretName` | string |  |  |  |
@@ -288,7 +286,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.updateStrategy` | string |  | `"OrderedUpdate"` | enum: `OrderedUpdate`, `Recreate` |
 
 
-### MysqlFailoverGroup `status` (192 fields)
+### MysqlFailoverGroup `status` (310 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -364,6 +362,14 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.lastFailover` | string (date-time) |  |  |  |
 | `status.lastFailoverTarget` | string |  |  |  |
 | `status.pitr` | object |  |  |  |
+| `status.pitr.archive` | object |  |  |  |
+| `status.pitr.archive.archiveID` | string |  |  | pattern=`^(ar1-[a-z2-7]{26})?$` |
+| `status.pitr.archive.destination` | string | yes |  | maxLength=4096 |
+| `status.pitr.archive.encryptionMode` | string |  |  | enum: `None`, `Passphrase` |
+| `status.pitr.archive.keyRevision` | string |  |  | maxLength=253 |
+| `status.pitr.archive.observedTime` | string (date-time) |  |  |  |
+| `status.pitr.archive.reason` | string |  |  | enum: `ArchiveForeign`, `ArchiveCopy`, `ArchiveLegacy`, `ArchiveDescriptorMissing`, `ArchiveEncryptionMismatch`, `ArchiveKeyMismatch`, `ArchiveVersionUnsupported`, `ArchiveStoreUnsupported`, `ArchiveUnsafeHistory` |
+| `status.pitr.archive.state` | string | yes |  | enum: `AwaitingDescriptor`, `Verified`, `Refused` |
 | `status.pitr.archivedBytes` | integer (int64) |  |  |  |
 | `status.pitr.archivedFileCount` | integer (int32) |  |  |  |
 | `status.pitr.enabled` | boolean |  |  |  |
@@ -372,34 +378,100 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.pitr.newestArchivedTime` | string (date-time) |  |  |  |
 | `status.pitr.oldestArchivedTime` | string (date-time) |  |  |  |
 | `status.pitr.profileName` | string |  |  |  |
+| `status.pitrArchiveBindings` | []object |  |  | maxItems=16; listType=map keys=id |
+| `status.pitrArchiveBindings[].archiveID` | string |  |  | pattern=`^(ar1-[a-z2-7]{26})?$` |
+| `status.pitrArchiveBindings[].check` | object |  |  |  |
+| `status.pitrArchiveBindings[].check.jobName` | string | yes |  | minLength=1; maxLength=63 |
+| `status.pitrArchiveBindings[].check.jobUID` | string |  |  |  |
+| `status.pitrArchiveBindings[].destination` | string | yes |  | minLength=1; maxLength=4096 |
+| `status.pitrArchiveBindings[].encryption` | object | yes |  |  |
+| `status.pitrArchiveBindings[].encryption.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.pitrArchiveBindings[].encryption.keySecretName` | string |  |  | maxLength=253 |
+| `status.pitrArchiveBindings[].encryption.mode` | string | yes |  | enum: `None`, `Passphrase` |
+| `status.pitrArchiveBindings[].id` | string | yes |  | pattern=`^pab-[0-9a-f]{16}$` |
+| `status.pitrArchiveBindings[].lastTransitionTime` | string (date-time) |  |  |  |
+| `status.pitrArchiveBindings[].message` | string |  |  | maxLength=2048 |
+| `status.pitrArchiveBindings[].reason` | string | yes |  | enum: `Authenticating`, `Establishing`, `Bound`, `KeyMaterialLost`, `KeyMismatch`, `ArchiveForeign`, `ArchiveCopy`, `ArchiveLegacy`, `ArchiveDescriptorMissing`, `ArchiveNotFound`, `ArchiveEncryptionMismatch`, `ArchiveVersionUnsupported`, `ArchiveListFailed` |
+| `status.pitrArchiveBindings[].source` | object |  |  |  |
+| `status.pitrArchiveBindings[].source.name` | string | yes |  | maxLength=253 |
+| `status.pitrArchiveBindings[].source.namespace` | string | yes |  | maxLength=63 |
+| `status.pitrArchiveBindings[].source.uid` | string | yes |  |  |
+| `status.pitrArchiveBindings[].state` | string | yes |  | enum: `Pending`, `Bound`, `Refused` |
 | `status.plannedFailover` | object |  |  |  |
-| `status.plannedFailover.completionTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.admission` | object |  |  |  |
+| `status.plannedFailover.admission.deadlineTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.admission.deferReason` | string |  |  | enum: `CooldownActive`, `DeploymentHold` |
+| `status.plannedFailover.admission.retryTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.admission.waitReason` | string |  |  | enum: `ManagerAbsent`, `ManagerNotReady`, `ManagerRetiring`, `PredecessorBusy`, `AuthorityUnsettled`, `PeerUnreadable`, `TargetNotReady`, `PromotionInFlight`, `UpdateInFlight`, `RecoveryInFlight`, `BootstrapInFlight`, `RestoreInFlight`, `KeyringRotation`, `DragonflyUpgradeInFlight`, `ClaimHeld`, `StatusUnsettled` |
+| `status.plannedFailover.claimBaseline` | object |  |  |  |
+| `status.plannedFailover.claimBaseline.target` | string |  |  |  |
+| `status.plannedFailover.claimBaseline.time` | string (date-time) |  |  |  |
+| `status.plannedFailover.claimTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.dns` | object |  |  |  |
+| `status.plannedFailover.dns.attemptTime` | string (date-time) | yes |  |  |
+| `status.plannedFailover.dns.lastError` | string |  |  |  |
+| `status.plannedFailover.dns.state` | string | yes |  | enum: `Applied`, `Failed`, `Skipped` |
 | `status.plannedFailover.dragonfly` | object |  |  |  |
-| `status.plannedFailover.dragonfly.enabled` | boolean |  |  |  |
 | `status.plannedFailover.dragonfly.message` | string |  |  |  |
-| `status.plannedFailover.dragonfly.offsetCaptureFailed` | boolean |  |  |  |
-| `status.plannedFailover.dragonfly.promotionMethod` | string |  |  |  |
-| `status.plannedFailover.dragonfly.reason` | string |  |  |  |
-| `status.plannedFailover.dragonfly.sessionsPreserved` | boolean |  |  |  |
-| `status.plannedFailover.dragonfly.sourceOffsetAtDrain` | integer (int64) |  |  |  |
+| `status.plannedFailover.dragonfly.reason` | string |  |  | enum: `DragonflySyncTimeout`, `DragonflyPromotionFailed` |
+| `status.plannedFailover.dragonfly.sessions` | string |  |  | enum: `Preserved`, `Lost` |
+| `status.plannedFailover.dragonfly.sourceOffset` | integer (int64) |  |  |  |
+| `status.plannedFailover.dragonfly.sourceOffsetState` | string |  |  | enum: `Captured`, `Unavailable` |
 | `status.plannedFailover.dragonfly.syncWaitSeconds` | integer (int64) |  |  |  |
 | `status.plannedFailover.dragonfly.syncWaitStartTime` | string (date-time) |  |  |  |
-| `status.plannedFailover.dragonfly.targetOffsetAtPromotion` | integer (int64) |  |  |  |
-| `status.plannedFailover.drainStartTime` | string (date-time) |  |  |  |
-| `status.plannedFailover.drainTimeout` | string |  |  |  |
-| `status.plannedFailover.durationSeconds` | integer (int64) |  |  |  |
-| `status.plannedFailover.lagWaitStartTime` | string (date-time) |  |  |  |
-| `status.plannedFailover.maxLagWait` | string |  |  |  |
+| `status.plannedFailover.dragonfly.takeover` | object |  |  |  |
+| `status.plannedFailover.dragonfly.takeover.completionTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.dragonfly.takeover.intentTime` | string (date-time) | yes |  |  |
+| `status.plannedFailover.dragonfly.takeover.method` | string |  |  | enum: `ReplTakeover`, `ReplicaOfNoOne`, `Skipped` |
+| `status.plannedFailover.dragonfly.takeover.state` | string | yes |  | enum: `Intended`, `Succeeded`, `Failed` |
+| `status.plannedFailover.dragonfly.takeover.targetOffset` | integer (int64) |  |  |  |
+| `status.plannedFailover.drain` | object |  |  |  |
+| `status.plannedFailover.drain.completionTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.drain.remainingConnections` | integer (int32) |  |  |  |
+| `status.plannedFailover.drain.startTime` | string (date-time) | yes |  |  |
+| `status.plannedFailover.fence` | object |  |  |  |
+| `status.plannedFailover.fence.applyTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.fence.gtidSet` | string |  |  |  |
+| `status.plannedFailover.fence.intentTime` | string (date-time) | yes |  |  |
+| `status.plannedFailover.fence.sourceServerUUID` | string | yes |  | minLength=1 |
+| `status.plannedFailover.fence.state` | string | yes |  | enum: `Intended`, `Applied` |
+| `status.plannedFailover.lagWait` | object |  |  |  |
+| `status.plannedFailover.lagWait.catchUpTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.lagWait.startTime` | string (date-time) | yes |  |  |
 | `status.plannedFailover.message` | string |  |  |  |
-| `status.plannedFailover.phase` | string |  |  | enum: ``, `Pending`, `Deferred`, `Validating`, `Draining`, `WaitingForLag`, `WaitingForDragonflySync`, `PromotingDragonfly`, `Promoting`, `Resuming`, `Succeeded`, `Failed` |
-| `status.plannedFailover.reason` | string |  |  |  |
-| `status.plannedFailover.retryAfter` | string (date-time) |  |  |  |
-| `status.plannedFailover.sourceGtidAtFence` | string |  |  |  |
-| `status.plannedFailover.sourcePrimary` | string |  |  |  |
+| `status.plannedFailover.phase` | string |  |  | enum: `Admitting`, `Deferred`, `Fencing`, `Draining`, `WaitingForLag`, `WaitingForDragonflySync`, `PromotingDragonfly`, `Promoting`, `Publishing`, `RollingBack`, `Succeeded`, `Failed` |
+| `status.plannedFailover.promotion` | object |  |  |  |
+| `status.plannedFailover.promotion.confirmationTime` | string (date-time) |  |  |  |
+| `status.plannedFailover.promotion.intentTime` | string (date-time) | yes |  |  |
+| `status.plannedFailover.promotion.state` | string | yes |  | enum: `Intended`, `Confirmed` |
+| `status.plannedFailover.promotion.targetServerUUID` | string | yes |  | minLength=1 |
+| `status.plannedFailover.promotion.warnings` | []string |  |  | listType=set; items enum: `DNSUpdateFailed`, `DragonflySessionsLost`, `TargetReplicationNotRestored`, `UnreachablePeers`, `FenceNotAttributable`, `StatusStalled`, `SourceReplaced`, `TargetSuperReadOnlyNotRestored` |
+| `status.plannedFailover.result` | object |  |  |  |
+| `status.plannedFailover.result.completionTime` | string (date-time) | yes |  |  |
+| `status.plannedFailover.result.outcome` | string | yes |  | enum: `Succeeded`, `NotStarted`, `RolledBack`, `SourceLeftFenced`, `PromotedUnconfirmed`, `ManualRecoveryRequired` |
+| `status.plannedFailover.result.reason` | string |  |  | enum: `InvalidAnnotation`, `UnknownSite`, `TargetNotPromotable`, `AlreadyActive`, `TargetUnhealthy`, `DivergentTarget`, `KeyringRotation`, `CooldownActive`, `ConcurrentOperation`, `InvalidFailoverState`, `Canceled`, `AdmissionTimeout`, `AuthorityChanged`, `LegacyRunRefused`, `FenceFailed`, `SourceLost`, `SourceUnfenced`, `TargetLost`, `ForeignWritable`, `PeerUnreadable`, `LagTimeout`, `InvalidGTID`, `DragonflySyncTimeout`, `DragonflyPromotionFailed`, `TargetChanged`, `PromotionAborted`, `PromotionUnconfirmed`, `ManagerUnavailable`, `StatusStalled`, `ManualRecoveryPending`, `ExecuteFailed`, `InternalError` |
+| `status.plannedFailover.result.warnings` | []string |  |  | listType=set; items enum: `DNSUpdateFailed`, `DragonflySessionsLost`, `TargetReplicationNotRestored`, `UnreachablePeers`, `FenceNotAttributable`, `StatusStalled`, `SourceReplaced`, `TargetSuperReadOnlyNotRestored` |
+| `status.plannedFailover.revision` | integer (int64) |  |  | minimum=1 |
+| `status.plannedFailover.rollback` | object |  |  |  |
+| `status.plannedFailover.rollback.intentTime` | string (date-time) | yes |  |  |
+| `status.plannedFailover.rollback.reason` | string | yes |  | enum: `InvalidAnnotation`, `UnknownSite`, `TargetNotPromotable`, `AlreadyActive`, `TargetUnhealthy`, `DivergentTarget`, `KeyringRotation`, `CooldownActive`, `ConcurrentOperation`, `InvalidFailoverState`, `Canceled`, `AdmissionTimeout`, `AuthorityChanged`, `LegacyRunRefused`, `FenceFailed`, `SourceLost`, `SourceUnfenced`, `TargetLost`, `ForeignWritable`, `PeerUnreadable`, `LagTimeout`, `InvalidGTID`, `DragonflySyncTimeout`, `DragonflyPromotionFailed`, `TargetChanged`, `PromotionAborted`, `PromotionUnconfirmed`, `ManagerUnavailable`, `StatusStalled`, `ManualRecoveryPending`, `ExecuteFailed`, `InternalError` |
+| `status.plannedFailover.runID` | string |  |  | minLength=1 |
+| `status.plannedFailover.settings` | object |  |  |  |
+| `status.plannedFailover.settings.dragonfly` | object |  |  |  |
+| `status.plannedFailover.settings.dragonfly.maxSyncWait` | string | yes |  |  |
+| `status.plannedFailover.settings.dragonfly.onSyncTimeout` | string | yes |  | enum: `Proceed`, `Fail` |
+| `status.plannedFailover.settings.drainTimeout` | string | yes |  |  |
+| `status.plannedFailover.settings.maxLagWait` | string | yes |  |  |
+| `status.plannedFailover.sourceSite` | string |  |  |  |
 | `status.plannedFailover.startTime` | string (date-time) |  |  |  |
-| `status.plannedFailover.target` | string |  |  |  |
-| `status.plannedFailover.targetGtidAtPromotion` | string |  |  |  |
-| `status.plannedFailover.transactionsLost` | integer (int64) |  |  |  |
+| `status.plannedFailover.targetSite` | string |  |  | minLength=1 |
+| `status.plannedFailoverHold` | object |  |  |  |
+| `status.plannedFailoverHold.ambiguousSites` | []string |  |  | maxItems=16; listType=set |
+| `status.plannedFailoverHold.holdTime` | string (date-time) | yes |  |  |
+| `status.plannedFailoverHold.reason` | string |  |  | enum: `InvalidAnnotation`, `UnknownSite`, `TargetNotPromotable`, `AlreadyActive`, `TargetUnhealthy`, `DivergentTarget`, `KeyringRotation`, `CooldownActive`, `ConcurrentOperation`, `InvalidFailoverState`, `Canceled`, `AdmissionTimeout`, `AuthorityChanged`, `LegacyRunRefused`, `FenceFailed`, `SourceLost`, `SourceUnfenced`, `TargetLost`, `ForeignWritable`, `PeerUnreadable`, `LagTimeout`, `InvalidGTID`, `DragonflySyncTimeout`, `DragonflyPromotionFailed`, `TargetChanged`, `PromotionAborted`, `PromotionUnconfirmed`, `ManagerUnavailable`, `StatusStalled`, `ManualRecoveryPending`, `ExecuteFailed`, `InternalError` |
+| `status.plannedFailoverHold.runID` | string | yes |  | minLength=1; maxLength=63 |
+| `status.plannedFailoverHold.sourceSite` | string |  |  |  |
+| `status.plannedFailoverHold.targetSite` | string |  |  |  |
 | `status.promotionGtidExecuted` | string |  |  |  |
 | `status.restore` | object |  |  |  |
 | `status.restore.completionTime` | string (date-time) |  |  |  |
@@ -407,13 +479,33 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restore.jobUID` | string |  |  |  |
 | `status.restore.message` | string |  |  |  |
 | `status.restore.phase` | string |  |  | enum: `Pending`, `Running`, `Succeeded`, `Failed` |
-| `status.restore.pitrCrossSiteUnverified` | boolean |  |  |  |
-| `status.restore.pitrNewestEventTime` | string |  |  |  |
-| `status.restore.pitrPartial` | boolean |  |  |  |
-| `status.restore.pitrReplaySites` | []string |  |  |  |
-| `status.restore.pitrReplayedBinlogCount` | integer (int32) |  |  |  |
-| `status.restore.pitrReplayedBinlogFile` | string |  |  |  |
-| `status.restore.pitrStopDatetime` | string |  |  |  |
+| `status.restore.pointInTime` | object |  |  |  |
+| `status.restore.pointInTime.archive` | object |  |  |  |
+| `status.restore.pointInTime.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.restore.pointInTime.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
+| `status.restore.pointInTime.archive.destination` | string |  |  | maxLength=4096 |
+| `status.restore.pointInTime.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
+| `status.restore.pointInTime.archive.source` | object | yes |  |  |
+| `status.restore.pointInTime.archive.source.name` | string | yes |  | maxLength=253 |
+| `status.restore.pointInTime.archive.source.namespace` | string | yes |  | maxLength=63 |
+| `status.restore.pointInTime.archive.source.uid` | string | yes |  |  |
+| `status.restore.pointInTime.excludedDivergentTransactionCount` | integer (int64) |  |  |  |
+| `status.restore.pointInTime.gtidExecuted` | string |  |  | maxLength=2048 |
+| `status.restore.pointInTime.gtidExecutedSHA256` | string |  |  | pattern=`^([0-9a-f]{64})?$` |
+| `status.restore.pointInTime.lastReplayedBinlog` | object |  |  |  |
+| `status.restore.pointInTime.lastReplayedBinlog.name` | string | yes |  | maxLength=255 |
+| `status.restore.pointInTime.lastReplayedBinlog.site` | string | yes |  | maxLength=63; pattern=`^[a-z0-9-]+$` |
+| `status.restore.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
+| `status.restore.pointInTime.newestReplayedCommitTime` | string (date-time) |  |  |  |
+| `status.restore.pointInTime.onHistoryExclusionCount` | integer (int64) |  |  |  |
+| `status.restore.pointInTime.onHistoryExclusions` | string |  |  | maxLength=2048 |
+| `status.restore.pointInTime.outcome` | string | yes |  | enum: `TargetCovered`, `Partial`, `ArchiveHead` |
+| `status.restore.pointInTime.replaySites` | []string |  |  | maxItems=16; listType=atomic; items maxLength=63; items pattern=`^[a-z0-9-]+$` |
+| `status.restore.pointInTime.replaySitesOmitted` | integer (int32) |  |  | minimum=0 |
+| `status.restore.pointInTime.replayedBinlogCount` | integer (int32) |  |  |  |
+| `status.restore.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
+| `status.restore.pointInTime.segmentCount` | integer (int32) |  |  |  |
+| `status.restore.pointInTime.stopTime` | string (date-time) |  |  |  |
 | `status.restore.reason` | string |  |  |  |
 | `status.restore.sourceBinlogFile` | string |  |  |  |
 | `status.restore.sourceBinlogPos` | integer (int64) |  |  |  |
@@ -431,9 +523,33 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restoreInPlace.jobName` | string |  |  |  |
 | `status.restoreInPlace.message` | string |  |  |  |
 | `status.restoreInPlace.phase` | string |  |  | enum: ``, `Preflight`, `Fencing`, `Restoring`, `Resuming`, `Succeeded`, `Failed` |
-| `status.restoreInPlace.pitrReplayedBinlogCount` | integer (int32) |  |  |  |
-| `status.restoreInPlace.pitrReplayedBinlogFile` | string |  |  |  |
-| `status.restoreInPlace.pitrStopDatetime` | string |  |  |  |
+| `status.restoreInPlace.pointInTime` | object |  |  |  |
+| `status.restoreInPlace.pointInTime.archive` | object |  |  |  |
+| `status.restoreInPlace.pointInTime.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.restoreInPlace.pointInTime.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
+| `status.restoreInPlace.pointInTime.archive.destination` | string |  |  | maxLength=4096 |
+| `status.restoreInPlace.pointInTime.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
+| `status.restoreInPlace.pointInTime.archive.source` | object | yes |  |  |
+| `status.restoreInPlace.pointInTime.archive.source.name` | string | yes |  | maxLength=253 |
+| `status.restoreInPlace.pointInTime.archive.source.namespace` | string | yes |  | maxLength=63 |
+| `status.restoreInPlace.pointInTime.archive.source.uid` | string | yes |  |  |
+| `status.restoreInPlace.pointInTime.excludedDivergentTransactionCount` | integer (int64) |  |  |  |
+| `status.restoreInPlace.pointInTime.gtidExecuted` | string |  |  | maxLength=2048 |
+| `status.restoreInPlace.pointInTime.gtidExecutedSHA256` | string |  |  | pattern=`^([0-9a-f]{64})?$` |
+| `status.restoreInPlace.pointInTime.lastReplayedBinlog` | object |  |  |  |
+| `status.restoreInPlace.pointInTime.lastReplayedBinlog.name` | string | yes |  | maxLength=255 |
+| `status.restoreInPlace.pointInTime.lastReplayedBinlog.site` | string | yes |  | maxLength=63; pattern=`^[a-z0-9-]+$` |
+| `status.restoreInPlace.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
+| `status.restoreInPlace.pointInTime.newestReplayedCommitTime` | string (date-time) |  |  |  |
+| `status.restoreInPlace.pointInTime.onHistoryExclusionCount` | integer (int64) |  |  |  |
+| `status.restoreInPlace.pointInTime.onHistoryExclusions` | string |  |  | maxLength=2048 |
+| `status.restoreInPlace.pointInTime.outcome` | string | yes |  | enum: `TargetCovered`, `Partial`, `ArchiveHead` |
+| `status.restoreInPlace.pointInTime.replaySites` | []string |  |  | maxItems=16; listType=atomic; items maxLength=63; items pattern=`^[a-z0-9-]+$` |
+| `status.restoreInPlace.pointInTime.replaySitesOmitted` | integer (int32) |  |  | minimum=0 |
+| `status.restoreInPlace.pointInTime.replayedBinlogCount` | integer (int32) |  |  |  |
+| `status.restoreInPlace.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
+| `status.restoreInPlace.pointInTime.segmentCount` | integer (int32) |  |  |  |
+| `status.restoreInPlace.pointInTime.stopTime` | string (date-time) |  |  |  |
 | `status.restoreInPlace.runConfirm` | string |  |  |  |
 | `status.restoreInPlace.runID` | string |  |  |  |
 | `status.restoreInPlace.scope` | string |  |  |  |
@@ -490,6 +606,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - Scope: Namespaced; plural `mysqlbackups`; shortNames: none; categories: none
 - Versions: v1alpha1 (storage); subresources: status
 - Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Started (`.status.startTime`), Completed (`.status.completionTime`), Location (`.status.location`), Size (`.status.size`), Age (`.metadata.creationTimestamp`)
+- Root CEL: `!self.metadata.name.endsWith('.bloodraven-backup.json')`
 - Root CEL: `!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location) || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage == oldSelf.status.artifactStorage)`
 
 ### MysqlBackup `spec` (5 fields)
@@ -503,7 +620,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.triggeredBy` | string |  |  |  |
 
 
-### MysqlBackup `status` (26 fields)
+### MysqlBackup `status` (31 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -513,6 +630,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.artifactStorage.claimName` | string |  |  |  |
 | `status.artifactStorage.endpointURL` | string |  |  |  |
 | `status.artifactStorage.location` | string |  |  |  |
+| `status.artifactStorage.passphraseSecret` | object |  |  |  |
+| `status.artifactStorage.passphraseSecret.key` | string | yes |  | minLength=1 |
+| `status.artifactStorage.passphraseSecret.name` | string | yes |  | minLength=1 |
 | `status.artifactStorage.region` | string |  |  |  |
 | `status.attempt` | integer (int32) |  |  |  |
 | `status.binlogFile` | string |  |  |  |
@@ -521,6 +641,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.conditions` | []metav1.Condition |  |  |  |
 | `status.encrypted` | boolean |  |  |  |
 | `status.encryptionAlgorithm` | string |  |  |  |
+| `status.failoverGroupUID` | string |  |  |  |
 | `status.gtidExecuted` | string |  |  |  |
 | `status.jobName` | string |  |  |  |
 | `status.location` | string |  |  |  |
@@ -528,6 +649,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.mysqlImage` | string |  |  |  |
 | `status.observedGeneration` | integer (int64) |  |  |  |
 | `status.phase` | string |  |  | enum: `Pending`, `Running`, `Succeeded`, `Failed` |
+| `status.pitrArchiveID` | string |  |  | pattern=`^(ar1-[a-z2-7]{26})?$` |
 | `status.size` | string |  |  |  |
 | `status.sizeBytes` | integer (int64) |  |  |  |
 | `status.sourceSite` | string |  |  |  |
@@ -540,7 +662,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - Versions: v1alpha1 (storage); subresources: status
 - Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Backup (`.status.backupRef.name`), Started (`.status.startTime`), Completed (`.status.completionTime`), Age (`.metadata.creationTimestamp`)
 
-### MysqlBackupVerification `spec` (21 fields)
+### MysqlBackupVerification `spec` (22 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -550,9 +672,10 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.failoverGroupRef.name` | string | yes |  | minLength=1 |
 | `spec.keepOnFailure` | boolean |  | `true` |  |
 | `spec.pointInTime` | object |  |  |  |
+| `spec.pointInTime.archiveProfileName` | string |  |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `spec.pointInTime.excludeGtids` | string |  |  | maxLength=131072 |
 | `spec.pointInTime.mode` | string |  | `"none"` | enum: `none`, `latest`, `timestamp` |
-| `spec.pointInTime.sites` | []string |  |  | listType=set; items minLength=1; items maxLength=253; items pattern=`^[a-z0-9-]+$` |
-| `spec.pointInTime.timestamp` | string |  |  |  |
+| `spec.pointInTime.timestamp` | string |  |  | maxLength=40; pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z\|[+-]([01][0-9]\|2[0-3]):[0-5][0-9])?$` |
 | `spec.profileName` | string | yes |  | minLength=1 |
 | `spec.resources` | corev1.ResourceRequirements |  |  |  |
 | `spec.sanityCheck` | object |  |  |  |
@@ -567,7 +690,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.ttlSecondsAfterFinished` | integer (int32) |  | `0` | minimum=0 |
 
 
-### MysqlBackupVerification `status` (25 fields)
+### MysqlBackupVerification `status` (52 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -584,6 +707,33 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.observedGeneration` | integer (int64) |  |  |  |
 | `status.phase` | string |  |  | enum: `Pending`, `Provisioning`, `Restoring`, `Checking`, `Cleaning`, `Succeeded`, `Failed` |
 | `status.podName` | string |  |  |  |
+| `status.pointInTime` | object |  |  |  |
+| `status.pointInTime.archive` | object |  |  |  |
+| `status.pointInTime.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.pointInTime.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
+| `status.pointInTime.archive.destination` | string |  |  | maxLength=4096 |
+| `status.pointInTime.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
+| `status.pointInTime.archive.source` | object | yes |  |  |
+| `status.pointInTime.archive.source.name` | string | yes |  | maxLength=253 |
+| `status.pointInTime.archive.source.namespace` | string | yes |  | maxLength=63 |
+| `status.pointInTime.archive.source.uid` | string | yes |  |  |
+| `status.pointInTime.excludedDivergentTransactionCount` | integer (int64) |  |  |  |
+| `status.pointInTime.gtidExecuted` | string |  |  | maxLength=2048 |
+| `status.pointInTime.gtidExecutedSHA256` | string |  |  | pattern=`^([0-9a-f]{64})?$` |
+| `status.pointInTime.lastReplayedBinlog` | object |  |  |  |
+| `status.pointInTime.lastReplayedBinlog.name` | string | yes |  | maxLength=255 |
+| `status.pointInTime.lastReplayedBinlog.site` | string | yes |  | maxLength=63; pattern=`^[a-z0-9-]+$` |
+| `status.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
+| `status.pointInTime.newestReplayedCommitTime` | string (date-time) |  |  |  |
+| `status.pointInTime.onHistoryExclusionCount` | integer (int64) |  |  |  |
+| `status.pointInTime.onHistoryExclusions` | string |  |  | maxLength=2048 |
+| `status.pointInTime.outcome` | string | yes |  | enum: `TargetCovered`, `Partial`, `ArchiveHead` |
+| `status.pointInTime.replaySites` | []string |  |  | maxItems=16; listType=atomic; items maxLength=63; items pattern=`^[a-z0-9-]+$` |
+| `status.pointInTime.replaySitesOmitted` | integer (int32) |  |  | minimum=0 |
+| `status.pointInTime.replayedBinlogCount` | integer (int32) |  |  |  |
+| `status.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
+| `status.pointInTime.segmentCount` | integer (int32) |  |  |  |
+| `status.pointInTime.stopTime` | string (date-time) |  |  |  |
 | `status.pvcName` | string |  |  |  |
 | `status.replayedThroughBinlog` | object |  |  |  |
 | `status.replayedThroughBinlog.file` | string |  |  |  |
@@ -677,22 +827,22 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.source.cluster` | string |  |  |  |
 | `spec.source.decryption` | object |  |  |  |
 | `spec.source.decryption.passphraseSecret` | object | yes |  |  |
-| `spec.source.decryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1 |
-| `spec.source.decryption.passphraseSecret.name` | string | yes |  | minLength=1 |
+| `spec.source.decryption.passphraseSecret.key` | string |  | `"passphrase"` | minLength=1; maxLength=253 |
+| `spec.source.decryption.passphraseSecret.name` | string | yes |  | minLength=1; maxLength=253 |
 | `spec.source.failoverGroupName` | string | yes |  | minLength=1 |
 | `spec.source.namespace` | string |  |  |  |
 | `spec.source.profileName` | string | yes |  | minLength=1 |
 | `spec.source.storage` | object | yes |  | CEL: `(self.type == 'S3' && has(self.s3) && !has(self.pvc)) \|\| (self.type == 'PVC' && has(self.pvc) && !has(self.s3))` |
 | `spec.source.storage.pvc` | object |  |  |  |
-| `spec.source.storage.pvc.claimName` | string |  |  |  |
+| `spec.source.storage.pvc.claimName` | string |  |  | maxLength=253; CEL: `bytes(self).size() <= 253` |
 | `spec.source.storage.pvc.size` | int-or-string |  |  | pattern=`^(\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$` |
 | `spec.source.storage.pvc.storageClassName` | string |  |  |  |
-| `spec.source.storage.pvc.subPath` | string |  |  | pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$` |
+| `spec.source.storage.pvc.subPath` | string |  |  | maxLength=512; pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.source.storage.s3` | object |  |  |  |
-| `spec.source.storage.s3.bucket` | string | yes |  | minLength=1 |
+| `spec.source.storage.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
 | `spec.source.storage.s3.credentialsSecret` | string | yes |  | minLength=1 |
-| `spec.source.storage.s3.endpointURL` | string |  |  | pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$` |
-| `spec.source.storage.s3.prefix` | string |  |  |  |
+| `spec.source.storage.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
+| `spec.source.storage.s3.prefix` | string |  |  | maxLength=512; pattern=`^/?(([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*)?/?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.source.storage.s3.region` | string |  |  |  |
 | `spec.source.storage.s3.storageClass` | string |  |  |  |
 | `spec.source.storage.type` | string | yes |  | enum: `S3`, `PVC` |
@@ -702,7 +852,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.transport` | string |  | `"ObjectStore"` | enum: `ObjectStore`, `Network` |
 
 
-### MysqlStandbyCluster `status` (41 fields)
+### MysqlStandbyCluster `status` (48 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -713,8 +863,6 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.activation.durationSeconds` | integer (int64) |  |  |  |
 | `status.activation.message` | string |  |  |  |
 | `status.activation.phase` | string |  |  | enum: ``, `Validating`, `Restoring`, `Replaying`, `Provisioning`, `Activated`, `Failed` |
-| `status.activation.pitrReplayedBinlogCount` | integer (int32) |  |  |  |
-| `status.activation.pitrStopDatetime` | string |  |  |  |
 | `status.activation.reason` | string |  |  |  |
 | `status.activation.sourceDumpLocation` | string |  |  |  |
 | `status.activation.sourceDumpName` | string |  |  |  |
@@ -723,6 +871,15 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.activation.targetGtidExecuted` | string |  |  |  |
 | `status.conditions` | []metav1.Condition |  |  |  |
 | `status.discovered` | object |  |  |  |
+| `status.discovered.archive` | object |  |  |  |
+| `status.discovered.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.discovered.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
+| `status.discovered.archive.destination` | string |  |  | maxLength=4096 |
+| `status.discovered.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
+| `status.discovered.archive.source` | object | yes |  |  |
+| `status.discovered.archive.source.name` | string | yes |  | maxLength=253 |
+| `status.discovered.archive.source.namespace` | string | yes |  | maxLength=63 |
+| `status.discovered.archive.source.uid` | string | yes |  |  |
 | `status.discovered.archivedBinlogBytes` | integer (int64) |  |  |  |
 | `status.discovered.archivedBinlogCount` | integer (int32) |  |  |  |
 | `status.discovered.dumpCompletionTime` | string (date-time) |  |  |  |
