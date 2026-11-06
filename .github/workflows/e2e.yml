@@ -57,6 +57,7 @@ jobs:
     needs: images
     uses: ./.github/workflows/_e2e.yml
     with:
+      label: encryption
       # Ordered least- to most-destructive: 48 and 50 leave the cluster
       # healthy, 52 holds the primary down mid-rotation, 51 rebuilds the
       # replica datadir. Together they are the minimum set from
@@ -75,6 +76,7 @@ jobs:
     needs: images
     uses: ./.github/workflows/_e2e.yml
     with:
+      label: planned-failover
       # Ordered least- to most-destructive: switchovers and rollbacks first,
       # the operator restarts next, then 64 (holds the primary down), 23 (an
       # emergency failover plus restart) and 53 (lease expiry) last.

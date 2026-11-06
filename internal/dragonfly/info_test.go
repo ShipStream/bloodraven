@@ -143,3 +143,14 @@ func TestParseInfoPersistence(t *testing.T) {
 		})
 	}
 }
+
+func TestParseInfoServer(t *testing.T) {
+	body := "# Server\r\nredis_version:7.4.0\r\ndragonfly_version:df-v1.27.0\r\nrun_id:1a2b3c\r\nuptime_in_seconds:4242\r\n"
+	got := ParseInfoServer(body)
+	if got.RunID != "1a2b3c" || got.UptimeSeconds != 4242 {
+		t.Fatalf("ParseInfoServer = %+v", got)
+	}
+	if got := ParseInfoServer("# Server\r\nrun_id:x\r\n"); got.UptimeSeconds != -1 {
+		t.Fatalf("missing uptime = %d, want -1", got.UptimeSeconds)
+	}
+}

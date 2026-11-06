@@ -260,6 +260,7 @@ var (
 		v1alpha1.PlannedFailoverWarningFenceNotAttributable,
 		v1alpha1.PlannedFailoverWarningStatusStalled,
 		v1alpha1.PlannedFailoverWarningSourceReplaced,
+		v1alpha1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored,
 	}
 	plannedFailoverReasons = []v1alpha1.PlannedFailoverReason{
 		v1alpha1.PlannedFailoverReasonInvalidAnnotation,

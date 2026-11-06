@@ -600,7 +600,7 @@ func (r *MysqlFailoverGroupReconciler) advanceEscrowedSite(
 	site.UnsealReason = ""
 	site.UnsealedSince = nil
 	site.Message = fmt.Sprintf("sealed against %s", site.KeyringSecret)
-	applyCoverage(site, live)
+	applyCoverage(site, live, r.encryptionNow())
 	return false, nil
 }
 
@@ -644,7 +644,7 @@ func (r *MysqlFailoverGroupReconciler) verifySealedSite(
 	// is strong enough to bring a Failed site back to Sealed.
 	confirmed := false
 	if live, err := fetch(ctx, fg, site.Name); err == nil && live.Enabled {
-		applyCoverage(site, live)
+		applyCoverage(site, live, r.encryptionNow())
 		if live.Component != nil && !live.Component.ReadOnly {
 			site.Phase = v1alpha1.KeyringPhaseFailed
 			site.Message = "MySQL reports a writable keyring on a site the operator considers sealed"
@@ -958,11 +958,19 @@ func alignSiteEncryptionStatus(existing []v1alpha1.SiteEncryptionStatus, names [
 	return out
 }
 
-func applyCoverage(site *v1alpha1.SiteEncryptionStatus, live *mysql.KeyringStatus) {
+// encryptionNow is the time stamped on encryption status (the coverage
+// check time): encryptionClock when a test sets one, else the wall clock.
+func (r *MysqlFailoverGroupReconciler) encryptionNow() metav1.Time {
+	if r.encryptionClock != nil {
+		return metav1.NewTime(r.encryptionClock.Now())
+	}
+	return metav1.Now()
+}
+
+func applyCoverage(site *v1alpha1.SiteEncryptionStatus, live *mysql.KeyringStatus, now metav1.Time) {
 	if live == nil || (live.Component == nil && live.Coverage == nil) {
 		return
 	}
-	now := metav1.Now()
 	cov := site.Coverage
 	if cov == nil {
 		cov = &v1alpha1.SiteEncryptionCoverage{}

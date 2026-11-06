@@ -42,7 +42,24 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Cont
 	if !plannedFailoverPassDue(fg) && !r.plannedClaimHeld(nn) {
 		return 0, nil
 	}
-	return r.plannedFailoverEngine().Step(ctx, nn)
+	return plannedStepResult(ctx, nn)(r.plannedFailoverEngine().Step(ctx, nn))
+}
+
+// plannedStepResult keeps the engine's own retry interval (I002). A pass
+// that failed transiently (its uncached load, a facade error) and asked for
+// a bounded requeue is logged and requeued on that interval; returning the
+// error instead would hand the retry to the controller's exponential
+// backoff, which can delay a fenced run's deadlines and its stall marker
+// far past their budgets. An error with no requeue is returned as before.
+func plannedStepResult(ctx context.Context, nn types.NamespacedName) func(time.Duration, error) (time.Duration, error) {
+	return func(d time.Duration, err error) (time.Duration, error) {
+		if err == nil || d <= 0 {
+			return d, err
+		}
+		log.FromContext(ctx).Error(err, "planned failover: pass failed; retrying on the planned-failover cadence",
+			"fg", nn.String(), "requeueAfter", d.String())
+		return d, nil
+	}
 }
 
 // reconcilePlannedFailoverInFlight runs one engine pass for a reconcile
@@ -54,7 +71,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailoverInFlight(ctx cont
 	if !plannedFailoverInFlightDue(fg) && !r.plannedClaimHeld(nn) {
 		return 0, false, nil
 	}
-	d, err := r.plannedFailoverEngine().step(ctx, nn, false)
+	d, err := plannedStepResult(ctx, nn)(r.plannedFailoverEngine().step(ctx, nn, false))
 	return d, true, err
 }
 
@@ -224,7 +241,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverEngine() *PlannedFailoverE
 		}
 		e := NewPlannedFailoverEngine(newAPIPlannedFailoverStore(r.Client, r.APIReader, clk), topo,
 			reconcilerPlannedSink{r: r}, clk, SimHooks{})
-		e.dragonfly = reconcilerDragonflyOps{r: r}
+		e.dragonfly = reconcilerDragonflyOps{r: r, clk: clk}
 		e.admission = leaseAdmissionGuard{r: r}
 		r.plannedEngine = e
 	})

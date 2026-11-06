@@ -143,6 +143,9 @@ type MysqlFailoverGroupReconciler struct {
 	PlannedTopology PlannedFailoverTopology
 	// plannedClock overrides the planned-failover engine's clock (tests).
 	plannedClock clock.Clock
+	// encryptionClock overrides the clock stamped on encryption status
+	// (tests that compare status writes byte for byte across passes).
+	encryptionClock clock.Clock
 	// plannedEngine is built on first use (plannedFailoverEngine) and kept:
 	// its memo of what this process sent must survive between passes.
 	plannedEngineOnce sync.Once

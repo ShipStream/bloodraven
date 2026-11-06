@@ -183,17 +183,31 @@ func TestRollDragonflyReplicaStatefulSet_HoldsPlannedTarget(t *testing.T) {
 }
 
 // pfLostReplyConn is a target whose REPLTAKEOVER reply is lost: the server
-// promotes it (or not) and the client sees a transport error.
+// promotes it (or not) and the client sees a transport error. A promotion
+// exits the source process, as Dragonfly's REPLTAKEOVER does (source, when
+// set, restarts). restartEmpty instead models a target that did not take
+// over but restarted, coming back as an empty standalone master.
 type pfLostReplyConn struct {
 	*fakeDragonflyConn
-	promote   bool
-	takeovers *atomic.Int32
+	promote      bool
+	restartEmpty bool
+	source       *fakeDragonflyConn
+	takeovers    *atomic.Int32
 }
 
 func (c *pfLostReplyConn) ReplTakeover(context.Context, time.Duration) error {
 	c.takeovers.Add(1)
-	if c.promote {
+	switch {
+	case c.promote:
 		c.info.Role = "master"
+		if c.source != nil {
+			restarted := int64(0)
+			c.source.uptime = &restarted
+		}
+	case c.restartEmpty:
+		restarted := int64(0)
+		c.info = dragonfly.ReplicationInfo{Role: "master"}
+		c.uptime = &restarted
 	}
 	return io.ErrUnexpectedEOF
 }
@@ -205,11 +219,13 @@ func (c *pfLostReplyConn) ReplTakeover(context.Context, time.Duration) error {
 // definite failure.
 func TestPlannedFailoverDragonfly_LostTakeoverReply(t *testing.T) {
 	t.Run("target promoted", func(t *testing.T) {
-		fg := pfDFIntended("Fail", time.Now())
+		fg := pfDFIntended("Fail", time.Now().Add(-5*time.Second))
 		r, _, _ := pfDFReconciler(t, fg, makeDragonflyPod(fg.Name, "iad", "master", true), makeDragonflyPod(fg.Name, "pdx", "replica", true))
 		var n atomic.Int32
-		target := &pfLostReplyConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave"}}, promote: true, takeovers: &n}
-		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}})
+		source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+		target := &pfLostReplyConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave"}}, promote: true,
+			source: source, takeovers: &n}
+		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
 		pfDFTakeoverPasses(t, r, fgNN(fg))
 		pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
 		if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
@@ -241,12 +257,13 @@ func TestPlannedFailoverDragonfly_LostTakeoverReply(t *testing.T) {
 		}
 	})
 	t.Run("target unreadable afterwards", func(t *testing.T) {
-		fg := pfDFIntended("Fail", time.Now())
+		fg := pfDFIntended("Fail", time.Now().Add(-5*time.Second))
 		sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 		r, c, _ := pfDFReconciler(t, fg, sourcePod, makeDragonflyPod(fg.Name, "pdx", "replica", true))
 		var n atomic.Int32
-		target := &pfLostReplyConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave"}}, promote: true, takeovers: &n}
 		source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+		target := &pfLostReplyConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave"}}, promote: true,
+			source: source, takeovers: &n}
 		var targetBack atomic.Bool
 		r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
 			switch addr {
@@ -680,5 +697,144 @@ func TestPlannedFailoverDragonfly_NoReadOnlyMidFlight(t *testing.T) {
 	}
 	if pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover; pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
 		t.Fatalf("takeover = %+v", pf.Dragonfly.Takeover)
+	}
+}
+
+// Fix round 3 (K033 reopening K005): a REPLTAKEOVER whose reply is lost,
+// with the target then observed as role:master, is not a takeover when the
+// target's process started after the intent (it restarted as an empty
+// standalone master) and the source is still the master it was. Nor is a
+// later pass's "this process sent a REPLTAKEOVER" enough. Either way the
+// takeover fails per onSyncTimeout and the source keeps serving: not
+// demoted, CLIENT KILLed or deleted, and back in the active Service.
+func TestPlannedFailoverDragonfly_RestartedEmptyAfterLostReply(t *testing.T) {
+	t.Run("observed right after the lost reply", func(t *testing.T) {
+		fg := pfDFIntended("Fail", time.Now().Add(-5*time.Second))
+		sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
+		targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
+		r, c, _ := pfDFReconciler(t, fg, sourcePod, targetPod)
+		var n atomic.Int32
+		source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 500}}
+		target := &pfLostReplyConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave"}},
+			restartEmpty: true, takeovers: &n}
+		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
+		pfDFTakeoverPasses(t, r, fgNN(fg))
+		pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+		if pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed || pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack ||
+			!strings.Contains(pf.Dragonfly.Message, "empty standalone master") {
+			t.Fatalf("block = %s %+v %q, want the takeover Failed and a rollback (onSyncTimeout=Fail)", pf.Phase, pf.Dragonfly.Takeover, pf.Dragonfly.Message)
+		}
+		pfDFAssertSourceKept(t, c, source, sourcePod, targetPod)
+	})
+	t.Run("a later pass after a REPLTAKEOVER this process sent", func(t *testing.T) {
+		fg := pfDFIntended("Proceed", time.Now().Add(-5*time.Second))
+		sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
+		targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
+		r, c, _ := pfDFReconciler(t, fg, sourcePod, targetPod)
+		restarted := int64(1)
+		source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 500}}
+		target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}, uptime: &restarted}}
+		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
+		for _, sent := range []plannedTakeoverAttempt{plannedTakeoverMaybe, plannedTakeoverDone} {
+			r.plannedFailoverEngine().runMemo("run-1").dragonfly.attempt = sent
+			res, err := reconcilerDragonflyOps{r: r}.Takeover(context.Background(), fetchFG(t, r, fgNN(fg)),
+				fetchFG(t, r, fgNN(fg)).Status.PlannedFailover, plannedTakeoverFull, sent, nil)
+			if err != nil || res.Succeeded || res.Unresolved {
+				t.Fatalf("Takeover with prior %d over a restarted target = %+v, %v; want a failure", sent, res, err)
+			}
+		}
+		if target.takeovers != 0 {
+			t.Errorf("REPLTAKEOVER sent %d times to a target reporting master", target.takeovers)
+		}
+		pfDFAssertSourceKept(t, c, source, sourcePod, targetPod)
+	})
+	t.Run("unreadable incarnations leave it unresolved", func(t *testing.T) {
+		fg := pfDFIntended("Fail", time.Now().Add(-5*time.Second))
+		sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
+		r, c, _ := pfDFReconciler(t, fg, sourcePod, makeDragonflyPod(fg.Name, "pdx", "replica", true))
+		source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 500},
+			serverInfoErr: errors.New("INFO server failed")}
+		target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"},
+			serverInfoErr: errors.New("INFO server failed")}}
+		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
+		pfDFPass(t, r, fgNN(fg))
+		pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+		if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverIntended {
+			t.Fatalf("block = %s %+v, want the takeover still Intended", pf.Phase, pf.Dragonfly.Takeover)
+		}
+		if len(source.clientKillTypes) != 0 || pfDFPodGone(t, c, sourcePod) {
+			t.Error("source evicted or deleted on unproven evidence")
+		}
+	})
+}
+
+// pfDFAssertSourceKept checks the source was never demoted, evicted or
+// deleted and serves again, and the target was not made master.
+func pfDFAssertSourceKept(t *testing.T, c client.Client, source *fakeDragonflyConn, sourcePod, targetPod *corev1.Pod) {
+	t.Helper()
+	if len(source.clientKillTypes) != 0 || pfDFPodGone(t, c, sourcePod) {
+		t.Errorf("source evicted (CLIENT KILL %v) or deleted after a takeover that never happened", source.clientKillTypes)
+	}
+	if l := pfDFPodLabels(t, c, sourcePod); l[labelDragonflyRole] != "master" || l[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+		t.Errorf("source labels = %v, want it kept as the serving master", l)
+	}
+	if l := pfDFPodLabels(t, c, targetPod); l[labelDragonflyRole] == "master" {
+		t.Errorf("empty target relabelled master: %v", l)
+	}
+}
+
+// Fix round 3: the target's run_id recorded with the intent (when it was
+// last seen as a caught-up replica) decides a role:master target: the same
+// process was promoted during the run; another one restarted empty. The
+// sync step records both run_ids.
+func TestPlannedFailoverDragonfly_TakeoverEvidenceByRunID(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		targetRunID string
+		wantState   v1alpha1.DragonflyTakeoverState
+	}{
+		{"same process", "run-target-1", v1alpha1.DragonflyTakeoverSucceeded},
+		{"restarted process", "run-target-2", v1alpha1.DragonflyTakeoverFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := pfDFIntended("Proceed", time.Now())
+			fg.Status.PlannedFailover.Dragonfly.Takeover.TargetRunID = "run-target-1"
+			sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
+			targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
+			r, c, _ := pfDFReconciler(t, fg, sourcePod, targetPod)
+			// No other evidence either way: the source is still the same
+			// master process, the target's offset is below the capture.
+			source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 500}}
+			target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}, runID: tc.targetRunID}}
+			installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
+			pfDFTakeoverPasses(t, r, fgNN(fg))
+			pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
+			if pf.Dragonfly.Takeover.State != tc.wantState {
+				t.Fatalf("takeover = %+v %q, want %s", pf.Dragonfly.Takeover, pf.Dragonfly.Message, tc.wantState)
+			}
+			if tc.wantState == v1alpha1.DragonflyTakeoverFailed {
+				pfDFAssertSourceKept(t, c, source, sourcePod, targetPod)
+			}
+		})
+	}
+}
+
+// Fix round 3: the sync step records the source's run_id with the offset
+// and the target's with the takeover intent.
+func TestPlannedFailoverDragonfly_SyncRecordsRunIDs(t *testing.T) {
+	ctx := context.Background()
+	fg := plannedFailoverFGWithDragonfly("Proceed")
+	r, _, _ := pfDFReconciler(t, fg)
+	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}, runID: "run-source"}
+	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", SlaveReplOffset: 100, MasterLinkStatus: "up"}, runID: "run-target"}
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
+	ops := reconcilerDragonflyOps{r: r}
+	off, srcRun, err := ops.CaptureSourceOffset(ctx, fg, "iad")
+	if err != nil || off != 100 || srcRun != "run-source" {
+		t.Fatalf("CaptureSourceOffset = %d %q %v", off, srcRun, err)
+	}
+	ready, detail, tgtRun, err := ops.TargetSyncReady(ctx, fg, "pdx", 100)
+	if err != nil || !ready || tgtRun != "run-target" {
+		t.Fatalf("TargetSyncReady = %v %q %q %v", ready, detail, tgtRun, err)
 	}
 }

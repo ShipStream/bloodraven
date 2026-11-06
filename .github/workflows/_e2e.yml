@@ -28,6 +28,14 @@ on:
         required: false
         default: ""
         type: string
+      label:
+        description: >-
+          Optional short label for artifact names. A long scenario list
+          exceeds the 256-character artifact-name limit, so callers that
+          pass several scenarios set this.
+        required: false
+        type: string
+        default: ""
       enable-encryption:
         description: "Convert the default playground to TLS + encryption before running"
         required: false
@@ -187,7 +195,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ inputs.scenario != '' && inputs.scenario || inputs.profile }}-forensics
+          name: e2e-${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || inputs.profile) }}-forensics
           path: playground/chaos-results/
           retention-days: 30
 
@@ -202,7 +210,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ inputs.scenario != '' && inputs.scenario || inputs.profile }}-kind-logs
+          name: e2e-${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || inputs.profile) }}-kind-logs
           path: /tmp/kind-logs/
           retention-days: 14
         continue-on-error: true
@@ -211,7 +219,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ inputs.scenario != '' && inputs.scenario || inputs.profile }}-setup-logs
+          name: e2e-${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || inputs.profile) }}-setup-logs
           path: |
             playground/setup.log
             playground/enable-encryption.log

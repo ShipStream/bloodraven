@@ -1429,9 +1429,24 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 				return res, nil
 			}
 		}
-		// Best effort: the source already serves writes, so the outcome is
-		// RolledBack either way.
-		_ = tm.refencePlannedTarget(ctx, p, ref, tgt, &live, liveErr)
+		// The target goes back behind super_read_only before the rollback
+		// completes: at read_only=ON, super_read_only=OFF it would accept
+		// SUPER writes beside the writable source. A failed re-fence is
+		// retried until just before the rollback deadline; then the run
+		// ends RolledBack (the source does serve writes) saying so, and
+		// the target's channel is left alone.
+		if err := tm.refencePlannedTarget(ctx, p, ref, tgt, &live, liveErr); err != nil {
+			if plannedClaimError(err) {
+				return RollbackResult{}, err
+			}
+			if deadline.IsZero() || tm.clock.Now().Add(plannedRequeuePoll).Before(deadline) {
+				return res, nil
+			}
+			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored,
+				v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored)
+			res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
+			return res, nil
+		}
 		verified := p.fenceAttribution(ref.RunID, pf.Fence, id.uuid) != FenceUnattributed
 		if !verified && pf.Fence != nil && pf.Fence.SourceServerUUID != "" {
 			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
@@ -1523,6 +1538,12 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	}
 	res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
 	return res, nil
+}
+
+// plannedClaimError reports whether err is one of the facade's "nothing
+// was sent: the claim or leadership is gone" sentinels.
+func plannedClaimError(err error) bool {
+	return errors.Is(err, errClaimLost) || errors.Is(err, errLeaderLost) || errors.Is(err, errReproveRequired)
 }
 
 // refencePlannedTarget puts a read-only target back behind
@@ -1793,6 +1814,16 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 	if err != nil {
 		return PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonInvalidGTID}, nil
 	}
+	if !tgt.isPromotable() {
+		// The manager's configuration is the current spec: a claim that
+		// survived a manager replacement (a role change restarts the
+		// manager) is not re-proven, so the target's role is checked here
+		// before any statement, and again at the pre-write gate.
+		tm.logger.Warn("planned failover: the target is no longer a primary candidate; not promoting it",
+			"runId", ref.RunID, "site", ref.Target, "role", string(tgt.role))
+		return PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonTargetNotPromotable,
+			TargetServerUUID: U, TargetReachable: true, MayHaveWritten: !p.memoProvesNoWrite(ref.RunID)}, nil
+	}
 	tm.beginPlannedPromotion()
 	defer tm.finishDeploymentTopologyChange()
 
@@ -1973,6 +2004,11 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 		tm.logger.Warn("planned failover: pre-write gate refused", "runId", ref.RunID, "reason", string(reason), "sites", sites)
 		return &plannedGateRefusal{out: PromoteOutcome{Kind: kind, Reason: reason, Terminal: terminal, TargetServerUUID: U,
 			TargetReachable: true, MayHaveWritten: wasWritable, Sites: slices.Clone(sites)}}
+	}
+	// The target's role, per the manager's current configuration, right
+	// before the write (I001): nothing has been written by this attempt.
+	if tgt := tm.getSite(ref.Target); tgt == nil || !tgt.isPromotable() {
+		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonTargetNotPromotable, "", []string{ref.Target})
 	}
 	// 2. The target, on the session that will be written.
 	live, err := readPromotionLive(ctx, sess)
