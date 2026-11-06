@@ -84,7 +84,9 @@ leftmost, caller-controlled value.
 `make test-license-roundtrip` signs a throwaway token in Node and verifies
 it with the Go operator verifier.
 
-`.github/workflows/deploy-site.yml` deploys this directory to Railway on every
-push to `main` that touches `site/`, and on manual dispatch.
+`.github/workflows/deploy-site.yml` deploys this directory to Railway from the
+latest published release tag, not from `main`, when a release is published and
+on manual dispatch. Until v1.7.0 ships, merging to `main` does not change
+bloodraven.dev; see the workflow header for deploying a docs hotfix.
 `.github/workflows/docs-link-check.yml` crawls the published site nightly and
 on manual dispatch to catch same-site broken links.
