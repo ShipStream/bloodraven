@@ -160,25 +160,36 @@ func (a *updateActor) stepOnce(ctx context.Context) {
 	case updClearRO:
 		if err := a.sess.SetReadOnly(ctx, false); err != nil {
 			// read_only=OFF may have been sent: the source stays fenced.
+			// As ExecuteTargets does (N2), a standby the pooled probe
+			// finds writable is recorded as the promotion it is, with the
+			// set proven before the promotion; without that evidence
+			// nothing is recorded.
+			if ro, perr := standbyC.CheckReadOnly(ctx); perr == nil && !ro {
+				a.record(ctx, a.fenced)
+			}
 			a.finish()
 			return
 		}
-		// ExecuteTargets' callback records the handoff right after the
-		// promotion returns, in the same goroutine: no poll can run between.
-		a.step = updRecord
 		gtid, _ := a.sess.GetGtidExecuted(ctx)
-		a.upd.RecordHandoffForSim(ctx, a.standby, gtid)
-		a.r.armPromotion(a.standby, a.r.clk.Now())
-		if a.tm != a.r.tm {
-			// Recorded on a retired manager: its status writes are dropped,
-			// and the record reaches its replacement only by the carry
-			// (DST-1, fixed); the tag marks a regression of that carry.
-			a.r.replacedBeforeRecord = true
-			if a.r.retiredRecordPolls == nil {
-				a.r.retiredRecordPolls = map[int]bool{}
-			}
-			a.r.retiredRecordPolls[a.r.cluster.Poll()] = true
-		}
+		a.record(ctx, gtid)
 		a.finish()
+	}
+}
+
+// record records the handoff as ExecuteTargets' callback does, right after
+// the promotion returns, in the same goroutine: no poll can run between.
+func (a *updateActor) record(ctx context.Context, gtid string) {
+	a.step = updRecord
+	a.upd.RecordHandoffForSim(ctx, a.standby, gtid)
+	a.r.armPromotion(a.standby, a.r.clk.Now())
+	if a.tm != a.r.tm {
+		// Recorded on a retired manager: its status writes are dropped,
+		// and the record reaches its replacement only by the carry
+		// (DST-1, fixed); the tag marks a regression of that carry.
+		a.r.replacedBeforeRecord = true
+		if a.r.retiredRecordPolls == nil {
+			a.r.retiredRecordPolls = map[int]bool{}
+		}
+		a.r.retiredRecordPolls[a.r.cluster.Poll()] = true
 	}
 }

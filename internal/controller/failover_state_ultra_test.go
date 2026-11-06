@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -56,8 +57,7 @@ func TestUltraK023_FutureDatedRecordDoesNotBlockWriters(t *testing.T) {
 			}
 			c := fake.NewClientBuilder().WithScheme(failoverStateScheme(t)).WithObjects(fg).Build()
 			nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-			rec := NewAnnotationFailoverStateRecorder(c, c, nn)
-			rec.(*annotationFailoverStateRecorder).now = func() time.Time { return now }
+			rec := NewAnnotationFailoverStateRecorderWithClock(c, c, nn, clock.NewFakeClock(now))
 			want := FailoverRecord{LastFailover: now, LastFailoverTarget: "beta", PromotionGtidExecuted: opsUUIDA + ":1-9"}
 			if err := rec.RecordFailoverState(context.Background(), want); err != nil {
 				t.Fatal(err)

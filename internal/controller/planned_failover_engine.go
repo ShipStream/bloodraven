@@ -1795,7 +1795,7 @@ func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1alpha1.My
 		}
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
 			warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningFenceNotAttributable},
-			msg:      fmt.Sprintf("source %q is read-only, but the fence is not this run's; check which site is writable, then unfence the source or re-annotate", pf.SourceSite)})
+			msg:      fmt.Sprintf("source %q is read-only, but the fence is not this run's; %s", pf.SourceSite, plannedManualUnfenceAdvice)})
 	case FenceSourceUnreachable:
 		if e.lossWindow(&m.sourceLossSince, false) {
 			return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonSourceLost)
@@ -3052,7 +3052,9 @@ func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.
 			// Status writes still stall: a request is refused all the same,
 			// never left to run once the hold is acknowledged (K069).
 			if hold := PlannedHoldFrom(fg); hold != nil {
-				e.refuseHeldRequest(ctx, fg, hold)
+				if d := e.refuseHeldRequest(ctx, fg, hold); d > 0 {
+					return min(d, plannedFailoverMarkerRetryInterval), nil
+				}
 			}
 		}
 		return plannedFailoverMarkerRetryInterval, nil
@@ -3138,6 +3140,13 @@ func plannedOwnRecordTime(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedF
 
 // ---------- legacy (§13) ----------
 
+// plannedManualUnfenceAdvice ends the message of a run that left a site
+// fenced without naming it for re-assert (K044). Re-annotating cannot fix
+// a group with no writable site: the new request waits AuthorityUnsettled
+// and ends NotStarted{AdmissionTimeout}. A human unfences a site first.
+const plannedManualUnfenceAdvice = "check which site is writable; if none is, unfence the site with the most complete GTID set by hand " +
+	"(confirm no other site is writable first); re-annotate only once a site is writable"
+
 // refuseLegacy ends a block an older operator wrote: nothing is hydrated.
 func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
@@ -3154,11 +3163,11 @@ func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.M
 		// §13's SourceLeftFenced for these two phases).
 		outcome = v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed
 		msg = fmt.Sprintf("planned failover in phase %q was written by an older operator and is refused: "+
-			"its promotion may have made the target writable; check every site's writability before unfencing the source or re-annotating", pf.Phase)
+			"its promotion may have made the target writable; %s", pf.Phase, plannedManualUnfenceAdvice)
 	default:
 		outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
 		msg = fmt.Sprintf("planned failover in phase %q was written by an older operator and is refused: "+
-			"check which site is writable, then unfence the source or re-annotate", pf.Phase)
+			"%s", pf.Phase, plannedManualUnfenceAdvice)
 	}
 	now := metav1.NewTime(e.clk.Now())
 	start := now

@@ -215,7 +215,10 @@ func (f *FailoverController) promoteVerifiedFrom(ctx context.Context, sess mysql
 		return "", reached, err
 	}
 	if err := h.send(ctx, promoteMemoROClearSent, func(c context.Context) error { return sess.SetReadOnly(c, false) }); err != nil {
-		return "", promoteStageWriteAttempted, err
+		// The statement may have applied: the proven set comes back with
+		// the error, so a caller that confirms the candidate writable can
+		// record the promotion it made.
+		return promotionGtid, promoteStageWriteAttempted, err
 	}
 	if !h.planned {
 		f.logger.Info("failover complete", "promotedSite", candidateSite, "promotionGtid", promotionGtid)

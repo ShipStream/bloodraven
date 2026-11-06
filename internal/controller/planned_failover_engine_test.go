@@ -546,6 +546,11 @@ func TestPlannedFailoverEngine_LegacyRefused(t *testing.T) {
 			if h.sink.eventCount("PlannedFailoverLegacyRunRefused") != 1 {
 				t.Errorf("events = %v", h.sink.events)
 			}
+			// K044: a run that may leave every site read-only never
+			// advises re-annotating as the way out.
+			if tc.outcome != v1alpha1.PlannedFailoverOutcomeNotStarted && !strings.Contains(pf.Message, plannedManualUnfenceAdvice) {
+				t.Errorf("message = %q; want the manual-unfence advice", pf.Message)
+			}
 			if len(h.topo.calls) != 0 || h.topo.PlannedClaimHeld(h.nn) {
 				t.Errorf("a legacy block touched the topology: %v", h.topo.calls)
 			}

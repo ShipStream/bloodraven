@@ -787,7 +787,7 @@ func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager,
 		return
 	}
 	tm.lastActiveSite, tm.lastActiveSiteNamed = src.SourceSite, true
-	tm.logger.Info("planned failover: named fenced source for re-assert", "fg", nn.String(), "runId", src.RunID, "site", src.SourceSite)
+	tm.logger.Info("planned failover: named fenced source for re-assert", "runId", src.RunID, "site", src.SourceSite)
 }
 
 // carryNamedActiveSite brings old's named lastActiveSite into tm when

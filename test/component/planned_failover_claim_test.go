@@ -375,7 +375,7 @@ func (h *pfHarness) newManager() *controller.TopologyManager {
 		newMockTainter(), platform.NewHub(h.logger), h.dns, h.logger, h.clk)
 	tm.SetSleepForTest(func(time.Duration) {})
 	obj := h.store.Object()
-	rec := controller.NewAnnotationFailoverStateRecorder(dst.NewPlannedStoreClient(h.store, func() bool { return h.stateDenied }), nil, h.nn)
+	rec := controller.NewAnnotationFailoverStateRecorderWithClock(dst.NewPlannedStoreClient(h.store, func() bool { return h.stateDenied }), nil, h.nn, h.clk)
 	tm.RestoreFailoverStateForSim(obj, rec)
 	tm.RestorePlannedFailoverStateForSim(obj)
 	tm.StatusCallback = func(snap controller.TopologySnapshot) {

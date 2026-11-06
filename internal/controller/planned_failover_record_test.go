@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -22,11 +23,10 @@ func TestFailoverStateRecorder_ConditionedNoOverwrite(t *testing.T) {
 	fg := failoverStateFG()
 	c := fake.NewClientBuilder().WithScheme(failoverStateScheme(t)).WithObjects(fg).Build()
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	rec := NewAnnotationFailoverStateRecorder(c, c, nn)
 	t1 := time.Date(2030, 1, 1, 0, 0, 10, 0, time.UTC)
 	t0 := t1.Add(-time.Minute)
 	// The writer's clock is at t1: neither record is future-dated (K023).
-	rec.(*annotationFailoverStateRecorder).now = func() time.Time { return t1 }
+	rec := NewAnnotationFailoverStateRecorderWithClock(c, c, nn, clock.NewFakeClock(t1))
 	read := func() FailoverRecord {
 		t.Helper()
 		var got v1alpha1.MysqlFailoverGroup

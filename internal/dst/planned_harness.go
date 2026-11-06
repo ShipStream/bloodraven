@@ -271,7 +271,7 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 		pl.noteCommit(before, after)
 	}
 	pl.oobClient = &storeClient{store: pl.store, denied: r.cluster.StateDenied}
-	pl.recorder = controller.NewAnnotationFailoverStateRecorder(pl.oobClient, nil, nn)
+	pl.recorder = controller.NewAnnotationFailoverStateRecorderWithClock(pl.oobClient, nil, nn, r.clk)
 
 	r.cluster.setPlannedHooks(plannedHooks{
 		yield:      pl.sched.Yield,

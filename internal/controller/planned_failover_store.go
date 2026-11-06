@@ -170,9 +170,14 @@ func (s *apiPlannedFailoverStore) settleOnce(ctx context.Context, nn types.Names
 	if fenced.Annotations == nil {
 		fenced.Annotations = map[string]string{}
 	}
-	fenced.Annotations[PlannedFailoverStatusFenceAnnotation] = FormatStatusFenceValue(s.clk.Now())
+	fenced.Annotations[PlannedFailoverStatusFenceAnnotation] = nextStatusFenceValue(cur.Annotations[PlannedFailoverStatusFenceAnnotation], s.clk.Now())
 	patch := client.MergeFromWithOptions(cur.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	switch err := s.client.Patch(actx, fenced, patch); {
+	case err == nil && (fenced.ResourceVersion == "" || fenced.ResourceVersion == baseRV):
+		// The API server skips a patch that changes nothing without moving
+		// the resourceVersion, so a nil error alone proves nothing: the
+		// pending write's precondition may still hold (K029). Retry.
+		return WriteUnknown, errors.New("settle: the fence did not move the object's resourceVersion"), true
 	case err == nil:
 		return WriteNotCommitted, errors.New("settle: fenced the write's base version; the write can never commit"), false
 	case apierrors.IsConflict(err):
@@ -182,6 +187,17 @@ func (s *apiPlannedFailoverStore) settleOnce(ctx context.Context, nn types.Names
 	default:
 		return WriteUnknown, fmt.Errorf("settle: fence: %w", err), false
 	}
+}
+
+// nextStatusFenceValue is the fence value for now, moved past prev by a
+// nanosecond when the clock has not advanced past it (a coarse clock, two
+// fences in one tick), so the fence always changes the annotation.
+func nextStatusFenceValue(prev string, now time.Time) string {
+	v := FormatStatusFenceValue(now)
+	if t, err := time.Parse(statusFenceLayout, prev); err == nil && !now.After(t) {
+		v = FormatStatusFenceValue(t.Add(time.Nanosecond))
+	}
+	return v
 }
 
 // classifyPlannedStatusWrite maps a write error to its outcome. definite is

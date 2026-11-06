@@ -657,9 +657,16 @@ func TestUltraA_K034_StalePendingTerminalDoesNotOverride(t *testing.T) {
 		if a == nil {
 			a = map[string]string{}
 		}
-		a[LastFailoverAnnotation] = h.e.runMemo("run-1").promote.confirmedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
-		a[LastFailoverTargetAnnotation] = pf.TargetSite
-		a[PromotionGtidExecutedAnnotation] = *pf.Fence.GtidSet
+		// Encoded as production encodes it: the watermark counts only
+		// beside its binding to this event (K095).
+		enc, err := FailoverRecordAnnotations(FailoverRecord{LastFailover: h.e.runMemo("run-1").promote.confirmedAt,
+			LastFailoverTarget: pf.TargetSite, PromotionGtidExecuted: *pf.Fence.GtidSet})
+		if err != nil {
+			return err
+		}
+		for k, v := range enc {
+			a[k] = v
+		}
 		fg.SetAnnotations(a)
 		return h.c.Update(context.Background(), fg)
 	}

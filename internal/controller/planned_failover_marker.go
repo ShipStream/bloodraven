@@ -49,6 +49,7 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 	}
 
 	msg := plannedHoldRefusal(hold)
+	var retryConsume time.Duration
 	if pf != nil && pf.RunID != hold.RunID && plannedFailoverPendingPhase(pf.Phase) && !plannedFailoverTerminal(pf) {
 		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonManualRecoveryPending, msg, ReleaseTerminal,
 			pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred)
@@ -71,8 +72,11 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 			}
 		}
 		// The hold run's own record stays visible; the request is refused
-		// with an Event only.
-		e.refuseHeldRequest(ctx, fg, hold)
+		// with an Event only. A removal that did not commit is retried at
+		// the poll cadence, not the hold's 10-minute one: a refused request
+		// left in place would start a switchover once the hold is
+		// acknowledged.
+		retryConsume = e.refuseHeldRequest(ctx, fg, hold)
 	}
 	if pf != nil && pf.RunID != hold.RunID && !plannedFailoverTerminal(pf) {
 		// A run that owns sites beside a hold of another run (not produced by
@@ -91,7 +95,11 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 			fmt.Sprintf("automatic failover is still held by planned failover %s (%s); resolve the split brain by hand, then annotate %s=%s",
 				hold.RunID, hold.Reason, AcknowledgePlannedFailoverHoldAnnotation, hold.RunID))
 	}
-	return max(time.Second, plannedFailoverHoldPendingInterval-now.Sub(g.holdPendingAt)), nil
+	next := max(time.Second, plannedFailoverHoldPendingInterval-now.Sub(g.holdPendingAt))
+	if retryConsume > 0 {
+		next = min(next, retryConsume)
+	}
+	return next, nil
 }
 
 // plannedHoldRefusal is the message a request gets while hold stands.
@@ -101,11 +109,12 @@ func plannedHoldRefusal(hold *PlannedHold) string {
 }
 
 // refuseHeldRequest refuses the request annotation with an Event only,
-// keeping the hold run's record, and consumes it.
-func (e *PlannedFailoverEngine) refuseHeldRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, hold *PlannedHold) {
+// keeping the hold run's record, and consumes it. It returns
+// consumeRequest's requeue (non-zero while the annotation is still there).
+func (e *PlannedFailoverEngine) refuseHeldRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, hold *PlannedHold) time.Duration {
 	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
 	if !ok {
-		return
+		return 0
 	}
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	target := ""
@@ -115,7 +124,7 @@ func (e *PlannedFailoverEngine) refuseHeldRequest(ctx context.Context, fg *v1alp
 	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, plannedHoldRefusal(hold))
 	e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{TargetSite: target, Result: &v1alpha1.PlannedFailoverResult{
 		Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonManualRecoveryPending}})
-	e.consumeRequest(ctx, fg, "held")
+	return e.consumeRequest(ctx, fg, "held")
 }
 
 // plannedFailoverPendingPhase: Admitting or Deferred.

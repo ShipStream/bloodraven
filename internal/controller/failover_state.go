@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/clock"
 )
 
 const (
@@ -143,7 +144,7 @@ type annotationFailoverStateRecorder struct {
 	client client.Client
 	reader client.Reader
 	nn     types.NamespacedName
-	now    func() time.Time // the writer's clock for the future-dated check
+	clock  clock.Clock // the writer's clock for the future-dated check
 }
 
 // failoverStateConflictRetries bounds the conditioned write's retries on a
@@ -155,10 +156,20 @@ const failoverStateConflictRetries = 3
 // be uncached (the runner passes its APIReader): the write is conditioned
 // on what it reads.
 func NewAnnotationFailoverStateRecorder(c client.Client, reader client.Reader, nn types.NamespacedName) FailoverStateRecorder {
+	return NewAnnotationFailoverStateRecorderWithClock(c, reader, nn, clock.RealClock{})
+}
+
+// NewAnnotationFailoverStateRecorderWithClock is NewAnnotationFailoverStateRecorder
+// with the writer's clock injected. The future-dated check (supersedes) must
+// use the same clock as the manager that reads the record back through
+// EffectiveFailoverRecord: against another clock a stored record stamped by
+// the manager looks future-dated and is written over by an older one.
+func NewAnnotationFailoverStateRecorderWithClock(c client.Client, reader client.Reader, nn types.NamespacedName,
+	clk clock.Clock) FailoverStateRecorder {
 	if reader == nil {
 		reader = c
 	}
-	return &annotationFailoverStateRecorder{client: c, reader: reader, nn: nn, now: time.Now}
+	return &annotationFailoverStateRecorder{client: c, reader: reader, nn: nn, clock: clk}
 }
 
 // RecordFailoverState writes the record's annotations as a read-compare-
@@ -192,7 +203,7 @@ func (s *annotationFailoverStateRecorder) RecordFailoverState(ctx context.Contex
 		}
 		if encoded != nil {
 			// A corrupt stored record is overwritten: it is no record.
-			if stored, err := FailoverRecordFromAnnotations(cur.GetAnnotations()); err == nil && !rec.supersedes(stored, s.now()) {
+			if stored, err := FailoverRecordFromAnnotations(cur.GetAnnotations()); err == nil && !rec.supersedes(stored, s.clock.Now()) {
 				return nil
 			}
 		}

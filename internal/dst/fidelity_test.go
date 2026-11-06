@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -536,9 +537,18 @@ func plannedSweep() (yields, steps, counts map[string]int) {
 
 // plannedSweepOf aggregates the planned reports of seeds 1..n.
 func plannedSweepOf(n uint64) (yields, steps, counts map[string]int) {
+	return plannedSweepRange(1, n)
+}
+
+// plannedSweepRange aggregates the planned reports of seeds from..to. The
+// trials run in parallel (runBatch, as the campaign runs them); the sums do
+// not depend on the order they finish in.
+func plannedSweepRange(from, to uint64) (yields, steps, counts map[string]int) {
 	yields, steps, counts = map[string]int{}, map[string]int{}, map[string]int{}
-	for seed := uint64(1); seed <= n; seed++ {
-		r := RunTrial(GeneratePlannedTrial(seed), false, nil)
+	if to < from {
+		return yields, steps, counts
+	}
+	for _, r := range runBatch(from, int(to-from+1), runtime.GOMAXPROCS(0), GeneratePlannedTrial) {
 		for k, v := range r.Planned.Yields {
 			yields[k] += v
 		}
@@ -560,25 +570,56 @@ func plannedSweepOf(n uint64) (yields, steps, counts map[string]int) {
 	return yields, steps, counts
 }
 
-// TestPlannedSweep_ReachesEveryOutcome: the sweep ends runs with every
-// terminal outcome (K172), so a generator or harness change that stops
-// producing one (the rare PromotedUnconfirmed and ManualRecoveryRequired
-// above all) fails here instead of leaving its invariants unexercised.
+// plannedOutcomeSeedCap bounds the extended search for the rare outcomes.
+// PromotedUnconfirmed and ManualRecoveryRequired need a fault to land in
+// the few polls between a target's read_only=OFF and its confirmation, so
+// they occur roughly once per few hundred seeds, and every engine change
+// that moves a run's timing by a poll moves them to other seeds. (After the
+// ultra-review fixes the first of each moved from seeds 142/190 to
+// 1122/1633: the confirmed-promotion manager-absent end became Succeeded,
+// K152, and the shifted timing missed the rogue writes.)
+const plannedOutcomeSeedCap = 3000
+
+// TestPlannedSweep_ReachesEveryOutcome: the generated trials end runs with
+// every terminal outcome (K172), so a generator or harness change that
+// stops producing one (the rare PromotedUnconfirmed and
+// ManualRecoveryRequired above all) fails here instead of leaving its
+// invariants unexercised. An outcome the shared sweep misses is searched
+// for in further seeds, in parallel batches, up to plannedOutcomeSeedCap.
 func TestPlannedSweep_ReachesEveryOutcome(t *testing.T) {
 	_, _, counts := plannedSweep()
 	// K041: a live engine holds an Unknown write whose late commit lands.
 	if counts["lateCommitAfterUnknown"] == 0 {
 		t.Errorf("no late commit landed after a settlement ended Unknown (counts %v)", counts)
 	}
-	for _, o := range []v1alpha1.PlannedFailoverOutcome{
+	outcomes := []v1alpha1.PlannedFailoverOutcome{
 		v1alpha1.PlannedFailoverOutcomeSucceeded, v1alpha1.PlannedFailoverOutcomeNotStarted,
 		v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
 		v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
-	} {
-		if counts["outcome:"+string(o)] == 0 {
-			t.Errorf("no run ended %s over %d seeds", o, plannedSweepSeeds)
-		}
 	}
+	missing := func() []v1alpha1.PlannedFailoverOutcome {
+		var out []v1alpha1.PlannedFailoverOutcome
+		for _, o := range outcomes {
+			if counts["outcome:"+string(o)] == 0 {
+				out = append(out, o)
+			}
+		}
+		return out
+	}
+	last := uint64(plannedSweepSeeds)
+	batch := uint64(max(64, 4*runtime.GOMAXPROCS(0)))
+	for len(missing()) > 0 && last < plannedOutcomeSeedCap {
+		to := min(last+batch, plannedOutcomeSeedCap)
+		_, _, more := plannedSweepRange(last+1, to)
+		for k, v := range more {
+			counts[k] += v
+		}
+		last = to
+	}
+	for _, o := range missing() {
+		t.Errorf("no run ended %s over %d seeds", o, last)
+	}
+	t.Logf("searched seeds 1..%d", last)
 }
 
 // TestScheduler_ReachesEveryYieldClass: over a fixed range the production

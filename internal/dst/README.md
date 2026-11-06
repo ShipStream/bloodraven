@@ -23,7 +23,13 @@ DST_PLANNED=1 make dst                  # saturation campaign over actors-on tri
 
 `make test` also runs `TestDST_PlannedQuick`: 300 seeds with the
 planned-failover actors enabled (see below; `DST_PLANNED_TRIALS` overrides
-the count).
+the count). The planned fidelity tests share one 400-seed actors-on sweep,
+run in parallel; `TestPlannedSweep_ReachesEveryOutcome` searches further
+seeds, in parallel batches up to seed 3000, for any terminal outcome the
+shared range misses: `PromotedUnconfirmed` and `ManualRecoveryRequired` need
+a fault inside the few polls between a target's `read_only=OFF` and its
+confirmation, so an engine change that moves a run's timing by one poll
+moves them to other seeds.
 
 Campaign knobs (env): `DST_BATCH` (default 1000), `DST_DRY_BATCHES` (default
 3), `DST_MAX_TRIALS` (500000), `DST_WALL_SECONDS` (1800), `DST_REPORT`.
@@ -151,8 +157,11 @@ production planned-failover path end to end:
   `ClaimOrderedUpdateForSim`, `RecordHandoffForSim`, `FinishOrderedUpdateForSim`):
   fence the active, wait for the standby, then STOP, RESET and
   read_only=OFF on one pinned session, recording the handoff in the same
-  step as the callback does. It keeps stepping on a retired manager; when it
-  ends, the successor's predecessor guard is cleared.
+  step as the callback does. A read_only=OFF that returns an error is
+  recorded too when a pooled probe then finds the standby writable, as
+  `ExecuteTargets` does (N2); without that evidence nothing is recorded.
+  It keeps stepping on a retired manager; when it ends, the successor's
+  predecessor guard is cleared.
 - **Status-write loss.** `pfWriteLost`, `pfWriteAmbiguous`, `pfWriteLate`,
   `pfReadOutage` and `pfStatusDenied` (with restarts inside the outage)
   script the store; the fault stream's status and out-of-band outages apply
