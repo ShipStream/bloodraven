@@ -22,6 +22,11 @@
 //
 // Every refusal carries a pitrarchive.Token; §4.11 fixes their precedence.
 //
-// Series 1 of #206 ships only the coverage.json contract (coverage.go);
-// the planner itself lands in series 2 (WP-B1).
+// Files: archive.go (inputs), index.go (FileIndex, built by
+// internal/sidecar.InspectTransactions), gtidset.go, budget.go (D-42),
+// frontier.go (§4.3), witness.go (§4.4, anchors), lineage.go (L1–L3, L5),
+// dwindow.go (L4), search.go (§4.6), latest.go (§4.8), identity.go (§4.9:
+// closure, waiver, D-51 order check), plan.go (orchestration) and
+// coverage.go (§4.12). The worked examples of §4.15 are the oracle in
+// examples_test.go.
 package pitrplan

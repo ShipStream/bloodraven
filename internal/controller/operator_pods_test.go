@@ -129,7 +129,7 @@ func TestOperatorImageContainersUseAbsoluteBinaryPath(t *testing.T) {
 	want := map[string][]string{
 		"backup/nightly-s3":      {backupStampInitContainerName, backupEncryptUploadContainerName},
 		"verification/encrypted": {"decrypt-download"},
-		"restore/bootstrap":      {restorePITRInitContainerName, "decrypt-download"},
+		"restore/bootstrap":      {restorePITRDumpMetaContainerName, restorePITRInitContainerName, "decrypt-download"},
 		"restore/in-place":       {"decrypt-download"},
 		"cleanup":                {cleanupContainerName},
 	}

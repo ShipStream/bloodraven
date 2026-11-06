@@ -57,10 +57,18 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "dump-meta":
+			// Invoked as the first PITR init container of a restore or
+			// verification Job: reads the dump's @.json, @.done.json and
+			// backup stamp and writes dump.json for pitr-download. See
+			// dump_meta.go.
+			runDumpMeta(os.Args[2:])
+			return
 		case "pitr-download":
-			// Invoked by restore Job init containers to download
-			// archived binlog files into the shared emptyDir before
-			// the mysqlsh container runs replay. See pitr_download.go.
+			// Invoked by restore Job init containers to plan the replay
+			// (internal/pitrplan) and stage the archived binlog files
+			// and coverage.json into the shared emptyDir before the
+			// mysqlsh container replays them. See pitr_download.go.
 			runPITRDownload(os.Args[2:])
 			return
 		case "trigger-verification":

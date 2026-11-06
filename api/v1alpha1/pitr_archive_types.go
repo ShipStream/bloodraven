@@ -122,3 +122,115 @@ type PITRArchiveObservation struct {
 	// +optional
 	ObservedTime *metav1.MicroTime `json:"observedTime,omitempty"`
 }
+
+// PointInTimeMode is how a point-in-time replay chose its end point.
+// +kubebuilder:validation:Enum=Timestamp;Latest
+type PointInTimeMode string
+
+const (
+	// PointInTimeModeTimestamp replays the history of the first archived
+	// transaction committed at or after the target, cut just before it.
+	PointInTimeModeTimestamp PointInTimeMode = "Timestamp"
+	// PointInTimeModeLatest replays to the unique archive head.
+	PointInTimeModeLatest PointInTimeMode = "Latest"
+)
+
+// PointInTimeOutcome is the outcome of a point-in-time replay.
+// +kubebuilder:validation:Enum=TargetCovered;Partial;ArchiveHead
+type PointInTimeOutcome string
+
+const (
+	// PointInTimeTargetCovered means an archived transaction at or after
+	// the target exists, and the restore is that transaction's history cut
+	// just before it.
+	PointInTimeTargetCovered PointInTimeOutcome = "TargetCovered"
+	// PointInTimePartial means no archived transaction at or after the
+	// target exists and allowPartial accepted the archive head instead.
+	PointInTimePartial PointInTimeOutcome = "Partial"
+	// PointInTimeArchiveHead means a latest-mode replay to the archive
+	// head.
+	PointInTimeArchiveHead PointInTimeOutcome = "ArchiveHead"
+)
+
+// ReplayedBinlogRef names one archived binlog by site and file name.
+type ReplayedBinlogRef struct {
+	// Site is the site whose archive holds the file.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
+	// +kubebuilder:validation:MaxLength=63
+	Site string `json:"site"`
+	// Name is the binlog file name, for example mysql-bin.000042.
+	// +required
+	// +kubebuilder:validation:MaxLength=255
+	Name string `json:"name"`
+}
+
+// PointInTimeResult is the certified outcome of a point-in-time replay,
+// read from the replay's verdict. Restores (status.restore.pointInTime and
+// status.restoreInPlace.pointInTime), verifications (status.pointInTime)
+// and standby activations (status.activation.pointInTime) share it.
+type PointInTimeResult struct {
+	// Mode is the replay mode.
+	// +required
+	Mode PointInTimeMode `json:"mode"`
+	// StopTime is the requested target, exact to the microsecond. Unset in
+	// Latest mode.
+	// +optional
+	StopTime *metav1.MicroTime `json:"stopTime,omitempty"`
+	// Outcome is how the end point was reached.
+	// +required
+	Outcome PointInTimeOutcome `json:"outcome"`
+	// Archive identifies the archive the replay read.
+	// +optional
+	Archive *PITRArchiveIdentity `json:"archive,omitempty"`
+	// ReplaySites are the sites whose archived binlogs were staged, sorted.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9-]+$`
+	// +kubebuilder:validation:items:MaxLength=63
+	ReplaySites []string `json:"replaySites,omitempty"`
+	// SegmentCount is the number of replay segments.
+	// +optional
+	SegmentCount int32 `json:"segmentCount,omitempty"`
+	// ReplayedBinlogCount is the number of distinct archived binlogs the
+	// segments read.
+	// +optional
+	ReplayedBinlogCount int32 `json:"replayedBinlogCount,omitempty"`
+	// LastReplayedBinlog is the file of the last segment.
+	// +optional
+	LastReplayedBinlog *ReplayedBinlogRef `json:"lastReplayedBinlog,omitempty"`
+	// ReplayedTransactionCount is the number of transactions replayed on
+	// top of the backup.
+	// +optional
+	ReplayedTransactionCount int64 `json:"replayedTransactionCount,omitempty"`
+	// NewestReplayedCommitTime is the newest original commit time among
+	// the replayed transactions.
+	// +optional
+	NewestReplayedCommitTime *metav1.MicroTime `json:"newestReplayedCommitTime,omitempty"`
+	// ExcludedDivergentTransactionCount is |D|: transactions committed between the backup's newest transaction and
+	// the target, outside the target history, excluded by excludeGtids.
+	// +optional
+	ExcludedDivergentTransactionCount int64 `json:"excludedDivergentTransactionCount,omitempty"`
+	// OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
+	// Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
+	// Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
+	// +optional
+	// +kubebuilder:validation:MaxLength=2048
+	OnHistoryExclusions string `json:"onHistoryExclusions,omitempty"`
+	// OnHistoryExclusionCount is the number of GTIDs in OnHistoryExclusions.
+	// +optional
+	OnHistoryExclusionCount int64 `json:"onHistoryExclusionCount,omitempty"`
+	// GtidExecuted is the target's @@global.gtid_executed after replay,
+	// which the replay proved equal to the target history minus
+	// excludeGtids. Empty when longer than 2048 characters; see
+	// GtidExecutedSHA256.
+	// +optional
+	// +kubebuilder:validation:MaxLength=2048
+	GtidExecuted string `json:"gtidExecuted,omitempty"`
+	// GtidExecutedSHA256 is the hex SHA-256 of GtidExecuted as the server
+	// printed it (newlines removed).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^([0-9a-f]{64})?$`
+	GtidExecutedSHA256 string `json:"gtidExecutedSHA256,omitempty"`
+}

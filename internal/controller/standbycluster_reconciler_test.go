@@ -330,7 +330,7 @@ func TestMysqlStandbyCluster_SuccessfulDiscovery(t *testing.T) {
 
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(atJSON),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":           standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json":      []byte(manifestJSON),
 	}}
 	r, recorder := newTestReconciler(t, []client.Object{cr}, store)
@@ -591,7 +591,7 @@ func TestMysqlStandbyCluster_MultiSiteManifests(t *testing.T) {
 
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/dump-2026-05-20/@.json":    []byte(atJSON),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(manifest1),
 		"orders/binlogs/manifest-dc2.json": []byte(manifest2),
 	}}
@@ -642,7 +642,7 @@ func TestMysqlStandbyCluster_NewestDumpSelected(t *testing.T) {
 		"orders/orders-2026-05-18/@.json":  []byte(`{"end":"2026-05-18T04:00:00Z"}`),
 		"orders/orders-2026-05-19/@.json":  []byte(`{"end":"2026-05-19T04:00:00Z"}`),
 		"orders/orders-2026-05-20/@.json":  []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"newest:1-999"}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	r, _ := newTestReconciler(t, []client.Object{cr}, store)
@@ -666,7 +666,7 @@ func TestMysqlStandbyCluster_NewestDumpSelectedBeyondLexicographicTail(t *testin
 	cr := minimalStandbyCR("test-sc", "default")
 
 	objects := map[string][]byte{
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 		"orders/z-dump-00/@.json":          []byte(`{"end":"2026-05-10T04:00:00Z"}`),
 		"orders/z-dump-01/@.json":          []byte(`{"end":"2026-05-11T04:00:00Z"}`),
@@ -706,7 +706,7 @@ func TestMysqlStandbyCluster_SlashBoundedPrefix(t *testing.T) {
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/west-old/other/@.json":        []byte(`{"end":"2026-05-21T04:00:00Z"}`),
 		"orders/west/current/@.json":          []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"current:1-100"}`),
-		"orders/west/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/west/binlogs/archive.json":    standbyTestDescriptor(),
 		"orders/west/binlogs/manifest-a.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"a","files":[]}`),
 	}}
 	r, _ := newTestReconciler(t, []client.Object{cr}, store)
@@ -739,7 +739,7 @@ func TestMysqlStandbyCluster_DecryptionConfiguresPassphraseFile(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlStandbyCluster{}).WithObjects(cr, secret).Build()
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly/@.json":     []byte(`{"end":"2026-05-20T04:00:00Z"}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	var passphrase string
@@ -776,7 +776,7 @@ func TestMysqlStandbyCluster_Idempotent(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(`{"end":"2026-05-20T04:00:00Z"}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":           standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json":      []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	r, _ := newTestReconciler(t, []client.Object{cr}, store)
@@ -878,7 +878,7 @@ func TestMysqlStandbyCluster_DumpMetaCachedAcrossScans(t *testing.T) {
 	atKey := "orders/orders-nightly-20260520/@.json"
 	store := &fakeStore{Objects: map[string][]byte{
 		atKey:                              []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100"}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	r, _ := newTestReconciler(t, []client.Object{cr}, store)
@@ -904,7 +904,7 @@ func TestMysqlStandbyCluster_DumpMetaCachePrunedWhenDumpRemoved(t *testing.T) {
 	store := &fakeStore{Objects: map[string][]byte{
 		oldKey:                             []byte(`{"end":"2026-05-19T04:00:00Z"}`),
 		newKey:                             []byte(`{"end":"2026-05-20T04:00:00Z"}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	r, _ := newTestReconciler(t, []client.Object{cr}, store)
@@ -983,7 +983,7 @@ func TestMysqlStandbyCluster_ColdStartManyDumpsCorrect(t *testing.T) {
 
 	const n = 50
 	objects := map[string][]byte{
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}
 	// Deterministic pseudo-random dir names and end times. The newest end time
@@ -1061,7 +1061,7 @@ func TestMysqlStandbyCluster_DeadlineDuringReads(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":111}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":           standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json":      []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":7,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:00:00Z","archivedAt":"2026-05-20T03:00:01Z"}]}`),
 	}}
 	r, recorder := newTestReconciler(t, []client.Object{cr}, store)
@@ -1125,7 +1125,7 @@ func TestMysqlStandbyCluster_DeadlineDuringManifestLoop(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":111}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":           standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json":      []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":7,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:00:00Z","archivedAt":"2026-05-20T03:00:01Z"}]}`),
 	}}
 	r, recorder := newTestReconciler(t, []client.Object{cr}, store)
@@ -1200,7 +1200,7 @@ func TestMysqlStandbyCluster_DeadlineDuringList(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100"}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":           standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json":      []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	r, recorder := newTestReconciler(t, []client.Object{cr}, store)
@@ -1258,7 +1258,7 @@ func TestMysqlStandbyCluster_AllCandidatesMalformed(t *testing.T) {
 		"orders/dump-a/@.json":             []byte(`{not valid json`),
 		"orders/dump-b/@.json":             []byte(`}}}garbage`),
 		"orders/dump-c/@.json":             []byte(`<<<>>>`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	r, recorder := newTestReconciler(t, []client.Object{cr}, store)
@@ -1318,10 +1318,10 @@ func TestMysqlStandbyCluster_TwoCRPruneIsolation(t *testing.T) {
 	eastKey := "orders/east/dump-e/@.json"
 	store := &fakeStore{Objects: map[string][]byte{
 		westKey:                               []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"west:1-1"}`),
-		"orders/west/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/west/binlogs/archive.json":    standbyTestDescriptor(),
 		"orders/west/binlogs/manifest-a.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"a","files":[]}`),
 		eastKey:                               []byte(`{"end":"2026-05-20T05:00:00Z","gtidExecuted":"east:1-1"}`),
-		"orders/east/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/east/binlogs/archive.json":    standbyTestDescriptor(),
 		"orders/east/binlogs/manifest-b.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"b","files":[]}`),
 	}}
 
@@ -1413,7 +1413,7 @@ func TestMysqlStandbyCluster_DeterministicAcrossListOrder(t *testing.T) {
 			"orders/aaa-tie/@.json":            []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"aaa"}`),
 			"orders/zzz-tie/@.json":            []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"zzz"}`),
 			"orders/mmm-older/@.json":          []byte(`{"end":"2026-05-19T04:00:00Z","gtidExecuted":"mmm"}`),
-			"orders/binlogs/archive.json": standbyTestDescriptor(),
+			"orders/binlogs/archive.json":      standbyTestDescriptor(),
 			"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 		}}
 	}

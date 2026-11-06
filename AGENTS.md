@@ -9,7 +9,7 @@ Run commands from the repository root:
 - `make build` builds the operator binary at `bin/bloodraven`.
 - `go build ./cmd/sidecar` builds the sidecar binary.
 - `make build-kubectl-plugin` builds `bin/kubectl-bloodraven` (the day-2 `kubectl` plugin). Override `KUBECTL_PLUGIN_VERSION=<tag>` to stamp a release; `make install-kubectl-plugin` drops the binary onto `$PATH`.
-- `make test` runs the fast PR gate: `test-unit` (`go test -race ./internal/... ./cmd/... ./charts/...`), `test-component` and `test-license-roundtrip`. The chart render tests in `charts/bloodraven` need `helm` on `PATH`; they skip without it locally and fail under `CI`. The `cmd/bloodraven` PITR coverage contract test needs `python3` on `PATH` and fails without it, locally too.
+- `make test` runs the fast PR gate: `test-unit` (`go test -race ./internal/... ./cmd/... ./charts/...`), `test-component` and `test-license-roundtrip`. The chart render tests in `charts/bloodraven` need `helm` on `PATH`; they skip without it locally and fail under `CI`. The `restore.py` contract test (`internal/controller/pitr_restore_script_test.go`, which runs `restore_script.py` under `python3` with a fake `mysqlsh` module) needs `python3` on `PATH` and fails without it, locally too.
 - `make test-e2e` runs the release profile of real-cluster E2E tests against the current playground cluster (requires kind/k3d/minikube context prepared with `./playground/setup.sh`; CI creates kind and runs setup first).
 - `make test-e2e-smoke` runs the smoke profile (~3 scenarios, fast feedback).
 - `make vet` runs `go vet ./...`.
@@ -33,6 +33,8 @@ The deployment API request log (`msg="deploy api"`) explicitly uses `duration_ms
 Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/component`, API-server/controller-runtime tests in `test/envtest`, and real-cluster playground scenarios in `internal/playground/scenarios` through `cmd/playground-chaos`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
 
 Deterministic simulation tests (DST) of the failover control loop live in `internal/dst`: seeded random fault schedules run against the real `TopologyManager` with a fake clock and an in-memory MySQL model. `make test` includes the quick sweep; `make dst` runs the saturation campaign (stops at coverage-diminishing returns); `DST_SEED=<n> make dst-repro` replays any trial exactly, with `DST_SKIP=<i,j>` to mask schedule ops. When a DST finding is fixed, pin it as a component test in `test/component` (see `dst_regression_test.go`) — DST seeds shift when the schedule generator changes, component tests don't. See `internal/dst/README.md`.
+
+The native PITR tests (`TestPITRNative*`, which replay real binlogs with `mysqlbinlog` into a `mysql:9.7` container) are opt-in: `BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven ./internal/controller -run 'TestPITRNative'` with docker. CI runs them in the `test-pitr-native` job when `cmd/bloodraven`, `internal/pitrplan`, `internal/sidecar` or `restore_script.py` change.
 
 ### Pre-PR gate (required, do not skip)
 Before pushing a branch that opens or updates a PR, run all of the following from the repo root and fix anything they report. Do **not** push expecting CI to find problems you could have caught locally — CI failures on lint or generate drift are round-trip latency and reviewer noise.

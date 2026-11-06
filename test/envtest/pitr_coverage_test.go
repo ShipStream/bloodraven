@@ -191,3 +191,181 @@ func TestPITRStatusArchiveObservation(t *testing.T) {
 		}
 	}
 }
+
+// §6.1: stopDatetime and the verification timestamp accept exactly the
+// microsecond pattern; excludeGtids is bounded at 64 KiB, and verifications
+// accept it.
+func TestPITRTargetPatternAndExclusions(t *testing.T) {
+	for i, tc := range []struct {
+		stop    string
+		exclude string
+		ok      bool
+	}{
+		{stop: "2030-01-01T00:00:00Z", ok: true},
+		{stop: "2030-01-01T00:00:00.123456Z", ok: true},
+		{stop: "2030-01-01 00:00:00.5", ok: true},
+		{stop: "2030-01-01T02:00:00.000001+02:00", ok: true},
+		{stop: "2030-01-01T00:00:00.1234567Z"},
+		{stop: "2030-01-01T00:00:00,5Z"},
+		{stop: "yesterday"},
+		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 65536), ok: true},
+		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 65537)},
+	} {
+		ns := fmt.Sprintf("pitr-target-pattern-%d", i)
+		ensureNamespace(t, ns)
+		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: tc.stop, ArchiveProfileName: "nightly-s3", ExcludeGtids: tc.exclude}))
+		if (err == nil) != tc.ok {
+			t.Fatalf("restore stop %q exclude %d chars: %v", tc.stop, len(tc.exclude), err)
+		}
+		v := &v1alpha1.MysqlBackupVerification{
+			ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: ns},
+			Spec: v1alpha1.MysqlBackupVerificationSpec{
+				FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
+				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: tc.stop, ExcludeGtids: tc.exclude},
+			},
+		}
+		err = k8sClient.Create(ctx, v)
+		if (err == nil) != tc.ok {
+			t.Fatalf("verification timestamp %q exclude %d chars: %v", tc.stop, len(tc.exclude), err)
+		}
+		if tc.ok && tc.exclude != "" {
+			got := &v1alpha1.MysqlBackupVerification{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "verify"}, got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Spec.PointInTime.ExcludeGtids != tc.exclude {
+				t.Fatal("verification excludeGtids did not round-trip")
+			}
+		}
+	}
+	ensureNamespace(t, "pitr-target-pattern-long")
+	if err := k8sClient.Create(ctx, pitrRestoreFG("pitr-target-pattern-long", &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00.123456+02:00" + strings.Repeat(" ", 10), ArchiveProfileName: "nightly-s3"})); err == nil {
+		t.Fatal("over-long stopDatetime accepted")
+	}
+}
+
+func pointInTimeFixture() *v1alpha1.PointInTimeResult {
+	stop := metav1.NewMicroTime(time.Date(2030, 1, 1, 0, 0, 0, 123456000, time.UTC))
+	newest := metav1.NewMicroTime(time.Date(2029, 12, 31, 23, 59, 59, 654321000, time.UTC))
+	return &v1alpha1.PointInTimeResult{
+		Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop, Outcome: v1alpha1.PointInTimeTargetCovered,
+		Archive: &v1alpha1.PITRArchiveIdentity{ArchiveID: "ar1-abcdefghijklmnopqrstuvwxyz", Destination: "s3://b/p/binlogs?endpoint=aws",
+			Source: v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "src", UID: "src-uid"}, EncryptionMode: v1alpha1.PITRArchiveEncryptionPassphrase,
+			Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM},
+		ReplaySites: []string{"a", "b"}, SegmentCount: 3, ReplayedBinlogCount: 2,
+		LastReplayedBinlog: &v1alpha1.ReplayedBinlogRef{Site: "a", Name: "mysql-bin.000010"}, ReplayedTransactionCount: 1234,
+		NewestReplayedCommitTime: &newest, ExcludedDivergentTransactionCount: 2, OnHistoryExclusions: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:7",
+		OnHistoryExclusionCount: 1, GtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-6:8-20",
+		GtidExecutedSHA256: strings.Repeat("ab", 32),
+	}
+}
+
+func assertPointInTimeRoundTrip(t *testing.T, where string, got *v1alpha1.PointInTimeResult) {
+	t.Helper()
+	want := pointInTimeFixture()
+	if got == nil || got.Outcome != want.Outcome || got.Archive == nil || got.Archive.ArchiveID != want.Archive.ArchiveID ||
+		got.GtidExecuted != want.GtidExecuted || got.LastReplayedBinlog == nil || got.LastReplayedBinlog.Name != want.LastReplayedBinlog.Name {
+		t.Fatalf("%s: pointInTime did not round-trip: %+v", where, got)
+	}
+	if got.StopTime == nil || got.StopTime.UTC().Format("15:04:05.000000") != "00:00:00.123456" ||
+		got.NewestReplayedCommitTime == nil || got.NewestReplayedCommitTime.UTC().Format("15:04:05.000000") != "23:59:59.654321" {
+		t.Fatalf("%s: MicroTime lost microseconds: %v %v", where, got.StopTime, got.NewestReplayedCommitTime)
+	}
+}
+
+// PointInTimeResult (D-29) round-trips at µs on every carrier, and its
+// enums and patterns are closed.
+func TestPointInTimeResultShape(t *testing.T) {
+	ns := "pitr-result-shape"
+	ensureNamespace(t, ns)
+
+	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00.123456Z", ArchiveProfileName: "nightly-s3"})
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*v1alpha1.PointInTimeResult)
+		ok     bool
+	}{
+		{name: "valid", mutate: func(*v1alpha1.PointInTimeResult) {}, ok: true},
+		{name: "outcome enum", mutate: func(r *v1alpha1.PointInTimeResult) { r.Outcome = "Covered" }},
+		{name: "mode enum", mutate: func(r *v1alpha1.PointInTimeResult) { r.Mode = "timestamp" }},
+		{name: "sha pattern", mutate: func(r *v1alpha1.PointInTimeResult) { r.GtidExecutedSHA256 = "ABC" }},
+		{name: "site pattern", mutate: func(r *v1alpha1.PointInTimeResult) { r.ReplaySites = []string{"A_b"} }},
+		{name: "gtidExecuted bound", mutate: func(r *v1alpha1.PointInTimeResult) { r.GtidExecuted = strings.Repeat("a", 2049) }},
+		{name: "replay site bound", mutate: func(r *v1alpha1.PointInTimeResult) {
+			r.ReplaySites = strings.Split(strings.Repeat("s,", 16)+"s", ",")
+		}},
+	} {
+		cur := &v1alpha1.MysqlFailoverGroup{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: fg.Name}, cur); err != nil {
+			t.Fatal(err)
+		}
+		res := pointInTimeFixture()
+		tc.mutate(res)
+		cur.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded, PointInTime: res}
+		err := k8sClient.Status().Update(ctx, cur)
+		if (err == nil) != tc.ok {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+	}
+	got := &v1alpha1.MysqlFailoverGroup{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: fg.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	assertPointInTimeRoundTrip(t, "status.restore", got.Status.Restore.PointInTime)
+
+	// The flat pitr* restore fields are gone from the schema.
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: fg.Name}, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedField(u.Object, "2030-01-01 00:00:00", "status", "restore", "pitrStopDatetime"); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Status().Update(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: fg.Name}, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "restore", "pitrStopDatetime"); found {
+		t.Fatal("status.restore.pitrStopDatetime survived")
+	}
+
+	// MBV status.pointInTime.
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: ns},
+		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+	}
+	if err := k8sClient.Create(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	v.Status.Phase = v1alpha1.VerificationPhaseSucceeded
+	v.Status.PointInTime = pointInTimeFixture()
+	if err := k8sClient.Status().Update(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	gotV := &v1alpha1.MysqlBackupVerification{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "verify"}, gotV); err != nil {
+		t.Fatal(err)
+	}
+	assertPointInTimeRoundTrip(t, "verification status", gotV.Status.PointInTime)
+
+	// MSC status.activation.pointInTime.
+	msc := minimalEnvtestStandby("standby", ns)
+	if err := k8sClient.Create(ctx, msc); err != nil {
+		t.Fatal(err)
+	}
+	msc.Status.Activation = &v1alpha1.StandbyActivationStatus{PointInTime: pointInTimeFixture()}
+	if err := k8sClient.Status().Update(ctx, msc); err != nil {
+		t.Fatal(err)
+	}
+	gotMSC := &v1alpha1.MysqlStandbyCluster{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "standby"}, gotMSC); err != nil {
+		t.Fatal(err)
+	}
+	assertPointInTimeRoundTrip(t, "standby activation", gotMSC.Status.Activation.PointInTime)
+}

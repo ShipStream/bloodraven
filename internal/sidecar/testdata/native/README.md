@@ -98,3 +98,26 @@ for f in compressed-inner-cut compressed-excluded-cut; do
     --no-defaults --verify-binlog-checksum /fixtures/$f.bin > $f.sql
 done
 ```
+
+
+## Mixed-file failback (MySQL 9.7)
+
+`failback/` is a genuine MySQL 9.7 capture of two servers in one network-less
+container (`bash capture.sh failback`, script `failback/capture-inner.sh`):
+a planned failover A→B and a planned failback B→A without reclone, with no
+rotation at either role change, `binlog_transaction_compression=ON` and
+tagged GTIDs (`SET gtid_next='AUTOMATIC:fixture'`). a's
+`mysql-bin.000003` is the mixed file of design §4.15: a's era-1 tail, b's
+era 2 as replica copies, and a's era 3. b's own file is never archived.
+`mysql-bin.000001` is the backup's history. `targets.tsv` records, at each
+target, the primary's `gtid_executed`, a row checksum (and one without the
+excluded `skip` row, whose GTID is in `skip.tsv`) and `UTC_TIMESTAMP(6)`;
+`records.tsv` holds the promotion records a sidecar would write.
+
+`go test ./cmd/bloodraven -run TestPITRNativeFailbackPlans` checks every plan
+against those sets without Docker. With Docker,
+`BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run TestPITRNativeSegmentReplay`
+replays each plan's segments with the mysqlsh image's `mysqlbinlog
+--include-gtids` into one `mysql` session on a fresh `mysql:9.7` and compares
+the rows and `gtid_executed` with the captured source. Recapturing changes
+UUIDs and times; the tests read them from the TSV files.

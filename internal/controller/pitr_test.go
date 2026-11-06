@@ -286,7 +286,8 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	if len(ic.Command) < 2 || ic.Command[0] != "/bloodraven" || ic.Command[1] != "pitr-download" {
 		t.Errorf("init container command: want [/bloodraven pitr-download ...], got %v", ic.Command)
 	}
-	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00Z")
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00.000000Z")
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_MODE", "timestamp")
 	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STORAGE_TYPE", "S3")
 	dest, err := pitrarchive.NewS3Destination("lion", "source-dumps", "")
 	if err != nil {
@@ -318,7 +319,7 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 
 	// Main container gets RO shared volume + BLOODRAVEN_PITR_LOCAL_DIR.
 	assertEnvEquals(t, frags.MainEnv, "BLOODRAVEN_PITR_LOCAL_DIR", restorePITRLocalDir)
-	assertEnvEquals(t, frags.MainEnv, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00Z")
+	assertEnvEquals(t, frags.MainEnv, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00.000000Z")
 	assertEnvEquals(t, frags.MainEnv, "TZ", "UTC")
 	if len(frags.MainMounts) != 1 || !frags.MainMounts[0].ReadOnly {
 		t.Errorf("want 1 RO main mount, got %+v", frags.MainMounts)
@@ -388,4 +389,48 @@ func assertEnvEquals(t *testing.T, env []corev1.EnvVar, name, want string) {
 		}
 	}
 	t.Errorf("env %s not found", name)
+}
+
+// excludeGtids reaches pitr-download and restore.py in the planner's
+// canonical form, so restore.py's comparison with coverage.json "excluded"
+// holds for any spelling MySQL accepts; a set that does not parse is
+// refused at reconcile.
+func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	const v = "4f22ab58-82db-22f2-af44-d91bba530673"
+	for _, tc := range []struct {
+		name, in, want string
+		wantErr        bool
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "trimmed", in: " " + u + ":1 ", want: u + ":1"},
+		{name: "MySQL multi-line, upper case, unsorted", in: v + ":2-3,\n3E11FA47-71CA-11E1-9E33-C80AA9429562:5:1-4", want: u + ":1-5," + v + ":2-3"},
+		{name: "tags", in: u + ":1:Blue:7", want: u + ":1," + u + ":blue:7"},
+		{name: "unparsable", in: u + ":9-2", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restore, rerr := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ExcludeGtids: tc.in})
+			verify, verr := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: tc.in})
+			for name, err := range map[string]error{"restore": rerr, "verification": verr} {
+				if tc.wantErr {
+					if err == nil || pitrFailureReason(err.Error()) != string(pitrarchive.TokenTargetInvalid) {
+						t.Fatalf("%s: err = %v, want %s", name, err, pitrarchive.TokenTargetInvalid)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+			}
+			if tc.wantErr {
+				return
+			}
+			if restore.ExcludeGtids != tc.want || verify.ExcludeGtids != tc.want {
+				t.Fatalf("excludeGtids = %q (restore), %q (verification); want %q", restore.ExcludeGtids, verify.ExcludeGtids, tc.want)
+			}
+		})
+	}
+	if req, err := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: "none", ExcludeGtids: "not a set:x-y"}); err != nil || req != nil {
+		t.Fatalf("mode none = %+v, %v; want no replay and no error", req, err)
+	}
 }

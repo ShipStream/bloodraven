@@ -25,10 +25,23 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 	// 31-pitr-verification-rustfs is no longer quarantined (#101 fixed — the
 	// verify mysqld runs gtid_mode=ON and server-side dedup handles the PITR
 	// replay), and the issue #115 reader scenarios (40-44) are release-graded.
-	// The four chaos-round 2026-10-15 regressions bring it to 24.
+	// The four chaos-round 2026-10-15 regressions bring it to 24, and the
+	// three #206 cross-site PITR histories (37, 68, 70) to 27.
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 24 {
-		t.Fatalf("release profile selected %d scenarios, want 24", len(release))
+	if len(release) != 27 {
+		t.Fatalf("release profile selected %d scenarios, want 27", len(release))
+	}
+	for _, id := range []string{
+		"37-pitr-planned-failback-no-reclone",
+		"68-pitr-failback-with-reclone",
+		"70-pitr-lossy-failover",
+	} {
+		if !containsScenarioID(release, id) {
+			t.Errorf("release profile must include %s (#206)", id)
+		}
+		if containsScenarioID(smoke, id) {
+			t.Errorf("%s must not be in the smoke profile", id)
+		}
 	}
 	for _, id := range []string{
 		"09-anti-flap-cooldown",

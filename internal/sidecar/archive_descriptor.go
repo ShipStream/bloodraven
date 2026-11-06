@@ -289,8 +289,10 @@ func (s *ArchiveSession) EnsureCreated(ctx context.Context) error {
 		return s.settle(err)
 	}
 	if created {
+		// The archiver's logger already carries site; repeating it here
+		// would emit a duplicate "site" key.
 		s.logger.Info("archive descriptor created",
-			"archiveID", got.ArchiveID, "destination", s.identity.Destination.String(), "site", s.site)
+			"archiveID", got.ArchiveID, "destination", s.identity.Destination.String())
 	}
 	return s.settle(nil)
 }

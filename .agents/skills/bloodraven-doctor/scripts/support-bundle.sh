@@ -112,11 +112,44 @@ kubectl get mysqlbackups.shipstream.io -n "$NAMESPACE" -o json 2>/dev/null | \
        gtidExecuted: .status.gtidExecuted,
        failoverGroupUID: .status.failoverGroupUID, pitrArchiveID: .status.pitrArchiveID}]' > "$OUTPUT_DIR/backups.json" 2> "$OUTPUT_DIR/backup-errors.txt" || true
 
-# PITR archive identity and condition. The descriptor fields hold no secret.
+# PITR archive identity, condition and point-in-time results. The descriptor
+# fields and GTID sets hold no secret.
 kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '{uid: .metadata.uid, archive: .status.pitr.archive,
-         pitrArchiveReady: [.status.conditions[]? | select(.type == "PITRArchiveReady")]}' \
+         pitrArchiveReady: [.status.conditions[]? | select(.type == "PITRArchiveReady")],
+         restore: (.status.restore // null | if . then {phase, reason, message, jobName, pointInTime} else null end),
+         restoreInPlacePointInTime: .status.restoreInPlace.pointInTime}' \
     > "$OUTPUT_DIR/pitr-archive.json" 2> "$OUTPUT_DIR/pitr-archive-errors.txt" || true
+kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o json 2>/dev/null | \
+    jq '[.items[] | {name: .metadata.name, mode: .spec.pointInTime.mode, timestamp: .spec.pointInTime.timestamp,
+         excludeGtids: .spec.pointInTime.excludeGtids, phase: .status.phase,
+         verified: [.status.conditions[]? | select(.type == "Verified")], pointInTime: .status.pointInTime,
+         replayedThroughBinlog: .status.replayedThroughBinlog}]' \
+    > "$OUTPUT_DIR/verification-pitr.json" 2> "$OUTPUT_DIR/verification-pitr-errors.txt" || true
+
+# Per-site /archiver/status: archive block, promotionRecordedAt, historyIntegrity,
+# divergentRows and quarantinedRows. The endpoint returns no credentials.
+for pod in $(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME,app.kubernetes.io/name=mysql" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
+    kubectl exec -n "$NAMESPACE" "$pod" -c sidecar -- wget -T 5 -qO- http://127.0.0.1:8080/archiver/status \
+        > "$OUTPUT_DIR/${pod}-archiver-status.json" 2>/dev/null || true
+done
+
+# PITR restore and verification Job pods: termination messages (refusals and
+# verdicts) and the planner's records. Env and volumes are not captured.
+for pod in $(kubectl get pods -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource in (restore,backup-verification)" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
+    kubectl get pod "$pod" -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq '{name: .metadata.name, phase: .status.phase,
+             containers: [(.status.initContainerStatuses // [])[], (.status.containerStatuses // [])[] |
+               {name, exitCode: (.state.terminated.exitCode // .lastState.terminated.exitCode),
+                message: (.state.terminated.message // .lastState.terminated.message)}]}' \
+        > "$OUTPUT_DIR/${pod}-termination.json" 2>/dev/null || true
+    for c in dump-meta pitr-download; do
+        kubectl logs -n "$NAMESPACE" "$pod" -c "$c" 2>/dev/null | \
+            grep -E '"msg":"(pitr plan|dump metadata|read dump metadata|download site binlogs)"|BLOODRAVEN_PITR_DIVERGENT_SET' > "$OUTPUT_DIR/${pod}-${c}-pitr.log" || true
+    done
+    kubectl logs -n "$NAMESPACE" "$pod" -c mysqlsh 2>/dev/null | \
+        grep -E 'BLOODRAVEN_PITR_(START|SEGMENT|COMPLETE|FAILED|PARTIAL|DIVERGENT|ON_HISTORY_EXCLUSIONS|RESULT)' > "$OUTPUT_DIR/${pod}-replay.log" || true
+done
 
 # 3. Capture Events
 kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp > "$OUTPUT_DIR/events.txt" 2>/dev/null || true
@@ -140,6 +173,13 @@ for pod in $PODS; do
     for c in $CONTAINERS; do
         kubectl logs -n "$NAMESPACE" "$pod" -c "$c" --tail=300 > "$OUTPUT_DIR/${pod}-${c}.log" 2>/dev/null || true
     done
+done
+
+# Promotion records and archive identity events from the sidecar logs.
+for pod in $PODS; do
+    kubectl logs -n "$NAMESPACE" "$pod" -c sidecar --tail=5000 2>/dev/null | \
+        grep -E '"msg":"(promotion recorded|uploads wait for the promotion record|archive descriptor created|archive descriptor changed|archive history unsafe|persist history integrity marker)"' \
+        > "$OUTPUT_DIR/${pod}-sidecar-pitr.log" || true
 done
 
 # Create tarball (staging directory is removed by the EXIT trap)

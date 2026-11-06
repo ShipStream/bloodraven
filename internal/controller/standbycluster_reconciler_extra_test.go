@@ -538,7 +538,7 @@ func TestStandbyCluster_DumpSelectionByEndTime(t *testing.T) {
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/z-dump-OLDER/@.json":       []byte(`{"end":"2026-05-18T04:00:00Z","gtidExecuted":"old:1-50","totalBytes":100}`),
 		"orders/a-dump-NEWER/@.json":       []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"new:1-200","totalBytes":200}`),
-		"orders/binlogs/archive.json": standbyTestDescriptor(),
+		"orders/binlogs/archive.json":      standbyTestDescriptor(),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[]}`),
 	}}
 	r, _ := newTestReconcilerRaw(t, []client.Object{cr}, store)

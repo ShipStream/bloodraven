@@ -11,7 +11,8 @@ package runner
 //     data integrity, operator kill during failover, self-fencing,
 //     network partition, PVC loss/re-bootstrap, old-primary recovery,
 //     failover state durability, plain and encrypted backup verification,
-//     PITR verification) plus the issue #115 reader-site behaviours
+//     PITR verification, and the #206 cross-site PITR histories: planned
+//     failback without reclone, failback with reclone, lossy failover) plus the issue #115 reader-site behaviours
 //     (reader PVC loss and direct-source auto-clone, reader availability
 //     through unplanned failover, reader stall isolation, writable-reader
 //     fencing, and the source-convergence invariant), and the regressions
@@ -64,6 +65,9 @@ var releaseScenarios = map[string]bool{
 	"30-backup-verification-rustfs":           true, // RustFS backup restore verification
 	"30-encrypted-backup-verification-rustfs": true, // encrypt-upload / decrypt-download operator-image containers
 	"31-pitr-verification-rustfs":             true, // RustFS PITR replay verification
+	"37-pitr-planned-failback-no-reclone":     true, // #206: anchored replica-copy era across a planned failback
+	"68-pitr-failback-with-reclone":           true, // #206: failback with reclone; unarchived tail refuses PITRArchiveGap
+	"70-pitr-lossy-failover":                  true, // #206: lost set, excludeGtids, reissue risk, history reset
 	"40-reader-data-loss-reclone":             true, // reader PVC loss, endpoint shedding, and direct-source auto-clone
 	"41-reader-availability-during-failover":  true, // reader keeps serving through unplanned failover, then repoints
 	"43-writable-reader-fence":                true, // writable reader fenced, rejected as target, blocked on divergence

@@ -493,3 +493,31 @@ func TestSnapshotCountsDivergentAndQuarantinedRows(t *testing.T) {
 		t.Fatalf("status = %+v (archive %+v)", st, st.Archive)
 	}
 }
+
+// The descriptor-created record is part of the log contract: one "site"
+// key (from the archiver's logger), plus archiveID and destination.
+func TestArchiveDescriptorCreatedLogRecord(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	a := NewBinlogArchiver(withTestArchive(&PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), BinlogIndex: "mysql-bin.index"}, store), "iad", &stubRoleChecker{}, store, logger)
+	a.scanAndArchive(ctx)
+	var record string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, `"msg":"archive descriptor created"`) {
+			record = line
+		}
+	}
+	if record == "" {
+		t.Fatalf("no archive descriptor created record in:\n%s", buf.String())
+	}
+	for key, want := range map[string]int{`"site":`: 1, `"archiveID":`: 1, `"destination":`: 1} {
+		if got := strings.Count(record, key); got != want {
+			t.Errorf("%s appears %d times, want %d: %s", key, got, want, record)
+		}
+	}
+	if !strings.Contains(record, `"site":"iad"`) || !strings.Contains(record, `"archiveID":"`+testArchiveID+`"`) {
+		t.Errorf("record = %s", record)
+	}
+}

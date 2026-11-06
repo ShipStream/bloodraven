@@ -66,7 +66,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `34-operator-kill-during-wait-replica` (§34; force-deletes the operator while an ordered update is held at `WaitReplica`; the replacement operator re-derives remaining drift from Deployment spec-hash mismatch and finishes with no double-roll and no `TOTAL LOSS`)
 - `35-planned-switchover-lag-timeout-rollback` (§35; `SOURCE_DELAY=60` on the target + `maxLagWait=5s` drives `WaitingForLag`→`Failed{LagTimeout}`; source stays active, `bloodraven_planned_failovers_total{result="failed_timeout"}` increments)
 - `36-rustfs-outage-during-restore-in-place` (§36; a per-schema in-place restore whose RustFS storage is scaled to 0 mid-run terminates `Failed` with the topology frozen; the untouched canary schema survives and the terminal `Failed` holds on the same confirm — a retry needs a new monotonic confirm — `ResetBeforeRunAll`)
-- `37-pitr-archive-handoff-across-failover` (§37; marker A archived on the old active, emergency failover, marker B archived on the new active; both the ordinary failover and reclone/failback verifications expect a refusal, because two sites hold transactions to replay — `ResetBeforeRunAll`)
+- `37-pitr-planned-failback-no-reclone` ([§37](#37-pitr-planned-failback-no-reclone); release profile, `ResetBeforeRunAll`; planned A→B→A without reclone or a flush on b; every era, including b's anchored replica-copy era, and an `initFromBackup` restore certify exactly the fenced history)
 - `38-dnsendpoint-write-denial-during-failover` (§38; denies the operator write verbs on `dnsendpoints`, forces promotion; the DNSEndpoint target stays stale during denial then heals to the promoted LBIP within 90s after RBAC restore with no re-failover)
 - `39-dragonfly-master-partition` (§39; deny-all NetworkPolicy on only the Dragonfly master pod promotes the surviving replica; MySQL `status.activeSite` and failover counters are unchanged)
 - `40-reader-data-loss-reclone` (§40; release-profile reader PVC replacement, continuous `Ready=True`, auto-clone donor/internal-host log assertion, direct-source/thread/lag/marker recovery, client EndpointSlice shedding, and internal endpoint publication)
@@ -75,8 +75,10 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `55-deployment-emergency-revocation` ([deployment coordination](#deployment-coordination); release profile, sustained primary outage bypasses live migration and hold leases, both renewals return `409`, and the MFG receives `DeploymentLeaseRevoked`)
 - `56-deployment-live-renewal-fenced` ([deployment coordination](#deployment-coordination); full profile, a migration client renewing every five seconds observes `409 revoked` after a planned topology change and stops)
 - `62-full-restore-fails-after-drop-keeps-peers` ([§62](#62-full-instance-restore-failing-after-its-drop); full profile, `ResetBeforeRunAll`; a full-instance in-place restore whose RustFS storage is scaled to 0 while it fences drops the user schemas and fails; the reclone queue is `Held` and every peer keeps its replication receiver `OFF` and its marker rows for two minutes, issue #212)
+- `68-pitr-failback-with-reclone` ([§68](#68-pitr-failback-with-reclone); release profile, `ResetBeforeRunAll`; failback with reclone is exact in every era; an unflushed era before the reclone refuses `PITRArchiveGap` until a newer backup)
+- `70-pitr-lossy-failover` ([§70](#70-pitr-lossy-failover); release profile, `ResetBeforeRunAll`; lost archived set, `excludeGtids`, a backup after the loss, `PITRArchiveReissueRisk`, `PITRArchiveHistoryReset` and the new-prefix remedy)
 
-Scenarios `32`–`39` are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. As of 2026-07-11, all eight have passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). All eight remain full-profile-only while this new, high-risk coverage matures. Scenarios `36` and `37` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
+Scenarios `32`–`39` except `37` are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. As of 2026-07-11, all eight have passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). All eight remain full-profile-only while this new, high-risk coverage matures. Scenarios `36` and `37` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
 
 `make chaos-list` is the authoritative inventory — when adding a scenario, also append it here so the doc and the registry stay in lock-step.
 
@@ -850,7 +852,7 @@ The scenario uses the same RustFS bucket/profile/credential Secret as scenario 3
 
 ## Scenarios 32-39: Denial, restore, and Dragonfly-partition band
 
-These eight scenarios add RBAC-denial, scoped-DNS, ordered-update-kill, planned-lag-timeout, restore-in-place, PITR-handoff, and Dragonfly-partition coverage. All are **full-profile-only** (omitted from `smoke`/`release`); §36 and §37 also run `ResetBeforeRunAll`. Each scenario below now records its live-run history on the k3d playground (2026-07-11) under "Actual live result" — prior failure evidence is preserved for the scenarios that needed a fix before their final pass.
+These eight scenarios add RBAC-denial, scoped-DNS, ordered-update-kill, planned-lag-timeout, restore-in-place, cross-site PITR, and Dragonfly-partition coverage. All are **full-profile-only** (omitted from `smoke`/`release`) except §37, which #206 rewrote and promoted to `release`; §36 and §37 also run `ResetBeforeRunAll`. Each scenario below now records its live-run history on the k3d playground (2026-07-11) under "Actual live result" — prior failure evidence is preserved for the scenarios that needed a fix before their final pass.
 
 Three of these (§32, §36, §38) exposed a real operator defect and shipped a minimal fix; see the **Observed defect and fix** notes under those sections. §33 exposed a real playground/tooling defect (a NetworkPolicy that this CNI evaluates post-DNAT), also documented under **Observed defect and fix**. §35 and §36's first live attempt each hit a scenario-only assertion-timing race (not an operator bug), fixed in the scenario's wait/verify logic — see the per-scenario notes below.
 
@@ -951,22 +953,32 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 ---
 
-### 37. PITR Archive Handoff Across Failover
-**Category**: PITR continuity across failover | **Risk**: Medium | **Profile**: full-only, `ResetBeforeRunAll`
+### 37. PITR Planned Failback Without Reclone {#37-pitr-planned-failback-no-reclone}
+**Category**: PITR across failover (#206) | **Risk**: Medium | **Automated**: `37-pitr-planned-failback-no-reclone` (release profile and the label-gated e2e `pitr` job, `ResetBeforeRunAll`)
 
-**Hypothesis**: PITR preserves per-site archives across emergency failover and reclone/failback. Both timestamp verifications refuse, because two sites hold transactions to replay in each window (#206).
+**Hypothesis**: A planned failover A→B and a planned failback B→A, with no reclone and no `FLUSH BINARY LOGS` on b, restore every era exactly. b's short era reaches the archive only as replica copies inside a's mixed binlog, and a target inside it is anchored by b's promotion record (DESIGN §4.15 Example 3).
 
-**Injection**: Configure PITR under `e2e/37-…/<run-stamp>`; wait for active archiver readiness; seed baseline and take a full `MysqlBackup`; insert marker A on the current active, `FLUSH BINARY LOGS`, wait archive coverage and replica GTID catch-up; scale the active to 0 to force failover; wait for the peer to become active and its sidecar archiver `primary=true` on the **same** prefix; insert marker B, flush, wait coverage; capture a timestamp, seal a successor and verify cross-site refusal before reclone; bring the former primary back, explicitly reclone it, promote it again, archive marker R under reused names, then capture the PITR target; insert marker C after the target, flush, wait coverage.
+**Setup**: an encrypted RustFS archive under `e2e/37-pitr-planned-failback-no-reclone/<run-stamp>` (`maxBinlogSize=64M`, so nothing rotates by size and the scenario decides what is sealed). The counter app writes throughout.
 
-**Verify**: Both per-site manifests exist with archived files. The initial ordinary-failover verification fails with `PITRCrossSiteOrder`. The final post-reclone/failback verification fails with `PITRCrossSiteOrder` or, when the clone base names transactions without their bytes, `PITRTargetNotCovered`. A verification that succeeds fails the step at once with forensics. For a target after failover, use a full backup taken after that failover and before the target so one site replays. A refused pre-failover target cannot be verified until #206. `allowUnverifiedCrossSite` and `pointInTime.sites` were removed in v2.0.0, and this build refuses every PITR verification with `PITRReplayUnsupported` after the archive identity checks, so these expectations describe the removed per-site planner until the scenario is rewritten for the chronological planner. These changed expectations have not been run against a live cluster.
+**Fences**: each expected set comes from a fence on the active primary: `FLUSH TABLES WITH READ LOCK`, read `@@gtid_executed` and `UTC_TIMESTAMP(6)` (the target T, µs) under the lock, optionally `FLUSH BINARY LOGS` under the lock, then `UNLOCK TABLES`. Every transaction committed before the lock is in the set and older than T; every later one is newer. So the expected history is exact even with concurrent writes. A flushing fence's set is exactly the sealed file's exec set (the latest-mode expectation).
 
-**Timing**: 40-minute timeout.
+**Injection and verification**:
 
-These updated expectations have compile/unit and native-fixture coverage. No live run of the new two-verification scenario is claimed; the historical live result below predates both the reclone extension and the current refusal policy.
+1. Seed the marker table, take backup β1, and read its baseline B from the dump's `@.json` (decrypted).
+2. Era A: marker M1, fence T1, witness M1b, flushing fence on a.
+3. Planned A→B (after the anti-flap cooldown). Wait until b's sidecar reports `promotionRecordedAt` for this promotion. Marker M2, fence T2 (after the record, so outside the D-53 lag window), witness M2b. No flush.
+4. Between the failover and the failback: a timestamp verification at T2 refuses `PITRTargetNotCovered` (b's era is not archived yet), and a latest verification is Verified with outcome `ArchiveHead` and the step-2 flush set.
+5. Planned B→A. Marker M3, fence T3, witness M3b, flushing fence on a, which uploads a's mixed file (era A tail, b's era as replica copies, era A').
+6. Verifications of β1: T1 (origin witness), T2 inside b's era (replica-copy witness, anchored by b's record), T3, and latest.
+7. An `initFromBackup` restore into a new group `s37-restored` (the source's two primary candidates without taints or LB IPs, no Dragonfly, PITR off, seeded on the source's active site) at T2.
 
-**Cleanup**: Reverter scales the old active back to 1; delete backup + verification CRs; drop `chaos_s37_pitr` and wait for the drop to replicate; restore the original backup/PITR spec; wait for a healthy baseline, absorbing any anti-flap cooldown from the failover.
+**Verify** (every verification and the restore): `status.pointInTime.outcome` (`TargetCovered`, or `ArchiveHead` for latest); `gtidExecuted` **equals** the fenced set as GTID sets; `replayedTransactionCount` = |expected ∖ B|; `archive.archiveID` equals the source group's `status.pitr.archive.archiveID`; and the marker rows are exactly the ones committed before T (a verification sanity query, or a direct query on `s37-restored`). Nothing is asserted on segment counts or sites.
 
-**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T021839Z`) with no operator defect surfaced. Both `manifest-<oldActive>.json` and `manifest-<newActive>.json` existed under the shared `<prefix>/binlogs` with the expected files, the sidecar archiver flipped `primary=true` on the new active after the forced failover, and the pinned timestamp `MysqlBackupVerification` reported `ResultRow=1` for baseline+A+B with C excluded and `ReplayedThroughBinlog` set — confirming archive continuity across the emergency failover.
+**Timing**: 60-minute timeout.
+
+**Cleanup**: deletes `s37-restored` (its Deployments and PVCs are owned by it), the verifications and backups (asserting their RustFS artifacts are removed), drops `chaos_s37_pitr`, restores the original `spec.backup`, deletes the run's passphrase Secret, and waits for a healthy baseline past the anti-flap cooldown.
+
+**Status**: written and compiled against the #206 series-2 API, not yet run on a live cluster. The pre-#206 version of this scenario (`37-pitr-archive-handoff-across-failover`, which expected `PITRCrossSiteOrder`) is gone.
 
 ---
 
@@ -1504,6 +1516,34 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 **Cleanup**: removes the spec and Job, and removes `status.restoreReclones`, which resumes the peers' replication from the damaged primary; run-all resets before the next destructive scenario.
 
 **Status**: written and compiled, not yet run on a live cluster.
+
+### 68. PITR Failback With Reclone {#68-pitr-failback-with-reclone}
+**Category**: PITR across failover (#206) | **Risk**: Medium | **Automated**: `68-pitr-failback-with-reclone` (release profile and the e2e `pitr` job, `ResetBeforeRunAll`)
+
+**Hypothesis**: A failback with a reclone of the old primary restores every era exactly when b's era was flushed before the reclone, and refuses with a precise gap when it was not (the unarchived-tail limitation FU-1, DESIGN §4.15 Example 4 and variant 4g).
+
+**Injection and verification**: plaintext RustFS archive, fences as in §37.
+
+1. Cycle 1: era A (marker, fence T1, witness, flush a); planned A→B; era B (marker, fence T2, witness, **flush b**); reclone a (`bloodraven.shipstream.io/reclone-site`); planned B→A; era A' (marker, fence T3, witness, flush a). Verifications of β1 at T1, T2 and T3 are each Verified with the exact fenced set, the replay count against the dump's `@.json`, the archive ID and the marker rows.
+2. Cycle 2: planned A→B; marker M4 on b with **no flush**; reclone a, which wipes a's unarchived binlogs; planned B→A; era A'' (marker, fence T5, witness, flush a). A verification of β1 at T5 refuses `PITRArchiveGap`, and the message names b's `server_uuid` and "unarchived tail".
+3. Take backup β2 after the failback, then marker, fence T6, witness, flush a. A verification of β2 at T6 is Verified exactly (a target before β2's dump end would refuse `PITRBackupAfterTarget`, so the covered check uses a new target).
+
+**Timing**: 75-minute timeout. **Cleanup**: as §37, without a restored group. **Status**: written and compiled, not yet run on a live cluster.
+
+### 70. PITR Lossy Failover {#70-pitr-lossy-failover}
+**Category**: PITR across failover (#206) | **Risk**: High | **Automated**: `70-pitr-lossy-failover` (release profile and the e2e `pitr` job, `ResetBeforeRunAll`)
+
+**Hypothesis**: After a failover that loses archived transactions, PITR refuses until they are excluded or a newer backup is used, and recloning the old primary and failing back to it fails closed (D-46): a Warning, then a whole-archive refusal until a new prefix and a full backup (DESIGN §4.15 Examples 5, 8(c) and O2-5).
+
+**Injection and verification**: plaintext RustFS archive, fences as in §37.
+
+1. Take β1. Delay b's applier with `SOURCE_DELAY=90` (the operator auto-recovers `STOP REPLICA SQL_THREAD`, see §14, and the failover's 30 s relay-log drain restarts a stopped applier, so a delay is what keeps L out of b). Write the lost markers L on a and archive them with a flushing fence, then scale a to 0. b is promoted without L; the scenario computes the lost set as a's archived set minus b's `@@gtid_executed` and fails if it is empty.
+2. A latest verification refuses `PITRArchiveDivergentHistory` (the message names a's UUID). With `excludeGtids` = the lost set it is Verified (`ArchiveHead`, a's archived set minus the lost set).
+3. b writes S (fence TS) and flushes. A timestamp verification of β1 at TS refuses `PITRArchiveDivergentHistory`; with `excludeGtids` it is Verified exactly and reports `excludedDivergentTransactionCount` = |lost set|. Take β2; b writes S2 (fence) and flushes; a verification of β2 **without exclusions** is Verified exactly.
+4. Scale a back up and reclone it. Wait until a's sidecar reports `divergentRows`/`quarantinedRows` > 0 (a's own manifest still holds the archived lost row). A planned failback to a emits Warning `PITRArchiveReissueRisk`. a writes R and flushes, reissuing the lost GTIDs (FU-4: a reclone keeps `server_uuid`); a verification refuses `PITRArchiveHistoryReset`.
+5. The documented remedy: switch the profile to a new prefix (a new archive ID), take β3, write, fence, flush; a verification of β3 is Verified exactly.
+
+**Timing**: 75-minute timeout. **Cleanup**: clears b's applier delay if the run stopped before the failover, reclones any `RecoveryBlocked` site, then as §37. **Status**: written and compiled, not yet run on a live cluster.
 
 ### Recorded, not automated
 

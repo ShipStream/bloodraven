@@ -15,16 +15,23 @@ var scenarios3239 = []string{
 	"34-operator-kill-during-wait-replica",
 	"35-planned-switchover-lag-timeout-rollback",
 	"36-rustfs-outage-during-restore-in-place",
-	"37-pitr-archive-handoff-across-failover",
+	"37-pitr-planned-failback-no-reclone",
 	"38-dnsendpoint-write-denial-during-failover",
 	"39-dragonfly-master-partition",
+}
+
+// releaseProfiled3239 lists the scenarios of this package that were later
+// promoted into the release profile. 37 was rewritten for #206 (cross-site
+// PITR) and is release-graded; the rest stay full-only.
+var releaseProfiled3239 = map[string]bool{
+	"37-pitr-planned-failback-no-reclone": true,
 }
 
 // resetBeforeRunAll3239 records which of the new scenarios must start from a
 // pristine playground in run-all (destructive backup/restore/PITR state).
 var resetBeforeRunAll3239 = map[string]bool{
 	"36-rustfs-outage-during-restore-in-place": true,
-	"37-pitr-archive-handoff-across-failover":  true,
+	"37-pitr-planned-failback-no-reclone":      true,
 }
 
 func TestScenarios3239RegisteredAndProfiled(t *testing.T) {
@@ -48,12 +55,13 @@ func TestScenarios3239RegisteredAndProfiled(t *testing.T) {
 		if !inventoryContains(full, id) {
 			t.Errorf("scenario %s must appear in the full profile", id)
 		}
-		// Full-profile-only by allowlist omission: never in smoke or release.
+		// Never in smoke; full-profile-only by allowlist omission unless
+		// promoted to release.
 		if inventoryContains(smoke, id) {
-			t.Errorf("scenario %s must NOT be in the smoke profile (full-only)", id)
+			t.Errorf("scenario %s must NOT be in the smoke profile", id)
 		}
-		if inventoryContains(release, id) {
-			t.Errorf("scenario %s must NOT be in the release profile (full-only)", id)
+		if inventoryContains(release, id) != releaseProfiled3239[id] {
+			t.Errorf("scenario %s in release profile=%v, want %v", id, inventoryContains(release, id), releaseProfiled3239[id])
 		}
 		if s.ResetBeforeRunAll != resetBeforeRunAll3239[id] {
 			t.Errorf("scenario %s ResetBeforeRunAll=%v, want %v", id, s.ResetBeforeRunAll, resetBeforeRunAll3239[id])

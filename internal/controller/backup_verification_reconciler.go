@@ -346,21 +346,24 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 			return ctrl.Result{}, fmt.Errorf("list verification Job pods: %w", err)
 		}
 	}
+	// A terminal observation always recomputes the certified result.
+	next.PointInTime = nil
 	if pitr && phase == v1alpha1.BackupPhaseSucceeded {
-		verdict, err := pitrJobVerdict(pod, job)
+		result, err := pitrJobVerdict(pod, job)
 		if err != nil {
 			phase = v1alpha1.BackupPhaseFailed
 			message = "PITRCoverageInvalid: " + err.Error()
 		} else {
-			mark := &v1alpha1.BinlogReplayMark{File: verdict.LastFile}
-			if next.ReplayedThroughBinlog != nil {
-				mark.Position = next.ReplayedThroughBinlog.Position
+			next.PointInTime = result
+			// replayedThroughBinlog keeps feeding the replay-lag gauge:
+			// the last segment's file and the newest replayed commit.
+			mark := &v1alpha1.BinlogReplayMark{}
+			if result.LastReplayedBinlog != nil {
+				mark.File = result.LastReplayedBinlog.Name
 			}
-			if verdict.NewestEventTime != "" {
-				if t, err := time.Parse(time.RFC3339, verdict.NewestEventTime); err == nil {
-					stamp := metav1.NewTime(t)
-					mark.Timestamp = &stamp
-				}
+			if result.NewestReplayedCommitTime != nil {
+				stamp := metav1.NewTime(result.NewestReplayedCommitTime.Time)
+				mark.Timestamp = &stamp
 			}
 			next.ReplayedThroughBinlog = mark
 		}
@@ -438,6 +441,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	r.emitTerminalMetrics(execution, verificationJobPITRMode(job))
 
 	if next.Phase == v1alpha1.VerificationPhaseSucceeded {
+		emitPointInTimeEvents(r.Recorder, v, next.PointInTime)
 		r.Recorder.Eventf(v, corev1.EventTypeNormal, "VerificationSucceeded",
 			"verification %s succeeded: %s", v.Name, message)
 	} else {

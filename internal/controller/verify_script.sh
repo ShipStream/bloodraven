@@ -24,8 +24,9 @@
 #   BLOODRAVEN_VERIFY_PITR_MODE           none|latest|timestamp
 #   BLOODRAVEN_PITR_LOCAL_DIR             where pitr-download init
 #                                         container dropped binlogs
-#   BLOODRAVEN_PITR_STOP_DATETIME         replay stop instant (RFC3339)
-#                                         for mode=timestamp
+#   BLOODRAVEN_PITR_MODE, BLOODRAVEN_PITR_STOP_DATETIME, ...
+#                                         the replay request restore.py
+#                                         reads (see restore_script.py)
 #   BLOODRAVEN_VERIFY_SANITY_QUERY        scalar SELECT to run post-load
 #   BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS  sanity client-side timeout (s)
 #   BLOODRAVEN_VERIFY_SANITY_MIN_ROWS     fail if scalar < this value
@@ -266,34 +267,15 @@ if [[ $LOAD_RC -ne 0 ]]; then
 fi
 
 # ---- PITR replay -----------------------------------------------------
-# restore.py owns PITR replay for both restore and verification jobs.
-# Bridge its BLOODRAVEN_RESTORE_COMPLETE metadata into the verification
-# sentinel consumed by the reconciler, including the newest verified event in
-# the prefix passed through replay (never the requested stop time).
+# restore.py owns PITR replay for both restore and verification jobs, and
+# writes its verdict (the only certificate the controller accepts) to
+# $PITR_VERDICT once the replay is proven. A replaying run without one
+# fails.
 PITR_MODE="${BLOODRAVEN_VERIFY_PITR_MODE:-none}"
 if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
-    RESTORE_COMPLETE="$(grep 'BLOODRAVEN_RESTORE_COMPLETE' "$RESTORE_LOG" | tail -n 1 || true)"
-    LAST_FILE=""
-    REPLAY_COUNT=""
-    NEWEST_EVENT=""
-    COVERAGE_VERSION=""
-    TARGET_COVERED="false"
-    PARTIAL="false"
-    for f in $RESTORE_COMPLETE; do
-        case "$f" in
-            pitrReplayedBinlogFile=*) LAST_FILE="${f#pitrReplayedBinlogFile=}" ;;
-            pitrCoverageVersion=*) COVERAGE_VERSION="${f#pitrCoverageVersion=}" ;;
-            pitrTargetCovered=*) TARGET_COVERED="${f#pitrTargetCovered=}" ;;
-            pitrPartial=*) PARTIAL="${f#pitrPartial=}" ;;
-            pitrNewestEventTime=*) NEWEST_EVENT="${f#pitrNewestEventTime=}" ;;
-            pitrReplayedBinlogCount=*) REPLAY_COUNT="${f#pitrReplayedBinlogCount=}" ;;
-        esac
-    done
     if [[ ! -s "$PITR_VERDICT" ]]; then
         fail 1 "PITRCoverageInvalid: PITR mode=$PITR_MODE but restore.py wrote no verdict"
     fi
-    printf 'BLOODRAVEN_VERIFY_REPLAY_COMPLETE coverage=%s mode=%s targetCovered=%s partial=%s files=%s file=%s position=%s timestamp=%s\n' \
-        "$COVERAGE_VERSION" "$PITR_MODE" "$TARGET_COVERED" "$PARTIAL" "$REPLAY_COUNT" "$LAST_FILE" "0" "$NEWEST_EVENT"
 fi
 
 # ---- Sanity check ----------------------------------------------------

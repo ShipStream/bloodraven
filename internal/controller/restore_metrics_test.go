@@ -26,14 +26,16 @@ func TestParseRestoreCompleteLine(t *testing.T) {
 	if !ok {
 		t.Fatal("expected sentinel match")
 	}
-	if meta.SourceSizeBytes != 123 || meta.SourceBinlogPos != 44 || meta.TargetBinlogPos != 88 || meta.PitrReplayedBinlogCount != 7 {
+	if meta.SourceSizeBytes != 123 || meta.SourceBinlogPos != 44 || meta.TargetBinlogPos != 88 {
 		t.Fatalf("numeric fields not parsed: %+v", meta)
 	}
-	if meta.PitrStopDatetime != "2026-04-15 09:30:00" {
-		t.Errorf("pitrStopDatetime = %q", meta.PitrStopDatetime)
-	}
-	if meta.SourceBinlogFile != "mysql_bin.000001" || meta.TargetGtidExecuted != "uuid:1-9,uuid_b:1-2" || meta.PitrReplayedBinlogFile != "site_a/mysql_bin.000003" {
+	if meta.SourceBinlogFile != "mysql_bin.000001" || meta.TargetGtidExecuted != "uuid:1-9,uuid_b:1-2" {
 		t.Errorf("string fields not parsed: %+v", meta)
+	}
+	// Point-in-time results come only from the verdict, never from this
+	// best-effort log line, whatever it carries.
+	if meta.PointInTime != nil {
+		t.Errorf("log line produced a point-in-time result: %+v", meta.PointInTime)
 	}
 }
 
@@ -47,9 +49,6 @@ func TestParseRestoreCompleteLine_ReversibleEncodingRoundTrip(t *testing.T) {
 	if meta.TargetBinlogFile != "mysql_bin with space%25" {
 		t.Fatalf("targetBinlogFile = %q", meta.TargetBinlogFile)
 	}
-	if meta.PitrReplayedBinlogFile != "site_a/mysql_bin_000003" {
-		t.Fatalf("pitrReplayedBinlogFile = %q", meta.PitrReplayedBinlogFile)
-	}
 }
 
 func TestParseRestoreCompleteLine_MismatchAndMalformedInts(t *testing.T) {
@@ -60,7 +59,7 @@ func TestParseRestoreCompleteLine_MismatchAndMalformedInts(t *testing.T) {
 	if !ok {
 		t.Fatal("expected restore sentinel match")
 	}
-	if meta.SourceSizeBytes != 0 || meta.TargetBinlogPos != 0 || meta.PitrReplayedBinlogCount != 0 {
+	if meta.SourceSizeBytes != 0 || meta.TargetBinlogPos != 0 {
 		t.Fatalf("malformed ints should stay zero: %+v", meta)
 	}
 }

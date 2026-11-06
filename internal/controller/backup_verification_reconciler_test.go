@@ -523,36 +523,39 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 
 // --- Phase 2: PITR, sanity, and sentinel parsing ------------------------
 
-func TestVerificationPITRSpec_ModeNoneIsNil(t *testing.T) {
-	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "none"})
-	if err != nil || out != nil {
-		t.Errorf("mode=none should yield (nil, nil), got (%+v, %v)", out, err)
-	}
-	out, err = verificationPITRSpec(nil)
-	if err != nil || out != nil {
-		t.Errorf("nil spec should yield (nil, nil), got (%+v, %v)", out, err)
-	}
-}
-
-func TestVerificationPITRSpec_Latest_UsesFarFutureStop(t *testing.T) {
-	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "latest"})
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if out == nil || !strings.HasPrefix(out.StopDatetime, "9999-") {
-		t.Errorf("mode=latest should sentinel-stop far-future, got %+v", out)
-	}
-}
-
-func TestVerificationPITRSpec_Timestamp_RequiresValue(t *testing.T) {
-	if _, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp"}); err == nil {
-		t.Error("mode=timestamp without Timestamp should error")
-	}
-	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{
-		Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
-	})
-	if err != nil || out == nil || out.StopDatetime != "2026-04-20T01:00:00Z" {
-		t.Errorf("timestamp plumb: out=%+v err=%v", out, err)
+func TestVerificationPITRRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      *v1alpha1.PointInTimeVerificationSpec
+		want    *pitrReplayRequest
+		wantErr string
+	}{
+		{name: "nil", in: nil},
+		{name: "none", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "none"}},
+		{name: "empty mode", in: &v1alpha1.PointInTimeVerificationSpec{}},
+		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: " a:1 "},
+			want: &pitrReplayRequest{Mode: "latest", ExcludeGtids: "a:1", Verification: true}},
+		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20 03:00:00.5+02:00"},
+			want: &pitrReplayRequest{Mode: "timestamp", Stop: "2026-04-20T01:00:00.500000Z", Verification: true}},
+		{name: "timestamp required", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp"}, wantErr: "PITRTargetInvalid"},
+		{name: "seven digits", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20T01:00:00.1234567Z"}, wantErr: "PITRTargetInvalid"},
+		{name: "unknown mode", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "head"}, wantErr: "not one of"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := verificationPITRRequest(tc.in)
+			if tc.wantErr != "" {
+				if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) && !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got == nil) != (tc.want == nil) || got != nil && *got != *tc.want {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -581,28 +584,34 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
 	}
-	// The only init container is the PITR download container.
+	// dump-meta runs first, then pitr-download (§6.3 init order).
 	initCs := job.Spec.Template.Spec.InitContainers
-	if len(initCs) != 1 {
-		t.Fatalf("want 1 init container (pitr-download), got %d", len(initCs))
-	}
-	if initCs[0].Name != restorePITRInitContainerName {
-		t.Errorf("want init container %q, got %q",
-			restorePITRInitContainerName, initCs[0].Name)
-	}
-	var haveMode, haveLocalDir, haveStop bool
-	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
-		switch e.Name {
-		case "BLOODRAVEN_VERIFY_PITR_MODE":
-			haveMode = e.Value == "timestamp"
-		case "BLOODRAVEN_PITR_LOCAL_DIR":
-			haveLocalDir = e.Value != ""
-		case "BLOODRAVEN_PITR_STOP_DATETIME":
-			haveStop = e.Value == "2026-04-20T01:00:00Z"
+	if len(initCs) != 2 || initCs[0].Name != restorePITRDumpMetaContainerName || initCs[1].Name != restorePITRInitContainerName {
+		names := []string{}
+		for _, c := range initCs {
+			names = append(names, c.Name)
 		}
+		t.Fatalf("init containers = %v, want [dump-meta pitr-download]", names)
 	}
-	if !haveMode || !haveLocalDir || !haveStop {
-		t.Errorf("missing PITR env vars: mode=%v localDir=%v stop=%v", haveMode, haveLocalDir, haveStop)
+	dumpEnv := containerEnv(initCs[:1], restorePITRDumpMetaContainerName)
+	if dumpEnv["BLOODRAVEN_DUMP_EXPECTED_BACKUP_UID"] != string(backup.UID) || dumpEnv["BLOODRAVEN_DUMP_EXPECTED_GTID_EXECUTED"] != backup.Status.GtidExecuted ||
+		dumpEnv["BLOODRAVEN_DUMP_META_OUTPUT_DIR"] != restorePITRDumpMetaDir || dumpEnv["BLOODRAVEN_SOURCE_PREFIX"] == "" {
+		t.Errorf("dump-meta env: %v", dumpEnv)
+	}
+	initEnv := containerEnv(initCs[1:], restorePITRInitContainerName)
+	if _, ok := initEnv["BLOODRAVEN_PITR_START_GTIDS"]; ok {
+		t.Error("pitr-download must not receive START_GTIDS; B comes from dump.json")
+	}
+	if initEnv["BLOODRAVEN_PITR_DUMP_META"] != restorePITRDumpMetaDir+"/dump.json" || initEnv["BLOODRAVEN_PITR_MODE"] != "timestamp" {
+		t.Errorf("pitr-download env: %v", initEnv)
+	}
+	main := containerEnv(job.Spec.Template.Spec.Containers, job.Spec.Template.Spec.Containers[0].Name)
+	if main["BLOODRAVEN_VERIFY_PITR_MODE"] != "timestamp" || main["BLOODRAVEN_PITR_LOCAL_DIR"] == "" ||
+		main["BLOODRAVEN_PITR_STOP_DATETIME"] != "2026-04-20T01:00:00.000000Z" || main["BLOODRAVEN_PITR_ALLOW_PARTIAL"] != "false" {
+		t.Errorf("main PITR env: %v", main)
+	}
+	if _, ok := main["BLOODRAVEN_SOURCE_GTID_EXECUTED"]; ok {
+		t.Error("restore.py no longer reads the backup's status.gtidExecuted")
 	}
 }
 

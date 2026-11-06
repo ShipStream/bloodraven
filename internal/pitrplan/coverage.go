@@ -2,6 +2,7 @@ package pitrplan
 
 import (
 	"encoding/json"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -202,4 +203,57 @@ func (c Coverage) Marshal() ([]byte, error) {
 		c.Witness = &w
 	}
 	return json.MarshalIndent(c, "", "  ")
+}
+
+// Coverage renders the plan as coverage.json version 2. archive and dump
+// come from the glue (descriptor and dump.json); refusal is the
+// termination message ("" on success).
+func (p *Plan) Coverage(archive CoverageArchive, dump CoverageDump, refusal string) Coverage {
+	c := Coverage{
+		Version: CoverageVersion, Mode: p.Mode, AllowPartial: p.AllowPartial, Outcome: p.Outcome, RefusalReason: refusal,
+		Archive: archive, Dump: dump,
+		Baseline: p.Baseline.String(), Excluded: p.Excluded.String(), Lineage: p.Lineage.String(), Replay: p.Replay.String(),
+		PostStop: p.PostStop.String(), Divergent: p.Divergent.String(), OnHistoryExclusions: p.OnHistoryExclusions.String(), Lost: p.Lost.String(),
+		Sites: p.Sites,
+	}
+	if refusal != "" {
+		c.Outcome = ""
+	}
+	if p.Mode == ModeTimestamp && !p.Stop.IsZero() {
+		c.StopTime = backupmeta.NewMicroTime(p.Stop)
+	}
+	if p.BackupNewestCommit != 0 {
+		c.BackupNewestCommitTime = microTime(p.BackupNewestCommit)
+	}
+	if w := p.Witness; w != nil {
+		c.Witness = &CoverageWitness{GTID: w.GTID.String(), Site: w.Row.Site, File: w.Row.Name, ID: w.Row.ID,
+			CommitTime: microTime(w.CommitTime), GroundTruth: w.GroundTruth}
+		if w.GroundTruth == GroundTruthAnchored {
+			c.Witness.Anchor = &CoverageAnchor{Records: w.AnchorRecords, OriginRow: w.AnchorOriginRow}
+		}
+	}
+	if h := p.Head; h != nil {
+		c.Head = &CoverageHead{Site: h.Site, File: h.Name, ID: h.ID}
+	}
+	if refusal != "" {
+		return c
+	}
+	c.NewestReplayedCommitTime = microTime(p.newestReplayed)
+	c.ReplayedTransactionCount = p.replayedCount
+	for _, f := range p.Files {
+		c.Files = append(c.Files, CoverageFile{Path: f.StagedPath(), Site: f.Row.Site, Name: f.Row.Name, ID: f.Row.ID,
+			SHA256: f.Digest, PreviousGTIDs: f.Previous.String(), GTIDs: f.GTIDs.String()})
+	}
+	for _, s := range p.Segments {
+		c.Segments = append(c.Segments, CoverageSegment{File: s.File, GTIDs: s.GTIDs.String(), StartPredecessors: s.StartPredecessors.String(),
+			Transactions: s.Transactions, FirstCommitTime: microTime(s.FirstCommit), LastCommitTime: microTime(s.LastCommit)})
+	}
+	return c
+}
+
+func microTime(us int64) backupmeta.MicroTime {
+	if us == 0 {
+		return backupmeta.MicroTime{}
+	}
+	return backupmeta.NewMicroTime(time.UnixMicro(us))
 }

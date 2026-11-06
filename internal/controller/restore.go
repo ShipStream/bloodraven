@@ -23,7 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
@@ -129,22 +128,21 @@ func restoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 }
 
 type restoreCompletionMetadata struct {
-	SourceSizeBytes         int64
-	SourceGtidExecuted      string
-	SourceBinlogFile        string
-	SourceBinlogPos         int64
-	TargetGtidExecuted      string
-	TargetBinlogFile        string
-	TargetBinlogPos         int64
-	PitrNewestEventTime     string
-	PitrPartial             bool
-	PitrCrossSiteUnverified bool
-	PitrReplaySites         []string
-	PitrCoverageVersion     int
-	PitrTargetCovered       bool
-	PitrStopDatetime        string
-	PitrReplayedBinlogFile  string
-	PitrReplayedBinlogCount int32
+	SourceSizeBytes    int64
+	SourceGtidExecuted string
+	SourceBinlogFile   string
+	SourceBinlogPos    int64
+	TargetGtidExecuted string
+	TargetBinlogFile   string
+	TargetBinlogPos    int64
+	// PointInTime is the certified replay result, only ever set from a
+	// PITR Job's verdict (pitrJobVerdict), never from the log.
+	PointInTime *v1alpha1.PointInTimeResult
+}
+
+// pitrPartial reports whether meta certifies a Partial point-in-time outcome.
+func (m restoreCompletionMetadata) pitrPartial() bool {
+	return m.PointInTime != nil && m.PointInTime.Outcome == v1alpha1.PointInTimePartial
 }
 
 // Keep restoreCompletionMetadata, the status copy helpers below, and the
@@ -177,18 +175,9 @@ func applyRestoreMetadataToStatus(rs *v1alpha1.RestoreStatus, meta restoreComple
 	rs.TargetGtidExecuted = meta.TargetGtidExecuted
 	rs.TargetBinlogFile = meta.TargetBinlogFile
 	rs.TargetBinlogPos = meta.TargetBinlogPos
-	rs.PitrStopDatetime = meta.PitrStopDatetime
-	rs.PitrReplayedBinlogFile = meta.PitrReplayedBinlogFile
-	rs.PitrReplayedBinlogCount = meta.PitrReplayedBinlogCount
-	rs.PitrNewestEventTime = meta.PitrNewestEventTime
-	rs.PitrPartial = meta.PitrPartial
-	rs.PitrCrossSiteUnverified = meta.PitrCrossSiteUnverified
-	rs.PitrReplaySites = meta.PitrReplaySites
-	if meta.PitrPartial {
+	rs.PointInTime = meta.PointInTime
+	if meta.pitrPartial() {
 		rs.Reason = "PointInTimePartial"
-	}
-	if meta.PitrCrossSiteUnverified {
-		rs.Reason = "PointInTimeCrossSiteUnverified"
 	}
 }
 
@@ -200,9 +189,7 @@ func applyRestoreMetadataToInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus, meta
 	rs.TargetGtidExecuted = meta.TargetGtidExecuted
 	rs.TargetBinlogFile = meta.TargetBinlogFile
 	rs.TargetBinlogPos = meta.TargetBinlogPos
-	rs.PitrStopDatetime = meta.PitrStopDatetime
-	rs.PitrReplayedBinlogFile = meta.PitrReplayedBinlogFile
-	rs.PitrReplayedBinlogCount = meta.PitrReplayedBinlogCount
+	rs.PointInTime = meta.PointInTime
 }
 
 func restoreMetadataFromInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus) restoreCompletionMetadata {
@@ -210,16 +197,14 @@ func restoreMetadataFromInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus) restore
 		return restoreCompletionMetadata{}
 	}
 	return restoreCompletionMetadata{
-		SourceSizeBytes:         rs.SourceSizeBytes,
-		SourceGtidExecuted:      rs.SourceGtidExecuted,
-		SourceBinlogFile:        rs.SourceBinlogFile,
-		SourceBinlogPos:         rs.SourceBinlogPos,
-		TargetGtidExecuted:      rs.TargetGtidExecuted,
-		TargetBinlogFile:        rs.TargetBinlogFile,
-		TargetBinlogPos:         rs.TargetBinlogPos,
-		PitrStopDatetime:        rs.PitrStopDatetime,
-		PitrReplayedBinlogFile:  rs.PitrReplayedBinlogFile,
-		PitrReplayedBinlogCount: rs.PitrReplayedBinlogCount,
+		SourceSizeBytes:    rs.SourceSizeBytes,
+		SourceGtidExecuted: rs.SourceGtidExecuted,
+		SourceBinlogFile:   rs.SourceBinlogFile,
+		SourceBinlogPos:    rs.SourceBinlogPos,
+		TargetGtidExecuted: rs.TargetGtidExecuted,
+		TargetBinlogFile:   rs.TargetBinlogFile,
+		TargetBinlogPos:    rs.TargetBinlogPos,
+		PointInTime:        rs.PointInTime,
 	}
 }
 
@@ -265,32 +250,6 @@ func parseRestoreCompleteLine(line string) (restoreCompletionMetadata, bool) {
 			if n, err := strconv.ParseInt(rawVal, 10, 64); err == nil {
 				meta.TargetBinlogPos = n
 			}
-		case "pitrCrossSiteUnverified":
-			meta.PitrCrossSiteUnverified = rawVal == "true"
-		case "pitrReplaySites":
-			if sites, ok := decodeRestoreToken(rawVal); ok && sites != "" {
-				meta.PitrReplaySites = strings.Split(sites, ",")
-			}
-		case "pitrTargetCovered":
-			meta.PitrTargetCovered = rawVal == "true"
-		case "pitrCoverageVersion":
-			meta.PitrCoverageVersion, _ = strconv.Atoi(rawVal)
-		case "pitrNewestEventTime":
-			meta.PitrNewestEventTime, _ = decodeRestoreToken(rawVal)
-		case "pitrPartial":
-			meta.PitrPartial = rawVal == "true"
-		case "pitrStopDatetime":
-			if val, ok := decodeRestoreToken(rawVal); ok {
-				meta.PitrStopDatetime = val
-			}
-		case "pitrReplayedBinlogFile":
-			if val, ok := decodeRestoreToken(rawVal); ok {
-				meta.PitrReplayedBinlogFile = val
-			}
-		case "pitrReplayedBinlogCount":
-			if n, err := strconv.ParseInt(rawVal, 10, 32); err == nil {
-				meta.PitrReplayedBinlogCount = int32(n)
-			}
 		}
 	}
 	return meta, true
@@ -335,19 +294,6 @@ func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context
 		}
 	}
 	return restoreCompletionMetadata{}, false
-}
-
-// applyPITRVerdict replaces log-derived PITR fields with the verdict's.
-func applyPITRVerdict(meta *restoreCompletionMetadata, verdict pitrVerdict) {
-	meta.PitrCoverageVersion = 1
-	meta.PitrStopDatetime = verdict.Stop
-	meta.PitrReplayedBinlogFile = verdict.LastFile
-	meta.PitrReplayedBinlogCount = verdict.Files
-	meta.PitrNewestEventTime = verdict.NewestEventTime
-	meta.PitrPartial = verdict.Partial
-	meta.PitrCrossSiteUnverified = verdict.CrossSiteUnverified
-	meta.PitrReplaySites = verdict.Sites
-	meta.PitrTargetCovered = verdict.TargetCovered
 }
 
 func restoreJobPods(ctx context.Context, c client.Client, job *batchv1.Job) ([]corev1.Pod, error) {
@@ -629,13 +575,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 			meta = parsed
 		}
 		if pitr {
-			verdict, err := pitrJobVerdict(pod, &job)
+			result, err := pitrJobVerdict(pod, &job)
 			if err != nil {
 				phase = v1alpha1.BackupPhaseFailed
 				message = "PITRCoverageInvalid: " + err.Error()
 				meta = r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
 			} else {
-				applyPITRVerdict(&meta, verdict)
+				meta.PointInTime = result
 			}
 		}
 	}
@@ -653,21 +599,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	if phase == v1alpha1.BackupPhaseFailed {
 		rs.Reason = pitrFailureReason(message)
 	}
-	if meta.PitrPartial {
-		newest := meta.PitrNewestEventTime
-		if newest == "" {
-			newest = "none"
-		}
-		rs.Message = fmt.Sprintf("PointInTimePartial: requested %s; newest replayed event %s", meta.PitrStopDatetime, newest)
-	}
-
-	if meta.PitrCrossSiteUnverified {
-		warning := fmt.Sprintf("PointInTimeCrossSiteUnverified: staged sites in replay order [%s]; cross-site completeness was not verified", strings.Join(meta.PitrReplaySites, ", "))
-		if meta.PitrPartial {
-			rs.Message += "; " + warning
-		} else {
-			rs.Message = warning
-		}
+	if meta.pitrPartial() {
+		rs.Message = pointInTimePartialMessage(meta.PointInTime)
 	}
 	if rs.StartTime == nil {
 		if fg.Status.Restore != nil && fg.Status.Restore.StartTime != nil {
@@ -686,13 +619,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 			// The outcome Events describe a recorded status.
 			return 15 * time.Second, nil
 		}
-		if meta.PitrPartial {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PointInTimePartial", "%s", rs.Message)
-		}
-		if meta.PitrCrossSiteUnverified {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PointInTimeCrossSiteUnverified", "%s", rs.Message)
-		}
-		if meta.PitrPartial || meta.PitrCrossSiteUnverified {
+		emitPointInTimeEvents(r.Recorder, fg, meta.PointInTime)
+		if meta.pitrPartial() {
 			return 0, nil
 		}
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreSucceeded",
@@ -969,7 +897,22 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		// come from in.Decryption or from the source profile itself).
 		passphraseRef *v1alpha1.PassphraseSecretRef
 		sourceMeta    restoreCompletionMetadata
+		// dumpSrc is where dump-meta reads the dump's identity; set only
+		// for a point-in-time restore.
+		dumpSrc *pitrDumpSource
 	)
+
+	// A point-in-time target that does not parse, or a schema-filtered
+	// load, refuses before anything is built (§7.1 reconcile tokens).
+	pitrReq, err := pitrRequestFromSpec(in.PointInTime)
+	if err != nil {
+		return nil, err
+	}
+	if pitrReq != nil {
+		if err := pitrLoadFilterRefusal(fp, in.LoadOptions); err != nil {
+			return nil, err
+		}
+	}
 
 	switch {
 	case src.MysqlBackupRef != nil:
@@ -980,7 +923,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded || ref.Status.Location == "" {
 			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded or has no location", ref.Name)
 		}
-		if err := validatePITRBackupBefore(in.PointInTime, ref.Status); err != nil {
+		if err := pitrBackupBefore(pitrReq, ref.Status); err != nil {
 			return nil, err
 		}
 		sourceMeta = restoreMetadataFromBackupStatus(ref.Status)
@@ -1060,6 +1003,13 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				decryptPVCPrefix = strings.TrimSuffix(strings.TrimPrefix(inputURL, backupPVCMountPath+"/"), "/")
 			}
 		}
+		if pitrReq != nil {
+			ds, err := pitrDumpSourceForBackup(fg, &ref, profile, passphraseRef)
+			if err != nil {
+				return nil, fmt.Errorf("%s.source.mysqlBackupRef: %w", fp, err)
+			}
+			dumpSrc = &ds
+		}
 		if profileS3 != nil {
 			extraEnv = append(extraEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profileS3.Bucket},
@@ -1116,6 +1066,13 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			decryptS3Prefix = strings.TrimSuffix(src.S3.Prefix, "/")
 			decryptAWSCredsSecret = src.S3.CredentialsSecret
 		}
+		if pitrReq != nil {
+			dumpSrc = &pitrDumpSource{
+				StorageType: v1alpha1.BackupStorageS3, Prefix: strings.Trim(src.S3.Prefix, "/"),
+				S3Bucket: src.S3.Bucket, S3EndpointURL: src.S3.EndpointURL, S3Region: src.S3.Region,
+				AWSCredsSecret: src.S3.CredentialsSecret, Passphrase: passphraseRef,
+			}
+		}
 
 	case src.PVC != nil:
 		claim := src.PVC.ClaimName
@@ -1153,6 +1110,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			decryptPVCClaim = claim
 			decryptPVCPrefix = strings.TrimPrefix(sub, "/")
 		}
+		if pitrReq != nil {
+			dumpSrc = &pitrDumpSource{StorageType: v1alpha1.BackupStoragePVC, Prefix: strings.Trim(sub, "/"), PVCClaim: claim, Passphrase: passphraseRef}
+		}
 
 	default:
 		return nil, fmt.Errorf("%s.source must set mysqlBackupRef, s3, or pvc", fp)
@@ -1163,20 +1123,30 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		return nil, err
 	}
 
-	// PITR replay. The download and replay phases are split across an
-	// init container (bloodraven pitr-download, downloads binlogs from
-	// S3/PVC into a shared emptyDir) and the main container
-	// (restore.py, runs mysqlbinlog | mysql on the downloaded files).
-	// See buildRestorePITRFragments for the shape.
-	if err := validatePITRBackupBound(in.PointInTime, sourceMeta.SourceGtidExecuted, false); err != nil {
-		return nil, err
-	}
+	// PITR replay: dump-meta identifies the dump, pitr-download opens the
+	// source archive, plans and stages the replay, and restore.py replays
+	// and proves it. See buildRestorePITRFragments for the shape.
 	if err := validateRestoreArchiveProfile(fg, in.PointInTime); err != nil {
 		return nil, err
 	}
-	pitrFrags, err := buildRestorePITRFragmentsFor(fg, in.PointInTime)
+	pitrFrags, err := buildRestorePITRFragmentsFor(fg, pitrReq)
 	if err != nil {
 		return nil, err
+	}
+	var dumpMeta *corev1.Container
+	if pitrReq != nil {
+		if dumpSrc == nil || dumpSrc.Prefix == "" {
+			return nil, fmt.Errorf("%s.pointInTime: the dump's location is unknown, so its identity cannot be read", fp)
+		}
+		container, volumes, err := buildDumpMetaInitContainer(fg, *dumpSrc)
+		if err != nil {
+			return nil, fmt.Errorf("%s.pointInTime: %w", fp, err)
+		}
+		dumpMeta = &container
+		extraVolumes = append(extraVolumes, volumes...)
+		if dumpSrc.ExpectedSourceUID != "" {
+			extraEnv = append(extraEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXPECTED_SOURCE_UID", Value: string(dumpSrc.ExpectedSourceUID)})
+		}
 	}
 	extraEnv = append(extraEnv, pitrFrags.MainEnv...)
 	extraVolumes = append(extraVolumes, pitrFrags.PodVolumes...)
@@ -1308,9 +1278,12 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	}
 	podSC, containerSC := mergeSecurityContexts(podSCSrc, containerSCSrc)
 
+	// Init order (§6.3): dump-meta → pitr-download → decrypt-download.
 	var initContainers []corev1.Container
+	if dumpMeta != nil {
+		initContainers = append(initContainers, *dumpMeta)
+	}
 	if pitrFrags.InitContainer != nil {
-		pitrFrags.InitContainer.Env = append(pitrFrags.InitContainer.Env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_START_GTIDS", Value: sourceMeta.SourceGtidExecuted})
 		initContainers = append(initContainers, *pitrFrags.InitContainer)
 	}
 
@@ -1530,27 +1503,6 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	return job, nil
 }
 
-// A dump cannot be un-applied. mysqlsh takes its snapshot after the Job
-// starts, so only the backup's completion time bounds what the dump holds:
-// a target before it could already be in the dump.
-func validatePITRBackupBefore(pit *v1alpha1.PointInTimeSpec, backup v1alpha1.MysqlBackupStatus) error {
-	if pit == nil {
-		return nil
-	}
-	stop, err := backupmeta.ParsePITRStopTime(pit.StopDatetime)
-	if err != nil {
-		return fmt.Errorf("invalid pointInTime.stopDatetime: %w", err)
-	}
-	completed := backup.CompletionTime
-	if completed == nil {
-		return fmt.Errorf("PITRTargetNotCovered: the backup has no completionTime, so it cannot be shown to precede pointInTime.stopDatetime %s", pit.StopDatetime)
-	}
-	if stop.Before(completed.Time) {
-		return fmt.Errorf("PITRTargetNotCovered: pointInTime.stopDatetime %s is earlier than the backup's completion %s, and the dump may already contain later changes; use a backup that completed before the target", pit.StopDatetime, completed.UTC().Format(time.RFC3339))
-	}
-	return nil
-}
-
 func sameRestoreJob(previous *v1alpha1.RestoreStatus, job *batchv1.Job) bool {
 	if previous == nil || previous.JobName != job.Name {
 		return false
@@ -1559,15 +1511,4 @@ func sameRestoreJob(previous *v1alpha1.RestoreStatus, job *batchv1.Job) bool {
 		return previous.JobUID == string(job.UID)
 	}
 	return job.CreationTimestamp.IsZero() || (previous.CompletionTime != nil && !job.CreationTimestamp.After(previous.CompletionTime.Time))
-}
-
-func validatePITRBackupBound(pit *v1alpha1.PointInTimeSpec, bound string, verification bool) error {
-	if pit == nil || pit.AllowPartial || strings.TrimSpace(bound) != "" {
-		return nil
-	}
-	remedy := "use a mysqlBackupRef whose backup has status.gtidExecuted, or set pointInTime.allowPartial"
-	if verification {
-		remedy = "use a referenced backup with trustworthy status.gtidExecuted; verification does not allow partial recovery"
-	}
-	return fmt.Errorf("PITRBackupBoundUnknown: pointInTime requires a non-empty trusted source GTID bound; %s", remedy)
 }

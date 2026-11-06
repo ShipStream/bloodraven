@@ -361,16 +361,11 @@ type StandbyActivationStatus struct {
 	// +optional
 	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
 
-	// PitrStopDatetime is the normalised mysqlbinlog --stop-datetime
-	// used for PITR replay (mirrors RestoreStatus.PitrStopDatetime,
-	// api/v1alpha1/backup_types.go:915-916).
+	// PointInTime is the certified outcome of the activation's
+	// point-in-time replay (the same shape as
+	// RestoreStatus.PointInTime). No activation writes it yet.
 	// +optional
-	PitrStopDatetime string `json:"pitrStopDatetime,omitempty"`
-
-	// PitrReplayedBinlogCount is the number of archived binlogs
-	// applied during activation.
-	// +optional
-	PitrReplayedBinlogCount int32 `json:"pitrReplayedBinlogCount,omitempty"`
+	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
 
 	// ActiveSite is the materialised group's status.activeSite once
 	// it becomes writable.

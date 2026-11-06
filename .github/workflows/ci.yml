@@ -24,6 +24,7 @@ jobs:
       go: ${{ steps.classify.outputs.go }}
       site: ${{ steps.classify.outputs.site }}
       course: ${{ steps.classify.outputs.course }}
+      pitr: ${{ steps.classify.outputs.pitr }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -35,7 +36,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          all() { printf 'go=true\nsite=true\ncourse=true\n' | tee -a "$GITHUB_OUTPUT"; }
+          all() { printf 'go=true\nsite=true\ncourse=true\npitr=true\n' | tee -a "$GITHUB_OUTPUT"; }
           # Release calls inherit the caller's push event; every non-PR runs all jobs.
           if [ "$EVENT_NAME" != pull_request ]; then echo "non-PR event: full run"; all; exit 0; fi
           # HEAD^1 is the PR merge commit's base; include old paths when files move.
@@ -176,6 +177,33 @@ jobs:
           flavor: race
       - name: Run component tests
         run: make test-component
+
+  # Opt-in native PITR replay tests (#206): restore.py's segment replay and
+  # pitr-download's planner against a real mysql:9.7 container, with the
+  # captured binlog fixtures. Needs docker, which ubuntu-latest provides.
+  test-pitr-native:
+    needs: changes
+    if: needs.changes.outputs.pitr == 'true'
+    name: Test / PITR native replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOFLAGS: -count=1
+      BLOODRAVEN_PITR_NATIVE_TEST: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: plain
+      - name: Pull MySQL image
+        run: docker pull mysql:9.7
+      - name: Run native PITR tests
+        run: go test ./cmd/bloodraven ./internal/controller -run 'TestPITRNative' -v
 
   test-envtest:
     needs: changes
@@ -365,7 +393,7 @@ jobs:
   all-checks:
     name: All Checks
     runs-on: ubuntu-latest
-    needs: [changes, lint, build, test-unit, test-component, test-envtest, generate-check, license-roundtrip, docs-build, course-check]
+    needs: [changes, lint, build, test-unit, test-component, test-pitr-native, test-envtest, generate-check, license-roundtrip, docs-build, course-check]
     if: always()
     steps:
       - name: Check all jobs passed

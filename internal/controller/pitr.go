@@ -2,14 +2,18 @@ package controller
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
+	"github.com/shipstream/bloodraven/internal/pitrplan"
 )
 
 // Defaults applied when the corresponding PITRSpec fields are unset.
@@ -301,6 +305,116 @@ const restorePITRLocalDir = "/pitr-binlogs"
 // failures.
 const restorePITRInitContainerName = "pitr-download"
 
+// restorePITRDumpMetaDir is the shared emptyDir where the dump-meta init
+// container writes dump.json for pitr-download (§4.2).
+const restorePITRDumpMetaDir = "/pitr-dump-meta"
+
+// restorePITRDumpMetaContainerName is the dump-meta init container, which
+// runs first whenever a restore or verification replays archived binlogs.
+const restorePITRDumpMetaContainerName = "dump-meta"
+
+// restorePITRDumpSourceMountPath is where dump-meta mounts a PVC-hosted
+// dump's claim, read-only.
+const restorePITRDumpSourceMountPath = "/pitr-dump-src"
+
+// pitrReplayRequest is one point-in-time replay as the Job renders it: the
+// spec of a restore (PointInTimeSpec) or of a verification
+// (PointInTimeVerificationSpec), normalized.
+type pitrReplayRequest struct {
+	// Mode is "timestamp" or "latest" (pitrplan.Mode).
+	Mode string
+	// Stop is the target in backupmeta.MicroTimeLayout; "" in latest mode.
+	Stop         string
+	AllowPartial bool
+	ExcludeGtids string
+	// ArchiveProfileName is the profile whose archive is read; "" means the
+	// group's own active PITR profile (verifications).
+	ArchiveProfileName string
+	// Verification marks a verification Job, which never accepts Partial.
+	Verification bool
+}
+
+// pitrStopPattern is the stopDatetime/timestamp CRD pattern (§6.1). The
+// controller enforces it again because objects admitted before the pattern
+// existed, and every caller of the builders, must not reach a Job.
+var pitrStopPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})?$`)
+
+// parsePITRTarget parses a point-in-time target exactly to the microsecond:
+// RFC 3339 with an optional zone, or the MySQL form, both with at most six
+// fractional digits; no zone means UTC. Callers refuse any other spelling
+// with PITRTargetInvalid.
+func parsePITRTarget(value string) (time.Time, error) {
+	if len(value) > 40 || !pitrStopPattern.MatchString(value) {
+		return time.Time{}, fmt.Errorf("%q is not a target instant (YYYY-MM-DDTHH:MM:SS[.ffffff][Z|±HH:MM], at most six fractional digits)", value)
+	}
+	normalized := strings.Replace(value, " ", "T", 1)
+	if !strings.HasSuffix(normalized, "Z") && !strings.ContainsAny(normalized[19:], "+-") {
+		normalized += "Z"
+	}
+	t, err := time.Parse(time.RFC3339Nano, normalized)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%q: %v", value, err)
+	}
+	return t.UTC(), nil
+}
+
+// canonicalPITRTarget renders a parsed target the one way every PITR
+// container reads it.
+func canonicalPITRTarget(t time.Time) string {
+	return backupmeta.NewMicroTime(t).String()
+}
+
+// pitrRequestFromSpec normalizes a restore's PointInTimeSpec.
+func pitrRequestFromSpec(pit *v1alpha1.PointInTimeSpec) (*pitrReplayRequest, error) {
+	if pit == nil {
+		return nil, nil
+	}
+	if pit.StopDatetime == "" {
+		return nil, fmt.Errorf("%s: pointInTime.stopDatetime is required", pitrarchive.TokenTargetInvalid)
+	}
+	stop, err := parsePITRTarget(pit.StopDatetime)
+	if err != nil {
+		return nil, fmt.Errorf("%s: pointInTime.stopDatetime: %v", pitrarchive.TokenTargetInvalid, err)
+	}
+	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", pit.ExcludeGtids)
+	if err != nil {
+		return nil, err
+	}
+	return &pitrReplayRequest{
+		Mode:               "timestamp",
+		Stop:               canonicalPITRTarget(stop),
+		AllowPartial:       pit.AllowPartial,
+		ExcludeGtids:       exclude,
+		ArchiveProfileName: pit.ArchiveProfileName,
+	}, nil
+}
+
+// canonicalExcludeGtids parses excludeGtids and renders it the one way every
+// PITR container reads it: the planner's canonical set (pitrplan.Set.String),
+// which is also what pitr-download writes to coverage.json "excluded" and
+// what restore.py compares BLOODRAVEN_PITR_EXCLUDE_GTIDS against. A user
+// spelling (MySQL's multi-line output, unmerged or unsorted intervals, tags
+// grouped under one UUID, uppercase UUIDs) would otherwise fail that
+// comparison. A set that does not parse is refused at reconcile.
+func canonicalExcludeGtids(field, raw string) (string, error) {
+	set, err := pitrplan.ParseUserSet(raw)
+	if err != nil {
+		return "", fmt.Errorf("%s: %s: %v", pitrarchive.TokenTargetInvalid, field, err)
+	}
+	return set.String(), nil
+}
+
+// pitrOperatorImage is the image of the PITR init containers (dump-meta,
+// pitr-download), which ship in the operator binary. operatorImageFromEnv
+// is wired from main.go; when it is empty (tests) the Job spec keeps a
+// stable shape with "bloodraven:latest".
+func pitrOperatorImage() string {
+	if operatorImageFromEnv == "" {
+		return "bloodraven:latest"
+	}
+	return operatorImageFromEnv
+}
+
 // restorePITRFragments is the bundle of additions PITR contributes to
 // a restore Job spec. Zero value means "PITR replay not requested";
 // callers append unconditionally.
@@ -321,37 +435,25 @@ type restorePITRFragments struct {
 	PodVolumes []corev1.Volume
 }
 
-// buildRestorePITRFragments wires up the restore-side PITR handoff:
+// buildRestorePITRFragments wires up the restore-side PITR handoff
+// (design WS-D §4.2, §4.13):
 //
+//	initContainer: bloodraven dump-meta     (built by the Job builder, which
+//	   └── writes /pitr-dump-meta/dump.json  knows where the dump lives)
 //	initContainer: bloodraven pitr-download
-//	   ├── downloads archived binlogs from S3 or PVC
-//	   └── writes to emptyDir /pitr-binlogs
-//	container: mysqlsh
-//	   ├── util.loadDump()  (existing restore.py behavior)
-//	   └── replays /pitr-binlogs/<site>/* via mysqlbinlog | mysql
+//	   ├── opens and verifies the source archive, plans the replay
+//	   └── stages the plan's files and coverage.json in /pitr-binlogs
+//	initContainer: bloodraven decrypt-download (encrypted dumps only)
+//	container: mysqlsh restore.py
+//	   ├── util.loadDump()
+//	   └── replays every segment into one mysql session and proves the result
 //
-// Splitting download + replay across two containers removes the aws
-// CLI runtime dependency from the MySQL image and reuses the sidecar
-// archiver's storage-backend abstraction.
-//
-// PITR replay is configured purely from the failover group's archive
-// settings: the backup profile named by fg.Spec.Backup.PITR tells the
-// init container where to fetch archived binlogs and manifests from.
-// The downloaded binlogs keep their original GTIDs and include
-// transactions the dump already contains. On a fresh bootstrap target the
-// load installs the dump's gtidExecuted into @@GLOBAL.gtid_purged
-// (updateGtidSet:"replace", see restoreLoadOptionsJSON), so MySQL skips
-// those transactions and any GTID archived by more than one site — no
-// per-MysqlBackup metadata plumbing needed here. That baseline cannot be
-// installed on a live primary, whose own gtid_executed already holds the
-// archived GTIDs, so in-place restores reject pointInTime
-// (errInPlacePointInTimeUnsupported).
-//
-// The verification path reuses this same builder (buildRestorePITRFragmentsFor)
-// against an EPHEMERAL verify mysqld, which is why that mysqld is started
-// gtid_mode=ON (verify_script.sh) and loads with the same baseline
-// (marshalVerificationLoadOptions), so raw replay of cross-site archived
-// binlogs does not double-apply in-dump or duplicated GTIDs (#101).
+// The bootstrap restore (spec.initFromBackup.pointInTime) and verification
+// share buildRestorePITRFragmentsFor. Both load the dump with its GTID set
+// installed (updateGtidSet "replace"), which restore.py proves equals the
+// plan's baseline before replaying. In-place restores reject pointInTime
+// (errInPlacePointInTimeUnsupported): a live primary's gtid_executed cannot
+// be the dump's.
 func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
 	if fg.Spec.InitFromBackup == nil {
 		return restorePITRFragments{}, nil
@@ -359,7 +461,11 @@ func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFrag
 	if err := validateRestoreArchiveProfile(fg, fg.Spec.InitFromBackup.PointInTime); err != nil {
 		return restorePITRFragments{}, err
 	}
-	return buildRestorePITRFragmentsFor(fg, fg.Spec.InitFromBackup.PointInTime)
+	req, err := pitrRequestFromSpec(fg.Spec.InitFromBackup.PointInTime)
+	if err != nil {
+		return restorePITRFragments{}, err
+	}
+	return buildRestorePITRFragmentsFor(fg, req)
 }
 
 // validateRestoreArchiveProfile enforces D-10 for initFromBackup: the
@@ -389,28 +495,34 @@ func validateRestoreArchiveProfile(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha
 	return nil
 }
 
-// buildRestorePITRFragmentsFor is the parameterized variant that lets
-// the bootstrap restore (spec.initFromBackup.pointInTime) and backup
-// verification share the PITR init-container wiring. A nil pit is a no-op: callers get an empty
-// fragments struct and skip the init container entirely.
-func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1.PointInTimeSpec) (restorePITRFragments, error) {
+// buildRestorePITRFragmentsFor renders req's pitr-download init container
+// and the main container's replay env. A nil req is a no-op: callers get an
+// empty fragments struct and skip the init containers entirely.
+func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrReplayRequest) (restorePITRFragments, error) {
 	var out restorePITRFragments
 
-	if pit == nil {
+	if req == nil {
 		return out, nil
 	}
-	if pit.StopDatetime == "" {
-		return out, fmt.Errorf("pointInTime.stopDatetime is required")
+	switch {
+	case req.Mode == "timestamp" && req.Stop == "":
+		return out, fmt.Errorf("%s: a timestamp replay needs a target", pitrarchive.TokenTargetInvalid)
+	case req.Mode == "latest" && req.Stop != "":
+		return out, fmt.Errorf("internal error: latest replay rendered with a target")
+	case req.Mode != "timestamp" && req.Mode != "latest":
+		return out, fmt.Errorf("internal error: unknown PITR mode %q", req.Mode)
+	case req.Verification && req.AllowPartial:
+		return out, fmt.Errorf("internal error: verification rendered with allowPartial")
 	}
 	// archiveProfileName reads a source archive that this group does not
 	// archive into, so a restored group never writes into the source prefix.
-	profileName := pit.ArchiveProfileName
+	profileName := req.ArchiveProfileName
 	if profileName == "" {
 		if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
 			return out, fmt.Errorf(
 				"pointInTime is set but spec.backup.pitr.enabled=false; " +
-					"PITR restore requires the failover group to have continuous binlog " +
-					"archival configured on the source, or pointInTime.archiveProfileName")
+					"PITR replay reads the source group's binlog archive, so continuous archival " +
+					"must be configured, or pointInTime.archiveProfileName must name the archive's profile")
 		}
 		profileName = fg.Spec.Backup.PITR.ProfileName
 	}
@@ -437,17 +549,31 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	if err != nil {
 		return out, err
 	}
-	initEnv := []corev1.EnvVar{
-		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
-		{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(pit.AllowPartial)},
-		{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
-		{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
-		{Name: "BLOODRAVEN_PITR_DESTINATION", Value: ident.Destination.String()},
-		{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(ident.Encryption.Mode)},
-		{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: ident.Destination.KeyPrefix},
+	// The replay request, rendered identically on pitr-download and the
+	// main container (contracts: "WP-B2 assumptions").
+	requestEnv := []corev1.EnvVar{{Name: "BLOODRAVEN_PITR_MODE", Value: req.Mode}}
+	if req.Mode == "timestamp" {
+		requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: req.Stop})
 	}
-	initMounts := []corev1.VolumeMount{initMount}
-	volumes := []corev1.Volume{emptyDirVol}
+	requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(req.AllowPartial)})
+	if req.ExcludeGtids != "" {
+		requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: req.ExcludeGtids})
+	}
+	initEnv := append(append([]corev1.EnvVar{}, requestEnv...),
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DUMP_META", Value: restorePITRDumpMetaDir + "/dump.json"},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DESTINATION", Value: ident.Destination.String()},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_ENCRYPTION_MODE", Value: string(ident.Encryption.Mode)},
+		corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: ident.Destination.KeyPrefix},
+	)
+	// dump-meta writes dump.json here; pitr-download only reads it.
+	dumpMetaVol := corev1.Volume{
+		Name:         "pitr-dump-meta",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	initMounts := []corev1.VolumeMount{initMount, {Name: "pitr-dump-meta", MountPath: restorePITRDumpMetaDir, ReadOnly: true}}
+	volumes := []corev1.Volume{emptyDirVol, dumpMetaVol}
 
 	switch profile.Storage.Type {
 	case v1alpha1.BackupStorageS3:
@@ -522,10 +648,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	// reconciler. operatorImageFromEnv is wired from main.go; if it's
 	// empty (tests) we fall back to "bloodraven:latest" to keep the
 	// Job spec shape stable.
-	image := operatorImageFromEnv
-	if image == "" {
-		image = "bloodraven:latest"
-	}
+	image := pitrOperatorImage()
 
 	// If the backup profile encrypts binlog archives too, mount the
 	// passphrase Secret onto the download init container and point
@@ -583,18 +706,10 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 		SecurityContext:          initSC,
 	}
 
-	mainEnv := []corev1.EnvVar{
+	mainEnv := append([]corev1.EnvVar{
 		{Name: "BLOODRAVEN_PITR_LOCAL_DIR", Value: restorePITRLocalDir},
 		{Name: "TZ", Value: "UTC"},
-		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
-		{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(pit.AllowPartial)},
-	}
-	if pit.ExcludeGtids != "" {
-		// The planner must exempt exactly what mysqlbinlog --exclude-gtids skips.
-		exclude := corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: pit.ExcludeGtids}
-		mainEnv = append(mainEnv, exclude)
-		init.Env = append(init.Env, exclude)
-	}
+	}, requestEnv...)
 
 	return restorePITRFragments{
 		MainEnv:       mainEnv,
