@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/shipstream/bloodraven/api/v1alpha1"
@@ -159,10 +160,17 @@ func pitrEstablishingRenderable(profile *v1alpha1.BackupProfile, entry *v1alpha1
 //	4b  write entry Pending/Establishing → candidate + profile access
 //	4a  not Bound, no writer runs (no Deployment, or H disabled) → candidate, or disabled
 //	4c  not Bound, H enabled → H's identity (K13 access)
-//	4d  not Bound, Deployments without a decodable annotation → Defer
+//	4d  not Bound, any site Deployment without a decodable annotation → Defer
+//	L   no entry, the binding list full → as 4c/4a/4d without a candidate
 //
 // Under pitrRenderDefer the inputs are what a site being created renders
-// (row 4a); existing Deployments must not be touched. Every returned
+// (H's identity when H is enabled, else the candidate); existing
+// Deployments must not be touched. Row 4d also holds when only some site
+// Deployments lack a decodable annotation (one was re-created, or a site
+// added, while the others were deferred, U01): a decodable annotation on
+// one site never authenticates what the others run. Row L never renders a
+// destination that has no binding (U14): its archive would have no
+// retention authorization and no reader could use it. Every returned
 // render validates.
 func resolvePITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deployment) (pitrRenderInputs, pitrRenderAction) {
 	profile, dest, ok := activePITRProfile(fg)
@@ -212,14 +220,34 @@ func resolvePITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deploym
 		pitrEstablishingRenderable(profile, entry) {
 		return candidateRender(), pitrRenderApply
 	}
-	switch {
-	case kind == pitrHoldNone, kind == pitrHeld && !hold.Enabled:
-		return candidateRender(), pitrRenderApply
-	case kind == pitrHeld:
-		return heldRender(), pitrRenderApply
-	default: // pitrHoldUnannotated
-		return candidateRender(), pitrRenderDefer
+	// L: no binding slot for the destination.
+	full := entry == nil && pitrBindingSlotsTaken(fg) >= pitrArchiveBindingsMax
+	if full {
+		candidateRender = pitrRenderDisabled
 	}
+	action := pitrRenderApply
+	if len(pitrUndecodableDeployments(fg, deploys)) > 0 {
+		action = pitrRenderDefer
+	}
+	switch {
+	case kind == pitrHeld && hold.Enabled:
+		return heldRender(), action
+	default: // pitrHoldNone, a disabled hold, pitrHoldUnannotated
+		return candidateRender(), action
+	}
+}
+
+// pitrBindingSlotsTaken is the number of fg's bindings that hold a slot of
+// the binding limit for sure: Bound entries, which only a release removes.
+// A non-Bound entry no target uses is dropped by the next binding pass.
+func pitrBindingSlotsTaken(fg *v1alpha1.MysqlFailoverGroup) int {
+	n := 0
+	for i := range fg.Status.PITRArchiveBindings {
+		if fg.Status.PITRArchiveBindings[i].State == v1alpha1.PITRArchiveBindingBound {
+			n++
+		}
+	}
+	return n
 }
 
 // checkedPITRRender returns in, or the disabled render when in does not
@@ -246,6 +274,15 @@ func renderedPITRInputs(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deploy
 	return in
 }
 
+// pitrDeploymentMayRun reports whether d may still run a pod: it wants
+// replicas, or its status still counts one.
+func pitrDeploymentMayRun(d *appsv1.Deployment) bool {
+	if d.Spec.Replicas == nil || *d.Spec.Replicas != 0 {
+		return true
+	}
+	return d.Status.Replicas != 0 || d.Status.ReadyReplicas != 0 || d.Status.AvailableReplicas != 0 || d.Status.UnavailableReplicas != 0
+}
+
 // pitrRendersArchiver reports whether in renders an enabled archiver.
 func pitrRendersArchiver(in pitrRenderInputs) bool {
 	return in.Enabled
@@ -255,12 +292,30 @@ func pitrRendersArchiver(in pitrRenderInputs) bool {
 // to (K5): every site Deployment's pitr-render annotation must decode and
 // name the same archive ID ("" when all are disabled). ok is false, with a
 // reason, while they disagree (a roll in progress) or one cannot be read;
-// a group with no site Deployment has no writer and stamps "".
+// a group with no site Deployment has no writer and stamps "". The
+// Deployment of a site no longer in spec.sites, which the operator never
+// renders again, counts only while it may still run a writer (U08): once
+// it is scaled to zero with no pod left it is ignored; until then the
+// reason names it and the way out.
 func renderedWriterArchiveID(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deployment) (string, bool, string) {
 	renders := sitePITRRenders(fg, deploys)
 	ids := map[string][]string{}
-	var unreadable []string
+	var unreadable, removed []string
+	inSpec := map[string]bool{}
+	for _, s := range fg.Spec.Sites {
+		inSpec[s.Name] = true
+	}
+	byName := map[string]*appsv1.Deployment{}
+	for i := range deploys {
+		byName[deploys[i].Name] = &deploys[i]
+	}
 	for _, r := range renders {
+		if !inSpec[r.Site] {
+			if d := byName[r.Deployment]; d != nil && !pitrDeploymentMayRun(d) {
+				continue
+			}
+			removed = append(removed, r.Deployment)
+		}
 		if r.Err != nil {
 			unreadable = append(unreadable, r.Deployment)
 			continue
@@ -283,7 +338,11 @@ func renderedWriterArchiveID(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.D
 			parts = append(parts, fmt.Sprintf("%s (%s)", id, strings.Join(names, ", ")))
 		}
 		sort.Strings(parts)
-		return "", false, fmt.Sprintf("site Deployments render different PITR archives: %s", strings.Join(parts, "; "))
+		msg := fmt.Sprintf("site Deployments render different PITR archives: %s", strings.Join(parts, "; "))
+		if len(removed) > 0 {
+			msg += fmt.Sprintf("; Deployments %s belong to sites no longer in spec.sites and are never re-rendered: scale them to zero or delete them", strings.Join(removed, ", "))
+		}
+		return "", false, msg
 	}
 	for id := range ids {
 		return id, true, ""
@@ -294,15 +353,17 @@ func renderedWriterArchiveID(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.D
 // pitrBackupWaitsForRollout reports whether a backup of profileName waits
 // for the site Deployments to agree on the rendered archive (F-B): only a
 // backup of the active PITR profile, and only while a roll is in progress
-// (at least one site Deployment carries a decodable render). With none (the
-// pre-#203 deferral) nothing ends the disagreement without the user, so
+// (at least one site Deployment carries a decodable render and the render
+// is not deferred). Under the pre-#203 deferral (some site Deployment has
+// no decodable render) nothing ends the disagreement without the user, so
 // the backup runs unstamped instead of pending indefinitely.
 func pitrBackupWaitsForRollout(fg *v1alpha1.MysqlFailoverGroup, profileName string, deploys []appsv1.Deployment) bool {
 	if !pitrEnabled(fg) || fg.Spec.Backup.PITR.ProfileName != profileName {
 		return false
 	}
 	_, kind := groupPITRHold(fg, deploys)
-	return kind == pitrHeld
+	_, action := resolvePITRRender(fg, deploys)
+	return kind == pitrHeld && action != pitrRenderDefer
 }
 
 // pitrReadBinding returns the binding a restore or verification reading
@@ -321,10 +382,18 @@ func pitrReadBinding(fg *v1alpha1.MysqlFailoverGroup, profileName string) (*v1al
 	}
 	entry := findPITRBinding(fg, dest)
 	if notReady := pitrBindingReadiness(entry); notReady != nil {
-		if entry == nil && len(fg.Status.PITRArchiveBindings) >= pitrArchiveBindingsMax {
+		// Only Bound entries surely hold their slot (only a release
+		// removes them); while unused non-Bound entries fill the list,
+		// the next binding pass drops them and makes room, so the reader
+		// waits (U10).
+		switch {
+		case entry != nil || len(fg.Status.PITRArchiveBindings) < pitrArchiveBindingsMax:
+		case pitrBindingSlotsTaken(fg) >= pitrArchiveBindingsMax:
 			notReady.reason = reasonPITRBindingLimitReached
-			notReady.message = fmt.Sprintf("the group already has %d archive bindings; release one (annotation %s) so %s can be bound",
+			notReady.message = fmt.Sprintf("the group already has %d Bound archive bindings; release one (annotation %s) so %s can be bound",
 				pitrArchiveBindingsMax, ReleasePITRArchiveBindingAnnotation, dest.String())
+		default:
+			notReady.message = fmt.Sprintf("the binding list is full of entries that are not Bound; waiting for the group's binding pass to make room for %s", dest.String())
 		}
 		return entry, notReady
 	}
@@ -335,7 +404,11 @@ func pitrReadBinding(fg *v1alpha1.MysqlFailoverGroup, profileName string) (*v1al
 // written by backups or archived to (D-10, Δ23), with the reason: it is the
 // initFromBackup archive profile while that restore has not succeeded, or
 // its destination's binding names another group as the archive's source,
-// or was refused as foreign or a copy.
+// or was refused as foreign or a copy, or it is the initFromBackup archive
+// profile of a restore that succeeded and its destination has no binding
+// (U19: a plaintext read binding is not rebuilt after a status loss, and
+// whose archive it is must be established again, by the writer check of a
+// write target, before anything writes there).
 func pitrProfileReadOnly(fg *v1alpha1.MysqlFailoverGroup, profileName string) (bool, string) {
 	if ifb := fg.Spec.InitFromBackup; ifb != nil && ifb.PointInTime != nil && ifb.PointInTime.ArchiveProfileName == profileName &&
 		(fg.Status.Restore == nil || fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded) {
@@ -351,6 +424,10 @@ func pitrProfileReadOnly(fg *v1alpha1.MysqlFailoverGroup, profileName string) (b
 	}
 	entry := findPITRBinding(fg, dest)
 	if entry == nil {
+		if ifb := fg.Spec.InitFromBackup; ifb != nil && ifb.PointInTime != nil && ifb.PointInTime.ArchiveProfileName == profileName {
+			return true, fmt.Sprintf("profile %q is the initFromBackup point-in-time archive profile and %s has no archive binding: the restore read another group's archive there, so it stays read-only until a binding shows whose archive it is",
+				profileName, dest.String())
+		}
 		return false, ""
 	}
 	if entry.Source != nil && entry.Source.UID != "" && entry.Source.UID != fg.UID {
@@ -457,6 +534,15 @@ func pickSecretKeys(data map[string][]byte, keys []string) map[string][]byte {
 type groupPITRRender struct {
 	inputs pitrRenderInputs
 	action pitrRenderAction
+	// existing are the names of the group's Deployments when resolved.
+	existing map[string]bool
+}
+
+// defers reports whether the site Deployment deployName exists and the
+// render is deferred: neither it nor the site's ConfigMap is touched
+// (§4.6 row 4d, U09). A site being created renders.
+func (g groupPITRRender) defers(deployName string) bool {
+	return g.action == pitrRenderDefer && g.existing[deployName]
 }
 
 // resolveGroupPITRRender lists fg's Deployments through the APIReader and
@@ -464,7 +550,15 @@ type groupPITRRender struct {
 // "pitr render annotation ignored" for a site Deployment whose annotation
 // does not decode, and INFO "pitr render deferred" while row 4d holds the
 // existing Deployments.
+//
+// A group whose PITR is disabled (or whose active profile does not
+// resolve) renders {enabled:false} whatever its Deployments carry, so no
+// Deployment is listed (U63).
 func (r *MysqlFailoverGroupReconciler) resolveGroupPITRRender(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (groupPITRRender, error) {
+	if _, _, ok := activePITRProfile(fg); !ok {
+		r.forgetPITRRenderLog(fg)
+		return groupPITRRender{inputs: pitrRenderDisabled(), action: pitrRenderApply}, nil
+	}
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		reader = r.APIReader
@@ -475,7 +569,11 @@ func (r *MysqlFailoverGroupReconciler) resolveGroupPITRRender(ctx context.Contex
 	}
 	in, action := resolvePITRRender(fg, deploys)
 	r.logPITRRender(fg, deploys, action)
-	return groupPITRRender{inputs: in, action: action}, nil
+	existing := make(map[string]bool, len(deploys))
+	for i := range deploys {
+		existing[deploys[i].Name] = true
+	}
+	return groupPITRRender{inputs: in, action: action, existing: existing}, nil
 }
 
 // pitrRenderLogState is what logPITRRender last logged for a group.
@@ -519,5 +617,33 @@ func (r *MysqlFailoverGroupReconciler) logPITRRender(fg *v1alpha1.MysqlFailoverG
 	if next.deferred != "" && next.deferred != prev.deferred {
 		logger.Info(logMsgPITRRenderDeferred, "fg", fg.Name, "namespace", fg.Namespace, "sites", next.deferred)
 	}
+	// An empty state is never stored (U27): nothing to compare against.
+	if len(next.ignored) == 0 && next.deferred == "" {
+		delete(r.pitrRenderLog, key)
+		return
+	}
 	r.pitrRenderLog[key] = next
+}
+
+// forgetGroupMemos drops the per-group memory of the PITR render log and
+// the schedule refusals of the group nn, every incarnation (a deleted
+// group, U27).
+func (r *MysqlFailoverGroupReconciler) forgetGroupMemos(nn types.NamespacedName) {
+	r.forgetScheduleRefusals(nn, "", nil)
+	prefix := nn.Namespace + "/" + nn.Name + "/"
+	r.pitrRenderLogMu.Lock()
+	defer r.pitrRenderLogMu.Unlock()
+	for key := range r.pitrRenderLog {
+		if strings.HasPrefix(key, prefix) {
+			delete(r.pitrRenderLog, key)
+		}
+	}
+}
+
+// forgetPITRRenderLog drops what logPITRRender remembers of fg (a group
+// that renders nothing).
+func (r *MysqlFailoverGroupReconciler) forgetPITRRenderLog(fg *v1alpha1.MysqlFailoverGroup) {
+	r.pitrRenderLogMu.Lock()
+	defer r.pitrRenderLogMu.Unlock()
+	delete(r.pitrRenderLog, fg.Namespace+"/"+fg.Name+"/"+string(fg.UID))
 }

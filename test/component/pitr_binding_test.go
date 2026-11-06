@@ -340,8 +340,10 @@ func (e *bindingEnv) runCheck(p v1alpha1.BackupProfile) controller.PITRArchiveCh
 		res.Source = v1alpha1.PITRArchiveSource{Namespace: d.Source.Namespace, Name: d.Source.Name, UID: d.Source.UID}
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: job.Name + "-" + string(job.UID)[len(job.UID)-6:], Namespace: pbcNS,
-		Labels:          map[string]string{"batch.kubernetes.io/job-name": job.Name},
-		OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID}}},
+		Labels: map[string]string{"batch.kubernetes.io/job-name": job.Name},
+		// The Job controller's pod: controlled by the Job, the only pod a
+		// verdict is read from.
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: &controlledByJob}}},
 		Status: corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{Name: "pitr-archive-check",
 			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Message: controller.FormatPITRArchiveCheckLine(res)}}}}}}
 	if err := e.c.Create(context.Background(), pod); err != nil {
@@ -705,3 +707,6 @@ func TestPITRBindingStatusWipeAndIntegrity(t *testing.T) {
 		t.Fatal("the forged snapshot was deleted or rewritten")
 	}
 }
+
+// controlledByJob marks a check pod's owner reference as its controller.
+var controlledByJob = true

@@ -548,6 +548,10 @@ func s70Remedy() runner.Step {
 		Name:  "the documented remedy: a new archive prefix and a full backup verify again",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			old := ctxFetch(env, "archiveID")
+			// The documented procedure (#203): switch to a new prefix,
+			// wait until its binding is Bound and the writers archive
+			// there, then take the full backup. The switch checks the
+			// prefix and rolls every site first, which takes minutes.
 			if err := pitrConfigureArchive(ctx, env, s70ID, "s70", "fresh", false); err != nil {
 				return err
 			}

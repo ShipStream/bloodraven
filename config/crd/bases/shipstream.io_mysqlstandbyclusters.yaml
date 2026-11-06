@@ -193,6 +193,9 @@ spec:
                               operator provisions a PVC per profile.
                             maxLength: 253
                             type: string
+                            x-kubernetes-validations:
+                            - message: claimName must be at most 253 bytes (UTF-8)
+                              rule: bytes(self).size() <= 253
                           size:
                             anyOf:
                             - type: integer
@@ -213,6 +216,9 @@ spec:
                             maxLength: 512
                             pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                             type: string
+                            x-kubernetes-validations:
+                            - message: subPath must be at most 512 bytes (UTF-8)
+                              rule: bytes(self).size() <= 512
                         type: object
                       s3:
                         description: S3 configures an S3-compatible object store destination.
@@ -222,6 +228,9 @@ spec:
                             maxLength: 63
                             minLength: 1
                             type: string
+                            x-kubernetes-validations:
+                            - message: bucket must be at most 63 bytes (UTF-8)
+                              rule: bytes(self).size() <= 63
                           credentialsSecret:
                             description: |-
                               CredentialsSecret references a Secret whose keys provide AWS
@@ -240,6 +249,9 @@ spec:
                             maxLength: 512
                             pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                             type: string
+                            x-kubernetes-validations:
+                            - message: endpointURL must be at most 512 bytes (UTF-8)
+                              rule: bytes(self).size() <= 512
                           prefix:
                             description: |-
                               Prefix is the object-name prefix inside the bucket. Each backup
@@ -252,6 +264,9 @@ spec:
                             maxLength: 512
                             pattern: ^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$
                             type: string
+                            x-kubernetes-validations:
+                            - message: prefix must be at most 512 bytes (UTF-8)
+                              rule: bytes(self).size() <= 512
                           region:
                             description: Region is the AWS region. Optional for non-AWS
                               S3 stores.
@@ -1023,6 +1038,10 @@ spec:
                                             operator provisions a PVC per profile.
                                           maxLength: 253
                                           type: string
+                                          x-kubernetes-validations:
+                                          - message: claimName must be at most 253
+                                              bytes (UTF-8)
+                                            rule: bytes(self).size() <= 253
                                         size:
                                           anyOf:
                                           - type: integer
@@ -1043,6 +1062,10 @@ spec:
                                           maxLength: 512
                                           pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                                           type: string
+                                          x-kubernetes-validations:
+                                          - message: subPath must be at most 512 bytes
+                                              (UTF-8)
+                                            rule: bytes(self).size() <= 512
                                       type: object
                                     s3:
                                       description: S3 configures an S3-compatible
@@ -1053,6 +1076,10 @@ spec:
                                           maxLength: 63
                                           minLength: 1
                                           type: string
+                                          x-kubernetes-validations:
+                                          - message: bucket must be at most 63 bytes
+                                              (UTF-8)
+                                            rule: bytes(self).size() <= 63
                                         credentialsSecret:
                                           description: |-
                                             CredentialsSecret references a Secret whose keys provide AWS
@@ -1071,6 +1098,10 @@ spec:
                                           maxLength: 512
                                           pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                           type: string
+                                          x-kubernetes-validations:
+                                          - message: endpointURL must be at most 512
+                                              bytes (UTF-8)
+                                            rule: bytes(self).size() <= 512
                                         prefix:
                                           description: |-
                                             Prefix is the object-name prefix inside the bucket. Each backup
@@ -1083,6 +1114,10 @@ spec:
                                           maxLength: 512
                                           pattern: ^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$
                                           type: string
+                                          x-kubernetes-validations:
+                                          - message: prefix must be at most 512 bytes
+                                              (UTF-8)
+                                            rule: bytes(self).size() <= 512
                                         region:
                                           description: Region is the AWS region. Optional
                                             for non-AWS S3 stores.
@@ -5805,14 +5840,16 @@ spec:
                         properties:
                           decryption:
                             description: |-
-                              Decryption, when set, provides the passphrase needed to decrypt
-                              the source backup and any archived binlogs it replays. Required
-                              whenever the source was encrypted via spec.backup.profiles[].encryption.
-                              When the source is a MysqlBackupRef, the operator falls back to
-                              the profile's own PassphraseSecret if Decryption is omitted — so
-                              same-group restores usually don't need to set this explicitly.
-                              For cross-group or direct S3/PVC restores there is no profile to
-                              consult and Decryption is mandatory.
+                              Decryption, when set, provides the passphrase that decrypts the
+                              source dump. The dump key is resolved in this order: Decryption;
+                              else, for a MysqlBackupRef source, the dump-key snapshot that backup
+                              recorded (status.artifactStorage.passphraseSecret); else the restore
+                              is refused (PITRBackupDumpKeyMissing). The profile's live
+                              passphrase Secret is never used: it may hold other bytes since the
+                              backup ran. For direct S3/PVC sources of encrypted dumps Decryption
+                              is required. Archived binlogs a point-in-time restore replays are
+                              decrypted with the key snapshot of the archive's read binding
+                              (status.pitrArchiveBindings), never with Decryption.
                             properties:
                               passphraseSecret:
                                 description: |-
@@ -5999,6 +6036,9 @@ spec:
                                     maxLength: 63
                                     minLength: 1
                                     type: string
+                                    x-kubernetes-validations:
+                                    - message: bucket must be at most 63 bytes (UTF-8)
+                                      rule: bytes(self).size() <= 63
                                   credentialsSecret:
                                     description: |-
                                       CredentialsSecret references a Secret whose keys provide AWS
@@ -6017,6 +6057,10 @@ spec:
                                     maxLength: 512
                                     pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                     type: string
+                                    x-kubernetes-validations:
+                                    - message: endpointURL must be at most 512 bytes
+                                        (UTF-8)
+                                      rule: bytes(self).size() <= 512
                                   prefix:
                                     description: |-
                                       Prefix is the object-name prefix inside the bucket. Each backup
@@ -6029,6 +6073,9 @@ spec:
                                     maxLength: 512
                                     pattern: ^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$
                                     type: string
+                                    x-kubernetes-validations:
+                                    - message: prefix must be at most 512 bytes (UTF-8)
+                                      rule: bytes(self).size() <= 512
                                   region:
                                     description: Region is the AWS region. Optional
                                       for non-AWS S3 stores.
@@ -6422,13 +6469,15 @@ spec:
                             type: string
                           decryption:
                             description: |-
-                              Decryption, when set, provides the passphrase needed to decrypt
-                              the source backup and any archived binlogs it replays. Same
-                              fall-back rules as InitFromBackupSpec.Decryption: when omitted
-                              for a MysqlBackupRef source, the operator resolves the
-                              passphrase from the source profile's own PassphraseSecret. For
-                              direct S3/PVC sources Decryption is required whenever the
-                              ciphertext is encrypted.
+                              Decryption, when set, provides the passphrase that decrypts the
+                              source dump, resolved as InitFromBackupSpec.Decryption is:
+                              Decryption; else, for a MysqlBackupRef source, the dump-key
+                              snapshot that backup recorded
+                              (status.artifactStorage.passphraseSecret); else the restore is
+                              refused (PITRBackupDumpKeyMissing). The profile's live passphrase
+                              Secret is never used. For direct S3/PVC sources of encrypted dumps
+                              Decryption is required. Archived binlogs are decrypted with the key
+                              snapshot of the archive's read binding (status.pitrArchiveBindings).
                             properties:
                               passphraseSecret:
                                 description: |-
@@ -6622,6 +6671,9 @@ spec:
                                     maxLength: 63
                                     minLength: 1
                                     type: string
+                                    x-kubernetes-validations:
+                                    - message: bucket must be at most 63 bytes (UTF-8)
+                                      rule: bytes(self).size() <= 63
                                   credentialsSecret:
                                     description: |-
                                       CredentialsSecret references a Secret whose keys provide AWS
@@ -6640,6 +6692,10 @@ spec:
                                     maxLength: 512
                                     pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                     type: string
+                                    x-kubernetes-validations:
+                                    - message: endpointURL must be at most 512 bytes
+                                        (UTF-8)
+                                      rule: bytes(self).size() <= 512
                                   prefix:
                                     description: |-
                                       Prefix is the object-name prefix inside the bucket. Each backup
@@ -6652,6 +6708,9 @@ spec:
                                     maxLength: 512
                                     pattern: ^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$
                                     type: string
+                                    x-kubernetes-validations:
+                                    - message: prefix must be at most 512 bytes (UTF-8)
+                                      rule: bytes(self).size() <= 512
                                   region:
                                     description: Region is the AWS region. Optional
                                       for non-AWS S3 stores.

@@ -956,7 +956,7 @@ func ProbeArchive(ctx context.Context, store ArchiveStore, prefix string, expect
 		return ArchiveProbe{State: ArchiveProbeVerified, Descriptor: d}, nil
 	}
 
-	c, err := classifyArchivePrefix(ctx, store, raw, prefix)
+	c, err := probeArchivePrefix(ctx, store, raw, prefix, expect.Role == pitrarchive.RoleWriter)
 	if err != nil {
 		var le *prefixListError
 		if errors.As(err, &le) && listPermissionDenied(le.err) {
@@ -985,6 +985,105 @@ func ProbeArchive(ctx context.Context, store ArchiveStore, prefix string, expect
 		Detail:    "the prefix holds no archive",
 		Procedure: "check the archive profile, or wait for the first archived binlog",
 	}, nil)
+}
+
+// archivePageLister is a store that lists page by page (S3), so a listing
+// can stop early.
+type archivePageLister interface {
+	ListPages(ctx context.Context, prefix string, fn func(keys []string) error) error
+}
+
+// errStopListing ends listUntil's paging.
+var errStopListing = errors.New("stop listing")
+
+// listUntil lists prefix through raw and calls visit for each key until it
+// returns true. A paging store stops fetching pages there.
+func listUntil(ctx context.Context, raw ArchiveStore, prefix string, visit func(key string) bool) error {
+	if pl, ok := raw.(archivePageLister); ok {
+		err := pl.ListPages(ctx, prefix, func(keys []string) error {
+			for _, k := range keys {
+				if visit(k) {
+					return errStopListing
+				}
+			}
+			return nil
+		})
+		if errors.Is(err, errStopListing) {
+			return nil
+		}
+		return err
+	}
+	keys, err := raw.List(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if visit(k) {
+			break
+		}
+	}
+	return nil
+}
+
+// probeArchivePrefix is classifyArchivePrefix for ProbeArchive, without
+// listing the whole prefix (U52): a check Job has a short deadline, and a
+// prefix with no descriptor may hold a whole history (or be a shared
+// bucket path). The manifests are listed by their own key prefix
+// (<prefix>/manifest-) and loaded; the rest of the prefix is listed only
+// when emptiness decides the verdict (a writer, with no manifest found),
+// and only up to the first object that counts. The verdicts are
+// classifyArchivePrefix's: a v2 manifest wins, then any other manifest or
+// object.
+func probeArchivePrefix(ctx context.Context, store, raw ArchiveStore, prefix string, needEmptiness bool) (archivePrefixContents, error) {
+	var c archivePrefixContents
+	base := prefix
+	if base != "" {
+		base += "/"
+	}
+	listErr := func(err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &prefixListError{prefix: prefix, err: err}
+	}
+	var sites []string
+	if err := listUntil(ctx, raw, base+"manifest-", func(key string) bool {
+		if site := SiteFromManifestKey(key); site != "" && manifestKey(prefix, site) == key {
+			sites = append(sites, site)
+		} else if !pitrarchive.IsIgnoredArchiveKey(key) {
+			c.otherObjects = true
+		}
+		return false
+	}); err != nil {
+		return c, listErr(err)
+	}
+	for _, site := range sites {
+		_, err := loadManifest(ctx, store, prefix, site)
+		switch {
+		case err == nil:
+			c.v2Manifests = true
+		case ctx.Err() != nil:
+			return c, ctx.Err()
+		case isManifestContentError(err):
+			c.otherManifests = true
+		default:
+			return c, fmt.Errorf("read manifest %s: %w", manifestKey(prefix, site), err)
+		}
+	}
+	if !needEmptiness || !c.empty() {
+		return c, nil
+	}
+	descriptor := pitrarchive.DescriptorKey(prefix)
+	if err := listUntil(ctx, raw, base, func(key string) bool {
+		if key == descriptor || pitrarchive.IsIgnoredArchiveKey(key) {
+			return false
+		}
+		c.otherObjects = true
+		return true
+	}); err != nil {
+		return c, listErr(err)
+	}
+	return c, nil
 }
 
 // listPermissionDenied reports a listing refused for lack of permission:

@@ -165,7 +165,7 @@ func TestBuildPITRArchiveCheckJob(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		target := &pitrBindingTarget{dest: d, write: tc.write, read: !tc.write, profile: &tc.profile}
+		target := &pitrBindingTarget{dest: d, write: tc.write, profile: &tc.profile}
 		entry := &v1alpha1.PITRArchiveBinding{ID: pitrBindingID(d), Destination: d.String(), Encryption: tc.enc}
 		job, err := buildPITRArchiveCheckJob(fg, entry, target, tc.enc.KeySecretName)
 		if err != nil {

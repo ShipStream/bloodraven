@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 	"github.com/shipstream/bloodraven/internal/platform"
 )
 
@@ -90,6 +91,32 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	})
 	addJob("cleanup", job, err)
 
+	// The PITR archive check Job (#203), as a writer with a candidate key
+	// snapshot and as a reader of a plaintext archive (U40).
+	checkFG := fg.DeepCopy()
+	checkFG.UID = "00000000-0000-4000-8000-0000000000a1"
+	for _, tc := range []struct {
+		name    string
+		profile v1alpha1.BackupProfile
+		write   bool
+		key     string
+	}{
+		{"archive-check/writer", encProfile, true, "mysql-" + fg.Name + "-pitr-key-0123456789"},
+		{"archive-check/reader", plainProfile, false, ""},
+	} {
+		dest, err := pitrprofile.DestinationFor(checkFG, &tc.profile)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionNone}
+		if tc.key != "" {
+			enc = v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionPassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM, KeySecretName: tc.key}
+		}
+		entry := &v1alpha1.PITRArchiveBinding{ID: pitrBindingID(dest), Destination: dest.String(), Encryption: enc}
+		job, err := buildPITRArchiveCheckJob(checkFG, entry, &pitrBindingTarget{dest: dest, write: tc.write, profile: &tc.profile}, tc.key)
+		addJob(tc.name, job, err)
+	}
+
 	src := v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: seed.Name}}
 	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, PointInTime: pit}
@@ -134,6 +161,8 @@ func TestOperatorImageContainersUseAbsoluteBinaryPath(t *testing.T) {
 		"restore/bootstrap":      {restorePITRDumpMetaContainerName, restorePITRInitContainerName, "decrypt-download"},
 		"restore/in-place":       {"decrypt-download"},
 		"cleanup":                {cleanupContainerName},
+		"archive-check/writer":   {pitrCheckContainerName},
+		"archive-check/reader":   {pitrCheckContainerName},
 	}
 	for _, p := range pods {
 		var got []string
@@ -244,8 +273,8 @@ func TestOperatorPodsTolerateOwnGroupReadOnlyTaint(t *testing.T) {
 	other := corev1.Taint{Key: platform.TaintKeyForGroup(fg.Name + "-other"), Value: platform.TaintValue, Effect: corev1.TaintEffectNoExecute}
 	legacy := corev1.Taint{Key: platform.LegacyTaintKey, Value: platform.TaintValue, Effect: corev1.TaintEffectNoExecute}
 
-	if len(pods) != 8 {
-		t.Fatalf("rendered %d pod templates, want 8", len(pods))
+	if len(pods) != 10 {
+		t.Fatalf("rendered %d pod templates, want 10", len(pods))
 	}
 	for _, p := range pods {
 		if !tolerates(p.spec.Tolerations, own) {

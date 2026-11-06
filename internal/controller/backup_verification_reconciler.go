@@ -28,6 +28,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // Condition types on MysqlBackupVerification.status.conditions.
@@ -278,6 +279,14 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 			reason, message = tok, tokenFirstMessage(tok, message)
 		}
 		return r.failVerification(ctx, v, reason, message)
+	}
+	// The dump key the Job mounts (required) must exist: a missing one
+	// would leave the pod in ContainerCreating until the Job's deadline.
+	// It fails now with the documented token (U13), as a restore does.
+	if missing, err := r.verificationDumpKeyMissing(ctx, backup); err != nil {
+		return ctrl.Result{}, err
+	} else if missing != "" {
+		return r.failVerification(ctx, v, string(pitrarchive.TokenBackupDumpKeyMissing), missing)
 	}
 	if err := controllerutil.SetControllerReference(v, built, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("set job owner ref: %w", err)
@@ -1063,7 +1072,7 @@ func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx contex
 }
 
 // waitVerification records why a verification has not launched yet and
-// requeues after pitrVerificationBindingRequeue (the read binding is not
+// requeues after pitrReadBindingRequeue (the read binding is not
 // ready, Δ22). The status write is skipped when the message is unchanged.
 func (r *MysqlBackupVerificationReconciler) waitVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification, message string) (ctrl.Result, error) {
 	if v.Status.Message != message {
@@ -1074,5 +1083,33 @@ func (r *MysqlBackupVerificationReconciler) waitVerification(ctx context.Context
 			return ctrl.Result{}, fmt.Errorf("patch waiting status: %w", err)
 		}
 	}
-	return ctrl.Result{RequeueAfter: pitrVerificationBindingRequeue}, nil
+	return ctrl.Result{RequeueAfter: pitrReadBindingRequeue}, nil
+}
+
+// verificationDumpKeyMissing explains why the dump-key Secret an encrypted
+// backup recorded (verificationDumpKey) cannot be mounted, or "" (also for
+// a plaintext backup). The read is uncached.
+func (r *MysqlBackupVerificationReconciler) verificationDumpKeyMissing(ctx context.Context, backup *v1alpha1.MysqlBackup) (string, error) {
+	ref, err := verificationDumpKey(backup)
+	if err != nil || ref == nil {
+		return "", nil // buildVerificationJob already refused a missing record
+	}
+	var s corev1.Secret
+	err = r.apiReader().Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: ref.Name}, &s)
+	switch {
+	case apierrors.IsNotFound(err):
+		return fmt.Sprintf("%s: backup %q is encrypted and the Secret %q it recorded as its dump key is gone; restore that Secret",
+			pitrarchive.TokenBackupDumpKeyMissing, backup.Name, ref.Name), nil
+	case err != nil:
+		return "", fmt.Errorf("get recorded dump key %s: %w", ref.Name, err)
+	}
+	key := ref.Key
+	if key == "" {
+		key = pitrKeySnapshotDataKey
+	}
+	if len(s.Data[key]) == 0 {
+		return fmt.Sprintf("%s: backup %q is encrypted and the Secret %q it recorded as its dump key has no key %q",
+			pitrarchive.TokenBackupDumpKeyMissing, backup.Name, ref.Name, key), nil
+	}
+	return "", nil
 }

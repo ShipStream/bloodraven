@@ -11,22 +11,11 @@ import (
 	"github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// verificationGroupIndex is the MysqlBackupVerification field index the
-// group reconciler lists a group's verifications by (§4.1). Register it once
-// per manager with indexVerificationGroup.
-const verificationGroupIndex = "spec.failoverGroupRef.name"
-
-// indexVerificationGroup is the verificationGroupIndex extractor.
-func indexVerificationGroup(obj client.Object) []string {
-	v, ok := obj.(*v1alpha1.MysqlBackupVerification)
-	if !ok || v.Spec.FailoverGroupRef.Name == "" {
-		return nil
-	}
-	return []string{v.Spec.FailoverGroupRef.Name}
-}
-
 // mapVerificationToGroup enqueues the group a MysqlBackupVerification
-// references: its PITR read target (§4.1) appears and disappears with it.
+// references directly (spec.failoverGroupRef): its PITR read target (§4.1)
+// appears and disappears with it. No field index is involved; the binding
+// pass lists the namespace's verifications and filters them in memory
+// (listPITRVerifications).
 func (r *MysqlFailoverGroupReconciler) mapVerificationToGroup(_ context.Context, obj client.Object) []reconcile.Request {
 	v, ok := obj.(*v1alpha1.MysqlBackupVerification)
 	if !ok || v.Spec.FailoverGroupRef.Name == "" {

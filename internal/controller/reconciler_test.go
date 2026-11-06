@@ -109,8 +109,7 @@ func newReconciler(objs ...client.Object) (*MysqlFailoverGroupReconciler, client
 	scheme := testScheme()
 	// Always include the test secret so the reconciler's validation passes.
 	allObjs := withTestPassphraseSecrets(append([]client.Object{newTestSecret()}, objs...))
-	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...).
-		WithIndex(&v1alpha1.MysqlBackupVerification{}, verificationGroupIndex, indexVerificationGroup)
+	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...)
 	c := cb.Build()
 	r := &MysqlFailoverGroupReconciler{
 		Client:   c,
@@ -1105,7 +1104,7 @@ func TestLegacyConfigMapCleanupIsReferenceDriven(t *testing.T) {
 	objects := []client.Object{fg, legacy}
 	objects = append(objects, deployments...)
 	r, c := newReconciler(objects...)
-	if err := r.reconcileSiteConfigMaps(context.Background(), fg, testPITRRender(fg)); err != nil {
+	if err := r.reconcileSiteConfigMaps(context.Background(), fg, testGroupPITRRender(fg)); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.cleanupLegacyConfigMap(context.Background(), fg, testPITRRender(fg)); err != nil {

@@ -30,10 +30,17 @@ func scenario31PITRVerificationRustFS() runner.Scenario {
 		Title: "PITR verification replays RustFS binlogs to timestamp",
 		Hypothesis: "With PITR enabled against RustFS, a pinned MysqlBackupVerification can restore a full dump, " +
 			"replay archived binlogs to a timestamp, include pre-target marker rows, and exclude post-target rows.",
-		Risk:     "medium",
-		DocLink:  "playground/chaos-scenarios.md#31-pitr-verification-against-rustfs",
-		Timeout:  24 * time.Minute,
-		Precheck: assertReplicationRunningPrecheck,
+		Risk:    "medium",
+		DocLink: "playground/chaos-scenarios.md#31-pitr-verification-against-rustfs",
+		Timeout: 24 * time.Minute,
+		// The cleanup deletes the backup and verification (artifact
+		// checks), restores spec.backup (which rolls every site), waits
+		// for a healthy baseline, and releases the run's archive binding
+		// (#203: the unmount wait plus one release), before the executor's
+		// global recover and reconverge. The default 4 minutes covers none
+		// of that, so it composes the same base as every PITR scenario.
+		CleanupTimeout: pitrCleanupBudget(0),
+		Precheck:       assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
 			s31EnsureBucket(),
 			s31ConfigureProfile(),
@@ -77,9 +84,10 @@ func s31ConfigureProfile() runner.Step {
 			if err := patchBackupSpec(ctx, env, backupProfileSpec(prefix, true)); err != nil {
 				return err
 			}
-			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-			defer cancel()
-			return waitForBackupProfile(waitCtx, env, prefix, true)
+			// Enabling PITR binds the prefix through a check Job and rolls
+			// every site (#203); the full backup must wait for both.
+			_, _, err := pitrWaitArchiveBound(ctx, env, prefix)
+			return err
 		},
 	}
 }

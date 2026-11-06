@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,10 +158,16 @@ func TestArtifactCleanupAbandonedMode(t *testing.T) {
 		wantDeleted int
 		wantRemoved bool
 		wantErr     string
+		// wantSkipped: nothing deleted and the verdict says the objects
+		// could not be shown to be the backup's (U05).
+		wantSkipped bool
 	}{
 		{name: "own stamp", stamp: stampFor("mine"), uid: "uid-mine", wantDeleted: 2, wantRemoved: true},
 		{name: "another backup's stamp", stamp: stampFor("theirs"), uid: "uid-mine"},
-		{name: "no stamp", uid: "uid-mine"},
+		// U05: no stamp, but the location still holds objects (the stamp
+		// was removed): they may be this backup's, so the run is skipped,
+		// never reported as a complete cleanup.
+		{name: "no stamp", uid: "uid-mine", wantSkipped: true},
 		{name: "own encrypted stamp", stamp: encryptForTest(t, stampFor("mine"), []byte("dump key")), passphrase: passphraseFile, uid: "uid-mine", wantDeleted: 2, wantRemoved: true},
 		{name: "plaintext stamp of an encrypted backup", stamp: stampFor("mine"), passphrase: passphraseFile, uid: "uid-mine", wantErr: "not BRV1"},
 		{name: "wrong passphrase", stamp: encryptForTest(t, stampFor("mine"), []byte("other key")), passphrase: passphraseFile, uid: "uid-mine", wantErr: "decrypt backup stamp"},
@@ -177,6 +185,15 @@ func TestArtifactCleanupAbandonedMode(t *testing.T) {
 			req := artifactCleanupRequest{Name: "backup-1", StorageType: "S3", Location: "p/backup-1", Bucket: "b",
 				Mode: cleanupModeAbandoned, UID: tt.uid, PassphraseFile: tt.passphrase}
 			n, cerr := runCleanupRequest(ctx, req, func(context.Context, *sidecar.PITRConfig) (cleanupStore, error) { return store, nil })
+			if tt.wantSkipped {
+				if cerr == nil || !cerr.skipped || cerr.code != 0 || n != 0 || !store.keys["p/backup-1/@.json"] {
+					t.Fatalf("err = %v, deleted %d; want a skipped run that deletes nothing", cerr, n)
+				}
+				return
+			}
+			if cerr != nil && cerr.skipped {
+				t.Fatalf("skipped: %v", cerr)
+			}
 			if tt.wantErr != "" {
 				if cerr == nil || cerr.code != backupmeta.CleanupExitRejected || !strings.Contains(cerr.Error(), tt.wantErr) {
 					t.Fatalf("err = %v, want a refusal containing %q", cerr, tt.wantErr)
@@ -220,6 +237,41 @@ func TestArtifactCleanupAbandonedMode(t *testing.T) {
 			if own != (n == 1 && os.IsNotExist(statErr) && os.IsNotExist(stampErr)) || !own && (statErr != nil || stampErr != nil) {
 				t.Fatalf("own=%t: deleted %d, dump %v, stamp %v", own, n, statErr, stampErr)
 			}
+		}
+	})
+
+	// U05: no stamp over an empty location: nothing of the backup is
+	// there, so the cleanup is complete (its key is no longer needed).
+	t.Run("no stamp, empty location", func(t *testing.T) {
+		store := &abandonedCleanupStore{cleanupMemoryStore: &cleanupMemoryStore{keys: map[string]bool{"p/backup-10/@.json": true}}, data: map[string][]byte{}}
+		req := artifactCleanupRequest{Name: "backup-1", StorageType: "S3", Location: "p/backup-1", Bucket: "b", Mode: cleanupModeAbandoned, UID: "uid-mine"}
+		n, cerr := runCleanupRequest(ctx, req, func(context.Context, *sidecar.PITRConfig) (cleanupStore, error) { return store, nil })
+		if cerr != nil || n != 0 {
+			t.Fatalf("deleted %d, err %v; want complete with nothing", n, cerr)
+		}
+	})
+	t.Run("PVC no stamp", func(t *testing.T) {
+		mount := t.TempDir()
+		req := artifactCleanupRequest{Name: "backup-1", StorageType: "PVC", Location: filepath.Join(mount, "sub", "backup-1"),
+			MountPath: mount, Mode: cleanupModeAbandoned, UID: "uid-mine"}
+		if _, cerr := runCleanupRequest(ctx, req, nil); cerr != nil {
+			t.Fatalf("empty: %v", cerr)
+		}
+		mustWrite(t, filepath.Join(mount, "sub", "backup-1", "@.json"))
+		if _, cerr := runCleanupRequest(ctx, req, nil); cerr == nil || !cerr.skipped {
+			t.Fatalf("leftovers without a stamp: %v, want skipped", cerr)
+		}
+		// The verdict line and exit code of a skipped run.
+		var out bytes.Buffer
+		prev := cleanupTerminationLogPath
+		cleanupTerminationLogPath = filepath.Join(t.TempDir(), "termination-log")
+		t.Cleanup(func() { cleanupTerminationLogPath = prev })
+		code := artifactCleanup(ctx, req, nil, &out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if reason, ok := backupmeta.ParseCleanupSkipped(out.String()); code != 0 || !ok || !strings.Contains(reason, "nothing was deleted") {
+			t.Fatalf("exit %d, output %q", code, out.String())
+		}
+		if _, ok := backupmeta.ParseCleanupComplete(out.String()); ok {
+			t.Fatal("a skipped run printed a complete verdict")
 		}
 	})
 

@@ -437,15 +437,18 @@ func TestEnvtest_PITRBindingDefersPre203Deployment(t *testing.T) {
 		State: controller.PITRArchiveCheckStateVerified, ArchiveID: pitrarchive.CreateArchiveID(fg.UID, dest),
 		Source: v1alpha1.PITRArchiveSource{Namespace: ns, Name: "lion", UID: fg.UID}, DestinationDigest: controller.PITRArchiveCheckDestinationDigest(dest.String()),
 	})
+	// The Job controller's pod: controlled by the Job (the verdict is read
+	// only from such a pod), with the check container.
+	controlled := true
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: job.Name + "-pod", Labels: map[string]string{"job-name": job.Name},
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID}}},
-		Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, Containers: []corev1.Container{{Name: "check", Image: "bloodraven:test"}}},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: &controlled}}},
+		Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, Containers: []corev1.Container{{Name: "pitr-archive-check", Image: "bloodraven:test"}}},
 	}
 	if err := k8sClient.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	pod.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{Name: "check",
+	pod.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{Name: "pitr-archive-check",
 		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: line}}}}}
 	if err := k8sClient.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)

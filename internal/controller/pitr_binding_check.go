@@ -389,44 +389,70 @@ func pitrCheckRetryWait(fg *v1alpha1.MysqlFailoverGroup, id string, now time.Tim
 	return 0
 }
 
-// ensurePITRArchiveCheck makes sure the check Job for entry's candidate
-// exists and is the one entry.Check records. It returns the Job (nil when
-// it is still being replaced) and whether status must record a new Job.
-// A Job of the deterministic name whose UID status does not record is a
-// leftover (an operator crash between Create and the status write, or an
-// earlier candidate round): it is deleted and re-created on a later pass.
-func (r *MysqlFailoverGroupReconciler) ensurePITRArchiveCheck(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, target *pitrBindingTarget, candidate string) (*batchv1.Job, error) {
+// ensurePITRArchiveCheck creates the check Job for entry's candidate and
+// records it in entry.Check. Its callers start a check only for an entry
+// with no check in flight (entry.Check is nil). A Job of the deterministic
+// name that already exists is a leftover (an operator crash between Create
+// and the status write, an earlier candidate round, or a check dropped by
+// this pass): it is returned as leftover, for deletion after the pass's
+// status write (with a UID precondition, so a pass computed from a stale
+// cache never deletes a Job a fresher status records, U12), and the Job is
+// created on a later pass. job is nil while a leftover is being replaced.
+// A candidate snapshot is read uncached and its UID recorded on the Job
+// (annotationPITRCheckedSnapshotUID).
+func (r *MysqlFailoverGroupReconciler) ensurePITRArchiveCheck(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, target *pitrBindingTarget, candidate string) (job, leftover *batchv1.Job, err error) {
 	name := pitrCheckJobName(fg.Name, entry.ID, candidate)
-	var job batchv1.Job
-	err := r.bindingReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &job)
+	var existing batchv1.Job
+	err = r.bindingReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &existing)
 	switch {
 	case err == nil:
-		if entry.Check != nil && entry.Check.JobName == name && entry.Check.JobUID == job.UID {
-			return &job, nil
-		}
-		if job.DeletionTimestamp == nil {
-			if err := r.deletePITRCheckJob(ctx, &job); err != nil {
-				return nil, err
-			}
-		}
 		entry.Check = nil
-		return nil, nil
+		if existing.DeletionTimestamp != nil {
+			return nil, nil, nil
+		}
+		return nil, &existing, nil
 	case !apierrors.IsNotFound(err):
-		return nil, fmt.Errorf("get check job %s: %w", name, err)
+		return nil, nil, fmt.Errorf("get check job %s: %w", name, err)
 	}
 	built, err := buildPITRArchiveCheckJob(fg, entry, target, candidate)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if candidate != "" {
+		var snap corev1.Secret
+		if err := r.bindingReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: candidate}, &snap); err != nil {
+			return nil, nil, fmt.Errorf("get candidate key snapshot %s: %w", candidate, err)
+		}
+		if built.Annotations == nil {
+			built.Annotations = map[string]string{}
+		}
+		built.Annotations[annotationPITRCheckedSnapshotUID] = string(snap.UID)
 	}
 	if err := r.Create(ctx, built); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			entry.Check = nil
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("create check job %s: %w", name, err)
+		return nil, nil, fmt.Errorf("create check job %s: %w", name, err)
 	}
 	entry.Check = &v1alpha1.PITRArchiveBindingCheck{JobName: built.Name, JobUID: built.UID}
-	return built, nil
+	return built, nil, nil
+}
+
+// pitrCheckJobRole is the role (PITRArchiveCheckRoleEnv) a check Job was
+// started with, or "" when its container does not set one.
+func pitrCheckJobRole(job *batchv1.Job) string {
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.Name != pitrCheckContainerName {
+			continue
+		}
+		for _, e := range c.Env {
+			if e.Name == PITRArchiveCheckRoleEnv && e.ValueFrom == nil {
+				return e.Value
+			}
+		}
+	}
+	return ""
 }
 
 // pitrCheckOutcome is what observePITRArchiveCheck found.
@@ -443,9 +469,13 @@ type pitrCheckOutcome struct {
 }
 
 // observePITRArchiveCheck reads the verdict of the Job entry.Check names,
-// only from the Job whose UID it records. A pod Pending past
-// pitrCheckPendingTimeout, a Job that never created a pod, a failed Job and
-// a finished Job without a parseable line are failures.
+// only from the Job whose UID it records, and only from a pod that Job
+// controls (owner reference UID; never a label match, U44), read uncached
+// (U28), from the pitr-archive-check container's status. A pod Pending
+// past pitrCheckPendingTimeout, a Job that never created a pod, a failed
+// Job and a finished Job without a parseable line are failures; a line
+// that is present but does not parse is reported with the parser's
+// reason (U43).
 func (r *MysqlFailoverGroupReconciler) observePITRArchiveCheck(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, now time.Time) (pitrCheckOutcome, error) {
 	if entry.Check == nil {
 		return pitrCheckOutcome{}, nil
@@ -461,19 +491,25 @@ func (r *MysqlFailoverGroupReconciler) observePITRArchiveCheck(ctx context.Conte
 	if entry.Check.JobUID != "" && job.UID != entry.Check.JobUID {
 		return pitrCheckOutcome{done: true, job: &job, failure: fmt.Sprintf("check Job %s was replaced by another object", job.Name)}, nil
 	}
-	pod, err := latestJobPod(ctx, r.Client, &job)
+	pod, err := pitrCheckPod(ctx, r.bindingReader(), &job)
 	if err != nil {
 		return pitrCheckOutcome{}, fmt.Errorf("read check pod: %w", err)
 	}
-	code, message, terminated := cleanupPodVerdict(pod)
+	code, message, terminated := pitrCheckContainerVerdict(pod)
+	var perr error
 	if terminated && code == 0 {
-		if res, perr := parsePITRArchiveCheckLine(message); perr == nil {
+		res, err := parsePITRArchiveCheckLine(message)
+		if err == nil {
 			return pitrCheckOutcome{done: true, job: &job, result: &res}, nil
 		}
+		perr = err
 	}
 	phase, detail := jobPhase(&job, "check")
 	switch phase {
 	case v1alpha1.BackupPhaseSucceeded:
+		if perr != nil && !errors.Is(perr, errPITRCheckNoLine) {
+			return pitrCheckOutcome{done: true, job: &job, failure: fmt.Sprintf("check Job %s reported a verdict line that does not parse: %v", job.Name, perr)}, nil
+		}
 		return pitrCheckOutcome{done: true, job: &job, failure: fmt.Sprintf("check Job %s ended without a verdict line", job.Name)}, nil
 	case v1alpha1.BackupPhaseFailed:
 		if terminated && message != "" {
@@ -491,6 +527,56 @@ func (r *MysqlFailoverGroupReconciler) observePITRArchiveCheck(ctx context.Conte
 	return pitrCheckOutcome{job: &job}, nil
 }
 
+// pitrCheckPod returns the newest pod job controls (its controller owner
+// reference names job's UID), read through reader, or nil.
+func pitrCheckPod(ctx context.Context, reader client.Reader, job *batchv1.Job) (*corev1.Pod, error) {
+	var chosen *corev1.Pod
+	seen := map[types.UID]bool{}
+	for _, selector := range []client.MatchingLabels{{"batch.kubernetes.io/job-name": job.Name}, {"job-name": job.Name}} {
+		var pods corev1.PodList
+		if err := reader.List(ctx, &pods, client.InNamespace(job.Namespace), selector); err != nil {
+			return nil, err
+		}
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			if seen[p.UID] {
+				continue
+			}
+			seen[p.UID] = true
+			owner := metav1.GetControllerOf(p)
+			if owner == nil || owner.UID == "" || owner.UID != job.UID {
+				continue
+			}
+			if chosen == nil || p.CreationTimestamp.After(chosen.CreationTimestamp.Time) {
+				chosen = p.DeepCopy()
+			}
+		}
+	}
+	return chosen, nil
+}
+
+// pitrCheckContainerVerdict is the pitr-archive-check container's
+// termination (exit code and message) in pod, by container name.
+func pitrCheckContainerVerdict(pod *corev1.Pod) (exitCode int32, message string, terminated bool) {
+	if pod == nil {
+		return 0, "", false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != pitrCheckContainerName {
+			continue
+		}
+		term := status.State.Terminated
+		if term == nil {
+			term = status.LastTerminationState.Terminated
+		}
+		if term == nil {
+			return 0, "", false
+		}
+		return term.ExitCode, strings.TrimSpace(term.Message), true
+	}
+	return 0, "", false
+}
+
 // compactPITRCheckMessage bounds a termination message quoted in a binding
 // message.
 func compactPITRCheckMessage(s string) string {
@@ -503,9 +589,16 @@ func compactPITRCheckMessage(s string) string {
 }
 
 // deletePITRCheckJob deletes a check Job and its pods (background
-// propagation). NotFound is success.
+// propagation), only the object job names (UID precondition): a Job
+// re-created under the name since it was read is kept. NotFound and a
+// failed precondition are success.
 func (r *MysqlFailoverGroupReconciler) deletePITRCheckJob(ctx context.Context, job *batchv1.Job) error {
-	if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
+	opts := []client.DeleteOption{client.PropagationPolicy(metav1.DeletePropagationBackground)}
+	if job.UID != "" {
+		uid := job.UID
+		opts = append(opts, client.Preconditions{UID: &uid})
+	}
+	if err := r.Delete(ctx, job, opts...); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		return fmt.Errorf("delete check job %s: %w", job.Name, err)
 	}
 	return nil

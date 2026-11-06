@@ -31,6 +31,9 @@ const (
 	pitrCheckExitOK        = 0
 	pitrCheckExitConfig    = 2
 	pitrCheckExitTransient = 3
+	// pitrCheckExitTerminationLog: the verdict could not be written to
+	// the termination log.
+	pitrCheckExitTerminationLog = 4
 )
 
 // runPITRArchiveCheck is `bloodraven pitr-archive-check` (#203, IMPL-203
@@ -139,7 +142,12 @@ func pitrArchiveCheck(ctx context.Context, getenv func(string) string, newStore 
 	}
 	line := controller.FormatPITRArchiveCheckLine(res)
 	if err := os.WriteFile(pitrArchiveCheckTerminationLogPath, []byte(line+"\n"), 0o644); err != nil {
-		logger.Warn("write termination log", "error", err)
+		// Exit 0 promises a verdict on the termination log, which the
+		// controller reads; without it the kubelet records an empty
+		// message (FallbackToLogsOnError applies to failures only). A
+		// failed write is a failed check, with the cause in the log (U62).
+		logger.Error("write the verdict to the termination log; the check fails", "path", pitrArchiveCheckTerminationLogPath, "error", err)
+		return pitrCheckExitTerminationLog
 	}
 	_, _ = fmt.Fprintln(out, line)
 	logger.Info(controller.PITRArchiveCheckLogMsg, "destination", req.expect.Destination.String(), "role", req.role,

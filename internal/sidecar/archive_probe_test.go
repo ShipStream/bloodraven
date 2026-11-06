@@ -3,7 +3,9 @@ package sidecar
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
+	"sort"
 	"strings"
 	"testing"
 
@@ -227,5 +229,75 @@ func TestProbeArchiveDetails(t *testing.T) {
 		if _, err := ProbeArchive(ctx, newMemStore(), "binlogs", e); !errors.Is(err, pitrarchive.ErrInvalidExpectation) {
 			t.Fatalf("%+v: err = %v", e, err)
 		}
+	}
+}
+
+// pagingStore lists like S3: sorted pages of pageSize keys, counting the
+// pages fetched.
+type pagingStore struct {
+	*memStore
+	pageSize int
+	pages    int
+}
+
+func (p *pagingStore) ListPages(ctx context.Context, prefix string, fn func(keys []string) error) error {
+	keys, err := p.memStore.List(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	sort.Strings(keys)
+	for len(keys) > 0 {
+		n := min(p.pageSize, len(keys))
+		p.pages++
+		if err := fn(keys[:n]); err != nil {
+			return err
+		}
+		keys = keys[n:]
+	}
+	return nil
+}
+
+func (p *pagingStore) List(context.Context, string) ([]string, error) {
+	panic("the probe materialized a whole listing")
+}
+
+// U52: a prefix with no descriptor and a large history settles from the
+// manifests' own listing and, for a writer, the first object that counts:
+// the probe never pages through the whole prefix.
+func TestProbeArchiveDoesNotListWholePrefix(t *testing.T) {
+	ctx := context.Background()
+	inner := newMemStore()
+	for i := 0; i < 5000; i++ {
+		key := fmt.Sprintf("binlogs/iad/mysql-bin.%06d", i)
+		if err := inner.Put(ctx, key, strings.NewReader("x"), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := &pagingStore{memStore: inner, pageSize: 100}
+	identity := testArchiveIdentity(store)
+	writer := pitrarchive.Expectation{Role: pitrarchive.RoleWriter, SourceUID: identity.Source.UID, Destination: identity.Destination, Encryption: identity.Encryption}
+	probe, err := ProbeArchive(ctx, store, "binlogs", writer)
+	if err != nil || probe.State != ArchiveProbeRefused || probe.Token != pitrarchive.TokenArchiveLegacy {
+		t.Fatalf("writer probe = %+v, %v", probe, err)
+	}
+	if store.pages > 2 {
+		t.Fatalf("writer probe fetched %d pages", store.pages)
+	}
+	store.pages = 0
+	reader := pitrarchive.Expectation{Role: pitrarchive.RoleReader, Destination: identity.Destination, Encryption: identity.Encryption}
+	probe, err = ProbeArchive(ctx, store, "binlogs", reader)
+	if err != nil || probe.State != ArchiveProbeRefused || probe.Token != pitrarchive.TokenArchiveNotFound {
+		t.Fatalf("reader probe = %+v, %v", probe, err)
+	}
+	if store.pages > 1 {
+		t.Fatalf("reader probe fetched %d pages", store.pages)
+	}
+	// A v2 manifest among the history is found through its own listing.
+	if err := inner.Put(ctx, "binlogs/manifest-iad.json", strings.NewReader(`{"version":2,"archiveID":"`+testArchiveID+`","site":"iad","files":[]}`), 1); err != nil {
+		t.Fatal(err)
+	}
+	store.pages = 0
+	if probe, err = ProbeArchive(ctx, store, "binlogs", writer); err != nil || probe.Token != pitrarchive.TokenArchiveDescriptorMissing || store.pages > 1 {
+		t.Fatalf("probe with a v2 manifest = %+v, %v (%d pages)", probe, err, store.pages)
 	}
 }

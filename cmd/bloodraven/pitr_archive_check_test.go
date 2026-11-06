@@ -287,3 +287,29 @@ func runCheckForTest(t *testing.T, root, role, key string, wrap checkStoreWrap, 
 	b, _ := os.ReadFile(termLog)
 	return strings.TrimSpace(out.String()), code, strings.TrimSpace(string(b))
 }
+
+// U62: the verdict cannot be written to the termination log. Exit 0 would
+// promise a verdict the kubelet never records; the check fails instead,
+// with the cause in the log.
+func TestPITRArchiveCheckTerminationLogWriteFails(t *testing.T) {
+	root := t.TempDir()
+	runCheckForTest(t, root, controller.PITRArchiveCheckRoleWriter, "", nil, nil) // sets the env up
+	prev := pitrArchiveCheckTerminationLogPath
+	pitrArchiveCheckTerminationLogPath = filepath.Join(t.TempDir(), "missing-dir", "termination-log")
+	t.Cleanup(func() { pitrArchiveCheckTerminationLogPath = prev })
+	newStore := func(ctx context.Context, cfg *sidecar.PITRConfig) (sidecar.ArchiveStore, error) {
+		pvc := *cfg.PVC
+		pvc.MountVerifier = sidecar.TempDirMountVerifierForTest
+		c := *cfg
+		c.PVC = &pvc
+		return sidecar.NewArchiveStore(ctx, &c)
+	}
+	var out, logs bytes.Buffer
+	code := pitrArchiveCheck(context.Background(), os.Getenv, newStore, &out, slog.New(slog.NewTextHandler(&logs, nil)))
+	if code == pitrCheckExitOK || code != pitrCheckExitTerminationLog {
+		t.Fatalf("exit %d, want %d", code, pitrCheckExitTerminationLog)
+	}
+	if !strings.Contains(logs.String(), "termination log") {
+		t.Fatalf("the write failure is not logged: %s", logs.String())
+	}
+}

@@ -873,7 +873,11 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 				return false, 0, err
 			}
 			if missing != "" {
-				return block(backupReasonPassphraseSecretMissing, missing, 5*time.Minute)
+				// The recorded key is gone, but the artifacts it decrypts
+				// may be there: the finalizer stays (no skip) until the
+				// Secret is restored, so the leftovers are cleaned up then
+				// (IMPL-203 §4.7, U11).
+				return r.blockArtifactCleanup(ctx, backup, backupReasonPassphraseSecretMissing, missing, 5*time.Minute)
 			}
 			in.Passphrase = passphrase
 		}
@@ -918,6 +922,12 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			return false, 0, fmt.Errorf("read cleanup verdict: %w", err)
 		}
 		_, message, _ := cleanupPodVerdict(pod)
+		if reason, skipped := backupmeta.ParseCleanupSkipped(message); abandoned && skipped {
+			// Nothing was deleted and the location may still hold this
+			// backup's unproven artifacts: the dump-key snapshot stays
+			// (K2, U05); the Event names it and the location.
+			return r.skipAbandonedCleanup(backup, location, reason)
+		}
 		objects, counted := backupmeta.ParseCleanupComplete(message)
 		switch {
 		case abandoned:

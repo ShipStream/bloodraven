@@ -256,6 +256,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.Get(ctx, req.NamespacedName, &fg); err != nil {
 		if errors.IsNotFound(err) {
 			r.forgetLicense(req.NamespacedName)
+			r.forgetGroupMemos(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -264,6 +265,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Handle deletion with finalizer
 	if !fg.DeletionTimestamp.IsZero() {
 		r.forgetLicense(req.NamespacedName)
+		r.forgetGroupMemos(req.NamespacedName)
 		if controllerutil.ContainsFinalizer(&fg, finalizerName) {
 			logger.Info("CR being deleted, running finalizer cleanup", "name", fg.Name)
 
@@ -370,7 +372,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Desired per-site ConfigMaps are created before any Deployment reference
 	// changes. This ordering makes migration from the legacy shared map safe.
-	if err := r.reconcileSiteConfigMaps(ctx, &fg, pitrRender.inputs); err != nil {
+	if err := r.reconcileSiteConfigMaps(ctx, &fg, pitrRender); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile site configmaps: %w", err)
 	}
 
@@ -663,12 +665,6 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
-	// A group's PITR read targets include its verifications (§4.1),
-	// listed by this index.
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.MysqlBackupVerification{},
-		verificationGroupIndex, indexVerificationGroup); err != nil {
-		return fmt.Errorf("index verifications by group: %w", err)
-	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlFailoverGroup{}).
 		Owns(&appsv1.Deployment{}).
@@ -945,7 +941,12 @@ func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.Sit
 	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(h.Sum(nil))[:12])
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr pitrRenderInputs) error {
+// reconcileSiteConfigMaps renders every site's ConfigMap from the group's
+// PITR render. A site whose existing Deployment the render defers keeps
+// its ConfigMap as it is: my.cnf follows the render (max_binlog_size), and
+// a restarted pod of the untouched Deployment must start with the
+// configuration it was rendered with (U09).
+func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr groupPITRRender) error {
 	for _, site := range fg.Spec.Sites {
 		if keys := unsafeMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "MysqlConfIgnored",
@@ -957,7 +958,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Conte
 				"site %s: ignoring mysqlConf keys %s: they override an operator-owned setting",
 				site.Name, strings.Join(keys, ", "))
 		}
-		if err := r.reconcileSiteConfigMap(ctx, fg, site, pitr); err != nil {
+		if pitr.defers(resourceName(fg.Name, site.Name)) {
+			continue
+		}
+		if err := r.reconcileSiteConfigMap(ctx, fg, site, pitr.inputs); err != nil {
 			return err
 		}
 	}
@@ -2722,8 +2726,10 @@ func (r *MysqlFailoverGroupReconciler) applySiteDeployment(ctx context.Context, 
 	for i, site := range fg.Spec.Sites {
 		if site.Name == siteName {
 			siteFound = true
-			if err := r.reconcileSiteConfigMap(ctx, &fg, site, pitrRender.inputs); err != nil {
-				return fmt.Errorf("reconcile site configmap: %w", err)
+			if !pitrRender.defers(resourceName(fg.Name, site.Name)) {
+				if err := r.reconcileSiteConfigMap(ctx, &fg, site, pitrRender.inputs); err != nil {
+					return fmt.Errorf("reconcile site configmap: %w", err)
+				}
 			}
 			serverID := int32(101 + i)
 			if err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender); err != nil {

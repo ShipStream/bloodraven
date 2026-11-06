@@ -607,6 +607,40 @@ func TestPITRBindingCELBounds(t *testing.T) {
 		})
 	}
 
+	// U15: the destination bounds count UTF-8 bytes, as the runtime's
+	// (pitrarchive D-18) do: a multibyte value within the character bound
+	// but over the byte bound is refused at admission, not rendered PITR
+	// disabled at reconcile.
+	multibyte := func(nBytes int) string { return strings.Repeat("é", nBytes/2) + strings.Repeat("a", nBytes%2) }
+	byteBounds := []bound{
+		{"bucket-bytes", "bucket must be at most 63 bytes", 63, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+			pitrProfile(fg, "a").Storage.S3.Bucket = multibyte(n)
+		}},
+		{"prefix-bytes", "prefix must be at most 512 bytes", 512, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+			pitrProfile(fg, "a").Storage.S3.Prefix = multibyte(n)
+		}},
+		{"endpoint-bytes", "endpointURL must be at most 512 bytes", 512, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+			pitrProfile(fg, "a").Storage.S3.EndpointURL = "http://h/" + multibyte(n-len("http://h/"))
+		}},
+		{"claim-bytes", "claimName must be at most 253 bytes", 253, func(fg *v1alpha1.MysqlFailoverGroup, n int) { pvc(fg).ClaimName = multibyte(n) }},
+		{"subpath-bytes", "subPath must be at most 512 bytes", 512, func(fg *v1alpha1.MysqlFailoverGroup, n int) { pvc(fg).SubPath = multibyte(n) }},
+	}
+	for i, b := range byteBounds {
+		t.Run(b.name, func(t *testing.T) {
+			ok := newPITRBindingFG(ns, fmt.Sprintf("bytes-%d-max", i))
+			b.set(ok, b.max)
+			if err := k8sClient.Create(ctx, ok); err != nil {
+				t.Fatalf("%s at its byte bound %d refused: %v", b.name, b.max, err)
+			}
+			over := newPITRBindingFG(ns, fmt.Sprintf("bytes-%d-over", i))
+			b.set(over, b.max+2)
+			err := k8sClient.Create(ctx, over)
+			if err == nil || !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), b.field) {
+				t.Fatalf("%s two bytes over its byte bound (fewer characters than the bound): err %v", b.name, err)
+			}
+		})
+	}
+
 	t.Run("pitr-profile-name-pattern", func(t *testing.T) {
 		fg := newPITRBindingFG(ns, "bad-profile-name")
 		fg.Spec.Backup.PITR.ProfileName = "Bad_Name"

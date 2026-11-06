@@ -102,7 +102,7 @@ func TestAcceptPITRKeySnapshotMatchesDescriptor(t *testing.T) {
 	// A second acceptance of another archive is refused, not overwritten.
 	other := *entry
 	other.ArchiveID = "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if err := e.r.acceptPITRKeySnapshot(context.Background(), e.fg(), &other, time.Now()); err == nil {
+	if err := e.r.acceptPITRKeySnapshot(context.Background(), e.fg(), &other, "", time.Now()); err == nil {
 		t.Fatal("re-accepted a snapshot for another archive")
 	}
 }
@@ -130,7 +130,7 @@ func TestPITRBindingRecovery(t *testing.T) {
 	e.updateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) { st.PITRArchiveBindings = nil })
 	e.pass()
 	for _, want := range []*v1alpha1.PITRArchiveBinding{k1, k2} {
-		got := findPITRBindingByID(e.fg(), want.ID)
+		got := findBindingIn(e.fg().Status.PITRArchiveBindings, want.ID)
 		if got == nil || got.State != v1alpha1.PITRArchiveBindingBound || got.Encryption != want.Encryption ||
 			got.ArchiveID != want.ArchiveID || *got.Source != *want.Source {
 			t.Fatalf("rebuilt %+v, want %+v", got, want)
@@ -175,8 +175,8 @@ func TestPITRBindingRecoveryOverflow(t *testing.T) {
 	e.updateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) { st.PITRArchiveBindings = nil })
 	e.pass()
 	got := e.fg().Status.PITRArchiveBindings
-	if len(got) != pitrArchiveBindingsMax || findPITRBindingByID(e.fg(), inUse.ID) == nil {
-		t.Fatalf("rebuilt %d bindings, in-use one present=%t", len(got), findPITRBindingByID(e.fg(), inUse.ID) != nil)
+	if len(got) != pitrArchiveBindingsMax || findBindingIn(e.fg().Status.PITRArchiveBindings, inUse.ID) == nil {
+		t.Fatalf("rebuilt %d bindings, in-use one present=%t", len(got), findBindingIn(e.fg().Status.PITRArchiveBindings, inUse.ID) != nil)
 	}
 	c := e.expectCond(metav1.ConditionFalse, reasonPITRBindingLimitReached)
 	if !strings.Contains(c.Message, "could not be rebuilt") {
@@ -358,6 +358,44 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "pitr-passphrase", VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{SecretName: entry.Encryption.KeySecretName}}}}},
 				Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+			if err := e.c.Create(context.Background(), pod); err != nil {
+				e.t.Fatal(err)
+			}
+		},
+		// U03: a scaled-to-zero Deployment with no render annotation still
+		// mounts the snapshot through its pod template.
+		"a scaled-to-zero Deployment's pod template": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+			d := pbcDeploy("mysql-"+pbtName+"-iad", pbtName, "iad", "")
+			d.Namespace = pbtNS
+			zero := int32(0)
+			d.Spec.Replicas = &zero
+			d.Spec.Template.Spec.Volumes = []corev1.Volume{{Name: "pitr-passphrase", VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: entry.Encryption.KeySecretName}}}}
+			if err := e.c.Create(context.Background(), &d); err != nil {
+				e.t.Fatal(err)
+			}
+		},
+		// U03: what a Deployment with an undecodable annotation renders
+		// cannot be told.
+		"a malformed render annotation": func(e *pbtEnv, _ *v1alpha1.PITRArchiveBinding) {
+			e.deploy("iad", `{"schemaVersion":99}`)
+		},
+		// U57: a maintenance pod mounting the snapshot through a projected
+		// volume, and one reading it from env.
+		"a pod's projected volume": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "repair", Namespace: pbtNS},
+				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "keys", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+					Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: entry.Encryption.KeySecretName}}}}}}}}},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+			if err := e.c.Create(context.Background(), pod); err != nil {
+				e.t.Fatal(err)
+			}
+		},
+		"a pod's env": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "repair-env", Namespace: pbtNS},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Env: []corev1.EnvVar{{Name: "K", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: entry.Encryption.KeySecretName}, Key: "passphrase"}}}}}}},
+				Status: corev1.PodStatus{Phase: corev1.PodPending}}
 			if err := e.c.Create(context.Background(), pod); err != nil {
 				e.t.Fatal(err)
 			}

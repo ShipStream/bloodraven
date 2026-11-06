@@ -1707,9 +1707,25 @@ func s69WaitOperatorGone(ctx context.Context, env *runner.Env) error {
 	}
 }
 
+// s69RebuiltStable advances s69WaitRebuilt's stability window: since is
+// when every wanted binding was first seen rebuilt (zero while not), all is
+// this poll's verdict. Any poll that is not all-Bound restarts the window,
+// so success needs window of continuous all-Bound observations, ending on
+// one.
+func s69RebuiltStable(since time.Time, all bool, now time.Time, window time.Duration) (time.Time, bool) {
+	if !all {
+		return time.Time{}, false
+	}
+	if since.IsZero() {
+		return now, false
+	}
+	return since, now.Sub(since) >= window
+}
+
 // s69WaitRebuilt waits until every wanted binding is back Bound/Bound with
-// the same snapshot, and fails if a check Job or a recorded check appears
-// meanwhile or in the half minute after (recovery needs no Job).
+// the same snapshot and stays so, uninterrupted, for s69ShortNoRollWindow,
+// and fails if a check Job or a recorded check appears meanwhile (recovery
+// needs no Job).
 func s69WaitRebuilt(ctx context.Context, env *runner.Env, want map[string]string, since time.Time) error {
 	waitCtx, cancel := context.WithTimeout(ctx, s69BindingWait)
 	defer cancel()
@@ -1734,11 +1750,16 @@ func s69WaitRebuilt(ctx context.Context, env *runner.Env, want map[string]string
 					last = s69BindingSummary(mfg, b)
 				}
 			}
-			if all && rebuiltAt.IsZero() {
-				rebuiltAt = time.Now()
+			first := all && rebuiltAt.IsZero()
+			if !all && !rebuiltAt.IsZero() {
+				env.Capture.Note("rebuilt bindings regressed; the stability window restarts: " + last)
+			}
+			var done bool
+			rebuiltAt, done = s69RebuiltStable(rebuiltAt, all, time.Now(), s69ShortNoRollWindow)
+			if first {
 				env.Capture.Note(fmt.Sprintf("bindings %v rebuilt after the status wipe", want))
 			}
-			if !rebuiltAt.IsZero() && time.Since(rebuiltAt) >= s69ShortNoRollWindow {
+			if done {
 				return nil
 			}
 		}

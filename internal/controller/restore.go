@@ -688,7 +688,7 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 	var notReady *errPITRBindingNotReady
 	if errors.As(err, &notReady) && !notReady.terminal {
 		r.setRestorePending(ctx, fg, targetSite, notReady.Error())
-		return pitrVerificationBindingRequeue, nil
+		return pitrReadBindingRequeue, nil
 	}
 	if err != nil {
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreBuildFailed", "%s", err.Error())

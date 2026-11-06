@@ -86,13 +86,17 @@ jobs:
       # failure, so 69, the newest and longest, runs after the #206
       # scenarios: a red 69 never hides them.
       scenario: 31-pitr-verification-rustfs,37-pitr-planned-failback-no-reclone,68-pitr-failback-with-reclone,70-pitr-lossy-failover,69-pitr-encryption-binding-refusal
-      # Scenario budgets: 24m + 60m + 75m + 75m + 60m = 294m, plus the
+      # Scenario Timeouts: 24m + 60m + 75m + 75m + 60m = 294m, plus the
       # reset run-all does before each of 37, 68, 70 and 69
       # (ResetBeforeRunAll, ~5m each) and setup, under the 360m hard cap of
-      # a GitHub-hosted runner job. Measured on #206, 31/37/68/70 passed in
-      # 3/6/6/11 minutes, so a run that passes them leaves 69 its whole
-      # budget plus its cleanup even if it times out. This is the cap, not
-      # a target: the next PITR scenario goes into a second job rather than
-      # into this list.
+      # a GitHub-hosted runner job. Each scenario also has a CleanupTimeout
+      # (32-44m for these five, ~180m together) that is a worst-case
+      # allowance for a hung cleanup, not a planned spend: Timeouts plus
+      # cleanup allowances exceed the cap by design, and
+      # TestPITRScenariosInPITRE2EJob guards only the Timeouts. Measured on
+      # #206, 31/37/68/70 passed in 3/6/6/11 minutes, so a run that passes
+      # them leaves 69 its whole budget plus its cleanup even if it times
+      # out. This is the cap, not a target: the next PITR scenario goes
+      # into a second job rather than into this list.
       timeout-minutes: 360
       images-artifact: e2e-images

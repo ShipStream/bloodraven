@@ -15,9 +15,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -270,13 +273,27 @@ func TestPITRScenariosInPITRE2EJob(t *testing.T) {
 	if !strings.Contains(jobBody, "timeout-minutes: 360") {
 		t.Error("the e2e pitr job must set timeout-minutes: 360 (IMPL-203 Δ19)")
 	}
-	var budget time.Duration
+	// This guards the scenario Timeouts only, not the job's wall clock.
+	// Each scenario's CleanupTimeout is a separate worst-case allowance
+	// (revert, cleanup, global recover and reconverge), spent in full only
+	// when a cleanup itself hangs; summed with the Timeouts it exceeds the
+	// 360m cap by design, and a passing run uses a fraction of both (see
+	// the pitr job's comment in e2e.yml). What this catches is the growth
+	// of the scenario budgets themselves, the part a slow but healthy run
+	// actually spends.
+	var budget, cleanup time.Duration
 	for _, s := range got {
 		budget += s.Timeout
+		c := s.CleanupTimeout
+		if c == 0 {
+			c = runner.DefaultCleanupTimeout
+		}
+		cleanup += c
 	}
 	if budget > 300*time.Minute {
-		t.Errorf("the e2e pitr job's scenario ceilings sum to %s; with resets and setup that leaves too little of the 360m cap: split the job", budget)
+		t.Errorf("the e2e pitr job's scenario Timeouts sum to %s (cleanup allowances, not counted: %s); with resets and setup that leaves too little of the 360m cap: split the job", budget, cleanup)
 	}
+	t.Logf("pitr job: scenario Timeouts %s; worst-case cleanup allowances %s (not bounded by this guard)", budget, cleanup)
 	reusable, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "_e2e.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -534,6 +551,7 @@ func TestPITRAssertResultReplayCount(t *testing.T) {
 // their composed cleanup on the 4-minute default.
 func TestPITRScenarioCleanupBudgets(t *testing.T) {
 	want := map[string]time.Duration{
+		s31ID: pitrCleanupBaseBudget,
 		s69ID: pitrCleanupBaseBudget,
 		s37ID: pitrCleanupBaseBudget + pitrDeleteGroupTimeout,
 		s68ID: pitrCleanupBaseBudget,
@@ -726,6 +744,171 @@ func TestPITRObservedArchiveIDMatchesPrefix(t *testing.T) {
 				t.Errorf("pitrObservedArchiveID=%q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestPITRArchiveBoundReady pins the prefix-switch wait (CI 6f3fc4b, s70's
+// remedy): it holds through Establishing and the ordered update, and ends
+// only once the new prefix's binding is Bound, the archive observation is
+// the same archive at that prefix, and the group is Ready at its
+// generation with no update in progress.
+func TestPITRArchiveBoundReady(t *testing.T) {
+	const (
+		oldPrefix = "e2e/70-pitr-lossy-failover/s70-run"
+		newPrefix = "e2e/70-pitr-lossy-failover/s70-run-fresh"
+		oldID     = "ar1-oooooooooooooooooooooooooo"
+		newID     = "ar1-nnnnnnnnnnnnnnnnnnnnnnnnnn"
+	)
+	newDest, err := pitrArchiveDestination(newPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDest, err := pitrArchiveDestination(oldPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := func() *v1alpha1.MysqlFailoverGroup {
+		spec := pitrBackupSpec(newPrefix, "")
+		return &v1alpha1.MysqlFailoverGroup{
+			ObjectMeta: metav1.ObjectMeta{Generation: 10},
+			Spec:       v1alpha1.MysqlFailoverGroupSpec{Backup: &spec},
+			Status: v1alpha1.MysqlFailoverGroupStatus{
+				ActiveSite: "iad",
+				Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 10}},
+				PITR: &v1alpha1.PITRStatus{Enabled: true, Archive: &v1alpha1.PITRArchiveObservation{
+					Destination: newDest, ArchiveID: newID, State: v1alpha1.PITRArchiveVerified,
+				}},
+				PITRArchiveBindings: []v1alpha1.PITRArchiveBinding{
+					{ID: "pab-new", Destination: newDest, State: v1alpha1.PITRArchiveBindingBound, Reason: "Bound", ArchiveID: newID},
+					{ID: "pab-old", Destination: oldDest, State: v1alpha1.PITRArchiveBindingBound, Reason: "Bound", ArchiveID: oldID},
+				},
+			},
+		}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*v1alpha1.MysqlFailoverGroup)
+		want   bool
+	}{
+		{"bound, verified and settled", func(*v1alpha1.MysqlFailoverGroup) {}, true},
+		{"CI 6f3fc4b: Establishing during the ordered update", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.PITRArchiveBindings[0] = v1alpha1.PITRArchiveBinding{ID: "pab-new", Destination: newDest, State: v1alpha1.PITRArchiveBindingPending, Reason: "Establishing"}
+			m.Status.PITR.Archive = &v1alpha1.PITRArchiveObservation{Destination: newDest, State: v1alpha1.PITRArchiveAwaitingDescriptor}
+			m.Status.UpdatePhase = "UpdateOldPrimary"
+			m.Status.Conditions[0].Status = metav1.ConditionFalse
+		}, false},
+		{"Establishing after the rollout", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.PITRArchiveBindings[0] = v1alpha1.PITRArchiveBinding{ID: "pab-new", Destination: newDest, State: v1alpha1.PITRArchiveBindingPending, Reason: "Establishing"}
+		}, false},
+		{"only the old prefix is bound", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.PITRArchiveBindings = m.Status.PITRArchiveBindings[1:]
+		}, false},
+		{"observation still names the old prefix", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.PITR.Archive = &v1alpha1.PITRArchiveObservation{Destination: oldDest, ArchiveID: oldID, State: v1alpha1.PITRArchiveVerified}
+		}, false},
+		{"observation names another archive", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.PITR.Archive.ArchiveID = oldID
+		}, false},
+		{"Ready from an older generation", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.Conditions[0].ObservedGeneration = 9
+		}, false},
+		{"ordered update still in progress", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.UpdatePhase = "UpdateOldPrimary"
+		}, false},
+		{"spec not on the new prefix", func(m *v1alpha1.MysqlFailoverGroup) {
+			spec := pitrBackupSpec(oldPrefix, "")
+			m.Spec.Backup = &spec
+		}, false},
+		{"PITR disabled in the spec", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Spec.Backup.PITR.Enabled = false
+		}, false},
+		{"no spec.backup", func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Spec.Backup = nil
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := settled()
+			c.mutate(m)
+			if got, msg := pitrArchiveBoundReady(m, newPrefix, newDest); got != c.want {
+				t.Errorf("pitrArchiveBoundReady=%v (%s), want %v", got, msg, c.want)
+			}
+		})
+	}
+}
+
+// TestPITRWithdrawRelease pins U24: the withdrawal runs even after the
+// caller's context expired, removes only this request's annotation, and
+// leaves a newer request in place.
+func TestPITRWithdrawRelease(t *testing.T) {
+	const mine = "pab-1111111111111111:confirm=playground"
+	cases := []struct {
+		name     string
+		current  string
+		wantLeft string
+	}{
+		{"pending request withdrawn", mine, ""},
+		{"newer request kept", "pab-2222222222222222:confirm=playground", "pab-2222222222222222:confirm=playground"},
+		{"already consumed", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mfg := testBaselineMFG(false)
+			if c.current != "" {
+				mfg.Annotations = map[string]string{brcontroller.ReleasePITRArchiveBindingAnnotation: c.current}
+			}
+			env := testScenarioEnv(t, mfg)
+			env.Capture = &runner.Capture{}
+			// The fake ignores contexts; make it honor them like a real
+			// API server, so a withdrawal on the caller's dead context fails.
+			env.Kube.Controller = interceptor.NewClient(env.Kube.Controller.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := pitrWithdrawRelease(ctx, env, mine); err != nil {
+				t.Fatalf("pitrWithdrawRelease: %v", err)
+			}
+			got, err := env.Kube.GetMFGNamed(context.Background(), env.Namespace, env.FG)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if left := got.Annotations[brcontroller.ReleasePITRArchiveBindingAnnotation]; left != c.wantLeft {
+				t.Errorf("release annotation=%q, want %q", left, c.wantLeft)
+			}
+		})
+	}
+}
+
+// TestPITRSnapshotsUnderPrefixes pins U45's reporting: the snapshots left
+// under the run's prefixes are named (and retained), others ignored.
+func TestPITRSnapshotsUnderPrefixes(t *testing.T) {
+	const mine = "e2e/69-pitr-encryption-binding-refusal/s69-run-p1"
+	in, err := pitrArchiveDestination(mine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := pitrArchiveDestination("e2e/other/run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := func(name, dest string) corev1.Secret {
+		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{pitrDestinationAnnotation: dest}}}
+	}
+	got := pitrSnapshotsUnderPrefixes([]corev1.Secret{snap("k-b", in), snap("k-x", out), snap("k-a", in), snap("k-none", "")}, []string{mine})
+	if strings.Join(got, ",") != "k-a,k-b" {
+		t.Errorf("pitrSnapshotsUnderPrefixes=%v, want [k-a k-b]", got)
 	}
 }
 

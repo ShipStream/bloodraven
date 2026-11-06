@@ -512,11 +512,16 @@ func TestPITRReadBindingAndRetentionGate(t *testing.T) {
 	}
 	full := fg.DeepCopy()
 	for i := 0; i < pitrArchiveBindingsMax; i++ {
-		full.Status.PITRArchiveBindings = append(full.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "x"})
+		full.Status.PITRArchiveBindings = append(full.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "x", State: v1alpha1.PITRArchiveBindingBound})
 	}
 	var nr *errPITRBindingNotReady
 	if _, err := pitrReadBinding(full, "c"); !errors.As(err, &nr) || nr.reason != reasonPITRBindingLimitReached || nr.terminal {
 		t.Fatalf("full list: %v", err)
+	}
+	// U10: one unused non-Bound entry frees a slot on the next pass.
+	full.Status.PITRArchiveBindings[3].State = v1alpha1.PITRArchiveBindingPending
+	if _, err := pitrReadBinding(full, "c"); !errors.As(err, &nr) || nr.reason == reasonPITRBindingLimitReached || nr.terminal {
+		t.Fatalf("list full of a discardable entry: %v", err)
 	}
 
 	g := fg.DeepCopy()
@@ -560,10 +565,19 @@ func TestPITRProfileReadOnly(t *testing.T) {
 		{"initFromBackup archive before success", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{PointInTime: &v1alpha1.PointInTimeSpec{ArchiveProfileName: "c"}}
 		}, true},
-		{"initFromBackup archive after success", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup archive after success with its binding", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{PointInTime: &v1alpha1.PointInTimeSpec{ArchiveProfileName: "c"}}
 			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded}
+			setBinding(t, fg, "c", v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "")
 		}, false},
+		// U19: the restore read another group's plaintext archive; its
+		// binding was lost with the status and is not rebuilt (no
+		// snapshot): the profile stays read-only, never written into the
+		// other group's prefix.
+		{"initFromBackup archive after success, binding lost", func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{PointInTime: &v1alpha1.PointInTimeSpec{ArchiveProfileName: "c"}}
+			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded}
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := renderFG()

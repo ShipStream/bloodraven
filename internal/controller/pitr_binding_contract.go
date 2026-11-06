@@ -55,6 +55,10 @@ const (
 	// staging Jobs: the archive key snapshot the Job mounts. Release refuses
 	// while a Job with it has not stopped.
 	labelPITRKeySecret = "bloodraven.shipstream.io/pitr-key-secret"
+	// annotationPITRCheckedSnapshotUID is on a check Job that mounts a
+	// candidate snapshot: the snapshot object's UID when the Job was
+	// created. A Verified verdict is accepted only for that object (U22).
+	annotationPITRCheckedSnapshotUID = "bloodraven.shipstream.io/pitr-key-secret-uid"
 
 	// ReleasePITRArchiveBindingAnnotation on a MysqlFailoverGroup releases
 	// one binding: "<id>:confirm=<metadata.name>" (parsePITRBindingRelease).
@@ -114,9 +118,10 @@ const (
 	// pitrReleaseRefusedRequeue is the requeue while a release is refused
 	// because the binding is in use.
 	pitrReleaseRefusedRequeue = time.Minute
-	// pitrVerificationBindingRequeue is a verification's requeue while its
-	// read binding is not ready and not terminal.
-	pitrVerificationBindingRequeue = 15 * time.Second
+	// pitrReadBindingRequeue is the requeue of a read-binding consumer
+	// while its binding is not ready and not terminal: a verification
+	// waiting on it, and an initFromBackup restore held Pending on it.
+	pitrReadBindingRequeue = 15 * time.Second
 )
 
 // conditionPITRArchiveBindingReady reports the group's PITR archive bindings
@@ -129,7 +134,13 @@ const (
 	reasonPITRBindingLimitReached     = "BindingLimitReached"
 	reasonPITREncryptionChangeRefused = "EncryptionChangeRefused"
 	reasonPITRKeyChangeRefused        = "KeyChangeRefused"
-	reasonPITRArchiveBindingNotReady  = string(pitrarchive.TokenArchiveBindingNotReady)
+)
+
+// Consumer reasons: what a restore (status.restore.reason) or a
+// verification (status reason) records when its read binding is not
+// usable (§4.7). PITRArchiveBindingReady never carries them.
+const (
+	reasonPITRArchiveBindingNotReady = string(pitrarchive.TokenArchiveBindingNotReady)
 )
 
 // Binding reasons (v1alpha1.PITRArchiveBinding.Reason). Pending:
@@ -261,20 +272,6 @@ func findPITRBinding(fg *v1alpha1.MysqlFailoverGroup, dest pitrarchive.Destinati
 	want := dest.String()
 	for i := range fg.Status.PITRArchiveBindings {
 		if fg.Status.PITRArchiveBindings[i].Destination == want {
-			return &fg.Status.PITRArchiveBindings[i]
-		}
-	}
-	return nil
-}
-
-// findPITRBindingByID returns the group's binding with id, or nil. The
-// result points into fg.Status.PITRArchiveBindings.
-func findPITRBindingByID(fg *v1alpha1.MysqlFailoverGroup, id string) *v1alpha1.PITRArchiveBinding {
-	if fg == nil || id == "" {
-		return nil
-	}
-	for i := range fg.Status.PITRArchiveBindings {
-		if fg.Status.PITRArchiveBindings[i].ID == id {
 			return &fg.Status.PITRArchiveBindings[i]
 		}
 	}
@@ -577,14 +574,6 @@ func parsePITRRender(annotation string) (pitrRenderInputs, error) {
 	return p, nil
 }
 
-// decodePITRRender is parsePITRRender without the error: ok is false for an
-// absent, malformed or unknown-version annotation (I-13: "no decodable
-// annotation").
-func decodePITRRender(annotation string) (pitrRenderInputs, bool) {
-	p, err := parsePITRRender(annotation)
-	return p, err == nil
-}
-
 // strictJSONUnmarshal decodes exactly one JSON value into v, refusing
 // unknown fields and trailing data.
 func strictJSONUnmarshal(b []byte, v any) error {
@@ -705,6 +694,19 @@ func sitePITRRenders(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deploymen
 			return out[i].Deployment < out[j].Deployment
 		}
 	})
+	return out
+}
+
+// pitrUndecodableDeployments returns the names of fg's site Deployments
+// among deploys that carry no decodable pitr-render annotation (pre-#203,
+// or mangled): what their writer runs cannot be told (K3).
+func pitrUndecodableDeployments(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deployment) []string {
+	var out []string
+	for _, sr := range sitePITRRenders(fg, deploys) {
+		if sr.Err != nil {
+			out = append(out, sr.Deployment)
+		}
+	}
 	return out
 }
 
@@ -930,7 +932,7 @@ func pitrBindingIDRE(id string) bool {
 // errPITRBindingNotReady is a read binding that a restore or verification
 // cannot use yet. Terminal errors fail the consumer with
 // PITRArchiveBindingNotReady; the rest wait (restore Pending, verification
-// requeue pitrVerificationBindingRequeue).
+// requeue pitrReadBindingRequeue).
 type errPITRBindingNotReady struct {
 	// state is the entry's state, "" when there is no entry.
 	state v1alpha1.PITRArchiveBindingState

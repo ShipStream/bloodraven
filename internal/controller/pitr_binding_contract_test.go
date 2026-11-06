@@ -95,6 +95,7 @@ func TestPITRBindingContractStrings(t *testing.T) {
 		annotationPITRRender:                          "bloodraven.shipstream.io/pitr-render",
 		annotationPITRDestination:                     "bloodraven.shipstream.io/pitr-destination",
 		annotationPITRAccepted:                        "bloodraven.shipstream.io/pitr-accepted",
+		annotationPITRCheckedSnapshotUID:              "bloodraven.shipstream.io/pitr-key-secret-uid",
 		labelPITRBindingID:                            "bloodraven.shipstream.io/pitr-binding-id",
 		labelFailoverGroupUID:                         "bloodraven.shipstream.io/failover-group-uid",
 		labelMysqlBackupUID:                           "bloodraven.shipstream.io/mysqlbackup-uid",
@@ -147,7 +148,6 @@ func TestPITRBindingContractStrings(t *testing.T) {
 		PITRArchiveCheckRoleEnv:                       "BLOODRAVEN_PITR_CHECK_ROLE",
 		PITRArchiveCheckRoleWriter:                    "Writer",
 		PITRArchiveCheckRoleReader:                    "Reader",
-		verificationGroupIndex:                        "spec.failoverGroupRef.name",
 	}
 	for got, want := range cases {
 		if got != want {
@@ -161,7 +161,7 @@ func TestPITRBindingContractStrings(t *testing.T) {
 		t.Errorf("bounds drifted")
 	}
 	if pitrCheckJobActiveDeadlineSeconds != 120 || pitrCheckPendingTimeout != time.Minute || pitrCheckRetryAfter != time.Minute ||
-		pitrReleaseRefusedRequeue != time.Minute || pitrVerificationBindingRequeue != 15*time.Second {
+		pitrReleaseRefusedRequeue != time.Minute || pitrReadBindingRequeue != 15*time.Second {
 		t.Errorf("timings drifted")
 	}
 
@@ -217,14 +217,14 @@ func TestPITRBindingFind(t *testing.T) {
 	if got == nil || got != &fg.Status.PITRArchiveBindings[1] {
 		t.Fatalf("findPITRBinding(d2) = %v, want a pointer to entry 1", got)
 	}
-	if findPITRBindingByID(fg, pitrBindingID(d1)) != &fg.Status.PITRArchiveBindings[0] {
-		t.Fatal("findPITRBindingByID(d1) is not entry 0")
+	if findBindingIn(fg.Status.PITRArchiveBindings, pitrBindingID(d1)) != &fg.Status.PITRArchiveBindings[0] {
+		t.Fatal("findBindingIn(d1) is not entry 0")
 	}
 	if findPITRBinding(fg, pbcPVCDest(t)) != nil || findPITRBinding(fg, pitrarchive.Destination{}) != nil || findPITRBinding(nil, d1) != nil {
 		t.Fatal("findPITRBinding found an absent destination")
 	}
-	if findPITRBindingByID(fg, "") != nil || findPITRBindingByID(fg, "pab-0000000000000000") != nil {
-		t.Fatal("findPITRBindingByID found an absent id")
+	if findBindingIn(fg.Status.PITRArchiveBindings, "") != nil || findBindingIn(fg.Status.PITRArchiveBindings, "pab-0000000000000000") != nil {
+		t.Fatal("findBindingIn found an absent id")
 	}
 }
 
@@ -516,10 +516,6 @@ func TestPITRRenderDecode(t *testing.T) {
 			}
 			if errors.Is(err, errPITRRenderAbsent) != c.absent {
 				t.Fatalf("absent = %v, want %v (%v)", errors.Is(err, errPITRRenderAbsent), c.absent, err)
-			}
-			dp, ok := decodePITRRender(c.in)
-			if ok != c.ok || dp != p {
-				t.Fatalf("decodePITRRender = %v, disagrees with parsePITRRender", ok)
 			}
 			if !c.ok && p != (pitrRenderInputs{}) {
 				t.Fatalf("failed parse returned inputs %+v", p)
@@ -838,20 +834,14 @@ func TestPITRBindingReadTerminal(t *testing.T) {
 func TestPITRBindingWatchMaps(t *testing.T) {
 	r := &MysqlFailoverGroupReconciler{}
 	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "db"}}
-	if got := indexVerificationGroup(v); got != nil {
-		t.Fatalf("index of an unbound verification = %v", got)
-	}
 	if got := r.mapVerificationToGroup(context.Background(), v); got != nil {
 		t.Fatalf("map of an unbound verification = %v", got)
 	}
 	v.Spec.FailoverGroupRef.Name = "orders"
-	if got := indexVerificationGroup(v); len(got) != 1 || got[0] != "orders" {
-		t.Fatalf("index = %v", got)
-	}
 	if got := r.mapVerificationToGroup(context.Background(), v); len(got) != 1 || got[0].Namespace != "db" || got[0].Name != "orders" {
 		t.Fatalf("map = %v", got)
 	}
-	if indexVerificationGroup(&corev1.Secret{}) != nil || r.mapVerificationToGroup(context.Background(), &corev1.Secret{}) != nil {
+	if r.mapVerificationToGroup(context.Background(), &corev1.Secret{}) != nil {
 		t.Fatal("non-verification objects must map to nothing")
 	}
 

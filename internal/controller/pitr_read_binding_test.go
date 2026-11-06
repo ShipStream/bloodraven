@@ -95,7 +95,8 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		fg := fgWithEncryptedBackup()
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		for i := 0; i < pitrArchiveBindingsMax; i++ {
-			fg.Status.PITRArchiveBindings = append(fg.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "pab-000000000000000" + string(rune('a'+i%6))})
+			fg.Status.PITRArchiveBindings = append(fg.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "pab-000000000000000" + string(rune('a'+i%6)),
+				State: v1alpha1.PITRArchiveBindingBound, Reason: pitrBindingBound})
 		}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		v := verifyCR("verify-limit", "lion", "nightly-s3")
@@ -104,6 +105,33 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		reconcileVerifUntilStable(t, r, v.Name)
 		if got := getVerification(t, c, v); got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != reasonPITRArchiveBindingNotReady {
 			t.Fatalf("phase %s reason %q", got.Status.Phase, verifiedReason(got))
+		}
+	})
+
+	// U10: a list full of entries that are not Bound frees a slot on the
+	// group's next binding pass (unused ones are dropped): the
+	// verification waits instead of failing on a transient count.
+	t.Run("a list full of non-Bound entries waits", func(t *testing.T) {
+		SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+		defer SetOperatorImageDefaults("", "")
+		fg := fgWithEncryptedBackup()
+		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		for i := 0; i < pitrArchiveBindingsMax; i++ {
+			state, reason := v1alpha1.PITRArchiveBindingBound, pitrBindingBound
+			if i == 0 {
+				state, reason = v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating
+			}
+			fg.Status.PITRArchiveBindings = append(fg.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "pab-000000000000000" + string(rune('a'+i%6)),
+				State: state, Reason: reason})
+		}
+		backup := successfulBackup("seed", "lion", "nightly-s3")
+		v := verifyCR("verify-limit", "lion", "nightly-s3")
+		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
+		r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+		reconcileVerifUntilStable(t, r, v.Name)
+		got := getVerification(t, c, v)
+		if verificationTerminal(got.Status.Phase) || !strings.Contains(got.Status.Message, "make room") {
+			t.Fatalf("phase %s message %q, want a wait", got.Status.Phase, got.Status.Message)
 		}
 	})
 }

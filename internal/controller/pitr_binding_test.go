@@ -107,7 +107,6 @@ func newPBTEnvWith(t *testing.T, funcs interceptor.Funcs, fg *v1alpha1.MysqlFail
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
 		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
-		WithIndex(&v1alpha1.MysqlBackupVerification{}, verificationGroupIndex, indexVerificationGroup).
 		WithInterceptorFuncs(funcs).
 		WithObjects(append([]client.Object{fg}, objs...)...).Build()
 	rec := record.NewFakeRecorder(200)
@@ -315,7 +314,7 @@ func (e *pbtEnv) finishCheck(job *batchv1.Job, code int32, message string) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: job.Name + "-" + string(job.UID)[len(job.UID)-6:], Namespace: pbtNS,
 			Labels:          map[string]string{"batch.kubernetes.io/job-name": job.Name},
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID}}},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: boolPtr(true)}}},
 		Status: corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
 			Name: pitrCheckContainerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: code, Message: message}},
 		}}},
@@ -441,11 +440,11 @@ func TestPITRBindingTargets(t *testing.T) {
 		t.Fatalf("targets = %+v", targets)
 	}
 	w, r := targets[0], targets[1]
-	if !w.write || !w.read || w.profile.Name != "a" || pitrProfileNames(w.uses) != "a, alias" ||
+	if !w.write || len(w.readers) == 0 || w.profile.Name != "a" || pitrProfileNames(w.uses) != "a, alias" ||
 		strings.Join(w.readers, ",") != "MysqlBackupVerification b-default,MysqlBackupVerification z-alias" {
 		t.Fatalf("write target = %+v uses %s readers %v", w, pitrProfileNames(w.uses), w.readers)
 	}
-	if r.write || !r.read || r.profile.Name != "src" || strings.Join(r.readers, ",") != "initFromBackup" {
+	if r.write || len(r.readers) == 0 || r.profile.Name != "src" || strings.Join(r.readers, ",") != "initFromBackup" {
 		t.Fatalf("read target = %+v", r)
 	}
 	// A terminal restore and disabled PITR leave only the verification that
@@ -1017,7 +1016,8 @@ func TestPITRBindingCheckCannotStart(t *testing.T) {
 	job := e.checkJob(entry)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: job.Name + "-p", Namespace: pbtNS, CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
-			Labels: map[string]string{"batch.kubernetes.io/job-name": job.Name}},
+			Labels:          map[string]string{"batch.kubernetes.io/job-name": job.Name},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: boolPtr(true)}}},
 		Status: corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{Name: pitrCheckContainerName,
 			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: "pull denied"}}}}},
 	}
@@ -1184,14 +1184,14 @@ func TestPITRBindingConditionPrecedence(t *testing.T) {
 		if c.limit {
 			p.limit = []string{"s3://x"}
 		}
-		if got := p.condition(context.Background()); got.Reason != c.want {
+		if got, err := p.condition(context.Background()); err != nil || got.Reason != c.want {
 			t.Fatalf("case %d: reason %s, want %s", i, got.Reason, c.want)
 		}
 	}
 	// No targets and no entries: the condition is removed.
 	p.entries, p.limit = nil, nil
-	if got := p.condition(context.Background()); got != nil {
-		t.Fatalf("condition without bindings = %+v", got)
+	if got, err := p.condition(context.Background()); err != nil || got != nil {
+		t.Fatalf("condition without bindings = %+v (%v)", got, err)
 	}
 	// Refusals are bounded and carry the procedure once.
 	var texts []string

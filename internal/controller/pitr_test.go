@@ -287,7 +287,9 @@ func TestBuildRestorePITRFragments_RequiresSourceArchive(t *testing.T) {
 		wantNot      string
 	}{
 		{name: "restore", want: "pointInTime.archiveProfileName must name the archive's profile"},
-		{name: "verification", verification: true, want: "a verification replays the group's own PITR archive", wantNot: "archiveProfileName"},
+		// U69: a verification can replay a retained archive through
+		// pointInTime.archiveProfileName with PITR disabled.
+		{name: "verification", verification: true, want: "set pointInTime.archiveProfileName to the profile of the archive to replay"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := buildRestorePITRFragmentsFor(withBackup(nil), &pitrReplayRequest{Mode: "latest", Verification: tc.verification})
@@ -550,7 +552,7 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 				{Name: "other", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3,
 					S3: &v1alpha1.S3Storage{Bucket: "lion", Prefix: "elsewhere", EndpointURL: "https://s3.example.com"}}},
 			}
-			ident, ok := activePITRArchiveIdentity(fg)
+			activeDest, ok := activePITRDestination(fg)
 			if !ok {
 				t.Fatal("no active archive")
 			}
@@ -567,9 +569,9 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 				if err != nil {
 					t.Fatalf("expanded destination %q does not parse: %v", got["BLOODRAVEN_PITR_DESTINATION"], err)
 				}
-				if dest != ident.Destination || got["BLOODRAVEN_PITR_MANIFEST_PREFIX"] != dest.KeyPrefix {
+				if dest != activeDest || got["BLOODRAVEN_PITR_MANIFEST_PREFIX"] != dest.KeyPrefix {
 					t.Fatalf("expanded destination %q prefix %q, want %q prefix %q", dest.String(),
-						got["BLOODRAVEN_PITR_MANIFEST_PREFIX"], ident.Destination.String(), ident.Destination.KeyPrefix)
+						got["BLOODRAVEN_PITR_MANIFEST_PREFIX"], activeDest.String(), activeDest.KeyPrefix)
 				}
 				if id, ok := got["BLOODRAVEN_PITR_ARCHIVE_ID"]; ok && !pitrarchive.IsDerivedArchiveID(id, fg.UID, dest) {
 					t.Fatalf("archive ID %s is not derived from the expanded destination %s", id, dest.String())
@@ -594,8 +596,8 @@ func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 			check(t, restore.InitContainer.Env)
 			job := &batchv1.Job{Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				InitContainers: []corev1.Container{*restore.InitContainer}}}}}
-			if got := renderedPITRRequest(job).Destination; got != ident.Destination.String() {
-				t.Fatalf("rendered request destination %q, want %q", got, ident.Destination.String())
+			if got := renderedPITRRequest(job).Destination; got != activeDest.String() {
+				t.Fatalf("rendered request destination %q, want %q", got, activeDest.String())
 			}
 		})
 	}

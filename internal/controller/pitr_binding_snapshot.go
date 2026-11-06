@@ -210,15 +210,26 @@ func orderPITRSnapshots(fg *v1alpha1.MysqlFailoverGroup, snaps []corev1.Secret, 
 	return out
 }
 
+// errPITRCheckedSnapshotReplaced: the snapshot a check Job verified was
+// replaced (deleted and re-created under its name) before its acceptance:
+// the verdict is about bytes that are no longer there.
+var errPITRCheckedSnapshotReplaced = errors.New("the key snapshot the check verified was replaced")
+
 // acceptPITRKeySnapshot writes the acceptance annotation (K8) on entry's
 // snapshot, computing the keyCheck locally from the snapshot's bytes. It
-// runs before the status write that records entry Bound. An existing valid
-// acceptance of the same archive is kept; one of another archive is never
-// overwritten.
-func (r *MysqlFailoverGroupReconciler) acceptPITRKeySnapshot(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, now time.Time) error {
+// runs before the status write that records entry Bound. checked, when
+// set, is the UID of the snapshot object the check Job mounted: another
+// object of the name is refused (errPITRCheckedSnapshotReplaced), so the
+// keyCheck is always computed from the bytes the check verified (U22). An
+// existing valid acceptance of the same archive is kept; one of another
+// archive is never overwritten.
+func (r *MysqlFailoverGroupReconciler) acceptPITRKeySnapshot(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, checked types.UID, now time.Time) error {
 	var snap corev1.Secret
 	if err := r.bindingReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: entry.Encryption.KeySecretName}, &snap); err != nil {
 		return fmt.Errorf("get pitr key snapshot %s: %w", entry.Encryption.KeySecretName, err)
+	}
+	if checked != "" && snap.UID != checked {
+		return fmt.Errorf("%w: Secret %s is object %s, the check Job mounted %s", errPITRCheckedSnapshotReplaced, snap.Name, snap.UID, checked)
 	}
 	if !pitrSnapshotOf(fg, &snap, entry.Destination) {
 		return fmt.Errorf("%w: Secret %s is not this group's snapshot for %s", errPITRSnapshotNameHeld, snap.Name, entry.Destination)
@@ -356,24 +367,24 @@ const (
 // listing lacks it); a failing or missing cached copy is confirmed through
 // the uncached reader before it is reported, so a lagging cache never
 // raises KeyMaterialLost.
-func (r *MysqlFailoverGroupReconciler) checkPITRKeySnapshotIntegrity(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, cached *corev1.Secret) (pitrIntegrity, string, *corev1.Secret, error) {
+func (r *MysqlFailoverGroupReconciler) checkPITRKeySnapshotIntegrity(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, cached *corev1.Secret) (pitrIntegrity, string, error) {
 	if cached != nil {
 		if why := pitrSnapshotIntegrityProblem(fg, entry, cached); why == "" {
-			return pitrIntegrityOK, "", cached, nil
+			return pitrIntegrityOK, "", nil
 		}
 	}
 	var s corev1.Secret
 	err := r.bindingReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: entry.Encryption.KeySecretName}, &s)
 	switch {
 	case apierrors.IsNotFound(err):
-		return pitrIntegrityNotFound, fmt.Sprintf("key snapshot Secret %s is missing", entry.Encryption.KeySecretName), nil, nil
+		return pitrIntegrityNotFound, fmt.Sprintf("key snapshot Secret %s is missing", entry.Encryption.KeySecretName), nil
 	case err != nil:
-		return 0, "", nil, fmt.Errorf("get pitr key snapshot %s: %w", entry.Encryption.KeySecretName, err)
+		return 0, "", fmt.Errorf("get pitr key snapshot %s: %w", entry.Encryption.KeySecretName, err)
 	}
 	if why := pitrSnapshotIntegrityProblem(fg, entry, &s); why != "" {
-		return pitrIntegrityInvalid, why, &s, nil
+		return pitrIntegrityInvalid, why, nil
 	}
-	return pitrIntegrityOK, "", &s, nil
+	return pitrIntegrityOK, "", nil
 }
 
 // pitrSnapshotIntegrityProblem explains why s does not hold entry's
@@ -396,49 +407,83 @@ func pitrSnapshotIntegrityProblem(fg *v1alpha1.MysqlFailoverGroup, entry *v1alph
 	return ""
 }
 
+// pitrRecreateOutcome is what recreatePITRKeySnapshot did.
+type pitrRecreateOutcome int
+
+const (
+	// pitrRecreateNotReproducible: the bytes do not reproduce the name;
+	// nothing was created.
+	pitrRecreateNotReproducible pitrRecreateOutcome = iota
+	// pitrRecreated: the snapshot was created again.
+	pitrRecreated
+	// pitrRecreateRaced: an object of the name appeared before the
+	// create; nothing was created and nothing is known about it until the
+	// next pass checks it.
+	pitrRecreateRaced
+)
+
 // recreatePITRKeySnapshot is C3: a Bound entry's snapshot is gone and
 // trimmed (a profile's live bytes) reproduces its name, so the same Secret
-// is created again with the acceptance rewritten from the entry. It reports
-// false when the bytes do not reproduce the name.
-func (r *MysqlFailoverGroupReconciler) recreatePITRKeySnapshot(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, digestKey []byte, entry *v1alpha1.PITRArchiveBinding, trimmed []byte, now time.Time) (bool, error) {
+// is created again with the acceptance rewritten from the entry. An
+// acceptance that cannot be built for the entry is an error, never "the
+// bytes do not match" (U58).
+func (r *MysqlFailoverGroupReconciler) recreatePITRKeySnapshot(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, digestKey []byte, entry *v1alpha1.PITRArchiveBinding, trimmed []byte, now time.Time) (pitrRecreateOutcome, error) {
 	if len(trimmed) == 0 || pitrKeySnapshotName(fg.Name, digestKey, entry.Destination, trimmed) != entry.Encryption.KeySecretName {
-		return false, nil
+		return pitrRecreateNotReproducible, nil
 	}
 	a, err := newPITRAcceptance(entry, trimmed, now)
 	if err != nil {
-		return false, nil
+		return pitrRecreateNotReproducible, fmt.Errorf("re-create pitr key snapshot %s: %w", entry.Encryption.KeySecretName, err)
 	}
 	raw, err := a.encode()
 	if err != nil {
-		return false, nil
+		return pitrRecreateNotReproducible, fmt.Errorf("re-create pitr key snapshot %s: %w", entry.Encryption.KeySecretName, err)
 	}
 	snap := newPITRKeySnapshot(fg, entry.Encryption.KeySecretName, entry.Destination, trimmed, raw)
 	if err := r.Create(ctx, snap); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return true, nil // the next pass checks what is there
+			return pitrRecreateRaced, nil
 		}
-		return false, fmt.Errorf("re-create pitr key snapshot %s: %w", snap.Name, err)
+		return pitrRecreateNotReproducible, fmt.Errorf("re-create pitr key snapshot %s: %w", snap.Name, err)
 	}
-	return true, nil
+	return pitrRecreated, nil
 }
 
-// pitrKeySnapshotInUse reports why any of the snapshots named in names is
-// still used (K9), or "": a site Deployment's pitr-render annotation names
-// it, a non-terminal pod in the namespace mounts it (old ReplicaSets
-// mid-roll, restore, verification, check and staging pods), a Job labelled
-// with it has not finished, or a snapshot carries a live verification hold.
-// Reads are uncached.
-func (r *MysqlFailoverGroupReconciler) pitrKeySnapshotInUse(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, snaps []corev1.Secret, deploys []appsv1.Deployment) (string, error) {
+// pitrKeySnapshotInUse reports why the binding at destination, or any of
+// its snapshots, is still used (K9), or "": a site Deployment's
+// pitr-render annotation renders the destination or names a snapshot, a
+// site Deployment carries an annotation that does not decode (what it
+// renders cannot be told), a site Deployment's pod template references a
+// snapshot (scaled to zero or not), a non-terminal pod in the namespace
+// references one (a Secret or projected volume, env or envFrom: old
+// ReplicaSets mid-roll, restore, verification, check, staging and
+// maintenance pods), a Job labelled with one has not finished, or a
+// snapshot carries a live verification hold. Reads are uncached.
+func (r *MysqlFailoverGroupReconciler) pitrKeySnapshotInUse(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, destination string, snaps []corev1.Secret, deploys []appsv1.Deployment) (string, error) {
 	names := map[string]bool{}
 	for _, s := range snaps {
 		names[s.Name] = true
 	}
+	for _, sr := range sitePITRRenders(fg, deploys) {
+		switch {
+		case sr.Err == nil && sr.Inputs.Enabled && destination != "" && sr.Inputs.Destination == destination:
+			return fmt.Sprintf("Deployment %s renders %s", sr.Deployment, destination), nil
+		case sr.Err == nil && names[sr.Inputs.KeySecretName]:
+			return fmt.Sprintf("Deployment %s renders key snapshot %s", sr.Deployment, sr.Inputs.KeySecretName), nil
+		case sr.Err != nil && !errors.Is(sr.Err, errPITRRenderAbsent):
+			return fmt.Sprintf("Deployment %s carries a %s annotation that does not decode (%v), so what it renders cannot be told; repair or remove it", sr.Deployment, annotationPITRRender, sr.Err), nil
+		}
+	}
 	if len(names) == 0 {
 		return "", nil
 	}
-	for _, sr := range sitePITRRenders(fg, deploys) {
-		if sr.Err == nil && names[sr.Inputs.KeySecretName] {
-			return fmt.Sprintf("Deployment %s renders key snapshot %s", sr.Deployment, sr.Inputs.KeySecretName), nil
+	for i := range deploys {
+		d := &deploys[i]
+		if !isPITRSiteDeployment(fg, d) {
+			continue
+		}
+		if name := podSpecSecretRef(&d.Spec.Template.Spec, names); name != "" {
+			return fmt.Sprintf("Deployment %s's pod template references key snapshot %s", d.Name, name), nil
 		}
 	}
 	reader := r.bindingReader()
@@ -451,10 +496,8 @@ func (r *MysqlFailoverGroupReconciler) pitrKeySnapshotInUse(ctx context.Context,
 		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			continue
 		}
-		for _, v := range p.Spec.Volumes {
-			if v.Secret != nil && names[v.Secret.SecretName] {
-				return fmt.Sprintf("pod %s mounts key snapshot %s", p.Name, v.Secret.SecretName), nil
-			}
+		if name := podSpecSecretRef(&p.Spec, names); name != "" {
+			return fmt.Sprintf("pod %s mounts key snapshot %s", p.Name, name), nil
 		}
 	}
 	for name := range names {
@@ -486,11 +529,59 @@ func (r *MysqlFailoverGroupReconciler) pitrKeySnapshotInUse(ctx context.Context,
 	return "", nil
 }
 
+// podSpecSecretRef returns the first Secret of names spec references (a
+// Secret volume, a projected volume's Secret source, or a container's or
+// init container's env valueFrom or envFrom), or "".
+func podSpecSecretRef(spec *corev1.PodSpec, names map[string]bool) string {
+	for _, v := range spec.Volumes {
+		if v.Secret != nil && names[v.Secret.SecretName] {
+			return v.Secret.SecretName
+		}
+		if v.Projected != nil {
+			for _, src := range v.Projected.Sources {
+				if src.Secret != nil && names[src.Secret.Name] {
+					return src.Secret.Name
+				}
+			}
+		}
+	}
+	for _, list := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
+		for _, c := range list {
+			for _, e := range c.Env {
+				if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil && names[e.ValueFrom.SecretKeyRef.Name] {
+					return e.ValueFrom.SecretKeyRef.Name
+				}
+			}
+			for _, e := range c.EnvFrom {
+				if e.SecretRef != nil && names[e.SecretRef.Name] {
+					return e.SecretRef.Name
+				}
+			}
+		}
+	}
+	for _, c := range spec.EphemeralContainers {
+		for _, e := range c.Env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil && names[e.ValueFrom.SecretKeyRef.Name] {
+				return e.ValueFrom.SecretKeyRef.Name
+			}
+		}
+		for _, e := range c.EnvFrom {
+			if e.SecretRef != nil && names[e.SecretRef.Name] {
+				return e.SecretRef.Name
+			}
+		}
+	}
+	return ""
+}
+
 // pitrReleaseOutcome is what processPITRBindingRelease did.
 type pitrReleaseOutcome struct {
 	// id is the released binding (the annotation is removed after the
 	// pass's status write).
 	id string
+	// value is the annotation value processed: the annotation is removed
+	// only while it still holds exactly this request.
+	value string
 	// destination is the released binding's destination, when known.
 	destination string
 	// rejected is the parse error of a malformed or unconfirmed value: the
@@ -530,9 +621,9 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 	}
 	id, err := parsePITRBindingRelease(value, fg.Name)
 	if err != nil {
-		return &pitrReleaseOutcome{rejected: err.Error()}, nil
+		return &pitrReleaseOutcome{rejected: err.Error(), value: value}, nil
 	}
-	out := &pitrReleaseOutcome{id: id}
+	out := &pitrReleaseOutcome{id: id, value: value}
 	for i := range base {
 		if base[i].ID == id {
 			out.destination = base[i].Destination
@@ -587,7 +678,7 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 	if err != nil {
 		return nil, err
 	}
-	why, err := r.pitrKeySnapshotInUse(ctx, &fresh, list.Items, deploys)
+	why, err := r.pitrKeySnapshotInUse(ctx, &fresh, out.destination, list.Items, deploys)
 	if err != nil {
 		return nil, err
 	}
@@ -663,15 +754,27 @@ func pitrReleasePending(fg *v1alpha1.MysqlFailoverGroup) string {
 	return id
 }
 
-// removePITRReleaseAnnotation removes the release annotation from fg.
-func (r *MysqlFailoverGroupReconciler) removePITRReleaseAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
-	if _, ok := fg.Annotations[ReleasePITRArchiveBindingAnnotation]; !ok {
+// removePITRReleaseAnnotation removes the release annotation from fg when
+// it still holds value, the request the pass processed: it re-reads the
+// group (uncached) and patches with a resourceVersion precondition, so a
+// newer request written meanwhile is never erased (U29); a conflict leaves
+// it for the next pass.
+func (r *MysqlFailoverGroupReconciler) removePITRReleaseAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, value string) error {
+	var fresh v1alpha1.MysqlFailoverGroup
+	if err := r.bindingReader().Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get group to remove the release annotation: %w", err)
+	}
+	if got, ok := fresh.Annotations[ReleasePITRArchiveBindingAnnotation]; fresh.UID != fg.UID || !ok || got != value {
 		return nil
 	}
-	patch := client.MergeFrom(fg.DeepCopy())
-	delete(fg.Annotations, ReleasePITRArchiveBindingAnnotation)
-	if err := r.Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
+	patch := client.MergeFromWithOptions(fresh.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	delete(fresh.Annotations, ReleasePITRArchiveBindingAnnotation)
+	if err := r.Patch(ctx, &fresh, patch); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		return fmt.Errorf("remove release annotation: %w", err)
 	}
+	delete(fg.Annotations, ReleasePITRArchiveBindingAnnotation)
 	return nil
 }

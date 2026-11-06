@@ -813,7 +813,12 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 		if action == pitrRenderDefer {
 			continue
 		}
-		if deploy.Annotations[specHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) {
+		// The render annotation is repaired on its own (U08): with a
+		// missing or edited one the site's writer would count as a
+		// disagreement (backup stamps, retention) forever, even when the
+		// hash matches.
+		if deploy.Annotations[specHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
+			deploy.Annotations[annotationPITRRender] != pitr.Canonical() {
 			driftSites = append(driftSites, site.Name)
 		}
 	}

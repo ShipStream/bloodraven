@@ -365,10 +365,12 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	//
 	// When the source backup is encrypted we run the same
 	// `bloodraven decrypt-download` init container the restore path
-	// uses. The profile's encryption.passphraseSecret is the source
-	// of truth — verification doesn't have its own decryption field
-	// by design, because "verify what your profile produced" is
-	// exactly the scope where the profile's passphrase is authoritative.
+	// uses, with the dump-key snapshot the backup recorded
+	// (status.artifactStorage.passphraseSecret, verificationDumpKey): the
+	// immutable copy of the key its artifacts were encrypted with (Δ17).
+	// Never fall back to the profile's live encryption.passphraseSecret:
+	// it may hold other bytes since the backup ran, and an encrypted
+	// backup that recorded no key is refused (PITRBackupDumpKeyMissing).
 	if dumpKey != nil {
 		if operatorImageFromEnv == "" {
 			return nil, fmt.Errorf("verification job: operator image is not configured (SetOperatorImageDefaults); required for encrypted verification")

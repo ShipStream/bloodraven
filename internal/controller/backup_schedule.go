@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -13,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -241,6 +243,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileOwnedBackupPVC(ctx context.Conte
 // schedules the user removed.
 func (r *MysqlFailoverGroupReconciler) reconcileBackupSchedules(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	desired := map[string]struct{}{}
+
+	// Remembered refusals of schedules no longer in the spec (or of an
+	// earlier incarnation of the group) are dropped (U27).
+	current := map[string]bool{}
+	if fg.Spec.Backup != nil {
+		for _, sched := range fg.Spec.Backup.Schedules {
+			current[sched.Name] = true
+		}
+	}
+	r.forgetScheduleRefusals(client.ObjectKeyFromObject(fg), fg.UID, current)
 
 	if fg.Spec.Backup != nil {
 		for _, sched := range fg.Spec.Backup.Schedules {
@@ -680,6 +692,25 @@ func startAfter(a, b *v1alpha1.MysqlBackup) bool {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// forgetScheduleRefusals drops what noteScheduleRefused remembers for the
+// group nn, except the schedules in keep of incarnation uid (keep nil:
+// everything, for a deleted group).
+func (r *MysqlFailoverGroupReconciler) forgetScheduleRefusals(nn types.NamespacedName, uid types.UID, keep map[string]bool) {
+	prefix := nn.Namespace + "/" + nn.Name + "/"
+	r.scheduleRefusedMu.Lock()
+	defer r.scheduleRefusedMu.Unlock()
+	for key := range r.scheduleRefused {
+		rest, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			continue
+		}
+		gotUID, schedule, _ := strings.Cut(rest, "/")
+		if keep == nil || types.UID(gotUID) != uid || !keep[schedule] {
+			delete(r.scheduleRefused, key)
+		}
+	}
+}
 
 // noteScheduleRefused emits BackupScheduleRefused when a schedule's
 // read-only refusal starts or its reason changes, and forgets it when the

@@ -41,11 +41,11 @@ func identityBackup() *v1alpha1.MysqlBackup {
 
 func identityArchiveID(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) string {
 	t.Helper()
-	ident, ok := activePITRArchiveIdentity(fg)
+	dest, ok := activePITRDestination(fg)
 	if !ok {
 		t.Fatal("no active archive")
 	}
-	return ident.ArchiveID
+	return pitrarchive.CreateArchiveID(fg.UID, dest)
 }
 
 func stampTemplateFromContainer(t *testing.T, c corev1.Container) backupmeta.Stamp {
@@ -234,8 +234,8 @@ func archiveStatus(dest string, state pitrarchive.ObservedState, id string, reas
 // destination; any refusal wins, Verified needs every site.
 func TestPITRArchiveObservation(t *testing.T) {
 	fg := identityFG()
-	ident, _ := activePITRArchiveIdentity(fg)
-	dest, id := ident.Destination.String(), ident.ArchiveID
+	activeDest, _ := activePITRDestination(fg)
+	dest, id := activeDest.String(), pitrarchive.CreateArchiveID(fg.UID, activeDest)
 	sites := []string{"iad", "pdx"}
 	tests := []struct {
 		name       string
