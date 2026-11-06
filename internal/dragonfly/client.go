@@ -110,15 +110,6 @@ func (c *Client) InfoReplication(ctx context.Context) (ReplicationInfo, error) {
 	return ParseInfoReplication(body), nil
 }
 
-// InfoServer issues `INFO server` and parses the body.
-func (c *Client) InfoServer(ctx context.Context) (ServerInfo, error) {
-	body, err := c.execReply(ctx, "INFO", "server")
-	if err != nil {
-		return ServerInfo{}, err
-	}
-	return ParseInfoServer(body), nil
-}
-
 // InfoPersistence issues `INFO persistence` and parses the body.
 func (c *Client) InfoPersistence(ctx context.Context) (PersistenceInfo, error) {
 	body, err := c.execReply(ctx, "INFO", "persistence")

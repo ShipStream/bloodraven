@@ -1431,11 +1431,17 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		}
 		// The target goes back behind super_read_only before the rollback
 		// completes: at read_only=ON, super_read_only=OFF it would accept
-		// SUPER writes beside the writable source. A failed re-fence is
+		// SUPER writes beside the writable source. A re-fence that is not
+		// verified (it failed, or the target could not be read at all) is
 		// retried until just before the rollback deadline; then the run
 		// ends RolledBack (the source does serve writes) saying so, and
-		// the target's channel is left alone.
-		if err := tm.refencePlannedTarget(ctx, p, ref, tgt, &live, liveErr); err != nil {
+		// the target's channel is left alone. No hold: read_only=ON,
+		// super_read_only=OFF is also mysqld's boot state for a replica.
+		err := tm.refencePlannedTarget(ctx, p, ref, tgt, &live, liveErr)
+		if err == nil && liveErr != nil {
+			err = fmt.Errorf("the target is unreadable: %w", liveErr)
+		}
+		if err != nil {
 			if plannedClaimError(err) {
 				return RollbackResult{}, err
 			}
@@ -1906,8 +1912,22 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		// The claim and the leader are re-checked immediately before
 		// every statement, including the SRO clear right after the
 		// gate's probes (§3.3): a pass that lost either while it waited
-		// on a probe sends nothing more.
-		guard:            func() error { return tm.requireRunClaim(p.leader(), ref, false) },
+		// on a probe sends nothing more. So are this manager and the
+		// target's role (I001): the claim is shared with a replacement
+		// manager, so a spec change during the probes must stop a
+		// retired manager from clearing the target's fences.
+		guard: func() error {
+			if err := tm.requireRunClaim(p.leader(), ref, false); err != nil {
+				return err
+			}
+			err := tm.checkPlannedPromotionManager(p, ref, U, !p.memoProvesNoWrite(ref.RunID))
+			var refusal *plannedGateRefusal
+			if errors.As(err, &refusal) {
+				tm.logger.Warn("planned failover: the target is no longer a primary candidate; not promoting it",
+					"runId", ref.RunID, "site", ref.Target, "role", string(tgt.role))
+			}
+			return err
+		},
 		statementTimeout: mysqlSafetyProbeTimeout,
 		planned:          true,
 	}
@@ -1949,6 +1969,34 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		tm.failover.logger.Info("failover complete", "promotedSite", ref.Target, "promotionGtid", promotionGtid)
 	}
 	return out, nil
+}
+
+// errPlannedManagerReplaced: the topology manager that classified the
+// promotion's stage was retired or replaced (a spec change restarts it)
+// while the promotion ran. Nothing more is sent on this pass; the next pass
+// classifies again under the current manager, which checks the target's
+// role before any statement.
+var errPlannedManagerReplaced = errors.New("planned failover: the topology manager was replaced during the promotion")
+
+// checkPlannedPromotionManager is I001's check immediately before a
+// promotion statement: tm must still be the group's current, unretired
+// manager (errPlannedManagerReplaced otherwise), and the target must still
+// be a primary candidate in its configuration, which is the current spec
+// (a *plannedGateRefusal with Aborted{TargetNotPromotable} otherwise,
+// carrying mayHaveWritten).
+func (tm *TopologyManager) checkPlannedPromotionManager(p *runnerPlannedTopology, ref PlannedRunRef, U string, mayHaveWritten bool) error {
+	cur, err := p.manager(ref.Group)
+	tm.mu.RLock()
+	retired := tm.retired
+	tm.mu.RUnlock()
+	if err != nil || cur != tm || retired {
+		return errPlannedManagerReplaced
+	}
+	if tgt := tm.getSite(ref.Target); tgt == nil || !tgt.isPromotable() {
+		return &plannedGateRefusal{out: PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonTargetNotPromotable,
+			TargetServerUUID: U, TargetReachable: true, MayHaveWritten: mayHaveWritten, Sites: []string{ref.Target}}}
+	}
+	return nil
 }
 
 // replacedTargetRollbackSafe is the facade's half of the DST-3 ruling for
@@ -2005,10 +2053,14 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 		return &plannedGateRefusal{out: PromoteOutcome{Kind: kind, Reason: reason, Terminal: terminal, TargetServerUUID: U,
 			TargetReachable: true, MayHaveWritten: wasWritable, Sites: slices.Clone(sites)}}
 	}
-	// The target's role, per the manager's current configuration, right
+	// The target's role, per the current manager's configuration, right
 	// before the write (I001): nothing has been written by this attempt.
-	if tgt := tm.getSite(ref.Target); tgt == nil || !tgt.isPromotable() {
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonTargetNotPromotable, "", []string{ref.Target})
+	if err := tm.checkPlannedPromotionManager(p, ref, U, wasWritable); err != nil {
+		var refusal *plannedGateRefusal
+		if errors.As(err, &refusal) {
+			return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonTargetNotPromotable, "", []string{ref.Target})
+		}
+		return nil, "", err
 	}
 	// 2. The target, on the session that will be written.
 	live, err := readPromotionLive(ctx, sess)

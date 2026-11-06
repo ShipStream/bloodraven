@@ -464,25 +464,30 @@ func TestFixR1_DragonflyTakeoverDeadline(t *testing.T) {
 			}
 		})
 	}
-	// Past the deadline, a takeover an earlier attempt already made (its
-	// result write lost) is finished, never failed: the fail policy must not
-	// roll MySQL back beside a Dragonfly target holding the master role.
-	t.Run("earlier takeover finished", func(t *testing.T) {
+	// Past the deadline a target already reporting master is not finished
+	// either (fix round 5): only a REPLTAKEOVER success reply this process
+	// received finishes a takeover, and that is recorded before the
+	// deadline matters. The fail policy rolls MySQL back; the source keeps
+	// serving.
+	t.Run("target already master", func(t *testing.T) {
 		probe := pfDFTakeoverFixture("Fail", time.Now())
 		late := time.Now().Add(-plannedDragonflyTakeoverDeadline(probe.Status.PlannedFailover) - 5*time.Second)
 		fg := pfDFTakeoverFixture("Fail", late)
-		r, _, _ := pfDFReconciler(t, fg, makeDragonflyPod(fg.Name, "iad", "master", true), makeDragonflyPod(fg.Name, "pdx", "replica", true))
+		sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
+		targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
+		r, c, _ := pfDFReconciler(t, fg, sourcePod, targetPod)
+		source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}
 		target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}}
-		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target,
-			pfDFIad: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}})
+		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
 		pfDFTakeoverPasses(t, r, fgNN(fg))
 		pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
-		if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
-			t.Fatalf("block = %s %+v, want Promoting with the earlier takeover Succeeded", pf.Phase, pf.Dragonfly.Takeover)
+		if pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed {
+			t.Fatalf("block = %s %+v, want RollingBack with the takeover Failed", pf.Phase, pf.Dragonfly.Takeover)
 		}
 		if target.takeovers != 0 {
 			t.Fatalf("REPLTAKEOVER sent %d times past the takeover deadline", target.takeovers)
 		}
+		pfDFAssertSourceKept(t, c, source, sourcePod, targetPod)
 	})
 	e := &PlannedFailoverEngine{runs: map[string]*plannedRunMemo{}}
 	pf := pfDFTakeoverFixture("Proceed", time.Now()).Status.PlannedFailover

@@ -51,26 +51,7 @@ type fakeDragonflyConn struct {
 	replTakeoverUnsupported bool
 	hasCommandErr           error
 
-	// uptime is the process's INFO server uptime_in_seconds; nil is a
-	// process up for ten years (predating anything a test stamps).
-	// serverInfoErr fails INFO server.
-	uptime        *int64
-	serverInfoErr error
-	// runID is the process's INFO server run_id ("" unreported).
-	runID string
-
 	closed bool
-}
-
-func (c *fakeDragonflyConn) InfoServer(_ context.Context) (dragonfly.ServerInfo, error) {
-	if c.serverInfoErr != nil {
-		return dragonfly.ServerInfo{}, c.serverInfoErr
-	}
-	up := int64(10 * 365 * 24 * 3600)
-	if c.uptime != nil {
-		up = *c.uptime
-	}
-	return dragonfly.ServerInfo{RunID: c.runID, UptimeSeconds: up}, nil
 }
 
 func (c *fakeDragonflyConn) Ping(_ context.Context) error { return nil }

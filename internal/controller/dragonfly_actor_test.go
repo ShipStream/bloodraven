@@ -1058,7 +1058,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 		if addr == emergencySourceAddr {
 			// The recreated dc1 has rejoined as dc2's replica. (A dc1 that
 			// came back as a standalone master would not be taken over: the
-			// run has no evidence it made it master.)
+			// run did not promote it.)
 			return &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", SlaveReplOffset: 200}}, nil
 		}
 		return &fakeDragonflyConn{}, nil

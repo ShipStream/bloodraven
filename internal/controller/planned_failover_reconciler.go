@@ -241,7 +241,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverEngine() *PlannedFailoverE
 		}
 		e := NewPlannedFailoverEngine(newAPIPlannedFailoverStore(r.Client, r.APIReader, clk), topo,
 			reconcilerPlannedSink{r: r}, clk, SimHooks{})
-		e.dragonfly = reconcilerDragonflyOps{r: r, clk: clk}
+		e.dragonfly = reconcilerDragonflyOps{r: r}
 		e.admission = leaseAdmissionGuard{r: r}
 		r.plannedEngine = e
 	})

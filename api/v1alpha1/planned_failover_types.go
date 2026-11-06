@@ -617,14 +617,6 @@ type DragonflyTakeoverRecord struct {
 	Method DragonflyTakeoverMethod `json:"method,omitempty"`
 	// +optional
 	TargetOffset *int64 `json:"targetOffset,omitempty"`
-	// TargetRunID is the target Dragonfly process's run_id when it was
-	// last seen as a caught-up replica, recorded with the intent. A target
-	// that later reports role master with the same run_id was promoted
-	// during the run; one with another run_id restarted (an empty
-	// standalone master) and is not a takeover.
-	// +optional
-	// +kubebuilder:validation:MaxLength=64
-	TargetRunID string `json:"targetRunID,omitempty"`
 }
 
 // PlannedFailoverDragonflyStatus records the Dragonfly side of a planned
@@ -645,13 +637,6 @@ type PlannedFailoverDragonflyStatus struct {
 	// Captured.
 	// +optional
 	SourceOffset *int64 `json:"sourceOffset,omitempty"`
-
-	// SourceRunID is the source Dragonfly process's run_id when
-	// SourceOffset was captured. REPLTAKEOVER exits the source, so a source
-	// with another run_id afterwards corroborates a takeover.
-	// +optional
-	// +kubebuilder:validation:MaxLength=64
-	SourceRunID string `json:"sourceRunID,omitempty"`
 
 	// SyncWaitSeconds is the time spent in WaitingForDragonflySync.
 	// +optional

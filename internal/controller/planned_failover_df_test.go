@@ -92,7 +92,26 @@ func pfDFReconciler(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, objs ...clien
 	topo.setHeld("run-1", false)
 	r.PlannedTopology = topo
 	r.plannedClock = clock.NewFakeClock(time.Now())
+	pfDFOwnIntent(r, fg)
 	return r, c, topo
+}
+
+// pfDFOwnIntent records fg's Intended takeover, if any, as written by this
+// process, as the pass that wrote it would have: a fixture built in
+// PromotingDragonfly models the process that recorded the intent, not a
+// cross-process re-run (pfDFForgetIntent models a restart).
+func pfDFOwnIntent(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup) {
+	pf := fg.Status.PlannedFailover
+	if pf == nil || pf.Dragonfly == nil || pf.Dragonfly.Takeover == nil || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverIntended {
+		return
+	}
+	r.plannedFailoverEngine().runMemo(pf.RunID).dragonfly.intent = pf.Dragonfly.Takeover.IntentTime.Time
+}
+
+// pfDFForgetIntent drops this process's memory of runID's Dragonfly
+// takeover: an operator restart or a leader change.
+func pfDFForgetIntent(r *MysqlFailoverGroupReconciler, runID string) {
+	r.plannedFailoverEngine().runMemo(runID).dragonfly = pfDragonflyMemo{}
 }
 
 func pfDFPass(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) {
@@ -185,9 +204,11 @@ func TestPlannedFailoverDragonfly_HappyPath(t *testing.T) {
 	}
 }
 
-// A re-run whose takeover intent is durable but whose result was lost
-// finds the target master and never sends a second REPLTAKEOVER: the
-// earlier attempt's promotion stamp shows the run made it master.
+// A re-run that finds the target already reporting master never sends a
+// second REPLTAKEOVER and never finishes the takeover from what it reads
+// (not even a promotion stamp naming the target): only a success reply this
+// process received does. The takeover is Failed (unconfirmed) and the run
+// proceeds under onSyncTimeout=Proceed.
 func TestPlannedFailoverDragonfly_RerunNeverRepeatsTakeover(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Proceed")
 	now := metav1.Now()
@@ -200,7 +221,8 @@ func TestPlannedFailoverDragonfly_RerunNeverRepeatsTakeover(t *testing.T) {
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: &fakeDragonflyConn{}})
 	pfDFTakeoverPasses(t, r, fgNN(fg))
 	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed ||
+		!strings.Contains(pf.Dragonfly.Message, "unconfirmed") {
 		t.Fatalf("block = %+v %+v", pf.Phase, pf.Dragonfly)
 	}
 	if target.takeovers != 0 {
@@ -280,6 +302,7 @@ func TestPlannedFailoverDragonfly_StripFailsProceeds(t *testing.T) {
 	topo.setHeld("run-1", false)
 	r.PlannedTopology = topo
 	r.plannedClock = clock.NewFakeClock(time.Now())
+	pfDFOwnIntent(r, fg)
 	dials := 0
 	r.dragonflyConnector = func(context.Context, string, string) (DragonflyConnection, error) {
 		dials++
@@ -404,7 +427,8 @@ func pfDragonflyTakeoverPass(t *testing.T, r *MysqlFailoverGroupReconciler, ctx 
 	if pf.Dragonfly == nil {
 		pf.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	}
-	if pf.Dragonfly.Takeover == nil {
+	wroteIntent := pf.Dragonfly.Takeover == nil
+	if wroteIntent {
 		pf.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: metav1.Now()}
 	}
 	if err := r.Client.Status().Update(ctx, &live); err != nil {
@@ -414,6 +438,10 @@ func pfDragonflyTakeoverPass(t *testing.T, r *MysqlFailoverGroupReconciler, ctx 
 		t.Fatal(err)
 	}
 	e := r.plannedFailoverEngine()
+	if wroteIntent {
+		// The intent this helper wrote stands for this process's own.
+		pfDFOwnIntent(r, &live)
+	}
 	if topo, ok := e.topo.(*pfFakeTopology); ok {
 		topo.setHeld(live.Status.PlannedFailover.RunID, false)
 	}

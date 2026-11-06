@@ -50,37 +50,6 @@ type ReplicationInfo struct {
 	ConnectedSlaves int
 }
 
-// ServerInfo is the parsed subset of `INFO server` that identifies the
-// running process: a restarted Dragonfly has a new run_id and a small
-// uptime.
-type ServerInfo struct {
-	// RunID is the process's random identifier, new on every start.
-	RunID string
-	// UptimeSeconds is how long the process has been running; -1 when
-	// not present on the wire.
-	UptimeSeconds int64
-}
-
-// ParseInfoServer parses the body of an `INFO server` response.
-func ParseInfoServer(body string) ServerInfo {
-	info := ServerInfo{UptimeSeconds: -1}
-	for _, line := range splitInfoLines(body) {
-		key, value, ok := splitKV(line)
-		if !ok {
-			continue
-		}
-		switch key {
-		case "run_id":
-			info.RunID = value
-		case "uptime_in_seconds":
-			if n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
-				info.UptimeSeconds = n
-			}
-		}
-	}
-	return info
-}
-
 // PersistenceInfo is the parsed subset of `INFO persistence` used to detect
 // load-after-restart states that should disqualify a replica from being
 // promoted.

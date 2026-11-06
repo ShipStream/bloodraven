@@ -39,9 +39,9 @@ func assertDragonflyStatusConsistent(t *testing.T, when string, df *v1alpha1.Dra
 // restarted in WaitingForDragonflySync, and the target came back as an
 // empty standalone master. The manager is paused while the run owns
 // Dragonfly, so nothing wires it as a replica and the sync wait times out;
-// onSyncTimeout=Proceed then finds the target reporting role:master with
-// no evidence that the run's takeover made it so, and refuses it (the
-// source keeps the cache). MySQL moves; Dragonfly follows afterwards
+// onSyncTimeout=Proceed then finds the target reporting role:master that
+// this process never promoted, and refuses it (the source keeps the
+// cache). MySQL moves; Dragonfly follows afterwards
 // through the manager: the empty target is re-attached as a replica, syncs,
 // and is promoted. At no point may status.dragonfly read Ready with the
 // master on a site other than its activeSite: the promotion stamp moves
@@ -51,24 +51,20 @@ func assertDragonflyStatusConsistent(t *testing.T, when string, df *v1alpha1.Dra
 func TestS25_RestartMidSyncThenFollowUpKeepsDragonflyStatusConsistent(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Proceed")
 	pf := fg.Status.PlannedFailover
-	// Before the restart: the source offset and process were captured, and
-	// the sync wait has been running past maxSyncWait.
+	// Before the restart: the source offset was captured, and the sync wait
+	// has been running past maxSyncWait.
 	started := metav1.NewTime(time.Now().Add(-time.Minute))
 	off := int64(100)
 	pf.Dragonfly.SyncWaitStartTime = &started
-	pf.Dragonfly.SourceOffsetState, pf.Dragonfly.SourceOffset, pf.Dragonfly.SourceRunID =
-		v1alpha1.DragonflyOffsetCaptured, &off, "source-run"
+	pf.Dragonfly.SourceOffsetState, pf.Dragonfly.SourceOffset = v1alpha1.DragonflyOffsetCaptured, &off
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
 
 	// A fresh reconciler is the restarted process: an empty memo, its claim
 	// hydrated (run-1 held).
 	r, c, _ := pfDFReconciler(t, fg, sourcePod, targetPod)
-	source := &fakeDragonflyConn{runID: "source-run",
-		info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 500}}
-	restored := int64(40) // restored before the takeover intent
-	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{runID: "target-after-restart", uptime: &restored,
-		info: dragonfly.ReplicationInfo{Role: "master"}}}
+	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 500}}
+	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}}
 	byAddr := map[string]DragonflyConnection{pfDFIad: source, pfDFPdx: target}
 	installFakeDragonflyConn(t, r, byAddr)
 	nn := fgNN(fg)

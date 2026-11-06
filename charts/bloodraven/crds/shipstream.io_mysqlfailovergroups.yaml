@@ -7406,13 +7406,6 @@ spec:
                         - Captured
                         - Unavailable
                         type: string
-                      sourceRunID:
-                        description: |-
-                          SourceRunID is the source Dragonfly process's run_id when
-                          SourceOffset was captured. REPLTAKEOVER exits the source, so a source
-                          with another run_id afterwards corroborates a takeover.
-                        maxLength: 64
-                        type: string
                       syncWaitSeconds:
                         description: SyncWaitSeconds is the time spent in WaitingForDragonflySync.
                         format: int64
@@ -7456,15 +7449,6 @@ spec:
                           targetOffset:
                             format: int64
                             type: integer
-                          targetRunID:
-                            description: |-
-                              TargetRunID is the target Dragonfly process's run_id when it was
-                              last seen as a caught-up replica, recorded with the intent. A target
-                              that later reports role master with the same run_id was promoted
-                              during the run; one with another run_id restarted (an empty
-                              standalone master) and is not a takeover.
-                            maxLength: 64
-                            type: string
                         required:
                         - intentTime
                         - state
