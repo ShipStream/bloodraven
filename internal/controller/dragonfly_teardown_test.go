@@ -31,7 +31,7 @@ func TestTeardownDragonflyResourcesNeedsNoDeleteCollection(t *testing.T) {
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "lion-dragonfly-active", Namespace: ns, Labels: owned}},
 	}
 	base := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).Build()
-	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+	c := interceptor.NewClient(base, interceptor.Funcs{
 		DeleteAllOf: func(context.Context, client.WithWatch, client.Object, ...client.DeleteAllOfOption) error {
 			return errors.New(`statefulsets.apps is forbidden: cannot deletecollection`)
 		},
