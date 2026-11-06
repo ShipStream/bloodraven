@@ -643,6 +643,16 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	PlannedFailover *PlannedFailoverStatus `json:"plannedFailover,omitempty"`
 
+	// PlannedFailoverHold is the automation hold left by a planned
+	// failover that may have written to its target and ended
+	// ManualRecoveryRequired. It outlives that run's plannedFailover block
+	// (a refused request can replace the block) and stays until an
+	// administrator acknowledges it with
+	// bloodraven.shipstream.io/acknowledge-planned-failover-hold=<runID>.
+	// The AutomaticFailoverHeld condition summarises it.
+	// +optional
+	PlannedFailoverHold *PlannedFailoverHold `json:"plannedFailoverHold,omitempty"`
+
 	// Dragonfly is the observed state of the Dragonfly subsystem when
 	// spec.dragonfly is configured.
 	// +optional

@@ -68,18 +68,19 @@ func TestSyncDragonflyPodLabels_StampsBothLabels(t *testing.T) {
 
 func TestSyncDragonflyPodLabels_SkipsRestoreDuringStripWindow(t *testing.T) {
 	// Mid-flight planned-failover PromotingDragonfly with the source's
-	// traffic label transiently stripped (PromotionMethod still empty).
+	// traffic label transiently stripped (takeover still Intended).
 	// syncDragonflyPodLabels must NOT re-stamp traffic on the source
 	// pod or it would re-attach the soon-to-be-demoted master to the
 	// active Service mid-REPLTAKEOVER.
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase:         v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		Target:        "dc2",
-		SourcePrimary: "dc1",
+		RunID:      "run-1",
+		Phase:      v1alpha1.PlannedFailoverPhasePromotingDragonfly,
+		TargetSite: "dc2",
+		SourceSite: "dc1",
 		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{
-			Enabled: true,
+			Takeover: &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: metav1.Now()},
 		},
 	}
 	// dc1 (source) has role=master but traffic stripped (no traffic label).
@@ -99,20 +100,21 @@ func TestSyncDragonflyPodLabels_SkipsRestoreDuringStripWindow(t *testing.T) {
 	}
 }
 
-func TestSyncDragonflyPodLabels_RestoresAfterPromotionMethodSet(t *testing.T) {
-	// PromotingDragonfly phase BUT PromotionMethod is now set, meaning
-	// the handler has finished the strip→takeover→restore sequence.
+func TestSyncDragonflyPodLabels_RestoresAfterTakeoverSucceeded(t *testing.T) {
+	// PromotingDragonfly phase BUT the takeover is recorded Succeeded,
+	// meaning the strip→takeover→restore sequence has finished.
 	// effectiveDragonflyMasterSite returns target. syncDragonflyPodLabels
 	// should enforce target=master,traffic=enabled and source=replica,traffic=enabled.
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase:         v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		Target:        "dc2",
-		SourcePrimary: "dc1",
+		RunID:      "run-1",
+		Phase:      v1alpha1.PlannedFailoverPhasePromotingDragonfly,
+		TargetSite: "dc2",
+		SourceSite: "dc1",
 		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{
-			Enabled:         true,
-			PromotionMethod: "REPLTAKEOVER",
+			Takeover: &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverSucceeded, IntentTime: metav1.Now(),
+				Method: v1alpha1.DragonflyTakeoverMethodReplTakeover},
 		},
 	}
 	// Both pods have been rewritten by the phase handler to their new

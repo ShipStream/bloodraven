@@ -169,15 +169,27 @@ type DragonflyPlannedFailoverSpec struct {
 	// OnSyncTimeout governs behavior when the target replica fails to
 	// reach the source's offset within MaxSyncWait, or when REPLTAKEOVER
 	// fails:
-	//   - "proceed" (default): continue with MySQL promotion, stamp
-	//     sessionsPreserved=false. Cache/session continuity is best-effort.
-	//   - "fail": abort planned failover before MySQL promotion, roll
-	//     back the source MySQL fence, leave activeSite unchanged.
-	// +kubebuilder:default="proceed"
-	// +kubebuilder:validation:Enum=proceed;fail
+	//   - Proceed (default): continue with the MySQL promotion and record
+	//     status.plannedFailover.dragonfly.sessions=Lost. Cache/session
+	//     continuity is best-effort.
+	//   - Fail: abort the planned failover before the MySQL promotion,
+	//     roll back the source MySQL fence, leave activeSite unchanged.
+	// +kubebuilder:default=Proceed
 	// +optional
-	OnSyncTimeout string `json:"onSyncTimeout,omitempty"`
+	OnSyncTimeout DragonflySyncTimeoutPolicy `json:"onSyncTimeout,omitempty"`
 }
+
+// DragonflySyncTimeoutPolicy is spec.dragonfly.plannedFailover.onSyncTimeout
+// and the run's frozen settings.dragonfly.onSyncTimeout.
+// +kubebuilder:validation:Enum=Proceed;Fail
+type DragonflySyncTimeoutPolicy string
+
+const (
+	// DragonflySyncTimeoutProceed continues with the MySQL promotion.
+	DragonflySyncTimeoutProceed DragonflySyncTimeoutPolicy = "Proceed"
+	// DragonflySyncTimeoutFail rolls the planned failover back.
+	DragonflySyncTimeoutFail DragonflySyncTimeoutPolicy = "Fail"
+)
 
 // DragonflyPhase describes the high-level state of the Dragonfly subsystem
 // for a failover group.

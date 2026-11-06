@@ -45,7 +45,7 @@ func main() {
 	junitOut := rootFlags.String("junit-out", "", "run-all only: write JUnit XML report to this path")
 	profile := rootFlags.String("profile", string(runner.DefaultProfile), "run-all only: scenario subset (smoke|release|full)")
 	scenarioList := rootFlags.String("scenarios", "", "run-all only: comma-separated scenario IDs to run in this order instead of a profile (resets before each scenario that requires it)")
-	baselineWait := rootFlags.Duration("baseline-wait", 5*time.Minute, "run-all only: wait up to this long for a healthy baseline before the first scenario (0 disables)")
+	baselineWait := rootFlags.Duration("baseline-wait", 5*time.Minute, "run-all: wait up to this long for a healthy baseline before the first scenario (0 disables); run: only when given explicitly")
 	verbose := rootFlags.Bool("verbose", false, "verbose logging")
 	kubeconfig := rootFlags.String("kubeconfig", "", "kubeconfig path (default: KUBECONFIG / ~/.kube/config)")
 	kctx := rootFlags.String("context", "", "kubectl context to use (default: current-context)")
@@ -98,7 +98,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: playground-chaos run <scenario-id>")
 			os.Exit(exitFlagParse)
 		}
-		os.Exit(runOne(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, *force, *autoReset, subArgs[0], logger))
+		os.Exit(runOne(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, runBaselineWait(rootFlags, *baselineWait), *noCleanup, *force, *autoReset, subArgs[0], logger))
 	case "run-all":
 		p := runner.Profile(*profile)
 		if !p.IsValid() {
@@ -133,7 +133,8 @@ Flags:
   --junit-out            run-all only: write JUnit XML to path
   --profile              run-all only: scenario subset (smoke|release|full)
   --scenarios            run-all only: comma-separated scenario IDs, run in order instead of --profile
-  --baseline-wait        run-all only: wait for healthy baseline before first scenario (default 5m, 0 disables)
+  --baseline-wait        wait for healthy baseline before the first scenario (run-all: default 5m, 0 disables;
+                         run: only when given, e.g. for the first of a CI scenario list)
   --verbose              verbose logging
   --kubeconfig           kubeconfig path
   --context              kubectl context
@@ -240,7 +241,25 @@ func check(kubeconfig, kctx, namespace, fg string) int {
 	return exitOK
 }
 
-func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Duration, noCleanup, force, autoReset bool, id string, logger *slog.Logger) int {
+// runBaselineWait is the suite-entry baseline wait for `run`: zero unless
+// --baseline-wait was given explicitly. A hand-run scenario keeps its
+// instant precheck; a CI job that runs a scenario list one `run` at a time
+// right after setup.sh passes the flag on the first one, the way run-all
+// waits by default.
+func runBaselineWait(fs *flag.FlagSet, wait time.Duration) time.Duration {
+	explicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "baseline-wait" {
+			explicit = true
+		}
+	})
+	if !explicit {
+		return 0
+	}
+	return wait
+}
+
+func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout, baselineWait time.Duration, noCleanup, force, autoReset bool, id string, logger *slog.Logger) int {
 	scen, ok := runner.DefaultRegistry.Get(id)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown scenario: %s — try `playground-chaos list`\n", id)
@@ -263,6 +282,9 @@ func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if baselineWait > 0 && !suiteEntryBaseline(ctx, k, namespace, fg, baselineWait, "run", logger) {
+		return exitEnvironment
+	}
 	res := runScenarioWithAutoReset(ctx, k, kubeconfig, kctx, scen, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
 	printResult(res)
 	if !res.Passed {
@@ -336,6 +358,31 @@ func waitForBaseline(ctx context.Context, timeout, interval time.Duration, check
 		case <-time.After(interval):
 		}
 	}
+}
+
+// suiteEntryBaseline waits up to wait for a healthy baseline. A timeout is
+// not fatal: it reports and returns true, and the scenario's precheck (and
+// --auto-reset) decide. It returns false only when ctx was cancelled.
+func suiteEntryBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string, wait time.Duration, cmd string, logger *slog.Logger) bool {
+	start := time.Now()
+	err := waitForBaseline(ctx, wait, 5*time.Second, func(ctx context.Context) error {
+		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return scenarios.CheckBaseline(checkCtx, k, namespace, fg)
+	}, func(lastErr error, elapsed time.Duration) {
+		logger.Info("wait", "what", cmd+" suite-entry healthy baseline",
+			"last", lastErr.Error(), "elapsed", elapsed.Round(time.Second))
+	})
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return false
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "!! %s: baseline still unhealthy after %s (%v) — proceeding; per-scenario precheck and --auto-reset take it from here\n",
+			cmd, wait, err)
+	default:
+		logger.Info(cmd+" suite-entry baseline healthy", "elapsed", time.Since(start).Round(time.Second))
+	}
+	return true
 }
 
 // runReset shells out to this same binary's reset subcommand. Streams
@@ -434,25 +481,8 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout, baselin
 	// A timeout here is deliberately NOT fatal: the per-scenario
 	// Precheck and --auto-reset remain the authoritative remedies, and
 	// they produce forensics that aborting the suite here would not.
-	if baselineWait > 0 {
-		start := time.Now()
-		err := waitForBaseline(ctx, baselineWait, 5*time.Second, func(ctx context.Context) error {
-			checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-			return scenarios.CheckBaseline(checkCtx, k, namespace, fg)
-		}, func(lastErr error, elapsed time.Duration) {
-			logger.Info("wait", "what", "run-all suite-entry healthy baseline",
-				"last", lastErr.Error(), "elapsed", elapsed.Round(time.Second))
-		})
-		switch {
-		case err != nil && ctx.Err() != nil:
-			return exitEnvironment
-		case err != nil:
-			fmt.Fprintf(os.Stderr, "!! run-all: baseline still unhealthy after %s (%v) — proceeding; per-scenario precheck and --auto-reset take it from here\n",
-				baselineWait, err)
-		default:
-			logger.Info("run-all suite-entry baseline healthy", "elapsed", time.Since(start).Round(time.Second))
-		}
+	if baselineWait > 0 && !suiteEntryBaseline(ctx, k, namespace, fg, baselineWait, "run-all", logger) {
+		return exitEnvironment
 	}
 
 	var results []runner.Result

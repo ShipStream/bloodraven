@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -83,6 +84,10 @@ func (r *trialRunner) lastKnownTarget() string {
 //
 // Anything else is the documented manual-resolution state, not a violation.
 func (r *trialRunner) splitBrainResolvable(truth []SiteTruth) bool {
+	if r.plannedHoldStands() {
+		// The automation hold (§10.5): a human resolves this split brain.
+		return false
+	}
 	writableByName := map[string]bool{}
 	var writableObs []state.SiteObservation
 	for i, t := range truth {
@@ -145,20 +150,38 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 	// Execute to reach recordFailover. A writable grant that applied just
 	// before process death is still visible to the physical ordering
 	// invariants below, but deliberately does not arm durable-state checks.
-	if target, _ := promotionTarget(events, effectiveOutcome); target != "" {
+	physical := events
+	if r.pl != nil {
+		// With actors on, a planned run's or an ordered update's promotion
+		// spans polls and is recorded later than it lands (the confirmed
+		// tail; the update's record step): the pf and upd promotions are
+		// detected across polls and armed for anti-flap bookkeeping when
+		// recorded (armPromotion). The single-cycle physical checks below
+		// are Execute's (the topology manager's) properties; the planned
+		// run's have their own invariants (planned_invariants.go).
+		for _, pr := range r.pl.promotions(events) {
+			r.promotionPolls = append(r.promotionPolls, p)
+			r.promotionActors = append(r.promotionActors, pr.actor)
+			r.promotionRuns = append(r.promotionRuns, pr.runID)
+		}
+		physical = tmEvents(events)
+		if target, _ := promotionTarget(physical, effectiveOutcome); target != "" {
+			r.promotionPolls = append(r.promotionPolls, p)
+			r.promotionActors = append(r.promotionActors, ActorTM)
+			r.promotionRuns = append(r.promotionRuns, "")
+			r.armPromotion(target, r.clk.Now())
+		}
+	} else if target, _ := promotionTarget(events, effectiveOutcome); target != "" {
 		r.promotionPolls = append(r.promotionPolls, p)
-		r.currentTarget = target
 		// The clock has not advanced for this poll yet, so Now() is the
 		// instant the operator itself stamped on the promotion. A restart
 		// that rehydrates anything older lost the record.
-		r.lastPromotionAt = r.clk.Now()
-		r.statusDroppedPromotion = false
-		r.promotionRestarts = len(r.restartPolls)
+		r.armPromotion(target, r.clk.Now())
 	}
 
 	// Promotion detection for physical writable/fencing invariants includes
 	// a grant that applied immediately before the operator died.
-	if target, grantSeq := promotionTarget(events, observedOutcome); target != "" {
+	if target, grantSeq := promotionTarget(physical, observedOutcome); target != "" {
 		// I: the operator must never promote while it observes another
 		// writable site, unless it fenced that site in the same cycle.
 		// "Fenced" deliberately counts an ATTEMPT with any outcome: fencing
@@ -187,9 +210,18 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 			}
 		}
 
-		// I: fencing of other sites happens before the writable grant.
+		// I: fencing of other sites happens before the writable grant. A
+		// re-fence of a site already fenced before the grant (the
+		// split-brain path's "fencing returning old primary") left no
+		// moment with two writable sites.
+		fencedBefore := map[string]bool{}
 		for _, e := range events {
-			if e.Site != target && e.Kind == EvSetSuperRO && e.Detail == "on=true" && e.Seq > grantSeq {
+			if e.Kind == EvSetSuperRO && e.Detail == "on=true" && e.Seq < grantSeq && observedOutcome(e.Outcome) {
+				fencedBefore[e.Site] = true
+			}
+		}
+		for _, e := range events {
+			if e.Site != target && e.Kind == EvSetSuperRO && e.Detail == "on=true" && e.Seq > grantSeq && !fencedBefore[e.Site] {
 				r.violations = append(r.violations, Violation{
 					Invariant: "FenceAfterPromote",
 					Poll:      p,
@@ -212,7 +244,14 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 			}
 		}
 	}
-	if !r.cluster.OperatorDead() && writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
+	// No registered manager (managerAbsent) is no operator, like a dead one.
+	managed := r.pl == nil || r.pl.reg.Current() != nil
+	// A run whose status writes are stalled keeps its claim, and with it
+	// the manager's split-brain fence deferred, until the stall marker ends
+	// it (§6.4): the documented bound on that deferral is the stall
+	// deadline, so the streak counts only once the run outlives it.
+	stalled := r.pl != nil && r.pl.stalledClaimWithinDeadline()
+	if !r.cluster.OperatorDead() && managed && !stalled && writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
 		r.dualStreak++
 		if r.dualStreak > dualWritableGrace && !r.dualFlagged {
 			r.dualFlagged = true
@@ -222,10 +261,17 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 					names = append(names, t.Name)
 				}
 			}
+			detail := fmt.Sprintf("%v writable and operator-reachable for >%d polls without being fenced", names, dualWritableGrace)
+			if r.pl != nil && r.pl.confirmedClaimHeld() {
+				// The claim of a run that already made its target writable
+				// is held until its Publishing record commits (§2.3), and
+				// blocks the manager's split-brain fence meanwhile (DST-4).
+				detail += " " + confirmedClaimMarker
+			}
 			r.violations = append(r.violations, Violation{
 				Invariant: "DualWritableUnresolved",
 				Poll:      p,
-				Detail:    fmt.Sprintf("%v writable and operator-reachable for >%d polls without being fenced", names, dualWritableGrace),
+				Detail:    detail,
 			})
 		}
 	} else {
@@ -263,6 +309,19 @@ func (r *trialRunner) checkEnd() []Violation {
 	// carried the cooldown across the restart).
 	cooldownPolls := r.trial.CooldownSec // 1s per poll
 	for i := 1; i < len(r.promotionPolls); i++ {
+		if i < len(r.promotionActors) && r.promotionActors[i] == ActorUpdate {
+			// An ordered update is a deliberate maintenance handoff: it
+			// stamps the cooldown for what follows but is not held by it.
+			continue
+		}
+		if i-1 < len(r.promotionRuns) && r.promotionRuns[i-1] != "" && r.pl != nil && !r.pl.mon.runRecorded(r.promotionRuns[i-1]) {
+			// A planned run that never recorded its promotion
+			// (PromotedUnconfirmed, ManualRecoveryRequired, a rollback)
+			// stamps no cooldown by rule (§10.1): emergency failover may
+			// follow it, and an acknowledged hold hands the decision to
+			// automation again.
+			continue
+		}
 		gap := r.promotionPolls[i] - r.promotionPolls[i-1]
 		if gap < cooldownPolls {
 			restarts, lost := 0, 0
@@ -276,15 +335,27 @@ func (r *trialRunner) checkEnd() []Violation {
 					lost++
 				}
 			}
+			detail := fmt.Sprintf("promotions %d polls apart (cooldown %d polls, operator restarts between: %d, of which lost the durable anti-flap record: %d)",
+				gap, cooldownPolls, restarts, lost)
+			if r.retiredRecordPolls[r.promotionPolls[i-1]] {
+				detail += " " + replacedBeforeRecordMarker
+			}
 			out = append(out, Violation{
 				Invariant: "CooldownViolated",
 				Poll:      r.promotionPolls[i],
-				Detail: fmt.Sprintf("promotions %d polls apart (cooldown %d polls, operator restarts between: %d, of which lost the durable anti-flap record: %d)",
-					gap, cooldownPolls, restarts, lost),
+				Detail:    detail,
 			})
 		}
 	}
 
+	if r.plannedHoldStands() {
+		// A standing automation hold is the documented manual-recovery
+		// state (§10.5): nothing automatic converges the group until a
+		// human acknowledges it, and the planned invariants judge whether
+		// the hold was warranted (HoldWithoutDataAtRisk). Convergence is
+		// exempt; transaction accounting is not (K059).
+		return append(out, r.checkHeldNoLoss(truth)...)
+	}
 	switch {
 	case len(writable) >= 2:
 		if r.splitBrainResolvable(truth) {
@@ -468,6 +539,36 @@ func (r *trialRunner) checkNoSilentLoss(p SiteTruth, truth []SiteTruth, final *c
 	return out
 }
 
+// checkHeldNoLoss is checkNoSilentLoss under a standing automation hold.
+// The hold leaves the histories it was set over for a human to reconcile:
+// an acknowledged transaction on any site, reachable or not, is reported by
+// the hold and not lost, whichever site is writable. One that exists on no
+// site was destroyed while automation was held: the hold failed to
+// preserve it.
+func (r *trialRunner) checkHeldNoLoss(truth []SiteTruth) []Violation {
+	endPoll := r.trial.Polls - 1
+	acked, err := mysql.ParseGTIDSet(r.cluster.Acked().String())
+	if err != nil {
+		return []Violation{{Invariant: "ModelHole", Poll: endPoll, Detail: "acked set unparseable: " + err.Error()}}
+	}
+	missing := acked
+	for _, t := range truth {
+		have, err := mysql.ParseGTIDSet(t.Executed.String())
+		if err != nil {
+			return []Violation{{Invariant: "ModelHole", Poll: endPoll, Detail: "site set unparseable: " + err.Error()}}
+		}
+		missing = missing.Subtract(have)
+	}
+	if missing.IsEmpty() {
+		return nil
+	}
+	return []Violation{{
+		Invariant: "SilentDataLoss",
+		Poll:      endPoll,
+		Detail:    fmt.Sprintf("acked txns %s exist on no site at the end, under a standing automation hold", missing),
+	}}
+}
+
 // checkWedge decides whether a zero-writable end state is a by-design manual
 // intervention point or a wedge the operator was equipped to heal.
 func (r *trialRunner) checkWedge(byName map[string]SiteTruth) []Violation {
@@ -502,10 +603,50 @@ func (r *trialRunner) checkWedge(byName map[string]SiteTruth) []Violation {
 			return nil // divergence: human review required, by design
 		}
 	}
+	detail := fmt.Sprintf("no writable site at end; target %s reachable, read-only, GTID-complete; re-assert should have restored it",
+		target)
+	if r.replacedBeforeRecord {
+		// The manager never learned the promotion that made target the
+		// target (DST-1): it judges the wedge from an older record.
+		detail += " " + replacedBeforeRecordMarker
+	}
 	return []Violation{{
 		Invariant: "WedgedNoPrimary",
 		Poll:      r.trial.Polls - 1,
-		Detail: fmt.Sprintf("no writable site at end; target %s reachable, read-only, GTID-complete; re-assert should have restored it",
-			target),
+		Detail:    detail,
 	}}
 }
+
+// armPromotion records a promotion that reached the operator's failover
+// record at instant at: the in-memory target, and the anti-flap
+// bookkeeping a later restart is judged against.
+func (r *trialRunner) armPromotion(target string, at time.Time) {
+	r.currentTarget = target
+	r.lastPromotionAt = at
+	r.statusDroppedPromotion = false
+	r.replacedBeforeRecord = false
+	r.promotionRestarts = len(r.restartPolls)
+}
+
+// tmEvents is the events not issued by the planned or update actors.
+func tmEvents(events []Event) []Event {
+	out := make([]Event, 0, len(events))
+	for _, e := range events {
+		if a := effectiveActor(e.Actor); a != ActorPF && a != ActorUpdate {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// plannedHoldStands reports whether a planned-failover automation hold stands
+// on the simulated object (trials with actors only).
+func (r *trialRunner) plannedHoldStands() bool {
+	return r.pl != nil && holdStands(r.pl.store.Object())
+}
+
+// confirmedClaimMarker tags a DualWritableUnresolved during which a planned
+// run that had already made its target writable held the claim
+// (fingerprint DualWritableUnresolved(confirmedClaim): the fixed DST-4, now a
+// regression; README, Known finding classes).
+const confirmedClaimMarker = "(while a planned run that had made its target writable held the claim)"

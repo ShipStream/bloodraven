@@ -12,7 +12,7 @@ A migration is running under a live `failover-hold` when `iad`'s node dies. Thre
 - The hold deferred the promotion; the pipeline keeps renewing with `200` until it releases the hold, then `pdx` is promoted.
 - The hold was not consulted; the promotion bumped `topologyGeneration` and revoked both leases, so the `PUT` returns `409 revoked` with reason `topology_changed`.
 - The hold was honoured for its remaining TTL; when it expired the promotion ran and the `PUT` returns `404` because the lease had lapsed.
-- The operator waited for `retryAfter`, then promoted; the `PUT` returns `423 unstable` until the pipeline re-POSTs the migration lease.
+- The operator waited for `admission.retryTime`, then promoted; the `PUT` returns `423 unstable` until the pipeline re-POSTs the migration lease.
 
 **Correct option index:** 1
 

@@ -26,10 +26,11 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 	// verify mysqld runs gtid_mode=ON and server-side dedup handles the PITR
 	// replay), and the issue #115 reader scenarios (40-44) are release-graded.
 	// The four chaos-round 2026-10-15 regressions bring it to 24, and the
-	// three #206 cross-site PITR histories (37, 68, 70) to 27.
+	// #235 planned-failover claim restart scenario (63) to 25, and the three
+	// #206 cross-site PITR histories (37, 68, 70) to 28.
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 27 {
-		t.Fatalf("release profile selected %d scenarios, want 27", len(release))
+	if len(release) != 28 {
+		t.Fatalf("release profile selected %d scenarios, want 28", len(release))
 	}
 	for _, id := range []string{
 		"37-pitr-planned-failback-no-reclone",
@@ -84,6 +85,7 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 		"44-reader-source-convergence-invariant",
 		"53-deployment-hold-expiry",
 		"55-deployment-emergency-revocation",
+		"63-planned-failover-operator-restart-mid-lag",
 	} {
 		if !containsScenarioID(release, id) {
 			t.Errorf("%s must be in the release profile", id)

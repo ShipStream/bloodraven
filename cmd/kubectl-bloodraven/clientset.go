@@ -8,8 +8,8 @@ import (
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/rest"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -116,4 +116,29 @@ func splitKubeconfigPathList(s string) []string {
 		}
 	}
 	return out
+}
+
+// parseFlagsAndArgs parses args with fs and returns the positional
+// arguments. Unlike fs.Parse, which stops at the first positional
+// argument, it accepts flags before, between and after positionals, so
+// the documented `kubectl bloodraven reclone orders iad -n orders` form
+// sets the namespace instead of leaving "-n" and "orders" as extra
+// positionals. A "--" ends flag parsing: everything after it is
+// positional.
+func parseFlagsAndArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" {
+			return append(positional, rest...), nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
 }

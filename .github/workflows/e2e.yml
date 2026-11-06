@@ -60,6 +60,7 @@ jobs:
     needs: images
     uses: ./.github/workflows/_e2e.yml
     with:
+      label: encryption
       # Ordered least- to most-destructive: 48 and 50 leave the cluster
       # healthy, 52 holds the primary down mid-rotation, 51 rebuilds the
       # replica datadir. Together they are the minimum set from
@@ -79,6 +80,7 @@ jobs:
     needs: images
     uses: ./.github/workflows/_e2e.yml
     with:
+      label: pitr
       # 31 first (single-site baseline); 37 and 68 are planned failbacks
       # (68 with reclones); 70 loses data on purpose and restarts the
       # archive; 69 last (key snapshots, refused key and encryption
@@ -99,4 +101,20 @@ jobs:
       # out. This is the cap, not a target: the next PITR scenario goes
       # into a second job rather than into this list.
       timeout-minutes: 360
+      images-artifact: e2e-images
+
+  # Durable planned-failover claim (#235). The PR job above runs only the
+  # smoke profile, so the planned-failover scenarios get their own targeted
+  # job, label-gated through `images` like encryption. The default playground
+  # already enables Dragonfly (22, 25, 26) and the deploy API (53, 64).
+  planned-failover:
+    needs: images
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      label: planned-failover
+      # Ordered least- to most-destructive: switchovers and rollbacks first,
+      # the operator restarts next, then 64 (holds the primary down), 23 (an
+      # emergency failover plus restart) and 53 (lease expiry) last.
+      scenario: 02-planned-switchover,35-planned-switchover-lag-timeout-rollback,22-planned-dragonfly-switchover,26-planned-dragonfly-sync-timeout-proceed,25-operator-restart-mid-dragonfly-failover,63-planned-failover-operator-restart-mid-lag,64-emergency-failover-during-planned-admission,23-failover-state-durability,53-deployment-hold-expiry
+      timeout-minutes: 120
       images-artifact: e2e-images

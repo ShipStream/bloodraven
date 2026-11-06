@@ -33,6 +33,8 @@ Commands:
   status         Show health for one or every MysqlFailoverGroup
   promote        Trigger a planned (graceful) failover via annotation
   reclone        Trigger a re-clone of a divergent site via annotation
+  ack-planned-failover-hold
+                 Acknowledge a planned-failover automation hold via annotation
   backup         Create an on-demand MysqlBackup CR for a profile
   verify-backup  Create an on-demand MysqlBackupVerification CR
   version        Print plugin version metadata
@@ -82,6 +84,8 @@ func run(args []string, stdout, stderr *os.File) error {
 		return runPromote(args[1:], stdout, stderr)
 	case "reclone":
 		return runReclone(args[1:], stdout, stderr)
+	case "ack-planned-failover-hold":
+		return runAckPlannedFailoverHold(args[1:], stdout, stderr)
 	case "backup":
 		return runBackup(args[1:], stdout, stderr)
 	case "verify-backup":

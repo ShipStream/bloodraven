@@ -289,7 +289,7 @@ if [[ ${#MANIFESTS[@]} -gt 0 ]]; then
                 continue
             fi
             jq -r '"📄 site=\(.site // "?") version=\(.version // "?") archiveId=\(.archiveId // "")" +
-                (if .historyIntegrity then "\n   historyIntegrity: \(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at); this site cannot certify history (playbook 38)" else "" end) +
+                (if .historyIntegrity then "\n   historyIntegrity: \(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at); this site cannot certify history (playbook 40)" else "" end) +
                 (if (.epoch.resetReason // "") != "" then "\n   epoch.resetReason: \(.epoch.resetReason); every restore refuses PITRArchiveHistoryReset" else "" end)' "$m"
             echo "   Records (kind serverUuid serverId observedAt probeInterval gtidExecuted [readOnlyGtidExecuted]):"
             jq -r '(.promotions // [])[] | "     \(.kind // "Promotion") \(.serverUuid) \(.serverId) \(.observedAt) \(.probeInterval // "unknown") \(.gtidExecuted)" + (if (.readOnlyGtidExecuted // "") != "" then " [read-only before: \(.readOnlyGtidExecuted)]" else "" end)' "$m"
@@ -327,7 +327,7 @@ if [[ ${#MANIFESTS[@]} -gt 0 ]]; then
             echo "   backup), which can hold more than MysqlBackup status.gtidExecuted. Drop what the"
             echo "   dump holds with, on any server:"
             echo "     SELECT GTID_SUBTRACT('$JOINED', '<gtidExecuted from the dump's @.json>');"
-            echo "   A backup taken after the loss needs no exclusion. See playbook 40."
+            echo "   A backup taken after the loss needs no exclusion. See playbook 42."
         fi
     fi
 fi

@@ -193,6 +193,9 @@ type TopologySnapshot struct {
 	BootstrapSource    string // "fresh-deploy", "auto-clone", or "reclone"
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
+	// ObservedAt is the manager's clock when the snapshot was built; the
+	// status merge uses it to recognise a future-dated stored record.
+	ObservedAt time.Time
 
 	// RecoverySite/RecoveryState/DivergentGtid/DivergentTxnCount summarize
 	// one site with active recovery state for the RecoveryPending condition
@@ -609,13 +612,21 @@ type TopologyManager struct {
 	// See runner.sync() and MysqlFailoverGroupReconciler.reconcileInPlaceRestore.
 	topologyFrozen bool
 
-	// plannedFailoverActive is set by the runner while the reconciler
-	// is driving a planned-failover state machine. Blocks automatic
-	// cross-site action in applyCrossSiteAction so an emergency
-	// promotion cannot race the admin-triggered switchover. Cleared on
-	// Succeeded or Failed. Protected by mu. See
-	// planned_failover_reconciler.go.
-	plannedFailoverActive bool
+	// plannedSlot is the group's planned-failover claim slot, shared with
+	// every other manager generation of the group and installed by
+	// WireRegisteredManager before Run (see planned_failover_claim.go).
+	// While it holds a claim (a run or a hold) this manager takes no
+	// automatic cross-site action, ordered update, rotation, follower
+	// mutation, bootstrap of a promotable site, or DNS reconcile. The
+	// pointer is protected by mu; the slot has its own leaf mutex.
+	plannedSlot *PlannedClaimSlot
+	// plannedGateRunID and plannedGateAttemptAt rate-limit a waiting
+	// run's follower-mutation gate attempts. lastPlannedRunRecorded is the
+	// run whose promotion RecordPlannedPromotion last recorded (idempotence
+	// per runId). Protected by mu.
+	plannedGateRunID       string
+	plannedGateAttemptAt   time.Time
+	lastPlannedRunRecorded string
 
 	// followerMutationGate is the admission barrier between follower
 	// mutations (recovery drain, old-primary recovery, source convergence)
@@ -903,6 +914,7 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checke
 		gtidAudit:           make(map[string]*gtidAuditSchedule),
 		gtidAuditSourceUUID: make(map[string]string),
 	}
+	tm.followerMutationGate.clock = clk
 	if updater != nil {
 		updater.SetReplicaStartGate(tm.withReplicaStartGate)
 	}
@@ -942,14 +954,18 @@ func (tm *TopologyManager) SetFailoverStateRecorder(rec FailoverStateRecorder) {
 }
 
 // recordFailover stamps the in-memory promotion state for a promotion that
-// has already been confirmed writable, then persists the anti-flap half of
-// it out of band.
+// has already been confirmed writable, then persists the whole failover
+// record (time, target and promotion watermark) out of band.
 //
 // Every path that promotes — emergency failover, planned switchover, and the
 // ordered-update handoff — goes through here, so the durable record can
 // never be written by one and skipped by another.
 func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, target, promotionGtid string) {
-	rec := FailoverRecord{LastFailover: now, LastFailoverTarget: target}
+	rec := FailoverRecord{LastFailover: now, LastFailoverTarget: target, PromotionGtidExecuted: promotionGtid}
+	if len(promotionGtid) > maxPromotionGtidAnnotationBytes {
+		tm.logger.Error("promotion watermark too large for the out-of-band failover record; only the status copy carries it",
+			"fg", tm.cfg.Name, "target", target, "bytes", len(promotionGtid))
+	}
 
 	tm.mu.Lock()
 	tm.authorityEpoch++
@@ -1877,10 +1893,11 @@ func (tm *TopologyManager) reconcileDNS(ctx context.Context) {
 	if tm.dns == nil {
 		return
 	}
-	// A planned failover owns the DNS record for the duration of its own
-	// promotion sequence; let it finish rather than racing it mid-flight.
-	// Any divergence it leaves behind is repaired by the next poll.
-	if tm.isPlannedFailoverActive() {
+	// A planned failover owns the DNS record while it holds its claim
+	// (and a hold freezes it): the run applies DNS itself before it
+	// releases. Any divergence it leaves behind is repaired by the next
+	// poll after release.
+	if tm.plannedClaimHeld() {
 		return
 	}
 
@@ -2135,6 +2152,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		ActiveSite:              tm.activeSiteLocked(),
 		LastFailover:            tm.lastFailover,
 		LastFailoverTarget:      tm.lastFailoverTarget,
+		ObservedAt:              tm.clock.Now(),
 		Alert:                   alert,
 		DegradedReason:          degradedReason,
 		UpdatePhase:             updatePhase,
@@ -2339,12 +2357,12 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		return
 	}
 
-	// A planned failover is driving its own fence/promote sequence
-	// from the reconciler. The topology manager must not race it by
-	// fencing the source itself, auto-promoting a different candidate,
-	// or resolving the transient split-brain window as if it were a
-	// real one.
-	if tm.isPlannedFailoverActive() {
+	// A planned failover holds its claim (or a hold stands after one
+	// ended ManualRecoveryRequired). The topology manager must not race it
+	// by fencing the source itself, auto-promoting a different candidate,
+	// or resolving the transient split-brain window as if it were a real
+	// one. A request that is only waiting holds nothing and defers nothing.
+	if tm.plannedClaimHeld() {
 		tm.armCrossSiteRetry()
 		tm.logger.Info("cross-site action deferred: planned failover in progress")
 		return
@@ -2718,7 +2736,7 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 	if !action.SplitBrain && writableCandidates < 2 {
 		return false
 	}
-	if tm.isTopologyFrozen() || tm.isPlannedFailoverActive() || tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
+	if tm.isTopologyFrozen() || tm.plannedClaimHeld() || tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
 		return false
 	}
 
@@ -3080,77 +3098,6 @@ func (tm *TopologyManager) isTopologyFrozen() bool {
 	return tm.topologyFrozen
 }
 
-// SetPlannedFailoverActive toggles the guard that blocks automatic
-// cross-site action while a reconciler-driven planned failover is in
-// flight. The runner sets it from the CR's status.plannedFailover.phase.
-func (tm *TopologyManager) SetPlannedFailoverActive(v bool) {
-	tm.mu.Lock()
-	tm.plannedFailoverActive = v
-	tm.mu.Unlock()
-}
-
-// isPlannedFailoverActive reports whether a planned failover is
-// currently running against this CR.
-func (tm *TopologyManager) isPlannedFailoverActive() bool {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	return tm.plannedFailoverActive
-}
-
-// FenceSite sets super_read_only=ON on the named site and returns the
-// site's GTID_EXECUTED captured after the fence takes effect. Returns
-// errSiteNotFound when the site name is unknown.
-//
-// Transactional: if the fence write or the GTID read fails, the site is
-// best-effort unfenced before the error is returned. A SET GLOBAL that
-// reports an error (a timeout, a dropped connection) may still have been
-// applied, so a failed fence write is not proof the site is still
-// writable. Leaving a healthy primary stuck read-only on a transient error
-// is worse than failing the whole operation — the caller can retry and the
-// site stays writable in the meantime. When that unfence fails too, the
-// returned error says so.
-func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, error) {
-	site := tm.getSite(name)
-	if site == nil {
-		return "", errSiteNotFound
-	}
-	if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
-		return "", tm.rollbackFence(ctx, name, site, fmt.Errorf("set super_read_only=ON on %q: %w", name, err))
-	}
-	gtid, err := site.mysql.GetGtidExecuted(ctx)
-	if err != nil {
-		return "", tm.rollbackFence(ctx, name, site, fmt.Errorf("read GTID_EXECUTED on %q after fence: %w", name, err))
-	}
-	return gtid, nil
-}
-
-// rollbackFence best-effort unfences site after a failed FenceSite and
-// returns cause, annotated when the unfence failed too. It runs under its
-// own short budget, detached from ctx's cancellation, so a cancelled or
-// expired fence context does not block the rollback.
-func (tm *TopologyManager) rollbackFence(ctx context.Context, name string, site *siteTracker, cause error) error {
-	unfenceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if unfenceErr := unfenceSite(unfenceCtx, site.mysql); unfenceErr != nil {
-		tm.logger.Error("fence rollback failed: site left read-only", "site", name, "error", unfenceErr)
-		return fmt.Errorf("%w (warning: source primary unfence failed: %v)", cause, unfenceErr)
-	}
-	return cause
-}
-
-// UnfenceSite gives the named site its writes back. Used by the
-// planned-failover rollback path when the target fails to catch up.
-func (tm *TopologyManager) UnfenceSite(ctx context.Context, name string) error {
-	site := tm.getSite(name)
-	if site == nil {
-		return errSiteNotFound
-	}
-	if err := unfenceSite(ctx, site.mysql); err != nil {
-		return fmt.Errorf("unfence %q: %w", name, err)
-	}
-	return nil
-}
-
 // WritablePeers probes every site other than except and returns those
 // observed writable and those whose probe failed. A rollback must not give
 // the source its writes back while another site already accepts them.
@@ -3247,90 +3194,11 @@ func (tm *TopologyManager) KillSiteAppConnections(ctx context.Context, name stri
 	return killed, nil
 }
 
-// PlannedPromote runs FailoverController.Execute against the target,
-// confirms the target is writable, flips DNS to the target's LB IP,
-// and updates the in-memory
-// lastFailover/lastFailoverTarget fields so the anti-flap cooldown
-// applies to any follow-on emergency or planned failover. Callers must
-// have already set plannedFailoverActive to true and completed the
-// zero-lag gate.
-//
-// Returns the promotion GTID recorded immediately before the target
-// accepted writes. That value matches what the automatic path records
-// into status.promotionGtidExecuted.
-func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source string) (string, error) {
-	targetSite := tm.getSite(target)
-	if targetSite == nil {
-		return "", errSiteNotFound
-	}
-	if !targetSite.isPromotable() {
-		return "", fmt.Errorf("planned promote: site %q has role %q; only primary-candidate sites may be promoted", target, targetSite.role)
-	}
-	tm.mu.RLock()
-	blocked := tm.keyringRotationBlockedLocked(target)
-	var divergence siteRecovery
-	if rec := tm.recovery[target]; rec != nil && rec.state == recoveryStateBlocked {
-		divergence = *rec
-	}
-	tm.mu.RUnlock()
-	if blocked {
-		return "", fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
-	}
-	if divergence.state == recoveryStateBlocked {
-		return "", fmt.Errorf("%w: site %q has %d transactions the primary lacks (%s)",
-			errDivergentTarget, target, divergence.divergentCount, truncateGtidSet(divergence.divergentGtid))
-	}
-
-	var sourceChecker mysql.Checker
-	if source != "" {
-		if src := tm.getSite(source); src != nil {
-			sourceChecker = src.mysql
-		}
-	}
-
-	// Publish the topology change at the follower-mutation barrier: a
-	// recovery drain pass admitted before the planned-failover flag was
-	// set may still be killing sessions on the target, and Execute must
-	// not start until it has finished.
-	if err := tm.claimPlannedPromotion(ctx, target); err != nil {
-		return "", err
-	}
-	defer tm.finishDeploymentTopologyChange()
-	promotionGtid, err := tm.failover.Execute(ctx, targetSite.mysql, sourceChecker, target)
-	if err != nil {
-		return "", err
-	}
-	tm.deploymentPromotionExecuted(target)
-	if err := tm.confirmWritable(ctx, targetSite); err != nil {
-		return "", fmt.Errorf("promotion succeeded but writable confirmation failed: %w", err)
-	}
-
-	// Record the failover-tracking state before the DNS flip: the target
-	// is writable now, so a DNS-provider outage must not erase the
-	// cooldown / split-brain / status-GTID fields the reconciler relies
-	// on. The DNS flip below is best-effort for state tracking; on
-	// failure we still return the promotion GTID (not "") so the caller
-	// can surface what was promoted rather than mistaking a stale-DNS
-	// condition for a failed promotion.
-	tm.recordFailover(ctx, tm.clock.Now(), target, promotionGtid)
-
-	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
-		return promotionGtid, fmt.Errorf("DNS flip failed after successful promotion: %w", err)
-	}
-
-	return promotionGtid, nil
-}
-
 // errSiteNotFound is returned by the planned-failover primitives when a
 // name does not match any configured site. Sentinel so callers can
 // decide whether to retry (transient lookup failure is impossible — the
 // topology manager only forgets sites when it restarts).
 var errSiteNotFound = fmt.Errorf("planned-failover: site not found in topology manager")
-
-// errDivergentTarget is returned by PlannedPromote for a target holding
-// transactions the primary lacks; promoting it would make them
-// authoritative.
-var errDivergentTarget = errors.New("planned-failover: target is divergent")
 
 // KeyringGate is consulted before a clone into a site that may be
 // running encryption-at-rest. RequestKeyringUnseal returns true when the
@@ -3517,7 +3385,7 @@ func (tm *TopologyManager) crossSiteRetryReady() bool {
 	if !armed || tm.clock.Now().Before(notBefore) {
 		return false
 	}
-	return !tm.isTopologyFrozen() && !tm.isPlannedFailoverActive() &&
+	return !tm.isTopologyFrozen() && !tm.plannedClaimHeld() &&
 		!tm.bootstrapBlocksCrossSite() && !tm.isUpdating()
 }
 
@@ -3658,9 +3526,9 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
 		"driftSites", driftSites, "active", activeName)
 	tm.mu.Lock()
-	// A planned failover owns the sites while its guard is set; an update
-	// started now could only be refused at its claim.
-	if tm.deploymentUpdatePending || tm.retired || tm.predecessorUpdateInFlight || tm.plannedFailoverActive {
+	// A planned failover owns the sites while its claim (or hold) is
+	// held; an update started now could only be refused at its claim.
+	if tm.deploymentUpdatePending || tm.retired || tm.predecessorUpdateInFlight || tm.plannedClaimHeldLocked() {
 		tm.mu.Unlock()
 		return false
 	}
@@ -4004,7 +3872,7 @@ func (tm *TopologyManager) maybeStartFreshDeployBootstrap(ctx context.Context, l
 // fence could not be lifted) would otherwise never run again, and the
 // group would wait for a primary forever.
 func (tm *TopologyManager) retryFreshDeployBootstrap(ctx context.Context, action state.CrossSiteAction) {
-	if action.Reason != "NoPrimary" || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() ||
+	if action.Reason != "NoPrimary" || tm.isTopologyFrozen() || tm.plannedClaimHeld() ||
 		tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
 		return
 	}
@@ -5011,7 +4879,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	// what rescues a group stuck with no writable site, and a reader clone
 	// says nothing about where the primary belongs. See
 	// bootstrapBlocksCrossSite.
-	if tm.bootstrapBlocksCrossSite() || tm.isUpdating() || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() {
+	if tm.bootstrapBlocksCrossSite() || tm.isUpdating() || tm.isTopologyFrozen() || tm.plannedClaimHeld() {
 		return false
 	}
 

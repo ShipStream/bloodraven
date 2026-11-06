@@ -476,10 +476,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		// CONNECTION_ADMIN is refused under it, so a clone would fail.
 		return restoreRecloneWaitRequeue, nil
 	}
-	if plannedFailoverInFlight(fg.Status.PlannedFailover) {
+	if plannedFailoverActive(fg) {
 		// A planned failover may be about to make a queued site the
 		// primary; a clone requested now could copy that site's stale data
-		// before Resuming rewrites status.activeSite.
+		// before the run's promotion moves status.activeSite.
 		return restoreRecloneWaitRequeue, nil
 	}
 	head, wait := nextRestoreReclone(q, known, time.Now())

@@ -709,7 +709,7 @@ func TestGTIDAudit_SuppressedWhileAuthorityMoves(t *testing.T) {
 	}{
 		{"ordered update running", func(tm *TopologyManager) { tm.deploymentUpdateRunning = true }},
 		{"topology change in flight", func(tm *TopologyManager) { tm.deploymentChanging = 1 }},
-		{"planned failover active", func(tm *TopologyManager) { tm.plannedFailoverActive = true }},
+		{"planned failover active", func(tm *TopologyManager) { holdPlannedClaimLockedForTest(tm, true) }},
 		{"promotion pending", func(tm *TopologyManager) { tm.promotedSite, tm.promotedAt = "follower-a", tm.clock.Now() }},
 		{"in-place restore", func(tm *TopologyManager) { tm.topologyFrozen = true }},
 		{"initial restore", func(tm *TopologyManager) { tm.autoBootstrapSuppressed = true }},

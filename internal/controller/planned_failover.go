@@ -4,25 +4,34 @@
 // via an annotation on the MysqlFailoverGroup. Unlike emergency
 // failover, the source is still writable — we fence it, wait for the
 // target to catch up on the source's fenced GTID, and only then
-// promote. The machinery reuses FailoverController.Execute for the
-// destructive steps so planned and emergency paths converge.
+// promote, through the topology facade's staged promotion on a pinned
+// session (planned_failover_ops.go), under the group's planned-failover
+// claim.
 //
 // This file owns the annotation grammar and the up-front validation.
-// The state-machine driver lives in planned_failover_reconciler.go.
+// The state-machine driver is PlannedFailoverEngine
+// (planned_failover_engine.go); planned_failover_reconciler.go only
+// decides when a pass is due.
 package controller
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 const (
 	// PlannedFailoverAnnotation triggers a graceful, cooldown-respecting
-	// switchover to the named primary-candidate site. Consumed and
-	// cleared on the next reconcile, like RecloneAnnotation. The
+	// switchover to the named primary-candidate site. The engine removes
+	// it once the request is decided: accepted (Admitting), rejected, or
+	// skipped. A request that is deferred (onCooldown=Defer, a deployment
+	// hold), or that waits in Admitting before its validation, keeps it
+	// until then; removing it cancels a deferred run. The
 	// annotation value is either a bare site name or a site followed by
 	// key=value overrides separated by ':'.
 	//
@@ -39,16 +48,6 @@ const (
 	// defaultPlannedFailoverDrainTimeout is the fallback drainTimeout
 	// when spec.plannedFailover.drainTimeout is not supplied.
 	defaultPlannedFailoverDrainTimeout = 30 * time.Second
-
-	// PlannedFailoverOnCooldownReject is the default behaviour:
-	// cooldown at Validating results in a terminal Failed status with
-	// reason "CooldownActive".
-	PlannedFailoverOnCooldownReject = "reject"
-
-	// PlannedFailoverOnCooldownDefer keeps the annotation in place and
-	// re-tries validation at cooldown expiry; the state machine enters
-	// the Deferred phase in the interim.
-	PlannedFailoverOnCooldownDefer = "defer"
 )
 
 // PlannedFailoverRequest is the parsed form of the
@@ -65,16 +64,24 @@ type PlannedFailoverRequest struct {
 	MaxLagWait time.Duration
 }
 
+// annotationValueRE is A-78's value charset for one-shot action
+// annotations: a value never contains ':' or '=', so the pair split is
+// unambiguous.
+var annotationValueRE = regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
+
 // parsePlannedFailoverAnnotation parses a planned-failover annotation
-// value. The grammar is:
+// value. The grammar is A-78's <subject>(:<key>=<value>)*:
 //
 //	<siteName>
-//	<siteName>:<key>=<value>[:<key>=<value>...]
+//	<siteName>:maxLagWait=<duration>
 //
-// Whitespace around tokens is trimmed. Unknown keys are rejected so
-// typos do not silently accept a request with default knobs. Returns a
-// PlannedFailoverRequest on success; an error on unknown keys or
-// malformed values.
+// The subject is the target site. Each pair splits at its first '=', its
+// value matches ^[A-Za-z0-9._/+-]+$, and a key appears at most once.
+// Whitespace around the whole value is trimmed (a shell heredoc's trailing
+// newline). Unknown keys are rejected so typos do not silently accept a
+// request with default knobs. Returns a PlannedFailoverRequest on success;
+// an error on an empty pair, an unknown or repeated key, or a malformed
+// value.
 func parsePlannedFailoverAnnotation(raw string) (PlannedFailoverRequest, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
@@ -83,20 +90,35 @@ func parsePlannedFailoverAnnotation(raw string) (PlannedFailoverRequest, error) 
 	}
 
 	parts := strings.Split(v, ":")
-	req := PlannedFailoverRequest{Site: strings.TrimSpace(parts[0])}
+	req := PlannedFailoverRequest{Site: parts[0]}
+	if req.Site == "" {
+		// ":maxLagWait=5s": overrides with no target. Rejected here, so
+		// every caller's parse-error path consumes it; a run must never
+		// be built with an empty targetSite.
+		return PlannedFailoverRequest{}, fmt.Errorf(
+			"planned-failover annotation %q names no site; expected <site>[:maxLagWait=<duration>]", v)
+	}
+	if !annotationValueRE.MatchString(req.Site) {
+		return PlannedFailoverRequest{}, fmt.Errorf(
+			"planned-failover annotation: site %q contains characters outside [A-Za-z0-9._/+-]", req.Site)
+	}
 
+	seen := map[string]bool{}
 	for _, kv := range parts[1:] {
-		kv = strings.TrimSpace(kv)
-		if kv == "" {
-			continue
-		}
-		eq := strings.Index(kv, "=")
-		if eq < 0 {
+		key, val, ok := strings.Cut(kv, "=")
+		if !ok || key == "" {
 			return PlannedFailoverRequest{}, fmt.Errorf(
 				"planned-failover annotation override %q must be key=value", kv)
 		}
-		key := strings.TrimSpace(kv[:eq])
-		val := strings.TrimSpace(kv[eq+1:])
+		if seen[key] {
+			return PlannedFailoverRequest{}, fmt.Errorf(
+				"planned-failover annotation: key %q appears more than once", key)
+		}
+		seen[key] = true
+		if !annotationValueRE.MatchString(val) {
+			return PlannedFailoverRequest{}, fmt.Errorf(
+				"planned-failover annotation: %s=%q: the value must match [A-Za-z0-9._/+-]+", key, val)
+		}
 		switch key {
 		case "maxLagWait":
 			d, err := time.ParseDuration(val)
@@ -129,36 +151,35 @@ const (
 
 	// PlannedFailoverSkip — the request is valid but trivially a no-op
 	// (target is already the active site). No state machine is run;
-	// callers should emit PlannedFailoverSkipped and clear the
-	// annotation.
+	// callers emit PlannedFailoverSkipped and consume the annotation.
 	PlannedFailoverSkip
 
 	// PlannedFailoverReject — the request is invalid or the cluster is
-	// in an inappropriate state. Callers should emit
-	// PlannedFailoverRejected with the error's message and clear the
-	// annotation.
+	// in an inappropriate state. Callers emit PlannedFailoverRejected
+	// with the error's message and consume the annotation, except for
+	// CooldownActive with onCooldown=Defer, which defers the run and
+	// keeps the annotation for the retry.
 	PlannedFailoverReject
 )
 
 // validatePlannedFailoverRequest checks the static pre-conditions that
-// can be evaluated from the CR alone (spec + status). Everything
-// time-sensitive — cooldown, clock — is evaluated via the supplied now
+// can be evaluated from the CR alone (spec + status). The engine calls it
+// on every admission pass with the pass's uncached snapshot; it never
+// grants anything (only the claim does), it only refuses. Everything
+// time-sensitive (cooldown, clock) is evaluated via the supplied now
 // argument so tests can drive the boundary deterministically.
 //
-// Returns (PlannedFailoverAccept, nil) on success, (PlannedFailoverSkip,
-// nil) when the target already matches status.activeSite, or
-// (PlannedFailoverReject, err) with an error message suitable for an
-// event when something is wrong. The reason string is a short machine-
-// readable tag ("UnknownSite", "CooldownActive", ...) that the state
-// machine stamps into status.plannedFailover.reason.
-func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, now time.Time, allowCurrentRun bool, holds ...*DeploymentLeaseView) (PlannedFailoverValidationResult, string, error) {
-	for _, hold := range holds {
-		if hold != nil && !now.After(hold.ExpiresAt) {
-			return PlannedFailoverReject, "DeploymentHold", fmt.Errorf("planned-failover held by operation %s instance %s until %s", hold.OperationID, hold.Instance, hold.ExpiresAt.UTC().Format(time.RFC3339))
-		}
-	}
+// Returns (PlannedFailoverAccept, "", nil) on success, (PlannedFailoverSkip,
+// AlreadyActive, nil) when the target already matches status.activeSite, or
+// (PlannedFailoverReject, reason, err) with an error message suitable for an
+// event when something is wrong. allowCurrentRun lets the request's own
+// non-terminal run pass the concurrent-run check. No current caller
+// reaches that check with a live run of another request (admitNew runs
+// only with no live block, the run's own passes set it): it is a
+// defensive refusal for a future caller, kept with its own test.
+func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, now time.Time, allowCurrentRun bool) (PlannedFailoverValidationResult, v1alpha1.PlannedFailoverReason, error) {
 	if req.Site == "" {
-		return PlannedFailoverReject, "InvalidAnnotation", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonInvalidAnnotation, fmt.Errorf(
 			"planned-failover annotation is empty; expected <site>[:maxLagWait=<duration>]")
 	}
 
@@ -174,20 +195,18 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 		}
 	}
 	if targetSpec == nil {
-		return PlannedFailoverReject, "UnknownSite", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonUnknownSite, fmt.Errorf(
 			"planned-failover: unknown site %q; must match one of spec.sites[].name", req.Site)
 	}
 	if !targetSpec.IsPromotable() {
-		return PlannedFailoverReject, "UnknownSite", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetNotPromotable, fmt.Errorf(
 			"planned-failover: site %q has role %q; only primary-candidate sites may be promoted",
 			req.Site, targetSpec.EffectiveRole())
 	}
 
-	// Idempotent no-op: target is already the active site. The admin
-	// sees one PlannedFailoverSkipped event and a clean annotation
-	// clear.
+	// Idempotent no-op: target is already the active site.
 	if fg.Status.ActiveSite == req.Site {
-		return PlannedFailoverSkip, "", nil
+		return PlannedFailoverSkip, v1alpha1.PlannedFailoverReasonAlreadyActive, nil
 	}
 
 	// Mid-rotation check sits before transient health checks so a
@@ -195,7 +214,7 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 	// TargetUnhealthy. Reject, do not defer: the documented procedure
 	// waits for Sealed, then re-annotates.
 	if fg.SiteKeyringRotationBlocksPromotion(req.Site) {
-		return PlannedFailoverReject, "KeyringRotation", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonKeyringRotation, fmt.Errorf(
 			"planned-failover: site %q is mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted",
 			req.Site)
 	}
@@ -212,7 +231,7 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 		}
 	}
 	if targetStatus == nil {
-		return PlannedFailoverReject, "TargetUnhealthy", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetUnhealthy, fmt.Errorf(
 			"planned-failover: no observed status for site %q yet; retry after the operator completes its first poll cycle",
 			req.Site)
 	}
@@ -225,12 +244,12 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 		if targetStatus.DivergentTransactionCount != nil {
 			count = *targetStatus.DivergentTransactionCount
 		}
-		return PlannedFailoverReject, "DivergentTarget", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonDivergentTarget, fmt.Errorf(
 			"planned-failover: site %q is divergent (%d transactions the primary lacks: %s); reclone it or make the primary contain them before it can be promoted",
 			req.Site, count, truncateGtidSet(targetStatus.DivergentGtid))
 	}
 	if targetStatus.State != "read-only" {
-		return PlannedFailoverReject, "TargetUnhealthy", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetUnhealthy, fmt.Errorf(
 			"planned-failover: site %q is in state %q; target must be a healthy read-only replica",
 			req.Site, targetStatus.State)
 	}
@@ -238,12 +257,12 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 		// Its replication receiver is held stopped until its post-restore
 		// reclone, so it cannot catch up; refuse before fencing the source
 		// even when the observed status still says it replicates.
-		return PlannedFailoverReject, "TargetUnhealthy", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetUnhealthy, fmt.Errorf(
 			"planned-failover: site %q awaits its post-restore reclone (status.restoreReclones.pending) and its replication is held stopped; refusing to promote it",
 			req.Site)
 	}
 	if !targetStatus.Replicating {
-		return PlannedFailoverReject, "TargetUnhealthy", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetUnhealthy, fmt.Errorf(
 			"planned-failover: site %q is read-only but not replicating; refusing to promote a non-replicating target",
 			req.Site)
 	}
@@ -255,7 +274,7 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 			v1alpha1.RestoreInPlaceFencing,
 			v1alpha1.RestoreInPlaceRestoring,
 			v1alpha1.RestoreInPlaceResuming:
-			return PlannedFailoverReject, "ConcurrentOperation", fmt.Errorf(
+			return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonConcurrentOperation, fmt.Errorf(
 				"planned-failover: in-place restore is in phase %q; retry once status.restoreInPlace is terminal",
 				rip.Phase)
 		}
@@ -263,20 +282,17 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 
 	// No in-flight ordered update.
 	if fg.Status.UpdatePhase != "" {
-		return PlannedFailoverReject, "ConcurrentOperation", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonConcurrentOperation, fmt.Errorf(
 			"planned-failover: ordered update is in progress (status.updatePhase=%q); retry once the rollout is idle",
 			fg.Status.UpdatePhase)
 	}
 
-	// No in-flight planned failover (either from the same attempt
-	// being re-delivered or from a previous attempt that is still
-	// running). Terminal phases do not block; they are replaced.
-	if pf := fg.Status.PlannedFailover; plannedFailoverInFlight(pf) {
-		if !(allowCurrentRun && (pf.Phase == v1alpha1.PlannedFailoverPhasePending || pf.Phase == v1alpha1.PlannedFailoverPhaseValidating)) {
-			return PlannedFailoverReject, "ConcurrentOperation", fmt.Errorf(
-				"planned-failover: previous planned failover is still running (status.plannedFailover.phase=%q)",
-				pf.Phase)
-		}
+	// No other non-terminal planned-failover run. Terminal runs do not
+	// block; they are replaced.
+	if plannedFailoverActive(fg) && !allowCurrentRun {
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonConcurrentOperation, fmt.Errorf(
+			"planned-failover: previous planned failover is still running (status.plannedFailover.phase=%q)",
+			fg.Status.PlannedFailover.Phase)
 	}
 
 	// Anti-flap cooldown. This is the same effective durable record used by
@@ -285,14 +301,14 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 	cooldown := failoverCooldownFromSpec(fg)
 	failoverRecord, _, err := EffectiveFailoverRecord(fg, now)
 	if err != nil && failoverRecord.IsZero() {
-		return PlannedFailoverReject, "InvalidFailoverState", fmt.Errorf(
+		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonInvalidFailoverState, fmt.Errorf(
 			"planned-failover: durable anti-flap state is invalid: %w", err)
 	}
 	if !failoverRecord.LastFailover.IsZero() {
 		elapsed := now.Sub(failoverRecord.LastFailover)
 		if elapsed < cooldown {
 			retryAfter := failoverRecord.LastFailover.Add(cooldown)
-			return PlannedFailoverReject, "CooldownActive", fmt.Errorf(
+			return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonCooldownActive, fmt.Errorf(
 				"planned-failover: anti-flap cooldown active (last failover at %s, cooldown %s, retry after %s)",
 				failoverRecord.LastFailover.UTC().Format(time.RFC3339),
 				cooldown, retryAfter.UTC().Format(time.RFC3339))
@@ -336,17 +352,16 @@ func effectiveDrainTimeout(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
 }
 
 // effectiveOnCooldown returns the spec.plannedFailover.onCooldown
-// policy, defaulting to "reject". An empty value or any unknown value
-// falls back to "reject" so a malformed spec does not accidentally
-// enable the defer path.
-func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) string {
-	if fg.Spec.PlannedFailover != nil {
-		switch fg.Spec.PlannedFailover.OnCooldown {
-		case PlannedFailoverOnCooldownDefer:
-			return PlannedFailoverOnCooldownDefer
-		}
+// policy, defaulting to Reject. An empty value or any unknown value
+// falls back to Reject so a malformed spec does not accidentally
+// enable the defer path. The comparison ignores case: releases before
+// v1beta1 wrote the lower-case `defer`, which CRD ratcheting keeps on an
+// object updated without touching the field.
+func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) v1alpha1.PlannedFailoverCooldownPolicy {
+	if fg.Spec.PlannedFailover != nil && strings.EqualFold(string(fg.Spec.PlannedFailover.OnCooldown), string(v1alpha1.PlannedFailoverCooldownDefer)) {
+		return v1alpha1.PlannedFailoverCooldownDefer
 	}
-	return PlannedFailoverOnCooldownReject
+	return v1alpha1.PlannedFailoverCooldownReject
 }
 
 // cooldownRetryAfter returns the earliest time after which the cooldown
@@ -360,26 +375,47 @@ func cooldownRetryAfter(fg *v1alpha1.MysqlFailoverGroup, now time.Time) time.Tim
 	return rec.LastFailover.Add(failoverCooldownFromSpec(fg))
 }
 
-// plannedFailoverFencesSourcePrimary reports whether syncPodLabels
-// should strip the primary role label on the currently-active site.
-// True during Draining, WaitingForLag, and Promoting — i.e. from the
-// moment we fence the source until the reconciler has persisted a new
-// status.activeSite. Resuming itself flips status.activeSite to the
-// target, so by the time the next reconcile runs, the "primary" label
-// naturally belongs to the new primary and no explicit unfencing step
-// is needed.
-func plannedFailoverFencesSourcePrimary(fg *v1alpha1.MysqlFailoverGroup) bool {
-	pf := fg.Status.PlannedFailover
+// plannedFailoverSettingsFor snapshots the run's settings at acceptance:
+// the annotation override, then spec, then the defaults. The Dragonfly
+// block is present iff Dragonfly is enabled, so the engine inserts the
+// Dragonfly phases exactly for the runs that were accepted with it.
+func plannedFailoverSettingsFor(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest) v1alpha1.PlannedFailoverSettings {
+	s := v1alpha1.PlannedFailoverSettings{
+		MaxLagWait:   metav1.Duration{Duration: effectiveMaxLagWait(fg, req)},
+		DrainTimeout: metav1.Duration{Duration: effectiveDrainTimeout(fg)},
+	}
+	if dragonflyEnabled(fg) {
+		s.Dragonfly = &v1alpha1.PlannedFailoverDragonflySettings{
+			MaxSyncWait:   metav1.Duration{Duration: effectiveDragonflyMaxSyncWait(fg)},
+			OnSyncTimeout: effectiveDragonflyOnSyncTimeout(fg),
+		}
+	}
+	return s
+}
+
+// plannedSettings returns the run's snapshotted settings, falling back to
+// the defaults for a block that carries none.
+func plannedSettings(pf *v1alpha1.PlannedFailoverStatus) v1alpha1.PlannedFailoverSettings {
+	s := v1alpha1.PlannedFailoverSettings{
+		MaxLagWait:   metav1.Duration{Duration: defaultPlannedFailoverMaxLagWait},
+		DrainTimeout: metav1.Duration{Duration: defaultPlannedFailoverDrainTimeout},
+	}
 	if pf == nil {
-		return false
+		return s
 	}
-	switch pf.Phase {
-	case v1alpha1.PlannedFailoverPhaseDraining,
-		v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting:
-		return true
+	if pf.Settings.MaxLagWait.Duration > 0 {
+		s.MaxLagWait = pf.Settings.MaxLagWait
 	}
-	return false
+	if pf.Settings.DrainTimeout.Duration > 0 {
+		s.DrainTimeout = pf.Settings.DrainTimeout
+	}
+	if d := pf.Settings.Dragonfly; d != nil {
+		dd := *d
+		if dd.MaxSyncWait.Duration <= 0 {
+			dd.MaxSyncWait.Duration = defaultDragonflySyncWait
+		}
+		dd.OnSyncTimeout = normalizeDragonflySyncTimeout(dd.OnSyncTimeout)
+		s.Dragonfly = &dd
+	}
+	return s
 }
