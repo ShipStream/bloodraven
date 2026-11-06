@@ -560,6 +560,7 @@ func (pl *plannedHarness) liveUpdates() []*updateActor {
 // predecessor guard is cleared, as retireManagerLocked's goroutine does.
 func (pl *plannedHarness) afterUpdates() {
 	ended := false
+	var endedOn []*controller.TopologyManager
 	kept := pl.updates[:0]
 	for _, a := range pl.updates {
 		if a.active() {
@@ -568,11 +569,20 @@ func (pl *plannedHarness) afterUpdates() {
 		}
 		if a.tm != pl.r.tm {
 			ended = true
+			endedOn = append(endedOn, a.tm)
 		}
 	}
 	pl.updates = kept
 	if !ended {
 		return
+	}
+	// As retireManagerLocked's goroutine after the retired manager's update
+	// workers exit: the handoff the update recorded there reaches the
+	// current manager (DST-1).
+	if cur := pl.r.tm; cur != nil {
+		for _, a := range endedOn {
+			controller.CarryRetiredFailoverRecord(cur, a)
+		}
 	}
 	for _, a := range pl.updates {
 		if a.tm != pl.r.tm && a.claimed() {

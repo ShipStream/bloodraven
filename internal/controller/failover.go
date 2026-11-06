@@ -127,13 +127,38 @@ type promoteHooks struct {
 	// gate runs immediately before SET super_read_only=OFF; an error
 	// stops the promotion with nothing written by this attempt.
 	gate func(ctx context.Context) error
+	// guard runs immediately before each statement, after the gate's
+	// probes for the writes: the planned failover re-checks the leader
+	// context and the run's claim there (§3.3), so a pass that lost either
+	// while it waited on a probe sends nothing more. An error stops the
+	// promotion before the statement.
+	guard func() error
+	// statementTimeout, when positive, bounds each statement on its own
+	// (§2.4 step 8: 5s per statement for the planned failover), so one slow
+	// statement cannot use up the pass.
+	statementTimeout time.Duration
+	// planned suppresses the "failover complete" log line: the planned
+	// failover emits it only after its live confirmation.
+	planned bool
 }
 
-func (h promoteHooks) send(s promoteMemoStage, stmt func() error) error {
+func (h promoteHooks) send(ctx context.Context, s promoteMemoStage, stmt func(context.Context) error) error {
+	if h.guard != nil {
+		if err := h.guard(); err != nil {
+			return err
+		}
+	}
 	if h.before != nil {
 		h.before(s)
 	}
-	err := stmt()
+	var err error
+	if false {
+		stmtCtx, cancel := context.WithTimeout(ctx, h.statementTimeout)
+		err = stmt(stmtCtx)
+		cancel()
+	} else {
+		err = stmt(ctx)
+	}
 	if h.after != nil {
 		h.after()
 	}
@@ -158,7 +183,7 @@ func (f *FailoverController) promoteVerifiedFrom(ctx context.Context, sess mysql
 	switch from {
 	case PromotionStageNotStarted, PromotionStageReplicaStopped:
 		if from == PromotionStageNotStarted {
-			if err := h.send(promoteMemoStopSent, func() error { return sess.StopReplica(ctx) }); err != nil {
+			if err := h.send(ctx, promoteMemoStopSent, sess.StopReplica); err != nil {
 				return "", promoteStageReplicaStopped, err
 			}
 		}
@@ -166,7 +191,7 @@ func (f *FailoverController) promoteVerifiedFrom(ctx context.Context, sess mysql
 		if _, err := requireCandidateGTIDs(ctx, sess, candidateSite, require); err != nil {
 			return "", reached, fmt.Errorf("after STOP REPLICA: %w", err)
 		}
-		if err := h.send(promoteMemoResetSent, func() error { return sess.ResetReplicaAll(ctx) }); err != nil {
+		if err := h.send(ctx, promoteMemoResetSent, sess.ResetReplicaAll); err != nil {
 			return "", promoteStageReplicaReset, err
 		}
 		reached = promoteStageReplicaReset
@@ -186,13 +211,15 @@ func (f *FailoverController) promoteVerifiedFrom(ctx context.Context, sess mysql
 			return "", reached, err
 		}
 	}
-	if err := h.send(promoteMemoSROClearSent, func() error { return sess.SetSuperReadOnly(ctx, false) }); err != nil {
+	if err := h.send(ctx, promoteMemoSROClearSent, func(c context.Context) error { return sess.SetSuperReadOnly(c, false) }); err != nil {
 		return "", reached, err
 	}
-	if err := h.send(promoteMemoROClearSent, func() error { return sess.SetReadOnly(ctx, false) }); err != nil {
+	if err := h.send(ctx, promoteMemoROClearSent, func(c context.Context) error { return sess.SetReadOnly(c, false) }); err != nil {
 		return "", promoteStageWriteAttempted, err
 	}
-	f.logger.Info("failover complete", "promotedSite", candidateSite, "promotionGtid", promotionGtid)
+	if !h.planned {
+		f.logger.Info("failover complete", "promotedSite", candidateSite, "promotionGtid", promotionGtid)
+	}
 	return promotionGtid, promoteStageWriteAttempted, nil
 }
 

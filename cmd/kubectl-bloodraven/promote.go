@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,8 +27,10 @@ Usage:
   kubectl bloodraven promote <group> <site> [flags]
 
 The operator drains writes on the current primary, waits for <site> to
-catch up on the fenced GTID set, and atomically promotes it. Status
-lands on status.plannedFailover.phase=Succeeded with transactionsLost=0.
+catch up on the fenced GTID set, and promotes it. Status lands on
+status.plannedFailover.phase=Succeeded with result.outcome=Succeeded. With
+--wait, a run the operator ended with the planned-failover-terminal
+annotation (status writes stalled) is reported from that annotation.
 
 Per-request override (defaults to spec.plannedFailover.maxLagWait):
   --max-lag-wait DURATION   override spec.plannedFailover.maxLagWait
@@ -205,8 +208,26 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 			}
 			lastPhase = phase
 		}
+		if outcome, reason, ok := plannedTerminalMarker(&fg); ok {
+			// The terminal marker ended the run while status writes were
+			// failing: status may still show a non-terminal phase.
+			if outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
+				fmt.Fprintln(stdout, "Planned failover succeeded (ended by the terminal marker after status writes stalled; warnings: StatusStalled).")
+				return nil
+			}
+			fmt.Fprintf(stderr, "Planned failover ended by the terminal marker after status writes stalled: outcome=%s reason=%s\n", outcome, reason)
+			return fmt.Errorf("planned failover failed: %s", plannedOutcomeReason(outcome, reason))
+		}
 		switch phase {
 		case v1alpha1.PlannedFailoverPhaseSucceeded:
+			if pf != nil && pf.Result != nil && len(pf.Result.Warnings) > 0 {
+				ws := make([]string, len(pf.Result.Warnings))
+				for i, w := range pf.Result.Warnings {
+					ws[i] = string(w)
+				}
+				fmt.Fprintf(stdout, "Planned failover succeeded (warnings: %s).\n", strings.Join(ws, ", "))
+				return nil
+			}
 			fmt.Fprintln(stdout, "Planned failover succeeded.")
 			return nil
 		case v1alpha1.PlannedFailoverPhaseFailed:

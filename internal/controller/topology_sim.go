@@ -251,3 +251,10 @@ func (tm *TopologyManager) RestorePlannedFailoverStateForSim(view *v1alpha1.Mysq
 	var r *TopologyManagerRunner // the restore reads nothing from the runner
 	r.restorePlannedFailoverState(tm, view, types.NamespacedName{Namespace: view.Namespace, Name: view.Name})
 }
+
+// PlannedOwnRecordDurableForSim reports whether fg's durable failover
+// record is the run pf's own, by §4.4's by-content rule (the DST-3 ruling's
+// durable-record half), evaluated at now.
+func PlannedOwnRecordDurableForSim(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) bool {
+	return plannedOwnRecordDurable(fg, pf, now)
+}

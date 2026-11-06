@@ -80,6 +80,7 @@ func (f *pfEnvTopology) PlannedClaimHeld(types.NamespacedName) bool {
 	defer f.mu.Unlock()
 	return f.held != ""
 }
+func (f *pfEnvTopology) CheckRunClaim(controller.PlannedRunRef) error { return nil }
 func (f *pfEnvTopology) Reprove(context.Context, controller.PlannedRunRef, *v1alpha1.MysqlFailoverGroup) (controller.ReproveResult, error) {
 	return controller.ReproveResult{OK: true}, nil
 }

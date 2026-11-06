@@ -47,6 +47,9 @@ type pfFakeTopology struct {
 	dns        func(ref PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error)
 	rollback   func(ref PlannedRunRef) (RollbackResult, error)
 	needsProof bool              // the next mutating call returns errReproveRequired
+	// probeUnguarded makes ProbeLag a plain read, as in production (the
+	// facade's ProbeLag needs no claim).
+	probeUnguarded bool
 	authority  *PlannedAuthority // ManagerAuthority's answer; nil: no manager
 	// onCtx, when set, sees the ctx of every ProbeLag and Promote call (the
 	// pass bound the engine applied).
@@ -197,6 +200,11 @@ func (f *pfFakeTopology) PlannedClaimHeld(types.NamespacedName) bool {
 	return f.heldRun != ""
 }
 
+func (f *pfFakeTopology) CheckRunClaim(ref PlannedRunRef) error {
+	f.note("checkClaim")
+	return f.guard(ref)
+}
+
 func (f *pfFakeTopology) Reprove(_ context.Context, ref PlannedRunRef, _ *v1alpha1.MysqlFailoverGroup) (ReproveResult, error) {
 	f.note("reprove")
 	f.mu.Lock()
@@ -245,8 +253,10 @@ func (f *pfFakeTopology) ProbeLag(ctx context.Context, ref PlannedRunRef, _ stri
 	if f.onCtx != nil {
 		f.onCtx("probe", ctx)
 	}
-	if err := f.guard(ref); err != nil {
-		return LagProbe{}, err
+	if !f.probeUnguarded {
+		if err := f.guard(ref); err != nil {
+			return LagProbe{}, err
+		}
 	}
 	f.note("probe")
 	if f.probe != nil {

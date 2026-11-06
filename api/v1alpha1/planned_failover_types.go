@@ -454,6 +454,12 @@ type PlannedFailoverPromotionRecord struct {
 	TargetServerUUID string `json:"targetServerUUID"`
 	// +optional
 	ConfirmedAt *metav1.Time `json:"confirmedAt,omitempty"`
+	// Warnings are the warnings the run had collected when its promotion
+	// was confirmed. The Publishing record carries them so that the
+	// terminal record keeps them when another process writes it.
+	// +optional
+	// +listType=set
+	Warnings []PlannedFailoverWarning `json:"warnings,omitempty"`
 }
 
 // PlannedFailoverDNSRecord records publishing the promoted target.

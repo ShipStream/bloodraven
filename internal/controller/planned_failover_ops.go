@@ -160,6 +160,11 @@ func (p *runnerPlannedTopology) ClaimPlannedFailover(ctx context.Context, nn typ
 // returns Granted when the slot holds the run, waits while another run or
 // conflicting work holds the sites, and otherwise hydrates the run's
 // claim with needsReprove from fg, the pass's uncached read.
+//
+// With no current manager it always returns Wait{ManagerAbsent}, after
+// hydrating an empty slot so the next manager is blocked from its first
+// poll: the run can send nothing, and the manager-absence deadline (§6.3)
+// must keep running rather than restart on a Granted pass.
 func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunRef, fg *v1alpha1.MysqlFailoverGroup) (PlannedClaimDecision, error) {
 	if l := p.leader(); l != nil && l.Err() != nil {
 		return PlannedClaimDecision{}, errLeaderLost
@@ -170,6 +175,15 @@ func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunR
 	}
 	snap := p.reg.Snapshot(ref.Group)
 	slot := snap.Slot
+	tm := snap.Current
+	if tm == nil {
+		// No other topology actor exists without a manager. An empty slot
+		// is filled now (no clock to read: the block's claimedAt is used).
+		if c, ok := hydratedRunClaim(pf, time.Time{}); ok && slot != nil {
+			slot.hydrate(c)
+		}
+		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerAbsent, "no topology manager is registered"), nil
+	}
 	if held, ok := slot.snapshot(); ok {
 		switch {
 		case held.mode == claimModeHold:
@@ -177,27 +191,13 @@ func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunR
 				"automatic failover is held after planned failover run %s", held.runID), nil
 		case held.runID != ref.RunID:
 			return claimDecisionWait(v1alpha1.PlannedFailoverWaitClaimHeld, "planned failover run %s holds the claim", held.runID), nil
-		case snap.Current == nil:
-			// The slot outlives the manager: without one the run can send
-			// nothing, and the manager-absence deadline (§6.3) must keep
-			// running rather than restart on every Granted pass.
-			return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerAbsent, "the claim is held; no topology manager is registered"), nil
 		default:
 			return claimDecisionGranted(&held), nil
 		}
 	}
-	c, ok := hydratedRunClaim(pf, time.Now())
+	c, ok := hydratedRunClaim(pf, tm.clock.Now())
 	if !ok {
 		return PlannedClaimDecision{}, errClaimLost
-	}
-	tm := snap.Current
-	if tm == nil {
-		// No other topology actor exists without a manager: hold the slot
-		// now so the next manager is blocked from its first poll.
-		if slot.hydrate(c) {
-			return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerAbsent, "claim hydrated; no topology manager is registered"), nil
-		}
-		return p.EnsureClaim(ctx, ref, fg)
 	}
 	for _, old := range snap.Retiring {
 		if old.changingSites() || old.orderedUpdateClaimed() {
@@ -532,7 +532,22 @@ func (p pooledIdentity) ReadGTIDSnapshot(ctx context.Context) (mysql.GTIDSnapsho
 // SET super_read_only=ON, read it back, snapshot the fenced set, then run
 // the post-fence proof. The fence is not transactional: nothing is undone
 // on error; the run's records and the rollback decide.
+//
+// A source that already reads read-only is never reported "nothing was
+// sent" before its super_read_only and @@server_uuid were read and §4.3's
+// attribution (this process's memo, or the intent's uuid) applied: the run's
+// own fence, set by an earlier attempt whose readback or Draining write was
+// lost, goes on to the post-fence proof. A failed identity read is a source
+// that did not answer (the loss window), never "nothing was sent".
 func (p *runnerPlannedTopology) Fence(ctx context.Context, ref PlannedRunRef, sourceServerUUID string) (FenceProof, error) {
+	proof, err := p.fence(ctx, ref, sourceServerUUID)
+	if m, ok := p.fenceMemoFor(ref.RunID); ok && m.sent {
+		proof.Sent = true
+	}
+	return proof, err
+}
+
+func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, sourceServerUUID string) (FenceProof, error) {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
 		return FenceProof{}, err
@@ -544,16 +559,29 @@ func (p *runnerPlannedTopology) Fence(ctx context.Context, ref PlannedRunRef, so
 	if src == nil {
 		return FenceProof{}, errSiteNotFound
 	}
-	// A re-run whose fence may already be in place (a lost Draining write,
-	// or a new process): super_read_only=ON is the run's only by §4.3's
-	// attribution rule, decided like ProveFence. The durable intent named
-	// sourceServerUUID before this call.
-	if id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql}); err == nil && id.superReadOnly {
-		intent := &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, SourceServerUUID: sourceServerUUID}
-		if p.fenceAttribution(ref.RunID, intent, id.uuid) == FenceUnattributed {
-			return FenceProof{Kind: FenceNotAttributable, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
+	intent := &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, SourceServerUUID: sourceServerUUID}
+	// attributed decides a source found already fenced by §4.3's rule.
+	attributed := func(id sourceIdentity) (FenceProof, bool) {
+		if !id.readOnly || !id.superReadOnly {
+			return FenceProof{}, false
 		}
-		return p.postFenceProof(ctx, tm, ref, id, p.fenceAttribution(ref.RunID, intent, id.uuid)), nil
+		by := p.fenceAttribution(ref.RunID, intent, id.uuid)
+		if by == FenceUnattributed {
+			return FenceProof{Kind: FenceNotAttributable, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, true
+		}
+		return p.postFenceProof(ctx, tm, ref, id, by), true
+	}
+	// A re-run whose fence may already be in place (a lost Draining write,
+	// or a new process). The durable intent named sourceServerUUID before
+	// this call.
+	id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
+	switch {
+	case err != nil && !errors.Is(err, mysql.ErrSessionUnsupported):
+		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+	case err == nil:
+		if proof, ok := attributed(id); ok {
+			return proof, nil
+		}
 	}
 	// §4.2: the source must still be the unique writable site.
 	probes := tm.plannedProbeSites(ctx)
@@ -572,8 +600,21 @@ func (p *runnerPlannedTopology) Fence(ctx context.Context, ref PlannedRunRef, so
 	}
 	v := classifyPlannedPeers(others)
 	switch {
-	case srcProbe.readOnly || len(v.writable) > 0:
-		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceWritable: !srcProbe.readOnly}, nil
+	case srcProbe.readOnly:
+		// Read-only since the identity read: decide by attribution before
+		// reporting that nothing was sent.
+		id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
+		if err != nil && !errors.Is(err, mysql.ErrSessionUnsupported) {
+			return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+		}
+		if err == nil {
+			if proof, ok := attributed(id); ok {
+				return proof, nil
+			}
+		}
+		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
+	case len(v.writable) > 0:
+		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceWritable: true}, nil
 	case len(v.unreadable) > 0:
 		// Strict evidence: an unreadable primary-candidate or dr-only
 		// peer may be a writable site the operator cannot see. Nothing
@@ -586,7 +627,7 @@ func (p *runnerPlannedTopology) Fence(ctx context.Context, ref PlannedRunRef, so
 		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
 	}
 	defer func() { _ = sess.Close() }()
-	id, err := readSourceIdentity(ctx, sess)
+	id, err = readSourceIdentity(ctx, sess)
 	if err != nil {
 		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
 	}
@@ -596,6 +637,9 @@ func (p *runnerPlannedTopology) Fence(ctx context.Context, ref PlannedRunRef, so
 		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged,
 			SourceWritable: !id.readOnly, SourceServerUUID: id.uuid}, nil
 	case id.readOnly:
+		if proof, ok := attributed(id); ok {
+			return proof, nil
+		}
 		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
 	}
 	if err := tm.requireRunClaim(p.leader(), ref, false); err != nil {
@@ -638,6 +682,14 @@ func (p *runnerPlannedTopology) postFenceProof(ctx context.Context, tm *Topology
 // FenceRetry with SourceWritable: the engine fences it again through Fence,
 // which re-proves authority first.
 func (p *runnerPlannedTopology) ProveFence(ctx context.Context, ref PlannedRunRef, fence v1alpha1.PlannedFailoverFenceRecord) (FenceProof, error) {
+	proof, err := p.proveFence(ctx, ref, fence)
+	if m, ok := p.fenceMemoFor(ref.RunID); ok && m.sent {
+		proof.Sent = true
+	}
+	return proof, err
+}
+
+func (p *runnerPlannedTopology) proveFence(ctx context.Context, ref PlannedRunRef, fence v1alpha1.PlannedFailoverFenceRecord) (FenceProof, error) {
 	if l := p.leader(); l != nil && l.Err() != nil {
 		return FenceProof{}, errLeaderLost
 	}
@@ -838,6 +890,15 @@ func (tm *TopologyManager) namePlannedTargetUnconfirmed(target string) {
 	defer tm.mu.Unlock()
 	tm.lastFailoverTarget = target
 	tm.statusWriteFailed = true
+	// The retry replays statusRetrySnapshot, which refreshes the failover
+	// record only after a topology-generation bump; a name-only target (no
+	// generation bump when read_only=OFF was never sent) must reach
+	// status.lastFailoverTarget all the same.
+	if tm.statusRetrySnapshot != nil {
+		snap := *tm.statusRetrySnapshot
+		snap.LastFailoverTarget = target
+		tm.statusRetrySnapshot = &snap
+	}
 }
 
 // NameFencedSource names the run's own fenced source for the topology
@@ -861,24 +922,59 @@ func (tm *TopologyManager) nameFencedSource(runID, source string) {
 	tm.logger.Info("planned failover: named fenced source for re-assert", "fg", tm.cfg.Name, "runId", runID, "site", source)
 }
 
+// CheckRunClaim is requireRunClaim for a side effect outside the facade.
+func (p *runnerPlannedTopology) CheckRunClaim(ref PlannedRunRef) error {
+	tm, err := p.manager(ref.Group)
+	if err != nil {
+		return err
+	}
+	return tm.requireRunClaim(p.leader(), ref, false)
+}
+
 // ---------- re-proof (§4.4) ----------
 
 // ownFailoverRecord reports whether the durable record rec is the run's
 // own (recordFailover flushed it before the Publishing write landed):
 // the run's target, not before promotion.intendedAt, carrying the fenced
-// set F as its watermark.
-func ownFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, rec FailoverRecordRef, pf *v1alpha1.PlannedFailoverStatus) bool {
+// set F as its watermark. The watermark is the one of the record
+// EffectiveFailoverRecord selected (§4.4 check 1), so a stale out-of-band
+// copy of an earlier failover never decides for a newer status record;
+// only when the selected copy carries none is the other copy used, and
+// only if it describes the same event.
+func ownFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, rec FailoverRecord, pf *v1alpha1.PlannedFailoverStatus) bool {
 	if pf.Promotion == nil || pf.Fence == nil || pf.Fence.GtidSet == nil || rec.LastFailoverTarget != pf.Target {
 		return false
 	}
 	if rec.LastFailover.Before(pf.Promotion.IntendedAt.UTC().Truncate(time.Second)) {
 		return false
 	}
-	watermark := fg.GetAnnotations()[PromotionGtidExecutedAnnotation]
+	watermark := rec.PromotionGtidExecuted
 	if watermark == "" {
-		watermark = fg.Status.PromotionGtidExecuted
+		// The selected copy carries none (the §5.3 size guard, or a status
+		// write that tied with the annotation but predates its watermark):
+		// the other copy of the same event, if it is one, carries it.
+		if st := FailoverRecordFromStatus(fg); st.sameEvent(rec) && st.PromotionGtidExecuted != "" {
+			watermark = st.PromotionGtidExecuted
+		} else if oob, err := FailoverRecordFromAnnotations(fg.GetAnnotations()); err == nil && oob.sameEvent(rec) {
+			watermark = oob.PromotionGtidExecuted
+		}
 	}
 	return sameGTIDText(watermark, *pf.Fence.GtidSet)
+}
+
+// runRecordDurable reports whether the run's own failover record
+// {confirmedAt, target, F} is the durable record of fg (read uncached):
+// the selected record is the same event and carries F.
+func runRecordDurable(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, confirmedAt time.Time, now time.Time) bool {
+	if fg == nil || pf == nil || confirmedAt.IsZero() {
+		return false
+	}
+	rec, _, err := EffectiveFailoverRecord(fg, now)
+	if err != nil && rec.IsZero() {
+		return false
+	}
+	want := FailoverRecord{LastFailover: confirmedAt.UTC().Truncate(time.Second), LastFailoverTarget: pf.Target}
+	return rec.sameEvent(want) && ownFailoverRecord(fg, rec, pf)
 }
 
 // sameGTIDText compares two GTID sets by value, falling back to the text.
@@ -920,6 +1016,11 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	if pf == nil || marked || pf.RunID != ref.RunID {
 		return ReproveResult{}, errClaimLost
 	}
+	if tm.getSite(ref.Source) == nil || tm.getSite(ref.Target) == nil {
+		// An endpoint was removed from the spec during the run: nothing
+		// can be re-proven, and the engine ends the run (G-M5).
+		return ReproveResult{}, errSiteNotFound
+	}
 	clear := func() { tm.plannedSlot.update(ref.RunID, func(c *plannedClaim) { c.needsReprove = false }) }
 
 	if pf.Phase == v1alpha1.PlannedFailoverPhaseRollingBack {
@@ -933,8 +1034,8 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	// Check 1: the durable record is the baseline, or the run's own.
 	var failed *v1alpha1.PlannedFailoverReason
 	recordChanged := false
-	cur, recErr := durableFailoverRecord(fg, tm.clock.Now())
-	if recErr != nil || !sameFailoverRecord(cur, failoverRecordRefFromAPI(pf.ClaimBaseline)) {
+	cur, _, recErr := EffectiveFailoverRecord(fg, tm.clock.Now())
+	if recErr != nil || !sameFailoverRecord(newFailoverRecordRef(cur.LastFailover, cur.LastFailoverTarget), failoverRecordRefFromAPI(pf.ClaimBaseline)) {
 		if recErr != nil || !ownFailoverRecord(fg, cur, pf) {
 			failed, recordChanged = reasonPtr(v1alpha1.PlannedFailoverReasonAuthorityChanged), true
 		}
@@ -945,6 +1046,10 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	if src := tm.getSite(ref.Source); src != nil && failed == nil && phaseAfterFencing(pf.Phase) {
 		id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 		switch {
+		case err != nil && pf.Phase != v1alpha1.PlannedFailoverPhasePromoting:
+			// One failed read is no evidence of a lost source: the engine
+			// applies the source-loss window (§6.2) before rolling back.
+			return ReproveResult{SourceUnreachable: true}, nil
 		case err != nil:
 			failed, lackOfEvidence = reasonPtr(v1alpha1.PlannedFailoverReasonSourceLost), true
 		case !id.superReadOnly || pf.Fence == nil || id.uuid != pf.Fence.SourceServerUUID:
@@ -959,9 +1064,11 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	}
 	if len(v.allUnreadable()) > 0 {
 		warnings = append(warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers)
-		if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && failed == nil {
-			lackOfEvidence = true
-		}
+	}
+	if len(v.unreadable) > 0 && pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && failed == nil {
+		// Only a promotable (primary-candidate or dr-only) peer is missing
+		// evidence; an unreadable reader is allowed by §4.1 and the gate.
+		lackOfEvidence = true
 	}
 
 	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
@@ -988,6 +1095,9 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 				// No transaction of the run committed: put the target back
 				// behind super_read_only and roll back.
 				if !live.superReadOnly {
+					if err := tm.requireRunClaim(p.leader(), ref, true); err != nil {
+						return ReproveResult{}, err
+					}
 					p.hooks.stmt(true, ref.Target, "super_read_only=ON")
 					_ = withMySQLSafetyTimeout(ctx, func(c context.Context) error { return tgt.mysql.SetSuperReadOnly(c, true) })
 					p.hooks.stmt(false, ref.Target, "super_read_only=ON")
@@ -1065,30 +1175,38 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	// The source as it is now.
 	id, idErr := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 	if idErr == nil && !id.readOnly {
-		tm.restorePlannedTargetChannel(ctx, p.hooks, ref, src, tgt, live, liveErr, F, fErr, &res)
+		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, &res)
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
 		return res, nil
 	}
 	peers := classifyPlannedPeers(tm.plannedProbeSites(ctx, ref.Source))
 	p.hooks.yield(YieldPeerProbeForSim)
-	if len(peers.writable) > 0 {
+	// Attribution is decided whenever the source answered, so every
+	// SourceLeftFenced end below carries FenceNotAttributable for a fence
+	// that is not the run's (a replaced pod fenced by someone else, say),
+	// and the topology manager is never told to lift it (§6.5).
+	unattributed := idErr == nil && p.fenceAttribution(ref.RunID, pf.Fence, id.uuid) == FenceUnattributed
+	leftFenced := func() (RollbackResult, error) {
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
+		if unattributed {
+			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable)
+		}
 		return res, nil
+	}
+	if len(peers.writable) > 0 {
+		return leftFenced()
 	}
 	if reason == v1alpha1.PlannedFailoverReasonSourceLost {
 		// §9 step 3: no unfence retries for a lost source.
-		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
-		return res, nil
+		return leftFenced()
 	}
 	if idErr != nil {
 		return res, nil // unreachable: retry until rollbackDeadline
 	}
-	if p.fenceAttribution(ref.RunID, pf.Fence, id.uuid) == FenceUnattributed {
-		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
-		res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable)
-		return res, nil
+	if unattributed {
+		return leftFenced()
 	}
-	tm.restorePlannedTargetChannel(ctx, p.hooks, ref, src, tgt, live, liveErr, F, fErr, &res)
+	tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, &res)
 
 	// Unfence on a pinned session to the attributed server.
 	sess, err := src.mysql.PinSession(ctx)
@@ -1135,8 +1253,9 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 // back from the source when it is read-only, has no channel and holds a
 // non-empty subset of F; restart a stopped channel; otherwise leave it for
 // clone or reclone with the warning TargetReplicationNotRestored.
-func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, hooks SimHooks, ref PlannedRunRef, src, tgt *siteTracker,
+func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, src, tgt *siteTracker,
 	live promotionLive, liveErr error, F mysql.GTIDSet, fErr error, res *RollbackResult) {
+	hooks := p.hooks
 	warn := func() {
 		if !slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
 			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored)
@@ -1150,6 +1269,10 @@ func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, hook
 		if live.repl.IORunning && live.repl.SQLRunning {
 			return
 		}
+		if tm.requireRunClaim(p.leader(), ref, false) != nil {
+			warn()
+			return
+		}
 		hooks.stmt(true, ref.Target, "START REPLICA")
 		err := tm.withReplicaStartGate(ref.Target, func() error {
 			return withMySQLSafetyTimeout(ctx, func(c context.Context) error { return tgt.mysql.StartReplica(c) })
@@ -1161,6 +1284,10 @@ func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, hook
 		return
 	}
 	if live.gtid.IsEmpty() || !live.gtid.Subtract(F).IsEmpty() || tm.bootstrapCfg.ReplUser == "" {
+		warn()
+		return
+	}
+	if tm.requireRunClaim(p.leader(), ref, false) != nil {
 		warn()
 		return
 	}
@@ -1335,7 +1462,7 @@ func (tm *TopologyManager) beginPlannedPromotion() {
 
 func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (PromoteOutcome, error) {
 	tgt := tm.getSite(ref.Target)
-	if tgt == nil {
+	if tgt == nil || tm.getSite(ref.Source) == nil {
 		return PromoteOutcome{}, errSiteNotFound
 	}
 	if pf.Promotion == nil || pf.Promotion.TargetServerUUID == "" {
@@ -1367,8 +1494,12 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 	if err != nil {
 		return unconfirmed(""), nil
 	}
+	_, haveMemo := p.promoteMemoFor(ref.RunID)
 	stage, verdict := classifyPromotionStage(live, F, U, p.memoProvesNoWrite(ref.RunID))
 	if verdict != nil {
+		if verdict.Kind == PromoteInconsistent && !haveMemo && live.readOnly && !strings.EqualFold(live.uuid, U) {
+			verdict.RollbackIfUnrecorded = tm.replacedTargetRollbackSafe(ctx, p, ref, pf, F)
+		}
 		return *verdict, nil
 	}
 	if stage != PromotionStageWritable {
@@ -1386,8 +1517,15 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 				gateWarnings = w
 				return err
 			},
+			// The claim and the leader are re-checked immediately before
+			// every statement, including the SRO clear right after the
+			// gate's probes (§3.3): a pass that lost either while it waited
+			// on a probe sends nothing more.
+			guard:            func() error { return tm.requireRunClaim(p.leader(), ref, false) },
+			statementTimeout: mysqlSafetyProbeTimeout,
+			planned:          true,
 		}
-		_, sent, err := tm.failover.promoteVerifiedFrom(ctx, sess, ref.Target, F, stage, hooks)
+		promotionGtid, sent, err := tm.failover.promoteVerifiedFrom(ctx, sess, ref.Target, F, stage, hooks)
 		var refusal *plannedGateRefusal
 		var divergent *DivergentCandidateError
 		mismatch := errors.Is(err, errCandidateGTIDMismatch) || errors.As(err, &divergent)
@@ -1395,9 +1533,13 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		case errors.As(err, &refusal):
 			refusal.out.Stage = stage
 			return refusal.out, nil
-		case errors.Is(err, errLeaderLost) || errors.Is(err, errClaimLost):
+		case errors.Is(err, errLeaderLost) || errors.Is(err, errClaimLost) || errors.Is(err, errSiteNotFound):
 			return PromoteOutcome{}, err
-		case mismatch && sent < promoteStageWriteAttempted && p.memoProvesNoWrite(ref.RunID):
+		case mismatch && sent < promoteStageWriteAttempted &&
+			(p.memoProvesNoWrite(ref.RunID) || stage == PromotionStageNotStarted || stage == PromotionStageReplicaStopped):
+			// A configured channel at classification (NotStarted,
+			// ReplicaStopped) proves no SRO clear ever ran on this server:
+			// RESET REPLICA ALL precedes it. Cross process too.
 			return PromoteOutcome{Kind: PromoteAborted, Stage: stage, Reason: v1alpha1.PlannedFailoverReasonTargetChanged,
 				TargetServerUUID: U, TargetReachable: true}, nil
 		case err != nil:
@@ -1410,6 +1552,12 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		if out.Kind == PromoteUnconfirmed {
 			out.TargetReachable = unconfirmed(stage).TargetReachable
 		}
+		if out.Kind == PromoteConfirmed {
+			// The documented completion line, only once the promotion is
+			// confirmed live (§7.3); a pass whose confirm finds a foreign
+			// writable peer or cannot read the target never emits it.
+			tm.failover.logger.Info("failover complete", "promotedSite", ref.Target, "promotionGtid", promotionGtid)
+		}
 		return out, nil
 	}
 	out := tm.confirmPlannedPromotion(ctx, p.hooks, ref, pf, sess, F, U)
@@ -1418,6 +1566,33 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		tm.deploymentPromotionExecuted(ref.Target)
 	}
 	return out, nil
+}
+
+// replacedTargetRollbackSafe is the facade's half of the DST-3 ruling for
+// a cross-process re-run that finds the target replaced: the source still
+// reads read-only under the run's attributable fence (the intent's
+// @@server_uuid with super_read_only=ON) and holds all of F, and no other
+// site reads writable. The engine adds the durable-record half.
+func (tm *TopologyManager) replacedTargetRollbackSafe(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef,
+	pf *v1alpha1.PlannedFailoverStatus, F mysql.GTIDSet) bool {
+	src := tm.getSite(ref.Source)
+	if src == nil {
+		return false
+	}
+	id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
+	if err != nil || !id.readOnly || !id.superReadOnly || p.fenceAttribution(ref.RunID, pf.Fence, id.uuid) == FenceUnattributed {
+		return false
+	}
+	have, err := mysql.ParseGTIDSet(id.gtid)
+	if err != nil || !have.Contains(F) {
+		return false
+	}
+	for _, pr := range tm.plannedProbeSites(ctx, ref.Source) {
+		if pr.err == nil && !pr.readOnly {
+			return false
+		}
+	}
+	return true
 }
 
 func mergeWarnings(a, b []v1alpha1.PlannedFailoverWarning) []v1alpha1.PlannedFailoverWarning {
@@ -1463,6 +1638,9 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 	// 3. The source (pooled: it is not the server being written).
 	var warnings []v1alpha1.PlannedFailoverWarning
 	src := tm.getSite(ref.Source)
+	if src == nil {
+		return nil, errSiteNotFound
+	}
 	id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 	switch {
 	case err != nil:

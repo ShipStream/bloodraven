@@ -528,12 +528,14 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// (the two guard against each other) and BEFORE syncPodLabels (so the
 	// source's role label is stripped on the same reconcile that records
 	// the fence). Each pass reads the group uncached, so operator restarts
-	// resume from the durable records. A pass for a run that is not active
-	// (a standing hold, a marker retry) only contributes a requeue and does
-	// not hold up the rest of the reconcile.
+	// resume from the durable records. Only an active block or a Run-mode
+	// claim returns early: a pass for a run that is not active (a standing
+	// automation hold, a marker retry) only contributes a requeue and does
+	// not hold up the rest of the reconcile, so backups, keyring and label
+	// work keep running for as long as a hold waits for its ack.
 	if pfRequeue, err := r.reconcilePlannedFailover(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile planned failover: %w", err)
-	} else if pfRequeue > 0 && (plannedFailoverActive(&fg) || r.plannedClaimHeld(req.NamespacedName)) {
+	} else if pfRequeue > 0 && (plannedFailoverActive(&fg) || r.plannedRunClaimHeld(req.NamespacedName)) {
 		if err := r.syncPodLabels(ctx, &fg); err != nil {
 			return ctrl.Result{}, fmt.Errorf("sync pod labels during planned failover: %w", err)
 		}

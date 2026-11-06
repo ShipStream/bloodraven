@@ -198,7 +198,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 
 	if fg.Status.PlannedFailover != nil {
 		fmt.Fprintln(out)
-		printPlannedFailover(out, fg.Status.PlannedFailover)
+		printPlannedFailover(out, fg)
 	}
 	if fg.Status.Restore != nil {
 		fmt.Fprintln(out)
@@ -223,11 +223,15 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	return nil
 }
 
-func printPlannedFailover(out io.Writer, pf *v1alpha1.PlannedFailoverStatus) {
+func printPlannedFailover(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
+	pf := fg.Status.PlannedFailover
 	fmt.Fprintln(out, "Planned failover:")
 	fmt.Fprintf(out, "  Phase: %s\n", emptyDash(string(pf.Phase)))
 	if pf.RunID != "" {
 		fmt.Fprintf(out, "  Run: %s (revision %d)\n", pf.RunID, pf.Revision)
+	}
+	if outcome, reason, ok := plannedTerminalMarker(fg); ok {
+		fmt.Fprintf(out, "  Ended by terminal marker: %s (status writes stalled)\n", plannedOutcomeReason(outcome, reason))
 	}
 	if pf.Source != "" || pf.Target != "" {
 		fmt.Fprintf(out, "  Source -> Target: %s -> %s\n", emptyDash(pf.Source), emptyDash(pf.Target))

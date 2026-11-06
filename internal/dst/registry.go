@@ -113,6 +113,11 @@ func (g *simRegistry) LeaderContext() context.Context { return g.leaderCtx }
 func (g *simRegistry) register(tm *controller.TopologyManager, w controller.ManagerWiring) {
 	g.mu.Lock()
 	w.Slot = g.slot
+	// As the runner's registerManagerWith: the retiring managers' records
+	// are carried into the new one (DST-1).
+	for _, rm := range g.retiring {
+		w.Predecessors = append(w.Predecessors, rm.tm)
+	}
 	if len(g.retiring) > 0 {
 		for _, rm := range g.retiring {
 			if rm.updateInFlight != nil && rm.updateInFlight() {
@@ -192,8 +197,7 @@ func (g *simRegistry) setAbsent(n int) {
 // window and counts the window down; managers past it are dropped.
 func (g *simRegistry) retiringToPoll() []*controller.TopologyManager {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	var out []*controller.TopologyManager
+	var out, dropped []*controller.TopologyManager
 	kept := g.retiring[:0]
 	for _, rm := range g.retiring {
 		if rm.pollsLeft > 0 {
@@ -202,9 +206,19 @@ func (g *simRegistry) retiringToPoll() []*controller.TopologyManager {
 		}
 		if rm.pollsLeft > 0 || (rm.updateInFlight != nil && rm.updateInFlight()) {
 			kept = append(kept, rm)
+		} else {
+			dropped = append(dropped, rm.tm)
 		}
 	}
 	g.retiring = kept
+	cur := g.current
+	g.mu.Unlock()
+	// As retireManagerLocked's goroutine once the retired manager's Run
+	// and update workers have ended: its record reaches the current
+	// manager (DST-1).
+	for _, old := range dropped {
+		controller.CarryRetiredFailoverRecord(cur, old)
+	}
 	return out
 }
 

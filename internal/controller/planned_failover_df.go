@@ -106,9 +106,48 @@ type plannedDragonflyOps interface {
 	// Takeover promotes the target under the group's Dragonfly gate: strip
 	// the source traffic label, REPLTAKEOVER, relabel. A target already
 	// holding role:master is reported Succeeded without a second
-	// REPLTAKEOVER. errDragonflyGateBusy: nothing was attempted.
-	Takeover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (plannedTakeoverResult, error)
+	// REPLTAKEOVER. errDragonflyGateBusy: nothing was attempted. guard is
+	// the run's claim check (§3.3); Takeover calls it immediately before
+	// the label strip and again before REPLTAKEOVER, and returns its error
+	// (after restoring a stripped label) when it fails.
+	Takeover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, guard func() error) (plannedTakeoverResult, error)
 }
+
+// plannedDragonflyTakeoverSlack is the REPLTAKEOVER allowance beyond
+// maxSyncWait (§6.2: maxSyncWait + 12s).
+const plannedDragonflyTakeoverSlack = 12 * time.Second
+
+// plannedDragonflyGateAllowance is how long PromotingDragonfly may wait for
+// the group's Dragonfly gate across passes (§6.2: about 40s).
+const plannedDragonflyGateAllowance = 40 * time.Second
+
+// plannedDragonflyMaxSyncWait is the run's snapshotted Dragonfly sync
+// budget.
+func plannedDragonflyMaxSyncWait(pf *v1alpha1.PlannedFailoverStatus) time.Duration {
+	if d := plannedSettings(pf).Dragonfly; d != nil && d.MaxSyncWait.Duration > 0 {
+		return d.MaxSyncWait.Duration
+	}
+	return defaultDragonflySyncWait
+}
+
+// plannedDragonflyTakeoverDeadline bounds PromotingDragonfly from
+// takeover.intendedAt (§6.2): the gate allowance plus REPLTAKEOVER's
+// maxSyncWait + 12s. Past it the takeover is treated as failed and the
+// run's onSyncTimeout policy applies.
+func plannedDragonflyTakeoverDeadline(pf *v1alpha1.PlannedFailoverStatus) time.Duration {
+	return plannedDragonflyGateAllowance + plannedDragonflyMaxSyncWait(pf) + plannedDragonflyTakeoverSlack
+}
+
+// plannedDragonflyPassBound is a PromotingDragonfly pass's wall-time bound:
+// the gate wait, REPLTAKEOVER (maxSyncWait + 12s) and one ordinary write
+// budget for the result write.
+func plannedDragonflyPassBound(pf *v1alpha1.PlannedFailoverStatus) time.Duration {
+	return defaultDragonflyGateWait + plannedDragonflyMaxSyncWait(pf) + plannedDragonflyTakeoverSlack + plannedPassOrdinary
+}
+
+// plannedDragonflyCleanupBudget bounds the detached label restore after a
+// failed takeover.
+const plannedDragonflyCleanupBudget = 10 * time.Second
 
 // plannedDragonflyGateWaitMessage is status.plannedFailover.dragonfly.message
 // while the Dragonfly phase waits for the group's Dragonfly gate.
@@ -283,12 +322,35 @@ func (e *PlannedFailoverEngine) dragonflyTakeoverStep(ctx context.Context, fg *v
 		// The takeover's result is durable; only the Promoting intent is missing.
 		return e.enterPromoting(ctx, fg, pf, ref, func(next *v1alpha1.PlannedFailoverStatus) {})
 	}
-	res, err := e.dragonfly.Takeover(ctx, fg, pf)
-	if errors.Is(err, errDragonflyGateBusy) {
-		return e.noteDragonflyGateWait(ctx, fg, pf)
+	// The takeover changes roles: it runs only under a re-proven claim, with
+	// the leader context alive (§3.3). A claim hydrated after a restart
+	// re-proves authority first (errReproveRequired), so Dragonfly never
+	// moves to the target after MySQL authority moved elsewhere.
+	if err := e.topo.CheckRunClaim(ref); err != nil {
+		if d, ferr, handled := e.facadeErr(ctx, fg, pf, err); handled {
+			return d, ferr
+		}
+		return plannedRequeueBackoff, nil
 	}
-	if errors.Is(err, errPlannedBlockMoved) {
-		return plannedRequeuePoll, nil
+	var res plannedTakeoverResult
+	var err error
+	if !e.clk.Now().Before(tk.IntendedAt.Add(plannedDragonflyTakeoverDeadline(pf))) {
+		// §6.2: the takeover (gate waits included) did not finish within its
+		// budget from the intent; apply the run's onSyncTimeout policy as
+		// for a failed takeover rather than retrying with the source fenced.
+		res.Why = fmt.Sprintf("the takeover did not finish within %s of its intent", plannedDragonflyTakeoverDeadline(pf))
+	} else {
+		guard := func() error { return e.topo.CheckRunClaim(ref) }
+		res, err = e.dragonfly.Takeover(ctx, fg, pf, guard)
+		if errors.Is(err, errDragonflyGateBusy) {
+			return e.noteDragonflyGateWait(ctx, fg, pf)
+		}
+		if errors.Is(err, errPlannedBlockMoved) {
+			return plannedRequeuePoll, nil
+		}
+		if d, ferr, handled := e.facadeErr(ctx, fg, pf, err); handled {
+			return d, ferr
+		}
 	}
 	now := metav1.NewTime(e.clk.Now())
 	if err == nil && res.Succeeded {
@@ -417,7 +479,11 @@ func (o reconcilerDragonflyOps) TargetSyncReady(ctx context.Context, fg *v1alpha
 //     recreate its pod.
 //
 // On failure the source's traffic label is restored before returning.
-func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (plannedTakeoverResult, error) {
+func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+	guard func() error) (plannedTakeoverResult, error) {
+	if guard == nil {
+		guard = func() error { return nil }
+	}
 	r := o.r
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	// Own the group's Dragonfly gate. The Dragonfly manager yields at its
@@ -446,6 +512,12 @@ func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.Mysql
 	if r.Recorder != nil {
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
 			"promoting Dragonfly target %q via REPLTAKEOVER", pf.Target)
+	}
+	// The gate wait and the fresh read above may have taken seconds: the
+	// claim is checked again immediately before the first role-changing
+	// step.
+	if err := guard(); err != nil {
+		return plannedTakeoverResult{}, err
 	}
 	if pf.Source != "" {
 		if err := r.setDragonflyTrafficOnSite(ctx, fg, pf.Source, false); err != nil {
@@ -480,6 +552,11 @@ func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.Mysql
 			return plannedTakeoverResult{Why: why}, nil
 		}
 	}
+	if err := guard(); err != nil {
+		_ = conn.Close()
+		o.restoreDetached(ctx, fg, pf)
+		return plannedTakeoverResult{}, err
+	}
 	if err := conn.ReplTakeover(ctx, timeout); err != nil {
 		_ = conn.Close()
 		why := fmt.Sprintf("REPLTAKEOVER: %v", err)
@@ -501,13 +578,23 @@ func (o reconcilerDragonflyOps) Takeover(ctx context.Context, fg *v1alpha1.Mysql
 }
 
 // fail restores the source's traffic label after a failed takeover so the
-// active Service keeps an endpoint, and reports the failure.
+// active Service keeps an endpoint, and reports the failure. The restore
+// runs on a detached, bounded context: a takeover that used up the pass
+// (REPLTAKEOVER clamps to it) must still put the label back.
 func (o reconcilerDragonflyOps) fail(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, why string) {
-	o.r.bestEffortRestoreSourceTraffic(ctx, fg, pf.Source)
+	o.restoreDetached(ctx, fg, pf)
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, pf.Target, "failed").Inc()
 	if o.r.Recorder != nil {
 		o.r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed, "%s", why)
 	}
+}
+
+// restoreDetached restores the source's traffic label on a detached
+// context bounded by plannedDragonflyCleanupBudget.
+func (o reconcilerDragonflyOps) restoreDetached(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plannedDragonflyCleanupBudget)
+	defer cancel()
+	o.r.bestEffortRestoreSourceTraffic(cctx, fg, pf.Source)
 }
 
 // finishPromotion relabels the target as master and demotes the source

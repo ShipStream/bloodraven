@@ -121,6 +121,12 @@ type TopologyManagerRunner struct {
 	// A slot is removed only when its CR is deleted and no manager,
 	// current or retiring, remains.
 	plannedClaims map[types.NamespacedName]*PlannedClaimSlot
+	// retiredFailover is the newest failover record a retired manager of
+	// each group held when it last stopped (DST-1). A replacement registered
+	// after the retired manager left retiring still receives it; the
+	// timestamp-monotonic carry makes a stale entry harmless. Guarded by mu;
+	// removed with the group's claim slot.
+	retiredFailover map[types.NamespacedName]FailoverRecord
 	// planned is the process's planned-failover topology facade, built on
 	// first use (see PlannedTopology). Guarded by mu.
 	planned *runnerPlannedTopology
@@ -600,6 +606,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	for nn := range r.plannedClaims {
 		if _, ok := seen[nn]; !ok && r.managers[nn] == nil && len(r.retiring[nn]) == 0 {
 			delete(r.plannedClaims, nn)
+			delete(r.retiredFailover, nn)
 		}
 	}
 	r.mu.Unlock()
@@ -1272,16 +1279,25 @@ func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt 
 		r.retiring = make(map[types.NamespacedName][]*managedTopology)
 	}
 	r.retiring[nn] = append(r.retiring[nn], mt)
+	r.stashRetiredFailoverLocked(nn, mt.tm)
 	// A retired manager adds no update worker, so the first wait ends when
 	// the last one exits, whether or not its Run has returned; that
 	// releases the replacement's predecessor guard. The entry itself stays
 	// until Run has returned too, so rotation admission still sees a
 	// promotion the old Run may be finishing (mutationInFlight).
+	//
+	// An ordered update that finished on the retired manager recorded its
+	// handoff there only; the current manager receives that record after
+	// the workers exit, and again once Run has returned (DST-1).
 	go func() {
 		mt.tm.waitUpdateWorkers()
 		r.mu.Lock()
-		if cur := r.managers[nn]; cur != nil && !r.retiringUpdateInFlightLocked(nn) {
-			cur.tm.setPredecessorUpdateInFlight(false)
+		r.stashRetiredFailoverLocked(nn, mt.tm)
+		if cur := r.managers[nn]; cur != nil {
+			CarryRetiredFailoverRecord(cur.tm, mt.tm)
+			if !r.retiringUpdateInFlightLocked(nn) {
+				cur.tm.setPredecessorUpdateInFlight(false)
+			}
 		}
 		r.mu.Unlock()
 		if mt.done != nil {
@@ -1289,6 +1305,10 @@ func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt 
 		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		r.stashRetiredFailoverLocked(nn, mt.tm)
+		if cur := r.managers[nn]; cur != nil {
+			CarryRetiredFailoverRecord(cur.tm, mt.tm)
+		}
 		r.retiring[nn] = slices.DeleteFunc(r.retiring[nn], func(m *managedTopology) bool { return m == mt })
 		if len(r.retiring[nn]) == 0 {
 			delete(r.retiring, nn)
@@ -1326,6 +1346,12 @@ func (r *TopologyManagerRunner) registerManagerWith(nn types.NamespacedName, vie
 	if len(r.retiring[nn]) > 0 {
 		w.RetiringBusy = func() bool { return r.retiringChangingSites(nn) }
 	}
+	for _, old := range r.retiring[nn] {
+		w.Predecessors = append(w.Predecessors, old.tm)
+	}
+	if rec, ok := r.retiredFailover[nn]; ok {
+		w.RetiredFailover = &rec
+	}
 	if view != nil {
 		w.HoldFrom = plannedHoldFrom(view)
 		if plannedFailoverOwnsSites(view) {
@@ -1334,6 +1360,22 @@ func (r *TopologyManagerRunner) registerManagerWith(nn types.NamespacedName, vie
 	}
 	WireRegisteredManager(mt.tm, w)
 	r.managers[nn] = mt
+}
+
+// stashRetiredFailoverLocked keeps the newer of nn's stashed record and
+// tm's in-memory failover record. Caller holds r.mu.
+func (r *TopologyManagerRunner) stashRetiredFailoverLocked(nn types.NamespacedName, tm *TopologyManager) {
+	rec, ok := tm.failoverRecordSnapshot()
+	if !ok {
+		return
+	}
+	if r.retiredFailover == nil {
+		r.retiredFailover = make(map[types.NamespacedName]FailoverRecord)
+	}
+	if cur, ok := r.retiredFailover[nn]; ok && !rec.LastFailover.After(cur.LastFailover) {
+		return
+	}
+	r.retiredFailover[nn] = rec
 }
 
 // retiringChangingSites reports whether a retiring manager of nn is still

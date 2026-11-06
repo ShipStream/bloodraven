@@ -144,20 +144,14 @@ func TestDeterminism_Planned(t *testing.T) {
 //     combines a status outage with operator restarts, and when the fault
 //     stream denies the out-of-band store over the same restarts, nothing
 //     could carry the cooldown.
-//   - AntiFlapStateLost(replacement), CooldownViolated(replacement),
-//     WedgedNoPrimary(replacement): the open finding DST-1 (README, Known
-//     finding classes): an ordered update's record
-//     made on, or not yet carried to status by, a manager that is then
-//     replaced is lost while the out-of-band store is down.
+//
+// DST-1 (a retiring manager's record not carried into its replacement:
+// CooldownViolated/AntiFlapStateLost/WedgedNoPrimary(replacement)) and
+// DST-4 (DualWritableUnresolved(confirmedClaim): a confirmed run's claim
+// held through a stalled Publishing write) are fixed and no longer allowed;
+// both are pinned in test/component.
 var plannedAllowedClasses = map[string]bool{
 	"CooldownViolated(restart+stateLost)": true,
-	"AntiFlapStateLost(replacement)":      true,
-	"CooldownViolated(replacement)":       true,
-	"WedgedNoPrimary(replacement)":        true,
-	// DST-4: a confirmed run's claim, held through a stalled Publishing
-	// write, blocks the manager's fence of a site an external writer made
-	// writable after the confirm.
-	"DualWritableUnresolved(confirmedClaim)": true,
 }
 
 // allowedFingerprint reports whether every class of fp is allowed. Classes

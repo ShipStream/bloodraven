@@ -43,6 +43,10 @@ type opsMySQL struct {
 	stmts    []string
 	// beforeSRO runs (without mu) just before SET super_read_only=OFF.
 	beforeSRO func()
+	// sroReadErr, when set, fails SELECT @@super_read_only only (a loaded
+	// server answering the single read_only probe but timing out on the
+	// identity read).
+	sroReadErr error
 }
 
 func (m *opsMySQL) log(stmt string) error {
@@ -74,6 +78,9 @@ func (m *opsMySQL) CheckReadOnly(context.Context) (bool, error) {
 func (m *opsMySQL) CheckSuperReadOnly(context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.sroReadErr != nil {
+		return false, m.sroReadErr
+	}
 	return m.sro, m.read()
 }
 func (m *opsMySQL) ReadGTIDSnapshot(context.Context) (mysql.GTIDSnapshot, error) {

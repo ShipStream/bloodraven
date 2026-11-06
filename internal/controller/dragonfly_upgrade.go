@@ -336,8 +336,12 @@ func dragonflyUpgradeSuperseded(fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.D
 func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeSupersededByMySQL(fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus) (why, active string) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if r.Runner != nil {
-		if site, ok := r.Runner.ActiveSite(nn); ok {
-			if site != "" && site != cur.ActiveSite {
+		// A registered manager that names a site decides. One that names
+		// none yet (it has not polled since a restart) falls through to the
+		// durable record, which carries an emergency failover recorded
+		// before the restart (§8.3).
+		if site, ok := r.Runner.ActiveSite(nn); ok && site != "" {
+			if site != cur.ActiveSite {
 				return fmt.Sprintf("MySQL failed over to %q during the upgrade", site), site
 			}
 			return "", ""

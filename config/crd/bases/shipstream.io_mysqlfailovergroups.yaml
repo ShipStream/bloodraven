@@ -7557,6 +7557,25 @@ spec:
                           session before the first promotion statement.
                         minLength: 1
                         type: string
+                      warnings:
+                        description: |-
+                          Warnings are the warnings the run had collected when its promotion
+                          was confirmed. The Publishing record carries them so that the
+                          terminal record keeps them when another process writes it.
+                        items:
+                          description: PlannedFailoverWarning qualifies a terminal
+                            outcome (result.warnings).
+                          enum:
+                          - DNSUpdateFailed
+                          - DragonflySessionsLost
+                          - TargetReplicationNotRestored
+                          - UnreachablePeers
+                          - FenceNotAttributable
+                          - StatusStalled
+                          - SourceReplaced
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
                     required:
                     - intendedAt
                     - state

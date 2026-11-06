@@ -187,11 +187,16 @@ func (s *PlannedClaimSlot) release(runID string, why ClaimReleaseReason) bool {
 
 // toHold switches runID's claim, in either mode, to a hold. It also
 // installs a hold for runID in an empty slot (a marker that landed after
-// the claim was gone): the hold must be in force either way.
+// the claim was gone): the hold must be in force either way. It returns
+// false, recording nothing, when the slot already holds runID's hold: a
+// standing hold is re-asserted on every pass and must not grow the release
+// notes or repeat the log line.
 func (s *PlannedClaimSlot) toHold(runID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
+	case s.held != nil && s.held.runID == runID && s.held.mode == claimModeHold:
+		return false
 	case s.held == nil:
 		s.held = &plannedClaim{mode: claimModeHold, runID: runID}
 	case s.held.runID != runID:
@@ -455,6 +460,16 @@ func fillWireRegisteredManager(tm *TopologyManager, w ManagerWiring) {
 	if w.RetiringUpdateInFlight {
 		tm.setPredecessorUpdateInFlight(true)
 	}
+	// DST-1: a record a predecessor of this process made (and may not have
+	// made durable) reaches the new manager before its first poll. No lock
+	// of tm is held here: each carry takes the predecessor's lock, then
+	// tm's, never both.
+	if w.RetiredFailover != nil {
+		tm.carryFailoverRecord(*w.RetiredFailover)
+	}
+	for _, old := range w.Predecessors {
+		CarryRetiredFailoverRecord(tm, old)
+	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if w.RetiringBusy != nil {
@@ -481,12 +496,86 @@ func fillWireRegisteredManager(tm *TopologyManager, w ManagerWiring) {
 	}
 	// The run recorded its promotion into an earlier generation of this
 	// process; bring it into this one. The watermark always comes from
-	// the run's uncached fence.gtidSet.
-	watermark := ""
+	// the run's uncached fence.gtidSet. Without it (the uncached read
+	// failed) nothing is applied: moving lastFailover forward beside the
+	// old watermark would let a later equal-second write keep the stale
+	// one (OPEN-2). The predecessor's own record was carried above, and
+	// the engine records the run into this manager again.
 	if pf := w.HydrateFrom; pf != nil && pf.RunID == held.runID && pf.Fence != nil && pf.Fence.GtidSet != nil {
-		watermark = *pf.Fence.GtidSet
+		tm.applyPlannedPromotionLocked(held.promotion.confirmedAt, held.target, *pf.Fence.GtidSet)
 	}
-	tm.applyPlannedPromotionLocked(held.promotion.confirmedAt, held.target, watermark)
+}
+
+// CarryRetiredFailoverRecord brings old's in-memory failover record into
+// tm under the timestamp-monotonic rule (DST-1): a retiring manager's
+// ordered-update handoff, recorded only in its memory and dropped from
+// status (a replaced manager's status writes are discarded) and from the
+// out-of-band store (its flush retries stop with its Run), would otherwise
+// be lost to the replacement, which could then promote inside the cooldown
+// or name the wrong last failover target. It takes old's lock, then tm's,
+// never both; the runner calls it at registration and again after the
+// retired manager's update workers exit.
+func CarryRetiredFailoverRecord(tm, old *TopologyManager) bool {
+	if tm == nil || old == nil || tm == old {
+		return false
+	}
+	rec, ok := old.failoverRecordSnapshot()
+	if !ok {
+		return false
+	}
+	return tm.carryFailoverRecord(rec)
+}
+
+// failoverRecordSnapshot is tm's in-memory failover triple.
+func (tm *TopologyManager) failoverRecordSnapshot() (FailoverRecord, bool) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if tm.lastFailover.IsZero() || tm.lastFailoverTarget == "" {
+		return FailoverRecord{}, false
+	}
+	return FailoverRecord{LastFailover: tm.lastFailover, LastFailoverTarget: tm.lastFailoverTarget,
+		PromotionGtidExecuted: tm.promotionGtidExecuted}, true
+}
+
+// carryFailoverRecord applies rec iff it is strictly newer than tm's record
+// (second precision; an equal one is the same event or loses the tie, as
+// in applyPlannedPromotionLocked), and marks it for tm's next status write
+// and out-of-band flush, which persist it.
+func (tm *TopologyManager) carryFailoverRecord(rec FailoverRecord) bool {
+	if rec.LastFailover.IsZero() || rec.LastFailoverTarget == "" {
+		return false
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	at := rec.LastFailover.UTC().Truncate(time.Second)
+	if !tm.lastFailover.IsZero() && !at.After(tm.lastFailover.UTC().Truncate(time.Second)) {
+		return false
+	}
+	tm.lastFailover, tm.lastFailoverTarget = rec.LastFailover, rec.LastFailoverTarget
+	tm.lastFailoverLocal = true
+	tm.lastActiveSite, tm.lastActiveSiteNamed = rec.LastFailoverTarget, true
+	if rec.PromotionGtidExecuted != "" {
+		tm.promotionGtidExecuted = rec.PromotionGtidExecuted
+		tm.groupHasData = true
+	}
+	tm.deploymentAuthorityLocked(rec.LastFailoverTarget)
+	if tm.desiredFailoverState == nil || tm.desiredFailoverState.LastFailover.Before(rec.LastFailover) {
+		cp := rec
+		tm.desiredFailoverState = &cp
+		tm.failoverStateDirty = true
+	}
+	// The next poll writes status even with nothing else changed, and a
+	// replayed retry snapshot carries the record.
+	tm.statusWriteFailed = true
+	if tm.statusRetrySnapshot != nil {
+		snap := *tm.statusRetrySnapshot
+		snap.LastFailover, snap.LastFailoverTarget, snap.PromotionGtidExecuted =
+			tm.lastFailover, tm.lastFailoverTarget, tm.promotionGtidExecuted
+		tm.statusRetrySnapshot = &snap
+	}
+	tm.logger.Info("carried a retired topology manager's failover record", "fg", tm.cfg.Name,
+		"target", rec.LastFailoverTarget, "lastFailover", rec.LastFailover)
+	return true
 }
 
 // applyPlannedPromotionLocked brings a planned promotion recorded

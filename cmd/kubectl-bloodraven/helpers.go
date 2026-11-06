@@ -119,11 +119,8 @@ func plannedFailoverSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 	}
 	// A terminal marker that names the run ends it whatever the phase says
 	// (the operator could not write status).
-	if m := fg.Annotations[brcontroller.PlannedFailoverTerminalAnnotation]; pf.RunID != "" && strings.HasPrefix(m, pf.RunID+"/") {
-		parts := strings.SplitN(m, "/", 3)
-		if len(parts) == 3 {
-			return fmt.Sprintf("Ended(%s)%s", plannedOutcomeReason(v1alpha1.PlannedFailoverOutcome(parts[1]), v1alpha1.PlannedFailoverReason(parts[2])), held)
-		}
+	if outcome, reason, ok := plannedTerminalMarker(fg); ok {
+		return fmt.Sprintf("Ended(%s)%s", plannedOutcomeReason(outcome, reason), held)
 	}
 	if r := pf.Result; r != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
 		return fmt.Sprintf("%s(%s)%s", pf.Phase, plannedOutcomeReason(r.Outcome, r.Reason), held)
@@ -135,6 +132,26 @@ func plannedFailoverSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 		return fmt.Sprintf("%s(%s)%s", pf.Phase, a.DeferReason, held)
 	}
 	return string(pf.Phase) + held
+}
+
+// plannedTerminalMarker returns the outcome and reason of the terminal
+// marker when it names the group's current run: the run ended, whatever
+// status.plannedFailover.phase still says (the operator could not write
+// status, §6.4).
+func plannedTerminalMarker(fg *v1alpha1.MysqlFailoverGroup) (v1alpha1.PlannedFailoverOutcome, v1alpha1.PlannedFailoverReason, bool) {
+	pf := fg.Status.PlannedFailover
+	if pf == nil || pf.RunID == "" {
+		return "", "", false
+	}
+	m := fg.Annotations[brcontroller.PlannedFailoverTerminalAnnotation]
+	if !strings.HasPrefix(m, pf.RunID+"/") {
+		return "", "", false
+	}
+	parts := strings.SplitN(m, "/", 3)
+	if len(parts) != 3 || parts[1] == "" {
+		return "", "", false
+	}
+	return v1alpha1.PlannedFailoverOutcome(parts[1]), v1alpha1.PlannedFailoverReason(parts[2]), true
 }
 
 // plannedOutcomeReason renders a terminal result: the reason alone for a

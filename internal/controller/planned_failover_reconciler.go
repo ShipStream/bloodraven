@@ -76,6 +76,13 @@ func (r *MysqlFailoverGroupReconciler) plannedClaimHeld(nn types.NamespacedName)
 	return r.Runner != nil && r.Runner.PlannedClaimHeld(nn)
 }
 
+// plannedRunClaimHeld reports whether the group's slot holds a Run-mode
+// claim (a run or its provisional grant); a hold does not count.
+func (r *MysqlFailoverGroupReconciler) plannedRunClaimHeld(nn types.NamespacedName) bool {
+	_, ok := r.plannedFailoverEngine().topo.HeldRunClaim(nn)
+	return ok
+}
+
 // plannedFailoverEngine returns the reconciler's engine, built on first use.
 // The engine is long-lived: its memo (what this process sent) must survive
 // between passes.

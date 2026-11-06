@@ -104,6 +104,13 @@ type runObs struct {
 	promotingGen int
 	targetUUID   string // promotion.targetServerUUID
 	zombieFor    int    // engine passes the slot has held this terminal run
+	// tailReleased: the confirmed tail released the claim (why=publishing)
+	// while the block still read Promoting (the DST-4 ruling); the block
+	// owns the sites durably without a live claim until Publishing commits.
+	// Only in the process that released it: a restart hydrates the claim
+	// again (tailReleasedGen is that process's generation).
+	tailReleased    bool
+	tailReleasedGen int
 }
 
 // plannedStats are statistics, not violations.
@@ -648,25 +655,35 @@ func (r *runObs) crossProcess(gen int) bool { return r.promotingGen >= 0 && r.pr
 // checkHoldAtRisk is HoldWithoutDataAtRisk: a hold needs two writable
 // sites, or a site holding transactions outside F.
 //
-// One spec-mandated exception (§7.1 row 1): a
-// cross-process re-run that finds the target's server_uuid changed cannot
-// rule out writes to the replaced pod, whose data is gone from view, and
-// holds by design.
+// One spec-mandated exception (§7.1 row 1): a cross-process re-run that
+// finds the target's server_uuid changed cannot rule out writes to the
+// replaced pod, whose data is gone from view, and holds by design, except
+// where the DST-3 ruling says to roll back: the run's own failover record
+// is not durable (it never reached RecordPlannedPromotion), the source still
+// holds all of F under the run's fence, and no site is writable. A hold in
+// that state is HoldWithoutDataAtRisk.
 func (m *plannedMonitor) checkHoldAtRisk(r *runObs) {
 	if r.fenceSet == "" {
 		return // F unknown: the rule cannot be judged
 	}
+	f, err := mysql.ParseGTIDSet(r.fenceSet)
+	if err != nil {
+		return
+	}
 	if r.crossProcess(m.procGen) && r.targetUUID != "" {
-		for _, t := range m.c.Truth() {
+		truth := m.c.Truth()
+		for _, t := range truth {
 			if t.Name == r.target && !strings.EqualFold(t.ServerUUID, r.targetUUID) {
+				if m.replacedTargetRollbackDue(r, truth, f) {
+					m.violate("HoldWithoutDataAtRisk", r.id, fmt.Sprintf(
+						"run %s held after finding target %s replaced, but its record is not durable, the source holds F under its fence and no site is writable (DST-3: roll back)",
+						r.id, r.target))
+					return
+				}
 				m.stats.ReplacedTargetHold++
 				return
 			}
 		}
-	}
-	f, err := mysql.ParseGTIDSet(r.fenceSet)
-	if err != nil {
-		return
 	}
 	writable := 0
 	for _, t := range m.c.Truth() {
@@ -681,6 +698,34 @@ func (m *plannedMonitor) checkHoldAtRisk(r *runObs) {
 		m.violate("HoldWithoutDataAtRisk", r.id, fmt.Sprintf(
 			"run %s set the automation hold with %d writable site(s) and no site holding GTIDs outside F", r.id, writable))
 	}
+}
+
+// replacedTargetRollbackDue is the DST-3 ruling's precondition, judged on
+// the truth and the durable object when the hold lands.
+func (m *plannedMonitor) replacedTargetRollbackDue(r *runObs, truth []SiteTruth, f mysql.GTIDSet) bool {
+	if m.cur == nil || m.cur.Status.PlannedFailover == nil {
+		return false
+	}
+	pf := m.cur.Status.PlannedFailover
+	// The judge has no clock: a far-future now only disables the record
+	// reader's clock-skew rejection, which the simulated clock never needs.
+	farFuture := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+	if pf.RunID != r.id || controller.PlannedOwnRecordDurableForSim(m.cur, pf, farFuture) {
+		return false
+	}
+	for _, t := range truth {
+		if t.Writable() {
+			return false
+		}
+		if t.Name != r.source {
+			continue
+		}
+		exec, err := mysql.ParseGTIDSet(t.Executed.String())
+		if t.Crashed || !t.SuperReadOnly || r.intentUUID == "" || !strings.EqualFold(t.ServerUUID, r.intentUUID) || err != nil || !exec.Contains(f) {
+			return false
+		}
+	}
+	return true
 }
 
 // checkWatermarks is WatermarkRegressed: once a run's Publishing record
@@ -786,10 +831,15 @@ func (m *plannedMonitor) endPoll(p int, managerReady bool) {
 				m.violate("ClaimRevoked", rel.RunID+"|"+string(rel.Why), fmt.Sprintf(
 					"run %s's claim was released with %q, which is not an engine release", rel.RunID, rel.Why))
 			}
+			if r := m.runs[rel.RunID]; r != nil && rel.Why == controller.ReleasePublishing {
+				r.tailReleased, r.tailReleasedGen = true, m.procGen
+			}
 		}
 		if managerReady && ownsSites(m.cur) {
 			id := m.cur.Status.PlannedFailover.RunID
-			if held, _, ok := m.claim.Held(); !ok || held != id {
+			tail := m.cur.Status.PlannedFailover.Phase == v1alpha1.PlannedFailoverPhasePromoting && m.runs[id] != nil && m.runs[id].tailReleased &&
+				m.runs[id].tailReleasedGen == m.procGen
+			if held, _, ok := m.claim.Held(); !tail && (!ok || held != id) {
 				m.violate("ClaimRevoked", id+"|slot", fmt.Sprintf(
 					"run %s durably owns the sites but the live slot holds %q", id, held))
 			}

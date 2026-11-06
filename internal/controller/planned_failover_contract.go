@@ -511,6 +511,11 @@ type FenceProof struct {
 	GtidSet          string // F, when Applied
 	Attribution      FenceAttribution
 	UnreadablePeers  []string // recorded as UnreachablePeers; enforced at the gate
+	// Sent reports that the facade's memo records a SET super_read_only=ON
+	// sent for the run (it may have applied, whatever Kind says). The
+	// engine treats it as its own fence.sent: the fence is attributable to
+	// the run, and the next attempt re-proves it rather than re-sending.
+	Sent bool
 }
 
 // LagProbe is one observation of the target catching up with the fenced set.
@@ -556,6 +561,15 @@ type PromoteOutcome struct {
 	TargetServerUUID string
 	TargetReachable  bool // feeds the target-loss window
 	MayHaveWritten   bool // the memo, or the stage, says SRO=OFF may have been sent
+	// RollbackIfUnrecorded marks an Inconsistent verdict for a target
+	// found replaced (@@server_uuid ≠ the intent's, no memo) where the
+	// source still holds all of F under the run's attributable fence and no
+	// site is writable (the DST-3 ruling). The engine rolls back instead of
+	// holding when the run's own failover record is not durable either: the
+	// run never reached RecordPlannedPromotion, so DNS never pointed at the
+	// target, and anything only the replaced pod could hold was written
+	// after the fence (the async-DR RPO).
+	RollbackIfUnrecorded bool
 }
 
 // ReproveResult: OK, or exactly one of RollBack, Hold, HandOff.
@@ -564,6 +578,10 @@ type ReproveResult struct {
 	RollBack *v1alpha1.PlannedFailoverReason // go to RollingBack with this reason
 	Hold     *v1alpha1.PlannedFailoverReason // ManualRecoveryRequired{reason} plus a hold
 	HandOff  *PromoteOutcome                 // apply the pre-write gate / confirm mapping
+	// SourceUnreachable: the source did not answer the re-proof's identity
+	// read before Promoting. Nothing is decided; the engine counts it
+	// toward the source-loss window and re-proves on its next pass.
+	SourceUnreachable bool
 }
 
 // RollbackResult is the result of one rollback attempt.
@@ -595,6 +613,12 @@ type PlannedFailoverTopology interface {
 	// the terminal Succeeded write merges into status beside the failover
 	// record (§5.3); ok=false when no manager is registered.
 	ManagerAuthority(nn types.NamespacedName) (PlannedAuthority, bool)
+
+	// CheckRunClaim is §3.3's check for a side effect the facade does not
+	// send itself (the Dragonfly takeover): the leader context is alive, a
+	// manager is registered, and the slot holds ref's Run claim, re-proven
+	// (errReproveRequired for a hydrated claim). It sends nothing.
+	CheckRunClaim(ref PlannedRunRef) error
 
 	Reprove(ctx context.Context, ref PlannedRunRef, fg *v1alpha1.MysqlFailoverGroup) (ReproveResult, error)
 	Fence(ctx context.Context, ref PlannedRunRef, sourceServerUUID string) (FenceProof, error)
@@ -671,6 +695,14 @@ type ManagerWiring struct {
 	PendingRotations       []string
 	RetiringUpdateInFlight bool
 	RetiringBusy           func() bool // nil when no retiring manager
+	// Predecessors are the group's retiring managers. Their in-memory
+	// failover records (an ordered-update handoff recorded on a manager
+	// that is being replaced, say) are carried into the new manager under
+	// the timestamp-monotonic rule before its Run (DST-1).
+	Predecessors []*TopologyManager
+	// RetiredFailover is the newest record a manager of the group held
+	// when it retired, for a predecessor that has already left retiring.
+	RetiredFailover *FailoverRecord
 }
 
 // WireRegisteredManager applies everything a manager must see before Run:

@@ -747,6 +747,15 @@ func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Co
 		logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target, "reason", why, "fg", nn)
 		return false, true
 	}
+	// Under the gate: a planned-failover claim (a run, its provisional
+	// grant, or an automation hold) or a standing hold owns the active
+	// Dragonfly. The temporary promoter has no planned owner of its own,
+	// so the check is here.
+	if r.plannedClaimHeld(nn) || plannedHoldFrom(fresh) != nil {
+		logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target,
+			"reason", "a planned failover claim or automation hold owns the sites", "fg", nn)
+		return false, true
+	}
 	if ready, err := r.dragonflyRolloutCandidateSyncReady(ctx, fresh, target, oldSource); err != nil || !ready {
 		logger.Info("dragonfly rollout: target no longer in sync; skipping", "site", target, "error", err, "fg", nn)
 		return false, true
