@@ -1702,12 +1702,28 @@ func stampDragonflyPromotionStatus(ctx context.Context, reader client.Reader, c 
 			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true}
 		}
 		if success {
+			if fg.Status.Dragonfly.ActiveSite != target {
+				restateDragonflyStatusForPromotion(fg.Status.Dragonfly, target)
+			}
 			fg.Status.Dragonfly.ActiveSite = target
 		}
 		fg.Status.Dragonfly.LastPromotionTime = &when
 		fg.Status.Dragonfly.LastPromotionTarget = target
 		return c.Status().Patch(ctx, &fg, client.MergeFrom(base))
 	})
+}
+
+// restateDragonflyStatusForPromotion takes a promotion that moves
+// status.dragonfly.activeSite to target out of the Ready phase. The phase
+// and sites describe the last observation, made against the previous
+// active site and before the promotion; with activeSite moved they would
+// read Ready with the master on the old site until the next observation
+// rebuilds them. ConfiguringReplication is what the topology is after a
+// promotion: the new master is up and the old one has to rejoin as its
+// replica. The sites stay as observed.
+func restateDragonflyStatusForPromotion(st *v1alpha1.DragonflyStatus, target string) {
+	st.Phase = v1alpha1.DragonflyPhaseConfiguringReplication
+	st.Message = fmt.Sprintf("promoted %s; waiting for the next observation of the sites", target)
 }
 
 // recordStaleMaster emits a deduplicated Event for a stale master on a
