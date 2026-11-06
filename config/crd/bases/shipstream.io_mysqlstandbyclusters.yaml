@@ -138,10 +138,12 @@ spec:
                               Key within the Secret that holds the passphrase bytes. Leading
                               and trailing whitespace is stripped when the passphrase is
                               read.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           name:
                             description: Name of the Secret.
+                            maxLength: 253
                             minLength: 1
                             type: string
                         required:
@@ -189,6 +191,7 @@ spec:
                             description: |-
                               ClaimName is the name of a pre-existing PVC to use. If empty the
                               operator provisions a PVC per profile.
+                            maxLength: 253
                             type: string
                           size:
                             anyOf:
@@ -207,6 +210,7 @@ spec:
                               SubPath inside the PVC to use. Each backup lands under
                               "<subPath>/<mysqlbackup-name>/".
                               A ".." segment is rejected so the path cannot leave the PVC.
+                            maxLength: 512
                             pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                             type: string
                         type: object
@@ -215,6 +219,7 @@ spec:
                         properties:
                           bucket:
                             description: Bucket is the S3 bucket name.
+                            maxLength: 63
                             minLength: 1
                             type: string
                           credentialsSecret:
@@ -232,6 +237,7 @@ spec:
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                               Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
                               or https:// URL without credentials, a query or a fragment.
+                            maxLength: 512
                             pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                             type: string
                           prefix:
@@ -591,7 +597,9 @@ spec:
                                   dedicated "binlogs/" subprefix (or subpath) inside the profile
                                   location so they do not collide with full dumps. Required when
                                   Enabled=true.
+                                maxLength: 63
                                 minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                             type: object
                           podSecurityContext:
@@ -831,7 +839,8 @@ spec:
                           profiles:
                             description: |-
                               Profiles are reusable, named backup configurations. Schedules and
-                              ad-hoc MysqlBackup CRs reference profiles by name.
+                              ad-hoc MysqlBackup CRs reference profiles by name. Names are unique
+                              (the list is a map keyed by name).
                             items:
                               description: BackupProfile is a named, reusable backup
                                 configuration.
@@ -895,8 +904,14 @@ spec:
                                     many workloads, but is not the same guarantee as keys held in a
                                     Kubernetes Secret that the operator controls.
 
-                                    The passphrase is owned by the operator: rotating it or
-                                    deleting the Secret renders existing ciphertexts unrecoverable.
+                                    The operator snapshots the passphrase into immutable Secrets it
+                                    manages: each MysqlBackup encrypts its dump with its own snapshot
+                                    (recorded in its status.artifactStorage.passphraseSecret), and the
+                                    PITR archive with the snapshot its binding accepted
+                                    (status.pitrArchiveBindings). Changing the passphrase bytes or this
+                                    field on a profile in PITR archive use is refused: archive with a
+                                    new profile on a new storage prefix instead.
+
                                     Treat the Secret as part of the failover group's critical
                                     recovery material and back it up out-of-band. See
                                     https://bloodraven.dev/docs/backup-and-restore/backup-encryption for the wire format,
@@ -925,10 +940,12 @@ spec:
                                             Key within the Secret that holds the passphrase bytes. Leading
                                             and trailing whitespace is stripped when the passphrase is
                                             read.
+                                          maxLength: 253
                                           minLength: 1
                                           type: string
                                         name:
                                           description: Name of the Secret.
+                                          maxLength: 253
                                           minLength: 1
                                           type: string
                                       required:
@@ -1004,6 +1021,7 @@ spec:
                                           description: |-
                                             ClaimName is the name of a pre-existing PVC to use. If empty the
                                             operator provisions a PVC per profile.
+                                          maxLength: 253
                                           type: string
                                         size:
                                           anyOf:
@@ -1022,6 +1040,7 @@ spec:
                                             SubPath inside the PVC to use. Each backup lands under
                                             "<subPath>/<mysqlbackup-name>/".
                                             A ".." segment is rejected so the path cannot leave the PVC.
+                                          maxLength: 512
                                           pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                                           type: string
                                       type: object
@@ -1031,6 +1050,7 @@ spec:
                                       properties:
                                         bucket:
                                           description: Bucket is the S3 bucket name.
+                                          maxLength: 63
                                           minLength: 1
                                           type: string
                                         credentialsSecret:
@@ -1048,6 +1068,7 @@ spec:
                                             EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                                             Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
                                             or https:// URL without credentials, a query or a fragment.
+                                          maxLength: 512
                                           pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                           type: string
                                         prefix:
@@ -1133,6 +1154,15 @@ spec:
                                         PointInTime is copied onto each scheduled verification CR by
                                         trigger-verification. See PointInTimeVerificationSpec.
                                       properties:
+                                        archiveProfileName:
+                                          description: |-
+                                            ArchiveProfileName names the backup profile whose PITR archive the
+                                            replay reads. Defaults to the group's spec.backup.pitr.profileName.
+                                            Use it to verify history in a retained archive after a prefix switch.
+                                          maxLength: 63
+                                          minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                          type: string
                                         excludeGtids:
                                           description: |-
                                             ExcludeGtids are never replayed and must not intersect the backup,
@@ -1287,7 +1317,11 @@ spec:
                               - name
                               - storage
                               type: object
+                            maxItems: 32
                             type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
                           resources:
                             description: Resources for the backup Job's mysqlsh container.
                             properties:
@@ -5793,10 +5827,12 @@ spec:
                                       Key within the Secret that holds the passphrase bytes. Leading
                                       and trailing whitespace is stripped when the passphrase is
                                       read.
+                                    maxLength: 253
                                     minLength: 1
                                     type: string
                                   name:
                                     description: Name of the Secret.
+                                    maxLength: 253
                                     minLength: 1
                                     type: string
                                 required:
@@ -5960,6 +5996,7 @@ spec:
                                 properties:
                                   bucket:
                                     description: Bucket is the S3 bucket name.
+                                    maxLength: 63
                                     minLength: 1
                                     type: string
                                   credentialsSecret:
@@ -5977,6 +6014,7 @@ spec:
                                       EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                                       Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
                                       or https:// URL without credentials, a query or a fragment.
+                                    maxLength: 512
                                     pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                     type: string
                                   prefix:
@@ -6405,10 +6443,12 @@ spec:
                                       Key within the Secret that holds the passphrase bytes. Leading
                                       and trailing whitespace is stripped when the passphrase is
                                       read.
+                                    maxLength: 253
                                     minLength: 1
                                     type: string
                                   name:
                                     description: Name of the Secret.
+                                    maxLength: 253
                                     minLength: 1
                                     type: string
                                 required:
@@ -6579,6 +6619,7 @@ spec:
                                 properties:
                                   bucket:
                                     description: Bucket is the S3 bucket name.
+                                    maxLength: 63
                                     minLength: 1
                                     type: string
                                   credentialsSecret:
@@ -6596,6 +6637,7 @@ spec:
                                       EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                                       Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
                                       or https:// URL without credentials, a query or a fragment.
+                                    maxLength: 512
                                     pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                     type: string
                                   prefix:

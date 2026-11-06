@@ -349,7 +349,9 @@ spec:
                           dedicated "binlogs/" subprefix (or subpath) inside the profile
                           location so they do not collide with full dumps. Required when
                           Enabled=true.
+                        maxLength: 63
                         minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                     type: object
                   podSecurityContext:
@@ -588,7 +590,8 @@ spec:
                   profiles:
                     description: |-
                       Profiles are reusable, named backup configurations. Schedules and
-                      ad-hoc MysqlBackup CRs reference profiles by name.
+                      ad-hoc MysqlBackup CRs reference profiles by name. Names are unique
+                      (the list is a map keyed by name).
                     items:
                       description: BackupProfile is a named, reusable backup configuration.
                       properties:
@@ -650,8 +653,14 @@ spec:
                             many workloads, but is not the same guarantee as keys held in a
                             Kubernetes Secret that the operator controls.
 
-                            The passphrase is owned by the operator: rotating it or
-                            deleting the Secret renders existing ciphertexts unrecoverable.
+                            The operator snapshots the passphrase into immutable Secrets it
+                            manages: each MysqlBackup encrypts its dump with its own snapshot
+                            (recorded in its status.artifactStorage.passphraseSecret), and the
+                            PITR archive with the snapshot its binding accepted
+                            (status.pitrArchiveBindings). Changing the passphrase bytes or this
+                            field on a profile in PITR archive use is refused: archive with a
+                            new profile on a new storage prefix instead.
+
                             Treat the Secret as part of the failover group's critical
                             recovery material and back it up out-of-band. See
                             https://bloodraven.dev/docs/backup-and-restore/backup-encryption for the wire format,
@@ -680,10 +689,12 @@ spec:
                                     Key within the Secret that holds the passphrase bytes. Leading
                                     and trailing whitespace is stripped when the passphrase is
                                     read.
+                                  maxLength: 253
                                   minLength: 1
                                   type: string
                                 name:
                                   description: Name of the Secret.
+                                  maxLength: 253
                                   minLength: 1
                                   type: string
                               required:
@@ -758,6 +769,7 @@ spec:
                                   description: |-
                                     ClaimName is the name of a pre-existing PVC to use. If empty the
                                     operator provisions a PVC per profile.
+                                  maxLength: 253
                                   type: string
                                 size:
                                   anyOf:
@@ -776,6 +788,7 @@ spec:
                                     SubPath inside the PVC to use. Each backup lands under
                                     "<subPath>/<mysqlbackup-name>/".
                                     A ".." segment is rejected so the path cannot leave the PVC.
+                                  maxLength: 512
                                   pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                                   type: string
                               type: object
@@ -785,6 +798,7 @@ spec:
                               properties:
                                 bucket:
                                   description: Bucket is the S3 bucket name.
+                                  maxLength: 63
                                   minLength: 1
                                   type: string
                                 credentialsSecret:
@@ -802,6 +816,7 @@ spec:
                                     EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                                     Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
                                     or https:// URL without credentials, a query or a fragment.
+                                  maxLength: 512
                                   pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                   type: string
                                 prefix:
@@ -887,6 +902,15 @@ spec:
                                 PointInTime is copied onto each scheduled verification CR by
                                 trigger-verification. See PointInTimeVerificationSpec.
                               properties:
+                                archiveProfileName:
+                                  description: |-
+                                    ArchiveProfileName names the backup profile whose PITR archive the
+                                    replay reads. Defaults to the group's spec.backup.pitr.profileName.
+                                    Use it to verify history in a retained archive after a prefix switch.
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
                                 excludeGtids:
                                   description: |-
                                     ExcludeGtids are never replayed and must not intersect the backup,
@@ -1041,7 +1065,11 @@ spec:
                       - name
                       - storage
                       type: object
+                    maxItems: 32
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   resources:
                     description: Resources for the backup Job's mysqlsh container.
                     properties:
@@ -5508,10 +5536,12 @@ spec:
                               Key within the Secret that holds the passphrase bytes. Leading
                               and trailing whitespace is stripped when the passphrase is
                               read.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           name:
                             description: Name of the Secret.
+                            maxLength: 253
                             minLength: 1
                             type: string
                         required:
@@ -5673,6 +5703,7 @@ spec:
                         properties:
                           bucket:
                             description: Bucket is the S3 bucket name.
+                            maxLength: 63
                             minLength: 1
                             type: string
                           credentialsSecret:
@@ -5690,6 +5721,7 @@ spec:
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                               Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
                               or https:// URL without credentials, a query or a fragment.
+                            maxLength: 512
                             pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                             type: string
                           prefix:
@@ -6116,10 +6148,12 @@ spec:
                               Key within the Secret that holds the passphrase bytes. Leading
                               and trailing whitespace is stripped when the passphrase is
                               read.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           name:
                             description: Name of the Secret.
+                            maxLength: 253
                             minLength: 1
                             type: string
                         required:
@@ -6288,6 +6322,7 @@ spec:
                         properties:
                           bucket:
                             description: Bucket is the S3 bucket name.
+                            maxLength: 63
                             minLength: 1
                             type: string
                           credentialsSecret:
@@ -6305,6 +6340,7 @@ spec:
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                               Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
                               or https:// URL without credentials, a query or a fragment.
+                            maxLength: 512
                             pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                             type: string
                           prefix:
@@ -7366,6 +7402,146 @@ spec:
                     description: ProfileName mirrors spec.backup.pitr.profileName.
                     type: string
                 type: object
+              pitrArchiveBindings:
+                description: |-
+                  PITRArchiveBindings are the encryption identities accepted for the
+                  PITR archive destinations this group writes or reads (#203). Written
+                  by the group reconciler.
+                items:
+                  description: |-
+                    PITRArchiveBinding is the encryption identity the group accepted for one
+                    PITR archive destination it writes or reads (#203). Accepted encrypted
+                    bindings are reconstructible from their key snapshot's acceptance
+                    annotation; plaintext bindings are re-proven (the descriptor records the
+                    mode).
+                  properties:
+                    archiveID:
+                      description: |-
+                        ArchiveID is the descriptor's archive ID once a descriptor was
+                        verified or created.
+                      pattern: ^(ar1-[a-z2-7]{26})?$
+                      type: string
+                    check:
+                      description: Check is the check Job authenticating Encryption,
+                        while one runs.
+                      properties:
+                        jobName:
+                          description: JobName is the check Job's name.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        jobUID:
+                          description: JobUID is the only Job whose result is accepted.
+                          type: string
+                      required:
+                      - jobName
+                      type: object
+                    destination:
+                      description: |-
+                        Destination is the normalized archive destination (s3://… or
+                        pvc://…).
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    encryption:
+                      description: |-
+                        Encryption is the accepted identity when State is Bound. Otherwise it
+                        is the candidate under test (Pending) or the last candidate tried
+                        (Refused); read it only when State is Bound.
+                      properties:
+                        algorithm:
+                          description: Algorithm is empty for None.
+                          enum:
+                          - AES-256-GCM
+                          type: string
+                        keySecretName:
+                          description: |-
+                            KeySecretName is the immutable, operator-made key snapshot
+                            (mysql-<group>-pitr-key-<h10>); empty for None.
+                          maxLength: 253
+                          type: string
+                        mode:
+                          description: Mode is the archive's encryption mode.
+                          enum:
+                          - None
+                          - Passphrase
+                          type: string
+                      required:
+                      - mode
+                      type: object
+                    id:
+                      description: |-
+                        ID identifies the binding: "pab-" and the first 16 hex digits of the
+                        SHA-256 of "bloodraven-pitr-binding-v1\0" and Destination. It is the
+                        release annotation's subject.
+                      pattern: ^pab-[0-9a-f]{16}$
+                      type: string
+                    lastTransitionTime:
+                      description: LastTransitionTime is when State or Reason last
+                        changed.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable explanation of Reason.
+                      maxLength: 2048
+                      type: string
+                    reason:
+                      description: Reason qualifies State.
+                      enum:
+                      - Authenticating
+                      - Establishing
+                      - Bound
+                      - KeyMaterialLost
+                      - KeyMismatch
+                      - ArchiveForeign
+                      - ArchiveCopy
+                      - ArchiveLegacy
+                      - ArchiveDescriptorMissing
+                      - ArchiveNotFound
+                      - ArchiveEncryptionMismatch
+                      - ArchiveVersionUnsupported
+                      - ArchiveListFailed
+                      type: string
+                    source:
+                      description: |-
+                        Source is the group that created the archive. Set from a verified
+                        descriptor, and from a refusal that names the owner (ArchiveForeign).
+                      properties:
+                        name:
+                          description: Name is the source group's name.
+                          maxLength: 253
+                          type: string
+                        namespace:
+                          description: Namespace is the source group's namespace.
+                          maxLength: 63
+                          type: string
+                        uid:
+                          description: UID is the source group's metadata.uid.
+                          type: string
+                      required:
+                      - name
+                      - namespace
+                      - uid
+                      type: object
+                    state:
+                      description: State is whether Encryption is accepted.
+                      enum:
+                      - Pending
+                      - Bound
+                      - Refused
+                      type: string
+                  required:
+                  - destination
+                  - encryption
+                  - id
+                  - reason
+                  - state
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - id
+                x-kubernetes-list-type: map
               plannedFailover:
                 description: |-
                   PlannedFailover tracks the most recent planned (admin-triggered)
@@ -8348,6 +8524,36 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: spec.backup.profiles[pitr.profileName].encryption (presence, algorithm,
+            passphraseSecret) cannot change while that profile archives PITR binlogs
+            to the same storage; create a new profile with a new storage prefix and
+            its own passphrase, take a full backup, then switch spec.backup.pitr.profileName
+            (see Backup encryption > Rotation)
+          rule: '!has(oldSelf.spec.backup) || !has(self.spec.backup) || !has(oldSelf.spec.backup.pitr)
+            || !has(self.spec.backup.pitr) || !(has(oldSelf.spec.backup.pitr.enabled)
+            && oldSelf.spec.backup.pitr.enabled) || !(has(self.spec.backup.pitr.enabled)
+            && self.spec.backup.pitr.enabled) || !has(oldSelf.spec.backup.pitr.profileName)
+            || !has(self.spec.backup.pitr.profileName) || oldSelf.spec.backup.pitr.profileName
+            != self.spec.backup.pitr.profileName || !has(oldSelf.spec.backup.profiles)
+            || !has(self.spec.backup.profiles) || self.spec.backup.profiles.all(p,
+            p.name != self.spec.backup.pitr.profileName || oldSelf.spec.backup.profiles.all(o,
+            o.name != p.name || !(o.storage.type == p.storage.type && has(o.storage.s3)
+            == has(p.storage.s3) && (!has(o.storage.s3) || (o.storage.s3.bucket ==
+            p.storage.s3.bucket && (has(o.storage.s3.prefix) ? o.storage.s3.prefix
+            : '''') == (has(p.storage.s3.prefix) ? p.storage.s3.prefix : '''') &&
+            (has(o.storage.s3.endpointURL) ? o.storage.s3.endpointURL : '''') == (has(p.storage.s3.endpointURL)
+            ? p.storage.s3.endpointURL : ''''))) && has(o.storage.pvc) == has(p.storage.pvc)
+            && (!has(o.storage.pvc) || ((has(o.storage.pvc.claimName) ? o.storage.pvc.claimName
+            : '''') == (has(p.storage.pvc.claimName) ? p.storage.pvc.claimName : '''')
+            && (has(o.storage.pvc.subPath) ? o.storage.pvc.subPath : '''') == (has(p.storage.pvc.subPath)
+            ? p.storage.pvc.subPath : '''')))) || (has(o.encryption) == has(p.encryption)
+            && (!has(o.encryption) || ((has(o.encryption.algorithm) ? o.encryption.algorithm
+            : ''AES-256-GCM'') == (has(p.encryption.algorithm) ? p.encryption.algorithm
+            : ''AES-256-GCM'') && o.encryption.passphraseSecret.name == p.encryption.passphraseSecret.name
+            && (has(o.encryption.passphraseSecret.key) ? o.encryption.passphraseSecret.key
+            : ''passphrase'') == (has(p.encryption.passphraseSecret.key) ? p.encryption.passphraseSecret.key
+            : ''passphrase''))))))'
     served: true
     storage: true
     subresources:

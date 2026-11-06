@@ -104,6 +104,13 @@ func main() {
 			// ahead of mysqlsh's loadDump. See encrypt_upload.go.
 			runDecryptDownload(os.Args[2:])
 			return
+		case "pitr-archive-check":
+			// Invoked as the container of a PITR archive check Job:
+			// verifies one archive's descriptor with the candidate key
+			// snapshot and reports the result on the termination log.
+			// See pitr_archive_check.go.
+			runPITRArchiveCheck(os.Args[2:])
+			return
 		}
 	}
 
