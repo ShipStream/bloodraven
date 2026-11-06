@@ -1505,7 +1505,30 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			},
 		},
 	}
+	setTerminationMessageLimit(&job.Spec.Template.Spec)
 	return job, nil
+}
+
+// terminationMessageLimitEnv tells restore.py and verify.sh how many bytes
+// of the main container's termination message the kubelet keeps, so the
+// PITR verdict is built to fit rather than cut (review F040).
+const terminationMessageLimitEnv = "BLOODRAVEN_TERMINATION_MESSAGE_LIMIT"
+
+// setTerminationMessageLimit renders terminationMessageLimitEnv on the
+// pod's main container: the kubelet divides 12 KiB of termination messages
+// evenly among a pod's containers, init containers included, and keeps at
+// most 4 KiB of each.
+func setTerminationMessageLimit(spec *corev1.PodSpec) {
+	n := len(spec.InitContainers) + len(spec.Containers)
+	if n == 0 {
+		return
+	}
+	limit := min(4096, 12288/n)
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == backupJobContainerName {
+			spec.Containers[i].Env = append(spec.Containers[i].Env, corev1.EnvVar{Name: terminationMessageLimitEnv, Value: strconv.Itoa(limit)})
+		}
+	}
 }
 
 func sameRestoreJob(previous *v1alpha1.RestoreStatus, job *batchv1.Job) bool {

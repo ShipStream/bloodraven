@@ -617,6 +617,11 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 	if _, ok := main["BLOODRAVEN_SOURCE_GTID_EXECUTED"]; ok {
 		t.Error("a verification Job must not render BLOODRAVEN_SOURCE_GTID_EXECUTED: its PITR baseline comes from dump.json (dump-meta), not the backup's status.gtidExecuted")
 	}
+	// F040: three containers share the kubelet's 12 KiB of termination
+	// messages, capped at 4 KiB each.
+	if got := main[terminationMessageLimitEnv]; got != "4096" {
+		t.Errorf("%s = %q, want 4096 (12288/3 capped at 4096)", terminationMessageLimitEnv, got)
+	}
 }
 
 func TestBuildVerificationJob_PITRRequiresPITREnabled(t *testing.T) {

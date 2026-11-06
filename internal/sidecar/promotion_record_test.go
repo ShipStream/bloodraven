@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/sidecar/binlogtest"
 )
 
@@ -66,7 +67,10 @@ func TestPromotionRecordPrecedesUploads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := PromotionRecord{ServerUUID: hintSIDA, ServerID: 102, GTIDExecuted: hintSIDA + ":1-7", ObservedAt: at.UTC().Truncate(time.Microsecond)}
+	// A process's first episode: no earlier observation bounds when it
+	// began, so the record carries the configured probe interval.
+	want := PromotionRecord{ServerUUID: hintSIDA, ServerID: 102, GTIDExecuted: hintSIDA + ":1-7", ObservedAt: at.UTC().Truncate(time.Microsecond),
+		ProbeInterval: pitrarchive.Duration(defaultPeerCheckInterval)}
 	if len(m.Promotions) != 1 || m.Promotions[0] != want {
 		t.Fatalf("promotions = %+v, want %+v", m.Promotions, want)
 	}

@@ -4,13 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/pitrplan"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -23,7 +25,15 @@ const (
 	s37ID       = "37-pitr-planned-failback-no-reclone"
 	s37DBName   = "chaos_s37_pitr"
 	s37Restored = "s37-restored"
+	// s37RecordClearSlack is added to δ before era B starts: the writer's
+	// first commit must be strictly more than δ after b's promotion record
+	// (observedAt + δ < oct(w)).
+	s37RecordClearSlack = time.Second
 )
+
+// pitrRunAnnotation marks a group a scenario run created, with the run
+// stem, so cleanup deletes only its own (F190).
+const pitrRunAnnotation = "chaos.playground.bloodraven.io/run"
 
 // scenario37PITRPlannedFailbackNoReclone is DESIGN §9.4 s37 and §4.15
 // Example 3: a planned failover A→B and failback B→A without a reclone or a
@@ -42,6 +52,7 @@ func scenario37PITRPlannedFailbackNoReclone() runner.Scenario {
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#37-pitr-planned-failback-no-reclone",
 		Timeout:           60 * time.Minute,
+		CleanupTimeout:    pitrCleanupBudget(pitrDeleteGroupTimeout),
 		ResetBeforeRunAll: true,
 		Precheck:          assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
@@ -130,10 +141,16 @@ func s37FailoverToB() runner.Step {
 			if err != nil {
 				return err
 			}
-			// The fence follows the record, so T2 is outside the
-			// promotion-record lag window (D-53) and a replica-copy witness
-			// is anchored by the record. The writer starts after the
-			// record too, so no era-B commit is in the lag window.
+			// A replica-copy witness w is anchored by b's record only when
+			// observedAt + δ < oct(w) (and no later record of b falls
+			// before oct(w) + probeInterval + δ; b stays writable through
+			// era B, so none does). Era B, the writer included, starts once
+			// b's server clock, which its sidecar shares, is past
+			// observedAt + δ, so every era-B commit and T2 clear the
+			// margin (F069).
+			if err := pitrWaitServerClockPast(ctx, env, b, recorded.Add(pitrplan.DefaultClockSkewMargin+s37RecordClearSlack)); err != nil {
+				return err
+			}
 			if err := pitrWithWriter(ctx, env, b, s37DBName, func() error {
 				return s37Era(ctx, env, b, 4, "M2", "T2")
 			}); err != nil {
@@ -143,8 +160,12 @@ func s37FailoverToB() runner.Step {
 			if err != nil {
 				return err
 			}
-			if t2, _ := time.Parse(pitrTargetLayout, f2.T); !t2.After(recorded) {
-				return fmt.Errorf("T2 %s is not after b's promotion record %s", f2.T, recorded.Format(time.RFC3339Nano))
+			t2, err := time.Parse(pitrTargetLayout, f2.T)
+			if err != nil {
+				return fmt.Errorf("T2 %q: %w", f2.T, err)
+			}
+			if !t2.After(recorded.Add(pitrplan.DefaultClockSkewMargin)) {
+				return fmt.Errorf("T2 %s is not more than δ=%s after b's promotion record %s", f2.T, pitrplan.DefaultClockSkewMargin, recorded.Format(time.RFC3339Nano))
 			}
 			return nil
 		},
@@ -271,10 +292,18 @@ func s37RestoreInsideBEra() runner.Step {
 			if err != nil {
 				return err
 			}
+			// Cleanup deletes the group only while it carries this run's
+			// annotation, so a lost Create response is still cleaned up
+			// while a group left by an earlier run (--no-cleanup) is not.
+			restored.Annotations = map[string]string{pitrRunAnnotation: ctxFetch(env, "backupRunStem")}
 			if err := ctxStash(ctx, env, "restoredCreated", "true"); err != nil {
 				return err
 			}
 			if err := env.Kube.Controller.Create(ctx, restored); err != nil {
+				if apierrors.IsAlreadyExists(err) {
+					_ = ctxStash(ctx, env, "restoredCreated", "")
+					return fmt.Errorf("create %s: a group of that name already exists (left by an earlier run?); delete it first: %w", s37Restored, err)
+				}
 				return fmt.Errorf("create %s: %w", s37Restored, err)
 			}
 			env.Capture.Note(fmt.Sprintf("created %s restoring backup %s to %s", s37Restored, ctxFetch(env, "backup:b1"), f2.T))
@@ -338,14 +367,47 @@ func s37WaitRestore(ctx context.Context, env *runner.Env) (*v1alpha1.RestoreStat
 	}
 }
 
-// pitrDeleteGroup deletes a scenario-created failover group and waits until
-// it is gone; its Deployments, Services and PVCs are owned by it.
-func pitrDeleteGroup(ctx context.Context, env *runner.Env, name string) error {
-	mfg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: env.Namespace}}
-	if err := env.Kube.Controller.Delete(ctx, mfg); err != nil && !apierrors.IsNotFound(err) {
+// pitrDeleteGroupTimeout bounds the wait for a deleted group to be gone.
+const pitrDeleteGroupTimeout = 5 * time.Minute
+
+// pitrArchivePrefixKind is the pitrTrackCR kind under which a run records
+// each archive prefix it configured.
+const pitrArchivePrefixKind = "archivePrefix"
+
+// pitrCleanupBaseBudget is the cleanup budget every PITR scenario composes:
+// revert and global recover, deleting each verification and backup with
+// its artifact check (up to 5 minutes per backup, a few backups per run),
+// dropping the marker schema, restoring spec.backup, the 6-minute
+// healthy-baseline wait, deleting the archive prefixes, and the executor's
+// reconverge wait (F071). pitrCleanupBudget adds a scenario's own extra
+// cleanup steps.
+const pitrCleanupBaseBudget = 25 * time.Minute
+
+func pitrCleanupBudget(extra time.Duration) time.Duration {
+	return pitrCleanupBaseBudget + extra
+}
+
+// pitrDeleteOwnedGroup deletes a group this run created (it carries this
+// run's pitrRunAnnotation) with a UID precondition and waits until it is
+// gone; its Deployments, Services and PVCs are owned by it. A group of the
+// same name without this run's annotation is left in place (F190).
+func pitrDeleteOwnedGroup(ctx context.Context, env *runner.Env, name string) error {
+	var mfg v1alpha1.MysqlFailoverGroup
+	if err := env.Kube.Controller.Get(ctx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &mfg); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get %s: %w", name, err)
+	}
+	if !pitrOwnedByRun(&mfg, ctxFetch(env, "backupRunStem")) {
+		env.Capture.Note(fmt.Sprintf("left failover group %s in place: it is not this run's (annotation %s=%q)", name, pitrRunAnnotation, mfg.Annotations[pitrRunAnnotation]))
+		return nil
+	}
+	uid := mfg.UID
+	if err := env.Kube.Controller.Delete(ctx, &mfg, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete %s: %w", name, err)
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	waitCtx, cancel := context.WithTimeout(ctx, pitrDeleteGroupTimeout)
 	defer cancel()
 	for {
 		err := env.Kube.Controller.Get(waitCtx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &v1alpha1.MysqlFailoverGroup{})
@@ -361,12 +423,62 @@ func pitrDeleteGroup(ctx context.Context, env *runner.Env, name string) error {
 	}
 }
 
-// pitrCleanup removes what a PITR scenario created and waits for a healthy
-// baseline with the original backup spec.
+// pitrOwnedByRun reports whether a group carries runStem's annotation.
+func pitrOwnedByRun(mfg *v1alpha1.MysqlFailoverGroup, runStem string) bool {
+	return runStem != "" && mfg.Annotations[pitrRunAnnotation] == runStem
+}
+
+// pitrArchivePrefixDeletable refuses any prefix outside a scenario's own
+// e2e/<scenario>/<run> tree.
+func pitrArchivePrefixDeletable(prefix string) bool {
+	parts := strings.Split(strings.Trim(prefix, "/"), "/")
+	if len(parts) < 3 || parts[0] != "e2e" {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// pitrDeleteArchivePrefixes deletes the objects under every archive prefix
+// this run configured (F191). It runs after the original spec.backup is
+// back and the group is healthy, so no archiver of this group writes
+// there; a second pass catches an object a still-terminating sidecar wrote
+// during the first.
+func pitrDeleteArchivePrefixes(ctx context.Context, env *runner.Env) error {
+	var errs []error
+	for _, prefix := range pitrTrackedCRs(env, pitrArchivePrefixKind) {
+		if !pitrArchivePrefixDeletable(prefix) {
+			errs = append(errs, fmt.Errorf("refusing to delete archive prefix %q outside e2e/<scenario>/<run>", prefix))
+			continue
+		}
+		total := 0
+		for pass := 0; pass < 2; pass++ {
+			n, err := env.Chaos.DeleteRustFSPrefix(ctx, backupE2EBucket, strings.Trim(prefix, "/")+"/")
+			total += n
+			if err != nil {
+				errs = append(errs, fmt.Errorf("delete archive prefix %s: %w", prefix, err))
+				break
+			}
+			if n == 0 {
+				break
+			}
+		}
+		env.Capture.Note(fmt.Sprintf("deleted %d objects under s3://%s/%s/", total, backupE2EBucket, strings.Trim(prefix, "/")))
+	}
+	return errors.Join(errs...)
+}
+
+// pitrCleanup removes what a PITR scenario created, waits for a healthy
+// baseline with the original backup spec, then deletes the run's archive
+// prefixes.
 func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...string) error {
 	var errs []error
 	for _, g := range groups {
-		if err := pitrDeleteGroup(ctx, env, g); err != nil {
+		if err := pitrDeleteOwnedGroup(ctx, env, g); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -410,6 +522,8 @@ func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...stri
 		done := ready && mfg.Status.ActiveSite != "" && mfg.Status.UpdatePhase == "" && pitrRestored && cooldown == ""
 		return done, fmt.Sprintf("ready=%v active=%q pitrRestored=%v cooldown=%q", ready, mfg.Status.ActiveSite, pitrRestored, cooldown), nil
 	}); err != nil {
+		errs = append(errs, err)
+	} else if err := pitrDeleteArchivePrefixes(ctx, env); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

@@ -39,7 +39,8 @@
 #                                     collide with the old replication
 #                                     metadata.
 #
-# Optional PITR env (enables post-load binlog replay; design WS-D §4.13):
+# Optional PITR env (enables post-load binlog replay; see
+# site/content/docs/7.backup-and-restore/2.backup-restore.md):
 #   BLOODRAVEN_PITR_MODE              timestamp or latest. Its presence turns
 #                                     replay on.
 #   BLOODRAVEN_PITR_STOP_DATETIME     the target, timestamp mode only, in the
@@ -58,6 +59,14 @@
 #                                     defaults to /dev/termination-log.
 #   BLOODRAVEN_VERIFY_PITR_MODE       set by verification Jobs, which never
 #                                     accept a Partial outcome.
+#   BLOODRAVEN_TERMINATION_MESSAGE_LIMIT  the bytes the kubelet keeps of this
+#                                     container's termination message: 12 KiB
+#                                     shared by the pod's containers, at most
+#                                     4 KiB each. The controller renders it
+#                                     from the pod's container count; it
+#                                     defaults to 3072, the share of the
+#                                     largest PITR pod (dump-meta,
+#                                     pitr-download, decrypt-download, main).
 import array
 import bisect
 import hashlib
@@ -329,7 +338,8 @@ def _maybe_preflight_drops(session):
 
 
 # --------------------------------------------------------------------
-# PITR: segment replay on top of the loaded dump (design WS-D §4.13)
+# PITR: segment replay on top of the loaded dump (site/content/docs/
+# 7.backup-and-restore/2.backup-restore.md, "Point-in-time recovery (PITR)")
 # --------------------------------------------------------------------
 #
 # The `bloodraven dump-meta` and `bloodraven pitr-download` init containers
@@ -360,12 +370,34 @@ _GTID_SET_CHARS = re.compile(r"^[0-9A-Za-z:,_-]*$")
 _GTID_INTERVAL = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
 _MYSQLSH_MYSQLBINLOG = "/usr/libexec/mysqlsh/mysqlbinlog"
 _PITR_OUTCOMES = {"timestamp": ("TargetCovered", "Partial"), "latest": ("ArchiveHead",)}
-# The verdict must fit the kubelet's 4096-byte termination message together
-# with the RESULT line (bounded to 2 KiB of GTIDs) and the optional
-# on-history line.
+# The verdict must fit this container's share of the kubelet's termination
+# messages (_termination_limit) together with the RESULT line (bounded to
+# 2 KiB of GTIDs) and the optional on-history line.
 _VERDICT_MAX = 1024
 _RESULT_GTIDS_MAX = 2048
 _ON_HISTORY_GTIDS_MAX = 768
+_TERMINATION_LIMIT_DEFAULT = 3072
+# Log lines that carry a whole GTID set are bounded; a cut one ends with
+# this marker, as pitr-download's do.
+_LOG_GTIDS_MAX = 65536
+
+
+def _termination_limit():
+    """The bytes the kubelet keeps of this container's termination message.
+    It divides 12 KiB among the pod's containers and keeps at most 4 KiB of
+    each; the largest PITR pod has four (dump-meta, pitr-download,
+    decrypt-download and this one), so 3072 is the default."""
+    try:
+        n = int(os.environ.get("BLOODRAVEN_TERMINATION_MESSAGE_LIMIT", "") or _TERMINATION_LIMIT_DEFAULT)
+    except ValueError:
+        n = _TERMINATION_LIMIT_DEFAULT
+    if n <= 0:
+        n = _TERMINATION_LIMIT_DEFAULT
+    return min(n, 4096)
+
+
+def _bounded_log(value, limit=_LOG_GTIDS_MAX):
+    return value if len(value) <= limit else value[:limit] + "..."
 
 
 def _write_termination(message, path=None, limit=3072):
@@ -435,6 +467,23 @@ def _gtid_intersect(session, a, b):
 
 def _gtid_union(*sets):
     return ",".join(_gtid_normalize(s) for s in sets if _gtid_normalize(s))
+
+
+def _gtid_canonical(*sets):
+    """The union of sets with each source's intervals merged, so a set
+    accumulated over many segments stays as compact as MySQL would print
+    it (F039)."""
+    return _gtid_format(_gtid_intervals(_gtid_union(*sets)), limit=None)
+
+
+def _gtid_cardinality(value):
+    """The number of distinct GTIDs in a set."""
+    return sum(hi - lo + 1 for ivs in _gtid_intervals(value).values() for lo, hi in ivs)
+
+
+def _gtid_uuids(value):
+    """The server UUIDs (lower case, tags dropped) a set names."""
+    return {sid.split(":", 1)[0] for sid in _gtid_intervals(value)}
 
 
 def _gtid_executed(session):
@@ -561,6 +610,10 @@ def _read_pitr_coverage(req):
             _require(_gtid_normalize(_gtid_field(seg, "gtids")) != "", "segments[{}] includes no GTID".format(k))
             _gtid_field(seg, "startPredecessors")
             _require(type(seg.get("transactions")) is int and seg["transactions"] > 0, "segments[{}].transactions is invalid".format(k))
+            # Each GTID is one transaction: a count that disagrees would
+            # only be found after the segment is streamed (F154).
+            _require(seg["transactions"] == _gtid_cardinality(seg["gtids"]),
+                     "segments[{}] counts {} transactions but includes {} GTIDs".format(k, seg["transactions"], _gtid_cardinality(seg["gtids"])))
             transactions += seg["transactions"]
         _require(type(cov.get("replayedTransactionCount")) is int and cov["replayedTransactionCount"] == transactions,
                  "replayedTransactionCount differs from the segments' transactions")
@@ -609,12 +662,18 @@ def _verify_pitr_plan(session, cov):
             overlap = _gtid_intersect(session, seg["gtids"], union)
             if overlap:
                 raise _PITRRefusal("PITRCoverageInvalid: R1: segment {} repeats {}".format(k, overlap))
-            union = _gtid_union(union, seg["gtids"])
+            union = _gtid_canonical(union, seg["gtids"])
         if not _gtid_equal(session, union, replay):
             raise _PITRRefusal("PITRCoverageInvalid: R1: the segments replay {} but the plan's replay set is {}".format(union, replay))
         want = _gtid_subtract(session, _gtid_subtract(session, lineage, baseline), excluded)
         if not _gtid_equal(session, replay, want):
             raise _PITRRefusal("PITRCoverageInvalid: R1: replay {} is not lineage minus baseline minus excluded ({})".format(replay, want))
+        # R6 refuses a replayed server that holds anything staged after
+        # the stop; a plan whose history already holds some of it can be
+        # refused before the load (F159).
+        conflict = _gtid_intersect(session, cov["postStop"], _gtid_subtract(session, lineage, excluded))
+        if conflict:
+            raise _PITRRefusal("PITRCoverageInvalid: R6: postStop holds {}, which the target history replays".format(conflict))
         # R3
         if not _gtid_subset(session, baseline, lineage):
             raise _PITRRefusal("PITRCoverageInvalid: R3: the baseline holds {}, outside the lineage".format(_gtid_subtract(session, baseline, lineage)))
@@ -643,7 +702,7 @@ def _verify_pitr_plan(session, cov):
             if not _gtid_subset(session, entry["previousGTIDs"], seg["startPredecessors"]) or \
                     not _gtid_subset(session, seg["startPredecessors"], _gtid_union(entry["previousGTIDs"], entry["gtids"])):
                 raise _PITRRefusal("PITRCoverageInvalid: R4: segment {} starts after {}, which is no position of its file {}".format(k, seg["startPredecessors"], entry["path"]))
-            applied = _gtid_union(applied, seg["gtids"])
+            applied = _gtid_canonical(applied, seg["gtids"])
         # R5
         if cov["outcome"] in ("ArchiveHead", "Partial") and not _gtid_normalize(replay):
             raise _PITRRefusal("PITRNoArchivedReplay: nothing is archived beyond the backup")
@@ -653,16 +712,61 @@ def _verify_pitr_plan(session, cov):
         _fail("PITRCoverageInvalid: cannot check the plan with the server's GTID functions: {}".format(e))
 
 
-def _verify_pitr_baseline(session, cov):
-    """R2: the loaded server's gtid_executed is the plan's baseline (E0)."""
+def _target_local_gtids(session, cov):
+    """The target's own history before the load (F004). A fresh restore
+    target may already hold transactions it executed itself: the image's
+    initialization, or the operator's credential reconcile (CREATE USER,
+    GRANT) on the writable target before the restore Job loads it. The load
+    (updateGtidSet "replace") keeps them beside the dump's set, so R2 and R6
+    expect them too, exactly. They must be the target server's own: any
+    other server's transaction means the target is not fresh, and a target
+    UUID that the plan names could collide with replayed transactions."""
     try:
         executed = _gtid_executed(session)
-        if not _gtid_equal(session, executed, cov["baseline"]):
-            _fail("PITRCoverageInvalid: R2: the loaded dump holds {} but the plan starts from {}".format(executed, cov["baseline"]))
+        row = session.run_sql("SELECT @@server_uuid").fetch_one()
+        uuid = "" if row is None or row[0] is None else str(row[0]).strip().lower()
+    except Exception as e:  # noqa: BLE001
+        _fail("PITRCoverageInvalid: cannot read the target's gtid_executed and server_uuid before the load: {}".format(e))
+    if not executed:
+        return ""
+    foreign = sorted(_gtid_uuids(executed) - {uuid})
+    if not uuid or foreign:
+        _fail("PITRCoverageInvalid: the restore target already holds transactions of other servers ({}); a point-in-time restore needs a fresh target: "
+              "empty it (or recreate its PVC) and retry".format(",".join(foreign) or executed))
+    named = set()
+    for key in ("baseline", "lineage", "excluded", "postStop", "divergent", "lost", "onHistoryExclusions"):
+        named |= _gtid_uuids(cov[key])
+    if uuid in named:
+        _fail("PITRCoverageInvalid: the restore target's server_uuid {} is a server of the restored history; its own transactions ({}) would collide with "
+              "the replay; give the target a new server_uuid (an empty datadir) and retry".format(uuid, executed))
+    print("BLOODRAVEN_PITR_TARGET_LOCAL gtids={}".format(_bounded_log(executed)), flush=True)
+    return executed
+
+
+def _verify_pitr_baseline(session, cov, local=""):
+    """R2: the loaded server's gtid_executed is the plan's baseline (E0) and
+    the target's own transactions from before the load."""
+    try:
+        executed = _gtid_executed(session)
+        want = _gtid_union(cov["baseline"], local)
+        if not _gtid_equal(session, executed, want):
+            _fail("PITRCoverageInvalid: R2: the loaded dump holds {} but the plan starts from {}{}".format(
+                executed, cov["baseline"], " and the target's own {}".format(local) if local else ""))
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001
         _fail("PITRCoverageInvalid: cannot read the loaded dump's gtid_executed: {}".format(e))
+
+
+def _open_check_session(conn, what):
+    """A fresh session for a proof after a long step (the load, the
+    replay): the main session may have outlived wait_timeout meanwhile
+    (F038). A failure to connect is an operational failure, not a
+    mismatch."""
+    try:
+        return mysqlsh.globals.shell.open_session(conn)
+    except Exception as e:  # noqa: BLE001
+        _fail("BLOODRAVEN_PITR_FAILED: cannot open a session to {}: {}".format(what, e))
 
 
 def _mysql_replay_command(host, port, user):
@@ -689,6 +793,12 @@ def _kill(proc):
 
 
 _GTID_NEXT = re.compile(rb"^SET @@SESSION\.GTID_NEXT= '([^']*)'")
+# mysqlbinlog prints each GTID event as a "#<date> <time> server id …
+# end_log_pos … GTID …" comment header, then version-gated "/*!…*/" and
+# "# …" lines, then the GTID_NEXT assignment. Only an assignment in that
+# position is a transaction boundary: a statement's text may hold a line
+# that reads like one (F156).
+_GTID_EVENT_HEADER = re.compile(rb"^#[0-9]{6} +[0-9]{1,2}:[0-9]{2}:[0-9]{2} server id [0-9]+ +end_log_pos [0-9]+ .*\t(?:GTID|Anonymous_GTID)\t")
 
 
 def _gtid_intervals(value):
@@ -723,20 +833,22 @@ def _gtid_intervals(value):
 def _gtid_format(intervals, limit=512):
     text = ",".join(sid + "".join(":{}".format(lo) if lo == hi else ":{}-{}".format(lo, hi) for lo, hi in intervals[sid])
                     for sid in sorted(intervals))
-    return text if len(text) <= limit else text[:limit] + "..."
+    return text if limit is None or len(text) <= limit else text[:limit] + "..."
 
 
 class _SegmentCheck:
     """P6: what mysqlbinlog actually emits for a segment, from the GTID_NEXT
     assignments in its output, must be exactly the segment's set: each one
     is checked before its transaction reaches mysql, and the whole set
-    after the segment."""
+    after the segment. The emitted GTIDs are kept as merged intervals per
+    source, compact for the long runs a segment holds (F155)."""
 
     def __init__(self, gtids):
         self.want = _gtid_intervals(gtids)
         self.starts = {sid: [lo for lo, _ in ivs] for sid, ivs in self.want.items()}
         self.seen = {}
         self.count = 0
+        self.repeated = False
 
     def admit(self, gtid):
         sid, _, gno = gtid.rpartition(":")
@@ -747,24 +859,33 @@ class _SegmentCheck:
         i = bisect.bisect_right(self.starts[sid], n) - 1
         if i < 0 or n > self.want[sid][i][1]:
             return False
-        self.seen.setdefault(sid, array.array("q")).append(n)
         self.count += 1
+        starts, ends = self.seen.setdefault(sid, (array.array("q"), array.array("q")))
+        j = bisect.bisect_right(starts, n) - 1
+        if j >= 0 and n <= ends[j]:
+            self.repeated = True
+        elif j >= 0 and ends[j] + 1 == n:
+            ends[j] = n
+            if j + 1 < len(starts) and starts[j + 1] == n + 1:
+                ends[j] = ends[j + 1]
+                del starts[j + 1]
+                del ends[j + 1]
+        elif j + 1 < len(starts) and starts[j + 1] == n + 1:
+            starts[j + 1] = n
+        else:
+            starts.insert(j + 1, n)
+            ends.insert(j + 1, n)
         return True
 
     def emitted(self):
         """The emitted set as intervals, and whether any GTID repeated."""
-        out, repeated = {}, False
-        for sid, gnos in self.seen.items():
-            merged = []
-            for n in sorted(gnos):
-                if merged and n <= merged[-1][1]:
-                    repeated = True
-                elif merged and n == merged[-1][1] + 1:
-                    merged[-1] = (merged[-1][0], n)
-                else:
-                    merged.append((n, n))
-            out[sid] = merged
-        return out, repeated
+        return {sid: list(zip(starts, ends)) for sid, (starts, ends) in self.seen.items()}, self.repeated
+
+
+# mysql reads its input ahead of the statements it runs, so the segment a
+# failure is reported against is where it was detected; the failing
+# statement may be from an earlier segment (F158).
+_DETECTED_AT = "segment is where the failure was detected; the failing statement may be from an earlier segment"
 
 
 def _run_pitr_segments(host, port, user, password, cov, mysqlbinlog):
@@ -799,29 +920,42 @@ def _run_pitr_segments(host, port, user, password, cov, mysqlbinlog):
             # E2BIG, ENOENT, EACCES: nothing of this segment reached mysql.
             _kill(mysql)
             _fail("BLOODRAVEN_PITR_FAILED: cannot start mysqlbinlog for segment={}: {}".format(k, e))
-        broken = False
+        broken = None
         unexpected = None
+        header = False
         try:
             for line in binlog.stdout:
-                if line.startswith(b"SET @@SESSION.GTID_NEXT="):
+                if header and line.startswith(b"SET @@SESSION.GTID_NEXT="):
+                    header = False
                     m = _GTID_NEXT.match(line)
                     value = m.group(1).decode("ascii", "replace") if m else line[:200].decode("ascii", "replace").strip()
                     if value.upper() != "AUTOMATIC" and not check.admit(value):
                         unexpected = value
                         break
+                elif header:
+                    header = line.startswith(b"/*!") or line.startswith(b"# ")
+                else:
+                    header = _GTID_EVENT_HEADER.match(line) is not None
                 mysql.stdin.write(line)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            broken = True
+        except OSError as e:  # BrokenPipeError, ConnectionResetError, a read error
+            broken = e
         finally:
             binlog.stdout.close()
         if unexpected is not None:
             _kill(binlog)
             _kill(mysql)
             _fail("PITRReplayMismatch: segment {} ({}): mysqlbinlog emitted {}, which the segment does not replay".format(k, label, unexpected))
-        if broken:
+        if broken is not None:
+            # mysql may still be running and waiting for input (a read
+            # error on mysqlbinlog's output); it must not run what it has
+            # buffered, so it is killed unless it already exited (F157).
             _kill(binlog)
-            rc = mysql.wait()
-            _fail("BLOODRAVEN_PITR_FAILED: mysql exit={} segment={}".format(rc, k))
+            try:
+                rc = mysql.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _kill(mysql)
+                rc = mysql.returncode
+            _fail("BLOODRAVEN_PITR_FAILED: mysql exit={} segment={} ({}; {})".format(rc, k, _DETECTED_AT, broken))
         rc = binlog.wait()
         if rc != 0:
             _kill(mysql)
@@ -837,26 +971,28 @@ def _run_pitr_segments(host, port, user, password, cov, mysqlbinlog):
         pass
     rc = mysql.wait()
     if rc != 0:
-        _fail("BLOODRAVEN_PITR_FAILED: mysql exit={} segment={}".format(rc, len(segments) - 1))
+        _fail("BLOODRAVEN_PITR_FAILED: mysql exit={} segment={} ({})".format(rc, len(segments) - 1, _DETECTED_AT))
     print("BLOODRAVEN_PITR_COMPLETE segments={}".format(len(segments)), flush=True)
 
 
-def _verify_pitr_result(session, cov):
-    """R6: the server holds exactly the target history minus X, and nothing
-    staged after the stop or outside the history. Returns S."""
+def _verify_pitr_result(session, cov, local=""):
+    """R6: the server holds exactly the target history minus X (and the
+    target's own transactions from before the load), and nothing staged
+    after the stop or outside the history. Returns S. A failure to read the
+    server is operational, not a mismatch (F038)."""
     try:
         executed = _gtid_executed(session)
-        want = _gtid_subtract(session, cov["lineage"], cov["excluded"])
+        want = _gtid_union(_gtid_subtract(session, cov["lineage"], cov["excluded"]), local)
         if not _gtid_equal(session, executed, want):
-            raise _PITRRefusal("PITRReplayMismatch: R6: replay left gtid_executed {} but the target history minus excludeGtids is {} (missing {}, extra {})".format(
-                executed, want, _gtid_subtract(session, want, executed), _gtid_subtract(session, executed, want)))
+            raise _PITRRefusal("PITRReplayMismatch: R6: replay left gtid_executed {} but the target history minus excludeGtids{} is {} (missing {}, extra {})".format(
+                executed, " plus the target's own transactions" if local else "", want, _gtid_subtract(session, want, executed), _gtid_subtract(session, executed, want)))
         leaked = _gtid_intersect(session, executed, _gtid_union(cov["postStop"], cov["divergent"]))
         if leaked:
             raise _PITRRefusal("PITRReplayMismatch: R6: replay applied {}, which is after the stop or outside the target history".format(leaked))
     except _PITRRefusal as e:
         _fail(str(e))
     except Exception as e:  # noqa: BLE001
-        _fail("PITRReplayMismatch: cannot read the replayed gtid_executed: {}".format(e))
+        _fail("BLOODRAVEN_PITR_FAILED: cannot read the replayed gtid_executed to prove the replay (R6): {}".format(e))
     return executed
 
 
@@ -867,10 +1003,10 @@ def _print_pitr_findings(cov):
     divergent = _gtid_normalize(cov["divergent"])
     if divergent:
         print("BLOODRAVEN_PITR_DIVERGENT count={}".format(_gtid_count(divergent)), flush=True)
-        print("BLOODRAVEN_PITR_DIVERGENT_SET gtids={}".format(divergent[:65536]), flush=True)
+        print("BLOODRAVEN_PITR_DIVERGENT_SET gtids={}".format(_bounded_log(divergent)), flush=True)
     on_history = _gtid_normalize(cov["onHistoryExclusions"])
     if on_history:
-        print("BLOODRAVEN_PITR_ON_HISTORY_EXCLUSIONS gtids={}".format(on_history[:65536]), flush=True)
+        print("BLOODRAVEN_PITR_ON_HISTORY_EXCLUSIONS gtids={}".format(_bounded_log(on_history)), flush=True)
 
 
 def _bounded(items, limit=8):
@@ -880,12 +1016,16 @@ def _bounded(items, limit=8):
     return ",".join(items)
 
 
-def _pitr_verdict_message(cov, executed):
+def _pitr_verdict_message(cov, executed, limit=None):
     """The controller certifies a PITR Job only from this message, read from
     the main container's termination message. It is written last, after
     every check and the replay. Line 1 is the verdict (≤ 1 KiB); line 2
     carries S, or only its digest when S is longer than 2 KiB; line 3, when
-    present, carries the on-history exclusions."""
+    present, carries the on-history exclusions. The whole message fits the
+    kubelet's share for this container (limit): the optional on-history
+    line goes first, then S gives way to its digest; no line is ever cut
+    (F040)."""
+    limit = limit or _termination_limit()
     segments, files = cov["segments"], cov["files"]
     used = sorted({seg["file"] for seg in segments})
     last = ""
@@ -923,21 +1063,26 @@ def _pitr_verdict_message(cov, executed):
         line = verdict("+{}".format(len(cov["sites"])))
     if len(line) > _VERDICT_MAX:
         _fail("PITRCoverageInvalid: the verdict exceeds {} bytes".format(_VERDICT_MAX))
-    lines = [line]
+    digest_line = "BLOODRAVEN_PITR_RESULT v=1 executedSha256={}".format(executed_sha)
+    result = digest_line
     if len(executed) <= _RESULT_GTIDS_MAX:
-        lines.append("BLOODRAVEN_PITR_RESULT v=1 executed={}".format(executed))
-    else:
-        lines.append("BLOODRAVEN_PITR_RESULT v=1 executedSha256={}".format(executed_sha))
+        result = "BLOODRAVEN_PITR_RESULT v=1 executed={}".format(executed)
     on_history = _gtid_normalize(cov["onHistoryExclusions"])
+    extra = []
     if on_history and len(on_history) <= _ON_HISTORY_GTIDS_MAX:
-        lines.append("BLOODRAVEN_PITR_ON_HISTORY_EXCLUSIONS gtids={}".format(on_history))
-    return "\n".join(lines)
+        extra = ["BLOODRAVEN_PITR_ON_HISTORY_EXCLUSIONS gtids={}".format(on_history)]
+    for lines in ([line, result] + extra, [line, result], [line, digest_line]):
+        message = "\n".join(lines)
+        if len(message.encode("utf-8")) <= limit:
+            return message
+    _fail("PITRCoverageInvalid: the verdict exceeds the {}-byte termination message".format(limit))
 
 
 def _write_pitr_verdict(cov, executed):
     message = _pitr_verdict_message(cov, executed)
     print(message.split("\n")[1], flush=True)
-    _write_termination(message, os.environ.get("BLOODRAVEN_PITR_VERDICT_PATH"), limit=4000)
+    # Already within the container's share: written whole, never cut.
+    _write_termination(message, os.environ.get("BLOODRAVEN_PITR_VERDICT_PATH"), limit=len(message))
 
 
 # --------------------------------------------------------------------
@@ -1146,9 +1291,12 @@ def main():
     mysqlsh.globals.shell.connect(conn)
 
     session = mysqlsh.globals.session
+    local = ""
     if coverage is not None:
-        # The plan's set algebra, before anything destructive runs.
+        # The plan's set algebra, before anything destructive runs, and
+        # the target's own history the load will keep.
         _verify_pitr_plan(session, coverage)
+        local = _target_local_gtids(session, coverage)
 
     # util.loadDump() needs @@GLOBAL.local_infile=ON. Establish that FIRST:
     # everything below this line is destructive, and a load that cannot
@@ -1182,13 +1330,18 @@ def main():
 
     print("BLOODRAVEN_LOAD_COMPLETE input={}".format(input_url), flush=True)
 
-    # Optional PITR replay on top of the loaded dump.
+    # Optional PITR replay on top of the loaded dump. Each proof runs on a
+    # session opened after the step before it, which may have outlasted
+    # the server's wait_timeout.
     executed = None
     if coverage is not None:
-        _verify_pitr_baseline(session, coverage)
+        check = _open_check_session(conn, "prove the loaded baseline (R2)")
+        _verify_pitr_baseline(check, coverage, local)
+        check.close()
         _print_pitr_findings(coverage)
         _run_pitr_segments(host_only, port, user, password, coverage, mysqlbinlog)
-        executed = _verify_pitr_result(session, coverage)
+        session = _open_check_session(conn, "prove the replay (R6)")
+        executed = _verify_pitr_result(session, coverage, local)
 
     _print_restore_complete(session)
     if coverage is not None:

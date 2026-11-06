@@ -158,7 +158,12 @@ type planner struct {
 
 	rows   []*Row
 	marked map[string]*pitrarchive.HistoryIntegrity
+	// promos are the promotion records: anchors and loss evidence.
+	// fences are every record of every kind, including the promotion
+	// records: a site's record observed after an anchor and not provably
+	// after the witness fences that anchor off (§4.4, N3 revised).
 	promos []promoRef
+	fences []promoRef
 	sites  []string
 
 	B, X  Set
@@ -228,12 +233,16 @@ func newPlanner(ctx context.Context, req Request, archive Archive, fetcher Fetch
 		for i, rec := range sm.Promotions {
 			set, err := ParseSet(rec.GTIDExecuted)
 			if err != nil {
-				return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "site %s promotion record %d has gtidExecuted %q: %v", sm.Site, i, rec.GTIDExecuted, err)
+				return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "site %s record %d has gtidExecuted %q: %v", sm.Site, i, rec.GTIDExecuted, err)
 			}
 			if err := p.budget.chargeSet(set, "promotion records"); err != nil {
 				return nil, err
 			}
-			p.promos = append(p.promos, promoRef{site: sm.Site, index: i, rec: rec, set: set})
+			ref := promoRef{site: sm.Site, index: i, rec: rec, set: set}
+			p.fences = append(p.fences, ref)
+			if rec.Kind == pitrarchive.RecordPromotion {
+				p.promos = append(p.promos, ref)
+			}
 		}
 	}
 	sort.Strings(p.sites)

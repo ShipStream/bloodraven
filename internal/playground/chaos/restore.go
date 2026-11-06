@@ -121,6 +121,27 @@ func (a *Actions) ListRustFSKeys(ctx context.Context, bucket, prefix string) ([]
 	return pgrustfs.ListKeys(ctx, fmt.Sprintf("http://127.0.0.1:%d", pf.LocalPort), bucket, prefix, creds)
 }
 
+// DeleteRustFSPrefix deletes every object under prefix (which must end in
+// "/") in the playground RustFS bucket through a port-forward. The PITR
+// scenarios use it to remove their uniquely named archive prefixes once no
+// archiver writes there.
+func (a *Actions) DeleteRustFSPrefix(ctx context.Context, bucket, prefix string) (int, error) {
+	creds, err := a.rustfsCredentials(ctx)
+	if err != nil {
+		return 0, err
+	}
+	pod, err := a.K.FindPodWithLabel(ctx, a.Namespace, "app.kubernetes.io/name=rustfs")
+	if err != nil {
+		return 0, fmt.Errorf("find RustFS pod: %w", err)
+	}
+	pf, err := a.K.PortForwardPod(ctx, a.Namespace, pod.Name, 9000)
+	if err != nil {
+		return 0, fmt.Errorf("port-forward RustFS: %w", err)
+	}
+	defer pf.Stop()
+	return pgrustfs.DeletePrefix(ctx, fmt.Sprintf("http://127.0.0.1:%d", pf.LocalPort), bucket, prefix, creds)
+}
+
 func (a *Actions) rustfsCredentials(ctx context.Context) (pgrustfs.Credentials, error) {
 	const secretName = "dragonfly-s3-credentials"
 	secret, err := a.K.Kubernetes.CoreV1().Secrets(a.Namespace).Get(ctx, secretName, metav1.GetOptions{})

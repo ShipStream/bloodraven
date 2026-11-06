@@ -76,6 +76,9 @@ type BinlogArchiver struct {
 	session     *ArchiveSession
 	identityErr error
 	episode     promotionEpisode
+	// startChecked: this process's first identified role observation was
+	// checked against the site's latest record (recordResets).
+	startChecked bool
 	// roles is fed by the role sampler goroutine and the scan; it has
 	// its own lock.
 	roles           roleTimeline
@@ -458,6 +461,9 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		// and persist a pending one.
 		integrityErr = a.checkHistoryIntegrity(ctx)
 	}
+	// Incarnation-reset records are written in every role, before the
+	// episode's promotion record and any upload (N3 revised).
+	resetErr := a.recordResets(ctx, snap)
 	recordErr := a.observeRole(ctx, snap)
 	if integrityErr != nil {
 		a.incUploadFailures()
@@ -467,10 +473,23 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	}
 	if !writable {
 		// No uploads on a standby. Clear stale errors so a former
-		// primary that failed over cleanly stops reporting noise.
-		a.setError("")
+		// primary that failed over cleanly stops reporting noise; a
+		// reset record that cannot be written is reported (a standby
+		// awaiting the writer's descriptor cannot run the check yet).
 		a.setBacklog(0)
+		if resetErr != nil && !errors.Is(resetErr, errStartCheckPending) {
+			a.incUploadFailures()
+			a.setError(resetErr.Error())
+			return
+		}
+		a.setError("")
 		return
+	}
+	switch {
+	case resetErr != nil && recordErr != nil && !errors.Is(recordErr, errStartCheckPending):
+		recordErr = joinKeepToken(resetErr, recordErr)
+	case resetErr != nil:
+		recordErr = resetErr
 	}
 	if recordErr != nil {
 		a.incUploadFailures()

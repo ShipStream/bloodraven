@@ -3,6 +3,7 @@ package pitrplan
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -150,7 +151,9 @@ func (p *planner) groundTruth(c GTID) (*groundTruth, error) {
 //	          ∪ exec(q), q the latest archived origin occurrence of s in pred(o_r)
 //
 // and accepts o_r iff every g ∈ pred(o_r) ∖ X ∖ Anchor(w) has sid(g) = sid(w).
-// anchorRecords says which records provably precede w (round-1 G1).
+// anchorRecords says which promotion records provably precede w and are
+// not fenced off by a later record of their site (round-1 G1, N3
+// revised); q is fenced the same way (originAnchor).
 func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error) {
 	uuid := c.UUID()
 	first := occs[0].f.txn(occs[0].i)
@@ -170,9 +173,12 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 			return nil, err
 		}
 		anchor := records
-		q, qExec, err := p.originAnchor(c, srv, pred, originSites, o.f.txn(o.i).OCT)
+		q, qExec, qFence, err := p.originAnchor(c, srv, pred, originSites, o.f.txn(o.i).OCT)
 		if err != nil {
 			return nil, err
+		}
+		if qFence != "" && !slices.Contains(choice.shrunk, qFence) {
+			choice.shrunk = append(choice.shrunk, qFence)
 		}
 		if q != nil {
 			anchor = anchor.Union(qExec)
@@ -224,7 +230,7 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 	}
 	msg := fmt.Sprintf("the first transaction at or after %s, %s, is archived only as a replica copy on %s. Its predecessors include %s (sid %s), which %s's origin (%s) is not proven to have executed. Exclude %s",
 		fmtMicros(p.T), c, r.o.f.row.Site, r.g, r.g.UUID(), c, originSite, r.g)
-	if lagRecord != nil {
+	if lagRecord != nil && len(choice.shrunk) == 0 {
 		// D-53: w was committed in its era's first probe interval, before
 		// the promotion record that would anchor it.
 		before := int64(0)
@@ -253,7 +259,7 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 			fmtMicros(p.anchorFrom(newest)), newest.site, newest.rec.ObservedAt.UTC().Format(microLayout), p.deltaString())
 	}
 	if len(choice.shrunk) > 0 {
-		msg += fmt.Sprintf("; the promotion records %s are not anchors, because their site's history may have been replaced (a reclone or reset) before %s", strings.Join(choice.shrunk, ", "), c)
+		msg += "; " + strings.Join(choice.shrunk, "; ")
 	}
 	return nil, refuse(pitrarchive.TokenStopAmbiguous, "%s", msg)
 }
@@ -273,14 +279,15 @@ func (p *planner) newestRecord(sites map[string]bool) *promoRef {
 
 // originAnchor finds q: the latest archived origin occurrence of s =
 // (uuid, srv) whose GTID is in pred, among the rows of the sites whose
-// promotion records name s. It returns q's file and exec(q). A q whose
-// site's history may have been replaced between q and w (until = oct(w))
-// is no anchor (G1): exec(q) is then not proven to precede w on s.
-func (p *planner) originAnchor(c GTID, srv uint32, pred Set, sites map[string]bool, until int64) (*file, Set, error) {
+// promotion records name s. It returns q's file and exec(q). A q that a
+// record of its site fences off before w (until = oct(w)) is no anchor:
+// exec(q) is then not proven to precede w on s, and the third result
+// says why.
+func (p *planner) originAnchor(c GTID, srv uint32, pred Set, sites map[string]bool, until int64) (*file, Set, string, error) {
 	uuid := c.UUID()
 	ofS := pred.OfUUID(uuid)
 	if ofS.IsEmpty() {
-		return nil, nil, nil
+		return nil, nil, "", nil
 	}
 	var rows []*Row
 	for _, r := range p.rows {
@@ -295,7 +302,7 @@ func (p *planner) originAnchor(c GTID, srv uint32, pred Set, sites map[string]bo
 			if isUnreadable(err) {
 				continue // an anchor is optional; a lost row only narrows it
 			}
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 		if f.idx.WriterServerID != srv {
 			continue
@@ -305,18 +312,18 @@ func (p *planner) originAnchor(c GTID, srv uint32, pred Set, sites map[string]bo
 			if f.origin(i) && g.UUID() == uuid && pred.Has(g) {
 				exec, err := p.pred(f, i+1)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, "", err
 				}
-				// q's commit time and its site's files are on the server's
-				// clock; its site's records on the sidecar's.
-				if p.historyShrinks(r.Site, c, srv, exec, f.txn(i).OCT, until, 0, p.delta) {
-					return nil, nil, nil
+				// q's commit time is on the server's clock and its site's
+				// records on the sidecar's: widen by δ.
+				if fc := p.fenceOf(r.Site, nil, c, srv, f.txn(i).OCT, until, p.delta); fc != nil {
+					return nil, nil, fc.explain(fmt.Sprintf("the origin row %s (through %s) is not an anchor", r.Label(), g), c), nil
 				}
-				return f, exec, nil
+				return f, exec, "", nil
 			}
 		}
 	}
-	return nil, nil, nil
+	return nil, nil, "", nil
 }
 
 // anchorChoice is the record part of Anchor(w).
@@ -328,25 +335,24 @@ type anchorChoice struct {
 	// pending is the earliest record of s without w observed within δ of
 	// w, or after it: its order against w is unknown.
 	pending *promoRef
-	// shrunk names the records refused because their site's history may
-	// have been replaced before w.
+	// shrunk says which anchors a fence refused, and why.
 	shrunk []string
 	// sites are the sites whose records name s.
 	sites map[string]bool
 }
 
 // anchorRecords selects the promotion records of s = (uuid(w), srv) that
-// provably precede w (§4.4, round-1 G1). Per site, it takes the latest
-// record R with
+// provably precede w (§4.4, round-1 G1, N3 revised). Per site, it takes
+// the latest promotion record R with
 //
 //	w ∉ R  and  R.observedAt + δ < oct(w)
 //
 // (observed before w even with the clock-skew margin), and uses it only if
-// nothing shows the site's history being replaced between R and w
-// (historyShrinks): R ⊆ pred_s(w) holds because gtid_executed only grows
-// within one server incarnation, and a reclone or reset starts a new one
-// whose history need not hold R. Earlier records of the site add nothing:
-// within one incarnation they are subsets of R.
+// no record fences it off (fenceOf): R ⊆ pred_s(w) holds because
+// gtid_executed only grows within one server incarnation, and the
+// sidecar records every episode and every incarnation change it observes.
+// Earlier records of the site add nothing: within one incarnation they
+// are subsets of R.
 func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 	uuid := c.UUID()
 	out := anchorChoice{set: Set{}, sites: map[string]bool{}}
@@ -387,10 +393,10 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 		if best == nil {
 			continue
 		}
-		name := fmt.Sprintf("%s#%d", best.site, best.index)
-		// The site's later records share best's clock.
-		if p.historyShrinks(site, c, srv, best.set, best.rec.ObservedAt.UnixMicro(), oct, p.delta, 0) {
-			out.shrunk = append(out.shrunk, name)
+		name := best.name()
+		// R and the site's later records share the sidecar's clock.
+		if fc := p.fenceOf(site, best, c, srv, best.rec.ObservedAt.UnixMicro(), oct, 0); fc != nil {
+			out.shrunk = append(out.shrunk, fc.explain("the promotion records "+name+" are not anchors", c))
 			continue
 		}
 		out.set = out.set.Union(best.set)
@@ -399,71 +405,89 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 	return out
 }
 
-// historyShrinks reports evidence that site's server, s = (uuid(w), srv),
-// may have stopped holding set, its gtid_executed at since, before until
-// (both µs; until is oct(w)): a new server incarnation (a reclone, a
-// reset, a re-seed) between them.
-// rowMargin and recordMargin widen the comparisons of since with file
-// times (the server's clock) and with the site's record times (its
-// sidecar's clock) for skew; a comparison on one clock needs none. The
-// evidence is
-//
-//   - a later record of the site by the same server that lacks part of set
-//     (any time after since: a shrink cannot be dated more precisely);
-//   - a record by another server, on any site, observed between since and
-//     until (each ±δ) that does not hold w: s lost its role and regained
-//     it in between, and its new era's record, which would anchor
-//     instead, is missing or not provably before until, so a reclone may
-//     have come in between (review F062). A record that holds w was taken
-//     after w committed, so it is no role change before w;
-//   - a row of the site whose prev ∪ base lacks part of set and that is a
-//     clone bridge (baseGtids) or starts from a state that is no subset of
-//     set: a new incarnation, at a time nothing proves (review F009, N3:
-//     neither the manifest's firstEventTime nor a commit time in the bytes
-//     proves when a file was opened);
-//   - an ordinary row starting from a proper subset of set (the shape of a
-//     file opened before since) whose firstEventTime falls between since +
-//     margin and until + margin. That time only ever adds evidence; it
-//     never discards any.
-//
-// Without such evidence, gtid_executed only grew from since to until.
-func (p *planner) historyShrinks(site string, w GTID, srv uint32, set Set, since, until, rowMargin, recordMargin int64) bool {
-	if set.IsEmpty() {
-		return false
+func (pr *promoRef) name() string { return fmt.Sprintf("%s#%d", pr.site, pr.index) }
+
+// fence is a record that keeps an anchor from proving s's history at w.
+type fence struct {
+	rec *promoRef
+	// role: another server's promotion record (F062), not a record of
+	// the anchor's own site.
+	role bool
+}
+
+// explain completes "<anchor> is not an anchor" with the fence's reason.
+func (f *fence) explain(what string, w GTID) string {
+	at := f.rec.rec.ObservedAt.UTC().Format(microLayout)
+	if f.role {
+		return fmt.Sprintf("%s, because %s, another server's promotion record observed at %s, between it and %s, does not hold %s: the server lost its role in between and its next era's record is missing or not provably before %s",
+			what, f.rec.name(), at, w, w, w)
 	}
+	kind := "a promotion record"
+	if f.rec.rec.Kind == pitrarchive.RecordReset {
+		kind = "an incarnation-reset record"
+	} else if f.rec.rec.Kind != pitrarchive.RecordPromotion {
+		kind = fmt.Sprintf("a %q record", f.rec.rec.Kind)
+	}
+	window := "an unknown time"
+	if pi := time.Duration(f.rec.rec.ProbeInterval); pi > 0 {
+		window = "up to " + pi.String()
+	}
+	return fmt.Sprintf("%s, because a later record of site %s, %s (%s observed at %s, reporting a change that happened %s before it), is not provably after %s: %s may belong to a later episode or server incarnation, whose history need not hold the anchor",
+		what, f.rec.site, f.rec.name(), kind, at, window, w, w)
+}
+
+// fenceOf returns the first record that keeps an anchor of site, taken at
+// since (µs: a record's observedAt, or q's commit time), from proving
+// that s = (uuid(w), srv) still held its set when w committed at until
+// (µs), or nil (§4.4, N3 revised). margin widens since for an anchor on
+// another clock than the site's records (q's commit time). self is the
+// anchor record itself (nil for q). A fence is
+//
+//   - a record of the site, of any kind and any server, observed after
+//     the anchor (at ≥ since − margin) and no later than until + PI + δ,
+//     PI the record's ProbeInterval (unknown: unbounded). The change the
+//     record reports (a new episode or server incarnation) happened
+//     within PI before it, so it may lie before w, and w may belong to a
+//     later episode or incarnation whose history need not hold the
+//     anchor. Neither a file's first event time nor a clone bridge row
+//     dates an incarnation (review F009): the sidecar's records do;
+//   - (review F062) another server's promotion record, on any site,
+//     observed within (since − δ, until + δ) that does not hold w: s lost
+//     its role and regained it in between, and its new era's record is
+//     missing or not provably before w. A record that holds w was taken
+//     after w committed, so it is no role change before w.
+//
+// Residual risk: an incarnation change the sidecar never observes (one
+// that happens and is reverted between two probes, or while the sidecar
+// is down when the server's new history still holds the site's latest
+// record) leaves no fence.
+func (p *planner) fenceOf(site string, self *promoRef, w GTID, srv uint32, since, until, margin int64) *fence {
 	uuid := w.UUID()
+	for i := range p.fences {
+		f := &p.fences[i]
+		if f.site != site || (self != nil && f.index == self.index) {
+			continue
+		}
+		at := f.rec.ObservedAt.UnixMicro()
+		if at+margin < since {
+			continue
+		}
+		pi := time.Duration(f.rec.ProbeInterval).Microseconds()
+		if pi <= 0 || at <= until+pi+p.delta {
+			return &fence{rec: f}
+		}
+	}
 	for i := range p.promos {
 		pr := &p.promos[i]
+		if pr.rec.ServerUUID == uuid && pr.rec.ServerID == srv {
+			continue
+		}
 		at := pr.rec.ObservedAt.UnixMicro()
-		if pr.rec.ServerUUID != uuid || pr.rec.ServerID != srv {
-			if at+p.delta > since && at-p.delta < until && !pr.set.Has(w) {
-				return true
-			}
-			continue
-		}
-		if pr.site == site && at+recordMargin > since && !pr.set.Contains(set) {
-			return true
+		if at+p.delta > since && at-p.delta < until && !pr.set.Has(w) {
+			return &fence{rec: pr, role: true}
 		}
 	}
-	for _, r := range p.rows {
-		if r.Site != site {
-			continue
-		}
-		prev := r.Hints.Previous
-		if f := p.files[r]; f != nil {
-			prev = f.prev
-		}
-		if prev.Contains(set) {
-			continue
-		}
-		if !r.Base.IsEmpty() || !set.Contains(prev) {
-			return true
-		}
-		if !r.Created.IsZero() && r.Created.UnixMicro() > since+rowMargin && r.Created.UnixMicro() <= until+rowMargin {
-			return true
-		}
-	}
-	return false
+	return nil
 }
 
 // anchorFrom is the earliest commit time a witness can have for record pr

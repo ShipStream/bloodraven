@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -544,7 +545,28 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 			if got := opts["threads"]; got != tc.wantThreads {
 				t.Errorf("threads = %v, want %v", got, tc.wantThreads)
 			}
+			// F040: the main container's share of the kubelet's 12 KiB of
+			// termination messages, capped at 4 KiB.
+			spec := job.Spec.Template.Spec
+			want := strconv.Itoa(min(4096, 12288/(len(spec.InitContainers)+len(spec.Containers))))
+			if got := containerEnv(spec.Containers, backupJobContainerName)[terminationMessageLimitEnv]; got != want {
+				t.Errorf("%s = %q, want %s for %d containers", terminationMessageLimitEnv, got, want, len(spec.InitContainers)+len(spec.Containers))
+			}
 		})
+	}
+}
+
+// F040: the limit follows the pod's container count.
+func TestSetTerminationMessageLimit(t *testing.T) {
+	for _, tc := range []struct {
+		init int
+		want string
+	}{{0, "4096"}, {2, "4096"}, {3, "3072"}, {4, "2457"}} {
+		spec := corev1.PodSpec{InitContainers: make([]corev1.Container, tc.init), Containers: []corev1.Container{{Name: backupJobContainerName}}}
+		setTerminationMessageLimit(&spec)
+		if got := containerEnv(spec.Containers, backupJobContainerName)[terminationMessageLimitEnv]; got != tc.want {
+			t.Errorf("%d init containers: limit %q, want %s", tc.init, got, tc.want)
+		}
 	}
 }
 

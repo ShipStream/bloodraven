@@ -7,6 +7,9 @@
 #
 set -euo pipefail
 
+# shellcheck source=lib-sidecar-http.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib-sidecar-http.sh"
+
 NAMESPACE=""
 MFG_NAME=""
 BUNDLE_NAME="bloodraven-bundle-$(date +%Y%m%d-%H%M%S)"
@@ -129,9 +132,14 @@ kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-
 
 # Per-site /archiver/status: archive block, promotionRecordedAt, historyIntegrity,
 # divergentRows and quarantinedRows. The endpoint returns no credentials.
+# When nothing could fetch it, the file holds an explicit error object
+# instead of being empty.
 for pod in $(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME,app.kubernetes.io/name=mysql" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
-    kubectl exec -n "$NAMESPACE" "$pod" -c sidecar -- wget -T 5 -qO- http://127.0.0.1:8080/archiver/status \
-        > "$OUTPUT_DIR/${pod}-archiver-status.json" 2>/dev/null || true
+    if sidecar_http_get "$NAMESPACE" "$pod" /archiver/status; then
+        printf '%s\n' "$SIDECAR_HTTP_BODY" > "$OUTPUT_DIR/${pod}-archiver-status.json"
+    else
+        printf '{"error":"/archiver/status unavailable","tried":"%s"}\n' "$SIDECAR_HTTP_TRIED" > "$OUTPUT_DIR/${pod}-archiver-status.json"
+    fi
 done
 
 # PITR restore and verification Job pods: termination messages (refusals and

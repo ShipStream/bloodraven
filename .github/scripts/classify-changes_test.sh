@@ -48,6 +48,8 @@ check pitr-sidecar 'internal/sidecar/binlog_txindex.go' true false false true
 check pitr-sidecar-fixture 'internal/sidecar/testdata/native/failback/a.bin' true false false true
 check restore-script 'internal/controller/restore_script.py' true false false true
 check native-test 'internal/controller/pitr_restore_script_test.go' true false false true
+check script-embedding 'internal/controller/backup.go' true false false true
+check native-python-harness 'internal/controller/script_credentials_test.go' true false false true
 check controller-go 'internal/controller/runner.go' true false false false
 check gtid-sets 'internal/mysql/gtid.go' true false false true
 check archive-crypto 'internal/backupcrypto/stream.go' true false false true

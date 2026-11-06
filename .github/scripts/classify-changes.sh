@@ -4,7 +4,9 @@
 # the planner, the sidecar binlog reader, restore.py, verify_script.sh), the
 # packages they link that change what is replayed (internal/mysql's GTID sets,
 # internal/backupcrypto's archive decryption, the controller's PITR Job
-# rendering) and their contracts.
+# rendering, backup.go's embedding of restore.py, and the Python harness
+# in script_credentials_test.go that the native replay test runs it with)
+# and their contracts.
 set -euo pipefail
 
 go=false site=false course=false pitr=false any=false
@@ -13,7 +15,7 @@ while IFS= read -r f || [ -n "$f" ]; do
   any=true
   case "$f" in *.go) go=true ;; esac
   case "$f" in
-    cmd/bloodraven/*|internal/pitrplan/*|internal/pitrarchive/*|internal/backupmeta/*|internal/sidecar/*|internal/mysql/*|internal/backupcrypto/*|internal/controller/pitr*.go|internal/controller/restore_script.py|internal/controller/verify_script.sh|go.mod|go.sum) pitr=true ;;
+    cmd/bloodraven/*|internal/pitrplan/*|internal/pitrarchive/*|internal/backupmeta/*|internal/sidecar/*|internal/mysql/*|internal/backupcrypto/*|internal/controller/pitr*.go|internal/controller/backup.go|internal/controller/script_credentials_test.go|internal/controller/restore_script.py|internal/controller/verify_script.sh|go.mod|go.sum) pitr=true ;;
   esac
   case "$f" in
     .github/workflows/ci.yml|.github/actions/*|.github/scripts/*|Makefile|.gitignore) go=true; site=true; course=true; pitr=true ;;

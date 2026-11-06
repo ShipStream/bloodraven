@@ -1,12 +1,20 @@
 package scenarios
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -116,6 +124,7 @@ func TestPITRCheckTargetAfterBackup(t *testing.T) {
 // audit keeps reporting its retained lost rows, yet must still require the
 // right primary, archive and a fresh promotion record.
 func TestPITRPromotionReadyToleratesOnlyExpectedDivergence(t *testing.T) {
+	const auditErr = "site iad name mysql-bin.000004 id ab12 P=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-40 divergent transactions=3e11fa47-71ca-11e1-9e33-c80aa9429562:41-60; preserve objects and use pitr-quarantine with a canonical full-backup bound"
 	notBefore := mustMicro(t, "2026-11-05T10:00:10.000000Z")
 	good := func() *pgsidecar.ArchiverStatusResponse {
 		return &pgsidecar.ArchiverStatusResponse{
@@ -132,15 +141,25 @@ func TestPITRPromotionReadyToleratesOnlyExpectedDivergence(t *testing.T) {
 	}{
 		{"clean", func(*pgsidecar.ArchiverStatusResponse) {}, false, true},
 		{"divergence error tolerated", func(s *pgsidecar.ArchiverStatusResponse) {
-			s.LastError, s.DivergentRows = "site iad: archived rows missing from the history", 1
+			s.LastError, s.DivergentRows = auditErr, 1
+		}, true, true},
+		{"divergence error behind an unsafe-history prefix", func(s *pgsidecar.ArchiverStatusResponse) {
+			s.LastError, s.DivergentRows = "PITRArchiveUnsafeHistory: site iad ...; also: "+auditErr, 1
 		}, true, true},
 		{"quarantined rows count as expected divergence", func(s *pgsidecar.ArchiverStatusResponse) {
-			s.LastError, s.QuarantinedRows = "audit", 2
+			s.LastError, s.QuarantinedRows = auditErr, 2
 		}, true, true},
 		{"divergence error without tolerance", func(s *pgsidecar.ArchiverStatusResponse) {
-			s.LastError, s.DivergentRows = "audit", 1
+			s.LastError, s.DivergentRows = auditErr, 1
 		}, false, false},
 		{"error without divergent rows", func(s *pgsidecar.ArchiverStatusResponse) { s.LastError = "upload failed" }, true, false},
+		{"audit error without divergent rows", func(s *pgsidecar.ArchiverStatusResponse) { s.LastError = auditErr }, true, false},
+		{"unrelated error while rows are suspect (F181)", func(s *pgsidecar.ArchiverStatusResponse) {
+			s.LastError, s.DivergentRows = "archive mysql-bin.000007: put object: 503 Service Unavailable", 1
+		}, true, false},
+		{"unreadable-object audit error while rows are suspect", func(s *pgsidecar.ArchiverStatusResponse) {
+			s.LastError, s.DivergentRows = "site iad name mysql-bin.000004 id x P=a:1-3 object missing or unreadable, digest unknown: 404; preserve objects and use pitr-quarantine with a canonical full-backup bound", 1
+		}, true, false},
 		{"not primary", func(s *pgsidecar.ArchiverStatusResponse) { s.Primary = false }, true, false},
 		{"other prefix", func(s *pgsidecar.ArchiverStatusResponse) { s.ManifestPrefix = "e2e/s70/run-fresh/binlogs" }, true, false},
 		{"other archive", func(s *pgsidecar.ArchiverStatusResponse) { s.Archive.ArchiveID = "arch-2" }, true, false},
@@ -149,8 +168,14 @@ func TestPITRPromotionReadyToleratesOnlyExpectedDivergence(t *testing.T) {
 		{"stale promotion record", func(s *pgsidecar.ArchiverStatusResponse) {
 			s.PromotionRecordedAt = notBefore.Add(-5 * time.Second)
 		}, true, false},
-		{"record within the µs slack", func(s *pgsidecar.ArchiverStatusResponse) {
+		{"record half a second before the request is stale (F182: no cross-host slack)", func(s *pgsidecar.ArchiverStatusResponse) {
 			s.PromotionRecordedAt = notBefore.Add(-500 * time.Millisecond)
+		}, false, false},
+		{"record a microsecond before the request is stale", func(s *pgsidecar.ArchiverStatusResponse) {
+			s.PromotionRecordedAt = notBefore.Add(-time.Microsecond)
+		}, false, false},
+		{"record at the request instant", func(s *pgsidecar.ArchiverStatusResponse) {
+			s.PromotionRecordedAt = notBefore
 		}, false, true},
 		{"no record yet", func(s *pgsidecar.ArchiverStatusResponse) { s.PromotionRecordedAt = time.Time{} }, true, false},
 		{"never scanned", func(s *pgsidecar.ArchiverStatusResponse) { s.LastScanAt = time.Time{} }, true, false},
@@ -238,5 +263,350 @@ func TestPITRScenariosInPITRE2EJob(t *testing.T) {
 	}
 	if !strings.Contains(string(reusable), `run-all --scenarios="$E2E_SCENARIOS"`) {
 		t.Error("_e2e.yml must run scenario lists through `run-all --scenarios` so ResetBeforeRunAll applies")
+	}
+	// F107: scenario-list jobs write and upload their JUnit report too.
+	if !strings.Contains(string(reusable), `--junit-out="$E2E_JUNIT_OUT"`) {
+		t.Error("_e2e.yml scenario-list run must pass --junit-out")
+	}
+	_, upload, ok := strings.Cut(string(reusable), "- name: Upload JUnit results\n")
+	if !ok {
+		t.Fatal("_e2e.yml has no JUnit upload step")
+	}
+	upload, _, _ = strings.Cut(upload, "- name:")
+	if strings.Contains(upload, "inputs.scenario == ''") || !strings.Contains(upload, "e2e-scenarios-junit.xml") && !strings.Contains(upload, "'scenarios'") {
+		t.Errorf("the JUnit upload must cover scenario-list jobs:\n%s", upload)
+	}
+}
+
+// TestPITRSealedFileArchived pins F185: a flushing fence is done only when
+// the file it sealed has a new manifest row; an older file's upload, or a
+// row of the same name that predates the flush, does not count.
+func TestPITRSealedFileArchived(t *testing.T) {
+	before := []pitrManifestRow{{Name: "mysql-bin.000003", ID: "a"}, {Name: "mysql-bin.000004", ID: "old"}}
+	cases := []struct {
+		name  string
+		after []pitrManifestRow
+		want  bool
+	}{
+		{"nothing new", before, false},
+		{"an older pending file uploaded", append(append([]pitrManifestRow{}, before...), pitrManifestRow{Name: "mysql-bin.000002", ID: "b"}), false},
+		{"the sealed file uploaded", append(append([]pitrManifestRow{}, before...), pitrManifestRow{Name: "mysql-bin.000005", ID: "c"}), true},
+		{"a same-name row from before", []pitrManifestRow{{Name: "mysql-bin.000005", ID: "c"}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := pitrSealedFileArchived(before, c.after, "mysql-bin.000005"); got != c.want {
+				t.Fatalf("archived=%v, want %v", got, c.want)
+			}
+		})
+	}
+	if pitrSealedFileArchived(before, before, "mysql-bin.000004") {
+		t.Error("a row of the sealed name that existed before the flush must not count")
+	}
+	if got := pitrManifestKey("/e2e/s37/run/binlogs/", "iad"); got != "e2e/s37/run/binlogs/manifest-iad.json" {
+		t.Errorf("manifest key %q", got)
+	}
+}
+
+// TestPITRRecloneRequest pins F067: the confirmation is built only once the
+// site's divergence report matches what the caller expects.
+func TestPITRRecloneRequest(t *testing.T) {
+	const div = "3e11fa47-71ca-11e1-9e33-c80aa9429562:41-60"
+	cases := []struct {
+		name      string
+		site      v1alpha1.SiteStatus
+		divergent bool
+		ready     bool
+		value     string
+	}{
+		{"divergent site not yet blocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only"}, true, false, ""},
+		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only", DivergentGtid: div}, true, false, ""},
+		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: "read-only", RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, true, "iad:3e11fa47"},
+		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: "unreachable", RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, false, ""},
+		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: "read-only", Replicating: true}, false, true, "iad:confirm=mfg"},
+		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: "read-only", DivergentGtid: div}, false, false, ""},
+		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only", RecoveryState: "RecoveryBlocked"}, false, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ready, value, msg := pitrRecloneRequest([]v1alpha1.SiteStatus{{Name: "pdx", State: "writable"}, c.site}, "iad", "mfg", c.divergent)
+			if ready != c.ready || value != c.value {
+				t.Fatalf("ready=%v value=%q, want %v %q (%s)", ready, value, c.ready, c.value, msg)
+			}
+		})
+	}
+	if ready, _, _ := pitrRecloneRequest(nil, "iad", "mfg", false); ready {
+		t.Error("an absent site is not ready")
+	}
+}
+
+// TestPITRRecloneWatch pins F188: an attempt that fails again while the
+// earlier failure's LastTransitionTime is kept is still reported, and an
+// earlier attempt's outcome is never taken for this one's.
+func TestPITRRecloneWatch(t *testing.T) {
+	t0 := metav1.NewTime(mustMicro(t, "2026-11-05T10:00:00.000000Z").Truncate(time.Second))
+	t1 := metav1.NewTime(t0.Add(time.Minute))
+	cond := func(status metav1.ConditionStatus, reason, msg string, ltt metav1.Time) *metav1.Condition {
+		return &metav1.Condition{Type: "Bootstrapping", Status: status, Reason: reason, Message: msg, LastTransitionTime: ltt}
+	}
+	oldFail := cond(metav1.ConditionTrue, "Failed", "Reclone failed: donor gone", t0)
+	t.Run("old failure is not this attempt's", func(t *testing.T) {
+		w := newPitrRecloneWatch(oldFail)
+		if done, _, err := w.observe(oldFail, false); done || err != nil {
+			t.Fatalf("done=%v err=%v", done, err)
+		}
+	})
+	t.Run("failure after an observed in-progress phase keeps the old LTT", func(t *testing.T) {
+		w := newPitrRecloneWatch(oldFail)
+		if _, _, err := w.observe(cond(metav1.ConditionTrue, "Cloning", "Reclone in progress: Cloning", t0), false); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := w.observe(oldFail, false); err == nil {
+			t.Fatal("this attempt's failure must be reported even with the old LastTransitionTime and message")
+		}
+	})
+	t.Run("failure with a new message", func(t *testing.T) {
+		w := newPitrRecloneWatch(oldFail)
+		if _, _, err := w.observe(cond(metav1.ConditionTrue, "Failed", "Reclone failed: clone plugin error", t0), false); err == nil {
+			t.Fatal("a changed failure message is this attempt's failure")
+		}
+	})
+	t.Run("old Done is not this attempt's", func(t *testing.T) {
+		oldDone := cond(metav1.ConditionFalse, "Done", "Reclone completed successfully", t0)
+		w := newPitrRecloneWatch(oldDone)
+		if done, _, _ := w.observe(oldDone, true); done {
+			t.Fatal("the previous reclone's Done must not complete this one")
+		}
+		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "Done", "Reclone completed successfully", t1), true); !done {
+			t.Fatal("a Done with a new transition time completes the attempt")
+		}
+	})
+	t.Run("done needs replication", func(t *testing.T) {
+		w := newPitrRecloneWatch(nil)
+		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "Done", "", t1), false); done {
+			t.Fatal("done before the site replicates")
+		}
+	})
+}
+
+// TestPITRNewRecloneRejection pins F067's rejection detection: a new (or
+// recounted) RecloneRejected Event naming the site fails the wait; old
+// ones and other sites' do not.
+func TestPITRNewRecloneRejection(t *testing.T) {
+	ev := func(uid, msg string, count int32) corev1.Event {
+		return corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{UID: types.UID(uid)},
+			InvolvedObject: corev1.ObjectReference{Kind: "MysqlFailoverGroup", Name: "mfg"},
+			Reason:         "RecloneRejected", Message: msg, Count: count,
+		}
+	}
+	before := map[string]int32{"u1": 1}
+	coldMsg := `reclone of "iad" rejected: cold reclone wipes the datadir and must be confirmed`
+	if _, ok := pitrNewRecloneRejection(before, []corev1.Event{ev("u1", coldMsg, 1)}, "mfg", "iad"); ok {
+		t.Error("an Event seen before the request must not count")
+	}
+	if _, ok := pitrNewRecloneRejection(before, []corev1.Event{ev("u1", coldMsg, 2)}, "mfg", "iad"); !ok {
+		t.Error("a recounted Event is a new rejection")
+	}
+	if _, ok := pitrNewRecloneRejection(before, []corev1.Event{ev("u2", coldMsg, 1)}, "mfg", "iad"); !ok {
+		t.Error("a new Event is a rejection")
+	}
+	if _, ok := pitrNewRecloneRejection(before, []corev1.Event{ev("u2", "reclone of iad refused: it awaits its post-restore reclone", 1)}, "mfg", "iad"); !ok {
+		t.Error("the restore-hold refusal names the site unquoted")
+	}
+	if _, ok := pitrNewRecloneRejection(before, []corev1.Event{ev("u3", `reclone of "pdx" rejected`, 1)}, "mfg", "iad"); ok {
+		t.Error("another site's rejection must not count")
+	}
+}
+
+// TestPITRWriterAwaitFirst pins F189: a window starts after the writer's
+// first commit, and a writer that stopped without one fails it.
+func TestPITRWriterAwaitFirst(t *testing.T) {
+	w := &pitrWriter{stop: make(chan struct{}), done: make(chan struct{}), first: make(chan struct{})}
+	close(w.first)
+	if err := w.awaitFirst(context.Background(), "iad"); err != nil {
+		t.Fatal(err)
+	}
+	failed := &pitrWriter{stop: make(chan struct{}), done: make(chan struct{}), first: make(chan struct{}), err: errors.New("read-only")}
+	close(failed.done)
+	if err := failed.awaitFirst(context.Background(), "iad"); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("err=%v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pending := &pitrWriter{stop: make(chan struct{}), done: make(chan struct{}), first: make(chan struct{})}
+	if err := pending.awaitFirst(ctx, "iad"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestPITRScenarioTargetsAreAdmissible pins F068: every target the PITR
+// scenarios generate (pitrFenceTarget, used by s31 and every fence) passes
+// the CRDs' admission patterns for verification timestamps and
+// stopDatetime, which refuse fractional seconds.
+func TestPITRScenarioTargetsAreAdmissible(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "config", "crd", "bases")
+	var patterns []*regexp.Regexp
+	for _, f := range []struct{ file, field string }{
+		{"shipstream.io_mysqlbackupverifications.yaml", "timestamp"},
+		{"shipstream.io_mysqlfailovergroups.yaml", "stopDatetime"},
+	} {
+		raw, err := os.ReadFile(filepath.Join(root, f.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(raw), "\n")
+		found := 0
+		for i, l := range lines {
+			if strings.TrimSpace(l) != f.field+":" {
+				continue
+			}
+			for j := i + 1; j < len(lines) && j < i+30; j++ {
+				if v, ok := strings.CutPrefix(strings.TrimSpace(lines[j]), "pattern: "); ok {
+					patterns = append(patterns, regexp.MustCompile(strings.Trim(v, `'"`)))
+					found++
+					break
+				}
+			}
+		}
+		if found == 0 {
+			t.Fatalf("%s: no pattern found for %s", f.file, f.field)
+		}
+	}
+	for _, now := range []string{"2026-11-05T10:00:00.000000Z", "2026-11-05T10:00:00.123456Z", "2026-12-31T23:59:59.999999Z"} {
+		target := pitrFenceTarget(mustMicro(t, now)).Format(pitrTargetLayout)
+		for _, p := range patterns {
+			if !p.MatchString(target) {
+				t.Errorf("target %q is refused by admission pattern %s", target, p)
+			}
+		}
+	}
+	for _, p := range patterns {
+		if p.MatchString("2026-11-05T10:00:00.250000Z") {
+			t.Errorf("pattern %s admits a fractional target; this test no longer pins the A-39 rule", p)
+		}
+	}
+}
+
+// TestPITRAssertResultReplayCount pins F187: with exclusions the replay
+// count is (fenced ∖ exclusions) ∖ baseline, subtracted once.
+func TestPITRAssertResultReplayCount(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	env := &runner.Env{Capture: &runner.Capture{}}
+	stashSet(env, "archiveID", "ar1-abc")
+	stashSet(env, "baseline:b1", u+":1-10")
+	res := &v1alpha1.PointInTimeResult{
+		Mode: v1alpha1.PointInTimeModeLatest, Outcome: v1alpha1.PointInTimeArchiveHead,
+		Archive:      &v1alpha1.PITRArchiveIdentity{ArchiveID: "ar1-abc"},
+		GtidExecuted: u + ":1-15:18-20", ReplayedTransactionCount: 8,
+	}
+	e := pitrExpectation{Backup: "b1", Mode: "latest", Fence: pitrFence{GTID: u + ":1-20"}, Exclude: u + ":16-17", Outcome: v1alpha1.PointInTimeArchiveHead}
+	if err := assertPITRResult(env, "t", res, e); err != nil {
+		t.Fatal(err)
+	}
+	res.ReplayedTransactionCount = 6
+	if err := assertPITRResult(env, "t", res, e); err == nil {
+		t.Fatal("a count that subtracts the exclusions twice must fail")
+	}
+}
+
+// TestPITRScenarioCleanupBudgets pins F071: the PITR scenarios do not run
+// their composed cleanup on the 4-minute default.
+func TestPITRScenarioCleanupBudgets(t *testing.T) {
+	want := map[string]time.Duration{
+		s37ID: pitrCleanupBaseBudget + pitrDeleteGroupTimeout,
+		s68ID: pitrCleanupBaseBudget,
+		s70ID: pitrCleanupBaseBudget + s70RepairTimeout,
+	}
+	for _, sc := range runner.DefaultRegistry.List() {
+		w, ok := want[sc.ID]
+		if !ok {
+			continue
+		}
+		delete(want, sc.ID)
+		if sc.CleanupTimeout < w {
+			t.Errorf("%s: CleanupTimeout=%s, want at least %s", sc.ID, sc.CleanupTimeout, w)
+		}
+	}
+	for id := range want {
+		t.Errorf("%s is not registered", id)
+	}
+	// The base must cover at least the healthy-baseline wait plus one group
+	// deletion and one backup deletion with its artifact check.
+	if pitrCleanupBaseBudget < 6*time.Minute+runner.DefaultCleanupTimeout+5*time.Minute {
+		t.Errorf("pitrCleanupBaseBudget=%s is below its composed parts", pitrCleanupBaseBudget)
+	}
+}
+
+// TestPITRCleanupOwnership pins F190 and F191's guards: only this run's
+// group is deleted, and only prefixes inside e2e/<scenario>/<run>.
+func TestPITRCleanupOwnership(t *testing.T) {
+	mine := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{pitrRunAnnotation: "s37-20261105T100000Z"}}}
+	if !pitrOwnedByRun(mine, "s37-20261105T100000Z") {
+		t.Error("this run's group must be deletable")
+	}
+	if pitrOwnedByRun(mine, "s37-20261104T090000Z") || pitrOwnedByRun(&v1alpha1.MysqlFailoverGroup{}, "s37-20261105T100000Z") || pitrOwnedByRun(mine, "") {
+		t.Error("another run's (or an unannotated) group must be left in place")
+	}
+	for prefix, ok := range map[string]bool{
+		"e2e/37-pitr-planned-failback-no-reclone/s37-20261105T100000Z": true,
+		"e2e/70-pitr-lossy-failover/s70-20261105T100000Z-fresh/":       true,
+		"e2e/":             false,
+		"e2e/37-pitr":      false,
+		"backups/prod":     false,
+		"e2e/../prod/x":    false,
+		"":                 false,
+		"e2e/37-pitr//run": false,
+	} {
+		if got := pitrArchivePrefixDeletable(prefix); got != ok {
+			t.Errorf("pitrArchivePrefixDeletable(%q)=%v, want %v", prefix, got, ok)
+		}
+	}
+}
+
+// TestS70ShouldClearDelay pins F193: cleanup resets SOURCE_DELAY from b's
+// live state, never on a promoted b.
+func TestS70ShouldClearDelay(t *testing.T) {
+	for _, c := range []struct {
+		name                 string
+		readOnly, hasChannel bool
+		delay                int64
+		want                 bool
+	}{
+		{"delayed replica", true, true, 300, true},
+		{"partly applied (START failed)", true, true, 300, true},
+		{"replica without a delay", true, true, 0, false},
+		{"promoted b", false, false, 0, false},
+		{"writable with a leftover channel", false, true, 300, false},
+	} {
+		if got := s70ShouldClearDelay(c.readOnly, c.hasChannel, c.delay); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestS70OperatorPollSync pins F070's synchronization: the wait spans two
+// operator poll intervals (mirrored from the controller's constant), and a
+// failed poll of the site is detected from status.pitr.message.
+func TestS70OperatorPollSync(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "controller", "archiver_poller.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`const archiverPollInterval = (\d+) \* time\.Second`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("archiverPollInterval not found in internal/controller/archiver_poller.go")
+	}
+	if got := string(m[1]) + "s"; got != pitrOperatorArchiverPollInterval.String() {
+		t.Fatalf("pitrOperatorArchiverPollInterval=%s, controller archiverPollInterval=%s", pitrOperatorArchiverPollInterval, got)
+	}
+	if s70OperatorPollWait < 2*pitrOperatorArchiverPollInterval {
+		t.Errorf("s70OperatorPollWait=%s is under two poll intervals", s70OperatorPollWait)
+	}
+	if !s70OperatorPollFailing(&v1alpha1.PITRStatus{Message: "iad: archiver status unavailable: dial tcp: refused"}, "iad") {
+		t.Error("a failed poll of iad must be detected")
+	}
+	if s70OperatorPollFailing(&v1alpha1.PITRStatus{Message: "pdx: archiver status unavailable: x; iad: site iad name ..."}, "iad") {
+		t.Error("another site's failed poll, or iad's own lastError, is not iad's failed poll")
 	}
 }

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -15,6 +17,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrplan"
@@ -29,7 +32,8 @@ import (
 // pitr-download. It uses decrypt-download's storage wiring; when the dump
 // is encrypted every object is BRV1 and there is no plaintext fallback.
 //
-// Env (see contracts.md "WP-B2 assumptions"):
+// Env (rendered by internal/controller's dump-meta init container builder,
+// beside buildRestorePITRFragmentsFor in pitr.go):
 //
 //	BLOODRAVEN_DUMP_META_OUTPUT_DIR        where dump.json goes (/pitr-dump-meta)
 //	BLOODRAVEN_STORAGE_TYPE                S3 or PVC
@@ -64,6 +68,7 @@ func runDumpMeta(args []string) {
 		fail("resolve dump storage", err)
 	}
 	cfg.PassphraseFile = os.Getenv("BLOODRAVEN_BACKUP_PASSPHRASE_FILE")
+	expect.encrypted = cfg.PassphraseFile != ""
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -90,10 +95,12 @@ func runDumpMeta(args []string) {
 		"pitrArchiveID", meta.Stamp.PITRArchiveID, "site", meta.Stamp.Site, "dumpEnd", meta.End.String())
 }
 
-// dumpExpectation is what the restore's mysqlBackupRef pins.
+// dumpExpectation is what the restore's mysqlBackupRef pins, and whether
+// the restore decrypts the dump.
 type dumpExpectation struct {
 	backupUID, sourceUID types.UID
 	gtidExecuted         string
+	encrypted            bool
 }
 
 func dumpExpectationFromEnv(getenv func(string) string) (dumpExpectation, error) {
@@ -136,18 +143,88 @@ type mysqlshDoneJSON struct {
 	End string `json:"end"`
 }
 
+// Bounds on the metadata objects dump-meta buffers (review F121): the
+// stamp is a small JSON document; mysqlsh's @.json and @.done.json grow
+// with the schema and table count, and 16 MiB covers hundreds of thousands
+// of tables.
+const (
+	maxBackupStampBytes    = 1 << 20
+	maxDumpMetaObjectBytes = 16 << 20
+)
+
+// dumpMetaBackoff bounds the retry of transient metadata reads (review
+// F018): the restore and verification Jobs do not retry, so a network blip
+// must not end them. Tests replace it.
+var dumpMetaBackoff = pitrFetchBackoff
+
+// errDumpObjectTooLarge is a metadata object over its bound.
+var errDumpObjectTooLarge = errors.New("larger than its bound")
+
+// readDumpObject reads one metadata object, at most limit bytes, retrying
+// transient store errors; ok is false when the object does not exist. A
+// persistent transient failure is a token-less *pitrplan.TransientError.
+func readDumpObject(ctx context.Context, store sidecar.ArchiveStore, key string, limit int64) ([]byte, bool, error) {
+	var (
+		data []byte
+		ok   bool
+	)
+	transient := func(err error) bool { return !errors.Is(err, errDumpObjectTooLarge) && storeErrorTransient(err) }
+	err := retryMetadata(ctx, dumpMetaBackoff, "read "+key, transient, func() error {
+		data, ok = nil, false
+		r, err := store.Open(ctx, key)
+		if err != nil {
+			if sidecar.IsArchiveObjectMissing(err) {
+				return nil
+			}
+			return err
+		}
+		defer r.Close()
+		b, err := io.ReadAll(io.LimitReader(r, limit+1))
+		if err != nil {
+			return err
+		}
+		if int64(len(b)) > limit {
+			return fmt.Errorf("%s is %w of %d bytes", key, errDumpObjectTooLarge, limit)
+		}
+		data, ok = b, true
+		return nil
+	})
+	return data, ok, err
+}
+
+// dumpReadError explains a failed metadata read: a transient failure or
+// cancellation stays token-less; an oversized object, and bytes that do not
+// match the restore's decryption setting, refuse with token and the remedy
+// (review F019, F121).
+func dumpReadError(token pitrarchive.Token, location, what string, err error) error {
+	switch {
+	case pitrplan.IsTransient(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("read %s: %w", what, err)
+	case errors.Is(err, errDumpObjectTooLarge):
+		return fmt.Errorf("%s: the dump at %s: %v; it is not a dump this release wrote", token, location, err)
+	case errors.Is(err, sidecar.ErrTamperedOrDowngrade):
+		return fmt.Errorf("%s: the dump at %s: %s is not encrypted, but the restore decrypts this dump (a passphrase is configured for it); if the backup was taken without encryption, remove the restore source's encryption setting; otherwise its objects were replaced", token, location, what)
+	case sidecar.IsArchiveIntegrityError(err):
+		return fmt.Errorf("%s: the dump at %s: %s does not decrypt with the configured passphrase (%v); check that the source's passphrase Secret is the one the backup was written with", token, location, what, err)
+	}
+	return fmt.Errorf("read %s: %w", what, err)
+}
+
 // loadDumpMeta reads and checks the dump's metadata (§4.2), refusing in
 // the design's order: IdentityUnknown, IdentityMismatch, Inconsistent,
 // Filtered, Incomplete.
 func loadDumpMeta(ctx context.Context, store sidecar.ArchiveStore, keyPrefix, location string, expect dumpExpectation) (backupmeta.DumpMeta, error) {
 	var meta backupmeta.DumpMeta
 	stampKey := backupmeta.StampKey(keyPrefix)
-	raw, ok, err := store.Get(ctx, stampKey)
+	raw, ok, err := readDumpObject(ctx, store, stampKey, maxBackupStampBytes)
 	if err != nil {
-		return meta, fmt.Errorf("read backup stamp %s: %w", stampKey, err)
+		return meta, dumpReadError(pitrarchive.TokenBackupIdentityUnknown, location, "the backup stamp "+stampKey, err)
 	}
 	if !ok {
 		return meta, fmt.Errorf("%s: the dump at %s has no backup stamp (%s); it was taken by a release without dump identity, or by hand; take a new backup", pitrarchive.TokenBackupIdentityUnknown, location, stampKey)
+	}
+	if !expect.encrypted && backupcrypto.LooksEncrypted(raw) {
+		return meta, fmt.Errorf("%s: the dump at %s is encrypted (its backup stamp %s is BRV1 ciphertext), but the restore has no decryption passphrase for it; configure the restore source's encryption (the passphrase Secret the backup was written with)", pitrarchive.TokenBackupIdentityUnknown, location, stampKey)
 	}
 	stamp, err := backupmeta.ParseStamp(raw)
 	if err != nil {
@@ -162,9 +239,9 @@ func loadDumpMeta(ctx context.Context, store sidecar.ArchiveStore, keyPrefix, lo
 			location, stamp.Source.Namespace, stamp.Source.Name, stamp.Source.UID, expect.sourceUID)
 	}
 	dumpKey := path.Join(keyPrefix, "@.json")
-	raw, ok, err = store.Get(ctx, dumpKey)
+	raw, ok, err = readDumpObject(ctx, store, dumpKey, maxDumpMetaObjectBytes)
 	if err != nil {
-		return meta, fmt.Errorf("read %s: %w", dumpKey, err)
+		return meta, dumpReadError(pitrarchive.TokenBackupIncomplete, location, dumpKey, err)
 	}
 	if !ok {
 		return meta, fmt.Errorf("%s: the dump at %s has no @.json", pitrarchive.TokenBackupIncomplete, location)
@@ -189,9 +266,9 @@ func loadDumpMeta(ctx context.Context, store sidecar.ArchiveStore, keyPrefix, lo
 			location, stamp.DumpFilters.IncludeSchemas, stamp.DumpFilters.ExcludeSchemas)
 	}
 	doneKey := path.Join(keyPrefix, "@.done.json")
-	raw, ok, err = store.Get(ctx, doneKey)
+	raw, ok, err = readDumpObject(ctx, store, doneKey, maxDumpMetaObjectBytes)
 	if err != nil {
-		return meta, fmt.Errorf("read %s: %w", doneKey, err)
+		return meta, dumpReadError(pitrarchive.TokenBackupIncomplete, location, doneKey, err)
 	}
 	if !ok {
 		return meta, fmt.Errorf("%s: the dump at %s has no @.done.json; the dump did not finish", pitrarchive.TokenBackupIncomplete, location)
@@ -211,14 +288,24 @@ func loadDumpMeta(ctx context.Context, store sidecar.ArchiveStore, keyPrefix, lo
 		ServerClock: stamp.ServerClock, Stamp: stamp}, nil
 }
 
-// parseDumpEnd parses @.done.json's end. The dump container runs with
-// TZ=UTC (D-8), so a zoneless value is UTC; mysqlsh writes
-// "YYYY-MM-DD HH:MM:SS" with an optional fraction.
+// parseDumpEnd parses @.done.json's end into the latest instant the dump
+// may have finished. The dump container runs with TZ=UTC (D-8), so a
+// zoneless value is UTC. mysqlsh writes "YYYY-MM-DD HH:MM:SS", whole
+// seconds of its finish time (truncated, as observed against mysqlsh
+// 9.7.1, where the end never followed the clock read right after the
+// process exited); the dump ended within that second, so a whole-second
+// end becomes its last microsecond, and the target check (T ≥ the end,
+// rounded up to a second) cannot accept a target inside the dump's last
+// second (review F122). A value with a fraction is taken as written,
+// rounded up to the microsecond.
 func parseDumpEnd(s string) (backupmeta.MicroTime, error) {
 	s = strings.TrimSpace(s)
 	for _, layout := range []string{"2006-01-02 15:04:05.999999", time.RFC3339Nano, "2006-01-02T15:04:05.999999"} {
 		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
-			if t.Nanosecond()%int(time.Microsecond) != 0 {
+			switch {
+			case !strings.ContainsAny(s, "."):
+				t = t.Add(time.Second - time.Microsecond)
+			case t.Nanosecond()%int(time.Microsecond) != 0:
 				// Round up: the dump ended no earlier than this.
 				t = t.Truncate(time.Microsecond).Add(time.Microsecond)
 			}

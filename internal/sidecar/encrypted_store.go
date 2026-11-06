@@ -163,8 +163,15 @@ func (e *encryptedStore) Open(ctx context.Context, key string) (io.ReadCloser, e
 	reader, writer := io.Pipe()
 	go func() {
 		_, err := backupcrypto.Decrypt(writer, buffered, e.passphrase)
-		if err != nil && recorded.err == nil {
+		switch {
+		case err == nil:
+		case recorded.err == nil:
 			err = fmt.Errorf("%w: key=%s: %w", errObjectUndecryptable, key, err)
+		default:
+			// The store cut the body: report its error (transient), with
+			// the decrypt symptom (ErrTruncated or a failed tag) as text
+			// only (review F082).
+			err = fmt.Errorf("read %s: %w (decrypt: %v)", key, recorded.err, err)
 		}
 		_ = source.Close()
 		_ = writer.CloseWithError(err)

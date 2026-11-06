@@ -101,7 +101,10 @@ func TestPromotionRecordNewIncarnationWhileRecorded(t *testing.T) {
 			if len(got) != 2 {
 				t.Fatalf("new incarnation wrote %d records in total, want 2", len(got))
 			}
-			want := PromotionRecord{ServerUUID: tt.uuid, ServerID: tt.serverID, GTIDExecuted: tt.gtids, ObservedAt: clock}
+			// The change happened after the previous probe a minute
+			// earlier; the record is its fence, with no reset record.
+			want := PromotionRecord{ServerUUID: tt.uuid, ServerID: tt.serverID, GTIDExecuted: tt.gtids, ObservedAt: clock,
+				ProbeInterval: pitrarchive.Duration(time.Minute)}
 			if got[1] != want {
 				t.Fatalf("new record = %+v, want %+v", got[1], want)
 			}

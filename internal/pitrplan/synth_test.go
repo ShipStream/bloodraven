@@ -129,10 +129,19 @@ func (s *synth) quarantine(ref RowRef, at time.Time) RowRef {
 	return ref
 }
 
+// synthProbeInterval is the ProbeInterval of the synthetic promotion
+// records: the default PEER_CHECK_INTERVAL.
+const synthProbeInterval = 5 * time.Second
+
 func (s *synth) promote(site, uuid string, srv uint32, executed string, at float64) {
+	s.record(site, pitrarchive.RecordPromotion, uuid, srv, executed, at, synthProbeInterval)
+}
+
+// record appends a record of any kind; pi 0 leaves ProbeInterval unknown.
+func (s *synth) record(site string, kind pitrarchive.RecordKind, uuid string, srv uint32, executed string, at float64, pi time.Duration) {
 	m := s.site(site)
-	m.Promotions = append(m.Promotions, pitrarchive.PromotionRecord{ServerUUID: uuid, ServerID: srv, GTIDExecuted: executed,
-		ObservedAt: synthEpoch.Add(time.Duration(at * float64(time.Second)))})
+	m.Promotions = append(m.Promotions, pitrarchive.PromotionRecord{Kind: kind, ServerUUID: uuid, ServerID: srv, GTIDExecuted: executed,
+		ObservedAt: synthEpoch.Add(time.Duration(at * float64(time.Second))), ProbeInterval: pitrarchive.Duration(pi)})
 }
 
 func (s *synth) backup(b, site string, srv uint32, end float64) {

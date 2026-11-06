@@ -8,6 +8,7 @@ import (
 	"time"
 
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // RoleObservation is one role probe of the local server (D-43).
@@ -103,7 +104,39 @@ type roleTimeline struct {
 	// none). It is recorded, not used by the planner (N5).
 	readOnly       *RoleObservation
 	readOnlyBefore string
+	// firstSince is when the server read the gtid_executed of the
+	// complete observation directly before first (zero: none in this
+	// process). The episode began after it.
+	firstSince time.Time
+
+	// lastComplete is the latest observation, in any role, that reported
+	// the server identity; start is this process's first one and
+	// startEpoch its epoch (0: read-only). resets are the incarnation
+	// changes seen between complete observations and not yet written as
+	// records (resetCandidate).
+	lastComplete *RoleObservation
+	start        *RoleObservation
+	startEpoch   uint64
+	resets       []resetCandidate
 }
+
+// resetCandidate is an observed incarnation change: obs no longer
+// continues the incarnation seen at since (sameIncarnation), so the change
+// happened in (since, obs.ObservedAt]. epoch is obs's writable epoch (0:
+// read-only). A candidate that is its epoch's first observation is
+// covered by the episode's promotion record, which carries the same
+// observation and a ProbeInterval reaching back to since; it is written as
+// a reset record only if that episode ends unrecorded.
+type resetCandidate struct {
+	obs   RoleObservation
+	since time.Time
+	epoch uint64
+}
+
+// maxPendingResets bounds the unwritten reset candidates. Beyond it the
+// two oldest are merged into one that spans both windows, which only
+// widens the fence (fail closed).
+const maxPendingResets = 16
 
 // roleSnapshot is a copy of the timeline.
 type roleSnapshot struct {
@@ -111,6 +144,7 @@ type roleSnapshot struct {
 	state          roleState
 	complete       bool
 	first          *RoleObservation
+	firstSince     time.Time
 	readOnlyBefore string
 }
 
@@ -125,6 +159,17 @@ func (t *roleTimeline) observe(obs RoleObservation, complete bool, err error) {
 			return
 		}
 		t.at = obs.ObservedAt
+	}
+	identified := err == nil && complete && obs.ServerUUID != ""
+	var prevStart time.Time
+	changed := false
+	if identified {
+		if t.lastComplete != nil {
+			prevStart = readStart(*t.lastComplete)
+			changed = !sameIncarnation(*t.lastComplete, obs)
+		}
+		last := obs
+		t.lastComplete = &last
 	}
 	switch {
 	case err != nil:
@@ -143,11 +188,88 @@ func (t *roleTimeline) observe(obs RoleObservation, complete bool, err error) {
 			t.first, t.readOnlyBefore = nil, before
 		}
 		t.state, t.last, t.complete, t.readOnly = roleWritable, obs, complete, nil
-		if t.first == nil && complete && obs.ServerUUID != "" && obs.Took <= maxRoleProbeSpread {
+		if t.first == nil && identified && obs.Took <= maxRoleProbeSpread {
 			first := obs
-			t.first = &first
+			t.first, t.firstSince = &first, prevStart
 		}
 	}
+	if !identified {
+		return
+	}
+	epoch := uint64(0)
+	if t.state == roleWritable {
+		epoch = t.epoch
+	}
+	if t.start == nil {
+		start := obs
+		t.start, t.startEpoch = &start, epoch
+	}
+	if changed {
+		t.resets = append(t.resets, resetCandidate{obs: obs, since: prevStart, epoch: epoch})
+		if len(t.resets) > maxPendingResets {
+			merged := t.resets[1]
+			if t.resets[0].since.Before(merged.since) {
+				merged.since = t.resets[0].since
+			}
+			t.resets = append([]resetCandidate{merged}, t.resets[2:]...)
+		}
+	}
+}
+
+// readStart is the earliest time the server can have read obs's
+// gtid_executed: when its probe started.
+func readStart(obs RoleObservation) time.Time {
+	return obs.ObservedAt.Add(-obs.Took)
+}
+
+// startObservation returns this process's first identified observation
+// and its epoch (0: read-only), or nil.
+func (t *roleTimeline) startObservation() (*RoleObservation, uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.start == nil {
+		return nil, 0
+	}
+	start := *t.start
+	return &start, t.startEpoch
+}
+
+// queueStartReset queues the change the start-up check found against the
+// site's latest record, ahead of the in-process ones.
+func (t *roleTimeline) queueStartReset(c resetCandidate) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.resets = append([]resetCandidate{c}, t.resets...)
+}
+
+// pendingResets returns a copy of the unwritten reset candidates.
+func (t *roleTimeline) pendingResets() []resetCandidate {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]resetCandidate(nil), t.resets...)
+}
+
+// dropResets forgets the candidates of the observations at done.
+func (t *roleTimeline) dropResets(done []time.Time) {
+	if len(done) == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	kept := t.resets[:0]
+	for _, c := range t.resets {
+		drop := false
+		for _, at := range done {
+			if c.obs.ObservedAt.Equal(at) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			kept = append(kept, c)
+		}
+	}
+	t.resets = kept
 }
 
 // sameIncarnation reports whether next continues prev's server
@@ -175,7 +297,7 @@ func sameIncarnation(prev, next RoleObservation) bool {
 func (t *roleTimeline) snapshot() roleSnapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	s := roleSnapshot{epoch: t.epoch, state: t.state, complete: t.complete, readOnlyBefore: t.readOnlyBefore}
+	s := roleSnapshot{epoch: t.epoch, state: t.state, complete: t.complete, firstSince: t.firstSince, readOnlyBefore: t.readOnlyBefore}
 	if t.first != nil {
 		first := *t.first
 		s.first = &first
@@ -290,12 +412,28 @@ func (a *BinlogArchiver) observeRole(ctx context.Context, snap roleSnapshot) err
 			}
 			return fmt.Errorf("promotion record: no role probe of this writable episode returned within %s; the record waits for one that does", maxRoleProbeSpread)
 		}
+		if !a.startChecked {
+			// The start-up check may find this very observation a new
+			// incarnation; the record must carry that (recordResets).
+			return fmt.Errorf("promotion record: %w", errStartCheckPending)
+		}
 		first := snap.first
+		// The episode began after the previous observation's read; an
+		// incarnation change seen at first (a reset candidate it covers)
+		// may reach back further, to the site's latest record.
+		since := snap.firstSince
+		for _, c := range a.roles.pendingResets() {
+			if c.covers(first) && (since.IsZero() || c.since.Before(since)) {
+				since = c.since
+			}
+		}
+		at := first.ObservedAt.UTC().Truncate(time.Microsecond)
 		a.episode.pending = &PromotionRecord{
 			ServerUUID:           first.ServerUUID,
 			ServerID:             first.ServerID,
 			GTIDExecuted:         first.GTIDExecuted,
-			ObservedAt:           first.ObservedAt.UTC().Truncate(time.Microsecond),
+			ObservedAt:           at,
+			ProbeInterval:        a.probeInterval(at, since),
 			ReadOnlyGTIDExecuted: snap.readOnlyBefore,
 		}
 	}
@@ -304,6 +442,10 @@ func (a *BinlogArchiver) observeRole(ctx context.Context, snap roleSnapshot) err
 	}
 	rec := *a.episode.pending
 	a.episode.recorded = true
+	// The record is the fence for the change its observation showed.
+	if snap.first != nil {
+		a.roles.dropResets([]time.Time{snap.first.ObservedAt})
+	}
 	a.mu.Lock()
 	a.promotionRecordedAt = rec.ObservedAt
 	a.mu.Unlock()
@@ -338,11 +480,120 @@ func (a *BinlogArchiver) writePromotionRecord(ctx context.Context, rec Promotion
 
 func hasPromotionRecord(records []PromotionRecord, rec PromotionRecord) bool {
 	for _, r := range records {
-		if r.ServerUUID == rec.ServerUUID && r.ServerID == rec.ServerID && r.GTIDExecuted == rec.GTIDExecuted && r.ObservedAt.Equal(rec.ObservedAt) {
+		if r.Kind == rec.Kind && r.ServerUUID == rec.ServerUUID && r.ServerID == rec.ServerID && r.GTIDExecuted == rec.GTIDExecuted && r.ObservedAt.Equal(rec.ObservedAt) {
 			return true
 		}
 	}
 	return false
+}
+
+// errStartCheckPending: the start-up incarnation check against the
+// site's latest record has not run yet (it needs a verified archive
+// session and an observation that reported the server identity).
+var errStartCheckPending = errors.New("the start-up incarnation check against this site's latest record has not run yet")
+
+// probeInterval is a record's ProbeInterval: from since (exclusive; the
+// earliest time the change it reports can have happened) to at, rounded
+// up to the microsecond, and never less than the configured probe
+// interval. A zero since (no earlier observation) gives the configured
+// interval.
+func (a *BinlogArchiver) probeInterval(at, since time.Time) pitrarchive.Duration {
+	floor := roleProbeInterval(a.cfg)
+	d := time.Duration(0)
+	if !since.IsZero() {
+		d = at.Sub(since)
+		if r := d % time.Microsecond; r != 0 {
+			d += time.Microsecond - r
+		}
+	}
+	return pitrarchive.Duration(max(d, floor))
+}
+
+// covers reports whether c is the change first showed: the episode's
+// promotion record, which holds first, is then its fence.
+func (c resetCandidate) covers(first *RoleObservation) bool {
+	return first != nil && c.epoch != 0 && c.obs.ObservedAt.Equal(first.ObservedAt)
+}
+
+// recordResets writes the incarnation-reset records (N3 revised). On the
+// first call with a verified session it checks this process's first
+// identified observation against the site's latest record, so a reclone,
+// reset or replaced datadir while the sidecar was not running is seen,
+// with a window reaching back to that record. Every in-process change
+// (roleTimeline.observe) is queued as it is observed, in any role. A
+// change that opened a writable episode at the episode's first
+// observation is left to that episode's promotion record while the
+// episode lasts. It returns errStartCheckPending until the start-up check
+// ran, and the write error while candidates remain; either keeps uploads
+// waiting.
+func (a *BinlogArchiver) recordResets(ctx context.Context, snap roleSnapshot) error {
+	if a.session == nil || !a.session.Verified() {
+		if a.startChecked && len(a.roles.pendingResets()) == 0 {
+			return nil
+		}
+		return fmt.Errorf("incarnation reset record: %w", errStartCheckPending)
+	}
+	var m *Manifest
+	if !a.startChecked {
+		start, epoch := a.roles.startObservation()
+		if start == nil {
+			return fmt.Errorf("incarnation reset record: %w", errStartCheckPending)
+		}
+		var err error
+		if m, err = a.loadManifest(ctx); err != nil {
+			return wrapKeepToken("incarnation reset record", err)
+		}
+		if n := len(m.Promotions); n > 0 {
+			latest := m.Promotions[n-1]
+			prev := RoleObservation{ServerUUID: latest.ServerUUID, ServerID: latest.ServerID, GTIDExecuted: latest.GTIDExecuted}
+			if !sameIncarnation(prev, *start) {
+				a.roles.queueStartReset(resetCandidate{obs: *start, since: latest.ObservedAt, epoch: epoch})
+				a.logger.Warn("server incarnation changed while the sidecar was not running",
+					"latestRecordAt", latest.ObservedAt, "serverUuid", start.ServerUUID, "serverId", start.ServerID)
+			}
+		}
+		a.startChecked = true
+	}
+	var due []resetCandidate
+	for _, c := range a.roles.pendingResets() {
+		if snap.state == roleWritable && c.epoch == snap.epoch && c.covers(snap.first) {
+			continue
+		}
+		due = append(due, c)
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	if m == nil {
+		var err error
+		if m, err = a.loadManifest(ctx); err != nil {
+			return wrapKeepToken("incarnation reset record", err)
+		}
+	}
+	recs := make([]PromotionRecord, 0, len(due))
+	for _, c := range due {
+		at := c.obs.ObservedAt.UTC().Truncate(time.Microsecond)
+		rec := PromotionRecord{Kind: pitrarchive.RecordReset, ServerUUID: c.obs.ServerUUID, ServerID: c.obs.ServerID,
+			GTIDExecuted: c.obs.GTIDExecuted, ObservedAt: at, ProbeInterval: a.probeInterval(at, c.since)}
+		recs = append(recs, rec)
+		if !hasPromotionRecord(m.Promotions, rec) {
+			m.AppendPromotionRecord(rec)
+		}
+	}
+	if err := a.saveManifest(ctx, m); err != nil {
+		return wrapKeepToken("incarnation reset record", err)
+	}
+	done := make([]time.Time, 0, len(due))
+	for i, rec := range recs {
+		if !hasPromotionRecord(m.Promotions, rec) {
+			return fmt.Errorf("incarnation reset record: the saved manifest for %s does not hold the reset record observed at %s", a.site, rec.ObservedAt.Format(time.RFC3339Nano))
+		}
+		done = append(done, due[i].obs.ObservedAt)
+		a.logger.Warn("server incarnation reset recorded", "serverUuid", rec.ServerUUID, "serverId", rec.ServerID,
+			"gtidExecuted", rec.GTIDExecuted, "observedAt", rec.ObservedAt, "probeInterval", time.Duration(rec.ProbeInterval))
+	}
+	a.roles.dropResets(done)
+	return nil
 }
 
 // roleTick probes the role and then runs recordTick. Run does not call
@@ -360,7 +611,13 @@ func (a *BinlogArchiver) recordTick(ctx context.Context) {
 	// Establishing or re-opening the archive is the scan's job; the tick
 	// only records on a verified session, so a refused archive is not
 	// listed every PEER_CHECK_INTERVAL.
-	if snap.state != roleWritable || a.episode.recorded || a.session == nil || !a.session.Verified() {
+	if a.session == nil || !a.session.Verified() {
+		return
+	}
+	if err := a.recordResets(ctx, snap); err != nil {
+		a.logger.Debug("incarnation reset record not written yet", "error", err)
+	}
+	if snap.state != roleWritable || a.episode.recorded {
 		return
 	}
 	if err := a.observeRole(ctx, snap); err != nil {

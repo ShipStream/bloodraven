@@ -107,6 +107,33 @@ func TestOpenPITRArchive(t *testing.T) {
 			id := putDescriptor(t, s, d).ArchiveID
 			putManifest(t, s, sidecar.Manifest{Version: 2, ArchiveID: id, Site: "dc1", Epoch: &sidecar.ArchiveEpoch{ResetReason: "GTID reuse verified"}})
 		}, want: pitrarchive.TokenArchiveHistoryReset},
+		// F126: every manifest's version and identity is checked before
+		// any reset marker.
+		{name: "a legacy manifest outranks another site's reset marker", setup: func(t *testing.T, s sidecar.ArchiveStore, d pitrarchive.Destination) {
+			id := putDescriptor(t, s, d).ArchiveID
+			putManifest(t, s, sidecar.Manifest{Version: 2, ArchiveID: id, Site: "a", Epoch: &sidecar.ArchiveEpoch{ResetReason: "GTID reuse verified"}})
+			putObject(t, s, sidecar.ManifestKey(downloadPrefix, "b"), []byte(`{"version":1,"site":"b","files":[]}`))
+		}, want: pitrarchive.TokenArchiveLegacy},
+		{name: "a mixed archive outranks another site's reset marker", setup: func(t *testing.T, s sidecar.ArchiveStore, d pitrarchive.Destination) {
+			id := putDescriptor(t, s, d).ArchiveID
+			putManifest(t, s, sidecar.Manifest{Version: 2, ArchiveID: id, Site: "a", Epoch: &sidecar.ArchiveEpoch{ResetReason: "GTID reuse verified"}})
+			putManifest(t, s, sidecar.Manifest{Version: 2, ArchiveID: "ar1-bbbbbbbbbbbbbbbbbbbbbbbbbb", Site: "b"})
+		}, want: pitrarchive.TokenArchiveIdentityMismatch},
+		// F124: only <prefix>/manifest-<site>.json names a site; a nested
+		// lookalike is ignored, not loaded as another site's manifest.
+		{name: "nested lookalike manifest keys are ignored", setup: func(t *testing.T, s sidecar.ArchiveStore, d pitrarchive.Destination) {
+			id := putDescriptor(t, s, d).ArchiveID
+			putManifest(t, s, sidecar.Manifest{Version: 2, ArchiveID: id, Site: "dc1"})
+			putManifest(t, s, sidecar.Manifest{Version: 2, ArchiveID: id, Site: "dc2"})
+			putObject(t, s, downloadPrefix+"/manifest-junk/manifest-dc3.json", []byte(`{}`))
+		}},
+		// F125: a site name outside the CRD pattern could collide with the
+		// staging directory's own entries.
+		{name: "a manifest naming the cache directory", setup: func(t *testing.T, s sidecar.ArchiveStore, d pitrarchive.Destination) {
+			id := putDescriptor(t, s, d).ArchiveID
+			putManifest(t, s, sidecar.Manifest{Version: 2, ArchiveID: id, Site: "dc1"})
+			putObject(t, s, sidecar.ManifestKey(downloadPrefix, ".pitr-cache"), []byte(`{}`))
+		}, want: pitrarchive.TokenArchiveObjectInvalid},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -120,7 +147,7 @@ func TestOpenPITRArchive(t *testing.T) {
 			opened, err := openPITRArchive(context.Background(), store, pitrArchiveRequest{
 				prefix: downloadPrefix,
 				expect: pitrarchive.Expectation{Role: pitrarchive.RoleReader, Destination: dest, Encryption: enc, SourceUID: ktypes.UID(tt.uid)},
-			})
+			}, []time.Duration{0})
 			if tt.want == "" {
 				if err != nil || len(opened.manifests) != 2 {
 					t.Fatalf("open = %+v, %v", opened, err)
@@ -347,10 +374,14 @@ func (a *dlArchive) put(t *testing.T, site, name string, fsrv uint32, prev, base
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(data)
-	// Every file is opened at dlEpoch, before any record (the anchor
-	// incarnation check reads firstEventTime).
+	// Coverage bound to the row's content ID, as the archiver uploads it
+	// (PlanSite trusts nothing else).
+	cov := *ev.Metadata.GTIDCoverage
+	cov.ContentID = hex.EncodeToString(sum[:])
+	// FirstEventTime is informational only: the planner dates incarnations
+	// by the sites' records, never by a file's first event time.
 	e := sidecar.ManifestEntry{Name: name, ID: hex.EncodeToString(sum[:]), BaseGTIDs: base, PreviousGTIDs: ev.Metadata.PreviousGTIDs,
-		GTIDCoverage: ev.Metadata.GTIDCoverage, Size: int64(len(data)), FirstEventTime: dlEpoch}
+		GTIDCoverage: &cov, Size: int64(len(data)), FirstEventTime: dlEpoch}
 	key, err := sidecar.ArchiveEntryKey(downloadPrefix, site, e)
 	if err != nil {
 		t.Fatal(err)
@@ -451,11 +482,14 @@ func TestPlanAndStageMixedFileFailback(t *testing.T) {
 			a := failbackArchive(t)
 			old := pitrDiskFreeAfter
 			defer func() { pitrDiskFreeAfter = old }()
-			pitrDiskFreeAfter = func(string, int64) (int64, int64) {
-				if cache {
-					return 1, 0
+			// Uncached: the node has no room to cache (the cache
+			// directory's checks), but room to stage (the staging
+			// directory's).
+			pitrDiskFreeAfter = func(dir string, n int64) (int64, int64) {
+				if !cache && filepath.Base(dir) == ".pitr-cache" {
+					return 0, 1
 				}
-				return 0, 1
+				return 1<<40 - n, 0
 			}
 			out, metaDir := t.TempDir(), t.TempDir()
 			// Leftovers from an earlier attempt are cleared.
@@ -469,11 +503,24 @@ func TestPlanAndStageMixedFileFailback(t *testing.T) {
 				mode: pitrplan.ModeTimestamp, stop: stop, exclude: pitrplan.Set{}, outDir: out, delta: 5 * time.Second, memory: 64 << 20,
 				dumpMetaPath: writeDumpJSON(t, metaDir, sidA+":1-40", a.tA(42), a),
 			}
-			res, err := planAndStage(context.Background(), a.store, req, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			counting := newFlakyStore(a.store)
+			res, err := planAndStage(context.Background(), counting, req, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			if err != nil {
 				t.Fatal(err)
 			}
 			c := readCoverage(t, out)
+			// F133: staging reuses the tee cache: one Open per plan file
+			// when cached (the planner's), two when re-downloaded.
+			wantOpens := map[bool]int{true: 1, false: 2}[cache]
+			for _, f := range res.plan.Files {
+				key, err := sidecar.ArchiveEntryKey(downloadPrefix, f.Row.Site, sidecar.ManifestEntry{Name: f.Row.Name, ID: f.Row.ID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := counting.opens[key]; got != wantOpens {
+					t.Errorf("%s/%s opened %d times, want %d", f.Row.Site, f.Row.Name, got, wantOpens)
+				}
+			}
 			if c.Version != 2 || c.Outcome != pitrplan.OutcomeTargetCovered || c.RefusalReason != "" || c.Witness == nil || c.Witness.GroundTruth != pitrplan.GroundTruthAnchored ||
 				c.Witness.GTID != sidB+":36" || c.Lineage != sidA+":1-100,"+sidB+":1-35" || c.Replay != sidA+":41-100,"+sidB+":1-35" || c.Archive.ArchiveID != a.desc.ArchiveID ||
 				c.Dump.SourceUID != a.desc.Source.UID || c.Dump.ServerID != 102 || c.StopTime.String() != backupmeta.NewMicroTime(stop).String() {

@@ -83,7 +83,12 @@ func runBackupStamp(args []string) {
 	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo).With("subcommand", "backup-stamp")
 	fs := flag.NewFlagSet("backup-stamp", flag.ContinueOnError)
 	endFlag := fs.String("end", "", "add serverClock.end (µs RFC3339 UTC) to an existing stamp")
+	checkFlag := fs.Bool("check", false, "require the dump location to still hold this backup's unfinished stamp, and write nothing")
 	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if *checkFlag && *endFlag != "" {
+		fmt.Fprintln(os.Stderr, "backup-stamp: --check and --end are exclusive")
 		os.Exit(2)
 	}
 
@@ -123,6 +128,17 @@ func runBackupStamp(args []string) {
 	}
 	logger = logger.With("key", key, "backup", template.Backup.Name, "site", template.Site)
 
+	if *checkFlag {
+		// A plaintext dump.py runs this before mysqlsh writes the dump
+		// (review F016): on a store without atomic create, a same-name
+		// backup of another namespace sharing the prefix may have replaced
+		// the stamp since the init container wrote it.
+		if err := checkBackupStampOwner(ctx, store, key, template); err != nil {
+			fail("check backup stamp", err)
+		}
+		logger.Info("backup stamp checked")
+		return
+	}
 	if *endFlag != "" {
 		end, err := backupmeta.ParseMicroTime(*endFlag)
 		if err != nil {

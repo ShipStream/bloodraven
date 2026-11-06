@@ -83,12 +83,9 @@ func TestExample2PlannedFailover(t *testing.T) {
 
 // example3 is the headline failback without reclone: a short b era with no
 // b rotation, b's file never archived; a's mixed file a2 holds everything.
-// b's bootstrap clone bridge b0 is retained only with withB0: under review
-// ruling N3 no recorded time proves that the bridge predates R_b, so while
-// it is retained R_b anchors nothing.
-func example3(t *testing.T, lag bool) *world { return example3With(t, lag, false) }
-
-func example3With(t *testing.T, lag, withB0 bool) *world {
+// b's bootstrap clone bridge b0 is retained: a clone bridge row is no fence
+// (N3 revised); only b's records date its incarnations.
+func example3(t *testing.T, lag bool) *world {
 	w := newWorld(t)
 	w.commit("A:1-100")
 	tauB := w.pass(2 * time.Second)
@@ -101,7 +98,7 @@ func example3With(t *testing.T, lag, withB0 bool) *world {
 	}
 	tauA3 := w.pass(2 * time.Second)
 	w.commit("A:101-135")
-	era1Files(w, withB0)
+	era1Files(w, true)
 	if lag {
 		w.promote("b", "Bu", "A:1-100,Bu:1-3", tauB)
 	} else {
@@ -147,13 +144,32 @@ func TestExample3FailbackWithoutReclone(t *testing.T) {
 	w.check("3ii lag, after the record", query{stop: w.in("Bu:10")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:10",
 		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-9", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-9", ""}}})
 
-	// With b's clone bridge b0 retained, b's history may have been replaced
-	// between R_b and Bu:36 for all the archive proves (N3): refuse.
-	w = example3With(t, false, true)
-	w.check("3ii, bridge retained", query{stop: w.in("Bu:36")}, want{token: pitrarchive.TokenStopAmbiguous,
-		msg: []string{"archived only as a replica copy on a", "the promotion records b#0 are not anchors"}})
-	w.check("3i, bridge retained", query{stop: w.in("A:80")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "A:80", truth: pitrplan.GroundTruthOrigin,
-		lambda: "A:1-79", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-79", ""}}})
+	// N3 revised: a reset record of b (b recloned, a sidecar restart that
+	// found b's history replaced) observed after R_b and not provably
+	// after Bu:36's episode began fences R_b off; one observed long enough
+	// after Bu:36 does not.
+	for _, tc := range []struct {
+		name   string
+		at     time.Time
+		pi     time.Duration
+		fenced bool
+	}{
+		{"reset inside b's era", w.at("Bu:40"), 5 * time.Second, true},
+		{"reset after Bu:36 within its probe interval", w.at("Bu:36").Add(9 * time.Second), 5 * time.Second, true},
+		{"reset after Bu:36 beyond its probe interval and δ", w.at("Bu:36").Add(11 * time.Second), 5 * time.Second, false},
+		{"start-up reset reaching back to b's record", w.at("Bu:36").Add(time.Hour), time.Hour + time.Minute, true},
+		{"reset with an unknown probe interval", w.at("Bu:36").Add(24 * time.Hour), 0, true},
+	} {
+		w := example3(t, false)
+		w.record("b", pitrarchive.RecordReset, "Bu", "A:1-100,Bu:1-50", tc.at, tc.pi)
+		if !tc.fenced {
+			w.check("3ii, "+tc.name, query{stop: w.in("Bu:36")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:36", truth: pitrplan.GroundTruthAnchored,
+				lambda: "A:1-100,Bu:1-35", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-35", ""}}})
+			continue
+		}
+		w.check("3ii, "+tc.name, query{stop: w.in("Bu:36")}, want{token: pitrarchive.TokenStopAmbiguous,
+			msg: []string{"archived only as a replica copy on a", "the promotion records b#0 are not anchors, because a later record of site b, b#1 (an incarnation-reset record observed at " + tc.at.UTC().Format(microLayout)}})
+	}
 }
 
 const microLayout = "2006-01-02T15:04:05.000000Z"

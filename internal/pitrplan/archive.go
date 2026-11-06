@@ -77,9 +77,10 @@ type Row struct {
 	// manifest's Divergent[] (nil otherwise).
 	Divergent Set
 	// Created is the file's first event time (the manifest's
-	// firstEventTime: its server's clock when it opened the file, whole
-	// seconds), or zero when unknown. Only the anchor incarnation check
-	// reads it (§4.4, G1).
+	// firstEventTime: its server's clock, whole seconds), or zero when
+	// unknown. It proves nothing about when the file was opened or which
+	// server incarnation wrote it (review F009), so the planner does not
+	// use it; anchors are fenced by the sites' records (§4.4, N3 revised).
 	Created time.Time
 }
 

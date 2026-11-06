@@ -11,6 +11,7 @@ import (
 
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
+	"github.com/shipstream/bloodraven/internal/pitrplan"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
@@ -84,7 +85,9 @@ func TestLoadDumpMeta(t *testing.T) {
 					store = sidecar.WrapWithEncryption(store, []byte("dump key"))
 				}
 				putDump(t, store, tt.objs)
-				meta, err := loadDumpMeta(context.Background(), store, dumpPrefix, "s3://dumps/orders/nightly-1/", tt.expect)
+				expect := tt.expect
+				expect.encrypted = encrypted
+				meta, err := loadDumpMeta(context.Background(), store, dumpPrefix, "s3://dumps/orders/nightly-1/", expect)
 				if tt.want != "" {
 					if tok, ok := pitrarchive.ParseToken(errString(err)); !ok || tok != tt.want {
 						t.Fatalf("err = %v, want %s", err, tt.want)
@@ -94,7 +97,7 @@ func TestLoadDumpMeta(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if meta.Version != 1 || meta.GTIDExecuted != sid+":1-40:42" || meta.End.String() != "2026-11-04T20:01:30.000000Z" ||
+				if meta.Version != 1 || meta.GTIDExecuted != sid+":1-40:42" || meta.End.String() != "2026-11-04T20:01:30.999999Z" ||
 					!meta.ServerClock.End.Equal(full.ServerClock.End.Time) || meta.Stamp.ServerID != 102 || meta.Location != "s3://dumps/orders/nightly-1/" {
 					t.Fatalf("meta = %+v", meta)
 				}
@@ -112,14 +115,62 @@ func TestLoadDumpMeta(t *testing.T) {
 	// An encrypted dump read without its key is not trusted as plaintext.
 	store := stampTestStore(t)
 	putDump(t, sidecar.WrapWithEncryption(store, []byte("dump key")), dumpObjects{&full, goodDump, goodDone})
-	if _, err := loadDumpMeta(context.Background(), sidecar.WrapWithEncryption(store, []byte("wrong key")), dumpPrefix, "l", dumpExpectation{}); err == nil {
-		t.Fatal("a wrong dump key was accepted")
+	_, err := loadDumpMeta(context.Background(), sidecar.WrapWithEncryption(store, []byte("wrong key")), dumpPrefix, "l", dumpExpectation{encrypted: true})
+	if tok, _ := pitrarchive.ParseToken(errString(err)); tok != pitrarchive.TokenBackupIdentityUnknown || !strings.Contains(errString(err), "does not decrypt with the configured passphrase") {
+		t.Fatalf("wrong dump key: %v", err)
+	}
+	// F019: an encrypted dump read without decryption, or a plaintext dump
+	// read with it, names the decryption setting, not a new backup.
+	_, err = loadDumpMeta(context.Background(), store, dumpPrefix, "l", dumpExpectation{})
+	if tok, _ := pitrarchive.ParseToken(errString(err)); tok != pitrarchive.TokenBackupIdentityUnknown || !strings.Contains(errString(err), "no decryption passphrase") {
+		t.Fatalf("encrypted dump without a key: %v", err)
+	}
+	plain := stampTestStore(t)
+	putDump(t, plain, dumpObjects{&full, goodDump, goodDone})
+	_, err = loadDumpMeta(context.Background(), sidecar.WrapWithEncryption(plain, []byte("dump key")), dumpPrefix, "l", dumpExpectation{encrypted: true})
+	if tok, _ := pitrarchive.ParseToken(errString(err)); tok != pitrarchive.TokenBackupIdentityUnknown || !strings.Contains(errString(err), "is not encrypted") {
+		t.Fatalf("plaintext dump with a key: %v", err)
+	}
+}
+
+// F018: transient metadata reads are retried; a persistent failure ends
+// token-less. F121: an oversized metadata object refuses with its token
+// without being buffered.
+func TestLoadDumpMetaReads(t *testing.T) {
+	const sid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	full := dumpStamp(true)
+	old := dumpMetaBackoff
+	dumpMetaBackoff = []time.Duration{0, 0}
+	defer func() { dumpMetaBackoff = old }()
+	inner := stampTestStore(t)
+	putDump(t, inner, dumpObjects{&full, `{"gtidExecuted":"` + sid + `:1-40"}`, `{"end":"2026-11-04 20:01:30"}`})
+	for _, key := range []string{backupmeta.StampKey(dumpPrefix), dumpPrefix + "/@.json", dumpPrefix + "/@.done.json"} {
+		store := newFlakyStore(inner)
+		store.open[key] = 2
+		if _, err := loadDumpMeta(context.Background(), store, dumpPrefix, "l", dumpExpectation{}); err != nil || store.opens[key] != 3 {
+			t.Fatalf("%s after two transient failures: %v (%d opens)", key, err, store.opens[key])
+		}
+		store.open[key] = -1
+		_, err := loadDumpMeta(context.Background(), store, dumpPrefix, "l", dumpExpectation{})
+		if err == nil || !pitrplan.IsTransient(err) {
+			t.Fatalf("%s failing persistently: %v, want a transient error", key, err)
+		}
+		if tok, ok := pitrarchive.ParseToken(err.Error()); ok {
+			t.Fatalf("%s: a transport failure carries token %s", key, tok)
+		}
+	}
+	putObject(t, inner, dumpPrefix+"/@.done.json", append([]byte(`{"end":"2026-11-04 20:01:30","x":"`), make([]byte, maxDumpMetaObjectBytes)...))
+	_, err := loadDumpMeta(context.Background(), inner, dumpPrefix, "l", dumpExpectation{})
+	if tok, _ := pitrarchive.ParseToken(errString(err)); tok != pitrarchive.TokenBackupIncomplete || !strings.Contains(errString(err), "larger than its bound") {
+		t.Fatalf("oversized @.done.json: %v", err)
 	}
 }
 
 func TestParseDumpEnd(t *testing.T) {
 	for in, want := range map[string]string{
-		"2026-11-04 20:01:30":           "2026-11-04T20:01:30.000000Z",
+		// mysqlsh writes whole seconds: the dump ended within that second.
+		"2026-11-04 20:01:30":           "2026-11-04T20:01:30.999999Z",
+		"2026-11-04T20:01:30Z":          "2026-11-04T20:01:30.999999Z",
 		"2026-11-04 20:01:30.5":         "2026-11-04T20:01:30.500000Z",
 		"2026-11-04T20:01:30.1234567Z":  "2026-11-04T20:01:30.123457Z",
 		"2026-11-04T22:01:30.000001+02": "",

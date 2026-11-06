@@ -269,6 +269,24 @@ def _server_clock_after_dump(conn, server_uuid):
             pass
 
 
+def _check_stamp():
+    """Before mysqlsh writes anything, require the dump location to still
+    hold this backup's unfinished stamp (review F016). On a store without
+    atomic create, a same-name backup of another namespace sharing the
+    prefix may have replaced the stamp since the backup-stamp init container
+    wrote it; dumping then would interleave the two backups' objects. Runs
+    the bloodraven binary the init container installed
+    (BLOODRAVEN_STAMP_TOOL), so only plaintext Jobs check here; an encrypted
+    Job's uploader checks before it uploads."""
+    tool = os.environ.get("BLOODRAVEN_STAMP_TOOL")
+    if not tool:
+        return
+    res = subprocess.run([tool, "backup-stamp", "--check"])
+    if res.returncode != 0:
+        raise RuntimeError(
+            "backup-stamp --check exited {}".format(res.returncode))
+
+
 def _finish_stamp(output, end):
     """Add serverClock.end to the backup stamp. A plaintext Job runs the
     bloodraven binary the backup-stamp init container installed
@@ -387,6 +405,13 @@ def main():
         server_uuid = _server_uuid(session)
     except Exception as e:  # noqa: BLE001
         print("BLOODRAVEN_DUMP_FAILED: read server_uuid: {}".format(e),
+              file=sys.stderr, flush=True)
+        sys.exit(2)
+
+    try:
+        _check_stamp()
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_DUMP_FAILED: backup stamp: {}".format(e),
               file=sys.stderr, flush=True)
         sys.exit(2)
 

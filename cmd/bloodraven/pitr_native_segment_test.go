@@ -124,7 +124,11 @@ func (nf *nativeFailback) archive(t *testing.T) (*dlArchive, string, time.Time) 
 		if !ev.Metadata.GTIDCoverage.Complete {
 			t.Fatalf("%s: coverage incomplete", name)
 		}
-		e := sidecar.ManifestEntry{Name: name, ID: ev.Digest, PreviousGTIDs: ev.Metadata.PreviousGTIDs, GTIDCoverage: ev.Metadata.GTIDCoverage, Size: int64(len(data))}
+		// Coverage bound to the row's content ID, as the archiver
+		// uploads it (PlanSite trusts nothing else).
+		cov := *ev.Metadata.GTIDCoverage
+		cov.ContentID = ev.Digest
+		e := sidecar.ManifestEntry{Name: name, ID: ev.Digest, PreviousGTIDs: ev.Metadata.PreviousGTIDs, GTIDCoverage: &cov, Size: int64(len(data))}
 		key, err := sidecar.ArchiveEntryKey(downloadPrefix, "a", e)
 		if err != nil {
 			t.Fatal(err)
@@ -225,9 +229,11 @@ func TestPITRNativeFailbackPlans(t *testing.T) {
 			}
 		})
 	}
-	// The decoder bound: a budget whose MaxEventBytes is below the big
-	// payload's uncompressed size refuses before zstd runs.
-	_, _, err = nf.plan(t, nativeCases[3], 128<<10)
+	// The decoder bound: a budget whose MaxEventBytes (32 KiB) is below
+	// the big payload's uncompressed size (60211 bytes) refuses before
+	// zstd runs; the small payloads before it, whose decode workspace is
+	// charged too, fit.
+	_, _, err = nf.plan(t, nativeCases[3], 256<<10)
 	if tok, _ := pitrarchive.ParseToken(errString(err)); tok != pitrarchive.TokenPlanTooLarge || !strings.Contains(errString(err), "compressed transaction payload") {
 		t.Fatalf("small budget: %v, want PITRPlanTooLarge", err)
 	}

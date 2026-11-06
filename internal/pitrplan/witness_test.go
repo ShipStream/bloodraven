@@ -103,59 +103,101 @@ func TestWitnessTies(t *testing.T) {
 	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "same µs", "choose a target ≠")
 }
 
-// G1: a record anchors w only when it provably precedes w on s's current
-// history. a records R_a = A:1-20,C:1 at 20 s; a is later recloned from a
-// donor without C:1 and re-promoted, then writes A:51-60, which only c (a
-// replica that has C:1 of its own) archives. R_a must not explain C:1 in
-// c's copy of A:55: a's new incarnation never had it.
-func TestWitnessAnchorIncarnation(t *testing.T) {
-	build := func(evidence string) *synth {
-		s := newSynth(t)
-		s.file("a", "a1", 101, "", "", run("A", 1, 50, 1, 101))
-		s.promote("a", "A", 101, "A:1-20,C:1", 20)
-		cOwn := stx{g: "C:1", oct: sec(0.5), srv: 103}
-		s.file("c", "c1", 103, "A:1-50", "", []stx{cOwn}, run("A", 51, 60, 51, 101))
-		switch evidence {
-		case "later record":
-			// a's re-promotion record lacks C:1 (observed within δ of A:55,
-			// so it cannot anchor A:55 itself).
-			s.promote("a", "A", 101, "A:1-50", 52)
-		case "later record keeps R":
-			s.promote("a", "A", 101, "A:1-50,C:1", 52)
-		case "reclone row":
-			// The post-clone first file: base A:1-50, opened at 45 s.
+// G1, N3 revised: a record anchors w only when no later record of its
+// site fences it off. a records R_a = A:1-20,C:1 at 20 s; c (a replica
+// with C:1 of its own) archives a's A:51-60 as replica copies. R_a must not
+// explain C:1 in c's copy of A:55 when a's server may have started a later
+// episode or incarnation (a reclone without C:1, F062; a reseed, F011)
+// before A:55.
+func TestWitnessAnchorFence(t *testing.T) {
+	reset := pitrarchive.RecordReset
+	tests := []struct {
+		name  string
+		add   func(s *synth)
+		fence bool
+	}{
+		{"no later record", func(*synth) {}, false},
+		// F062: a recloned from a donor without C:1; its sidecar recorded
+		// the reset, the new era's promotion record never persisted.
+		{"reset record before w", func(s *synth) { s.record("a", reset, "A", 101, "A:1-50", 40, 5*time.Second) }, true},
+		// The reset is observed after w, but the change it reports may
+		// lie up to its probe interval (and δ) before it.
+		{"reset record within its probe interval + δ after w", func(s *synth) { s.record("a", reset, "A", 101, "A:1-50", 64.9, 5*time.Second) }, true},
+		{"reset record beyond its probe interval + δ after w", func(s *synth) { s.record("a", reset, "A", 101, "A:1-50", 65.1, 5*time.Second) }, false},
+		// A sidecar start that found a's history replaced reaches back to
+		// a's latest record.
+		{"start-up reset reaching back to R_a", func(s *synth) { s.record("a", reset, "A", 101, "A:1-50", 300, 280*time.Second) }, true},
+		{"record with an unknown probe interval", func(s *synth) { s.record("a", reset, "A", 101, "A:1-50", 10000, 0) }, true},
+		// F011: the reseeded incarnation's own promotion record (lacking
+		// C:1), observed within δ of A:55, so it anchors nothing itself.
+		{"new incarnation's promotion record", func(s *synth) { s.promote("a", "A", 101, "A:1-50", 52) }, true},
+		// A later episode's record that still holds R_a: w may belong to
+		// that episode, whose start the archive does not date.
+		{"later episode's record holding R_a", func(s *synth) { s.promote("a", "A", 101, "A:1-50,C:1", 52) }, true},
+		{"another kind of record", func(s *synth) { s.record("a", "Future", "A", 101, "A:1-50,C:1", 45, time.Second) }, true},
+		// F009: clone bridges and rows of earlier states are no fences,
+		// whatever their first event times; records date incarnations.
+		{"clone bridge row lacking C:1", func(s *synth) {
 			s.file("a", "a0", 101, "", "A:1-50")
 			s.sites["a"].Rows[1].Created = synthEpoch.Add(45 * time.Second)
-		case "row opened before R":
-			s.file("a", "a0", 101, "", "A:1-50")
-			s.sites["a"].Rows[1].Created = synthEpoch.Add(5 * time.Second)
-		case "row opened after w":
-			s.file("a", "a0", 101, "", "A:1-50")
-			s.sites["a"].Rows[1].Created = synthEpoch.Add(70 * time.Second)
-		case "row opened at an unknown time":
+		}, false},
+		{"clone bridge row with an unknown open time", func(s *synth) {
 			s.file("a", "a0", 101, "", "A:1-50")
 			s.sites["a"].Rows[1].Created = time.Time{}
-		}
-		s.backup("A:1-40", "a", 101, 42)
-		return s
+		}, false},
+		{"earlier-state row opened between R_a and w", func(s *synth) {
+			s.file("a", "a0", 101, "A:1-10", "")
+			s.sites["a"].Rows[1].Created = synthEpoch.Add(40 * time.Second)
+		}, false},
+		{"clone bridge row and its reset record", func(s *synth) {
+			s.file("a", "a0", 101, "", "A:1-50")
+			s.record("a", reset, "A", 101, "A:1-50", 45, 5*time.Second)
+		}, true},
 	}
-	// N3 (review F009): no recorded time proves when a file was opened,
-	// so a clone bridge lacking part of R_a is evidence whatever its
-	// firstEventTime says.
-	for _, ev := range []string{"later record", "reclone row", "row opened at an unknown time", "row opened before R", "row opened after w"} {
-		_, err := build(ev).run(ModeTimestamp, 54.5, "", false)
-		wantToken(t, err, pitrarchive.TokenStopAmbiguous, "replica copy on c", "predecessors include C:1", "a#0 are not anchors")
-		p, err := build(ev).run(ModeTimestamp, 54.5, "C:1", false)
-		if err != nil || !p.Lineage.Equal(MustParseSet("A:1-54")) {
-			t.Fatalf("%s, C:1 excluded: %+v %v", ev, p, err)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := incarnationArchive(t)
+			tt.add(s)
+			if !tt.fence {
+				wantAnchoredByRa(t, tt.name, s)
+				return
+			}
+			wantRaNoAnchor(t, tt.name, s)
+			p, err := s.run(ModeTimestamp, 54.5, "C:1", false)
+			if err != nil || !p.Lineage.Equal(MustParseSet("A:1-54")) {
+				t.Fatalf("C:1 excluded: %+v %v", p, err)
+			}
+		})
 	}
-	for _, ev := range []string{"later record keeps R"} {
-		p, err := build(ev).run(ModeTimestamp, 54.5, "", false)
-		if err != nil || p.Witness.GroundTruth != GroundTruthAnchored || !p.Lineage.Equal(MustParseSet("A:1-54,C:1")) ||
-			len(p.Witness.AnchorRecords) != 1 || p.Witness.AnchorRecords[0] != "a#0" {
-			t.Fatalf("%s: R_a anchors: %+v %v", ev, p, err)
-		}
+	// The refusal names the fence.
+	s := incarnationArchive(t)
+	s.record("a", reset, "A", 101, "A:1-50", 40, 5*time.Second)
+	_, err := s.run(ModeTimestamp, 54.5, "", false)
+	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "the promotion records a#0 are not anchors, because a later record of site a, a#1 (an incarnation-reset record observed at 2026-11-01T12:00:40.000000Z, reporting a change that happened up to 5s before it), is not provably after A:55")
+}
+
+// A sidecar restart in the middle of a's era writes a second promotion
+// record of the same incarnation. Witnesses well before it keep R_a#0,
+// witnesses more than δ after it use R_a#1, and the window between
+// (where the restart record may mark a later episode) refuses with a
+// safe target.
+func TestWitnessAnchorSidecarRestartMidEra(t *testing.T) {
+	s := newSynth(t)
+	s.promote("a", "A", 101, "A:1-50,D:1", 50.5)
+	s.promote("a", "A", 101, "A:1-70,D:1", 70.5) // the restart's record
+	s.file("b", "b1", 102, "A:1-50,D:1", "", run("A", 51, 100, 51, 101))
+	s.backup("A:1-50,D:1", "b", 102, 50.8)
+	p, err := s.run(ModeTimestamp, 55.7, "", false)
+	if err != nil || p.Witness.GTID.String() != "A:56" || len(p.Witness.AnchorRecords) != 1 || p.Witness.AnchorRecords[0] != "a#0" {
+		t.Fatalf("before the restart: %+v %v", p, err)
+	}
+	_, err = s.run(ModeTimestamp, 61.7, "", false)
+	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "predecessors include D:1",
+		"or choose a target after 2026-11-01T12:01:15.500000Z (a's promotion record at 2026-11-01T12:01:10.500000Z plus the 5s clock-skew margin)",
+		"the promotion records a#0 are not anchors, because a later record of site a, a#1 (a promotion record")
+	p, err = s.run(ModeTimestamp, 76.7, "", false)
+	if err != nil || p.Witness.GTID.String() != "A:77" || len(p.Witness.AnchorRecords) != 1 || p.Witness.AnchorRecords[0] != "a#1" {
+		t.Fatalf("after the restart: %+v %v", p, err)
 	}
 }
 
@@ -249,66 +291,77 @@ func TestWitnessAnchorAcrossRoleChange(t *testing.T) {
 	wantAnchoredByRa(t, "b promoted holding w", s)
 }
 
-// F065: G1's other evidence sources, with boundary controls.
+// F065: a record of another server on a's own site fences R_a off like
+// any record of the site; one observed beyond w + its probe interval + δ
+// does not. Downloaded bytes of a clone bridge prove nothing either way
+// (F009): even with an origin transaction committed before R_a in them,
+// the bridge is no fence.
 func TestWitnessAnchorEvidenceSources(t *testing.T) {
-	// Another server's record on a's own site, before w (+δ).
 	s := incarnationArchive(t)
 	s.promote("a", "Z", 109, "A:1-30", 40)
 	wantRaNoAnchor(t, "another server on site a", s)
 	s = incarnationArchive(t)
-	s.promote("a", "Z", 109, "A:1-30", 61)
-	wantAnchoredByRa(t, "another server on site a after w + δ", s)
+	s.promote("a", "Z", 109, "A:1-30", 66)
+	wantAnchoredByRa(t, "another server on site a after w + PI + δ", s)
 
-	// An ordinary row starting from an earlier state of R_a, whose first
-	// event time lies between R_a + δ and w + δ: the history went back.
-	opened := func(at float64) *synth {
-		s := incarnationArchive(t)
-		s.file("a", "a0", 101, "A:1-10", "")
-		s.sites["a"].Rows[1].Created = synthEpoch.Add(time.Duration(at * float64(time.Second)))
-		return s
-	}
-	wantRaNoAnchor(t, "earlier-state row opened at 40 s", opened(40))
-	wantAnchoredByRa(t, "earlier-state row opened at R_a + δ", opened(25))
-
-	// A clone bridge with no first event time whose downloaded bytes hold
-	// an origin transaction committed before R_a: commit times prove
-	// nothing about when a file was opened (N3), so it is evidence. E:1,
-	// a member of B committed after a1's newest member of B, makes the
-	// frontier download a0 before the witness is grounded.
+	// E:1, a member of B committed after a1's newest member of B, makes
+	// the frontier download a0 before the witness is grounded.
 	s = incarnationArchive(t)
 	s.file("a", "a0", 101, "", "A:1-5", run("A", 6, 6, 6, 101), []stx{{g: "E:1", oct: sec(41), srv: 105}})
 	s.sites["a"].Rows[1].Created = time.Time{}
 	s.backup("A:1-40,E:1", "a", 101, 42)
-	wantRaNoAnchor(t, "bridge with early origin bytes", s)
+	// R_a anchors A:55 (Λ = A:1-54,C:1); the plan then refuses only
+	// because this backup's E:1 is off that history.
+	p, err := s.run(ModeTimestamp, 54.5, "", false)
+	wantToken(t, err, pitrarchive.TokenBackupNotOnLineage, "the backup holds E:1, which is not in the history of A:55")
+	if p == nil || p.Witness == nil || p.Witness.GroundTruth != GroundTruthAnchored || !p.Lineage.Equal(MustParseSet("A:1-54,C:1")) {
+		t.Fatalf("bridge with early origin bytes: %+v", p)
+	}
 	if s.fetches["a/a0"] == 0 {
 		t.Fatal("a0 was not downloaded; the case needs its bytes")
 	}
 }
 
-// F064: the origin anchor q is guarded too. a1 (a's own file, which
+// F064: the origin anchor q is fenced too. a1 (a's own file, which
 // carries D:1 from before) is the only anchor for c's replica copy of
-// A:55; a clone bridge on a lacking part of exec(q) makes q no anchor,
-// while a bridge that starts from all of exec(q) does not.
+// A:55. A record of a observed after q (A:50, at 50 s; δ before it on the
+// server's clock) and not provably after A:55 makes q no anchor; a clone
+// bridge row does not.
 func TestWitnessOriginAnchorIncarnation(t *testing.T) {
-	build := func(bridgeBase string) *synth {
+	build := func(add func(s *synth)) *synth {
 		s := newSynth(t)
 		s.promote("a", "A", 101, "", -100)
 		s.file("a", "a1", 101, "D:1", "", run("A", 1, 50, 1, 101))
 		s.file("c", "c1", 103, "D:1,A:1-50", "", run("A", 51, 60, 51, 101))
-		if bridgeBase != "" {
-			s.file("a", "a9", 101, "", bridgeBase)
-		}
+		add(s)
 		s.backup("D:1,A:1-40", "a", 101, 42)
 		return s
 	}
-	for _, base := range []string{"", "D:1,A:1-50"} {
-		p, err := build(base).run(ModeTimestamp, 54.5, "", false)
+	anchored := map[string]func(*synth){
+		"no record":         func(*synth) {},
+		"bridge from exec":  func(s *synth) { s.file("a", "a9", 101, "", "D:1,A:1-50") },
+		"bridge without D1": func(s *synth) { s.file("a", "a9", 101, "", "A:1-50") },
+		"reset before q":    func(s *synth) { s.record("a", pitrarchive.RecordReset, "A", 101, "D:1,A:1-40", 44.9, 5*time.Second) },
+		"reset after w":     func(s *synth) { s.record("a", pitrarchive.RecordReset, "A", 101, "A:1-60", 65.1, 5*time.Second) },
+	}
+	for name, add := range anchored {
+		p, err := build(add).run(ModeTimestamp, 54.5, "", false)
 		if err != nil || p.Witness.GroundTruth != GroundTruthAnchored || p.Witness.AnchorOriginRow != "a/a1/id-a1" || !p.Lineage.Equal(MustParseSet("D:1,A:1-54")) {
-			t.Fatalf("bridge %q: q anchors: %+v %v", base, p, err)
+			t.Fatalf("%s: q anchors: %+v %v", name, p, err)
 		}
 	}
-	_, err := build("A:1-50").run(ModeTimestamp, 54.5, "", false)
-	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "archived only as a replica copy on c", "predecessors include D:1")
+	fenced := map[string]func(*synth){
+		"reset between q and w":     func(s *synth) { s.record("a", pitrarchive.RecordReset, "A", 101, "A:1-50", 52, 5*time.Second) },
+		"reset within δ before q":   func(s *synth) { s.record("a", pitrarchive.RecordReset, "A", 101, "A:1-50", 45.1, 5*time.Second) },
+		"promotion record after q":  func(s *synth) { s.promote("a", "A", 101, "D:1,A:1-50", 51) },
+		"reset within PI + δ after": func(s *synth) { s.record("a", pitrarchive.RecordReset, "A", 101, "A:1-60", 64.9, 5*time.Second) },
+	}
+	for name, add := range fenced {
+		_, err := build(add).run(ModeTimestamp, 54.5, "", false)
+		t.Log(name)
+		wantToken(t, err, pitrarchive.TokenStopAmbiguous, "archived only as a replica copy on c", "predecessors include D:1",
+			"the origin row a/a1 (through A:50) is not an anchor, because a later record of site a, a#1")
+	}
 }
 
 // F066: an anchor row from a marked site refuses, though the witness's

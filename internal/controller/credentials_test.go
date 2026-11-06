@@ -229,6 +229,46 @@ func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1a
 	}
 }
 
+// TestReconcileCredentialsDefersDuringInitFromBackup: no credential SQL
+// runs on the target while spec.initFromBackup has not succeeded (review
+// F004); a point-in-time restore proves its exact gtid_executed. The roles
+// converge once the restore has succeeded.
+func TestReconcileCredentialsDefersDuringInitFromBackup(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status *v1alpha1.RestoreStatus
+		fenced bool
+	}{
+		{"not yet started", nil, true},
+		{"running", &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning}, true},
+		{"failed", &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed}, true},
+		{"succeeded", &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := &v1alpha1.MysqlFailoverGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
+				Spec: v1alpha1.MysqlFailoverGroupSpec{
+					Credentials:    &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+					Sites:          []v1alpha1.SiteSpec{{Name: "dc1", Role: "primary-candidate"}},
+					InitFromBackup: &v1alpha1.InitFromBackupSpec{},
+				},
+			}
+			fg.Status.ActiveSite = "dc1"
+			fg.Status.Restore = tc.status
+			// No operator Secret: any step past the fence fails.
+			c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg).Build()
+			r := &MysqlFailoverGroupReconciler{Client: c, Scheme: testScheme()}
+			err := r.reconcileCredentials(context.Background(), fg)
+			if tc.fenced && err != nil {
+				t.Fatalf("reconcileCredentials() = %v, want it deferred before any read or SQL", err)
+			}
+			if !tc.fenced && err == nil {
+				t.Fatal("reconcileCredentials() = nil after the restore succeeded, want it to proceed (and fail on the missing Secret)")
+			}
+		})
+	}
+}
+
 func TestComputeCredentialHashIsKeyedOnContent(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()

@@ -598,6 +598,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			},
 		},
 	}
+	setTerminationMessageLimit(&job.Spec.Template.Spec)
 	return job, nil
 }
 

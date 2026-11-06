@@ -62,6 +62,7 @@ except SystemExit as e:
     code = e.code
 print('EXIT', code)
 print('CLOCK_QUERIED', job['_SERVER_CLOCK_SQL'] in QUERIES)
+print('DUMPED', DUMPED['done'])
 `
 
 // Review B7: dump.py's end path, which every backup's stamp depends on.
@@ -79,30 +80,35 @@ func TestDumpScriptFinishesBackupStamp(t *testing.T) {
 		s3, tool, dumpFails bool
 		idleKilled          bool
 		freshUUID           string
-		toolExit            string
+		toolExit, checkExit string
 		wantExit            string
 		wantArgv            string // "" = the tool must not run
 		wantMetaEnd         string // "-" = no meta file
 		wantErr             string
 	}{
 		{name: "plain S3 finishes through the tool", s3: true, tool: true, wantExit: "EXIT 0",
-			wantArgv: "backup-stamp --end 2026-11-04T13:00:00.654321Z", wantMetaEnd: "-"},
+			wantArgv: "backup-stamp --check\nbackup-stamp --end 2026-11-04T13:00:00.654321Z", wantMetaEnd: "-"},
 		{name: "plain PVC finishes through the tool", tool: true, wantExit: "EXIT 0",
-			wantArgv: "backup-stamp --end 2026-11-04T13:00:00.654321Z", wantMetaEnd: ""},
+			wantArgv: "backup-stamp --check\nbackup-stamp --end 2026-11-04T13:00:00.654321Z", wantMetaEnd: ""},
 		{name: "encrypted staging hands the end to encrypt-upload", wantExit: "EXIT 0", wantMetaEnd: "2026-11-04T13:00:00.654321Z"},
 		{name: "S3 without the tool fails", s3: true, wantExit: "EXIT 2", wantMetaEnd: "-",
 			wantErr: "BLOODRAVEN_DUMP_FAILED: backup stamp: BLOODRAVEN_STAMP_TOOL is unset"},
 		{name: "a failing tool fails the backup", s3: true, tool: true, toolExit: "3", wantExit: "EXIT 2",
-			wantArgv: "backup-stamp --end 2026-11-04T13:00:00.654321Z", wantMetaEnd: "-", wantErr: "backup-stamp --end exited 3"},
+			wantArgv: "backup-stamp --check\nbackup-stamp --end 2026-11-04T13:00:00.654321Z", wantMetaEnd: "-", wantErr: "backup-stamp --end exited 3"},
 		{name: "a failed dump never finishes the stamp", s3: true, tool: true, dumpFails: true, wantExit: "EXIT 2", wantMetaEnd: "-",
-			wantErr: "BLOODRAVEN_DUMP_FAILED: dump exploded"},
+			wantArgv: "backup-stamp --check", wantErr: "BLOODRAVEN_DUMP_FAILED: dump exploded"},
+		// F016: the location no longer holds this backup's unfinished
+		// stamp (another namespace's same-name backup replaced it on a
+		// store without atomic create): nothing is dumped.
+		{name: "a replaced stamp stops the dump before it starts", s3: true, tool: true, checkExit: "2", wantExit: "EXIT 2", wantMetaEnd: "-",
+			wantArgv: "backup-stamp --check", wantErr: "BLOODRAVEN_DUMP_FAILED: backup stamp: backup-stamp --check exited 2"},
 		// F027: the pre-dump session idles through the dump and the server
 		// drops it after wait_timeout; serverClock.end comes from a fresh
 		// session to the same server.
 		{name: "a dump that outlasts wait_timeout still finishes", s3: true, tool: true, idleKilled: true, wantExit: "EXIT 0",
-			wantArgv: "backup-stamp --end 2026-11-04T13:00:00.654321Z", wantMetaEnd: "-"},
+			wantArgv: "backup-stamp --check\nbackup-stamp --end 2026-11-04T13:00:00.654321Z", wantMetaEnd: "-"},
 		{name: "the fresh session must reach the dumped server", s3: true, tool: true, freshUUID: "4f22ab58-82db-22f2-af44-d91bba530673", wantExit: "EXIT 2",
-			wantMetaEnd: "-", wantErr: "not the dumped server 3e11fa47-71ca-11e1-9e33-c80aa9429562"},
+			wantArgv: "backup-stamp --check", wantMetaEnd: "-", wantErr: "not the dumped server 3e11fa47-71ca-11e1-9e33-c80aa9429562"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -110,7 +116,7 @@ func TestDumpScriptFinishesBackupStamp(t *testing.T) {
 			output := filepath.Join(dir, "staging", "nightly-1")
 			env := map[string]string{
 				"BLOODRAVEN_MYSQL_HOST": "lion-pdx:3306", "MYSQL_USER": "backup",
-				"BLOODRAVEN_OUTPUT_URL": output, "TEST_ARGV_LOG": argvLog, "TEST_TOOL_EXIT": tc.toolExit,
+				"BLOODRAVEN_OUTPUT_URL": output, "TEST_ARGV_LOG": argvLog, "TEST_TOOL_EXIT": tc.toolExit, "TEST_CHECK_EXIT": tc.checkExit,
 			}
 			if tc.s3 {
 				env["BLOODRAVEN_OUTPUT_URL"] = "prod/nightly-1"
@@ -118,7 +124,10 @@ func TestDumpScriptFinishesBackupStamp(t *testing.T) {
 			}
 			if tc.tool {
 				tool := filepath.Join(dir, "bloodraven")
-				script := "#!/bin/sh\necho \"$@\" > \"$TEST_ARGV_LOG\"\nexit ${TEST_TOOL_EXIT:-0}\n"
+				// Every call is logged; TEST_CHECK_EXIT fails the pre-dump
+				// --check, TEST_TOOL_EXIT the --end.
+				script := "#!/bin/sh\necho \"$@\" >> \"$TEST_ARGV_LOG\"\n" +
+					"if [ \"$2\" = --check ]; then exit ${TEST_CHECK_EXIT:-0}; fi\nexit ${TEST_TOOL_EXIT:-0}\n"
 				if err := os.WriteFile(tool, []byte(script), 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -144,8 +153,11 @@ func TestDumpScriptFinishesBackupStamp(t *testing.T) {
 			if complete := strings.Contains(text, "BLOODRAVEN_DUMP_COMPLETE"); complete != (tc.wantExit == "EXIT 0") {
 				t.Fatalf("DUMP_COMPLETE printed=%t:\n%s", complete, text)
 			}
-			if clock := strings.Contains(text, "CLOCK_QUERIED True"); clock != (!tc.dumpFails && tc.freshUUID == "") {
+			if clock := strings.Contains(text, "CLOCK_QUERIED True"); clock != (!tc.dumpFails && tc.checkExit == "" && tc.freshUUID == "") {
 				t.Fatalf("serverClock.end queried=%t after a dump that failed=%t", clock, tc.dumpFails)
+			}
+			if dumped := strings.Contains(text, "DUMPED True"); dumped != (!tc.dumpFails && tc.checkExit == "") {
+				t.Fatalf("dumped=%t with a stamp check exit %q", dumped, tc.checkExit)
 			}
 			argv, err := os.ReadFile(argvLog)
 			if tc.wantArgv == "" {

@@ -417,6 +417,31 @@ func TestGroupFenced(t *testing.T) {
 		wantReason string
 	}{
 		{"clean", group(func(fg *v1alpha1.MysqlFailoverGroup) {}), false, ""},
+		// F004: a point-in-time initFromBackup proves the target's exact
+		// gtid_executed; tenant DDL during its load or replay breaks it.
+		{
+			"initFromBackup requested",
+			group(func(fg *v1alpha1.MysqlFailoverGroup) {
+				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
+			}),
+			true, "RestoreInProgress",
+		},
+		{
+			"initFromBackup running",
+			group(func(fg *v1alpha1.MysqlFailoverGroup) {
+				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
+				fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning}
+			}),
+			true, "RestoreInProgress",
+		},
+		{
+			"initFromBackup succeeded is not fenced",
+			group(func(fg *v1alpha1.MysqlFailoverGroup) {
+				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
+				fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded}
+			}),
+			false, "",
+		},
 		{
 			"restore restoring",
 			group(func(fg *v1alpha1.MysqlFailoverGroup) {

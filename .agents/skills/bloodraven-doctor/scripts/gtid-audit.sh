@@ -291,25 +291,42 @@ if [[ ${#MANIFESTS[@]} -gt 0 ]]; then
             jq -r '"📄 site=\(.site // "?") version=\(.version // "?") archiveId=\(.archiveId // "")" +
                 (if .historyIntegrity then "\n   historyIntegrity: \(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at); this site cannot certify history (playbook 38)" else "" end) +
                 (if (.epoch.resetReason // "") != "" then "\n   epoch.resetReason: \(.epoch.resetReason); every restore refuses PITRArchiveHistoryReset" else "" end)' "$m"
-            echo "   Promotion records (serverUuid serverId observedAt gtidExecuted):"
-            jq -r '(.promotions // [])[] | "     \(.serverUuid) \(.serverId) \(.observedAt) \(.gtidExecuted)"' "$m"
+            echo "   Records (kind serverUuid serverId observedAt probeInterval gtidExecuted [readOnlyGtidExecuted]):"
+            jq -r '(.promotions // [])[] | "     \(.kind // "Promotion") \(.serverUuid) \(.serverId) \(.observedAt) \(.probeInterval // "unknown") \(.gtidExecuted)" + (if (.readOnlyGtidExecuted // "") != "" then " [read-only before: \(.readOnlyGtidExecuted)]" else "" end)' "$m"
             echo "   Divergent rows (name id missingGtids):"
             jq -r '(.divergent // [])[] | "     \(.name) \(.id // "legacy") \(.missingGtids)"' "$m"
-            echo "   Quarantined rows (name id at reason):"
-            jq -r '(.quarantined // [])[] | "     \(.entry.name) \(.entry.id // "legacy") \(.at) \(.reason)"' "$m"
-            while IFS= read -r set; do
-                [[ -n "$set" ]] && CANDIDATES+=("$set")
-            done < <(jq -r '(.divergent // [])[] | .missingGtids' "$m")
+            echo "   Quarantined rows (name id at reason [missingGtids]):"
+            jq -r '(.quarantined // [])[] | "     \(.entry.name) \(.entry.id // "legacy") \(.at) \(.reason)" + (if .divergent then " [divergent: \(.divergent.missingGtids)]" else "" end)' "$m"
+            # Candidates come from active and quarantined Divergent rows: a
+            # quarantined lost tail still needs excluding. Each set is
+            # checked before it reaches the printed SQL (the manifest is
+            # archive content, not trusted input).
+            while IFS=$'\t' read -r where set; do
+                [[ -z "$where" ]] && continue
+                if [[ -z "$set" ]]; then
+                    continue
+                elif valid_gtid_set "$set" && [[ "$set" == *:* ]]; then
+                    CANDIDATES+=("$set")
+                else
+                    echo "   ⚠️  $where: missingGtids is not a GTID set, not used: $(printf '%q' "$set")"
+                fi
+            done < <(jq -r '((.divergent // [])[] | ["divergent row \(.name)", (.missingGtids | if type == "string" then . else tojson end)]),
+                            ((.quarantined // [])[] | select(.divergent) | ["quarantined row \(.entry.name)", (.divergent.missingGtids | if type == "string" then . else tojson end)])
+                            | @tsv' "$m")
         done
         if [[ ${#CANDIDATES[@]} -gt 0 ]]; then
             JOINED=$(IFS=,; printf '%s' "${CANDIDATES[*]}")
             echo ""
-            echo "Candidate excludeGtids (union of the Divergent rows' missingGtids):"
+            echo "Candidate excludeGtids (union of the active and quarantined Divergent rows' missingGtids):"
             echo "   $JOINED"
-            echo "   Use only the part inside the restore window: the PITRArchiveDivergentHistory"
-            echo "   refusal prints the exact set D to copy. excludeGtids must not intersect the"
-            echo "   backup; drop what the backup holds with, on any server:"
-            echo "     SELECT GTID_SUBTRACT('$JOINED', '<MysqlBackup status.gtidExecuted>');"
+            echo "   Prefer the exact set the refusal printed: PITRArchiveDivergentHistory (and a"
+            echo "   latest-mode loss refusal) prints it as BLOODRAVEN_PITR_DIVERGENT_SET gtids= in"
+            echo "   the restore Job's log and coverage.json. This union is wider: use only the part"
+            echo "   inside the restore window. excludeGtids must not intersect the dump's own GTID"
+            echo "   set B (gtidExecuted in the dump's @.json; decrypt it first for an encrypted"
+            echo "   backup), which can hold more than MysqlBackup status.gtidExecuted. Drop what the"
+            echo "   dump holds with, on any server:"
+            echo "     SELECT GTID_SUBTRACT('$JOINED', '<gtidExecuted from the dump's @.json>');"
             echo "   A backup taken after the loss needs no exclusion. See playbook 40."
         fi
     fi

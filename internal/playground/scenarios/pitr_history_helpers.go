@@ -37,8 +37,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -120,6 +122,9 @@ func pitrConfigureArchive(ctx context.Context, env *runner.Env, scenarioID, shor
 	if err := ctxStash(ctx, env, "backupPrefix", prefix); err != nil {
 		return err
 	}
+	// pitrCleanup deletes every prefix this run archived to, once the
+	// original spec.backup is back and no archiver writes there (F191).
+	pitrTrackCR(ctx, env, pitrArchivePrefixKind, prefix)
 	secret := ctxFetch(env, backupPassphraseSecretKey)
 	if encrypted && secret == "" {
 		var err error
@@ -227,8 +232,8 @@ func pitrMarkerQuery(db, runStem string, phases []string) string {
 		", 1, 0) FROM " + quoteSQLIdentifier(db) + ".marker WHERE run_id=" + quoteSQLString(runStem)
 }
 
-// pitrFence is one fenced observation of a primary: T (µs UTC) and the
-// exact executed set at T.
+// pitrFence is one fenced observation of a primary: T, the whole-second
+// RFC 3339 UTC target (pitrTargetLayout), and the exact executed set at T.
 type pitrFence struct {
 	Site string
 	T    string
@@ -239,18 +244,13 @@ type pitrFence struct {
 // also seals the active binlog under the lock and waits until the archiver
 // uploaded it, so fence.GTID is the sealed file's exec set.
 func pitrTakeFence(ctx context.Context, env *runner.Env, site string, flush bool) (pitrFence, error) {
-	var before *pgsidecar.ArchiverStatusResponse
-	var probe *pgsidecar.Probe
+	var seal *pitrSealWatch
 	if flush {
 		var err error
-		probe, err = pgsidecar.Open(ctx, env.Kube, env.Namespace, env.FG, site)
-		if err != nil {
-			return pitrFence{}, fmt.Errorf("open sidecar %s: %w", site, err)
+		if seal, err = pitrStartSealWatch(ctx, env, site); err != nil {
+			return pitrFence{}, err
 		}
-		defer probe.Close()
-		if before, err = probe.ArchiverStatus(ctx); err != nil {
-			return pitrFence{}, fmt.Errorf("read pre-flush archiver status on %s: %w", site, err)
-		}
+		defer seal.Close()
 	}
 	c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
 	if err != nil {
@@ -302,8 +302,8 @@ func pitrTakeFence(ctx context.Context, env *runner.Env, site string, flush bool
 	}
 	t := target.Format(pitrTargetLayout)
 	if flush {
-		if _, err := conn.ExecContext(fenceCtx, "FLUSH BINARY LOGS"); err != nil {
-			return pitrFence{}, fmt.Errorf("FLUSH BINARY LOGS under lock on %s: %w", site, err)
+		if err := seal.flush(fenceCtx, conn); err != nil {
+			return pitrFence{}, err
 		}
 	}
 	if _, err := conn.ExecContext(fenceCtx, "UNLOCK TABLES"); err != nil {
@@ -312,7 +312,7 @@ func pitrTakeFence(ctx context.Context, env *runner.Env, site string, flush bool
 	unlocked = true
 	fence := pitrFence{Site: site, T: t, GTID: strings.ReplaceAll(strings.TrimSpace(gtid), "\n", "")}
 	if flush {
-		if err := pitrWaitArchiverAdvanced(ctx, env, probe, site, before, true); err != nil {
+		if err := seal.wait(ctx, env, true); err != nil {
 			return pitrFence{}, err
 		}
 	}
@@ -320,54 +320,210 @@ func pitrTakeFence(ctx context.Context, env *runner.Env, site string, flush bool
 	return fence, nil
 }
 
-// pitrWaitArchiverAdvanced waits until the archiver uploaded a new file
-// after before. With clean it also requires no backlog and no error.
-func pitrWaitArchiverAdvanced(ctx context.Context, env *runner.Env, probe *pgsidecar.Probe, site string, before *pgsidecar.ArchiverStatusResponse, clean bool) error {
+// pitrQueryer is what the binlog-status read needs: a *sql.DB or a pinned
+// *sql.Conn.
+type pitrQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// pitrCurrentBinlog returns the binlog file the server is writing, which is
+// the file the next FLUSH BINARY LOGS seals.
+func pitrCurrentBinlog(ctx context.Context, q pitrQueryer) (string, error) {
+	rows, err := q.QueryContext(ctx, "SHOW BINARY LOG STATUS")
+	if err != nil {
+		return "", fmt.Errorf("SHOW BINARY LOG STATUS: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", err
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("SHOW BINARY LOG STATUS returned no row (binary logging off?)")
+	}
+	vals := make([]sql.RawBytes, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return "", err
+	}
+	for i, c := range cols {
+		if strings.EqualFold(c, "File") && len(vals[i]) > 0 {
+			return string(vals[i]), nil
+		}
+	}
+	return "", fmt.Errorf("SHOW BINARY LOG STATUS has no File column (columns %v)", cols)
+}
+
+// pitrManifestRow identifies one archived row of a site manifest.
+type pitrManifestRow struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// pitrSealedFileArchived reports whether after holds a row for file that
+// before did not: the upload of the file a flush sealed. A row of the same
+// name already present before (an earlier incarnation's file, say) does
+// not count (F185).
+func pitrSealedFileArchived(before, after []pitrManifestRow, file string) bool {
+	seen := make(map[pitrManifestRow]bool, len(before))
+	for _, r := range before {
+		seen[r] = true
+	}
+	for _, r := range after {
+		if r.Name == file && !seen[r] {
+			return true
+		}
+	}
+	return false
+}
+
+// pitrManifestKey is the bucket key of site's manifest under the archiver's
+// manifest prefix (the sidecar's manifestKey layout).
+func pitrManifestKey(manifestPrefix, site string) string {
+	return path.Join(strings.Trim(manifestPrefix, "/"), "manifest-"+site+".json")
+}
+
+// pitrReadManifestRows reads site's manifest rows straight from RustFS; a
+// manifest not written yet has none.
+func pitrReadManifestRows(ctx context.Context, env *runner.Env, key string) ([]pitrManifestRow, error) {
+	data, found, err := env.Chaos.ReadRustFSObject(ctx, backupE2EBucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest %s: %w", key, err)
+	}
+	if !found {
+		return nil, nil
+	}
+	var m struct {
+		Files []pitrManifestRow `json:"files"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("decode manifest %s: %w", key, err)
+	}
+	return m.Files, nil
+}
+
+// pitrSealWatch proves that the file one FLUSH BINARY LOGS seals reaches
+// the site's manifest: it records the manifest rows before the flush and
+// the file the flush seals, then waits for a new row of that file.
+type pitrSealWatch struct {
+	site   string
+	probe  *pgsidecar.Probe
+	key    string
+	before []pitrManifestRow
+	file   string
+}
+
+func pitrStartSealWatch(ctx context.Context, env *runner.Env, site string) (*pitrSealWatch, error) {
+	probe, err := pgsidecar.Open(ctx, env.Kube, env.Namespace, env.FG, site)
+	if err != nil {
+		return nil, fmt.Errorf("open sidecar %s: %w", site, err)
+	}
+	st, err := probe.ArchiverStatus(ctx)
+	if err != nil {
+		probe.Close()
+		return nil, fmt.Errorf("read pre-flush archiver status on %s: %w", site, err)
+	}
+	if st.ManifestPrefix == "" {
+		probe.Close()
+		return nil, fmt.Errorf("archiver on %s reports no manifest prefix: %s", site, archiverSummary(st))
+	}
+	manifestSite := st.Site
+	if manifestSite == "" {
+		manifestSite = site
+	}
+	w := &pitrSealWatch{site: site, probe: probe, key: pitrManifestKey(st.ManifestPrefix, manifestSite)}
+	if w.before, err = pitrReadManifestRows(ctx, env, w.key); err != nil {
+		probe.Close()
+		return nil, err
+	}
+	return w, nil
+}
+
+func (w *pitrSealWatch) Close() { w.probe.Close() }
+
+// flush records the file being written and seals it, on one connection so
+// nothing rotates in between.
+func (w *pitrSealWatch) flush(ctx context.Context, q pitrQueryer) error {
+	file, err := pitrCurrentBinlog(ctx, q)
+	if err != nil {
+		return fmt.Errorf("read the active binlog on %s: %w", w.site, err)
+	}
+	if _, err := q.ExecContext(ctx, "FLUSH BINARY LOGS"); err != nil {
+		return fmt.Errorf("FLUSH BINARY LOGS on %s: %w", w.site, err)
+	}
+	w.file = file
+	return nil
+}
+
+// wait waits until the sealed file has a new row in the site's manifest.
+// With clean it also requires no backlog and no archiver error.
+func (w *pitrSealWatch) wait(ctx context.Context, env *runner.Env, clean bool) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	var last string
 	for {
-		st, err := probe.ArchiverStatus(waitCtx)
+		archived := false
+		after, err := pitrReadManifestRows(waitCtx, env, w.key)
 		if err != nil {
 			last = err.Error()
 		} else {
-			last = archiverSummary(st)
-			advanced := st.FilesArchived > before.FilesArchived || st.ManifestFileCount > before.ManifestFileCount
-			if advanced && (!clean || (st.BacklogFiles == 0 && st.LastError == "")) {
+			archived = pitrSealedFileArchived(w.before, after, w.file)
+			last = fmt.Sprintf("%s archived=%v (%d rows)", w.file, archived, len(after))
+		}
+		if archived {
+			if !clean {
 				return nil
+			}
+			st, err := w.probe.ArchiverStatus(waitCtx)
+			if err != nil {
+				last = err.Error()
+			} else {
+				last += "; " + archiverSummary(st)
+				if st.BacklogFiles == 0 && st.LastError == "" {
+					return nil
+				}
 			}
 		}
 		select {
 		case <-waitCtx.Done():
-			return fmt.Errorf("archiver on %s did not upload the flushed binlog: %w (last: %s)", site, waitCtx.Err(), last)
+			return fmt.Errorf("archiver on %s did not upload the sealed binlog %s to %s: %w (last: %s)", w.site, w.file, w.key, waitCtx.Err(), last)
 		case <-tick.C:
 		}
 	}
 }
 
-// pitrFlush seals the active binlog on site and waits for the upload,
-// without fencing.
+// pitrFlush seals the active binlog on site and waits until that file is in
+// the site's manifest, without fencing.
 func pitrFlush(ctx context.Context, env *runner.Env, site string, clean bool) error {
-	probe, err := pgsidecar.Open(ctx, env.Kube, env.Namespace, env.FG, site)
+	seal, err := pitrStartSealWatch(ctx, env, site)
 	if err != nil {
-		return fmt.Errorf("open sidecar %s: %w", site, err)
+		return err
 	}
-	defer probe.Close()
-	before, err := probe.ArchiverStatus(ctx)
-	if err != nil {
-		return fmt.Errorf("read pre-flush archiver status on %s: %w", site, err)
-	}
+	defer seal.Close()
 	c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	if _, err := c.Exec(ctx, "FLUSH BINARY LOGS"); err != nil {
-		return fmt.Errorf("flush binary logs on %s: %w", site, err)
+	conn, err := c.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("pin connection on %s: %w", site, err)
 	}
-	return pitrWaitArchiverAdvanced(ctx, env, probe, site, before, clean)
+	err = seal.flush(ctx, conn)
+	_ = conn.Close()
+	if err != nil {
+		return err
+	}
+	return seal.wait(ctx, env, clean)
 }
 
 // pitrStashFence and pitrFetchFence keep fences across steps.
@@ -542,7 +698,7 @@ type pitrExpectation struct {
 	Markers []string
 }
 
-// pitrExpectedSet is the fenced set minus excludeGtids.
+// expectedSet is the fenced set minus excludeGtids.
 func (e pitrExpectation) expectedSet() (string, error) {
 	if e.Exclude == "" {
 		return e.Fence.GTID, nil
@@ -602,14 +758,11 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 	if missingBase != "" {
 		return fmt.Errorf("%s: the expected history %s does not contain the backup's %s (missing %s); the scenario's expectation is wrong", what, want, baseline, missingBase)
 	}
+	// want is already the fenced set minus excludeGtids, so the replay is
+	// (fenced ∖ exclusions) ∖ baseline.
 	replay, err := gtidSubtract(want, baseline)
 	if err != nil {
 		return err
-	}
-	if e.Exclude != "" {
-		if replay, err = gtidSubtract(replay, e.Exclude); err != nil {
-			return err
-		}
 	}
 	n, err := gtidCount(replay)
 	if err != nil {
@@ -720,16 +873,67 @@ func pitrWaitCooldown(ctx context.Context, env *runner.Env) error {
 	return err
 }
 
+// pitrSiteNow reads site's server clock. The sidecar shares the MySQL
+// pod's (and so the node's) clock, so a promotion record's observedAt is
+// comparable with it; the runner host's clock is not (F182).
+func pitrSiteNow(ctx context.Context, env *runner.Env, site string) (time.Time, error) {
+	c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("open %s for its clock: %w", site, err)
+	}
+	defer c.Close()
+	now, err := pitrServerNow(ctx, c.DB)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read the server clock on %s: %w", site, err)
+	}
+	return now, nil
+}
+
+// pitrWaitServerClockPast waits until site's server clock is strictly past t.
+func pitrWaitServerClockPast(ctx context.Context, env *runner.Env, site string, t time.Time) error {
+	c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
+	if err != nil {
+		return fmt.Errorf("open %s for its clock: %w", site, err)
+	}
+	defer c.Close()
+	return pitrWaitClockPast(ctx, c.DB, site, t)
+}
+
+func pitrWaitClockPast(ctx context.Context, q interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}, site string, t time.Time) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		now, err := pitrServerNow(waitCtx, q)
+		if err != nil {
+			return fmt.Errorf("read the server clock on %s: %w", site, err)
+		}
+		if now.After(t) {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("server clock on %s did not pass %s: %w", site, t.Format(pitrMicroLayout), waitCtx.Err())
+		case <-time.After(t.Sub(now) + 10*time.Millisecond):
+		}
+	}
+}
+
 // pitrPlannedFailover runs a planned failover to target and waits for it
 // to succeed, for target's archiver to be primary on the active prefix and
 // archive, and for target's promotion record to be confirmed after the
 // request (pitrWaitPromotionRecorded; tolerateDivergence as there). It
-// returns the confirmed promotionRecordedAt.
+// returns the confirmed promotionRecordedAt. The request time is read on
+// target's server clock, the clock its sidecar records with.
 func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, tolerateDivergence bool) (time.Time, error) {
 	if err := pitrWaitCooldown(ctx, env); err != nil {
 		return time.Time{}, err
 	}
-	requested := time.Now()
+	requested, err := pitrSiteNow(ctx, env, target)
+	if err != nil {
+		return time.Time{}, err
+	}
 	if err := env.Chaos.AnnotatePlannedFailover(ctx, target); err != nil {
 		return time.Time{}, err
 	}
@@ -795,29 +999,137 @@ func pitrWaitPromotionRecorded(ctx context.Context, env *runner.Env, site string
 	}
 }
 
-// pitrRecloneSite reclones site (a replica, or a RecoveryBlocked former
-// primary) from the active site and waits for the clone to finish.
-func pitrRecloneSite(ctx context.Context, env *runner.Env, site string) error {
+// pitrRecloneRequest decides whether site can be recloned now and the
+// reclone-site annotation value for it. With expectDivergent the site must
+// be RecoveryBlocked with a recorded divergent GTID, which the value
+// confirms by prefix; without it the site must be a read-only replica with
+// no divergence recorded, confirmed by the group name (a cold reclone).
+// Building the value before the divergence report settles would pick the
+// wrong confirmation, which the operator rejects (F067).
+func pitrRecloneRequest(sites []v1alpha1.SiteStatus, site, group string, expectDivergent bool) (ready bool, value, msg string) {
+	for _, s := range sites {
+		if s.Name != site {
+			continue
+		}
+		div := strings.TrimSpace(s.DivergentGtid)
+		msg = fmt.Sprintf("state=%s recovery=%s divergentGtid=%q", s.State, s.RecoveryState, div)
+		if s.State != "read-only" {
+			return false, "", msg
+		}
+		if expectDivergent {
+			if s.RecoveryState != "RecoveryBlocked" || len(div) < 8 {
+				return false, "", msg + " (waiting for RecoveryBlocked with a divergent GTID)"
+			}
+			return true, site + ":" + div[:8], msg
+		}
+		if div != "" || s.RecoveryState == "RecoveryBlocked" {
+			return false, "", msg + " (a cold reclone needs a site with no recorded divergence)"
+		}
+		return true, site + ":confirm=" + group, msg
+	}
+	return false, "", "site absent"
+}
+
+// pitrRecloneWatch tells a reclone attempt's outcome apart from an earlier
+// one's. setCondition keeps LastTransitionTime while Status is unchanged,
+// so a Failed → Cloning → Failed attempt keeps the old time (Failed and
+// every in-progress phase are Status=True): the attempt is identified by
+// observing one of its in-progress phases, or by any change of the
+// condition's reason, transition time or message from the pre-request
+// snapshot (F188).
+type pitrRecloneWatch struct {
+	pre        *metav1.Condition
+	sawAttempt bool
+}
+
+func newPitrRecloneWatch(pre *metav1.Condition) *pitrRecloneWatch {
+	w := &pitrRecloneWatch{}
+	if pre != nil {
+		c := *pre
+		w.pre = &c
+	}
+	return w
+}
+
+// observe classifies one Bootstrapping observation: done once this attempt
+// finished and the site replicates, err once this attempt failed.
+func (w *pitrRecloneWatch) observe(boot *metav1.Condition, replicating bool) (bool, string, error) {
+	if boot == nil {
+		return false, "bootstrap not observed", nil
+	}
+	msg := fmt.Sprintf("bootstrap=%s replicating=%v", boot.Reason, replicating)
+	if boot.Status == metav1.ConditionTrue && boot.Reason != "Failed" {
+		w.sawAttempt = true
+		return false, msg, nil
+	}
+	changed := w.pre == nil || w.pre.Reason != boot.Reason || w.pre.Status != boot.Status ||
+		!w.pre.LastTransitionTime.Equal(&boot.LastTransitionTime) || w.pre.Message != boot.Message
+	if !w.sawAttempt && !changed {
+		return false, msg + " (the condition still shows the state before the request)", nil
+	}
+	switch boot.Reason {
+	case "Failed":
+		return false, boot.Message, fmt.Errorf("reclone failed: %s", boot.Message)
+	case "Done":
+		return replicating, msg, nil
+	}
+	return false, msg, nil
+}
+
+// pitrNewRecloneRejection finds a RecloneRejected Event for site that is not
+// in before (keyed by Event UID, with its count): a rejected annotation is
+// cleared, so without this the completion wait would only time out (F067).
+func pitrNewRecloneRejection(before map[string]int32, events []corev1.Event, group, site string) (corev1.Event, bool) {
+	for _, ev := range events {
+		if ev.InvolvedObject.Kind != "MysqlFailoverGroup" || ev.InvolvedObject.Name != group || ev.Reason != "RecloneRejected" {
+			continue
+		}
+		if !strings.Contains(ev.Message, `"`+site+`"`) && !strings.Contains(ev.Message, "reclone of "+site+" ") {
+			continue
+		}
+		if n, seen := before[string(ev.UID)]; seen && n >= ev.Count {
+			continue
+		}
+		return ev, true
+	}
+	return corev1.Event{}, false
+}
+
+func pitrRecloneRejectedSnapshot(ctx context.Context, env *runner.Env) (map[string]int32, []corev1.Event, error) {
+	events, err := env.Kube.RecentEvents(ctx, env.Namespace, 200)
+	if err != nil {
+		return nil, nil, err
+	}
+	seen := map[string]int32{}
+	for _, ev := range events {
+		if ev.Reason == "RecloneRejected" {
+			seen[string(ev.UID)] = ev.Count
+		}
+	}
+	return seen, events, nil
+}
+
+// pitrRecloneSite reclones site from the active site and waits for the
+// clone to finish. expectDivergent selects the confirmation
+// (pitrRecloneRequest): true for a RecoveryBlocked former primary, false
+// for a healthy replica.
+func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDivergent bool) error {
 	readyCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
-	mfg, err := env.Wait.UntilCR(readyCtx, env.Namespace, site+" reachable before reclone", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		for _, s := range m.Status.Sites {
-			if s.Name == site {
-				return s.State == "read-only", fmt.Sprintf("state=%s recovery=%s", s.State, s.RecoveryState), nil
-			}
-		}
-		return false, "site absent", nil
+	var value string
+	mfg, err := env.Wait.UntilCR(readyCtx, env.Namespace, site+" ready for reclone", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		ready, v, msg := pitrRecloneRequest(m.Status.Sites, site, env.FG, expectDivergent)
+		value = v
+		return ready, msg, nil
 	})
 	if err != nil {
 		return err
 	}
-	value := site + ":confirm=" + env.FG
-	for _, s := range mfg.Status.Sites {
-		if s.Name == site && len(strings.TrimSpace(s.DivergentGtid)) >= 8 {
-			value = site + ":" + strings.TrimSpace(s.DivergentGtid)[:8]
-		}
+	rejectedBefore, _, err := pitrRecloneRejectedSnapshot(ctx, env)
+	if err != nil {
+		return fmt.Errorf("list events before the reclone of %s: %w", site, err)
 	}
-	requested := time.Now()
+	watch := newPitrRecloneWatch(findCondition(mfg.Status.Conditions, "Bootstrapping"))
 	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
 		return err
 	}
@@ -825,12 +1137,10 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string) error {
 	cloneCtx, cloneCancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cloneCancel()
 	if _, err := env.Wait.UntilCR(cloneCtx, env.Namespace, "reclone of "+site+" completes", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		boot := findCondition(m.Status.Conditions, "Bootstrapping")
-		if boot == nil {
-			return false, "bootstrap not observed", nil
-		}
-		if boot.Reason == "Failed" && boot.LastTransitionTime.Time.After(requested) {
-			return false, boot.Message, fmt.Errorf("reclone of %s failed: %s", site, boot.Message)
+		if _, events, err := pitrRecloneRejectedSnapshot(cloneCtx, env); err == nil {
+			if ev, rejected := pitrNewRecloneRejection(rejectedBefore, events, env.FG, site); rejected {
+				return false, ev.Message, fmt.Errorf("reclone-site=%s was rejected: %s", value, ev.Message)
+			}
 		}
 		replicating := false
 		for _, s := range m.Status.Sites {
@@ -838,7 +1148,11 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string) error {
 				replicating = s.Replicating && s.State == "read-only"
 			}
 		}
-		return boot.Reason == "Done" && boot.LastTransitionTime.Time.After(requested) && replicating, fmt.Sprintf("bootstrap=%s replicating=%v", boot.Reason, replicating), nil
+		done, msg, err := watch.observe(findCondition(m.Status.Conditions, "Bootstrapping"), replicating)
+		if err != nil {
+			return false, msg, fmt.Errorf("reclone of %s: %w", site, err)
+		}
+		return done, msg, nil
 	}); err != nil {
 		return err
 	}
@@ -912,9 +1226,10 @@ const pitrWriterInterval = 50 * time.Millisecond
 // commits arrive before, during (blocked on the read lock) and after each
 // fence.
 type pitrWriter struct {
-	site    string
 	stop    chan struct{}
 	done    chan struct{}
+	first   chan struct{}
+	once    sync.Once
 	commits atomic.Int64
 	err     error
 }
@@ -926,7 +1241,7 @@ func pitrStartWriter(ctx context.Context, env *runner.Env, site, db string) (*pi
 	if err != nil {
 		return nil, fmt.Errorf("open %s for the background writer: %w", site, err)
 	}
-	w := &pitrWriter{site: site, stop: make(chan struct{}), done: make(chan struct{})}
+	w := &pitrWriter{stop: make(chan struct{}), done: make(chan struct{}), first: make(chan struct{})}
 	query := "INSERT INTO " + quoteSQLIdentifier(db) + ".load (site) VALUES (?)"
 	go func() {
 		defer close(w.done)
@@ -934,6 +1249,16 @@ func pitrStartWriter(ctx context.Context, env *runner.Env, site, db string) (*pi
 		tick := time.NewTicker(pitrWriterInterval)
 		defer tick.Stop()
 		for {
+			// The first insert runs at once, the rest on the tick. The
+			// statement runs on the scenario context, not on stop: a stop
+			// never cancels an insert in flight, so after Stop returns no
+			// commit of this writer can still land.
+			if _, err := c.Exec(ctx, query, site); err != nil {
+				w.err = fmt.Errorf("background writer on %s after %d commits: %w", site, w.commits.Load(), err)
+				return
+			}
+			w.commits.Add(1)
+			w.once.Do(func() { close(w.first) })
 			select {
 			case <-w.stop:
 				return
@@ -942,17 +1267,32 @@ func pitrStartWriter(ctx context.Context, env *runner.Env, site, db string) (*pi
 				return
 			case <-tick.C:
 			}
-			// The statement runs on the scenario context, not on stop: a
-			// stop never cancels an insert in flight, so after Stop returns
-			// no commit of this writer can still land.
-			if _, err := c.Exec(ctx, query, site); err != nil {
-				w.err = fmt.Errorf("background writer on %s after %d commits: %w", site, w.commits.Load(), err)
-				return
-			}
-			w.commits.Add(1)
 		}
 	}()
 	return w, nil
+}
+
+// pitrWriterFirstCommitTimeout bounds the wait for a writer's first commit.
+const pitrWriterFirstCommitTimeout = 30 * time.Second
+
+// awaitFirst waits until the writer committed once, or failed, or the
+// bound or ctx ran out.
+func (w *pitrWriter) awaitFirst(ctx context.Context, site string) error {
+	select {
+	case <-w.first:
+		return nil
+	case <-w.done:
+		select {
+		case <-w.first:
+			return nil
+		default:
+		}
+		return fmt.Errorf("the background writer on %s stopped before its first commit: %v", site, w.err)
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(pitrWriterFirstCommitTimeout):
+		return fmt.Errorf("the background writer on %s committed nothing within %s", site, pitrWriterFirstCommitTimeout)
+	}
 }
 
 // Stop waits for the writer's last insert to finish and returns how many
@@ -964,12 +1304,18 @@ func (w *pitrWriter) Stop() (int64, error) {
 }
 
 // pitrWithWriter runs fn while a background writer commits on site, then
-// stops the writer. A writer that failed, or committed nothing while fn ran,
-// fails the step: the window was meant to have concurrent writes.
+// stops the writer. fn starts only after the writer's first commit, so a
+// fast fn cannot end the window before the writer's first insert (F189). A
+// writer that failed, or committed nothing, fails the step: the window was
+// meant to have concurrent writes.
 func pitrWithWriter(ctx context.Context, env *runner.Env, site, db string, fn func() error) error {
 	w, err := pitrStartWriter(ctx, env, site, db)
 	if err != nil {
 		return err
+	}
+	if err := w.awaitFirst(ctx, site); err != nil {
+		_, werr := w.Stop()
+		return errors.Join(err, werr)
 	}
 	fnErr := fn()
 	n, werr := w.Stop()
@@ -1083,21 +1429,8 @@ func pitrWaitPastBackup(ctx context.Context, env *runner.Env, key string, b *v1a
 		return fmt.Errorf("read the server clock on %s: %w", site, err)
 	}
 	clear := pitrBackupClearTime(seen, dumpEnd)
-	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	for {
-		now, err := pitrServerNow(waitCtx, c.DB)
-		if err != nil {
-			return fmt.Errorf("read the server clock on %s: %w", site, err)
-		}
-		if now.After(clear) {
-			break
-		}
-		select {
-		case <-waitCtx.Done():
-			return fmt.Errorf("server clock on %s did not pass %s: %w", site, clear.Format(pitrMicroLayout), waitCtx.Err())
-		case <-time.After(clear.Sub(now) + 10*time.Millisecond):
-		}
+	if err := pitrWaitClockPast(ctx, c.DB, site, clear); err != nil {
+		return err
 	}
 	env.Capture.Note(fmt.Sprintf("backup %s: dump end %s, server clock after Succeeded %s; targets are clear after %s",
 		b.Name, dumpEnd.Format(pitrMicroLayout), seen.Format(pitrMicroLayout), clear.Format(pitrMicroLayout)))
@@ -1129,14 +1462,21 @@ func pitrCheckTargetAfterBackup(env *runner.Env, e pitrExpectation) error {
 	return nil
 }
 
+// pitrDivergenceAuditError matches the sidecar's history-audit LastError for
+// archived rows the server no longer has (internal/sidecar
+// binlog_history.go auditArchive), possibly behind an unsafe-history prefix.
+var pitrDivergenceAuditError = regexp.MustCompile(`site \S+ name \S+ id \S* P=\S* divergent transactions=\S+; preserve objects and use pitr-quarantine`)
+
 // pitrPromotionReady reports whether an archiver status shows site's
 // promotion confirmed: primary on the active prefix and the expected
 // archive, scanned, with a promotion record observed no earlier than
-// notBefore (less a second: observedAt is truncated to µs). With
-// tolerateDivergence a LastError is accepted while the site's manifest
-// holds divergent or quarantined rows: the divergence audit keeps reporting
-// rows a lossy failover deliberately left behind (s70), and that error
-// never clears. Any other error, or one with no such rows, is not ready.
+// notBefore. notBefore must be read on the site's server clock
+// (pitrSiteNow), which the sidecar shares, so no cross-host slack is
+// needed (F182). With tolerateDivergence the divergence audit's LastError
+// is accepted while the site's manifest holds divergent or quarantined
+// rows: the audit keeps reporting rows a lossy failover deliberately left
+// behind (s70), and that error never clears. Any other error, or the audit
+// error with no such rows, is not ready (F181).
 func pitrPromotionReady(st *pgsidecar.ArchiverStatusResponse, prefix, archiveID string, notBefore time.Time, tolerateDivergence bool) (bool, string) {
 	if st == nil {
 		return false, "no status"
@@ -1148,10 +1488,10 @@ func pitrPromotionReady(st *pgsidecar.ArchiverStatusResponse, prefix, archiveID 
 	if st.Archive == nil || st.Archive.State != pitrarchive.StateVerified || (archiveID != "" && st.Archive.ArchiveID != archiveID) {
 		return false, summary + fmt.Sprintf(" archive=%+v want %s", st.Archive, archiveID)
 	}
-	if st.LastError != "" && !(tolerateDivergence && st.DivergentRows+st.QuarantinedRows > 0) {
+	if st.LastError != "" && !(tolerateDivergence && st.DivergentRows+st.QuarantinedRows > 0 && pitrDivergenceAuditError.MatchString(st.LastError)) {
 		return false, summary
 	}
-	if st.PromotionRecordedAt.IsZero() || st.PromotionRecordedAt.Before(notBefore.Add(-time.Second)) {
+	if st.PromotionRecordedAt.IsZero() || st.PromotionRecordedAt.Before(notBefore) {
 		return false, summary
 	}
 	return true, summary

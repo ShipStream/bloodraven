@@ -69,12 +69,19 @@ func localBinlogHeader(path string) (binlogHeader, error) {
 	}
 	p := replication.NewBinlogParser()
 	var previous string
-	found := false
+	found, checksum := false, false
 	limited := io.LimitReader(f, 1<<20)
 	for i := 0; i < 3 && !found; i++ {
 		eof, err := p.ParseSingleEvent(limited, func(e *replication.BinlogEvent) error {
-			if event, ok := e.Event.(*replication.PreviousGTIDsEvent); ok {
-				previous = event.GTIDSets
+			if format, ok := e.Event.(*replication.FormatDescriptionEvent); ok {
+				checksum = format.ChecksumAlgorithm == replication.BINLOG_CHECKSUM_ALG_CRC32
+			}
+			if _, ok := e.Event.(*replication.PreviousGTIDsEvent); ok {
+				text, err := previousGTIDsOf(e, checksum)
+				if err != nil {
+					return err
+				}
+				previous = text
 				found = true
 			}
 			return nil

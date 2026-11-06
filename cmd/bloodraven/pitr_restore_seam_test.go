@@ -83,11 +83,15 @@ class Session:
             return Result(1 if gsub(args[0], args[1]) == '' else 0)
         if sql == 'SELECT @@global.gtid_executed':
             return Result(self.executed)
+        if sql == 'SELECT @@server_uuid':
+            return Result('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee')
         raise AssertionError('unexpected SQL ' + sql)
+    def close(self): pass
 
 session = Session()
 class Shell:
     def connect(self, conn): pass
+    def open_session(self, conn): return session
 class Util:
     def load_dump(self, url, opts):
         session.executed = os.environ['SEAM_DUMP_GTIDS']
@@ -110,8 +114,10 @@ job['main']()
 print('SEAM_MAIN_OK')
 `
 
-// seamGTIDNext prints mysqlbinlog's GTID_NEXT assignment for every GTID of
-// its --include-gtids=<set> argument.
+// seamGTIDNext prints, for every GTID of its --include-gtids=<set>
+// argument, what mysqlbinlog prints for a GTID event: the "#… server id …
+// end_log_pos … GTID" header and its comment lines, then the GTID_NEXT
+// assignment (restore.py counts only an assignment in that position, F156).
 const seamGTIDNext = `import re, sys
 spec = sys.argv[1].split('=', 1)[1]
 for member in [m for m in spec.split(',') if m]:
@@ -123,6 +129,9 @@ for member in [m for m in spec.split(',') if m]:
             sid = parts[0] + ':' + part
             continue
         for n in range(int(r.group(1)), int(r.group(2) or r.group(1)) + 1):
+            print("#261101 10:00:00 server id 101  end_log_pos 235 CRC32 0x883f9886 \tGTID\tlast_committed=0\tsequence_number=1")
+            print("/*!50718 SET TRANSACTION ISOLATION LEVEL READ COMMITTED*//*!*/;")
+            print("# original_commit_timestamp=1 (2026-11-01 10:00:00.000001 UTC)")
             print("SET @@SESSION.GTID_NEXT= '%s:%d'/*!*/;" % (sid, n))
 `
 

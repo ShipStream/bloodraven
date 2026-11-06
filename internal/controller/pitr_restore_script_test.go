@@ -68,19 +68,29 @@ class Result:
     def __init__(self, value): self.value = value
     def fetch_one(self): return (self.value,)
 
+TARGET = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+
 class Session:
-    def __init__(self, executed=''):
+    def __init__(self, executed='', uuid=TARGET):
         self.executed = executed
+        self.uuid = uuid
         self.queries = []
+        self.max_arg = 0
+        self.closed = False
+    def close(self):
+        self.closed = True
     def run_sql(self, sql, args=None):
         self.queries.append(sql)
         args = list(args or [])
+        self.max_arg = max([self.max_arg] + [len(a) for a in args])
         if sql == 'SELECT GTID_SUBTRACT(?, ?)':
             return Result(gsub(args[0], args[1]))
         if sql == 'SELECT GTID_SUBSET(?, ?)':
             return Result(1 if gsubset(args[0], args[1]) else 0)
         if sql == 'SELECT @@global.gtid_executed':
             return Result(self.executed)
+        if sql == 'SELECT @@server_uuid':
+            return Result(self.uuid)
         raise AssertionError('unexpected SQL ' + sql)
 
 def stage(d, path, data):
@@ -148,8 +158,8 @@ func runPITRScript(t *testing.T, body string, env map[string]string) (string, st
 	return string(out), string(recorded), err
 }
 
-// Every _read_pitr_coverage refusal (§4.13 checks 1-6), each recorded for
-// the controller with its token first.
+// _read_pitr_coverage's refusals (§4.13 checks 1-6), each recorded for the
+// controller with its token first: one case per guard (F151).
 func TestPITRScriptCoverageRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name, mutate, token, detail string
@@ -183,6 +193,26 @@ func TestPITRScriptCoverageRefusals(t *testing.T) {
 		{name: "segment file out of range", mutate: `cov['segments'][1]['file']=2`, token: "PITRCoverageInvalid", detail: "out of range"},
 		{name: "transaction count differs", mutate: `cov['replayedTransactionCount']=16`, token: "PITRCoverageInvalid", detail: "replayedTransactionCount"},
 		{name: "not a GTID set", mutate: `cov['lineage']='a; DROP'`, token: "PITRCoverageInvalid", detail: "not a GTID set"},
+		{name: "not an object", mutate: `cov = []`, token: "PITRCoverageInvalid", detail: "must be an object"},
+		{name: "path listed twice", mutate: `cov['files'][1]['path']=cov['files'][0]['path']`, token: "PITRCoverageInvalid", detail: "listed twice"},
+		{name: "staged symlink", mutate: `os.symlink(os.path.join(d,'a/mysql-bin.000001.r1'), os.path.join(d,'a/link'))`, token: "PITRCoverageInvalid", detail: "not a regular file"},
+		{name: "listed path is a symlink out of the directory", mutate: `os.symlink('/etc', os.path.join(d,'esc')); cov['files'][0]['path']='esc/passwd'`, token: "PITRCoverageInvalid", detail: "escapes"},
+		{name: "bad digest syntax", mutate: `cov['files'][0]['sha256']='XYZ'`, token: "PITRCoverageInvalid", detail: "sha256 is invalid"},
+		{name: "empty site", mutate: `cov['files'][0]['site']=''`, token: "PITRCoverageInvalid", detail: "site is empty"},
+		{name: "empty name", mutate: `cov['files'][0]['name']=''`, token: "PITRCoverageInvalid", detail: "name is empty"},
+		{name: "file previous not a set", mutate: `cov['files'][0]['previousGTIDs']=5`, token: "PITRCoverageInvalid", detail: "previousGTIDs must be a GTID set string"},
+		{name: "files not a list", mutate: `cov['files']={}`, token: "PITRCoverageInvalid", detail: "files must be a list"},
+		{name: "segments not a list", mutate: `cov['segments']={}`, token: "PITRCoverageInvalid", detail: "segments must be a list"},
+		{name: "segment not an object", mutate: `cov['segments'][0]=[]`, token: "PITRCoverageInvalid", detail: "segments[0] must be an object"},
+		{name: "segment start not a set", mutate: `cov['segments'][0]['startPredecessors']='x;y'`, token: "PITRCoverageInvalid", detail: "startPredecessors is not a GTID set"},
+		{name: "zero transactions", mutate: `cov['segments'][0]['transactions']=0`, token: "PITRCoverageInvalid", detail: "transactions is invalid"},
+		// F154: a segment's count is checked against its GTIDs before the load.
+		{name: "segment count differs from its GTIDs", mutate: `cov['segments'][0]['transactions']=11; cov['replayedTransactionCount']=16`, token: "PITRCoverageInvalid", detail: "segments[0] counts 11 transactions but includes 10 GTIDs"},
+		{name: "sites malformed", mutate: `cov['sites']=['a','']`, token: "PITRCoverageInvalid", detail: "sites must be a list"},
+		{name: "archive not an object", mutate: `cov['archive']=None`, token: "PITRCoverageInvalid", detail: "archive and dump must be objects"},
+		{name: "encryption mode invalid", mutate: `cov['archive']['encryptionMode']='Rot13'`, token: "PITRCoverageInvalid", detail: "encryptionMode is invalid"},
+		{name: "source incomplete", mutate: `cov['archive']['source']['uid']=''`, token: "PITRCoverageInvalid", detail: "source is incomplete"},
+		{name: "unknown outcome", mutate: `cov['outcome']='Maybe'`, token: "PITRCoverageInvalid", detail: "not valid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := map[string]string{}
@@ -218,7 +248,7 @@ func TestPITRScriptPlanRules(t *testing.T) {
 		baseline                    string // the loaded server's gtid_executed for R2; default the plan's
 	}{
 		{name: "valid plan"},
-		{name: "R1 overlapping segments", mutate: `cov['segments'][1]['gtids']=A+':20,'+B+':1-5'`, token: "PITRCoverageInvalid", detail: "R1: segment 1 repeats"},
+		{name: "R1 overlapping segments", mutate: `cov['segments'][1]['gtids']=A+':20,'+B+':1-5'; cov['segments'][1]['transactions']=6; cov['replayedTransactionCount']=16`, token: "PITRCoverageInvalid", detail: "R1: segment 1 repeats"},
 		{name: "R1 union differs from replay", mutate: `cov['replay']=A+':11-20,'+B+':1-6'`, token: "PITRCoverageInvalid", detail: "R1: the segments replay"},
 		{name: "R1 replay is not lineage minus baseline", mutate: `cov['lineage']=A+':1-20,'+B+':1-6'`, token: "PITRCoverageInvalid", detail: "R1: replay"},
 		{name: "R3 baseline outside lineage", mutate: `cov['baseline']=A+':1-10,'+B+':99'`, token: "PITRCoverageInvalid", detail: "R3: the baseline holds bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:99"},
@@ -232,6 +262,9 @@ func TestPITRScriptPlanRules(t *testing.T) {
 		{name: "R4 start outside its file", mutate: `cov['files'][0]['previousGTIDs']=A+':1-12'; cov['files'][0]['gtids']=A+':13-20'`, token: "PITRCoverageInvalid", detail: "R4: segment 0 replays aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:11-12, which its file"},
 		{name: "R4 start before its file", mutate: `cov['files'][0]['previousGTIDs']=A+':1-10,'+B+':9'`, token: "PITRCoverageInvalid", detail: "R4: segment 0 starts after aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10, which is no position of its file"},
 		{name: "R2 loaded dump differs", baseline: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-11", token: "PITRCoverageInvalid", detail: "R2"},
+		// F159: a postStop the history already replays is refused before
+		// the load, not after the replay.
+		{name: "R6 postStop inside the history", mutate: `cov['postStop']=B+':5-7'`, token: "PITRCoverageInvalid", detail: "R6: postStop holds bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:5"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			loaded := "cov['baseline']"
@@ -311,6 +344,9 @@ func TestPITRScriptResultRule(t *testing.T) {
 		{name: "applied the witness", executed: "A+':1-20,'+B+':1-6'", token: "PITRReplayMismatch", detail: "extra bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:6"},
 		{name: "applied an excluded transaction", mutate: `cov['excluded']=A+':12'; cov['onHistoryExclusions']=A+':12'`, executed: "A+':1-20,'+B+':1-5'", token: "PITRReplayMismatch", detail: "R6"},
 		{name: "post-stop leak inside the history", mutate: `cov['postStop']=B+':5-7'`, executed: "A+':1-20,'+B+':1-5'", token: "PITRReplayMismatch", detail: "after the stop"},
+		// F038: a server that cannot be read is an operational failure,
+		// never a replay mismatch.
+		{name: "unreadable server", mutate: `Session.run_sql = lambda self, sql, args=None: (_ for _ in ()).throw(RuntimeError('MySQL Error 2013: Lost connection'))`, executed: "''", token: "BLOODRAVEN_PITR_FAILED", detail: "Lost connection"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := `d, cov = base_plan()
@@ -341,22 +377,42 @@ print('S=' + job['_verify_pitr_result'](s, cov))
 const pythonFakeReplay = `
 procs = []
 class FakeStdin(io.BytesIO):
+    writes = 0
+    def write(self, b):
+        FakeStdin.writes += 1
+        if os.environ.get('WRITE_FAIL') and FakeStdin.writes > int(os.environ['WRITE_FAIL']):
+            raise BrokenPipeError(32, 'Broken pipe')
+        return super().write(b)
     def close(self):
         self.final = self.getvalue()
         super().close()
+def gtid_header():
+    return b"#261106  4:11:55 server id 1  end_log_pos 235 CRC32 0x883f9886 \tGTID\tlast_committed=0\tsequence_number=1\n" \
+        b"/*!50718 SET TRANSACTION ISOLATION LEVEL READ COMMITTED*//*!*/;\n# original_commit_timestamp=1 (2026-11-06 04:11:55.000001 UTC)\n" \
+        b"/*!80001 SET @@session.original_commit_timestamp=1*//*!*/;\n"
 def gtid_next(g):
-    return ("SET @@SESSION.GTID_NEXT= '%s'/*!*/;\n" % g).encode()
+    return gtid_header() + ("SET @@SESSION.GTID_NEXT= '%s'/*!*/;\n" % g).encode()
+class FailingStdout(io.BytesIO):
+    def __iter__(self):
+        lines = self.getvalue().splitlines(True)
+        yield lines[0]
+        raise OSError(5, 'Input/output error')
 class FakeProc:
     def __init__(self, args, stdin=None, stdout=None, env=None, **kw):
-        self.args, self.signals, self.env = args, [], env
+        self.args, self.signals, self.env, self.waited = args, [], env, False
         self.is_mysql = args[0] == 'mysql'
-        if not self.is_mysql and os.environ.get('EXEC_FAIL') == 'mysqlbinlog':
+        if os.environ.get('EXEC_FAIL') == ('mysql' if self.is_mysql else 'mysqlbinlog'):
             raise OSError(7, 'Argument list too long')
         procs.append(self)
         if self.is_mysql:
             self.stdin = FakeStdin()
-            self.rc = 0
+            self.rc = int(os.environ.get('MYSQL_RC', '0'))
+            # A mysql still waiting for input never exits on its own.
+            self.hang = bool(os.environ.get('READ_FAIL'))
+            if os.environ.get('WRITE_FAIL'):
+                self.rc = 1
         else:
+            self.hang = False
             seg = len([p for p in procs if not p.is_mysql]) - 1
             self.rc = 1 if seg == int(os.environ.get('FAIL_SEGMENT', '-1')) else 0
             gtids = []
@@ -372,13 +428,26 @@ class FakeProc:
             body = ('-- segment %d %s\n' % (seg, args[1])).encode()
             for g in gtids:
                 body += gtid_next(g) + ('INSERT /* %s */;\n' % g).encode()
+                if mode == 'lookalike':
+                    # A statement whose text holds a line that reads like a
+                    # GTID_NEXT assignment (F156).
+                    body += b"CREATE PROCEDURE p() SELECT 'x\nSET @@SESSION.GTID_NEXT= ''" + (B + ":99").encode() + b"''/*!*/;\ny'/*!*/;\n"
             body += b"SET @@SESSION.GTID_NEXT= 'AUTOMATIC' /* added by mysqlbinlog */ /*!*/;\n"
-            self.stdout = io.BytesIO(body)
-    def wait(self):
-        return -9 if signal.SIGKILL in self.signals else self.rc
+            self.stdout = FailingStdout(body) if os.environ.get('READ_FAIL') else io.BytesIO(body)
+    def poll(self):
+        return None if self.hang and signal.SIGKILL not in self.signals else self.rc
+    def wait(self, timeout=None):
+        if self.hang and signal.SIGKILL not in self.signals:
+            if timeout is None:
+                raise AssertionError('waited forever on a mysql that never exits')
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        self.waited = True
+        self.returncode = -9 if signal.SIGKILL in self.signals else self.rc
+        return self.returncode
     def send_signal(self, sig):
         self.signals.append(sig)
 g = job['_run_pitr_segments'].__globals__
+import subprocess
 g['subprocess'].Popen = FakeProc
 `
 
@@ -528,6 +597,9 @@ order = []
 session = Session()
 class Shell:
     def connect(self, conn): order.append('connect')
+    def open_session(self, conn):
+        order.append('open')
+        return session
 class Util:
     def load_dump(self, url, opts):
         order.append('load')
@@ -537,7 +609,7 @@ import mysqlsh
 mysqlsh.globals = types.SimpleNamespace(shell=Shell(), session=session, util=Util())
 orig_plan, orig_base = g['_verify_pitr_plan'], g['_verify_pitr_baseline']
 g['_verify_pitr_plan'] = lambda s, c: (order.append('plan'), orig_plan(s, c))
-g['_verify_pitr_baseline'] = lambda s, c: (order.append('R2'), orig_base(s, c))
+g['_verify_pitr_baseline'] = lambda s, c, l='': (order.append('R2'), orig_base(s, c, l))
 g['_resolve_mysqlbinlog'] = lambda: '/usr/bin/mysqlbinlog'
 g['_prepare_local_infile'] = lambda s, st: None
 g['_restore_local_infile'] = lambda s, p: None
@@ -550,7 +622,7 @@ def run(*a):
 g['_run_pitr_segments'] = run
 os.environ.update({'BLOODRAVEN_MYSQL_HOST': 'db:3306', 'BLOODRAVEN_INPUT_URL': 'src/nightly', 'MYSQL_USER': 'root', 'MYSQL_PASSWORD': 'pw', 'BLOODRAVEN_LOAD_PROGRESS_FILE': ''})
 job['main']()
-assert order == ['connect', 'plan', 'load', 'R2', 'replay'], order
+assert order == ['connect', 'plan', 'load', 'open', 'R2', 'replay', 'open'], order
 print('MAIN_OK')
 `
 			out, term, err := runPITRScript(t, body, map[string]string{"BLOODRAVEN_PITR_VERDICT_PATH": verdictPath})
@@ -754,5 +826,300 @@ func TestVerifyScriptDescribesSegmentReplay(t *testing.T) {
 	}
 	if !strings.Contains(verifyScript, "--include-gtids=<segment>") || !strings.Contains(verifyScript, "--gtid-mode=ON") {
 		t.Error("verify_script.sh must explain why the segment replay needs GTID mode")
+	}
+}
+
+// F035, F157, F158: mysql's own failures. A mysql that cannot start, dies
+// mid-stream, keeps waiting while mysqlbinlog's output fails, or exits
+// nonzero at the end is a recorded failure naming where it was detected,
+// and every child process is reaped (a waiting mysql is killed first).
+func TestPITRScriptReplayFailures(t *testing.T) {
+	body := `d, cov = base_plan()
+c = read(d)
+` + pythonFakeReplay + `
+try:
+    job['_run_pitr_segments']('db', 3306, 'root', 'secret', c, '/usr/bin/mysqlbinlog')
+finally:
+    mysql = [p for p in procs if p.is_mysql]
+    print('MYSQL_SIGNALS=%s' % (mysql[0].signals if mysql else 'none'))
+    print('UNREAPED=%d' % len([p for p in procs if not p.waited]))
+`
+	for _, tc := range []struct {
+		name, term string
+		env        map[string]string
+		killed     bool
+	}{
+		{name: "mysql cannot start", env: map[string]string{"EXEC_FAIL": "mysql"}, term: "BLOODRAVEN_PITR_FAILED: cannot start mysql: [Errno 7]"},
+		{name: "mysql dies mid-stream", env: map[string]string{"WRITE_FAIL": "3"},
+			term: "BLOODRAVEN_PITR_FAILED: mysql exit=1 segment=0 (segment is where the failure was detected; the failing statement may be from an earlier segment; [Errno 32] Broken pipe)"},
+		{name: "mysqlbinlog output fails while mysql waits", env: map[string]string{"READ_FAIL": "1"}, killed: true,
+			term: "BLOODRAVEN_PITR_FAILED: mysql exit=-9 segment=0 (segment is where the failure was detected; the failing statement may be from an earlier segment; [Errno 5] Input/output error)"},
+		{name: "mysql exits nonzero at the end", env: map[string]string{"MYSQL_RC": "1"},
+			term: "BLOODRAVEN_PITR_FAILED: mysql exit=1 segment=1 (segment is where the failure was detected; the failing statement may be from an earlier segment)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, term, err := runPITRScript(t, body, tc.env)
+			if err == nil || !strings.HasPrefix(term, tc.term) {
+				t.Fatalf("err=%v term=%q out=%s", err, term, out)
+			}
+			if !strings.Contains(out, "UNREAPED=0") {
+				t.Fatalf("a child process was not reaped: %s", out)
+			}
+			if tc.killed != strings.Contains(out, "MYSQL_SIGNALS=[<Signals.SIGKILL: 9>]") {
+				t.Fatalf("mysql killed=%t expected, got %s", tc.killed, out)
+			}
+		})
+	}
+}
+
+// F156: a statement whose text holds a line reading like a GTID_NEXT
+// assignment is replayed, not taken for a transaction boundary.
+func TestPITRScriptGTIDNextLookalike(t *testing.T) {
+	body := `d, cov = base_plan()
+c = read(d)
+` + pythonFakeReplay + `
+job['_run_pitr_segments']('db', 3306, 'root', 'secret', c, '/usr/bin/mysqlbinlog')
+mysql = [p for p in procs if p.is_mysql][0]
+assert (B + ':99').encode() in mysql.stdin.final, 'the statement was not forwarded'
+print('REPLAY_OK')
+`
+	out, term, err := runPITRScript(t, body, map[string]string{"FAKE_EMIT": "lookalike"})
+	if err != nil || !strings.Contains(out, "REPLAY_OK") {
+		t.Fatalf("%v %q %s", err, term, out)
+	}
+}
+
+// F155: the emitted-set check keeps merged intervals, whatever the order,
+// and still finds repeats and strays.
+func TestPITRScriptSegmentCheckIntervals(t *testing.T) {
+	body := `
+C = job['_SegmentCheck']
+c = C(A + ':1-100000')
+for n in range(1, 100001):
+    assert c.admit('%s:%d' % (A, n))
+emitted, repeated = c.emitted()
+assert emitted == {A: [(1, 100000)]} and not repeated and c.count == 100000, (emitted, repeated)
+assert len(c.seen[A][0]) == 1
+c = C(A + ':1-10:20-30,' + B + ':tag:1-3')
+for g in [A + ':30', A + ':5', A + ':6', A + ':4', B.upper() + ':TAG:2', A + ':20']:
+    assert c.admit(g), g
+assert not c.admit(A + ':15') and not c.admit(B + ':2')
+emitted, repeated = c.emitted()
+assert emitted == {A: [(4, 6), (20, 20), (30, 30)], B + ':tag': [(2, 2)]} and not repeated, emitted
+assert c.admit(A + ':5')
+assert c.emitted()[1] and c.count == 7
+print('CHECK_OK')
+`
+	out, term, err := runPITRScript(t, body, nil)
+	if err != nil || !strings.Contains(out, "CHECK_OK") {
+		t.Fatalf("%v %q %s", err, term, out)
+	}
+}
+
+// F039: the plan checks accumulate canonical sets, so many consecutive
+// segments of one source never send a growing list to the server.
+func TestPITRScriptPlanChecksStayCompact(t *testing.T) {
+	body := `d, cov = base_plan()
+N = 3000
+cov['files'] = cov['files'][:1]
+cov['files'][0]['gtids'] = A + ':6-%d' % (10 + N)
+cov['segments'] = [{'file': 0, 'gtids': A + ':%d' % n, 'startPredecessors': A + ':1-%d' % (n - 1), 'transactions': 1,
+                    'firstCommitTime': STOP, 'lastCommitTime': STOP} for n in range(11, 11 + N)]
+cov['lineage'] = A + ':1-%d' % (10 + N)
+cov['replay'] = A + ':11-%d' % (10 + N)
+cov['postStop'] = ''
+cov['replayedTransactionCount'] = N
+os.remove(os.path.join(d, 'b/mysql-bin.000004.r2'))
+write_coverage(d, cov)
+s = Session()
+job['_verify_pitr_plan'](s, read(d))
+assert s.max_arg < 200, s.max_arg
+print('COMPACT_OK')
+`
+	out, term, err := runPITRScript(t, body, nil)
+	if err != nil || !strings.Contains(out, "COMPACT_OK") {
+		t.Fatalf("%v %q %s", err, term, out)
+	}
+}
+
+// F004: a fresh target's own transactions from before the load (image
+// initialization, the operator's credential reconcile) are part of R2's
+// and R6's exact sets; anything else on the target refuses.
+func TestPITRScriptTargetLocalHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name, setup, token, detail string
+	}{
+		{name: "own transactions kept", setup: `s = Session(TARGET + ':1-3')`},
+		{name: "fresh target", setup: `s = Session('')`},
+		{name: "another server's transactions", setup: `s = Session(TARGET + ':1-3,' + 'ffffffff-ffff-ffff-ffff-ffffffffffff:1')`, token: "PITRCoverageInvalid", detail: "transactions of other servers (ffffffff-ffff-ffff-ffff-ffffffffffff)"},
+		{name: "target uuid in the plan", setup: `s = Session(A + ':1-3', uuid=A.upper())`, token: "PITRCoverageInvalid", detail: "is a server of the restored history"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `d, cov = base_plan()
+c = read(d)
+` + tc.setup + `
+local = job['_target_local_gtids'](s, c)
+s.executed = job['_gtid_union'](c['baseline'], local)
+job['_verify_pitr_baseline'](s, c, local)
+s.executed = job['_gtid_union'](gsub(c['lineage'], c['excluded']), local)
+S = job['_verify_pitr_result'](s, c, local)
+assert (TARGET in S) == bool(local), S
+print('LOCAL_OK')
+`
+			out, term, err := runPITRScript(t, body, nil)
+			if tc.token == "" {
+				if err != nil || !strings.Contains(out, "LOCAL_OK") {
+					t.Fatalf("%v %q %s", err, term, out)
+				}
+				return
+			}
+			if err == nil || !strings.HasPrefix(term, tc.token+": ") || !strings.Contains(term, tc.detail) {
+				t.Fatalf("want %s (%q), got err=%v term=%q out=%s", tc.token, tc.detail, err, term, out)
+			}
+		})
+	}
+	// R2 and R6 stay exact: target transactions beyond those seen before
+	// the load (a write during the replay) still refuse.
+	body := `d, cov = base_plan()
+c = read(d)
+s = Session(TARGET + ':1-3')
+local = job['_target_local_gtids'](s, c)
+s.executed = job['_gtid_union'](gsub(c['lineage'], c['excluded']), TARGET + ':1-4')
+job['_verify_pitr_result'](s, c, local)
+`
+	_, term, err := runPITRScript(t, body, nil)
+	if err == nil || !strings.HasPrefix(term, "PITRReplayMismatch: R6") || !strings.Contains(term, "extra "+"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee:4") {
+		t.Fatalf("a target write during the replay: err=%v term=%q", err, term)
+	}
+}
+
+// F038: a proof session that cannot be opened is an operational failure.
+func TestPITRScriptCheckSessionFailure(t *testing.T) {
+	body := `
+class BadShell:
+    def open_session(self, conn): raise RuntimeError('MySQL Error 2003: Can not connect')
+import mysqlsh
+mysqlsh.globals = types.SimpleNamespace(shell=BadShell())
+job['_open_check_session']({}, 'prove the replay (R6)')
+`
+	_, term, err := runPITRScript(t, body, nil)
+	if err == nil || term != "BLOODRAVEN_PITR_FAILED: cannot open a session to prove the replay (R6): MySQL Error 2003: Can not connect" {
+		t.Fatalf("err=%v term=%q", err, term)
+	}
+}
+
+// F040: the verdict fits this container's share of the kubelet's
+// termination messages (12 KiB over four containers in an encrypted PITR
+// pod): the on-history line goes first, then S gives way to its digest,
+// and no line is cut.
+func TestPITRScriptVerdictBudget(t *testing.T) {
+	body := `d, cov = base_plan()
+cov['onHistoryExclusions'] = ','.join('%08x-0000-0000-0000-000000000000:1' % i for i in range(18))
+cov['excluded'] = cov['onHistoryExclusions']
+executed = ','.join('%08x-1111-1111-1111-111111111111:1-99' % i for i in range(48))
+assert 1900 < len(executed) <= 2048 and len(cov['onHistoryExclusions']) <= 768
+print('VERDICT=' + json.dumps(job['_pitr_verdict_message'](cov, executed)))
+os.environ['BLOODRAVEN_TERMINATION_MESSAGE_LIMIT'] = '4096'
+print('ROOMY=' + json.dumps(job['_pitr_verdict_message'](cov, executed)))
+os.environ['BLOODRAVEN_TERMINATION_MESSAGE_LIMIT'] = '1500'
+print('TIGHT=' + json.dumps(job['_pitr_verdict_message'](cov, executed)))
+`
+	out, term, err := runPITRScript(t, body, nil)
+	if err != nil {
+		t.Fatalf("%v %q %s", err, term, out)
+	}
+	read := func(prefix string) string {
+		for _, line := range strings.Split(out, "\n") {
+			if v, ok := strings.CutPrefix(line, prefix); ok {
+				var msg string
+				if err := json.Unmarshal([]byte(v), &msg); err != nil {
+					t.Fatal(err)
+				}
+				return msg
+			}
+		}
+		t.Fatalf("no %s in %s", prefix, out)
+		return ""
+	}
+	req := pitrRenderedRequest{Mode: "timestamp", Stop: "2030-01-01T00:00:00.000000Z", EncryptionMode: "None"}
+	for _, tc := range []struct {
+		prefix                    string
+		limit                     int
+		wantOnHistory, wantInline bool
+	}{
+		{prefix: "VERDICT=", limit: 3072, wantInline: true},
+		{prefix: "ROOMY=", limit: 4096, wantOnHistory: true, wantInline: true},
+		{prefix: "TIGHT=", limit: 1500},
+	} {
+		msg := read(tc.prefix)
+		if len(msg) > tc.limit {
+			t.Fatalf("%s %d bytes over %d", tc.prefix, len(msg), tc.limit)
+		}
+		res, err := parsePITRVerdict(msg, req)
+		if err != nil {
+			t.Fatalf("%s refused: %v", tc.prefix, err)
+		}
+		if (res.OnHistoryExclusions != "") != tc.wantOnHistory || (res.GtidExecuted != "") != tc.wantInline || res.OnHistoryExclusionCount != 18 {
+			t.Fatalf("%s: on-history %q, executed inline %t", tc.prefix, res.OnHistoryExclusions, res.GtidExecuted != "")
+		}
+	}
+}
+
+// F160: a cut GTID set in the log says so.
+func TestPITRScriptFindingsMarkTruncation(t *testing.T) {
+	body := `d, cov = base_plan()
+cov['divergent'] = ','.join('%08x-0000-0000-0000-000000000000:1' % i for i in range(2000))
+job['_print_pitr_findings'](cov)
+`
+	out, term, err := runPITRScript(t, body, nil)
+	if err != nil {
+		t.Fatalf("%v %q", err, term)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "BLOODRAVEN_PITR_DIVERGENT_SET gtids=") {
+			if len(line) != len("BLOODRAVEN_PITR_DIVERGENT_SET gtids=")+65536+3 || !strings.HasSuffix(line, "...") {
+				t.Fatalf("divergent set line of %d bytes without its marker", len(line))
+			}
+			return
+		}
+	}
+	t.Fatalf("no divergent set line: %s", out)
+}
+
+// F040: verify.sh publishes restore.py's verdict whole or not at all.
+func TestPITRVerifyScriptVerdictBudget(t *testing.T) {
+	start := strings.Index(verifyScript, "TERMINATION_LOG=")
+	fail := verifyScript[start : strings.Index(verifyScript[start:], "\n}\n")+start+3]
+	publish := verifyScript[strings.Index(verifyScript, "# Publishing the verdict is the last action."):]
+	for _, tc := range []struct {
+		size  int
+		limit string
+		ok    bool
+	}{
+		{size: 3000, ok: true},
+		{size: 3100},
+		{size: 3100, limit: "4096", ok: true},
+		{size: 4100, limit: "9000"},
+	} {
+		dir := t.TempDir()
+		term, verdict := filepath.Join(dir, "termination-log"), filepath.Join(dir, "verdict")
+		if err := os.WriteFile(verdict, []byte(strings.Repeat("v", tc.size)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env := []string{"BLOODRAVEN_TERMINATION_LOG=" + term, "PITR_VERDICT=" + verdict}
+		if tc.limit != "" {
+			env = append(env, "BLOODRAVEN_TERMINATION_MESSAGE_LIMIT="+tc.limit)
+		}
+		out, err := execBash(t, fail+"log() { :; }\n"+publish, env...).CombinedOutput()
+		recorded, _ := os.ReadFile(term)
+		if tc.ok {
+			if err != nil || len(recorded) != tc.size {
+				t.Fatalf("%d bytes (limit %q): %v %s, recorded %d", tc.size, tc.limit, err, out, len(recorded))
+			}
+			continue
+		}
+		if err == nil || !strings.HasPrefix(string(recorded), "PITRCoverageInvalid: restore.py's verdict is") {
+			t.Fatalf("%d bytes (limit %q): err=%v recorded %q", tc.size, tc.limit, err, recorded)
+		}
 	}
 }

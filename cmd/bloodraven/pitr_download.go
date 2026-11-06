@@ -9,16 +9,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"math"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
+
+	"github.com/aws/smithy-go"
 
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
@@ -40,8 +47,8 @@ import (
 //     <site>/<name>.<id>, and write coverage.json version 2 atomically,
 //     also on refusal (with refusalReason set and no files).
 //
-// Env (rendered by internal/controller; see contracts.md "WP-B2
-// assumptions"):
+// Env (rendered by internal/controller's buildRestorePITRFragmentsFor in
+// pitr.go):
 //
 //	BLOODRAVEN_PITR_MODE               timestamp | latest
 //	BLOODRAVEN_PITR_STOP_DATETIME      T in backupmeta.MicroTimeLayout (timestamp mode only)
@@ -78,6 +85,9 @@ func runPITRDownload(args []string) {
 	}
 	cfg, err := pitrDownloadStoreConfig()
 	if err != nil {
+		fail(2, "invalid archive config", err)
+	}
+	if err := checkStoreDestination(cfg, req.archive.expect.Destination); err != nil {
 		fail(2, "invalid archive config", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -300,81 +310,228 @@ type openedArchive struct {
 	manifests []*sidecar.Manifest
 }
 
+// pitrSiteName is the CRD's spec.sites[].name pattern. A manifest naming
+// any other site is not one this archive's writers produced, and could
+// collide with the staging directory's own entries (.pitr-cache,
+// coverage.json; review F125).
+var pitrSiteName = regexp.MustCompile(`^[a-z0-9-]{1,253}$`)
+
+// retryMetadata runs one archive-open read with the in-process retry the
+// row fetches use (P4): a transient store error is retried with backoff,
+// and one that persists ends as a token-less *pitrplan.TransientError, so
+// an outage is never recorded as a refusal (review F020). Cancellation
+// returns the context's error.
+func retryMetadata(ctx context.Context, backoff []time.Duration, what string, transient func(error) bool, read func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := read()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !transient(err) {
+			return err
+		}
+		if attempt == len(backoff) {
+			return &pitrplan.TransientError{Err: fmt.Errorf("%s after %d attempts: %w", what, attempt+1, err)}
+		}
+		if werr := sleepCtx(ctx, backoff[attempt]); werr != nil {
+			return werr
+		}
+	}
+}
+
+// listPermissionDenied reports a listing refused for lack of permission
+// (an S3 403 or AccessDenied, a filesystem EACCES): retrying cannot help.
+func listPermissionDenied(err error) bool {
+	if errors.Is(err, fs.ErrPermission) {
+		return true
+	}
+	var withStatus interface{ HTTPStatusCode() int }
+	if errors.As(err, &withStatus) && withStatus.HTTPStatusCode() == http.StatusForbidden {
+		return true
+	}
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDenied"
+}
+
+// manifestContentError reports a manifest load failure about the stored
+// bytes (a refusal token, undecodable JSON, bytes that fail
+// authentication) rather than the store failing to deliver them.
+func manifestContentError(err error) bool {
+	if _, ok := pitrarchive.ParseToken(err.Error()); ok {
+		return true
+	}
+	var syntax *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	return sidecar.IsArchiveIntegrityError(err) || errors.As(err, &syntax) || errors.As(err, &typ)
+}
+
 // openPITRArchive opens the archive as a reader (§3.3, §4.2): the
 // descriptor, then every site manifest, which must be version 2 and name
-// the descriptor's archive, then verified reuse (D-35).
-func openPITRArchive(ctx context.Context, store sidecar.ArchiveStore, req pitrArchiveRequest) (*openedArchive, error) {
-	desc, err := sidecar.OpenArchiveForRead(ctx, store, req.prefix, req.expect)
+// the descriptor's archive, then verified reuse (D-35). Every manifest's
+// version and identity is checked before any reset marker, so the
+// precedence is the documented one (review F126). Transient read failures
+// are retried and end token-less (F020).
+func openPITRArchive(ctx context.Context, store sidecar.ArchiveStore, req pitrArchiveRequest, backoff []time.Duration) (*openedArchive, error) {
+	var desc *pitrarchive.Descriptor
+	err := retryMetadata(ctx, backoff, "read the archive descriptor", func(err error) bool {
+		// Refusals carry their token; any other failure is a read of the
+		// descriptor or of a manifest while classifying the prefix.
+		if _, ok := pitrarchive.TokenOf(err); ok {
+			return false
+		}
+		if _, ok := pitrarchive.ParseToken(err.Error()); ok {
+			return false
+		}
+		return storeErrorTransient(err)
+	}, func() error {
+		var err error
+		desc, err = sidecar.OpenArchiveForRead(ctx, store, req.prefix, req.expect)
+		return err
+	})
 	if err != nil {
 		if _, ok := pitrarchive.TokenOf(err); ok {
 			return nil, err
 		}
-		if _, ok := pitrarchive.ParseToken(err.Error()); ok {
+		if _, ok := pitrarchive.ParseToken(err.Error()); ok || pitrplan.IsTransient(err) || ctx.Err() != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%s: open archive at %s: %w", pitrarchive.TokenArchiveListFailed, req.expect.Destination, err)
+		// A missing object or bytes that fail authentication while the
+		// descriptor was read.
+		return nil, fmt.Errorf("%s: open archive at %s: %w", pitrarchive.TokenArchiveObjectInvalid, req.expect.Destination, err)
 	}
 	dest := req.expect.Destination.String()
-	keys, err := store.List(ctx, sidecar.ManifestKeyPrefix(req.prefix))
+	var keys []string
+	err = retryMetadata(ctx, backoff, "list site manifests", func(err error) bool { return !listPermissionDenied(err) }, func() error {
+		var err error
+		keys, err = store.List(ctx, sidecar.ManifestKeyPrefix(req.prefix))
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("%s: list site manifests under %q: %w; restore needs list permission on the prefix (S3 ListObjectsV2)", pitrarchive.TokenArchiveListFailed, req.prefix, err)
+		if pitrplan.IsTransient(err) || ctx.Err() != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%s: list site manifests under %q: %w; restore needs list permission on the prefix (S3 ListObjectsV2, s3:ListBucket) or a readable archive volume", pitrarchive.TokenArchiveListFailed, req.prefix, err)
 	}
 	sort.Strings(keys)
-	out := &openedArchive{desc: desc}
+	var sites []string
+	seen := map[string]bool{}
 	for _, key := range keys {
 		site := sidecar.SiteFromManifestKey(key)
-		if site == "" {
+		// Only "<prefix>/manifest-<site>.json" itself names a site: a
+		// nested lookalike (manifest-x/manifest-a.json) is another object
+		// (review F124).
+		if site == "" || key != sidecar.ManifestKey(req.prefix, site) || seen[site] {
 			continue
 		}
-		if !isSafeBasename(site) {
-			return nil, fmt.Errorf("%s: archive %s at %s: manifest key %q names an unsafe site", pitrarchive.TokenArchiveObjectInvalid, desc.ArchiveID, dest, key)
+		if !pitrSiteName.MatchString(site) {
+			return nil, fmt.Errorf("%s: archive %s at %s: manifest key %q names an invalid site; site names match %s", pitrarchive.TokenArchiveObjectInvalid, desc.ArchiveID, dest, key, pitrSiteName)
 		}
-		m, err := sidecar.LoadManifest(ctx, store, req.prefix, site)
+		seen[site] = true
+		sites = append(sites, site)
+	}
+	out := &openedArchive{desc: desc}
+	for _, site := range sites {
+		key := sidecar.ManifestKey(req.prefix, site)
+		var m *sidecar.Manifest
+		err := retryMetadata(ctx, backoff, "read manifest "+key, func(err error) bool { return !manifestContentError(err) && storeErrorTransient(err) }, func() error {
+			var err error
+			m, err = sidecar.LoadManifest(ctx, store, req.prefix, site)
+			return err
+		})
 		if err != nil {
-			if _, ok := pitrarchive.ParseToken(err.Error()); ok {
+			if _, ok := pitrarchive.ParseToken(err.Error()); ok || pitrplan.IsTransient(err) || ctx.Err() != nil {
 				return nil, err
 			}
 			return nil, fmt.Errorf("%s: archive %s at %s: manifest %s: %w", pitrarchive.TokenArchiveObjectInvalid, desc.ArchiveID, dest, key, err)
 		}
+		// LoadManifest returns an empty manifest without an archive ID
+		// for a missing object (a stored version-2 manifest always has
+		// one): it was listed and then removed.
+		if m.ArchiveID == "" {
+			return nil, &pitrplan.TransientError{Err: fmt.Errorf("manifest %s was listed but is gone; the archive changed while it was read; retry", key)}
+		}
+		// LoadManifest sets m.Site from the key; the stored "site" field
+		// is never trusted (review F127).
 		if m.ArchiveID != desc.ArchiveID {
 			return nil, fmt.Errorf("%s: archive %s at %s: manifest %s names archive %q; the prefix mixes two archives", pitrarchive.TokenArchiveIdentityMismatch, desc.ArchiveID, dest, key, m.ArchiveID)
 		}
-		if m.Epoch != nil && m.Epoch.ResetReason != "" {
-			return nil, fmt.Errorf("%s: archive %s at %s: site %s: %s; start a new archive prefix and take a full backup", pitrarchive.TokenArchiveHistoryReset, desc.ArchiveID, dest, site, m.Epoch.ResetReason)
-		}
-		if m.Site == "" {
-			m.Site = site
-		}
-		if m.Site != site {
-			return nil, fmt.Errorf("%s: archive %s at %s: manifest %s is for site %q", pitrarchive.TokenArchiveObjectInvalid, desc.ArchiveID, dest, key, m.Site)
-		}
 		out.manifests = append(out.manifests, m)
 	}
+	for _, m := range out.manifests {
+		if m.Epoch != nil && m.Epoch.ResetReason != "" {
+			return nil, fmt.Errorf("%s: archive %s at %s: site %s: %s; start a new archive prefix and take a full backup", pitrarchive.TokenArchiveHistoryReset, desc.ArchiveID, dest, m.Site, m.Epoch.ResetReason)
+		}
+	}
 	return out, nil
+}
+
+// checkStoreDestination refuses a store configuration that does not
+// address the archive destination the Job names: both are rendered from
+// one normalized destination, so a disagreement is a stale or hand-edited
+// Job, which could otherwise read one bucket and report another in
+// coverage.json (review F123).
+func checkStoreDestination(cfg *sidecar.PITRConfig, dest pitrarchive.Destination) error {
+	switch dest.Kind {
+	case pitrarchive.DestinationS3:
+		if cfg.S3 == nil {
+			return fmt.Errorf("BLOODRAVEN_PITR_STORAGE_TYPE=%s, but BLOODRAVEN_PITR_DESTINATION %s is S3", cfg.StorageType, dest)
+		}
+		if cfg.S3.Bucket != dest.Bucket {
+			return fmt.Errorf("BLOODRAVEN_PITR_S3_BUCKET %q is not the bucket of BLOODRAVEN_PITR_DESTINATION %s", cfg.S3.Bucket, dest)
+		}
+		ep, err := pitrarchive.NormalizeEndpoint(cfg.S3.EndpointURL)
+		if err != nil {
+			return fmt.Errorf("BLOODRAVEN_PITR_S3_ENDPOINT_URL: %w", err)
+		}
+		if ep != dest.Endpoint {
+			return fmt.Errorf("BLOODRAVEN_PITR_S3_ENDPOINT_URL %q is not the endpoint of BLOODRAVEN_PITR_DESTINATION %s", cfg.S3.EndpointURL, dest)
+		}
+	case pitrarchive.DestinationPVC:
+		// The claim is mounted by the Job; the mount path cannot name it.
+		if cfg.PVC == nil {
+			return fmt.Errorf("BLOODRAVEN_PITR_STORAGE_TYPE=%s, but BLOODRAVEN_PITR_DESTINATION %s is a PVC", cfg.StorageType, dest)
+		}
+	default:
+		return fmt.Errorf("BLOODRAVEN_PITR_DESTINATION %s has an unknown kind", dest)
+	}
+	if cfg.ManifestPrefix != dest.KeyPrefix {
+		return fmt.Errorf("BLOODRAVEN_PITR_MANIFEST_PREFIX %q is not the key prefix %q of %s", cfg.ManifestPrefix, dest.KeyPrefix, dest)
+	}
+	return nil
+}
+
+// cachedRow is a tee-cached download: its file and its authenticated size.
+type cachedRow struct {
+	path string
+	size int64
 }
 
 // rowFetcher downloads, tees, authenticates and indexes rows for the
 // planner. A row is cached in cacheDir only when the planner says it may
 // become a plan file (P2), the node filesystem keeps max(10%, 256 MiB)
 // free after it, and the staging emptyDir's sizeLimit (when set) still
-// has room for it; an uncached plan file is re-downloaded with a digest
-// check when staged. Before staging, cached rows the plan does not stage
-// are deleted, and the staged set must fit.
+// has room for it; the copy is dropped as soon as the bytes received pass
+// that allowance, whatever the manifest says the row's size is. An
+// uncached plan file is re-downloaded with a digest check when staged.
+// Before staging, cached rows the plan does not stage are deleted, and
+// the staged set must fit under the sizeLimit and above the node's floor.
 type rowFetcher struct {
 	store    sidecar.ArchiveStore
 	prefix   string
 	entries  map[pitrplan.RowRef]sidecar.ManifestEntry
 	budget   *pitrplan.Budget
 	cacheDir string
-	cached   map[pitrplan.RowRef]string
-	digests  map[pitrplan.RowRef]string
+	cached   map[pitrplan.RowRef]cachedRow
 	parts    int
 	// limit is the staging emptyDir's sizeLimit (0: none); cachedBytes is
 	// the cache's usage as the kubelet measures it (whole blocks).
 	limit       int64
 	cachedBytes int64
-	// freeAfter reports the free bytes left after writing n more; tests
-	// replace it.
+	// freeAfter reports the free bytes left on dir's filesystem after
+	// writing n more, and the floor to keep; tests replace it.
 	freeAfter func(dir string, n int64) (free, threshold int64)
 	// backoff is the delay before each retry of a transient store error.
 	backoff []time.Duration
@@ -395,16 +552,21 @@ const (
 
 func blocks(n int64) int64 { return (n + stagingBlock - 1) / stagingBlock * stagingBlock }
 
+// stagingDir is the staging emptyDir: the cache's parent, where staged
+// files land.
+func (rf *rowFetcher) stagingDir() string { return filepath.Dir(rf.cacheDir) }
+
 // Fetch implements pitrplan.Fetcher; the planner calls FetchForPlan.
 func (rf *rowFetcher) Fetch(ctx context.Context, ref pitrplan.RowRef) (*pitrplan.FileIndex, error) {
 	return rf.FetchForPlan(ctx, ref, true)
 }
 
-// FetchForPlan implements pitrplan.StagingFetcher. A missing object or an
-// integrity failure is returned as an ordinary error (the planner's
-// unreadable row); any other store error is retried with backoff and then
-// returned as a *pitrplan.TransientError, which ends planning without a
-// refusal.
+// FetchForPlan implements pitrplan.StagingFetcher. A missing object of a
+// row the site's live manifest still lists, or an integrity failure, is
+// returned as an ordinary error (the planner's unreadable row); a missing
+// object of a row retention has since retired, any other store error after
+// its retries, and cancellation end planning without a refusal
+// (*pitrplan.TransientError).
 func (rf *rowFetcher) FetchForPlan(ctx context.Context, ref pitrplan.RowRef, mayStage bool) (*pitrplan.FileIndex, error) {
 	entry, ok := rf.entries[ref]
 	if !ok {
@@ -422,16 +584,58 @@ func (rf *rowFetcher) FetchForPlan(ctx context.Context, ref pitrplan.RowRef, may
 		}
 		// A failed attempt's partial index is garbage.
 		rf.budget.Release(rf.budget.Used() - used)
+		if ctx.Err() != nil {
+			// Cancellation is neither damage nor a refusal.
+			return nil, &pitrplan.TransientError{Err: fmt.Errorf("read %s: %w", key, ctx.Err())}
+		}
 		if !transient {
+			if sidecar.IsArchiveObjectMissing(err) {
+				return nil, rf.missingObject(ctx, ref, key, err)
+			}
 			return nil, err
 		}
 		if attempt == len(rf.backoff) {
 			return nil, &pitrplan.TransientError{Err: fmt.Errorf("read %s after %d attempts: %w", key, attempt+1, err)}
 		}
 		if werr := sleepCtx(ctx, rf.backoff[attempt]); werr != nil {
-			return nil, werr
+			return nil, &pitrplan.TransientError{Err: werr}
 		}
 	}
+}
+
+// missingObject tells a lost object from a retired row (review F058): the
+// planner works from the manifests read when the Job started, and
+// retention may have retired a row and deleted its object since. It
+// re-reads the site's live manifest; a row it no longer lists (or lists
+// as pruned) ends planning as a transient error, to be retried with a
+// fresh snapshot, so the planner neither reports the row as damaged nor
+// advises quarantining it. A row still listed is the planner's unreadable
+// row.
+func (rf *rowFetcher) missingObject(ctx context.Context, ref pitrplan.RowRef, key string, err error) error {
+	var live *sidecar.Manifest
+	rerr := retryMetadata(ctx, rf.backoff, "re-read manifest of site "+ref.Site, func(err error) bool { return !manifestContentError(err) && storeErrorTransient(err) }, func() error {
+		var err error
+		live, err = sidecar.LoadManifest(ctx, rf.store, rf.prefix, ref.Site)
+		return err
+	})
+	if rerr != nil {
+		return &pitrplan.TransientError{Err: fmt.Errorf("%s is missing and the site's live manifest cannot be read to tell whether retention retired it (%v); retry", key, rerr)}
+	}
+	listed := false
+	rows := live.Files
+	if ref.State == pitrplan.RowQuarantined {
+		rows = quarantinedEntries(live)
+	}
+	for _, e := range rows {
+		if e.Name == ref.Name && e.ID == ref.ID {
+			listed = true
+			break
+		}
+	}
+	if !listed {
+		return &pitrplan.TransientError{Err: fmt.Errorf("%s/%s (id %s) is gone and its site's live manifest no longer lists it: the archive changed during planning (row retired); retry", ref.Site, ref.Name, ref.ID)}
+	}
+	return err
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -468,18 +672,24 @@ func (rr *recordingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// cacheTee copies what it reads into the cache file until a write fails;
-// then it drops the copy (a full disk only costs a re-download).
+// cacheTee copies what it reads into the cache file until a write fails
+// or the bytes pass its allowance; then it drops the copy (a full disk
+// only costs a re-download).
 type cacheTee struct {
-	r    io.Reader
-	out  *os.File
-	part string
+	r       io.Reader
+	out     *os.File
+	part    string
+	allow   int64
+	written int64
 }
 
 func (t *cacheTee) Read(p []byte) (int, error) {
 	n, err := t.r.Read(p)
 	if n > 0 && t.out != nil {
-		if _, werr := t.out.Write(p[:n]); werr != nil {
+		t.written += int64(n)
+		if blocks(t.written) > t.allow {
+			t.drop()
+		} else if _, werr := t.out.Write(p[:n]); werr != nil {
 			t.drop()
 		}
 	}
@@ -503,70 +713,93 @@ func (rf *rowFetcher) fetchOnce(ctx context.Context, ref pitrplan.RowRef, entry 
 	}
 	defer r.Close()
 	rec := &recordingReader{r: r}
-	tee := &cacheTee{r: rec}
-	if mayStage && rf.cacheFits(entry.Size) {
-		rf.parts++
-		tee.part = filepath.Join(rf.cacheDir, fmt.Sprintf("%d.part", rf.parts))
-		if tee.out, err = os.OpenFile(tee.part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600); err != nil {
-			tee.out = nil
+	// The digest of every byte, also when the index pass stops early.
+	h := sha256.New()
+	tee := &cacheTee{r: io.TeeReader(rec, h)}
+	if mayStage {
+		if allow := rf.cacheAllowance(entry.Size); allow > 0 {
+			rf.parts++
+			tee.part = filepath.Join(rf.cacheDir, fmt.Sprintf("%d.part", rf.parts))
+			tee.allow = allow
+			if tee.out, err = os.OpenFile(tee.part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600); err != nil {
+				tee.out = nil
+			}
 		}
 	}
+	defer tee.drop()
 	label := ref.Site + "/" + ref.Name
 	idx, err := sidecar.InspectTransactions(tee, sidecar.TxIndexOptions{Label: label, Budget: rf.budget})
-	if err == nil {
-		// Read to EOF so the object's integrity check completes.
-		_, err = io.Copy(io.Discard, tee)
+	refusal, refused := pitrplan.RefusalOf(err)
+	if err == nil || refused {
+		// Read to EOF so the object's integrity check completes, and so a
+		// refusal is reported only for authentic bytes (review F021).
+		if _, cerr := io.Copy(io.Discard, tee); err == nil {
+			err = cerr
+		}
 	}
 	if rec.err != nil {
 		// The store's stream failed; whatever the index pass made of it.
-		tee.drop()
 		return nil, storeErrorTransient(rec.err) && ctx.Err() == nil, fmt.Errorf("read %s: %w", key, rec.err)
 	}
+	digest := hex.EncodeToString(h.Sum(nil))
+	if (err == nil || refused) && !sidecar.MatchesBinlogDigest(rf.store, entry.ID, digest) {
+		return nil, false, &pitrplan.Refusal{Token: pitrarchive.TokenArchiveObjectInvalid, Message: fmt.Sprintf("%s (id %s): the bytes' digest %s does not match the row's content ID", label, entry.ID, digest)}
+	}
+	if refused {
+		return nil, false, refusal
+	}
 	if err != nil {
-		tee.drop()
 		return nil, false, err
 	}
-	if !sidecar.MatchesBinlogDigest(rf.store, entry.ID, idx.Digest) {
-		tee.drop()
-		return nil, false, &pitrplan.Refusal{Token: pitrarchive.TokenArchiveObjectInvalid, Message: fmt.Sprintf("%s (id %s): the bytes' digest %s does not match the row's content ID", label, entry.ID, idx.Digest)}
+	if idx.Size != entry.Size {
+		return nil, false, &pitrplan.Refusal{Token: pitrarchive.TokenArchiveObjectInvalid, Message: fmt.Sprintf("%s (id %s): the manifest row says %d bytes, its authenticated bytes are %d", label, entry.ID, entry.Size, idx.Size)}
 	}
-	rf.digests[ref] = idx.Digest
 	if tee.out != nil {
-		if cerr := tee.out.Close(); cerr != nil {
+		out := tee.out
+		tee.out = nil
+		if cerr := out.Close(); cerr != nil {
 			_ = os.Remove(tee.part)
 		} else {
-			rf.cached[ref] = tee.part
-			rf.cachedBytes += blocks(entry.Size)
+			rf.cached[ref] = cachedRow{path: tee.part, size: idx.Size}
+			rf.cachedBytes += blocks(idx.Size)
 		}
 	}
 	return idx, false, nil
 }
 
-// cacheFits is the tee rule: the node keeps its floor, and the emptyDir's
-// sizeLimit has room for the cache plus this row and the reserve.
-func (rf *rowFetcher) cacheFits(size int64) bool {
-	if rf.limit > 0 && rf.cachedBytes+blocks(size)+stagingReserve > rf.limit {
-		return false
+// cacheAllowance is the tee rule: the bytes a row may cache, or 0 when
+// size (the manifest's claim) does not fit. The node keeps its floor, and
+// the emptyDir's sizeLimit has room for the cache plus this row and the
+// reserve. The allowance, not size, bounds what the tee writes.
+func (rf *rowFetcher) cacheAllowance(size int64) int64 {
+	allow := int64(math.MaxInt64)
+	if rf.limit > 0 {
+		allow = rf.limit - rf.cachedBytes - stagingReserve
 	}
-	free, threshold := rf.freeAfter(rf.cacheDir, size)
-	return free >= threshold
+	free, threshold := rf.freeAfter(rf.cacheDir, 0)
+	allow = min(allow, free-threshold)
+	if blocks(size) > allow {
+		return 0
+	}
+	return allow
 }
 
 // prepareStaging deletes cached rows the plan does not stage, then checks
 // that the staged set (plus coverage.json of coverageBytes) fits under the
-// emptyDir's sizeLimit and on the filesystem, refusing PITRPlanTooLarge
-// rather than letting the kubelet evict the pod.
+// emptyDir's sizeLimit and keeps the node filesystem above its floor,
+// refusing PITRPlanTooLarge rather than letting the kubelet evict the pod
+// (review F022).
 func (rf *rowFetcher) prepareStaging(files []pitrplan.PlanFile, coverageBytes int64) error {
 	keep := map[pitrplan.RowRef]bool{}
 	for _, f := range files {
 		keep[f.Row] = true
 	}
-	for ref, part := range rf.cached {
+	for ref, c := range rf.cached {
 		if !keep[ref] {
-			if err := os.Remove(part); err != nil {
+			if err := os.Remove(c.path); err != nil {
 				return err
 			}
-			rf.cachedBytes -= blocks(rf.entries[ref].Size)
+			rf.cachedBytes -= blocks(c.size)
 			delete(rf.cached, ref)
 		}
 	}
@@ -583,12 +816,16 @@ func (rf *rowFetcher) prepareStaging(files []pitrplan.PlanFile, coverageBytes in
 			"the plan stages %d binlog files of %s, which with coverage.json needs %s, more than the staging volume's sizeLimit of %s; raise spec.backup.stagingVolumeSizeLimit, or choose a backup closer to the target",
 			len(files), util.HumanBytes(staged), util.HumanBytes(need), util.HumanBytes(rf.limit))}
 	}
-	if free, _ := rf.freeAfter(rf.cacheDir, download+blocks(coverageBytes)); free < 0 {
-		return &pitrplan.Refusal{Token: pitrarchive.TokenPlanTooLarge, Message: fmt.Sprintf(
-			"staging the plan needs %s more on the node's filesystem than it has free; give the Job's node more ephemeral storage, or choose a backup closer to the target",
-			util.HumanBytes(download+blocks(coverageBytes)))}
+	if free, threshold := rf.freeAfter(rf.stagingDir(), download+blocks(coverageBytes)+stagingReserve); free < threshold {
+		return rf.nodeFloorRefusal(download+blocks(coverageBytes)+stagingReserve, threshold)
 	}
 	return nil
+}
+
+func (rf *rowFetcher) nodeFloorRefusal(n, threshold int64) error {
+	return &pitrplan.Refusal{Token: pitrarchive.TokenPlanTooLarge, Message: fmt.Sprintf(
+		"staging the plan needs %s more on the node's filesystem, which would leave less than its floor of %s free (max(10%%, 256 MiB), kept clear of the kubelet's eviction threshold); give the Job's node more ephemeral storage, or choose a backup closer to the target",
+		util.HumanBytes(n), util.HumanBytes(threshold))}
 }
 
 // pitrDiskFreeAfter is the tee rule's free-space check; tests replace it.
@@ -606,7 +843,8 @@ func diskFreeAfter(dir string, n int64) (int64, int64) {
 }
 
 // stage places one plan file at its staged path: from the tee cache, or
-// re-downloaded with a digest check (transient store errors retried).
+// re-downloaded with a digest check (transient store errors retried),
+// after rechecking the node's floor for it.
 func (rf *rowFetcher) stage(ctx context.Context, outDir string, f pitrplan.PlanFile) error {
 	rel := f.StagedPath()
 	dst, err := safeJoinUnderRoot(outDir, filepath.FromSlash(rel))
@@ -616,18 +854,21 @@ func (rf *rowFetcher) stage(ctx context.Context, outDir string, f pitrplan.PlanF
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	if part, ok := rf.cached[f.Row]; ok {
-		if err := os.Rename(part, dst); err != nil {
+	if c, ok := rf.cached[f.Row]; ok {
+		if err := os.Rename(c.path, dst); err != nil {
 			return err
 		}
 		delete(rf.cached, f.Row)
-		rf.cachedBytes -= blocks(f.Size)
+		rf.cachedBytes -= blocks(c.size)
 		return os.Chmod(dst, 0o644)
+	}
+	if free, threshold := rf.freeAfter(outDir, blocks(f.Size)); free < threshold {
+		return rf.nodeFloorRefusal(blocks(f.Size), threshold)
 	}
 	entry := rf.entries[f.Row]
 	key, err := sidecar.ArchiveEntryKey(rf.prefix, f.Row.Site, entry)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %s/%s: %v", pitrarchive.TokenArchiveObjectInvalid, f.Row.Site, f.Row.Name, err)
 	}
 	for attempt := 0; ; attempt++ {
 		transient, err := rf.stageOnce(ctx, key, dst, f)
@@ -643,10 +884,15 @@ func (rf *rowFetcher) stage(ctx context.Context, outDir string, f pitrplan.PlanF
 	}
 }
 
+// stageOnce is one staging download. Cancellation returns the context's
+// error, never a refusal (review F023).
 func (rf *rowFetcher) stageOnce(ctx context.Context, key, dst string, f pitrplan.PlanFile) (bool, error) {
 	r, err := rf.store.Open(ctx, key)
 	if err != nil {
-		if storeErrorTransient(err) && ctx.Err() == nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if storeErrorTransient(err) {
 			return true, fmt.Errorf("open %s: %w", key, err)
 		}
 		return false, fmt.Errorf("%s: %s/%s became unreadable while staging: %v", pitrarchive.TokenArchiveObjectInvalid, f.Row.Site, f.Row.Name, err)
@@ -665,7 +911,10 @@ func (rf *rowFetcher) stageOnce(ctx context.Context, key, dst string, f pitrplan
 	}
 	if rec.err != nil {
 		_ = os.Remove(tmp)
-		if storeErrorTransient(rec.err) && ctx.Err() == nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if storeErrorTransient(rec.err) {
 			return true, fmt.Errorf("read %s: %w", key, rec.err)
 		}
 		return false, fmt.Errorf("%s: %s/%s became unreadable during staging (%v)", pitrarchive.TokenArchiveObjectInvalid, f.Row.Site, f.Row.Name, rec.err)
@@ -685,6 +934,19 @@ func (rf *rowFetcher) stageOnce(ctx context.Context, key, dst string, f pitrplan
 type planResult struct {
 	plan     *pitrplan.Plan
 	coverage pitrplan.Coverage
+}
+
+// manifestRowBytes is the budget charge for a manifest row pitr-download
+// holds besides PlanSite's conversion: the decoded entry, its copy in the
+// fetcher's entries map with the map's slot, and its strings (review F211).
+var manifestRowBytes = 2*int64(unsafe.Sizeof(sidecar.ManifestEntry{})) + int64(unsafe.Sizeof(pitrplan.RowRef{})) + 64
+
+func manifestEntryBytes(e sidecar.ManifestEntry) int64 {
+	n := manifestRowBytes + int64(len(e.Name)+len(e.ID)+len(e.ContentID)+len(e.BaseGTIDs)+len(e.PreviousGTIDs))
+	if c := e.GTIDCoverage; c != nil {
+		n += int64(unsafe.Sizeof(*c)) + int64(len(c.GTIDs)+len(c.EmptyGTIDs)+len(c.ContentID))
+	}
+	return n
 }
 
 // planAndStage runs the planner and leaves the staging directory holding
@@ -710,13 +972,16 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 	expect := req.archive
 	expect.expect.SourceUID = dump.Stamp.Source.UID
 	expect.expect.ArchiveID = dump.Stamp.PITRArchiveID
-	opened, err := openPITRArchive(ctx, store, expect)
+	opened, err := openPITRArchive(ctx, store, expect, pitrFetchBackoff)
 	if err != nil {
 		return res, writeRefusal(req.outDir, cov, err)
 	}
 	cov.Archive = pitrplan.CoverageArchive{ArchiveID: opened.desc.ArchiveID, Destination: req.archive.expect.Destination.String(),
 		Source: opened.desc.Source, EncryptionMode: opened.desc.Encryption.Mode}
 
+	// The budget exists before the manifests are converted: their rows
+	// and parsed sets are charged as they are built (D-42, review F211).
+	budget := pitrplan.NewBudget(req.memory)
 	var archive pitrplan.Archive
 	entries := map[pitrplan.RowRef]sidecar.ManifestEntry{}
 	for _, m := range opened.manifests {
@@ -724,8 +989,11 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 			if !isSafeBasename(e.Name) {
 				return res, writeRefusal(req.outDir, cov, fmt.Errorf("%s: site %s lists an unsafe binlog name %q", pitrarchive.TokenArchiveObjectInvalid, m.Site, e.Name))
 			}
+			if err := budget.Charge(manifestEntryBytes(e), "manifest rows of site "+m.Site); err != nil {
+				return res, writeRefusal(req.outDir, cov, err)
+			}
 		}
-		site, err := sidecar.PlanSite(m)
+		site, err := sidecar.PlanSiteCharged(m, budget)
 		if err != nil {
 			return res, writeRefusal(req.outDir, cov, err)
 		}
@@ -740,14 +1008,13 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 		}
 		archive.Sites = append(archive.Sites, site)
 	}
-	budget := pitrplan.NewBudget(req.memory)
 	cacheDir := filepath.Join(req.outDir, ".pitr-cache")
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return res, err
 	}
 	defer os.RemoveAll(cacheDir)
 	rf := &rowFetcher{store: store, prefix: req.archive.prefix, entries: entries, budget: budget, cacheDir: cacheDir,
-		cached: map[pitrplan.RowRef]string{}, digests: map[pitrplan.RowRef]string{}, freeAfter: pitrDiskFreeAfter,
+		cached: map[pitrplan.RowRef]cachedRow{}, freeAfter: pitrDiskFreeAfter,
 		limit: req.stagingLimit, backoff: pitrFetchBackoff}
 	plan, err := pitrplan.Run(ctx, pitrplan.Request{Mode: req.mode, Stop: req.stop, AllowPartial: req.allowPartial, Exclude: req.exclude,
 		Delta: req.delta, Dump: dump, Budget: budget}, archive, rf)
@@ -762,7 +1029,16 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 		if r, ok := pitrplan.RefusalOf(err); ok && r.Token == pitrarchive.TokenArchiveDivergentHistory && plan != nil && !plan.Divergent.IsEmpty() {
 			fmt.Printf("BLOODRAVEN_PITR_DIVERGENT_SET gtids=%s\n", boundedText(plan.Divergent.Subtract(plan.Excluded).String(), 64<<10))
 		}
-		c := plan.Coverage(cov.Archive, cov.Dump, err.Error())
+		c := cov
+		if plan != nil {
+			c = plan.Coverage(cov.Archive, cov.Dump, err.Error())
+			// A refusal before the planner reads the dump (target or
+			// request checks) leaves its baseline empty; the dump's is
+			// known (review F131).
+			if c.Baseline == "" {
+				c.Baseline = cov.Baseline
+			}
+		}
 		_ = os.RemoveAll(cacheDir)
 		return res, writeRefusal(req.outDir, c, err)
 	}

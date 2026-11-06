@@ -4,6 +4,9 @@
 #
 set -euo pipefail
 
+# shellcheck source=lib-sidecar-http.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib-sidecar-http.sh"
+
 NAMESPACE=""
 MFG_NAME=""
 
@@ -129,11 +132,11 @@ if [[ -n "$PITR_ARCHIVE_ID" && "$PITR_ARCHIVE_ID" != " archiveID= encryption= de
     # and the divergent/quarantined rows in the site's own manifest.
     if command -v jq >/dev/null 2>&1; then
         for pod in $(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME,app.kubernetes.io/name=mysql" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
-            ARCHIVER_JSON=$(kubectl exec -n "$NAMESPACE" "$pod" -c sidecar -- wget -T 5 -qO- http://127.0.0.1:8080/archiver/status 2>/dev/null || true)
-            if [[ -z "$ARCHIVER_JSON" ]]; then
-                echo "  $pod: /archiver/status unavailable (sidecar-probe.sh -n $NAMESPACE $MFG_NAME archiver)"
+            if ! sidecar_http_get "$NAMESPACE" "$pod" /archiver/status; then
+                echo "  $pod: /archiver/status unavailable (tried: $SIDECAR_HTTP_TRIED; sidecar-probe.sh -n $NAMESPACE $MFG_NAME archiver)"
                 continue
             fi
+            ARCHIVER_JSON="$SIDECAR_HTTP_BODY"
             printf '%s' "$ARCHIVER_JSON" | jq -r --arg pod "$pod" \
                 '"  \($pod) site=\(.site // "?") archive=\(.archive.state // "none")/\(.archive.reason // "") id=\(.archive.archiveID // "") promotionRecordedAt=\(.promotionRecordedAt // "none") historyIntegrity=\(if .historyIntegrity then "\(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at)" else "none" end) divergentRows=\(.divergentRows // 0) quarantinedRows=\(.quarantinedRows // 0)"' \
                 2>/dev/null || echo "  $pod: /archiver/status is not JSON"
@@ -204,8 +207,19 @@ if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "  (kubectl logs -n <operator-ns> deploy/bloodraven --since=2m | grep 'failed to start topology manager' | grep '$NAMESPACE/$MFG_NAME'), and status.sites[].lastSeen stops advancing. See playbook 24."
     echo "$MANAGER_EVENTS"
 fi
+# A verification's exclusion and partial-outcome Warnings are recorded on the
+# MysqlBackupVerification, not on the group: collect those of the group's
+# verifications too.
+for verification in $(kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
+    VERIFICATION_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.kind=MysqlBackupVerification,involvedObject.name=$verification" --sort-by=.lastTimestamp \
+        -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
+        | grep -E 'PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PointInTimePartial' | sed "s|^|[verification/$verification] |" || true)
+    if [[ -n "$VERIFICATION_EVENTS" ]]; then
+        PITR_EVENTS+="${PITR_EVENTS:+$'\n'}$VERIFICATION_EVENTS"
+    fi
+done
 if [[ -n "$PITR_EVENTS" ]]; then
-    echo "PITR warnings for $MFG_NAME (PITRArchiveReissueRiskDetected: playbook 39; PITRArchiveUnsafeHistoryDetected: playbook 38; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PointInTimePartial: playbooks 32 and 40):"
+    echo "PITR warnings for $MFG_NAME and its verifications (PITRArchiveReissueRiskDetected: playbook 39; PITRArchiveUnsafeHistoryDetected: playbook 38; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PointInTimePartial: playbooks 32 and 40):"
     echo "$PITR_EVENTS"
 fi
 

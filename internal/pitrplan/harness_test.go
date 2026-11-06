@@ -182,9 +182,13 @@ func (w *world) file(site, name string, fsrv uint32, prev, base string, specs ..
 	sum := sha256.Sum256(data)
 	id := hex.EncodeToString(sum[:])
 	w.objects[site+"/"+name+"/"+id] = data
+	// Bind the coverage to the row like the archiver does (binlog_upload.go):
+	// PlanSite trusts complete hints only when coverage.contentId is the row ID.
+	cov := *ev.Metadata.GTIDCoverage
+	cov.ContentID = id
 	m := w.manifest(site)
 	m.Files = append(m.Files, sidecar.ManifestEntry{Name: name, ID: id, BaseGTIDs: w.set(base).String(), PreviousGTIDs: ev.Metadata.PreviousGTIDs,
-		GTIDCoverage: ev.Metadata.GTIDCoverage, Size: int64(len(data)), FirstEventTime: ev.Metadata.FirstEventTime})
+		GTIDCoverage: &cov, Size: int64(len(data)), FirstEventTime: ev.Metadata.FirstEventTime})
 }
 
 // lose deletes a row's object (the row stays listed).
@@ -211,8 +215,14 @@ func (w *world) quarantine(site, name string, at time.Time) {
 
 // promote records a promotion of site's server (uuid short name).
 func (w *world) promote(site, short, executed string, at time.Time) {
+	w.record(site, pitrarchive.RecordPromotion, short, executed, at, 5*time.Second)
+}
+
+// record appends a record of any kind with ProbeInterval pi (0: unknown).
+func (w *world) record(site string, kind pitrarchive.RecordKind, short, executed string, at time.Time, pi time.Duration) {
 	m := w.manifest(site)
-	m.AppendPromotionRecord(pitrarchive.PromotionRecord{ServerUUID: uuids[short], ServerID: servers[short], GTIDExecuted: w.set(executed).String(), ObservedAt: at})
+	m.AppendPromotionRecord(pitrarchive.PromotionRecord{Kind: kind, ServerUUID: uuids[short], ServerID: servers[short], GTIDExecuted: w.set(executed).String(),
+		ObservedAt: at, ProbeInterval: pitrarchive.Duration(pi)})
 }
 
 // mark sets site's history-integrity marker.

@@ -34,6 +34,7 @@ func scenario68PITRFailbackWithReclone() runner.Scenario {
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#68-pitr-failback-with-reclone",
 		Timeout:           75 * time.Minute,
+		CleanupTimeout:    pitrCleanupBudget(0),
 		ResetBeforeRunAll: true,
 		Precheck:          assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
@@ -137,7 +138,7 @@ func s68Cycle1() runner.Step {
 			if err := s68Era(ctx, env, b, 4, "M2", "T2", true); err != nil {
 				return err
 			}
-			if err := pitrRecloneSite(ctx, env, a); err != nil {
+			if err := pitrRecloneSite(ctx, env, a, false); err != nil {
 				return err
 			}
 			if _, err := pitrPlannedFailover(ctx, env, a, false); err != nil {
@@ -183,6 +184,14 @@ func s68Cycle2() runner.Step {
 		Name:  "cycle 2: A→B, era B without a flush, reclone a, failback, era A'' + flush a",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			a, b := ctxFetch(env, "siteA"), ctxFetch(env, "siteB")
+			// Everything a executed before the failover was sealed and
+			// archived by cycle 1's last flushing fence (nothing commits
+			// in between), so b's unarchived tail is exactly what b
+			// executes from here until the reclone of a.
+			before, err := pitrSiteGTID(ctx, env, a)
+			if err != nil {
+				return err
+			}
 			if _, err := pitrPlannedFailover(ctx, env, b, false); err != nil {
 				return err
 			}
@@ -201,7 +210,22 @@ func s68Cycle2() runner.Step {
 			}); err != nil {
 				return err
 			}
-			if err := pitrRecloneSite(ctx, env, a); err != nil {
+			after, err := pitrSiteGTID(ctx, env, b)
+			if err != nil {
+				return err
+			}
+			tail, err := gtidSubtract(after, before)
+			if err != nil {
+				return err
+			}
+			if tail == "" {
+				return fmt.Errorf("b executed nothing in cycle 2's era (%s ⊆ %s)", after, before)
+			}
+			env.Capture.Note("cycle 2: b's unarchived tail is " + tail)
+			if err := ctxStash(ctx, env, "tailB", tail); err != nil {
+				return err
+			}
+			if err := pitrRecloneSite(ctx, env, a, false); err != nil {
 				return err
 			}
 			if _, err := pitrPlannedFailover(ctx, env, a, false); err != nil {
@@ -221,11 +245,19 @@ func s68VerifyCycle2Gap() runner.Step {
 			if err != nil {
 				return err
 			}
-			_, err = pitrVerifyRefused(ctx, env, s68ID, s68DBName, "c2-gap", pitrExpectation{
+			v, err := pitrVerifyRefused(ctx, env, s68ID, s68DBName, "c2-gap", pitrExpectation{
 				Backup: "b1", Mode: "timestamp", Fence: f,
 				Markers: []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b", "M4", "M5"},
 			}, "PITRArchiveGap", ctxFetch(env, "uuidB"), "unarchived tail")
-			return err
+			if err != nil {
+				return err
+			}
+			// The refusal must name b's unarchived tail itself, not just
+			// some interval of b's UUID (F192).
+			if err := refusalNamesExactly(findCondition(v.Status.Conditions, "Verified").Message, ctxFetch(env, "tailB")); err != nil {
+				return fmt.Errorf("verification %s: %w", v.Name, err)
+			}
+			return nil
 		},
 	}
 }

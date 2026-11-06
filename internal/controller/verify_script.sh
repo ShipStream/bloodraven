@@ -333,8 +333,19 @@ if [[ -n "$SANITY_Q" ]]; then
     fi
 fi
 
-# Publishing the verdict is the last action.
+# Publishing the verdict is the last action. restore.py builds it within
+# this container's share of the kubelet's termination messages (the same
+# BLOODRAVEN_TERMINATION_MESSAGE_LIMIT the controller renders, default
+# 3072); a longer one would
+# be cut, and a cut verdict must never reach the controller.
 if [[ -s "$PITR_VERDICT" ]]; then
+    verdict_limit="${BLOODRAVEN_TERMINATION_MESSAGE_LIMIT:-3072}"
+    [[ "$verdict_limit" =~ ^[0-9]+$ && "$verdict_limit" -gt 0 ]] || verdict_limit=3072
+    (( verdict_limit > 4096 )) && verdict_limit=4096
+    verdict_bytes="$(wc -c <"$PITR_VERDICT")"
+    if (( verdict_bytes > verdict_limit )); then
+        fail 1 "PITRCoverageInvalid: restore.py's verdict is $verdict_bytes bytes, over the $verdict_limit-byte termination message"
+    fi
     cat "$PITR_VERDICT" >"$TERMINATION_LOG"
 fi
 log "verification succeeded"

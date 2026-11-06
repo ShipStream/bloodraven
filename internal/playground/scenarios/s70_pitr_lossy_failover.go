@@ -2,6 +2,7 @@ package scenarios
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -32,6 +33,12 @@ const (
 	// whatever the delay, and promotion resets b's channel, so a longer
 	// delay does not slow the failover.
 	s70SourceDelay = 5 * time.Minute
+	// s70RepairTimeout bounds cleanup's reclone of a RecoveryBlocked site.
+	s70RepairTimeout = 12 * time.Minute
+	// pitrOperatorArchiverPollInterval mirrors the operator's
+	// archiverPollInterval (internal/controller/archiver_poller.go): how
+	// often it polls each sidecar's /archiver/status.
+	pitrOperatorArchiverPollInterval = 30 * time.Second
 )
 
 // scenario70PITRLossyFailover is DESIGN §9.4 s70 and §4.15 Examples 5, 8(c)
@@ -53,6 +60,7 @@ func scenario70PITRLossyFailover() runner.Scenario {
 		Risk:              "high",
 		DocLink:           "playground/chaos-scenarios.md#70-pitr-lossy-failover",
 		Timeout:           75 * time.Minute,
+		CleanupTimeout:    pitrCleanupBudget(s70RepairTimeout),
 		ResetBeforeRunAll: true,
 		Precheck:          assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
@@ -120,12 +128,16 @@ func s70LossyFailover() runner.Step {
 			if err != nil {
 				return err
 			}
+			// Stashed first: a partly applied delay (STOP and CHANGE done,
+			// START failed) must be cleaned up too. Cleanup checks b's live
+			// state before touching it (F193).
+			if err := ctxStash(ctx, env, "delayPending", "true"); err != nil {
+				_ = replica.Close()
+				return err
+			}
 			err = setSourceDelay(ctx, replica, int(s70SourceDelay.Seconds()))
 			_ = replica.Close()
 			if err != nil {
-				return err
-			}
-			if err := ctxStash(ctx, env, "delayApplied", "true"); err != nil {
 				return err
 			}
 			// L is the two markers plus the writer's commits around them.
@@ -149,7 +161,11 @@ func s70LossyFailover() runner.Step {
 			if err := pitrStashFence(ctx, env, "A-flush", flushed); err != nil {
 				return err
 			}
-			killed := time.Now()
+			// Read on b's clock, which b's sidecar records with (F182).
+			killed, err := pitrSiteNow(ctx, env, b)
+			if err != nil {
+				return err
+			}
 			if err := env.Chaos.ScaleSiteToZero(ctx, a); err != nil {
 				return err
 			}
@@ -158,9 +174,6 @@ func s70LossyFailover() runner.Step {
 			if _, err := env.Wait.UntilCR(foCtx, env.Namespace, "failover to "+b, func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 				return m.Status.ActiveSite == b, "active=" + m.Status.ActiveSite, nil
 			}); err != nil {
-				return err
-			}
-			if err := ctxStash(ctx, env, "failedOver", "true"); err != nil {
 				return err
 			}
 			if _, err := pitrWaitPromotionRecorded(ctx, env, b, killed, false); err != nil {
@@ -328,13 +341,21 @@ func s70RecloneAndFailback() runner.Step {
 			if err := env.Chaos.ScaleSiteToOne(ctx, a); err != nil {
 				return err
 			}
-			if err := pitrRecloneSite(ctx, env, a); err != nil {
+			// a returns RecoveryBlocked with L as its divergent set: the
+			// reclone is confirmed by that GTID's prefix (F067).
+			if err := pitrRecloneSite(ctx, env, a, true); err != nil {
 				return err
 			}
 			// a's own manifest still holds the archived row with L, which
 			// its recloned server no longer has: the audit flags it, which
 			// is what the runner's reissue warning keys on.
 			if err := s70WaitSuspectRows(ctx, env, a); err != nil {
+				return err
+			}
+			// The warning reads the operator's cached poll of a, not the
+			// sidecar: fail back only once a poll after the rows appeared
+			// has run (F070).
+			if err := s70WaitOperatorPolled(ctx, env, a); err != nil {
 				return err
 			}
 			requested := time.Now()
@@ -387,6 +408,44 @@ func s70WaitSuspectRows(ctx context.Context, env *runner.Env, site string) error
 		case <-tick.C:
 		}
 	}
+}
+
+// s70OperatorPollWait is how long after a sidecar first reports suspect
+// rows an operator poll of that sidecar has certainly started and finished:
+// two poll intervals plus slack for the poll itself.
+const s70OperatorPollWait = 2*pitrOperatorArchiverPollInterval + 10*time.Second
+
+// s70OperatorPollFailing reports whether status.pitr.message says the
+// operator's last poll of site failed, in which case its cached suspect-row
+// count may be stale.
+func s70OperatorPollFailing(pitr *v1alpha1.PITRStatus, site string) bool {
+	return pitr != nil && strings.Contains(pitr.Message, site+": archiver status unavailable")
+}
+
+// s70WaitOperatorPolled waits s70OperatorPollWait after the suspect rows were
+// seen, then requires that the operator's latest poll of site succeeded and
+// the sidecar still reports the rows. The operator publishes no suspect-row
+// count, so the poll cadence is the synchronization: a poll started after
+// the rows appeared sees them, since a manifest's divergent rows stay until
+// quarantined.
+func s70WaitOperatorPolled(ctx context.Context, env *runner.Env, site string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(s70OperatorPollWait):
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "operator polls "+site+" successfully", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		msg := "status.pitr unset"
+		if m.Status.PITR != nil {
+			msg = "status.pitr.message=" + m.Status.PITR.Message
+		}
+		return m.Status.PITR != nil && !s70OperatorPollFailing(m.Status.PITR, site), msg, nil
+	}); err != nil {
+		return err
+	}
+	return s70WaitSuspectRows(ctx, env, site)
 }
 
 func s70VerifyHistoryReset() runner.Step {
@@ -448,22 +507,56 @@ func s70Remedy() runner.Step {
 	}
 }
 
+// s70ShouldClearDelay decides from b's live state whether cleanup must
+// reset SOURCE_DELAY: only while b is still a read-only replica whose
+// channel carries a delay. A promoted b has no channel to change (F193).
+func s70ShouldClearDelay(readOnly, hasChannel bool, delay int64) bool {
+	return readOnly && hasChannel && delay > 0
+}
+
+// s70ReplicaDelay reads b's role and the default channel's configured
+// SOURCE_DELAY.
+func s70ReplicaDelay(ctx context.Context, c *pgmysql.SiteClient) (readOnly, hasChannel bool, delay int64, err error) {
+	var ro int64
+	if err := c.DB.QueryRowContext(ctx, "SELECT @@global.read_only").Scan(&ro); err != nil {
+		return false, false, 0, fmt.Errorf("read read_only: %w", err)
+	}
+	err = c.DB.QueryRowContext(ctx, "SELECT DESIRED_DELAY FROM performance_schema.replication_applier_configuration WHERE CHANNEL_NAME = ''").Scan(&delay)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ro != 0, false, 0, nil
+	}
+	if err != nil {
+		return false, false, 0, fmt.Errorf("read SOURCE_DELAY: %w", err)
+	}
+	return ro != 0, true, delay, nil
+}
+
 func s70Cleanup(ctx context.Context, env *runner.Env) error {
 	var errs []error
 	// The ScaleSiteToZero reverter has brought a back. If the run stopped
-	// before the failover, b still carries the applier delay; if it stopped
-	// before the reclone, a is RecoveryBlocked.
-	if ctxFetch(env, "delayApplied") != "" && ctxFetch(env, "failedOver") == "" {
-		if c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, ctxFetch(env, "siteB"), env.Creds); err == nil {
-			if err := clearSourceDelay(ctx, c); err != nil {
+	// before the failover, b may still carry the applier delay (judged
+	// from b's live state); if it stopped before the reclone, a is
+	// RecoveryBlocked.
+	if ctxFetch(env, "delayPending") != "" {
+		b := ctxFetch(env, "siteB")
+		if c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, b, env.Creds); err == nil {
+			readOnly, hasChannel, delay, err := s70ReplicaDelay(ctx, c)
+			switch {
+			case err != nil:
 				errs = append(errs, err)
+			case s70ShouldClearDelay(readOnly, hasChannel, delay):
+				if err := clearSourceDelay(ctx, c); err != nil {
+					errs = append(errs, err)
+				} else {
+					env.Capture.Note(fmt.Sprintf("cleared SOURCE_DELAY=%d on replica %s", delay, b))
+				}
 			}
 			_ = c.Close()
 		} else {
 			errs = append(errs, err)
 		}
 	}
-	if err := repairDivergentSites(ctx, env, 12*time.Minute); err != nil {
+	if err := repairDivergentSites(ctx, env, s70RepairTimeout); err != nil {
 		errs = append(errs, err)
 	}
 	if err := pitrCleanup(ctx, env, s70DBName); err != nil {
