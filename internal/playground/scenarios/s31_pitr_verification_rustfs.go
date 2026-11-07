@@ -431,7 +431,7 @@ func s31CreateVerification() runner.Step {
 			}
 			runStem := ctxFetch(env, "backupRunStem")
 			query := "SELECT IF(SUM(phase='baseline') = 1 AND SUM(phase='before-target') = 1 AND SUM(phase='after-target') = 0, 1, 0) FROM " + s31DBName + ".marker WHERE run_id=" + quoteSQLString(runStem)
-			pit := &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: ctxFetch(env, "pitrTargetTimestamp")}
+			pit := &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: ctxFetch(env, "pitrTargetTimestamp")}
 			return createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backupName"), s31ID, pit, query, 1)
 		},
 	}

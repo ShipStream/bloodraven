@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -399,9 +400,8 @@ type BackupEncryptionSpec struct {
 	// future releases can add envelope-over-KMS / XChaCha20-Poly1305
 	// / external key-manager modes without a breaking CRD bump.
 	// +kubebuilder:default="AES-256-GCM"
-	// +kubebuilder:validation:Enum=AES-256-GCM
 	// +optional
-	Algorithm string `json:"algorithm,omitempty"`
+	Algorithm EncryptionAlgorithm `json:"algorithm,omitempty"`
 
 	// PassphraseSecretKeyRef selects the Secret key, in the same namespace
 	// as the MysqlFailoverGroup, holding the passphrase. The
@@ -620,9 +620,8 @@ type DumpOptions struct {
 
 	// Compression algorithm used by the dump utility.
 	// +kubebuilder:default="zstd"
-	// +kubebuilder:validation:Enum=none;gzip;zstd
 	// +optional
-	Compression string `json:"compression,omitempty"`
+	Compression DumpCompression `json:"compression,omitempty"`
 
 	// ExcludeSchemas skipped by the dump.
 	// +optional
@@ -649,6 +648,20 @@ type DumpOptions struct {
 	// +optional
 	Ocimds *bool `json:"ocimds,omitempty"`
 }
+
+// DumpCompression is the util.dumpInstance() compression option. The
+// values are mysqlsh's own and are passed to it verbatim.
+// +kubebuilder:validation:Enum=none;gzip;zstd
+type DumpCompression string
+
+const (
+	// DumpCompressionNone stores the dump chunks uncompressed.
+	DumpCompressionNone DumpCompression = "none"
+	// DumpCompressionGzip compresses the dump chunks with gzip.
+	DumpCompressionGzip DumpCompression = "gzip"
+	// DumpCompressionZstd compresses the dump chunks with zstd.
+	DumpCompressionZstd DumpCompression = "zstd"
+)
 
 // BackupSchedule drives recurring backups via a Kubernetes CronJob owned
 // by the operator. Each schedule references a named profile. The CronJob's
@@ -702,7 +715,7 @@ type BackupSchedule struct {
 	// +kubebuilder:default=Forbid
 	// +kubebuilder:validation:Enum=Allow;Forbid;Replace
 	// +optional
-	ConcurrencyPolicy string `json:"concurrencyPolicy,omitempty"`
+	ConcurrencyPolicy batchv1.ConcurrencyPolicy `json:"concurrencyPolicy,omitempty"`
 
 	// SuccessfulJobsHistoryLimit is forwarded to the CronJob spec.
 	// +kubebuilder:default=3
@@ -860,7 +873,7 @@ type BackupScheduleStatus struct {
 
 	// LastBackupPhase is the phase of that most-recent MysqlBackup.
 	// +optional
-	LastBackupPhase string `json:"lastBackupPhase,omitempty"`
+	LastBackupPhase BackupPhase `json:"lastBackupPhase,omitempty"`
 
 	// LastSuccessfulBackupName is the name of the most recent Succeeded
 	// MysqlBackup created by this schedule. Lets dashboards link to the
@@ -968,15 +981,13 @@ type RestoreInPlaceSpec struct {
 // The in-place restore is considered Succeeded once the primary has the
 // fresh data; the peers are recloned afterwards, and until then they are
 // excluded from automatic promotion and the reader Services.
-// +kubebuilder:validation:Enum="";Preflight;Fencing;Restoring;Resuming;Succeeded;Failed
+//
+// A terminal status is kept, even after spec.restoreInPlace is removed, so
+// its confirmTokenUsed keeps blocking replays.
+// +kubebuilder:validation:Enum=Preflight;Fencing;Restoring;Resuming;Succeeded;Failed
 type RestoreInPlacePhase string
 
 const (
-	// RestoreInPlaceNone is the zero value (no in-place restore has been
-	// observed). A terminal status is kept, even after spec.restoreInPlace
-	// is removed, so its confirmTokenUsed keeps blocking replays.
-	RestoreInPlaceNone RestoreInPlacePhase = ""
-
 	// RestoreInPlacePreflight means the operator has accepted the
 	// confirmation token and is validating preconditions (active site
 	// writable, deployment rolled out, source artifact resolvable).
@@ -1077,7 +1088,7 @@ type RestoreReclonesStatus struct {
 	FencedGtidExecuted string `json:"fencedGtidExecuted,omitempty"`
 
 	// Pending lists the peer sites still to be recloned, in the order
-	// they are recloned (primary-candidate sites first). Pending sites
+	// they are recloned (PrimaryCandidate sites first). Pending sites
 	// are never promoted automatically and are removed from the -replica
 	// and read-only Services.
 	// +optional
@@ -1182,6 +1193,33 @@ type RestoreOfflineFenceStatus struct {
 	SessionsEvicted bool `json:"sessionsEvicted,omitempty"`
 }
 
+// RestoreScopeType is what an in-place restore restores.
+// +kubebuilder:validation:Enum=Full;Schema
+type RestoreScopeType string
+
+const (
+	// RestoreScopeFull restores the whole instance.
+	RestoreScopeFull RestoreScopeType = "Full"
+	// RestoreScopeSchema restores one schema, named by RestoreScope.Schema.
+	RestoreScopeSchema RestoreScopeType = "Schema"
+)
+
+// RestoreScope is the scope of an accepted in-place restore, inferred from
+// spec.restoreInPlace.loadOptions.includeSchemas: one schema is a Schema
+// restore, none is a Full restore.
+// +kubebuilder:validation:XValidation:rule="self.type == 'Schema' ? has(self.schema) : !has(self.schema)",message="schema is required when type is Schema, and forbidden otherwise"
+type RestoreScope struct {
+	// Type is Full or Schema.
+	// +required
+	Type RestoreScopeType `json:"type"`
+
+	// Schema is the restored schema when Type is Schema.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Schema string `json:"schema,omitempty"`
+}
+
 // RestoreInPlaceStatus tracks an in-flight or completed in-place
 // restore.
 type RestoreInPlaceStatus struct {
@@ -1207,10 +1245,10 @@ type RestoreInPlaceStatus struct {
 	// +optional
 	TargetSite string `json:"targetSite,omitempty"`
 
-	// Scope is a human-readable tag: "full" for a full-instance
-	// restore, or "schema:<name>" for a per-schema restore.
+	// Scope is what the run restores: the whole instance, or one schema.
+	// It is pinned when the run is accepted.
 	// +optional
-	Scope string `json:"scope,omitempty"`
+	Scope *RestoreScope `json:"scope,omitempty"`
 
 	// ConfirmTokenUsed records the spec.restoreInPlace.confirm value of
 	// the most recent executed restore. Subsequent reconciles ignore
@@ -1291,11 +1329,14 @@ type RestoreStatus struct {
 	// JobUID identifies the producing Job across retries using the same name.
 	// +optional
 	JobUID string `json:"jobUID,omitempty"`
-	// Reason is the failure token (the first word of the failing step's
-	// termination message, for example PITRArchiveDivergentHistory), or
-	// PointInTimePartial on a partial point-in-time success.
+	// Reason is the failure token: the PITR catalog token found in the
+	// failing step's termination message, for example
+	// PITRArchiveDivergentHistory. Absent on success and for a failure
+	// that carries no token.
 	// +optional
-	Reason string `json:"reason,omitempty"`
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:Pattern=`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`
+	Reason PITRToken `json:"reason,omitempty"`
 
 	// Phase of the restore Job.
 	// +optional

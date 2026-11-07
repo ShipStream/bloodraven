@@ -630,7 +630,7 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 		}
 		siteOut = append(siteOut, v1alpha1.DragonflySiteStatus{
 			Name:             s.Name,
-			Role:             v1alpha1.DragonflyRole(role),
+			Role:             apiDragonflyRole(role),
 			Reachable:        s.Reachable,
 			ServiceName:      dragonflySiteServiceName(fg.Name, s.Name),
 			ReplicationState: s.Info.Role,

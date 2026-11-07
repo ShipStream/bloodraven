@@ -344,12 +344,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 
 		concurrency := batchv1.ForbidConcurrent
 		switch sched.ConcurrencyPolicy {
-		case "Allow":
+		case batchv1.AllowConcurrent:
 			concurrency = batchv1.AllowConcurrent
-		case "Replace":
+		case batchv1.ReplaceConcurrent:
 			concurrency = batchv1.ReplaceConcurrent
-		case "Forbid", "":
-			concurrency = batchv1.ForbidConcurrent
 		}
 
 		cj.Spec.Schedule = sched.Schedule
@@ -465,7 +463,7 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 				created := ru.latest.CreationTimestamp
 				entry.LastScheduleTime = &created
 				entry.LastBackupName = ru.latest.Name
-				entry.LastBackupPhase = string(ru.latest.Status.Phase)
+				entry.LastBackupPhase = ru.latest.Status.Phase
 				entry.LastSuccessfulTime = ru.lastOK
 				entry.LastSuccessfulBackupName = ru.lastOKName
 				entry.LastRetryAttempt = effectiveBackupAttempt(&ru.latest)

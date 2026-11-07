@@ -23,7 +23,7 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}

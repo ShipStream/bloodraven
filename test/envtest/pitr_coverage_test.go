@@ -93,7 +93,7 @@ func TestPITRRemovedFieldsArePruned(t *testing.T) {
 		"apiVersion": v1alpha1.GroupVersion.String(), "kind": "MysqlBackupVerification",
 		"metadata": map[string]any{"name": "verify", "namespace": ns},
 		"spec": map[string]any{"failoverGroupRef": map[string]any{"name": "lion"}, "profileName": "nightly-s3",
-			"pointInTime": map[string]any{"mode": "latest", "sites": []any{"iad"}}},
+			"pointInTime": map[string]any{"mode": string(v1alpha1.PointInTimeModeLatest), "sites": []any{"iad"}}},
 	}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
@@ -227,7 +227,7 @@ func TestPITRTargetPatternAndExclusions(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: ns},
 			Spec: v1alpha1.MysqlBackupVerificationSpec{
 				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
-				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: tc.stop, ExcludeGtids: tc.exclude},
+				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: tc.stop, ExcludeGtids: tc.exclude},
 			},
 		}
 		err = k8sClient.Create(ctx, v)

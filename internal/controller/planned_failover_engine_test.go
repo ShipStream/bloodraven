@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 )
 
 // pfExpect is one engine-table expectation after the scripted steps.
@@ -378,7 +379,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 					if st.LastFailover == nil || st.LastFailoverTarget != "pdx" || st.PromotionGtidExecuted != "uuid-iad:1-10" {
 						t.Errorf("failover record = %v %q %q", st.LastFailover, st.LastFailoverTarget, st.PromotionGtidExecuted)
 					}
-					if len(h.sink.terminals) != 1 || mapOutcomeToMetricResult(&h.sink.terminals[0]) != "success" {
+					if len(h.sink.terminals) != 1 || labels.PlannedFailoverResult(h.sink.terminals[0].Outcome) != "succeeded" {
 						t.Errorf("terminals = %+v", h.sink.terminals)
 					}
 				}}},
@@ -707,30 +708,28 @@ func TestPF_ZombieClaimReleased(t *testing.T) {
 	}
 }
 
-// TestOutcomeReasonMapping pins the metric mapping and that every reason
-// in §10.2 is a known enum value.
+// TestOutcomeReasonMapping pins the metric result label (the kebab-case
+// of the outcome, whatever the reason) and that every reason in §10.2 is a
+// known enum value.
 func TestOutcomeReasonMapping(t *testing.T) {
 	cases := []struct {
 		outcome v1alpha1.PlannedFailoverOutcome
 		reason  v1alpha1.PlannedFailoverReason
 		want    string
 	}{
-		{v1alpha1.PlannedFailoverOutcomeSucceeded, "", "success"},
-		{v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonCooldownActive, "rejected"},
-		{v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAdmissionTimeout, "failed_timeout"},
-		{v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout, "failed_timeout"},
-		{v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonDragonflySyncTimeout, "failed_timeout"},
-		{v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonDivergentTarget, "failed_other"},
-		{v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverReasonTargetLost, "failed_other"},
-		{v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed, "failed_other"},
+		{v1alpha1.PlannedFailoverOutcomeSucceeded, "", "succeeded"},
+		{v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonCooldownActive, "not-started"},
+		{v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAdmissionTimeout, "not-started"},
+		{v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout, "rolled-back"},
+		{v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonDragonflySyncTimeout, "source-left-fenced"},
+		{v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonDivergentTarget, "rolled-back"},
+		{v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverReasonTargetLost, "promoted-unconfirmed"},
+		{v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed, "manual-recovery-required"},
 	}
 	for _, tc := range cases {
-		if got := mapOutcomeToMetricResult(&v1alpha1.PlannedFailoverResult{Outcome: tc.outcome, Reason: tc.reason}); got != tc.want {
+		if got := labels.PlannedFailoverResult(tc.outcome); got != tc.want {
 			t.Errorf("%s/%s → %q, want %q", tc.outcome, tc.reason, got, tc.want)
 		}
-	}
-	if got := mapOutcomeToMetricResult(nil); got != "failed_other" {
-		t.Errorf("nil → %q", got)
 	}
 	// ExecuteFailed is only ever a ManualRecoveryRequired reason (§10.2):
 	// the engine maps an Inconsistent promotion without a reason to it.

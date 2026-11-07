@@ -407,7 +407,7 @@ func TestReconcile_MovedEncryptionBaselineRendersNothing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			fg := encTestFG()
-			fg.Spec.UpdateStrategy = "Recreate"
+			fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
 			fg.Finalizers = []string{v1alpha1.FailoverGroupFinalizer}
 			fg.Status.ActiveSite = "dc1"
 			dc1 := v1alpha1.SiteEncryptionStatus{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,

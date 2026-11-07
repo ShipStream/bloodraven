@@ -59,7 +59,7 @@ func TestOpenAdminConnectionRootFallback(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 			Spec: v1alpha1.MysqlFailoverGroupSpec{
 				Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
-				Sites:       []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: "primary-candidate"}},
+				Sites:       []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate}},
 			},
 		}
 		fg.Status.ActiveSite = "dc1"
@@ -190,7 +190,7 @@ func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1a
 				OperatorSecretName: "mysql-operator",
 				AppSecretName:      "mysql-app",
 			},
-			Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: "primary-candidate"}},
+			Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate}},
 		},
 	}
 	fg.Status.ActiveSite = "dc1"
@@ -249,7 +249,7 @@ func TestReconcileCredentialsDefersDuringInitFromBackup(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 				Spec: v1alpha1.MysqlFailoverGroupSpec{
 					Credentials:    v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
-					Sites:          []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: "primary-candidate"}},
+					Sites:          []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate}},
 					InitFromBackup: &v1alpha1.InitFromBackupSpec{},
 				},
 			}

@@ -91,7 +91,7 @@ Now the constraint objective 9 turns on: **the operator refuses to rotate the ac
 
 Lose a replica's keyring in that window and you re-clone the site from a healthy peer. Lose the primary's and you have lost data. So the site you cannot rotate is not a fixed name — it is whichever site is currently active. On `playground` right now that is `iad`.
 
-Work through the consequence for the three sites. `pdx` is a replica and rotatable. The `reader` is `role: read-only` and never a primary, so it is rotatable too. `iad` becomes rotatable by no longer being primary — via the planned failover you already run from Unit 4, at RPO 0 by construction.
+Work through the consequence for the three sites. `pdx` is a replica and rotatable. The `reader` is `role: ReadOnly` and never a primary, so it is rotatable too. `iad` becomes rotatable by no longer being primary — via the planned failover you already run from Unit 4, at RPO 0 by construction.
 
 ```widget
 {

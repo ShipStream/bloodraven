@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -244,7 +245,7 @@ func s14VerifyDrainRecoveredAll() runner.Step {
 			}
 			var newPrimary string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "writable" {
+				if s.State == v1alpha1.SiteStateWritable {
 					newPrimary = s.Name
 					break
 				}
@@ -298,7 +299,7 @@ func s14ResetReplicationDelay(ctx context.Context, env *runner.Env) error {
 		return fmt.Errorf("cleanup: get MFG: %w", err)
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.State != "read-only" {
+		if s.State != v1alpha1.SiteStateReadOnly {
 			continue
 		}
 		client, err := env.MySQL(s.Name)
@@ -321,7 +322,7 @@ func s14ResetReplicationDelay(ctx context.Context, env *runner.Env) error {
 		}
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.State != "writable" {
+		if s.State != v1alpha1.SiteStateWritable {
 			continue
 		}
 		client, err := env.MySQL(s.Name)

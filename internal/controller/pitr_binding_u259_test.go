@@ -176,7 +176,7 @@ func TestPITRBindingEstablishingBecomesRead(t *testing.T) {
 	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b" })
 	mbv := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: pbtNS},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: pbtName}, ProfileName: "b",
-			PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ArchiveProfileName: "b"}}}
+			PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ArchiveProfileName: "b"}}}
 	if err := e.c.Create(context.Background(), mbv); err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestPITRBindingTargetsPreLaunchRestoreFailure(t *testing.T) {
 	e.verdict(e.entry(src), PITRArchiveCheckResult{State: PITRArchiveCheckStateRefused, Reason: pitrarchive.TokenArchiveNotFound})
 	e.pass()
 	e.updateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, Reason: string(v1alpha1.PITRTokenArchiveBindingNotReady)}
+		st.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, Reason: v1alpha1.PITRTokenArchiveBindingNotReady}
 	})
 	for i := 0; i < 3; i++ {
 		e.pass()

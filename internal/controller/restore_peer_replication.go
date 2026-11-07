@@ -15,6 +15,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/metrics"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -643,7 +644,7 @@ func emitRestoreReclonePendingMetric(fg *v1alpha1.MysqlFailoverGroup) {
 		metrics.SetRestoreReclonePending(fg.Namespace, fg.Name, "", nil)
 		return
 	}
-	metrics.SetRestoreReclonePending(fg.Namespace, fg.Name, string(q.Phase), q.Pending)
+	metrics.SetRestoreReclonePending(fg.Namespace, fg.Name, labels.RestoreReclonePhase(q.Phase), q.Pending)
 }
 
 // --- reconciler: the Fencing step ---

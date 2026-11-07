@@ -174,9 +174,9 @@ func siteCountSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 	writable, readonly, unhealthy := 0, 0, 0
 	for _, s := range fg.Status.Sites {
 		switch s.State {
-		case "writable":
+		case v1alpha1.SiteStateWritable:
 			writable++
-		case "read-only":
+		case v1alpha1.SiteStateReadOnly:
 			readonly++
 		default:
 			// Includes "unreachable", "unknown", and the empty

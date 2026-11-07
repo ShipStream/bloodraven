@@ -159,7 +159,6 @@ const (
 	ReasonAwaitingRollout          = "AwaitingRollout"
 	ReasonBindingLimitReached      = "BindingLimitReached"
 	ReasonCloning                  = "Cloning"
-	ReasonComplete                 = "Complete"
 	ReasonCredentialsComplete      = "CredentialsComplete"
 	ReasonCredentialsIncomplete    = "CredentialsIncomplete"
 	ReasonDegraded                 = "Degraded"
@@ -308,7 +307,9 @@ const (
 // The same strings are the MysqlBackupVerification Verified=False reasons
 // and the status.restore.reason values for a refused point-in-time restore.
 // The sidecar, which does not import this package, keeps an identical
-// catalog in internal/pitrarchive.
+// catalog in internal/pitrarchive. The replay script's failure sentinel,
+// BLOODRAVEN_PITR_FAILED, stays in Job messages and logs and is served as
+// PITRReplayFailed.
 type PITRToken string
 
 // PITRToken values.
@@ -352,7 +353,7 @@ const (
 	PITRTokenPlanTooLarge              PITRToken = "PITRPlanTooLarge"
 	PITRTokenCoverageInvalid           PITRToken = "PITRCoverageInvalid"
 	PITRTokenReplayMismatch            PITRToken = "PITRReplayMismatch"
-	PITRTokenPITRFailed                PITRToken = "BLOODRAVEN_PITR_FAILED"
+	PITRTokenReplayFailed              PITRToken = "PITRReplayFailed"
 )
 
 // PITRArchiveBindingReason values: status.pitrArchiveBindings[].reason, and

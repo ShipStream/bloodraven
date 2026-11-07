@@ -255,7 +255,7 @@ func TestRegisterManager_HydratesUncachedBeforeRun(t *testing.T) {
 	cached := fg.DeepCopy() // the sync's cached copy predates the run
 	cached.Status.Sites = live.Status.Sites
 
-	cfg := CRConfigToTopologyConfig(cached)
+	cfg := mustTopologyConfig(cached)
 	if err := r.startManager(context.Background(), cached, cfg, nil); err != nil {
 		t.Fatalf("startManager: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestRegisterManager_HydratesUncachedBeforeRun(t *testing.T) {
 func TestStartManager_PlannedViewReadErrorFailsFirstStart(t *testing.T) {
 	r, _, fg, _ := lifecycleRunner(t)
 	r.SetAPIReader(failingReader{})
-	cfg := CRConfigToTopologyConfig(fg)
+	cfg := mustTopologyConfig(fg)
 	if err := r.startManager(context.Background(), fg, cfg, nil); err == nil {
 		t.Fatal("startManager succeeded without an uncached read of the planned-failover claim")
 	}
@@ -300,7 +300,7 @@ func TestRotationReservationSurvivesManagerReplacement(t *testing.T) {
 	r, _, fg, _ := lifecycleRunner(t)
 	nn := FailoverGroupNamespacedName(fg)
 	ctx := context.Background()
-	cfg := CRConfigToTopologyConfig(fg)
+	cfg := mustTopologyConfig(fg)
 
 	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedNoManager {
 		t.Fatalf("reservation with no manager = %v, %q; want refused until a manager runs", ok, why)
@@ -347,7 +347,7 @@ func TestRotationReservationSurvivesManagerReplacement(t *testing.T) {
 func TestRefusedRotationReservationIsNotCarried(t *testing.T) {
 	r, _, fg, _ := lifecycleRunner(t)
 	nn := FailoverGroupNamespacedName(fg)
-	cfg := CRConfigToTopologyConfig(fg)
+	cfg := mustTopologyConfig(fg)
 	if err := r.startManager(context.Background(), fg, cfg, nil); err != nil {
 		t.Fatalf("startManager: %v", err)
 	}

@@ -885,6 +885,10 @@ const (
 	sinkConditionReason = "conditionReason"
 	sinkConditionType   = "conditionType"
 	sinkUnstableReason  = "unstableReason"
+	// sinkStatusReasonPrefix + "<type>" is a typed status reason field that
+	// is not a condition: its values are the api/v1alpha1 constants of
+	// that type.
+	sinkStatusReasonPrefix = "statusReason:"
 )
 
 // eventMethods are the recorder methods (client-go's EventRecorder and the
@@ -908,6 +912,19 @@ var fieldSinks = map[string]string{
 	"k8s.io/api/core/v1.Event.Reason": sinkEvent,
 	// The reason of a deployment API lease refusal (423 and 409 bodies).
 	modulePath + "/internal/controller.DeploymentLeaseError.Reason": sinkUnstableReason,
+	// Typed status reasons that are not conditions (A-33). The planned
+	// failover's rollback, result and hold reasons are not listed: the
+	// engine passes them through pointers this analysis does not follow,
+	// and their Go type already closes the set.
+	apiPath + ".RestoreStatus.Reason":                  sinkStatusReasonPrefix + "PITRToken",
+	apiPath + ".DragonflyUpgradeStatus.Reason":         sinkStatusReasonPrefix + "DragonflyUpgradeReason",
+	apiPath + ".SiteStatus.SourceConvergenceReason":    sinkStatusReasonPrefix + "SourceConvergenceReason",
+	apiPath + ".PlannedFailoverDragonflyStatus.Reason": sinkStatusReasonPrefix + "DragonflyPlannedReason",
+	apiPath + ".PlannedFailoverAdmission.WaitReason":   sinkStatusReasonPrefix + "PlannedFailoverWaitReason",
+	apiPath + ".PlannedFailoverAdmission.DeferReason":  sinkStatusReasonPrefix + "PlannedFailoverDeferReason",
+	apiPath + ".PITRArchiveObservation.Reason":         sinkStatusReasonPrefix + "PITRArchiveRefusalReason",
+	apiPath + ".PITRArchiveBinding.Reason":             sinkStatusReasonPrefix + "PITRArchiveBindingReason",
+	apiPath + ".SiteEncryptionStatus.UnsealReason":     sinkStatusReasonPrefix + "KeyringUnsealReason",
 }
 
 func paramIndex(fn *types.Func, name string) int {

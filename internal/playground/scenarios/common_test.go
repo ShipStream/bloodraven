@@ -145,8 +145,8 @@ func testBaselineMFG(dragonflyEnabled bool) *v1alpha1.MysqlFailoverGroup {
 				Status: metav1.ConditionTrue,
 			}},
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
-				{Name: "pdx", State: "read-only", Replicating: true},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
 			},
 		},
 	}

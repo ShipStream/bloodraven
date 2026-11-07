@@ -114,7 +114,7 @@ func TestReplicationMetricsReplaceRoleOnReread(t *testing.T) {
 	reg.MustRegister(metrics.ReplicationLag, metrics.SiteState)
 	lagFam := gatherFamily(t, reg, "bloodraven_replication_lag_seconds")
 	if _, ok := findSeries(lagFam, map[string]string{
-		"namespace": ns, "group": group, "site": "reader", "role": "dr-only",
+		"namespace": ns, "group": group, "site": "reader", "role": "disaster-recovery",
 	}); ok {
 		t.Fatal("stale dr-only lag series survived a role change")
 	}

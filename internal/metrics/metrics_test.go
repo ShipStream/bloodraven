@@ -357,9 +357,9 @@ func TestSiteGaugesSeparateFailoverGroups(t *testing.T) {
 func TestDeleteReplicationGaugesDropsOldRole(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(ReplicationLag, ReplicationRunning)
-	ReplicationLag.WithLabelValues("ns", "g", "pdx", "dr-only").Set(9)
-	ReplicationRunning.WithLabelValues("ns", "g", "pdx", "dr-only", "io").Set(1)
-	ReplicationRunning.WithLabelValues("ns", "g", "pdx", "dr-only", "sql").Set(1)
+	ReplicationLag.WithLabelValues("ns", "g", "pdx", "disaster-recovery").Set(9)
+	ReplicationRunning.WithLabelValues("ns", "g", "pdx", "disaster-recovery", "io").Set(1)
+	ReplicationRunning.WithLabelValues("ns", "g", "pdx", "disaster-recovery", "sql").Set(1)
 	t.Cleanup(func() { DeleteReplicationGauges("ns", "g", "pdx") })
 
 	DeleteReplicationGauges("ns", "g", "pdx")

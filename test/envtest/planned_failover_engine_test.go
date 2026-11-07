@@ -141,7 +141,7 @@ func pfEnvGroup(t *testing.T, prefix string, annotations map[string]string) type
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}, {Name: "dc2", State: "read-only", Replicating: true}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -269,6 +269,8 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		// The pre-#235 CRD spells the operator Secret credentials.operatorSecret.
 		old := inertFieldsObject(t, fg, "MysqlFailoverGroup")
 		inertFieldsSet(t, old, map[string]any{"operatorSecret": fg.Spec.Credentials.OperatorSecretName}, "spec", "credentials")
+		// ... and spec.updateStrategy as a string, which it defaults.
+		unstructured.RemoveNestedField(old.Object, "spec", "updateStrategy")
 		if err := c.Create(ctx, old); err != nil {
 			t.Fatal(err)
 		}
@@ -280,8 +282,11 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		status := map[string]any{
 			"activeSite": "dc1",
 			"sites": []any{
-				map[string]any{"name": "dc1", "state": "writable"},
-				map[string]any{"name": "dc2", "state": "read-only", "replicating": true},
+				// No state: the old CRD admits only the lower-case spelling,
+				// which the final schema refuses on a status write that does
+				// not ratchet (1.31, 1.32). snapshotWrite sets the states.
+				map[string]any{"name": "dc1"},
+				map[string]any{"name": "dc2", "replicating": true},
 			},
 			"plannedFailover": block,
 		}
@@ -346,7 +351,10 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	// final schema prunes credentials.operatorSecret; it requires both
 	// spec.sites[].serverID (A-08) and credentials.operatorSecretName
 	// (A-02), and every write evaluates the rule that keeps serverID
-	// unique, so the upgrade adds them first.
+	// unique, so the upgrade adds them first. The old CRD also defaulted
+	// the lower-case role primary-candidate and the string updateStrategy
+	// OrderedUpdate, which the final schema refuses (A-27), so the upgrade
+	// rewrites them too.
 	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
@@ -356,8 +364,12 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		sites, _, _ := unstructured.NestedSlice(u.Object, "spec", "sites")
 		for i := range sites {
 			sites[i].(map[string]any)["serverID"] = int64(101 + i)
+			sites[i].(map[string]any)["role"] = string(v1alpha1.SiteRolePrimaryCandidate)
 		}
 		if err := unstructured.SetNestedSlice(u.Object, sites, "spec", "sites"); err != nil {
+			t.Fatal(err)
+		}
+		if err := unstructured.SetNestedField(u.Object, map[string]any{"type": string(v1alpha1.UpdateStrategyOrderedUpdate)}, "spec", "updateStrategy"); err != nil {
 			t.Fatal(err)
 		}
 		if err := unstructured.SetNestedField(u.Object, "mysql-credentials", "spec", "credentials", "operatorSecretName"); err != nil {
@@ -376,11 +388,20 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		}
 		return &fg
 	}
+	// snapshotWrite is a runner status write: it rewrites status.sites
+	// from the poll (so in the CamelCase states, A-28) and leaves the
+	// planned-failover block alone.
 	snapshotWrite := func(nn types.NamespacedName) error {
 		t.Helper()
 		fg := get(nn)
 		fg.Status.UpdatePhase = ""
 		fg.Status.TopologyGeneration++
+		for i := range fg.Status.Sites {
+			fg.Status.Sites[i].State = v1alpha1.SiteStateReadOnly
+			if fg.Status.Sites[i].Name == "dc1" {
+				fg.Status.Sites[i].State = v1alpha1.SiteStateWritable
+			}
+		}
 		return c.Status().Update(ctx, fg)
 	}
 	// A status write that leaves the legacy block unchanged (the runner's

@@ -1826,7 +1826,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		// manager) is not re-proven, so the target's role is checked here
 		// before any statement, and again at the pre-write gate.
 		tm.logger.Warn("planned failover: the target is no longer a primary candidate; not promoting it",
-			"runId", ref.RunID, "site", ref.Target, "role", string(tgt.role))
+			"runId", ref.RunID, "site", ref.Target, "role", string(APISiteRole(tgt.role)))
 		return PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonTargetNotPromotable,
 			TargetServerUUID: U, TargetReachable: true, MayHaveWritten: !p.memoProvesNoWrite(ref.RunID)}, nil
 	}
@@ -1924,7 +1924,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 			var refusal *plannedGateRefusal
 			if errors.As(err, &refusal) {
 				tm.logger.Warn("planned failover: the target is no longer a primary candidate; not promoting it",
-					"runId", ref.RunID, "site", ref.Target, "role", string(tgt.role))
+					"runId", ref.RunID, "site", ref.Target, "role", string(APISiteRole(tgt.role)))
 			}
 			return err
 		},

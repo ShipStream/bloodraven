@@ -378,21 +378,21 @@ func TestRestoreTargetSite(t *testing.T) {
 		{
 			name: "fresh deploy waits even when the seed is observed",
 			status: v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "read-only"},
+				{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly},
 			}},
 			wantSite: "iad",
 		},
 		{
 			name: "writable active site is ready",
 			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "writable"},
+				{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateWritable},
 			}},
 			wantSite: "pdx", wantReady: true,
 		},
 		{
 			name: "seed published but not yet observed writable waits",
 			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"}, {Name: "pdx", State: "read-only"},
+				{Name: "iad", State: v1alpha1.SiteStateWritable}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly},
 			}},
 			wantSite: "pdx",
 		},
@@ -404,7 +404,7 @@ func TestRestoreTargetSite(t *testing.T) {
 		{
 			name: "unreachable active site refuses",
 			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "unreachable"},
+				{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateUnreachable},
 			}},
 			wantSite: "pdx", wantRefuse: true,
 		},
@@ -671,8 +671,8 @@ func TestMysqlBackupReconciler_StampsLabels(t *testing.T) {
 	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: "writable"},
-			{Name: "pdx", State: "read-only", Replicating: true},
+			{Name: "iad", State: v1alpha1.SiteStateWritable},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
 		},
 	}
 	mb := &v1alpha1.MysqlBackup{

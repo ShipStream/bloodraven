@@ -8,7 +8,7 @@ Assemble the artefacts you would actually hand an on-call rotation: a Prometheus
 
 ## How this works
 
-`playground` runs three sites: `iad` and `pdx` as `primary-candidate`, and `reader` with `role: read-only`. You have already backed it up, verified it, restored it in place and turned on encryption at rest. What is missing is the pack you hand to the rotation.
+`playground` runs three sites: `iad` and `pdx` as `PrimaryCandidate`, and `reader` with `role: ReadOnly`. You have already backed it up, verified it, restored it in place and turned on encryption at rest. What is missing is the pack you hand to the rotation.
 
 The pack lives in `starter/pack/`:
 
@@ -28,7 +28,7 @@ It runs as given and reports twelve problems. Fix them in order.
 
 ## Your tasks
 
-**TODO A — `pack/alerts.yml`.** `BloodravenReplicationLagging` currently reads every site. Chaos scenario 42 soaks the reader past three times `maxLagSeconds` with both replication threads still running, and asserts the group stays `Ready`, no failover fires, no cooldown is consumed, and only the reader endpoint sheds. That is the role model doing its job, not a fault. Exclude the read-only site by label matcher and keep the threshold at `30` — the value `playground` actually sets in `spec.replication.maxLagSeconds` — so a genuinely lagging `primary-candidate` still pages. The shipped CRD default is `300`; a rule's number tracks the group's spec, never the default.
+**TODO A — `pack/alerts.yml`.** `BloodravenReplicationLagging` currently reads every site. Chaos scenario 42 soaks the reader past three times `maxLagSeconds` with both replication threads still running, and asserts the group stays `Ready`, no failover fires, no cooldown is consumed, and only the reader endpoint sheds. That is the role model doing its job, not a fault. Exclude the read-only site by label matcher and keep the threshold at `30` — the value `playground` actually sets in `spec.replication.maxLagSeconds` — so a genuinely lagging `PrimaryCandidate` still pages. The shipped CRD default is `300`; a rule's number tracks the group's spec, never the default.
 
 **TODO B — `pack/alerts.yml`.** `BloodravenBackupStale` reads `bloodraven_backup_age_seconds`. That metric does not exist. The shipped operator exports a last-success timestamp gauge, so an age has to be derived from it with `time() -`. Rewrite the expression against a name in `SHIPPED_METRICS`.
 
@@ -104,7 +104,7 @@ Exit code 0.
       *Done when:* `python3 starter/golive.py` prints `[metrics]  clean` and `[coverage] clean`, and the `post-failover-divergence` fixture line reads `5 firing, expected 5  OK`.
 
 - [ ] **4. Make the lag alert ignore the reader on purpose (TODO A)**
-      This is the centrepiece. Add a site-label exclusion for the `read-only` site to `BloodravenReplicationLagging` and leave the threshold at `30`. Do not delete the rule and do not raise the threshold — `pdx` at 64 seconds behind is a genuine RPO drift on a promotable candidate and must still page. Remember what the threshold is and is not: `maxLagSeconds` drives only the `ReplicationLagging` condition. It is not a promotion gate, so a candidate past it is still promoted, because no writable site at all is almost always worse.
+      This is the centrepiece. Add a site-label exclusion for the `ReadOnly` site to `BloodravenReplicationLagging` and leave the threshold at `30`. Do not delete the rule and do not raise the threshold — `pdx` at 64 seconds behind is a genuine RPO drift on a promotable candidate and must still page. Remember what the threshold is and is not: `maxLagSeconds` drives only the `ReplicationLagging` condition. It is not a promotion gate, so a candidate past it is still promoted, because no writable site at all is almost always worse.
       *Done when:* `python3 starter/golive.py` prints both `fixture reader-soak-3x: 0 firing, expected 0  OK` and `fixture candidate-lagging: 1 firing, expected 1  OK`.
 
 - [ ] **5. Finish the alert-to-runbook-to-first-command map (TODO D)**

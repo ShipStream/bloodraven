@@ -141,7 +141,7 @@ func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
 		}, wantOK: true},
 		{name: "candidate requires lb ip", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].LBIP = "" }},
 		{name: "dr only requires selector", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Sites[0].Role = v1alpha1.SiteRoleDROnly
+			fg.Spec.Sites[0].Role = v1alpha1.SiteRoleDisasterRecovery
 			fg.Spec.Sites[0].TaintNodeSelector = nil
 		}},
 		{name: "reader does not satisfy candidate minimum", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
@@ -196,14 +196,14 @@ func TestEnvtest_ReadOnlyRoleTransitions(t *testing.T) {
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDROnly
+	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDisasterRecovery
 	if err := k8sClient.Update(ctx, fg); err == nil {
 		t.Fatal("reader to dr-only transition without placement was accepted")
 	}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: ns}, fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDROnly
+	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDisasterRecovery
 	fg.Spec.Sites[2].LBIP = "203.0.113.3"
 	fg.Spec.Sites[2].TaintNodeSelector = map[string]string{"site": "reader"}
 	if err := k8sClient.Update(ctx, fg); err != nil {
@@ -229,8 +229,8 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	// Update status subresource
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: "writable"},
-		{Name: "dc2", State: "read-only"},
+		{Name: "dc1", State: v1alpha1.SiteStateWritable},
+		{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
 	}
 	now := metav1.Now()
 	fg.Status.LastFailover = &now
@@ -249,10 +249,10 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	if fetched.Status.ActiveSite != "dc1" {
 		t.Errorf("expected ActiveSite 'dc1', got %q", fetched.Status.ActiveSite)
 	}
-	if fetched.Status.Sites[0].State != "writable" {
+	if fetched.Status.Sites[0].State != v1alpha1.SiteStateWritable {
 		t.Errorf("expected Sites[0] state 'writable', got %q", fetched.Status.Sites[0].State)
 	}
-	if fetched.Status.Sites[1].State != "read-only" {
+	if fetched.Status.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Errorf("expected Sites[1] state 'read-only', got %q", fetched.Status.Sites[1].State)
 	}
 	if fetched.Status.LastFailoverTarget != "dc1" {

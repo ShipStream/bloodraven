@@ -42,7 +42,7 @@ func fgThreeSiteRestore() *v1alpha1.MysqlFailoverGroup {
 	third := fg.Spec.Sites[1]
 	third.Name, third.LBIP = "sea", "10.0.0.3"
 	fg.Spec.Sites = append(fg.Spec.Sites, third)
-	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "sea", State: "read-only"})
+	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "sea", State: v1alpha1.SiteStateReadOnly})
 	return fg
 }
 
@@ -51,7 +51,7 @@ func fgThreeSiteRestore() *v1alpha1.MysqlFailoverGroup {
 func fgDrainingRestore(pending ...string) *v1alpha1.MysqlFailoverGroup {
 	fg := fgThreeSiteRestore()
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceSucceeded, TargetSite: "iad", Scope: "full", ConfirmTokenUsed: testRestoreConfirm,
+		Phase: v1alpha1.RestoreInPlaceSucceeded, TargetSite: "iad", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: testRestoreConfirm,
 	}
 	fg.Status.RestoreReclones = drainingQueue(pending...)
 	return fg
@@ -120,7 +120,7 @@ func TestRestoreReclone_ConsumerAcceptsRestoreRequest(t *testing.T) {
 			fg := fgInPlaceDC()
 			fg.Status.Sites[1].DivergentGtid = tc.divergent
 			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-				Phase: v1alpha1.RestoreInPlaceResuming, TargetSite: "dc1", Scope: "full",
+				Phase: v1alpha1.RestoreInPlaceResuming, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
 				ConfirmTokenUsed: testRestoreConfirm, StartTime: ptrTime(time.Now()),
 			}
 			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
@@ -173,7 +173,7 @@ func TestRestoreRecloneRecipients_PromotableFirst(t *testing.T) {
 	fg.Spec.Sites = []v1alpha1.SiteSpec{
 		{Name: "a", ServerID: 101},
 		{Name: "reader", ServerID: 102, Role: v1alpha1.SiteRoleReadOnly},
-		{Name: "dr", ServerID: 103, Role: v1alpha1.SiteRoleDROnly},
+		{Name: "dr", ServerID: 103, Role: v1alpha1.SiteRoleDisasterRecovery},
 		{Name: "b", ServerID: 104},
 		{Name: "c", ServerID: 105},
 	}
@@ -203,7 +203,7 @@ func TestRestoreReclone_ArmedWhenRestoreIsAccepted(t *testing.T) {
 				fg.Spec.RestoreInPlace.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{tc.schema}}
 			}
 			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-				Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now()),
+				Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 			}
 			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			withFenceRunner(r, c, fg)
@@ -792,8 +792,8 @@ func TestSyncPodLabels_QueuedRecloneSiteServesNoReads(t *testing.T) {
 			fg := newTestFG()
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Sites = []v1alpha1.SiteStatus{
-				{Name: "dc1", State: "writable"},
-				{Name: "dc2", State: "read-only", Replicating: true, SecondsBehindSource: &lag0},
+				{Name: "dc1", State: v1alpha1.SiteStateWritable},
+				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true, SecondsBehindSource: &lag0},
 			}
 			if tc.queued {
 				fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
@@ -927,7 +927,7 @@ func TestRestoreReclone_SiteRemovedFromSpecLeavesQueue(t *testing.T) {
 func TestRestoreReclone_PendingSetPushedToTopologyManager(t *testing.T) {
 	fg := fgInPlaceDC()
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 	}
 	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	tm, _, _ := newTestTopologyManagerWithBootstrap(&mockMySQL{}, &mockMySQL{readOnly: true})

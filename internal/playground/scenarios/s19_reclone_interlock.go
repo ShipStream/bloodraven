@@ -126,8 +126,8 @@ func injectDivergenceViaFailover() runner.Step {
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("new primary %s stable and cooldown clear before reintroducing old primary %s", peer, active),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					peerState := "<missing>"
-					activeState := "<missing>"
+					peerState := v1alpha1.SiteState("<missing>")
+					activeState := v1alpha1.SiteState("<missing>")
 					for _, s := range mfg.Status.Sites {
 						switch s.Name {
 						case peer:
@@ -147,8 +147,8 @@ func injectDivergenceViaFailover() runner.Step {
 						mfg.Status.ActiveSite, peerState, activeState, mfg.Status.LastFailoverTarget, cooldownRemaining.Round(time.Second))
 					done := mfg.Status.ActiveSite == peer &&
 						mfg.Status.LastFailoverTarget == peer &&
-						peerState == "writable" &&
-						activeState != "writable" &&
+						peerState == v1alpha1.SiteStateWritable &&
+						activeState != v1alpha1.SiteStateWritable &&
 						cooldownRemaining == 0
 					return done, msg, nil
 				},
@@ -357,9 +357,9 @@ func verifyRecloneAcceptedMatching() runner.Step {
 					var writable, readOnly, blocked, divergent []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						}
 						if s.RecoveryState == "RecoveryBlocked" {

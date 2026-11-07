@@ -22,7 +22,7 @@
     },
     {
       "front": "Grants the `app` user receives",
-      "back": "`ALL PRIVILEGES ON *.*` — **without** `GRANT OPTION` and without `SUPER`. It cannot grant privileges to anyone. The grant sets are fixed and not configurable, which is what makes them an answer you can give a security review.",
+      "back": "DML and DDL on `*.*` — **without** `GRANT OPTION`, `SUPER` or any other administrative privilege. It cannot grant privileges to anyone. The grant sets are fixed and not configurable, which is what makes them an answer you can give a security review.",
       "orderIndex": 4
     },
     {
@@ -42,12 +42,12 @@
     },
     {
       "front": "Does rotating a password in the credential Secret change MySQL?",
-      "back": "No. The `ALTER USER` line only runs on a fresh datadir. Changing the Secret changes what the operator *presents*, not what MySQL *accepts* — and the site goes `unreachable` for no visible reason. It does roll the pods, because the spec hash includes credential Secret data.",
+      "back": "No. The `ALTER USER` line only runs on a fresh datadir. Changing the Secret changes what the operator *presents*, not what MySQL *accepts* — and the site goes `Unreachable` for no visible reason. It does roll the pods, because the spec hash includes credential Secret data.",
       "orderIndex": 8
     },
     {
       "front": "`lbIP` and `taintNodeSelector`",
-      "back": "Required by a CEL rule unless the site's role is `read-only`: *taintNodeSelector and lbIP are required unless role is read-only*. A reader is never promoted and never tainted, so it needs neither.",
+      "back": "Required by a CEL rule unless the site's role is `ReadOnly`: *taintNodeSelector and lbIP are required unless role is ReadOnly*. A reader is never promoted and never tainted, so it needs neither.",
       "orderIndex": 9
     },
     {
@@ -57,7 +57,7 @@
     },
     {
       "front": "`isFreshDeploy` — the three conditions, all required",
-      "back": "Every site is reachable (`read-only` or `writable`), no site has ever had replication configured (`SHOW REPLICA STATUS` returns nothing), and no site holds data (empty `GTID_EXECUTED`, cross-checked against user schemas). Only then does the operator seed and clone.",
+      "back": "Every site is reachable (`ReadOnly` or `Writable`), no site has ever had replication configured (`SHOW REPLICA STATUS` returns nothing), and no site holds data (empty `GTID_EXECUTED`, cross-checked against user schemas). Only then does the operator seed and clone.",
       "orderIndex": 11
     },
     {
@@ -98,7 +98,7 @@
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
-        "It holds `ALL PRIVILEGES ON *.*` but without `GRANT OPTION` and without `SUPER`, so it can read and write everything and cannot create users, grant privileges or bypass `super_read_only`",
+        "It holds DML and DDL on `*.*` but no `GRANT OPTION`, `SUPER` or other admin privileges, so it can read and write everything and cannot create users, grant privileges or bypass `super_read_only`",
         "It holds only the grants you listed in `spec.credentials`, so the answer depends on your manifest",
         "It holds `SELECT, SHOW VIEW, SHOW DATABASES, PROCESS` — the application user is read-only by default",
         "It is the same account the operator uses, so it holds `ALL PRIVILEGES` with `GRANT OPTION`"

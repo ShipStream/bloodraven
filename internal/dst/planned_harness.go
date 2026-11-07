@@ -230,7 +230,7 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	nn := types.NamespacedName{Namespace: r.cfg.Namespace, Name: r.cfg.Name}
 	obj := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: nn.Namespace, Name: nn.Name}}
 	for i, name := range t.SiteNames {
-		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: v1alpha1.SiteRole(t.Roles[i])})
+		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: controller.APISiteRole(t.Roles[i])})
 	}
 	cooldown := metav1.Duration{Duration: time.Duration(t.CooldownSec) * time.Second}
 	obj.Spec.FailoverCooldown = &cooldown

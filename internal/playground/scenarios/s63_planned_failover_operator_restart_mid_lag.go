@@ -714,7 +714,7 @@ func s63Cleanup(ctx context.Context, env *runner.Env) error {
 		return errors.Join(append(errs, fmt.Errorf("get MFG: %w", err))...)
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.State != "writable" {
+		if s.State != v1alpha1.SiteStateWritable {
 			continue
 		}
 		c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, s.Name, env.Creds)

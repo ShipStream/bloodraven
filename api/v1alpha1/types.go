@@ -36,8 +36,8 @@ type MysqlFailoverGroupList struct {
 
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
 // +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.serverID == x.serverID).size() == 1)",message="spec.sites[].serverID must be unique within the group"
-// +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'primary-candidate').size() >= 2",message="spec.sites must contain at least two sites with role 'primary-candidate'"
-// +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))",message="splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'"
+// +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'PrimaryCandidate').size() >= 2",message="spec.sites must contain at least two sites with role PrimaryCandidate"
+// +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'PrimaryCandidate'))",message="splitBrainPolicy.sitePriorities entries must match the names of sites with role PrimaryCandidate"
 // +kubebuilder:validation:XValidation:rule="!has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || (has(self.serviceTemplate.type) && self.serviceTemplate.type in ['NodePort', 'LoadBalancer'])",message="serviceTemplate.externalTrafficPolicy requires serviceTemplate.type NodePort or LoadBalancer"
 // +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="site serviceTemplate.externalTrafficPolicy requires an effective type of NodePort or LoadBalancer"
 // +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.nodePort) || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="site serviceTemplate.nodePort requires an effective type of NodePort or LoadBalancer"
@@ -57,9 +57,9 @@ type MysqlFailoverGroupSpec struct {
 	SidecarImage string `json:"sidecarImage,omitempty"`
 
 	// Sites defines the sites that form this failover group. The slice must
-	// contain at least two sites with role "primary-candidate"; additional
-	// sites with role "dr-only" may be appended for cross-region DR.
-	// Failover is performed by picking the best primary-candidate replica
+	// contain at least two sites with role PrimaryCandidate; additional
+	// sites with role DisasterRecovery may be appended for cross-region DR.
+	// Failover is performed by picking the best PrimaryCandidate replica
 	// when the active site is lost.
 	//
 	// The list is a map keyed by name, so names are unique and server-side
@@ -142,11 +142,11 @@ type MysqlFailoverGroupSpec struct {
 	// +optional
 	Replication *ReplicationSpec `json:"replication,omitempty"`
 
-	// UpdateStrategy controls how spec changes are rolled out. Default: OrderedUpdate
-	// +kubebuilder:default="OrderedUpdate"
-	// +kubebuilder:validation:Enum=OrderedUpdate;Recreate
+	// UpdateStrategy controls how spec changes are rolled out. Default:
+	// {type: OrderedUpdate}.
+	// +kubebuilder:default={}
 	// +optional
-	UpdateStrategy string `json:"updateStrategy,omitempty"`
+	UpdateStrategy UpdateStrategy `json:"updateStrategy,omitempty"`
 
 	// SidecarResources defines the compute resources for the sidecar container.
 	// +optional
@@ -281,8 +281,8 @@ type MysqlFailoverGroupSpec struct {
 // operator walks the list in order and promotes the first entry that
 // is currently writable; every other writable site is fenced.
 //
-// Entries must reference sites with role "primary-candidate" — a
-// "dr-only" site is never auto-promoted, and naming one here is
+// Entries must reference sites with role PrimaryCandidate: a
+// DisasterRecovery site is never auto-promoted, and naming one here is
 // rejected by validation.
 //
 // This is a policy decision, not a safety feature: any writes accepted
@@ -292,7 +292,7 @@ type MysqlFailoverGroupSpec struct {
 // transactions the winner never saw; those transactions are only
 // recoverable via re-clone.
 type SplitBrainPolicySpec struct {
-	// SitePriorities is the ordered list of primary-candidate site
+	// SitePriorities is the ordered list of PrimaryCandidate site
 	// names that win unresolvable split-brain ties. The first entry
 	// that is currently writable becomes the new primary; every other
 	// writable site is fenced. If empty, the operator falls back to
@@ -300,7 +300,7 @@ type SplitBrainPolicySpec struct {
 	//
 	// MaxItems must stay equal to spec.sites' MaxItems so the CEL cost
 	// estimator can bound the "every priority entry names a real
-	// primary-candidate" rule.
+	// PrimaryCandidate" rule.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
@@ -327,41 +327,73 @@ type ReplicationSpec struct {
 
 // SiteRole describes the promotion eligibility of a site.
 //
-// "primary-candidate" sites are full participants: they can be promoted
+// PrimaryCandidate sites are full participants: they can be promoted
 // as the active primary during failover, and they count against the
 // minimum-two-candidate quorum that the CRD requires.
 //
-// "dr-only" sites are passive replicas. They follow the active primary
-// (typical use: cross-region DR) and are never considered as promotion
-// targets — the operator will not auto-promote them on failover, and
-// the split-brain priority picker treats them as ineligible winners.
+// DisasterRecovery sites are passive replicas. They follow the active
+// primary (typical use: cross-region DR) and are never considered as
+// promotion targets: the operator will not auto-promote them on
+// failover, and the split-brain priority picker treats them as
+// ineligible winners.
 //
-// A writable "dr-only" site is an anomaly (the role implies read-only
-// replication), and when the operator detects that anomaly during
-// split-brain resolution it fences the site along with the other
+// A writable DisasterRecovery site is an anomaly (the role implies
+// read-only replication), and when the operator detects that anomaly
+// during split-brain resolution it fences the site along with the other
 // losers so divergent writes cannot continue. The role limits
 // *promotion* and *policy eligibility*; it does not exempt the site
-// from the same safety fencing that protects primary-candidate
-// losers.
-// +kubebuilder:validation:Enum=primary-candidate;dr-only;read-only
+// from the same safety fencing that protects PrimaryCandidate losers.
+//
+// ReadOnly sites are serving replicas that are never promoted and do not
+// participate in core failover-group readiness.
+// +kubebuilder:validation:Enum=PrimaryCandidate;DisasterRecovery;ReadOnly
 type SiteRole string
 
 const (
 	// SiteRolePrimaryCandidate is the default role: a site that
 	// participates in failover elections.
-	SiteRolePrimaryCandidate SiteRole = "primary-candidate"
+	SiteRolePrimaryCandidate SiteRole = "PrimaryCandidate"
 
-	// SiteRoleDROnly is a passive replica role: a site that follows
-	// the active primary but is never promoted automatically.
-	SiteRoleDROnly SiteRole = "dr-only"
+	// SiteRoleDisasterRecovery is a passive replica role: a site that
+	// follows the active primary but is never promoted automatically.
+	SiteRoleDisasterRecovery SiteRole = "DisasterRecovery"
 
 	// SiteRoleReadOnly is a serving replica that is never promoted and
 	// does not participate in core failover-group readiness.
-	SiteRoleReadOnly SiteRole = "read-only"
+	SiteRoleReadOnly SiteRole = "ReadOnly"
 )
 
+// UpdateStrategyType is how spec changes are rolled out to the sites.
+// +kubebuilder:validation:Enum=OrderedUpdate;Recreate
+type UpdateStrategyType string
+
+const (
+	// UpdateStrategyOrderedUpdate rolls one site at a time: the followers
+	// first, then the active site after a handoff to an updated standby.
+	UpdateStrategyOrderedUpdate UpdateStrategyType = "OrderedUpdate"
+	// UpdateStrategyRecreate patches every site's Deployment at once.
+	UpdateStrategyRecreate UpdateStrategyType = "Recreate"
+)
+
+// UpdateStrategy controls how spec changes are rolled out.
+type UpdateStrategy struct {
+	// Type is the rollout strategy. Default: OrderedUpdate.
+	// +kubebuilder:default=OrderedUpdate
+	// +optional
+	Type UpdateStrategyType `json:"type,omitempty"`
+}
+
+// EffectiveType returns the strategy type, defaulting to OrderedUpdate
+// when unset (an object that bypassed CRD defaulting).
+func (u UpdateStrategy) EffectiveType() UpdateStrategyType {
+	if u.Type == "" {
+		return UpdateStrategyOrderedUpdate
+	}
+	return u.Type
+}
+
 // SiteSpec defines the configuration for a single site in the failover group.
-// +kubebuilder:validation:XValidation:rule="self.role == 'read-only' || (has(self.taintNodeSelector) && has(self.lbIP))",message="taintNodeSelector and lbIP are required unless role is read-only"
+// +kubebuilder:validation:XValidation:rule="self.role == 'ReadOnly' || (has(self.taintNodeSelector) && has(self.lbIP))",message="taintNodeSelector and lbIP are required unless role is ReadOnly"
 type SiteSpec struct {
 	// Name is the site identifier (e.g. "iad", "pdx", "lhr"), the key of
 	// spec.sites. MaxLength caps the CEL cost of the spec-level
@@ -386,8 +418,8 @@ type SiteSpec struct {
 	ServerID int64 `json:"serverID"`
 
 	// Role governs whether this site can be auto-promoted on failover.
-	// Default: primary-candidate.
-	// +kubebuilder:default="primary-candidate"
+	// Default: PrimaryCandidate.
+	// +kubebuilder:default=PrimaryCandidate
 	// +optional
 	Role SiteRole `json:"role,omitempty"`
 
@@ -658,9 +690,10 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	PromotionGtidExecuted string `json:"promotionGtidExecuted,omitempty"`
 
-	// UpdatePhase indicates the current phase of an ordered update, empty if not updating.
+	// UpdatePhase is the current phase of an ordered update. Absent when
+	// no ordered update is running.
 	// +optional
-	UpdatePhase string `json:"updatePhase,omitempty"`
+	UpdatePhase UpdatePhase `json:"updatePhase,omitempty"`
 
 	// Restore tracks an in-flight or completed initFromBackup operation.
 	// +optional
@@ -756,10 +789,10 @@ type SiteStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
-	// State is the current state: writable, read-only, unreachable, or unknown.
-	// +kubebuilder:validation:Enum=writable;read-only;unreachable;unknown
+	// State is the current state: Writable, ReadOnly, Unreachable, or
+	// Unknown.
 	// +optional
-	State string `json:"state,omitempty"`
+	State SiteState `json:"state,omitempty"`
 
 	// LastSeen is the last time this site was successfully polled.
 	// +optional
@@ -778,15 +811,14 @@ type SiteStatus struct {
 	SecondsBehindSource *int64 `json:"secondsBehindSource,omitempty"`
 
 	// RecoveryState tracks old-primary recovery progress after failover.
-	// Empty when no recovery is needed. RecoveryInProgress means the site is
+	// Absent when no recovery is needed. RecoveryInProgress means the site is
 	// being reconfigured, or is stabilizing, as a replica of the current primary.
 	// RecoveryBlocked means the site holds transactions the primary lacks
 	// (see DivergenceDetectedBy): it is not promoted by an ordered update or
 	// a planned failover, and it must be recloned or the primary made to
 	// contain the set. Replication may still be running.
-	// +kubebuilder:validation:Enum="";RecoveryInProgress;RecoveryBlocked
 	// +optional
-	RecoveryState string `json:"recoveryState,omitempty"`
+	RecoveryState SiteRecoveryState `json:"recoveryState,omitempty"`
 
 	// DivergentGtid is the GTID set of transactions on this site that
 	// the primary named by DivergenceComparedTo lacks. Populated when
@@ -803,9 +835,8 @@ type SiteStatus struct {
 	// the new primary) or ReplicaAudit (a replica, possibly replicating
 	// normally, was found to hold transactions the primary lacks).
 	// Populated when RecoveryState is RecoveryBlocked.
-	// +kubebuilder:validation:Enum="";OldPrimaryRecovery;ReplicaAudit
 	// +optional
-	DivergenceDetectedBy string `json:"divergenceDetectedBy,omitempty"`
+	DivergenceDetectedBy DivergenceDetector `json:"divergenceDetectedBy,omitempty"`
 
 	// DivergenceComparedTo is the site whose GTID set DivergentGtid was
 	// computed against: the primary at the time of the comparison.
@@ -822,13 +853,53 @@ type SiteStatus struct {
 	// +optional
 	SourceConvergenceState SourceConvergenceState `json:"sourceConvergenceState,omitempty"`
 
-	// SourceConvergenceReason is a stable machine-readable explanation.
+	// SourceConvergenceReason is a stable machine-readable explanation of
+	// SourceConvergenceState.
 	// +optional
-	SourceConvergenceReason string `json:"sourceConvergenceReason,omitempty"`
+	SourceConvergenceReason SourceConvergenceReason `json:"sourceConvergenceReason,omitempty"`
 }
 
+// SiteState is the observed state of a site's MySQL server.
+// +kubebuilder:validation:Enum=Writable;ReadOnly;Unreachable;Unknown
+type SiteState string
+
+const (
+	// SiteStateWritable means the server answered with read_only=OFF.
+	SiteStateWritable SiteState = "Writable"
+	// SiteStateReadOnly means the server answered with read_only=ON.
+	SiteStateReadOnly SiteState = "ReadOnly"
+	// SiteStateUnreachable means the operator could not query the server.
+	SiteStateUnreachable SiteState = "Unreachable"
+	// SiteStateUnknown means the site has not been classified since the
+	// operator started.
+	SiteStateUnknown SiteState = "Unknown"
+)
+
+// UpdatePhase is the phase of an in-flight ordered update. While the
+// update runs it is also the reason of the Updating condition.
+// +kubebuilder:validation:Enum=UpdateReplica;WaitReplica;Failover;UpdateOldPrimary;WaitOldPrimary
+type UpdatePhase string
+
+const (
+	// UpdatePhaseUpdateReplica means a follower's Deployment is being
+	// updated.
+	UpdatePhaseUpdateReplica UpdatePhase = ReasonUpdateReplica
+	// UpdatePhaseWaitReplica means the update waits for an updated
+	// follower to be ready and caught up.
+	UpdatePhaseWaitReplica UpdatePhase = ReasonWaitReplica
+	// UpdatePhaseFailover means the active site is being handed off to an
+	// updated standby.
+	UpdatePhaseFailover UpdatePhase = ReasonFailover
+	// UpdatePhaseUpdateOldPrimary means the former active site's
+	// Deployment is being updated.
+	UpdatePhaseUpdateOldPrimary UpdatePhase = ReasonUpdateOldPrimary
+	// UpdatePhaseWaitOldPrimary means the update waits for the former
+	// active site to replicate from the new primary.
+	UpdatePhaseWaitOldPrimary UpdatePhase = ReasonWaitOldPrimary
+)
+
 // SourceConvergenceState describes direct-primary source convergence.
-// +kubebuilder:validation:Enum="";Converged;Pending;Blocked
+// +kubebuilder:validation:Enum=Converged;Pending;Blocked
 type SourceConvergenceState string
 
 const (
@@ -837,10 +908,56 @@ const (
 	SourceConvergenceBlocked   SourceConvergenceState = "Blocked"
 )
 
-// status.sites[].recoveryState values. Empty means no recovery is needed.
+// SourceConvergenceReason explains a SourceConvergenceState.
+// +kubebuilder:validation:Enum=DirectSource;SourceMismatch;ProbeFailed;MutationFailed;GTIDDiverged;RestorePeerHold
+type SourceConvergenceReason string
+
 const (
-	RecoveryStateInProgress = "RecoveryInProgress"
-	RecoveryStateBlocked    = "RecoveryBlocked"
+	// SourceReasonDirectSource: the follower replicates directly from the
+	// confirmed active primary.
+	SourceReasonDirectSource SourceConvergenceReason = "DirectSource"
+	// SourceReasonSourceMismatch: the follower replicates from another
+	// source, or its threads are not running.
+	SourceReasonSourceMismatch SourceConvergenceReason = "SourceMismatch"
+	// SourceReasonProbeFailed: the follower's replication status could
+	// not be read.
+	SourceReasonProbeFailed SourceConvergenceReason = "ProbeFailed"
+	// SourceReasonMutationFailed: a source correction failed.
+	SourceReasonMutationFailed SourceConvergenceReason = "MutationFailed"
+	// SourceReasonGTIDDiverged: the follower holds transactions the
+	// primary lacks, so it is not repointed.
+	SourceReasonGTIDDiverged SourceConvergenceReason = "GTIDDiverged"
+	// SourceReasonRestorePeerHold: the site awaits its post-restore
+	// reclone (status.restoreReclones.pending) and its replication is held
+	// stopped, so convergence does not touch it.
+	SourceReasonRestorePeerHold SourceConvergenceReason = "RestorePeerHold"
+)
+
+// SiteRecoveryState is status.sites[].recoveryState. Absent means no
+// recovery is needed.
+// +kubebuilder:validation:Enum=RecoveryInProgress;RecoveryBlocked
+type SiteRecoveryState string
+
+const (
+	// RecoveryStateInProgress means the site is being reconfigured, or is
+	// stabilizing, as a replica of the current primary.
+	RecoveryStateInProgress SiteRecoveryState = "RecoveryInProgress"
+	// RecoveryStateBlocked means the site holds transactions the primary
+	// lacks.
+	RecoveryStateBlocked SiteRecoveryState = "RecoveryBlocked"
+)
+
+// DivergenceDetector names the check that recorded a divergence report.
+// +kubebuilder:validation:Enum=OldPrimaryRecovery;ReplicaAudit
+type DivergenceDetector string
+
+const (
+	// DivergenceDetectorOldPrimaryRecovery: a returning former primary was
+	// compared with the new primary.
+	DivergenceDetectorOldPrimaryRecovery DivergenceDetector = "OldPrimaryRecovery"
+	// DivergenceDetectorReplicaAudit: a replica, possibly replicating
+	// normally, was found to hold transactions the primary lacks.
+	DivergenceDetectorReplicaAudit DivergenceDetector = "ReplicaAudit"
 )
 
 func init() {

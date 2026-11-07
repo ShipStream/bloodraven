@@ -177,13 +177,13 @@ expires against a `pdx` that is genuinely behind, let the rollback fire and fix 
 window in which your source is fenced and your writes are refused.
 
 Two refusals worth recognising before you meet them. A planned failover aimed at `reader` ends
-`Failed{NotStarted, TargetNotPromotable}` with `only primary-candidate sites may be promoted` — the
+`Failed{NotStarted, TargetNotPromotable}` with `only PrimaryCandidate sites may be promoted` — the
 promotability rule from Unit 1, enforced again at this entry point. And the anti-flap cooldown gates
 planned admission just as it gates the automatic path, with reason `CooldownActive`; because
 `onCooldown` defaults to `Reject`, a planned failover attempted soon after an emergency one ends
 `NotStarted` and the annotation is cleared, not queued. Set `onCooldown: Defer` if you would rather it
 wait in `Deferred` and retry itself at `admission.retryTime`. One more: planned failover is strict. If a
-`primary-candidate` or `dr-only` site does not answer, admission waits with `waitReason: PeerUnreadable`
+`PrimaryCandidate` or `DisasterRecovery` site does not answer, admission waits with `waitReason: PeerUnreadable`
 and ends `AdmissionTimeout` after two minutes. A site it cannot read might be writable.
 
 ## What you have now

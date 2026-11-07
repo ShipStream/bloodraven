@@ -64,9 +64,9 @@ func TestComputeSpecHashIgnoresLicense(t *testing.T) {
 
 func TestCRConfigToTopologyConfigIgnoresLicense(t *testing.T) {
 	fg := newTestFG()
-	before := CRConfigToTopologyConfig(fg)
+	before := mustTopologyConfig(fg)
 	fg.Spec.License = "eyJhbGciOiJFZERTQSJ9.e30.sig"
-	after := CRConfigToTopologyConfig(fg)
+	after := mustTopologyConfig(fg)
 	if !before.Equal(after) {
 		t.Fatal("spec.license must not restart the topology manager")
 	}

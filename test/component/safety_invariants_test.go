@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/sidecar"
@@ -46,7 +47,7 @@ func TestSafetyInvariant_NeverDualPrimary(t *testing.T) {
 
 	// Neither should have been promoted through failover
 	s := h.tm.Status()
-	if s.Sites[0].State != "writable" || s.Sites[1].State != "writable" {
+	if s.Sites[0].State != v1alpha1.SiteStateWritable || s.Sites[1].State != v1alpha1.SiteStateWritable {
 		t.Errorf("expected both writable (split brain), got dc1=%s dc2=%s", s.Sites[0].State, s.Sites[1].State)
 	}
 }
@@ -191,7 +192,7 @@ func TestSafetyInvariant_TransientFailureNotOutage(t *testing.T) {
 	h.pollN(1)
 
 	s := h.tm.Status()
-	if s.Sites[0].State == "unreachable" {
+	if s.Sites[0].State == v1alpha1.SiteStateUnreachable {
 		t.Error("SAFETY VIOLATION: single failure marked DC as unreachable before threshold")
 	}
 
@@ -199,7 +200,7 @@ func TestSafetyInvariant_TransientFailureNotOutage(t *testing.T) {
 	h.dc1MySQL.setReadOnly(false)
 	h.pollN(2)
 
-	if h.tm.Status().Sites[0].State != "writable" {
+	if h.tm.Status().Sites[0].State != v1alpha1.SiteStateWritable {
 		t.Error("DC should recover to writable after transient failure")
 	}
 
@@ -223,7 +224,7 @@ func TestSafetyInvariant_RecoveryRequiresThreshold(t *testing.T) {
 	h.pollN(1)
 
 	s := h.tm.Status()
-	if s.Sites[0].State == "writable" {
+	if s.Sites[0].State == v1alpha1.SiteStateWritable {
 		t.Error("SAFETY VIOLATION: single writable poll confirmed recovery (threshold not met)")
 	}
 
@@ -231,7 +232,7 @@ func TestSafetyInvariant_RecoveryRequiresThreshold(t *testing.T) {
 	h.pollN(1)
 
 	s = h.tm.Status()
-	if s.Sites[0].State != "writable" {
+	if s.Sites[0].State != v1alpha1.SiteStateWritable {
 		t.Errorf("DC1 should be writable after recovery threshold, got %s", s.Sites[0].State)
 	}
 }
@@ -350,10 +351,10 @@ func TestSafetyInvariant_PrimaryServiceSelectorIsCorrect(t *testing.T) {
 	h.pollN(2)
 
 	s := h.tm.Status()
-	if s.Sites[0].State != "writable" {
+	if s.Sites[0].State != v1alpha1.SiteStateWritable {
 		t.Fatalf("expected dc1 writable, got %s", s.Sites[0].State)
 	}
-	if s.Sites[1].State != "read-only" {
+	if s.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Fatalf("expected dc2 read-only, got %s", s.Sites[1].State)
 	}
 }

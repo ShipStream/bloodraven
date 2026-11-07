@@ -46,7 +46,7 @@
       "orderIndex": 8
     },
     {
-      "front": "`spec.updateStrategy`",
+      "front": "`spec.updateStrategy.type`",
       "back": "`OrderedUpdate` (default) leaves existing site Deployments untouched so the runner sees spec drift and rolls one site at a time; `Recreate` clears the drift list and patches every site Deployment in one pass, so pod restarts may overlap.",
       "orderIndex": 9
     }
@@ -68,7 +68,7 @@
         "The ordered-update handoff promoted `pdx`; that path calls `recordFailover` and increments the counter but is never cooldown-gated, so the guard was never reached",
         "The operator restarted during the update and rehydrated an empty `lastFailover`, so the cooldown evaluated as expired",
         "The counter increments on promotion attempts rather than completed promotions, and attempts are not gated",
-        "`spec.updateStrategy: Recreate` was set, which disables anti-flap for the duration of the rollout"
+        "`spec.updateStrategy.type: Recreate` was set, which disables anti-flap for the duration of the rollout"
       ],
       "correctOptionIndex": 0,
       "explanation": "The ordered-update handoff is a separate promotion path with no cooldown check anywhere in it, yet its completion callback stamps the durable failover record and increments `bloodraven_failovers_total` — so the counter moves without the guard ever being consulted, which is also why there is no log line. Option 2 would produce a rehydration warning and requires a restart you did not observe; rehydration also prefers the later of the two durable copies rather than emptying them. Option 3 is wrong: the counter is incremented after a successful promotion, not on attempts. Option 4 invents a coupling that does not exist: `spec.updateStrategy` decides whether a spec change rolls one site at a time or all at once, and touches nothing about anti-flap. (objective 7)",

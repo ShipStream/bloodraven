@@ -460,7 +460,7 @@ func TestMysqlDatabaseLegacyPendingWithoutPendingHosts(t *testing.T) {
 	const next = "acme_app_v2"
 	cr := mdbCR(withOwnerHosts(hostB), func(m *v1alpha1.MysqlDatabase) {
 		m.Status.DatabaseCreated = true
-		m.Status.Phase = v1alpha1.MysqlDatabasePhaseCreating
+		m.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
 		m.Status.OwnerUser = mdbOwnerUser
 		m.Status.OwnerHosts = []string{hostA, hostB}
 		m.Status.PendingOwnerUser = next
@@ -710,7 +710,7 @@ func TestMysqlDatabaseLegacyPendingHostsSurviveSharedHostEdit(t *testing.T) {
 		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("moved-mysql", hostA)}
 		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "ghost", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
 		m.Status.DatabaseCreated = true
-		m.Status.Phase = v1alpha1.MysqlDatabasePhaseCreating
+		m.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
 		m.Status.OwnerUser, m.Status.OwnerHosts = mdbOwnerUser, []string{hostA}
 		m.Status.PendingOwnerUser = moved // legacy: no pendingOwnerHosts
 	})

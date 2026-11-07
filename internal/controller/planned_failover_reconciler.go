@@ -22,6 +22,7 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 )
 
 // plannedFailoverTerminal reports whether the given status is in a
@@ -273,7 +274,9 @@ func (s reconcilerPlannedSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.
 	if pf == nil {
 		return
 	}
-	metrics.PlannedFailoversTotal.WithLabelValues(pf.TargetSite, mapOutcomeToMetricResult(pf.Result)).Inc()
+	if pf.Result != nil {
+		metrics.PlannedFailoversTotal.WithLabelValues(pf.TargetSite, labels.PlannedFailoverResult(pf.Result.Outcome)).Inc()
+	}
 	if !pf.StartTime.IsZero() && pf.Result != nil {
 		if d := pf.Result.CompletionTime.Sub(pf.StartTime.Time); d > 0 {
 			metrics.PlannedFailoverDurationSeconds.WithLabelValues(pf.TargetSite).Observe(d.Seconds())
@@ -287,27 +290,6 @@ func (s reconcilerPlannedSink) LagWaitObserved(_ types.NamespacedName, target st
 
 func (s reconcilerPlannedSink) Deferred(nn types.NamespacedName, reason v1alpha1.PlannedFailoverDeferReason) {
 	metrics.PlannedFailoversDeferredTotal.WithLabelValues(nn.Name, string(reason)).Inc()
-}
-
-// mapOutcomeToMetricResult maps a run's result to the existing values of
-// bloodraven_planned_failovers_total{result}: success, rejected,
-// failed_timeout and failed_other.
-func mapOutcomeToMetricResult(r *v1alpha1.PlannedFailoverResult) string {
-	if r == nil {
-		return "failed_other"
-	}
-	switch r.Reason {
-	case v1alpha1.PlannedFailoverReasonLagTimeout, v1alpha1.PlannedFailoverReasonAdmissionTimeout,
-		v1alpha1.PlannedFailoverReasonDragonflySyncTimeout:
-		return "failed_timeout"
-	}
-	switch r.Outcome {
-	case v1alpha1.PlannedFailoverOutcomeSucceeded:
-		return "success"
-	case v1alpha1.PlannedFailoverOutcomeNotStarted:
-		return "rejected"
-	}
-	return "failed_other"
 }
 
 // productionPlannedTopology is the facade the reconciler's engine uses

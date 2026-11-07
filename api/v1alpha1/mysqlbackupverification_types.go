@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -100,9 +101,9 @@ type MysqlBackupVerificationSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// PointInTime configures whether the verification replays archived
-	// binlogs on top of the restored dump. Leave nil or set mode=none to
-	// skip replay. mode=latest replays to the unique archive head;
-	// mode=timestamp restores the history of the first archived
+	// binlogs on top of the restored dump. Leave it unset to skip replay.
+	// mode=Latest replays to the unique archive head; mode=Timestamp
+	// restores the history of the first archived
 	// transaction at or after a caller-supplied instant, cut just before
 	// it. Either way the replay may span every site's archive. Requires
 	// spec.backup.pitr.enabled=true on the referenced failover group.
@@ -120,26 +121,23 @@ type MysqlBackupVerificationSpec struct {
 }
 
 // PointInTimeVerificationSpec controls PITR binlog replay during a
-// verification. When Mode is "none" (or this field is nil), the
-// verification stops after util.loadDump() returns; no binlog replay
-// happens. "latest" replays to the unique archive head; it exercises the
-// archiver and replay path end to end. "timestamp" replays to a
-// caller-supplied instant, which drills a specific known-good point or
-// checks that archives covering a past incident still replay. A
+// verification. Without it the verification stops after util.loadDump()
+// returns; no binlog replay happens. Latest replays to the unique archive
+// head; it exercises the archiver and replay path end to end. Timestamp
+// replays to a caller-supplied instant, which drills a specific known-good
+// point or checks that archives covering a past incident still replay. A
 // verification never accepts a Partial outcome.
 type PointInTimeVerificationSpec struct {
-	// Mode selects the replay behavior.
-	// +kubebuilder:default=none
-	// +kubebuilder:validation:Enum=none;latest;timestamp
-	// +optional
-	Mode string `json:"mode,omitempty"`
+	// Mode selects the replay end point: Latest or Timestamp.
+	// +required
+	Mode PointInTimeMode `json:"mode"`
 
 	// Timestamp is the target instant, a whole second in the same forms as
 	// PointInTimeSpec.StopDatetime (fractional seconds are refused; a
 	// stored fractional value must be corrected in the same update, as for
 	// StopDatetime). Replay restores the history of the first archived
 	// transaction committed at or after it, cut just before that
-	// transaction. Required when Mode=timestamp; ignored otherwise.
+	// transaction. Required when Mode=Timestamp; ignored otherwise.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
 	// +kubebuilder:validation:MaxLength=40
@@ -148,7 +146,7 @@ type PointInTimeVerificationSpec struct {
 	// ExcludeGtids are never replayed and must not intersect the backup,
 	// with the same meaning as PointInTimeSpec.ExcludeGtids: every archived
 	// transaction committed between the backup's newest transaction and the
-	// target (or the archive head in latest mode) that is outside the
+	// target (or the archive head in Latest mode) that is outside the
 	// target history must be listed.
 	// +optional
 	// +kubebuilder:validation:MaxLength=131072
@@ -394,7 +392,7 @@ type VerificationSpec struct {
 	// +kubebuilder:default=Forbid
 	// +kubebuilder:validation:Enum=Forbid;Replace
 	// +optional
-	ConcurrencyPolicy string `json:"concurrencyPolicy,omitempty"`
+	ConcurrencyPolicy batchv1.ConcurrencyPolicy `json:"concurrencyPolicy,omitempty"`
 
 	// StartingDeadlineSeconds is forwarded to the CronJob spec.
 	// +optional

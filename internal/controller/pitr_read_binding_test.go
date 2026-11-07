@@ -31,7 +31,7 @@ func readBindingVerification(t *testing.T, state v1alpha1.PITRArchiveBindingStat
 	backup.Status.FailoverGroupUID = "lion-uid"
 	v := verifyCR("verify-binding", "lion", "nightly-s3")
 	v.UID = "verify-binding-uid"
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: outcomeStop}
+	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: outcomeStop}
 	r, c := newVerificationReconciler(t, append([]client.Object{fg, backup, v, operatorCredsSecret()}, extra...)...)
 	return r, c, v
 }
@@ -100,7 +100,7 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		v := verifyCR("verify-limit", "lion", "nightly-s3")
-		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
+		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest}
 		r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 		reconcileVerifUntilStable(t, r, v.Name)
 		if got := getVerification(t, c, v); got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(v1alpha1.PITRTokenArchiveBindingNotReady) {
@@ -126,7 +126,7 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		v := verifyCR("verify-limit", "lion", "nightly-s3")
-		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
+		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest}
 		r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 		reconcileVerifUntilStable(t, r, v.Name)
 		got := getVerification(t, c, v)
@@ -225,7 +225,7 @@ func TestVerificationArchiveProfileName(t *testing.T) {
 	e := bindTestPITRArchive(t, fg, "retained")
 	e.Encryption.KeySecretName = "mysql-lion-pitr-key-retained00"
 	v := verifyCR("verify-retained", "lion", "nightly-s3")
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ArchiveProfileName: "retained"}
+	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ArchiveProfileName: "retained"}
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
 	if err != nil {
@@ -321,7 +321,7 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 					t.Fatalf("restore mounts %+v, want the required snapshot", vol)
 				}
 			case tc.fail:
-				if got.Status.Restore == nil || got.Status.Restore.Phase != v1alpha1.BackupPhaseFailed || got.Status.Restore.Reason != string(v1alpha1.PITRTokenArchiveBindingNotReady) {
+				if got.Status.Restore == nil || got.Status.Restore.Phase != v1alpha1.BackupPhaseFailed || got.Status.Restore.Reason != v1alpha1.PITRTokenArchiveBindingNotReady {
 					t.Fatalf("restore %+v, want Failed/%s", got.Status.Restore, string(v1alpha1.PITRTokenArchiveBindingNotReady))
 				}
 			default:

@@ -107,13 +107,13 @@ spec:
   sites:                      # MinItems 2, MaxItems 16
     - name: iad
       serverID: 101           # MySQL server_id: unique in the group, never changes
-      role: primary-candidate
+      role: PrimaryCandidate
     - name: pdx
       serverID: 102
-      role: primary-candidate
+      role: PrimaryCandidate
     - name: reader
       serverID: 103
-      role: read-only
+      role: ReadOnly
   dns:
     hostname: playground-db.example.local
   # ... splitBrainPolicy, replication, sidecar, storage elided
@@ -142,6 +142,6 @@ You can now say what deployment Bloodraven targets, and what it will refuse to d
 You have a running group whose parts you can name, and a contract for what an emergency
 failover is allowed to lose.
 
-Then a site stops answering. The fields you learned start moving — `state` to `unreachable`,
+Then a site stops answering. The fields you learned start moving — `state` to `Unreachable`,
 the reason off `Healthy`. The operator sees exactly what you see. What it decides to do
 about that, and how long it waits first, is the next unit.

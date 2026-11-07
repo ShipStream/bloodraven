@@ -138,7 +138,7 @@ func pitrBindingTargets(fg *v1alpha1.MysqlFailoverGroup, mbvs []v1alpha1.MysqlBa
 			continue
 		}
 		pit := v.Spec.PointInTime
-		if pit == nil || (pit.Mode != "latest" && pit.Mode != "timestamp") {
+		if pit == nil || (pit.Mode != v1alpha1.PointInTimeModeLatest && pit.Mode != v1alpha1.PointInTimeModeTimestamp) {
 			continue
 		}
 		name := pit.ArchiveProfileName

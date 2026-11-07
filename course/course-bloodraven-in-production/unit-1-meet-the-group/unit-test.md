@@ -3,7 +3,7 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Assesses:** Quick check: can you name the active site from a status dump, say which pod the `-primary` Service selects, and explain why a `read-only` site can never be promoted?
+**Assesses:** Quick check: can you name the active site from a status dump, say which pod the `-primary` Service selects, and explain why a `ReadOnly` site can never be promoted?
 
 **Passing score:** 70%
 
@@ -62,18 +62,18 @@ This is the trade, made visible: Bloodraven buys write availability with consist
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; and `reader` — declared `role: read-only` in the spec — state `writable`. What `reason` does the `Degraded` condition carry, and what happens to `reader`?
+`playground` reports `activeSite: iad`; `iad` state `Writable`; `pdx` state `ReadOnly`, `replicating: true`; and `reader` — declared `role: ReadOnly` in the spec — state `Writable`. What `reason` does the `Degraded` condition carry, and what happens to `reader`?
 
 - `SplitBrain`, and the operator resolves it by picking a winner between `iad` and `reader`
-- `Healthy`, and nothing happens to `reader` — a `read-only` site is excluded from the tallies, so the operator ignores it entirely
+- `Healthy`, and nothing happens to `reader` — a `ReadOnly` site is excluded from the tallies, so the operator ignores it entirely
 - `NoPrimary`, and the operator waits for a human because authority is now ambiguous
-- `Degraded`, and `reader` is fenced — a writable non-`primary-candidate` site is routed straight to fencing, never to promotion
+- `Degraded`, and `reader` is fenced — a writable non-`PrimaryCandidate` site is routed straight to fencing, never to promotion
 
 **Correct option index:** 3
 
 **Explanation:**
 
-Two rules meet here. A `role: read-only` site is excluded from `coreCount` and from all three state tallies, so it cannot make the group `SplitBrain` — that reason needs more than one *core* site writable, and only `iad` qualifies. But exclusion from the tallies is not the same as being ignored: any site that is writable while its role is not `primary-candidate` is routed to fencing, and that shape reports `Degraded`. `Healthy` is the trap for anyone who learns the exclusion rule and stops there — the tallies ignore `reader`, the fencing path does not. `NoPrimary` describes the opposite topology, no core site writable and none unreachable, whereas `iad` is writable right now. And `reader` is never a promotion candidate to pick a winner between: promotability is exactly `role == primary-candidate`, and fresh data or a writable state does not earn it. (objectives 6, 8)
+Two rules meet here. A `role: ReadOnly` site is excluded from `coreCount` and from all three state tallies, so it cannot make the group `SplitBrain` — that reason needs more than one *core* site writable, and only `iad` qualifies. But exclusion from the tallies is not the same as being ignored: any site that is writable while its role is not `PrimaryCandidate` is routed to fencing, and that shape reports `Degraded`. `Healthy` is the trap for anyone who learns the exclusion rule and stops there — the tallies ignore `reader`, the fencing path does not. `NoPrimary` describes the opposite topology, no core site writable and none unreachable, whereas `iad` is writable right now. And `reader` is never a promotion candidate to pick a winner between: promotability is exactly `role == PrimaryCandidate`, and fresh data or a writable state does not earn it. (objectives 6, 8)
 
 ## Question 5
 
@@ -95,11 +95,11 @@ You have just run `./playground/setup.sh` against a fresh three-agent k3d cluste
 
 **Sample answer:**
 
-First the pods: `kubectl -n bloodraven-playground get pods -l app.kubernetes.io/name=mysql` should list three, one per site, and each should read 2/2 Ready — `mysql` plus its `sidecar` container. Then the status. `status.activeSite` names exactly one site, say `iad`. In `status.sites[]`, `iad` reads state `writable` with no `replicating`, `secondsBehindSource` or `gtidExecuted` keys at all, because the operator only probes replication on read-only sites; `pdx` and `reader` read state `read-only` with `replicating: true` and `secondsBehindSource: 0`. The `Ready` condition is True and the `Degraded` condition's `reason` is `Healthy`. The values I would not carry to production are the playground's deliberate overrides: `failoverCooldown: 30s` against a shipped default of 5m, `replication.maxLagSeconds: 30` against 300, and `dns.ttl: 10` against 60. Everything else — `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`, `peerCheckInterval`, `maxSyncWait` — is at its shipped default here.
+First the pods: `kubectl -n bloodraven-playground get pods -l app.kubernetes.io/name=mysql` should list three, one per site, and each should read 2/2 Ready — `mysql` plus its `sidecar` container. Then the status. `status.activeSite` names exactly one site, say `iad`. In `status.sites[]`, `iad` reads state `Writable` with no `replicating`, `secondsBehindSource` or `gtidExecuted` keys at all, because the operator only probes replication on read-only sites; `pdx` and `reader` read state `ReadOnly` with `replicating: true` and `secondsBehindSource: 0`. The `Ready` condition is True and the `Degraded` condition's `reason` is `Healthy`. The values I would not carry to production are the playground's deliberate overrides: `failoverCooldown: 30s` against a shipped default of 5m, `replication.maxLagSeconds: 30` against 300, and `dns.ttl: 10` against 60. Everything else — `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`, `peerCheckInterval`, `maxSyncWait` — is at its shipped default here.
 
 **A full-credit answer shows:**
 
-A strong answer covers: (1) three MySQL pods, each 2/2 because every MySQL pod runs a sidecar container beside mysqld; (2) reading the status — one named `activeSite`, that site `writable`, the other two `read-only` with `replicating: true` and lag 0, `Degraded` reason `Healthy`; (3) at least two of the three playground overrides with their shipped defaults: `failoverCooldown` 30s vs 5m, `maxLagSeconds` 30 vs 300, `dns.ttl` 10 vs 60. Credit for noting that the primary's entry has replication fields absent rather than zero or false, and for noting that timings observed in the playground are not shipped timings. Do not credit an answer that reads a 1/1 pod as healthy, or that presents the overridden values as defaults.
+A strong answer covers: (1) three MySQL pods, each 2/2 because every MySQL pod runs a sidecar container beside mysqld; (2) reading the status — one named `activeSite`, that site `Writable`, the other two `ReadOnly` with `replicating: true` and lag 0, `Degraded` reason `Healthy`; (3) at least two of the three playground overrides with their shipped defaults: `failoverCooldown` 30s vs 5m, `maxLagSeconds` 30 vs 300, `dns.ttl` 10 vs 60. Credit for noting that the primary's entry has replication fields absent rather than zero or false, and for noting that timings observed in the playground are not shipped timings. Do not credit an answer that reads a 1/1 pod as healthy, or that presents the overridden values as defaults.
 
 **Explanation:**
 
@@ -143,18 +143,18 @@ The `-primary` Service selector is fixed at two labels — `app.kubernetes.io/in
 
 **Type:** MULTIPLE_CHOICE
 
-You add a third site, `fra`, purely to serve analytics reads. It must never be promoted. A colleague sets `role: dr-only` rather than `role: read-only`. `fra` later becomes unreachable while `iad` is still writable. What is the practical difference?
+You add a third site, `fra`, purely to serve analytics reads. It must never be promoted. A colleague sets `role: DisasterRecovery` rather than `role: ReadOnly`. `fra` later becomes unreachable while `iad` is still writable. What is the practical difference?
 
 - None — neither role is promotable, so the two behave identically once you have ruled out promotion
-- `dr-only` counts as a core site, so the unreachable `fra` moves the `Degraded` reason off `Healthy`; declared `read-only`, `fra` is excluded from the tallies and its loss leaves the group reading `Healthy`
-- `dr-only` makes `fra` promotable as a last resort when no `primary-candidate` site survives, which is why it is the safer choice for a third site
-- `read-only` would have made `fra` unreachable-tolerant, because a `read-only` site never appears in `status.sites[]` at all
+- `DisasterRecovery` counts as a core site, so the unreachable `fra` moves the `Degraded` reason off `Healthy`; declared `ReadOnly`, `fra` is excluded from the tallies and its loss leaves the group reading `Healthy`
+- `DisasterRecovery` makes `fra` promotable as a last resort when no `PrimaryCandidate` site survives, which is why it is the safer choice for a third site
+- `ReadOnly` would have made `fra` unreachable-tolerant, because a `ReadOnly` site never appears in `status.sites[]` at all
 
 **Correct option index:** 1
 
 **Explanation:**
 
-The two non-promotable roles differ in visibility, not in promotability. A `dr-only` site is a full participant in the topology view: it is counted in `coreCount` and in the writable, read-only and unreachable tallies, so losing it produces the shape "a site is unreachable while the primary is up" and the `Degraded` reason follows. A `read-only` site is excluded from all of that, so a dead `fra` would leave the group reporting `Healthy` — and it also never taints its node and is refused as a backup source. "Identical" is the common flattening and it will surprise you at 03:00, when a reporting replica takes your alerting off `Healthy`. `dr-only` as a last-resort candidate is the more dangerous misreading: promotability is exactly `role == primary-candidate`, with no fallback, and a planned failover naming a non-candidate is hard-refused. And `read-only` sites do appear in `status.sites[]` with their own state and replication fields; what they are absent from is the tallies that compute the condition reasons. (objectives 6, 8)
+The two non-promotable roles differ in visibility, not in promotability. A `DisasterRecovery` site is a full participant in the topology view: it is counted in `coreCount` and in the writable, read-only and unreachable tallies, so losing it produces the shape "a site is unreachable while the primary is up" and the `Degraded` reason follows. A `ReadOnly` site is excluded from all of that, so a dead `fra` would leave the group reporting `Healthy` — and it also never taints its node and is refused as a backup source. "Identical" is the common flattening and it will surprise you at 03:00, when a reporting replica takes your alerting off `Healthy`. `DisasterRecovery` as a last-resort candidate is the more dangerous misreading: promotability is exactly `role == PrimaryCandidate`, with no fallback, and a planned failover naming a non-candidate is hard-refused. And `ReadOnly` sites do appear in `status.sites[]` with their own state and replication fields; what they are absent from is the tallies that compute the condition reasons. (objectives 6, 8)
 
 ## Question 10
 

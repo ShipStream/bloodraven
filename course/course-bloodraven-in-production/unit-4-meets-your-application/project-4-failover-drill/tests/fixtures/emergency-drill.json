@@ -32,18 +32,18 @@
     "sites": [
       {
         "name": "iad",
-        "role": "primary-candidate",
-        "state": "unreachable"
+        "role": "PrimaryCandidate",
+        "state": "Unreachable"
       },
       {
         "name": "pdx",
-        "role": "primary-candidate",
-        "state": "writable"
+        "role": "PrimaryCandidate",
+        "state": "Writable"
       },
       {
         "name": "reader",
-        "role": "read-only",
-        "state": "read-only"
+        "role": "ReadOnly",
+        "state": "ReadOnly"
       }
     ]
   }

@@ -170,7 +170,7 @@ type KeyringSpec struct {
 
 // SiteKeyringPhase is the per-site keyring lifecycle state. It drives
 // how the operator renders that site's MySQL Deployment.
-// +kubebuilder:validation:Enum="";Pending;Unsealed;Escrowed;Sealed;Failed
+// +kubebuilder:validation:Enum=Pending;Unsealed;Escrowed;Sealed;Failed
 type SiteKeyringPhase string
 
 const (
@@ -199,11 +199,11 @@ const (
 	KeyringPhaseFailed SiteKeyringPhase = "Failed"
 )
 
-// KeyringUnsealReason records why a site is currently unsealed. Empty
+// KeyringUnsealReason records why a site is currently unsealed. Absent
 // when the site is sealed, or when a clone hold has been released and
 // reseal is in progress. Clone is a control signal: the operator must
 // not advance that site to Escrowed until the clone bootstrap finishes.
-// +kubebuilder:validation:Enum="";Bootstrap;Clone;Rotation
+// +kubebuilder:validation:Enum=Bootstrap;Clone;Rotation
 type KeyringUnsealReason string
 
 const (

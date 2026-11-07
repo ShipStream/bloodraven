@@ -269,7 +269,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 		// operator-side build failure.
 		reason, message := v1alpha1.ReasonBuildJobFailed, err.Error()
 		if tok := pitrFailureReason(message); tok != "" {
-			reason, message = tok, tokenFirstMessage(tok, message)
+			reason, message = string(tok), tokenFirstMessage(string(tok), message)
 		}
 		return r.failVerification(ctx, v, reason, message)
 	}
@@ -428,7 +428,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		// without having to grep pod logs.
 		switch {
 		case pitrFailureReason(message) != "":
-			reason = pitrFailureReason(message)
+			reason = string(pitrFailureReason(message))
 		case strings.HasPrefix(message, "SanityCheckTimeout"), sentinels.Sanity != nil && strings.EqualFold(sentinels.Sanity.Error, "timeout"):
 			reason = v1alpha1.ReasonSanityCheckTimeout
 		case strings.HasPrefix(message, "SanityCheckFailed"), sentinels.Sanity != nil && sentinels.Sanity.Error != "":

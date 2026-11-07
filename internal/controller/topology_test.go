@@ -671,10 +671,10 @@ func TestNormalSite0Primary(t *testing.T) {
 	}
 
 	s := tm.Status()
-	if s.Sites[0].State != "writable" {
+	if s.Sites[0].State != v1alpha1.SiteStateWritable {
 		t.Errorf("site0 state: got %s, want writable", s.Sites[0].State)
 	}
-	if s.Sites[1].State != "read-only" {
+	if s.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Errorf("site1 state: got %s, want read-only", s.Sites[1].State)
 	}
 }
@@ -690,7 +690,7 @@ func TestStatusIncludesSourceConvergence(t *testing.T) {
 	if got, want := site.SourceHost, "mysql-lion-dc1-internal.ns.svc.cluster.local"; got != want {
 		t.Fatalf("sourceHost = %q, want %q", got, want)
 	}
-	if got, want := site.SourceConvergenceState, string(sourceConvergenceConverged); got != want {
+	if got, want := site.SourceConvergenceState, sourceConvergenceConverged; got != want {
 		t.Fatalf("sourceConvergenceState = %q, want %q", got, want)
 	}
 	if !site.ServingHealthy {
@@ -3109,7 +3109,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 		primaryGTID      string // defaults to clusterGTID
 		oldGTID          string
 		wantRecovery     bool
-		wantState        string
+		wantState        v1alpha1.SiteRecoveryState
 		wantStartReplica bool
 		wantDivergent    string
 	}{
@@ -3186,7 +3186,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			if !tt.wantRecovery {
 				return
 			}
-			gotState := ""
+			var gotState v1alpha1.SiteRecoveryState
 			if rec != nil {
 				gotState = rec.state
 			}

@@ -25,7 +25,6 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
-	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // filterOutVolumeByName returns a copy of vols with the entry whose
@@ -170,7 +169,7 @@ func initRestoreReadyCondition(fg *v1alpha1.MysqlFailoverGroup) (reason, message
 	if rs != nil && rs.Phase == v1alpha1.BackupPhaseFailed {
 		detail := rs.Message
 		if rs.Reason != "" {
-			detail = rs.Reason + ": " + detail
+			detail = string(rs.Reason) + ": " + detail
 		}
 		if rs.JobName == "" {
 			return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf(
@@ -235,9 +234,6 @@ func applyRestoreMetadataToStatus(rs *v1alpha1.RestoreStatus, meta restoreComple
 	rs.TargetBinlogFile = meta.TargetBinlogFile
 	rs.TargetBinlogPos = meta.TargetBinlogPos
 	rs.PointInTime = meta.PointInTime
-	if meta.pitrPartial() {
-		rs.Reason = "PointInTimePartial"
-	}
 }
 
 func applyRestoreMetadataToInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus, meta restoreCompletionMetadata) {
@@ -479,9 +475,9 @@ func restoreTargetSite(fg *v1alpha1.MysqlFailoverGroup) (site string, ready bool
 			continue
 		}
 		switch s.State {
-		case state.StateWritable.String():
+		case v1alpha1.SiteStateWritable:
 			return active, true, "", false
-		case "", state.StateReadOnly.String():
+		case "", v1alpha1.SiteStateReadOnly:
 			// The seed is published before the poll that observes it
 			// writable, so read-only here is normally that window.
 			return active, false, fmt.Sprintf("waiting for active site %q to be observed writable", active), false

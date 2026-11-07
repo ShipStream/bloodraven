@@ -205,7 +205,7 @@ func TestUnsettledEarlierQueueIsHeldWhenNextRunEndsWithoutJob(t *testing.T) {
 	site, peerName := fg.Spec.Sites[0].Name, fg.Spec.Sites[1].Name
 	no := false
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", ConfirmTokenUsed: confirmA, RunConfirm: confirmB, RunID: "run-b",
+		Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: confirmA, RunConfirm: confirmB, RunID: "run-b",
 		StartTime: ptrTime(time.Now()),
 	}
 	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{peerName}}

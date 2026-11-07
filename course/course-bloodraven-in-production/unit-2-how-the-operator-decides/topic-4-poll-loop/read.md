@@ -23,10 +23,10 @@ state machine. There are four states, and they are exactly these:
 
 | Constant | Rendered in status | Meaning |
 | --- | --- | --- |
-| `StateUnknown` | `unknown` | no usable answer yet |
-| `StateWritable` | `writable` | `read_only=0` |
-| `StateReadOnly` | `read-only` | `read_only=1` |
-| `StateUnreachable` | `unreachable` | connection failed |
+| `StateUnknown` | `Unknown` | no usable answer yet |
+| `StateWritable` | `Writable` | `read_only=0` |
+| `StateReadOnly` | `ReadOnly` | `read_only=1` |
+| `StateUnreachable` | `Unreachable` | connection failed |
 
 ```widget
 {
@@ -43,7 +43,7 @@ state machine. There are four states, and they are exactly these:
     },
     {
       "label": "Compute each site's state",
-      "detail": "unknown / writable / read-only / unreachable, from the counters plus this poll's answer."
+      "detail": "Unknown / Writable / ReadOnly / Unreachable, from the counters plus this poll's answer."
     },
     {
       "label": "Detect transitions",
@@ -72,8 +72,8 @@ now load-bearing rather than boilerplate:
 # playground — unchanged since you stood it up; these three lines are the subject now
 spec:
   pollInterval: 2s        # <-- the tick
-  failureThreshold: 3     # <-- consecutive failures before "unreachable"
-  recoveryThreshold: 2    # <-- consecutive writable answers before "writable"
+  failureThreshold: 3     # <-- consecutive failures before "Unreachable"
+  recoveryThreshold: 2    # <-- consecutive writable answers before "Writable"
 ```
 
 They land in one function, and reading it is faster than reading any prose about it:
@@ -116,10 +116,10 @@ One good answer in the middle puts `failCount` back to zero and you start again.
 ## The asymmetry, and the number people get wrong
 
 Now look at what that function believes instantly and what it makes prove itself. A `read_only=1`
-answer becomes `read-only` on a **single** poll — no counter, no waiting — and it zeroes
+answer becomes `ReadOnly` on a **single** poll — no counter, no waiting — and it zeroes
 `recoveryCount` on the way through. A `read_only=0` answer from a site that is not already writable
-becomes `writable` only after `recoveryThreshold` consecutive successes. A connection error becomes
-`unreachable` only after `failureThreshold` consecutive failures.
+becomes `Writable` only after `recoveryThreshold` consecutive successes. A connection error becomes
+`Unreachable` only after `failureThreshold` consecutive failures.
 
 ```widget
 {
@@ -150,10 +150,10 @@ becomes `writable` only after `recoveryThreshold` consecutive successes. A conne
   ],
   "columns": [
     {
-      "label": "→ read-only"
+      "label": "→ ReadOnly"
     },
     {
-      "label": "→ writable"
+      "label": "→ Writable"
     }
   ]
 }
@@ -163,8 +163,8 @@ One logic, two directions. Read-only is cheap to be wrong about; writable is exp
 
 Which gives you the derivation everyone reaches for and half of everyone gets wrong. Detection delay
 for a dead site is `pollInterval × failureThreshold` = **2 s × 3 = 6 s**. Three probes, one every
-2 s, and the third one returns `unreachable`. `recoveryThreshold` is **not** a term in that sum. It
-never was. It gates the opposite transition — the way back to `writable` — and adding it to get 10 s
+2 s, and the third one returns `Unreachable`. `recoveryThreshold` is **not** a term in that sum. It
+never was. It gates the opposite transition — the way back to `Writable` — and adding it to get 10 s
 is the single most common wrong answer about this operator. The 5 s probe ceiling is not a term
 either; it bounds one probe, it does not pace the loop.
 
@@ -190,7 +190,7 @@ the operator can take that long to notice — to rejoin it, or to see that it ca
 sidecar's fencing rules cover a returning old primary in that window, not the operator's poll. The
 skip also saves the loop real time: every poll waits for its slowest probe, so a site that hangs
 rather than refusing costs each poll its full 5 s ceiling — but only until it has been declared
-`unreachable` and its probes start backing off.
+`Unreachable` and its probes start backing off.
 
 Put the pair in your runbook: **6 s to detect any site's failure, up to 30 s to notice a long-down site
 has come back.** A single number is the wrong shape for this answer. If an older runbook says a
@@ -200,8 +200,8 @@ second fault takes up to 90 s, it describes a shared backoff the operator no lon
 ## One bypass
 
 Last thing. A writable observation on a **non-promotable** site — anything whose role is not
-`primary-candidate`, so `reader` in `playground` — skips `recoveryThreshold` entirely and records
-`writable` on the first poll. The comment in the code is the whole argument: a writable
+`PrimaryCandidate`, so `reader` in `playground` — skips `recoveryThreshold` entirely and records
+`Writable` on the first poll. The comment in the code is the whole argument: a writable
 non-promotable site is an immediate safety fact, and authority invalidation must not be debounced
 behind the normal recovery threshold. Being slow to believe a new primary is prudence. Being slow to
 notice a reader taking writes is not.

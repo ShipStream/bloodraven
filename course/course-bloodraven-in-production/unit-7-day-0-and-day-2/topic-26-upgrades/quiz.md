@@ -29,7 +29,7 @@ You bump `spec.image` on a two-site group. Ninety seconds in, the rollout stops 
 - The standby came back from its restart writable — something cleared the `read_only=ON` every `mysqld` boots with — with no working replication, and because cross-site recovery is suppressed during an update nothing is going to start it — so the updater gives up early rather than burning its five-minute deadline
 - The image tag is wrong and MySQL failed to start, so the checker read a stale writable value from before the restart
 - The primary was promoted twice, leaving both sites writable, and the updater refuses to continue into a split brain
-- `recoveryThreshold` was not reached before the deadline, so the standby never debounced to `writable` and the updater timed out
+- `recoveryThreshold` was not reached before the deadline, so the standby never debounced to `Writable` and the updater timed out
 
 **Correct option index:** 0
 

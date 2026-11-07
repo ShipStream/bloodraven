@@ -1,7 +1,7 @@
 {
   "flashcards": [
     {
-      "front": "Any site is writable while its role is not primary-candidate. What does EvalCrossSite do?",
+      "front": "Any site is writable while its role is not PrimaryCandidate. What does EvalCrossSite do?",
       "back": "Fills action.FenceSites, sets Alert `writable non-promotable site requires fencing (…)` and Reason \"Degraded\", and returns immediately — before TotalLoss, SplitBrain, failover or anything else is evaluated.",
       "orderIndex": 0
     },
@@ -41,8 +41,8 @@
       "orderIndex": 7
     },
     {
-      "front": "A group's only surviving reachable site is `dr-only` and read-only; the primary-candidate peer is unreachable. Which tally holds the dr-only site, and what is emitted?",
-      "back": "The readOnly tally — dr-only is not excluded, so the failover row's three conjuncts all hold; but RankPromotionCandidates keeps primary-candidates only, returns empty, and the code falls through to Reason \"NoPrimary\".",
+      "front": "A group's only surviving reachable site is `DisasterRecovery` and read-only; the PrimaryCandidate peer is unreachable. Which tally holds the DisasterRecovery site, and what is emitted?",
+      "back": "The readOnly tally — DisasterRecovery is not excluded, so the failover row's three conjuncts all hold; but RankPromotionCandidates keeps PrimaryCandidate sites only, returns empty, and the code falls through to Reason \"NoPrimary\".",
       "orderIndex": 8
     },
     {
@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "In `playground`, `iad` (primary-candidate) is writable and someone runs `SET GLOBAL read_only=OFF` on `reader` (role: read-only), so it reads writable. `pdx` is read-only. What does EvalCrossSite return?",
+      "question": "In `playground`, `iad` (PrimaryCandidate) is writable and someone runs `SET GLOBAL read_only=OFF` on `reader` (role: ReadOnly), so it reads writable. `pdx` is read-only. What does EvalCrossSite return?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -73,14 +73,14 @@
         "Reason \"Degraded\" with alert `reader unreachable while iad is primary`"
       ],
       "correctOptionIndex": 1,
-      "explanation": "The tally loop routes any writable site whose role is not primary-candidate into FenceSites and `continue`s, so `reader` never joins the writable tally; the fence-first guard then fires and returns immediately. SplitBrain is wrong because len(writable) counts core sites only and equals 1 here — and even with two writable candidates the fence-first return would preempt it. Healthy is the trap version of the same fact: readers are excluded from coreCount and the tallies, but a writable one is not merely ignored, it is an anomaly that produces an alert. The last option invents an unreachable site that does not exist. (objectives 4, 6)"
+      "explanation": "The tally loop routes any writable site whose role is not PrimaryCandidate into FenceSites and `continue`s, so `reader` never joins the writable tally; the fence-first guard then fires and returns immediately. SplitBrain is wrong because len(writable) counts core sites only and equals 1 here — and even with two writable candidates the fence-first return would preempt it. Healthy is the trap version of the same fact: readers are excluded from coreCount and the tallies, but a writable one is not merely ignored, it is an anomaly that produces an alert. The last option invents an unreachable site that does not exist. (objectives 4, 6)"
     },
     {
       "question": "`playground` has `iad` and `pdx` both reachable and both read-only, and no site unreachable. What does the operator do?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 1,
       "options": [
-        "Promotes whichever of `iad` or `pdx` has the freshest GTID set, since both are eligible primary-candidates",
+        "Promotes whichever of `iad` or `pdx` has the freshest GTID set, since both are eligible PrimaryCandidate sites",
         "Promotes `iad`, because it is first in `spec.splitBrainPolicy.sitePriorities`",
         "Emits Reason \"NoPrimary\" with alert `NO PRIMARY: both sites are read-only` and takes no automatic action",
         "Emits Reason \"Degraded\" with promotion candidates, then waits for a human to confirm"
@@ -102,11 +102,11 @@
       "explanation": "One writable plus at least one unreachable hits the primary-up-peer-down row: Reason \"Degraded\", alert `<site> unreachable while <site> is primary`. \"Failover\" is the most dangerous distractor because the published docs table does name that outcome — but no code path emits it; the only five reasons that reach status.conditions are Healthy, Degraded, SplitBrain, NoPrimary and TotalLoss, so an alert rule matching a `Failover` reason never fires. \"Healthy\" requires exactly one writable AND zero unreachable, and the second clause fails. \"NoPrimary\" requires zero writable, and `iad` is still writable. (objective 4)"
     },
     {
-      "question": "Because `dr-only` sites are non-promotable, EvalCrossSite excludes them from `coreCount` and from the writable/read-only/unreachable tallies, exactly as it excludes `role: read-only` sites. True or false?",
+      "question": "Because `DisasterRecovery` sites are non-promotable, EvalCrossSite excludes them from `coreCount` and from the writable/read-only/unreachable tallies, exactly as it excludes `role: ReadOnly` sites. True or false?",
       "type": "TRUE_FALSE",
       "orderIndex": 3,
       "correctAnswer": false,
-      "explanation": "The opposite is true: only `role: read-only` is excluded. The tally loop increments coreCount for every site whose role is not read-only, so a `dr-only` site counts and still lands in the readOnly or unreachable tally. Promotability and matrix visibility are two separate properties, and conflating them is expensive: in a group of two primary-candidates plus one dr-only site, treating dr-only as invisible would make you predict `len(unreachable) == coreCount` at two unreachable sites when the real threshold is three, so you would expect TotalLoss a whole site early. (objective 4)"
+      "explanation": "The opposite is true: only `role: ReadOnly` is excluded. The tally loop increments coreCount for every site whose role is not read-only, so a `DisasterRecovery` site counts and still lands in the readOnly or unreachable tally. Promotability and matrix visibility are two separate properties, and conflating them is expensive: in a group of two PrimaryCandidate sites plus one DisasterRecovery site, treating DisasterRecovery as invisible would make you predict `len(unreachable) == coreCount` at two unreachable sites when the real threshold is three, so you would expect TotalLoss a whole site early. (objective 4)"
     },
     {
       "question": "`spec.splitBrainPolicy.sitePriorities` is `[iad, pdx]`. The table has emitted PromotionCandidates and `pdx` holds a strictly fresher GTID set than `iad`. Which site is promoted, and why?",

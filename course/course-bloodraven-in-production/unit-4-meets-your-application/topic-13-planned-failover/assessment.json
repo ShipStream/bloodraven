@@ -46,8 +46,8 @@
       "orderIndex": 8
     },
     {
-      "front": "Verbatim refusal when a planned failover targets a `role: read-only` site.",
-      "back": "`only primary-candidate sites may be promoted`.",
+      "front": "Verbatim refusal when a planned failover targets a `role: ReadOnly` site.",
+      "back": "`only PrimaryCandidate sites may be promoted`.",
       "orderIndex": 9
     },
     {

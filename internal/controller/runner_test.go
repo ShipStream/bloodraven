@@ -93,12 +93,12 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 		Sites: []v1alpha1.SiteStatus{
 			{
 				Name:     "dc1",
-				State:    "writable",
+				State:    v1alpha1.SiteStateWritable,
 				LastSeen: &lastSeen,
 			},
 			{
 				Name:     "dc2",
-				State:    "read-only",
+				State:    v1alpha1.SiteStateReadOnly,
 				LastSeen: &lastSeen,
 			},
 		},
@@ -125,8 +125,8 @@ func TestStatusDeepEqual_DifferentActiveSite(t *testing.T) {
 	status := v1alpha1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
 		Sites: []v1alpha1.SiteStatus{
-			{Name: "dc1", State: "writable"},
-			{Name: "dc2", State: "read-only"},
+			{Name: "dc1", State: v1alpha1.SiteStateWritable},
+			{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
 		},
 	}
 
@@ -142,13 +142,13 @@ func TestStatusDeepEqual_DifferentSiteState(t *testing.T) {
 	status := v1alpha1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
 		Sites: []v1alpha1.SiteStatus{
-			{Name: "dc1", State: "writable"},
-			{Name: "dc2", State: "read-only"},
+			{Name: "dc1", State: v1alpha1.SiteStateWritable},
+			{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
 		},
 	}
 
 	existing := status.DeepCopy()
-	status.Sites[0].State = "unreachable"
+	status.Sites[0].State = v1alpha1.SiteStateUnreachable
 
 	if equality.Semantic.DeepEqual(existing, &status) {
 		t.Error("expected different Sites[0] state to be unequal")
@@ -448,7 +448,7 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 	for _, role := range []state.SiteRole{state.SiteRoleReadOnly, state.SiteRoleDROnly} {
 		t.Run(string(role), func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "anomaly", ServerID: 103, Role: v1alpha1.SiteRole(role)})
+			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "anomaly", ServerID: 103, Role: APISiteRole(role)})
 			scheme := testScheme()
 			c := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).

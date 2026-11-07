@@ -41,23 +41,23 @@
       "orderIndex": 7
     },
     {
-      "front": "Role: `primary-candidate`",
-      "back": "The only role that may be promoted. Promotability is exactly `role == primary-candidate`.",
+      "front": "Role: `PrimaryCandidate`",
+      "back": "The only role that may be promoted. Promotability is exactly `role == PrimaryCandidate`.",
       "orderIndex": 8
     },
     {
-      "front": "Role: `dr-only`",
+      "front": "Role: `DisasterRecovery`",
       "back": "Counted in the topology tallies like any core site, but never eligible for promotion.",
       "orderIndex": 9
     },
     {
-      "front": "Role: `read-only`",
+      "front": "Role: `ReadOnly`",
       "back": "Excluded from `coreCount` and all three state tallies; never taints a node and cannot be a backup source.",
       "orderIndex": 10
     },
     {
       "front": "Active site versus primary candidate — what is the difference?",
-      "back": "`primary-candidate` is a static role you declare in `spec.sites`; the active site is the one site currently holding writable authority.",
+      "back": "`PrimaryCandidate` is a static role you declare in `spec.sites`; the active site is the one site currently holding writable authority.",
       "orderIndex": 11
     }
   ],
@@ -73,7 +73,7 @@
         "`mysql-playground-reader-internal`, the stable in-cluster address"
       ],
       "correctOptionIndex": 0,
-      "explanation": "`mysql-playground-replicas` is the group read endpoint — instance, `shipstream.io/role=replica` and `shipstream.io/healthy=yes` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: read-only` site, its per-site Service *does* carry the same `healthy=yes` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)"
+      "explanation": "`mysql-playground-replicas` is the group read endpoint — instance, `shipstream.io/role=replica` and `shipstream.io/healthy=yes` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: ReadOnly` site, its per-site Service *does* carry the same `healthy=yes` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)"
     },
     {
       "question": "During the draining phase of a planned failover, the operator stamps the `iad` pod `shipstream.io/role=fenced`. Which Service still resolves to that pod?",
@@ -86,14 +86,14 @@
         "None; the operator deletes the pod as part of fencing"
       ],
       "correctOptionIndex": 0,
-      "explanation": "The per-site Services select on name, instance and `shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `primary-candidate`; on a `role: read-only` site the per-site Service adds a `healthy=yes` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)"
+      "explanation": "The per-site Services select on name, instance and `shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `PrimaryCandidate`; on a `role: ReadOnly` site the per-site Service adds a `healthy=yes` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)"
     },
     {
-      "question": "A `dr-only` site holds the freshest GTID set when the primary dies, so Bloodraven will promote it rather than lose those transactions.",
+      "question": "A `DisasterRecovery` site holds the freshest GTID set when the primary dies, so Bloodraven will promote it rather than lose those transactions.",
       "type": "TRUE_FALSE",
       "orderIndex": 2,
       "correctAnswer": false,
-      "explanation": "The reversal: GTID freshness never rescues a non-candidate, because promotability is checked first and is exactly `role == primary-candidate`. A `dr-only` site is counted in the topology tallies — unlike a `read-only` site it is a full core participant — which is what makes this tempting, but counting and being promotable are different properties. If such a site ever comes up writable it is routed to fencing rather than accepted. To make a site promotable you change its declared role; you cannot earn it with fresh data. (objective 6)"
+      "explanation": "The reversal: GTID freshness never rescues a non-candidate, because promotability is checked first and is exactly `role == PrimaryCandidate`. A `DisasterRecovery` site is counted in the topology tallies — unlike a `ReadOnly` site it is a full core participant — which is what makes this tempting, but counting and being promotable are different properties. If such a site ever comes up writable it is routed to fencing rather than accepted. To make a site promotable you change its declared role; you cannot earn it with fresh data. (objective 6)"
     },
     {
       "question": "The binlog archiver runs inside the per-pod sidecar rather than centrally in the operator. Give the physical reason, and say what would break if it were moved into the operator.",

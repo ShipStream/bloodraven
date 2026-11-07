@@ -112,7 +112,7 @@ func TestBackupProfileRolloutReady(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mfg := &v1alpha1.MysqlFailoverGroup{
 				ObjectMeta: metav1.ObjectMeta{Generation: 5},
-				Status:     v1alpha1.MysqlFailoverGroupStatus{ActiveSite: tc.active, UpdatePhase: tc.phase, Conditions: stale},
+				Status:     v1alpha1.MysqlFailoverGroupStatus{ActiveSite: tc.active, UpdatePhase: v1alpha1.UpdatePhase(tc.phase), Conditions: stale},
 			}
 			if got := backupProfileRolloutReady(mfg); got != tc.want {
 				t.Fatalf("backupProfileRolloutReady = %v, want %v", got, tc.want)

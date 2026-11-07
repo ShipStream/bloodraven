@@ -452,7 +452,7 @@ func s36VerifySafety() runner.Step {
 			}
 			writable := 0
 			for _, s := range mfg.Status.Sites {
-				if s.State == "writable" {
+				if s.State == v1alpha1.SiteStateWritable {
 					writable++
 				}
 				if s.RecoveryState == "RecoveryBlocked" {

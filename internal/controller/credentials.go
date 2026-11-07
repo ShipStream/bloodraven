@@ -533,7 +533,7 @@ func openAdminConnection(
 
 	activeSite := fg.Spec.SiteByName(fg.Status.ActiveSite)
 	if activeSite == nil || !activeSite.IsPromotable() {
-		return nil, fmt.Errorf("active site %q is not a primary-candidate", fg.Status.ActiveSite)
+		return nil, fmt.Errorf("active site %q is not a PrimaryCandidate site", fg.Status.ActiveSite)
 	}
 	primaryHost := fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, activeSite.Name, fg.Namespace), mysqlPort)
 

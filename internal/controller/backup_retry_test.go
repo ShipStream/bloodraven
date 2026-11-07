@@ -107,7 +107,7 @@ func TestBackupRetry_CreateConvergesAfterLostStatusAndStaleList(t *testing.T) {
 func TestBackupRetry_AttemptSurvivesLaunchStatusLoss(t *testing.T) {
 	fg := fgWithRetrySpec(3, 1)
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	backup := backupCR("retry-launch", fg.Name, "nightly-s3")
 	backup.Annotations = map[string]string{v1alpha1.BackupAttemptAnnotation: "2"}
 	r, c := newBackupReconciler(t, fg, backup, operatorCredsSecret())

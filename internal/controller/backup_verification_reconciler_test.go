@@ -536,16 +536,18 @@ func TestVerificationPITRRequest(t *testing.T) {
 		wantErr string
 	}{
 		{name: "nil", in: nil},
-		{name: "none", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "none"}},
-		{name: "empty mode", in: &v1alpha1.PointInTimeVerificationSpec{}},
-		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:1 "},
+		// A present block needs a mode; none is gone (no block = no replay).
+		{name: "none", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "none"}, wantErr: "not one of"},
+		{name: "lower-case latest", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}, wantErr: "not one of"},
+		{name: "empty mode", in: &v1alpha1.PointInTimeVerificationSpec{}, wantErr: "not one of"},
+		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:1 "},
 			want: &pitrReplayRequest{Mode: "latest", ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1", Verification: true}},
-		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20 03:00:00+02:00"},
+		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20 03:00:00+02:00"},
 			want: &pitrReplayRequest{Mode: "timestamp", Stop: "2026-04-20T01:00:00.000000Z", Verification: true}},
 		// C2 / A-39: whole seconds only.
-		{name: "fraction refused", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20T01:00:00.5Z"}, wantErr: "PITRTargetInvalid"},
-		{name: "timestamp required", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp"}, wantErr: "PITRTargetInvalid"},
-		{name: "seven digits", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2026-04-20T01:00:00.1234567Z"}, wantErr: "PITRTargetInvalid"},
+		{name: "fraction refused", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20T01:00:00.5Z"}, wantErr: "PITRTargetInvalid"},
+		{name: "timestamp required", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp}, wantErr: "PITRTargetInvalid"},
+		{name: "seven digits", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20T01:00:00.1234567Z"}, wantErr: "PITRTargetInvalid"},
 		{name: "unknown mode", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "head"}, wantErr: "not one of"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -576,7 +578,7 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
+				Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20T01:00:00Z",
 			},
 		},
 	}
@@ -636,7 +638,7 @@ func TestBuildVerificationJob_PITRRequiresPITREnabled(t *testing.T) {
 			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
+				Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20T01:00:00Z",
 			},
 		},
 	}
@@ -812,7 +814,7 @@ func TestBuildVerificationJob_PITRRefusesBackupWithoutIdentity(t *testing.T) {
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
 			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
-			PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"},
+			PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest},
 		},
 	}
 	_, err := buildVerificationJob(verificationJobInputs{
@@ -844,7 +846,7 @@ func TestVerificationReconciler_PITRBuildRefusalKeepsToken(t *testing.T) {
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 			backup := successfulBackup("nightly-pitr", "lion", "nightly-s3")
 			v := verifyCR("verify-pitr", "lion", "nightly-s3")
-			v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
+			v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest}
 			tc.mutate(fg, backup, v)
 			r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 			reconcileVerifUntilStable(t, r, "verify-pitr")

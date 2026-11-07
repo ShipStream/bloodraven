@@ -512,10 +512,10 @@ func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			restore, rerr := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ExcludeGtids: tc.in})
-			verify, verr := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: tc.in})
+			verify, verr := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ExcludeGtids: tc.in})
 			for name, err := range map[string]error{"restore": rerr, "verification": verr} {
 				if tc.wantErr {
-					if err == nil || pitrFailureReason(err.Error()) != string(pitrarchive.TokenTargetInvalid) {
+					if err == nil || string(pitrFailureReason(err.Error())) != string(pitrarchive.TokenTargetInvalid) {
 						t.Fatalf("%s: err = %v, want %s", name, err, pitrarchive.TokenTargetInvalid)
 					}
 					continue
@@ -532,8 +532,8 @@ func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
 			}
 		})
 	}
-	if req, err := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: "none", ExcludeGtids: "not a set:x-y"}); err != nil || req != nil {
-		t.Fatalf("mode none = %+v, %v; want no replay and no error", req, err)
+	if req, err := verificationPITRRequest(nil); err != nil || req != nil {
+		t.Fatalf("no pointInTime block = %+v, %v; want no replay and no error", req, err)
 	}
 }
 

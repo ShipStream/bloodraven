@@ -5,7 +5,7 @@
 
 **Front:** The `state transition` log event — which four fields does it carry?
 
-**Back:** `site`, `from`, `to`, `fg`. `from`/`to` are one of `unknown`, `unreachable`, `read-only`, `writable`.
+**Back:** `site`, `from`, `to`, `fg`. `from`/`to` are one of `Unknown`, `Unreachable`, `ReadOnly`, `Writable`.
 
 ---
 
@@ -35,7 +35,7 @@
 
 **Front:** Which metric increments exactly once per `state transition` log line, with the same labels?
 
-**Back:** `bloodraven_state_transitions_total{site, from, to}`.
+**Back:** `bloodraven_state_transitions_total{site, from, to}`. Same fields, different spelling: the log's `from`/`to` carry the API values (`ReadOnly`), the counter's labels their kebab-case (`read-only`).
 
 ---
 

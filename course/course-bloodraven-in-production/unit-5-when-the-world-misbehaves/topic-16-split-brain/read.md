@@ -1,6 +1,6 @@
 # Split brain, and what `sitePriorities` really buys you
 
-`playground` is telling you something new. The counter application's writes are still landing, both `iad` and `pdx` are answering, and the group's condition reads `SPLIT BRAIN: 2 sites are writable (iad, pdx)` with reason `SplitBrain`. The matrix emits that the moment more than one core site reports `read_only=0` — strictly `len(writable) > 1`, with the `read-only` `reader` site excluded from the tally. Two writable primary-candidates, then. What does the operator do about it?
+`playground` is telling you something new. The counter application's writes are still landing, both `iad` and `pdx` are answering, and the group's condition reads `SPLIT BRAIN: 2 sites are writable (iad, pdx)` with reason `SplitBrain`. The matrix emits that the moment more than one core site reports `read_only=0` — strictly `len(writable) > 1`, with the `ReadOnly` `reader` site excluded from the tally. Two writable primary candidates, then. What does the operator do about it?
 
 That depends entirely on one field, and there is a habit to install before you go looking for it.
 
@@ -15,7 +15,7 @@ That is not a hypothetical: for part of Bloodraven's history the published failo
 Two commands make it impossible to be caught by this class of error. `kubectl explain mysqlfailovergroup.spec.splitBrainPolicy` renders the schema the API server actually validates against, which is the only schema that matters. And `grep -rn preferSite config/crd/bases/ charts/bloodraven/crds/` returns nothing, which is the whole story in one line. Documentation drifts from CRDs in both directions and at unpredictable speed. The CRD is the contract.
 
 ```widget
-{"type":"anatomy","title":"The field that actually ships","parts":[{"text":"splitBrainPolicy:","label":"optional block","note":"Omit it entirely and you are on tier 3 — alert only."},{"text":"  sitePriorities:","label":"the real field","note":"Not preferSite. An ordered list, not a single name. MaxItems 16, matching spec.sites."},{"text":"    - iad","label":"first choice","note":"Wins if it is currently writable AND role: primary-candidate."},{"text":"    - pdx","label":"fallback","note":"Wins only if iad is not currently writable. Order is the whole policy."}]}
+{"type":"anatomy","title":"The field that actually ships","parts":[{"text":"splitBrainPolicy:","label":"optional block","note":"Omit it entirely and you are on tier 3 — alert only."},{"text":"  sitePriorities:","label":"the real field","note":"Not preferSite. An ordered list, not a single name. MaxItems 16, matching spec.sites."},{"text":"    - iad","label":"first choice","note":"Wins if it is currently writable AND role: PrimaryCandidate."},{"text":"    - pdx","label":"fallback","note":"Wins only if iad is not currently writable. Order is the whole policy."}]}
 ```
 
 ## The three tiers, in evaluation order
@@ -28,9 +28,9 @@ The response is tiered, evaluated in this order every time the operator sees `Sp
 | 2 — policy | No usable history **and** `sitePriorities` is non-empty | `ResolveSplitBrain` picks the winner, losers are fenced, winner is re-promoted through the standard path |
 | 3 — neither | No usable history **and** no priorities | Alert only. Manual resolution, by design |
 
-Tier 1's three conditions are a conjunction and all three matter: `keepSite != nil && keepSite.state == StateWritable && keepSite.isPromotable()`. A recorded target that has since gone unreachable, been demoted to read-only, or had its role changed away from `primary-candidate` does **not** win by memory alone — the operator falls through to tier 2. Authority has to be currently true, not merely once recorded.
+Tier 1's three conditions are a conjunction and all three matter: `keepSite != nil && keepSite.state == StateWritable && keepSite.isPromotable()`. A recorded target that has since gone unreachable, been demoted to read-only, or had its role changed away from `PrimaryCandidate` does **not** win by memory alone — the operator falls through to tier 2. Authority has to be currently true, not merely once recorded.
 
-Tier 2 runs `state.ResolveSplitBrain(writable, sitePriorities)`. It walks your list in order and takes the earliest entry that is both currently writable and `primary-candidate`; every other writable site becomes a loser to fence. Two refusals are worth memorising. An empty list returns `("", nil)` — it will not guess. So does a list whose entries name nothing currently writable and promotable. It **never falls back to the order sites were declared in** under `spec.sites`. No policy means no automated resolution.
+Tier 2 runs `state.ResolveSplitBrain(writable, sitePriorities)`. It walks your list in order and takes the earliest entry that is both currently writable and `PrimaryCandidate`; every other writable site becomes a loser to fence. Two refusals are worth memorising. An empty list returns `("", nil)` — it will not guess. So does a list whose entries name nothing currently writable and promotable. It **never falls back to the order sites were declared in** under `spec.sites`. No policy means no automated resolution.
 
 ## The selector that is deliberately missing
 
@@ -40,7 +40,7 @@ Split-brain winner selection does not consult GTID at all. The code says why: *"
 
 ## What shows up in logs and manifests
 
-CEL rejects priority entries that do not name a `primary-candidate` site: *"splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'"*. Naming `reader` fails at `kubectl apply`, not silently at 3am. The resolution then emits a `Warn` naming the correct field and carrying two keys you can alert on — `winner` and `fencedSite`.
+CEL rejects priority entries that do not name a `PrimaryCandidate` site: *"splitBrainPolicy.sitePriorities entries must match the names of sites with role PrimaryCandidate"*. Naming `reader` fails at `kubectl apply`, not silently at 3am. The resolution then emits a `Warn` naming the correct field and carrying two keys you can alert on — `winner` and `fencedSite`.
 
 ```widget
 {

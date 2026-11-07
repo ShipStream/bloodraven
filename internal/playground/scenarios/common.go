@@ -134,7 +134,7 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		if s.RecoveryState == "RecoveryBlocked" {
 			return fmt.Errorf("baseline unhealthy: site %s has RecoveryBlocked — run ./playground/reset-mysql.sh and retry", s.Name)
 		}
-		if s.State == "" || s.State == "unknown" || s.State == "unreachable" {
+		if s.State == "" || s.State == v1alpha1.SiteStateUnknown || s.State == v1alpha1.SiteStateUnreachable {
 			return fmt.Errorf("baseline unhealthy: site %s state=%q — wait for recovery or run ./playground/reset-mysql.sh", s.Name, s.State)
 		}
 	}
@@ -232,7 +232,7 @@ func bothReadOnly(mfg *v1alpha1.MysqlFailoverGroup) bool {
 		return false
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.State != "read-only" {
+		if s.State != v1alpha1.SiteStateReadOnly {
 			return false
 		}
 	}

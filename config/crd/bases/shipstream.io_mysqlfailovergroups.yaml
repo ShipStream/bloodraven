@@ -942,17 +942,16 @@ spec:
                                     ExcludeGtids are never replayed and must not intersect the backup,
                                     with the same meaning as PointInTimeSpec.ExcludeGtids: every archived
                                     transaction committed between the backup's newest transaction and the
-                                    target (or the archive head in latest mode) that is outside the
+                                    target (or the archive head in Latest mode) that is outside the
                                     target history must be listed.
                                   maxLength: 131072
                                   type: string
                                 mode:
-                                  default: none
-                                  description: Mode selects the replay behavior.
+                                  description: 'Mode selects the replay end point:
+                                    Latest or Timestamp.'
                                   enum:
-                                  - none
-                                  - latest
-                                  - timestamp
+                                  - Timestamp
+                                  - Latest
                                   type: string
                                 timestamp:
                                   description: |-
@@ -961,10 +960,12 @@ spec:
                                     stored fractional value must be corrected in the same update, as for
                                     StopDatetime). Replay restores the history of the first archived
                                     transaction committed at or after it, cut just before that
-                                    transaction. Required when Mode=timestamp; ignored otherwise.
+                                    transaction. Required when Mode=Timestamp; ignored otherwise.
                                   maxLength: 40
                                   pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
                                   type: string
+                              required:
+                              - mode
                               type: object
                             retentionPolicy:
                               description: |-
@@ -6511,9 +6512,9 @@ spec:
               sites:
                 description: |-
                   Sites defines the sites that form this failover group. The slice must
-                  contain at least two sites with role "primary-candidate"; additional
-                  sites with role "dr-only" may be appended for cross-region DR.
-                  Failover is performed by picking the best primary-candidate replica
+                  contain at least two sites with role PrimaryCandidate; additional
+                  sites with role DisasterRecovery may be appended for cross-region DR.
+                  Failover is performed by picking the best PrimaryCandidate replica
                   when the active site is lost.
 
                   The list is a map keyed by name, so names are unique and server-side
@@ -6607,14 +6608,14 @@ spec:
                           type: object
                       type: object
                     role:
-                      default: primary-candidate
+                      default: PrimaryCandidate
                       description: |-
                         Role governs whether this site can be auto-promoted on failover.
-                        Default: primary-candidate.
+                        Default: PrimaryCandidate.
                       enum:
-                      - primary-candidate
-                      - dr-only
-                      - read-only
+                      - PrimaryCandidate
+                      - DisasterRecovery
+                      - ReadOnly
                       type: string
                     serverID:
                       description: |-
@@ -6703,8 +6704,8 @@ spec:
                   type: object
                   x-kubernetes-validations:
                   - message: taintNodeSelector and lbIP are required unless role is
-                      read-only
-                    rule: self.role == 'read-only' || (has(self.taintNodeSelector)
+                      ReadOnly
+                    rule: self.role == 'ReadOnly' || (has(self.taintNodeSelector)
                       && has(self.lbIP))
                 maxItems: 16
                 minItems: 2
@@ -6724,7 +6725,7 @@ spec:
                 properties:
                   sitePriorities:
                     description: |-
-                      SitePriorities is the ordered list of primary-candidate site
+                      SitePriorities is the ordered list of PrimaryCandidate site
                       names that win unresolvable split-brain ties. The first entry
                       that is currently writable becomes the new primary; every other
                       writable site is fenced. If empty, the operator falls back to
@@ -6732,7 +6733,7 @@ spec:
 
                       MaxItems must stay equal to spec.sites' MaxItems so the CEL cost
                       estimator can bound the "every priority entry names a real
-                      primary-candidate" rule.
+                      PrimaryCandidate" rule.
                     items:
                       maxLength: 253
                       type: string
@@ -6767,13 +6768,19 @@ spec:
                 - secretName
                 type: object
               updateStrategy:
-                default: OrderedUpdate
-                description: 'UpdateStrategy controls how spec changes are rolled
-                  out. Default: OrderedUpdate'
-                enum:
-                - OrderedUpdate
-                - Recreate
-                type: string
+                default: {}
+                description: |-
+                  UpdateStrategy controls how spec changes are rolled out. Default:
+                  {type: OrderedUpdate}.
+                properties:
+                  type:
+                    default: OrderedUpdate
+                    description: 'Type is the rollout strategy. Default: OrderedUpdate.'
+                    enum:
+                    - OrderedUpdate
+                    - Recreate
+                    type: string
+                type: object
             required:
             - credentials
             - dns
@@ -6783,14 +6790,13 @@ spec:
             - message: spec.sites[].serverID must be unique within the group
               rule: self.sites.all(x, self.sites.filter(y, y.serverID == x.serverID).size()
                 == 1)
-            - message: spec.sites must contain at least two sites with role 'primary-candidate'
-              rule: self.sites.filter(s, s.role == 'primary-candidate').size() >=
-                2
+            - message: spec.sites must contain at least two sites with role PrimaryCandidate
+              rule: self.sites.filter(s, s.role == 'PrimaryCandidate').size() >= 2
             - message: splitBrainPolicy.sitePriorities entries must match the names
-                of sites with role 'primary-candidate'
+                of sites with role PrimaryCandidate
               rule: '!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities)
                 || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s,
-                s.name == p && s.role == ''primary-candidate''))'
+                s.name == p && s.role == ''PrimaryCandidate''))'
             - message: serviceTemplate.externalTrafficPolicy requires serviceTemplate.type
                 NodePort or LoadBalancer
               rule: '!has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy)
@@ -6853,6 +6859,11 @@ spec:
                     lastBackupPhase:
                       description: LastBackupPhase is the phase of that most-recent
                         MysqlBackup.
+                      enum:
+                      - Pending
+                      - Running
+                      - Succeeded
+                      - Failed
                       type: string
                     lastRetryAttempt:
                       description: |-
@@ -6993,7 +7004,6 @@ spec:
                   phase:
                     description: Phase is the high-level Dragonfly state.
                     enum:
-                    - ""
                     - Disabled
                     - Reconciling
                     - ConfiguringReplication
@@ -7074,12 +7084,12 @@ spec:
                         role:
                           description: Role is the site's observed Dragonfly role.
                           enum:
-                          - unknown
-                          - master
-                          - replica
-                          - stale-master
-                          - unconfigured
-                          - unreachable
+                          - Unknown
+                          - Master
+                          - Replica
+                          - StaleMaster
+                          - Unconfigured
+                          - Unreachable
                           type: string
                         serviceName:
                           description: ServiceName is the site-local Dragonfly Service
@@ -7127,8 +7137,9 @@ spec:
                         - Failed
                         type: string
                       reason:
-                        description: Reason is a machine-readable terminal or waiting
-                          reason.
+                        description: Reason is a machine-readable terminal reason.
+                        maxLength: 1024
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                         type: string
                       snapshotDir:
                         description: SnapshotDir is the Dragonfly --dir used for SAVE
@@ -7252,7 +7263,6 @@ spec:
                           description: Phase is the keyring lifecycle phase for this
                             site.
                           enum:
-                          - ""
                           - Pending
                           - Unsealed
                           - Escrowed
@@ -7264,7 +7274,6 @@ spec:
                             UnsealReason records why the site is unsealed. Empty when the site
                             is sealed, or after a clone hold is released and reseal has begun.
                           enum:
-                          - ""
                           - Bootstrap
                           - Clone
                           - Rotation
@@ -8346,9 +8355,12 @@ spec:
                     type: object
                   reason:
                     description: |-
-                      Reason is the failure token (the first word of the failing step's
-                      termination message, for example PITRArchiveDivergentHistory), or
-                      PointInTimePartial on a partial point-in-time success.
+                      Reason is the failure token: the PITR catalog token found in the
+                      failing step's termination message, for example
+                      PITRArchiveDivergentHistory. Absent on success and for a failure
+                      that carries no token.
+                    maxLength: 1024
+                    pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                     type: string
                   sourceBinlogFile:
                     description: SourceBinlogFile is the referenced MysqlBackup binary
@@ -8435,7 +8447,6 @@ spec:
                   phase:
                     description: Phase of the in-place restore.
                     enum:
-                    - ""
                     - Preflight
                     - Fencing
                     - Restoring
@@ -8632,9 +8643,27 @@ spec:
                     type: string
                   scope:
                     description: |-
-                      Scope is a human-readable tag: "full" for a full-instance
-                      restore, or "schema:<name>" for a per-schema restore.
-                    type: string
+                      Scope is what the run restores: the whole instance, or one schema.
+                      It is pinned when the run is accepted.
+                    properties:
+                      schema:
+                        description: Schema is the restored schema when Type is Schema.
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                      type:
+                        description: Type is Full or Schema.
+                        enum:
+                        - Full
+                        - Schema
+                        type: string
+                    required:
+                    - type
+                    type: object
+                    x-kubernetes-validations:
+                    - message: schema is required when type is Schema, and forbidden
+                        otherwise
+                      rule: 'self.type == ''Schema'' ? has(self.schema) : !has(self.schema)'
                   sourceBinlogFile:
                     description: SourceBinlogFile is the referenced MysqlBackup binary
                       log file when known.
@@ -8769,7 +8798,7 @@ spec:
                   pending:
                     description: |-
                       Pending lists the peer sites still to be recloned, in the order
-                      they are recloned (primary-candidate sites first). Pending sites
+                      they are recloned (PrimaryCandidate sites first). Pending sites
                       are never promoted automatically and are removed from the -replica
                       and read-only Services.
                     items:
@@ -8849,7 +8878,6 @@ spec:
                         normally, was found to hold transactions the primary lacks).
                         Populated when RecoveryState is RecoveryBlocked.
                       enum:
-                      - ""
                       - OldPrimaryRecovery
                       - ReplicaAudit
                       type: string
@@ -8882,14 +8910,13 @@ spec:
                     recoveryState:
                       description: |-
                         RecoveryState tracks old-primary recovery progress after failover.
-                        Empty when no recovery is needed. RecoveryInProgress means the site is
+                        Absent when no recovery is needed. RecoveryInProgress means the site is
                         being reconfigured, or is stabilizing, as a replica of the current primary.
                         RecoveryBlocked means the site holds transactions the primary lacks
                         (see DivergenceDetectedBy): it is not promoted by an ordered update or
                         a planned failover, and it must be recloned or the primary made to
                         contain the set. Replication may still be running.
                       enum:
-                      - ""
                       - RecoveryInProgress
                       - RecoveryBlocked
                       type: string
@@ -8903,15 +8930,22 @@ spec:
                       format: int64
                       type: integer
                     sourceConvergenceReason:
-                      description: SourceConvergenceReason is a stable machine-readable
-                        explanation.
+                      description: |-
+                        SourceConvergenceReason is a stable machine-readable explanation of
+                        SourceConvergenceState.
+                      enum:
+                      - DirectSource
+                      - SourceMismatch
+                      - ProbeFailed
+                      - MutationFailed
+                      - GTIDDiverged
+                      - RestorePeerHold
                       type: string
                     sourceConvergenceState:
                       description: |-
                         SourceConvergenceState reports whether this follower directly follows
                         the confirmed active primary.
                       enum:
-                      - ""
                       - Converged
                       - Pending
                       - Blocked
@@ -8921,13 +8955,14 @@ spec:
                         MySQL.
                       type: string
                     state:
-                      description: 'State is the current state: writable, read-only,
-                        unreachable, or unknown.'
+                      description: |-
+                        State is the current state: Writable, ReadOnly, Unreachable, or
+                        Unknown.
                       enum:
-                      - writable
-                      - read-only
-                      - unreachable
-                      - unknown
+                      - Writable
+                      - ReadOnly
+                      - Unreachable
+                      - Unknown
                       type: string
                   required:
                   - name
@@ -8944,8 +8979,15 @@ spec:
                 minimum: 0
                 type: integer
               updatePhase:
-                description: UpdatePhase indicates the current phase of an ordered
-                  update, empty if not updating.
+                description: |-
+                  UpdatePhase is the current phase of an ordered update. Absent when
+                  no ordered update is running.
+                enum:
+                - UpdateReplica
+                - WaitReplica
+                - Failover
+                - UpdateOldPrimary
+                - WaitOldPrimary
                 type: string
             type: object
         required:

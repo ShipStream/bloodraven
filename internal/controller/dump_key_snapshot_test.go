@@ -26,7 +26,7 @@ func encryptedBackupFixture(t *testing.T, extra ...client.Object) (*MysqlBackupR
 	fg := fgWithEncryptedBackup()
 	fg.UID = "lion-uid"
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	mb := backupCR("dk", fg.Name, "nightly-s3")
 	mb.UID = "0123abcd-dk-uid"
 	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, operatorCredsSecret()}, extra...)...)
@@ -158,7 +158,7 @@ func TestBackupWaitsForPITRRollout(t *testing.T) {
 	fg := fgWithBackup()
 	fg.UID = "lion-uid"
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 	mb := backupCR("rollout", fg.Name, "nightly-s3")
 	mb.UID = "rollout-uid"
@@ -202,7 +202,7 @@ func TestBackupOfReadOnlyProfileFails(t *testing.T) {
 	fg := fgWithBackup()
 	fg.UID = "lion-uid"
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	e := bindTestPITRArchive(t, fg, "nightly-s3")
 	e.Source.UID = "another-group"
 	mb := backupCR("ro", fg.Name, "nightly-s3")
@@ -380,7 +380,7 @@ func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 			fg := fgWithBackup()
 			fg.UID = "lion-uid"
 			fg.Status.ActiveSite = "iad"
-			fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+			fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 			mb := backupCR("unstamped", fg.Name, tc.profile)
 			mb.UID = "unstamped-uid"

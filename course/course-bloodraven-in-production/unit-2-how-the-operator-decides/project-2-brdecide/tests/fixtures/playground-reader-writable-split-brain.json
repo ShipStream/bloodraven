@@ -10,15 +10,15 @@
     "sites": [
       {
         "name": "iad",
-        "role": "primary-candidate"
+        "role": "PrimaryCandidate"
       },
       {
         "name": "pdx",
-        "role": "primary-candidate"
+        "role": "PrimaryCandidate"
       },
       {
         "name": "reader",
-        "role": "read-only"
+        "role": "ReadOnly"
       }
     ],
     "failoverCooldown": "5m",
@@ -33,22 +33,22 @@
     "sites": [
       {
         "name": "iad",
-        "state": "writable",
-        "role": "primary-candidate",
+        "state": "Writable",
+        "role": "PrimaryCandidate",
         "replicating": false,
         "secondsBehindSource": null
       },
       {
         "name": "pdx",
-        "state": "writable",
-        "role": "primary-candidate",
+        "state": "Writable",
+        "role": "PrimaryCandidate",
         "replicating": false,
         "secondsBehindSource": null
       },
       {
         "name": "reader",
-        "state": "writable",
-        "role": "read-only",
+        "state": "Writable",
+        "role": "ReadOnly",
         "replicating": false,
         "secondsBehindSource": null
       }

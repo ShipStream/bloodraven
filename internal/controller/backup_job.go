@@ -493,7 +493,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 			{Name: "BLOODRAVEN_OUTPUT_URL", Value: outputURL},
 			{
 				Name:  "BLOODRAVEN_ENCRYPTION_ALGORITHM",
-				Value: encryption.AlgorithmOrDefault(),
+				Value: string(encryption.AlgorithmOrDefault()),
 			},
 			{
 				Name:  "BLOODRAVEN_BACKUP_PASSPHRASE_FILE",

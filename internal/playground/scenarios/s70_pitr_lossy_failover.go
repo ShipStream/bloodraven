@@ -279,7 +279,7 @@ func s70VerifyLatestLoss() runner.Step {
 			}
 			lost := ctxFetch(env, "lost")
 			if err := s70VerifyRefusedNamingL(ctx, env, "latest-lost", pitrExpectation{
-				Backup: "b1", Mode: "latest", Fence: flushed, Markers: []string{"baseline", "P"},
+				Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: flushed, Markers: []string{"baseline", "P"},
 			}, lost); err != nil {
 				return err
 			}
@@ -288,7 +288,7 @@ func s70VerifyLatestLoss() runner.Step {
 			// latest-x asserts L through gtidExecuted = A-flush ∖ L exactly,
 			// which replays era P.
 			return pitrVerify(ctx, env, s70ID, s70DBName, "latest-x", pitrExpectation{
-				Backup: "b1", Mode: "latest", Fence: flushed, Exclude: lost, Outcome: v1alpha1.PointInTimeArchiveHead,
+				Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: flushed, Exclude: lost, Outcome: v1alpha1.PointInTimeArchiveHead,
 				Markers: []string{"baseline", "P"},
 			})
 		},
@@ -312,7 +312,7 @@ func s70VerifyTimestampAfterLoss() runner.Step {
 				return err
 			}
 			lost := ctxFetch(env, "lost")
-			e := pitrExpectation{Backup: "b1", Mode: "timestamp", Fence: f, Markers: []string{"baseline", "P", "S"}}
+			e := pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Markers: []string{"baseline", "P", "S"}}
 			if err := s70VerifyRefusedNamingL(ctx, env, "ts-lost", e, lost); err != nil {
 				return err
 			}
@@ -396,7 +396,7 @@ func s70VerifyBackupAfterLoss() runner.Step {
 				return err
 			}
 			return pitrVerify(ctx, env, s70ID, s70DBName, "b2", pitrExpectation{
-				Backup: "b2", Mode: "timestamp", Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Backup: "b2", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
 				Markers: []string{"baseline", "P", "S", "Sb", "S2"},
 			})
 		},
@@ -535,7 +535,7 @@ func s70VerifyHistoryReset() runner.Step {
 				env.Capture.Note("flush after reissue: " + err.Error())
 			}
 			_, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, "reset", pitrExpectation{
-				Backup: "b2", Mode: "latest", Markers: []string{"baseline"},
+				Backup: "b2", Mode: v1alpha1.PointInTimeModeLatest, Markers: []string{"baseline"},
 			}, string(v1alpha1.PITRTokenArchiveHistoryReset))
 			return err
 		},
@@ -575,7 +575,7 @@ func s70Remedy() runner.Step {
 				return err
 			}
 			return pitrVerify(ctx, env, s70ID, s70DBName, "fresh", pitrExpectation{
-				Backup: "b3", Mode: "timestamp", Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Backup: "b3", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
 				Markers: []string{"baseline", "P", "S", "Sb", "S2", "S2b", "R", "F"},
 			})
 		},

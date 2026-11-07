@@ -101,7 +101,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 	case v1alpha1.DragonflyUpgradePhaseReattachingReplicas:
 		return r.dragonflyUpgradeReattachReplicas(ctx, fg, cur)
 	default:
-		return r.failDragonflyUpgrade(ctx, fg, cur, "UnknownPhase", fmt.Sprintf("unknown phase %q", cur.Phase))
+		return r.failDragonflyUpgrade(ctx, fg, cur, v1alpha1.DragonflyUpgradeReasonUnknownPhase, fmt.Sprintf("unknown phase %q", cur.Phase))
 	}
 }
 
@@ -219,14 +219,14 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeToSaving(ctx context.Cont
 func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeSave(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus) (time.Duration, error) {
 	conn, err := r.dragonflyDial(ctx, fg, cur.ActiveSite)
 	if err != nil {
-		return r.failDragonflyUpgrade(ctx, fg, cur, "DragonflySnapshotDialFailed", err.Error())
+		return r.failDragonflyUpgrade(ctx, fg, cur, v1alpha1.DragonflyUpgradeReasonSnapshotDialFailed, err.Error())
 	}
 	saveCtx, cancel := context.WithTimeout(ctx, dragonflySaveTimeout)
 	err = conn.Save(saveCtx)
 	cancel()
 	_ = conn.Close()
 	if err != nil {
-		return r.failDragonflyUpgrade(ctx, fg, cur, "DragonflySnapshotSaveFailed", err.Error())
+		return r.failDragonflyUpgrade(ctx, fg, cur, v1alpha1.DragonflyUpgradeReasonSnapshotSaveFailed, err.Error())
 	}
 	now := metav1.Now()
 	next := copyDragonflyUpgradeStatus(cur)
@@ -319,7 +319,7 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeReattachReplicas(ctx cont
 	next := copyDragonflyUpgradeStatus(cur)
 	next.Phase = v1alpha1.DragonflyUpgradePhaseSucceeded
 	next.CompletionTime = &now
-	next.Reason = "Completed"
+	next.Reason = v1alpha1.DragonflyUpgradeReasonCompleted
 	next.Message = "snapshot-restore upgrade completed"
 	if err := r.setDragonflyUpgradeStatus(ctx, fg, next); err != nil {
 		return 0, err
@@ -397,7 +397,7 @@ func (r *MysqlFailoverGroupReconciler) abandonDragonflyUpgrade(ctx context.Conte
 	next := copyDragonflyUpgradeStatus(cur)
 	next.Phase = v1alpha1.DragonflyUpgradePhaseFailed
 	next.CompletionTime = &now
-	next.Reason = "ActiveSiteChanged"
+	next.Reason = v1alpha1.DragonflyUpgradeReasonActiveSiteChanged
 	next.Message = why + "; upgrade abandoned, retry it against the new active site"
 	if err := r.setDragonflyUpgradeStatus(ctx, fg, next); err != nil {
 		return 0, err
@@ -413,7 +413,7 @@ func (r *MysqlFailoverGroupReconciler) abandonDragonflyUpgrade(ctx context.Conte
 	return 0, nil
 }
 
-func (r *MysqlFailoverGroupReconciler) failDragonflyUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus, reason, msg string) (time.Duration, error) {
+func (r *MysqlFailoverGroupReconciler) failDragonflyUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus, reason v1alpha1.DragonflyUpgradeReason, msg string) (time.Duration, error) {
 	_ = r.setDragonflyTrafficOnSite(ctx, fg, cur.ActiveSite, true)
 	now := metav1.Now()
 	next := copyDragonflyUpgradeStatus(cur)

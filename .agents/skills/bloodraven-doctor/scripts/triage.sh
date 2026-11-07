@@ -254,17 +254,17 @@ if [[ -n "$PF_PHASE" ]]; then
             echo "  The run may have written to the target and could not explain the result; automation is held: see playbook 38." ;;
     esac
     if [[ "$PF_PHASE" == "Admitting" && "$PF_WAIT" == "PeerUnreadable" ]]; then
-        echo "  Waiting because a primary-candidate or dr-only site does not answer. Planned failovers are strict: it ends NotStarted/AdmissionTimeout after 2 minutes unless the site answers."
+        echo "  Waiting because a PrimaryCandidate or DisasterRecovery site does not answer. Planned failovers are strict: it ends NotStarted/AdmissionTimeout after 2 minutes unless the site answers."
     fi
 fi
 
 echo ""
 echo "--- 2. Sites & Replication Summary ---"
-kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.sites[*]}Site: {.name}{"\n"}  Role: {.role}{"\n"}  Reachable: {.reachable}{"\n"}  ReadOnly: {.readOnly}{"\n"}  Replicating: {.replicating}{"\n"}  SecondsBehindSource: {.secondsBehindSource}{"\n"}  ReplicationError: {.replicationError}{"\n"}  RecoveryState: {.recoveryState}{"\n"}  Divergence: {.divergenceDetectedBy}{" vs "}{.divergenceComparedTo}{" "}{.divergentTransactionCount}{" "}{.divergentGtid}{"\n\n"}{end}' 2>/dev/null || echo "Could not parse site status."
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.sites[*]}Site: {.name}{"\n"}  State: {.state}{"\n"}  Replicating: {.replicating}{"\n"}  SecondsBehindSource: {.secondsBehindSource}{"\n"}  ReplicationError: {.replicationError}{"\n"}  RecoveryState: {.recoveryState}{"\n"}  Divergence: {.divergenceDetectedBy}{" vs "}{.divergenceComparedTo}{" "}{.divergentTransactionCount}{" "}{.divergentGtid}{"\n\n"}{end}' 2>/dev/null || echo "Could not parse site status."
 DEGRADED=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Degraded")].status}{" "}{.status.conditions[?(@.type=="Degraded")].reason}{": "}{.status.conditions[?(@.type=="Degraded")].message}' 2>/dev/null || true)
 echo "Degraded: ${DEGRADED:-unavailable}"
 if [[ "$DEGRADED" == *Initializing* ]]; then
-    echo "  The operator just started and has not classified every primary-candidate yet; this is not an outage. Re-run in a few seconds; a site still unclassified after failureThreshold+recoveryThreshold probes is reported as NoPrimary instead."
+    echo "  The operator just started and has not classified every PrimaryCandidate site yet; this is not an outage. Re-run in a few seconds; a site still unclassified after failureThreshold+recoveryThreshold probes is reported as NoPrimary instead."
 fi
 if [[ "$DEGRADED" == *DivergentTransactions* ]]; then
     echo "  A site holds transactions the primary lacks (replication may still be running). Ordered updates and planned failovers will not promote it: run gtid-audit.sh and see playbook 33."

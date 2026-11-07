@@ -168,7 +168,7 @@ func s68VerifyCycle1() runner.Step {
 					return err
 				}
 				if err := pitrVerify(ctx, env, s68ID, s68DBName, c.label, pitrExpectation{
-					Backup: "b1", Mode: "timestamp", Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered, Markers: c.markers,
+					Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered, Markers: c.markers,
 				}); err != nil {
 					return err
 				}
@@ -246,7 +246,7 @@ func s68VerifyCycle2Gap() runner.Step {
 				return err
 			}
 			v, err := pitrVerifyRefused(ctx, env, s68ID, s68DBName, "c2-gap", pitrExpectation{
-				Backup: "b1", Mode: "timestamp", Fence: f,
+				Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f,
 				Markers: []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b", "M4", "M5"},
 			}, string(v1alpha1.PITRTokenArchiveGap), ctxFetch(env, "uuidB"), "unarchived tail")
 			if err != nil {
@@ -279,7 +279,7 @@ func s68VerifyNewBackup() runner.Step {
 				return err
 			}
 			return pitrVerify(ctx, env, s68ID, s68DBName, "c2-b2", pitrExpectation{
-				Backup: "b2", Mode: "timestamp", Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Backup: "b2", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
 				Markers: []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b", "M4", "M5", "M5b", "M6"},
 			})
 		},

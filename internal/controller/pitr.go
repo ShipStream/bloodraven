@@ -368,7 +368,7 @@ func pitrRequestFromSpec(pit *v1alpha1.PointInTimeSpec) (*pitrReplayRequest, err
 		return nil, err
 	}
 	return &pitrReplayRequest{
-		Mode:               "timestamp",
+		Mode:               string(pitrplan.ModeTimestamp),
 		Stop:               canonicalPITRTarget(stop),
 		AllowPartial:       pit.AllowPartial,
 		ExcludeGtids:       exclude,
@@ -555,6 +555,36 @@ func validateRestoreArchiveProfile(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha
 // buildRestorePITRFragmentsFor renders req's pitr-download init container
 // and the main container's replay env. A nil req is a no-op: callers get an
 // empty fragments struct and skip the init containers entirely.
+// pitrReplayRequestEnv renders the replay request env that pitr-download
+// and restore.py both read.
+func pitrReplayRequestEnv(req *pitrReplayRequest) []corev1.EnvVar {
+	env := []corev1.EnvVar{{Name: "BLOODRAVEN_PITR_MODE", Value: req.Mode}}
+	if req.Mode == string(pitrplan.ModeTimestamp) {
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: req.Stop})
+	}
+	env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(req.AllowPartial)})
+	if req.ExcludeGtids != "" {
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: req.ExcludeGtids})
+	}
+	return env
+}
+
+// VerificationPITRRequestEnvForTest renders the replay request env a
+// verification Job carries for spec (nil for no replay), so the
+// cmd/bloodraven tests can feed it to the download planner. Not for
+// production use.
+func VerificationPITRRequestEnvForTest(spec *v1alpha1.PointInTimeVerificationSpec) (map[string]string, error) {
+	req, err := verificationPITRRequest(spec)
+	if err != nil || req == nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, e := range pitrReplayRequestEnv(req) {
+		out[e.Name] = e.Value
+	}
+	return out, nil
+}
+
 func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrReplayRequest) (restorePITRFragments, error) {
 	var out restorePITRFragments
 
@@ -626,14 +656,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	}
 	// The replay request, rendered identically on pitr-download and the
 	// main container (contracts: "WP-B2 assumptions").
-	requestEnv := []corev1.EnvVar{{Name: "BLOODRAVEN_PITR_MODE", Value: req.Mode}}
-	if req.Mode == "timestamp" {
-		requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: req.Stop})
-	}
-	requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(req.AllowPartial)})
-	if req.ExcludeGtids != "" {
-		requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: req.ExcludeGtids})
-	}
+	requestEnv := pitrReplayRequestEnv(req)
 	initEnv := append(append([]corev1.EnvVar{}, requestEnv...),
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DUMP_META", Value: restorePITRDumpMetaDir + "/dump.json"},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},

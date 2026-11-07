@@ -31,8 +31,8 @@ func midEmergencyFailover(at time.Time) func(*v1alpha1.MysqlFailoverGroupStatus)
 		st.ActiveSite = ""
 		st.LastFailover, st.LastFailoverTarget = &rec, "pdx"
 		st.Sites = []v1alpha1.SiteStatus{
-			{Name: "iad", State: "unreachable"},
-			{Name: "pdx", State: "read-only", Replicating: false},
+			{Name: "iad", State: v1alpha1.SiteStateUnreachable},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: false},
 		}
 	}
 }
@@ -40,8 +40,8 @@ func midEmergencyFailover(at time.Time) func(*v1alpha1.MysqlFailoverGroupStatus)
 func publishedPDX(st *v1alpha1.MysqlFailoverGroupStatus) {
 	st.ActiveSite = "pdx"
 	st.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: "unreachable"},
-		{Name: "pdx", State: "writable"},
+		{Name: "iad", State: v1alpha1.SiteStateUnreachable},
+		{Name: "pdx", State: v1alpha1.SiteStateWritable},
 	}
 }
 

@@ -350,7 +350,7 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 				bad = append(bad, fmt.Sprintf("updatePhase=%s", mfg.Status.UpdatePhase))
 			}
 			for _, s := range mfg.Status.Sites {
-				if s.State != "writable" && s.State != "read-only" {
+				if s.State != v1alpha1.SiteStateWritable && s.State != v1alpha1.SiteStateReadOnly {
 					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))
 				}
 				if s.RecoveryState == "RecoveryBlocked" {

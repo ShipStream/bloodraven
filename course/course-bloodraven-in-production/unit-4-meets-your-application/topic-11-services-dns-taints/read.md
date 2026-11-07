@@ -15,7 +15,7 @@ count is `2 × len(sites) + 2` — for three-site `playground` (iad, pdx, reader
 
 | Service | Selector | Who may use it |
 | --- | --- | --- |
-| `mysql-playground-<site>` | name + instance + site (plus `healthy=yes` on a `read-only` site) | site-pinned tooling, debugging |
+| `mysql-playground-<site>` | name + instance + site (plus `healthy=yes` on a `ReadOnly` site) | site-pinned tooling, debugging |
 | `mysql-playground-<site>-internal` | name + instance + site | sidecar and peer traffic only |
 | `mysql-playground-primary` | instance + `shipstream.io/role=primary` | writes |
 | `mysql-playground-replicas` | instance + `role=replica` + `healthy=yes` | reads |
@@ -32,7 +32,7 @@ and `publishNotReadyAddresses` is `false`. `-replicas` is **three**: instance, `
 and `shipstream.io/healthy=yes`. The operator stamps `role` and `healthy` onto the pods on each
 reconcile; the Services never change, only the labels underneath them.
 
-For a `role: read-only` reader site, that `healthy=yes` stamp is expensive. Five conjuncts must **all**
+For a `role: ReadOnly` reader site, that `healthy=yes` stamp is expensive. Five conjuncts must **all**
 hold: source convergence is `converged`; `replicating` is true; `secondsBehindSource` is non-nil; the
 reported source host canonically matches the active site's internal per-site Service — a *direct*
 source, so a replication chain does not count; and the lag is within
@@ -100,7 +100,7 @@ the DNS target stays stale — a perfect failover and an unreachable database at
 
 Recall from Unit 2: the taint is a pure function of a per-site state transition,
 applied earlier in the same poll than any cross-site action. It is **not** a step in the failover
-sequence, and `role: read-only` sites are never tainted at all — a reader is already read-only, so
+sequence, and `role: ReadOnly` sites are never tainted at all — a reader is already read-only, so
 there is nothing to demote.
 
 `NoExecute` is upstream Kubernetes behaviour, and stronger than people expect. Pods that do

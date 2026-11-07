@@ -37,7 +37,7 @@ func bindingFG(ns string) *v1alpha1.MysqlFailoverGroup {
 	fg := newTestFG(ns)
 	// Recreate: the reconciler itself patches existing Deployments, so a
 	// render change is visible without the ordered updater.
-	fg.Spec.UpdateStrategy = "Recreate"
+	fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
 	s3 := func(prefix string) v1alpha1.BackupStorage {
 		return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "archive", Prefix: prefix, EndpointURL: "http://rustfs:9000", CredentialsSecretName: "s3-creds"}}
 	}
@@ -477,7 +477,7 @@ func TestEnvtest_MysqlBackupDumpKeySnapshot(t *testing.T) {
 	}
 	fg = h.fg()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}

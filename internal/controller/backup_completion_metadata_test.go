@@ -35,7 +35,7 @@ func backupMetadataFixture(t *testing.T, encrypted bool) (*MysqlBackupReconciler
 	}
 	fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = "prod_backups/db dumps"
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	mb := backupCR("metadata", fg.Name, "nightly-s3")
 	mb.UID = types.UID("metadata-backup-uid")
 	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())

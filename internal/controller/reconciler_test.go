@@ -440,7 +440,7 @@ func TestReconcile_DefaultImage(t *testing.T) {
 func TestCRConfigToTopologyConfig(t *testing.T) {
 	fg := newTestFG()
 	fg.Spec.ConnectionDrainTimeout = &metav1.Duration{Duration: 17 * time.Second}
-	tc := CRConfigToTopologyConfig(fg)
+	tc := mustTopologyConfig(fg)
 
 	if tc.Sites[0].Name != "dc1" {
 		t.Errorf("expected Sites[0] name 'dc1', got %s", tc.Sites[0].Name)
@@ -473,7 +473,7 @@ func TestCRConfigToTopologyConfig_Defaults(t *testing.T) {
 	fg.Spec.PollInterval = nil
 	fg.Spec.FailureThreshold = 0
 	fg.Spec.RecoveryThreshold = 0
-	tc := CRConfigToTopologyConfig(fg)
+	tc := mustTopologyConfig(fg)
 
 	if tc.FailureThreshold != 3 {
 		t.Errorf("expected default failure threshold 3, got %d", tc.FailureThreshold)
@@ -1203,9 +1203,9 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 	}
 	healthyStatuses := func() []v1alpha1.SiteStatus {
 		return []v1alpha1.SiteStatus{
-			{Name: "dc1", State: "writable"},
-			{Name: "dc2", State: "read-only", Replicating: true},
-			{Name: "reader", State: "read-only", Replicating: true, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local", SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
+			{Name: "dc1", State: v1alpha1.SiteStateWritable},
+			{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replicating: true, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local", SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
 		}
 	}
 	for _, tc := range []struct {
@@ -1218,8 +1218,8 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 		{name: "non-promotable active", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "reader"
 			fg.Status.Sites = healthyStatuses()
-			fg.Status.Sites[0].State = "read-only"
-			fg.Status.Sites[2].State = "writable"
+			fg.Status.Sites[0].State = v1alpha1.SiteStateReadOnly
+			fg.Status.Sites[2].State = v1alpha1.SiteStateWritable
 		}},
 		{name: "incomplete status", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "dc1"
@@ -1749,7 +1749,7 @@ func TestReconcile_DefersExistingDeploymentWhenRunnerUnavailable(t *testing.T) {
 func TestReconcile_RecreateUpdatesExistingDeployments(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy = "Recreate"
+	fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
 	r, c := newReconciler(fg)
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 
@@ -1784,7 +1784,7 @@ func TestReconcile_RecreateUpdatesExistingDeployments(t *testing.T) {
 
 func TestCheckSpecDrift_RecreateClearsOrderedDrift(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy = "Recreate"
+	fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
 	logger := testLogger()
 	tm := NewTopologyManager(testTopologyConfig(), []internalmysql.Checker{
 		&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true},
@@ -2023,8 +2023,8 @@ func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
 	}
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: "writable"},
-		{Name: "dc2", State: "read-only", Replicating: true},
+		{Name: "dc1", State: v1alpha1.SiteStateWritable},
+		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
 		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc1", v1alpha1.RoleLabel: "replica",

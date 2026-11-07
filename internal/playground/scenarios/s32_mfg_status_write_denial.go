@@ -196,7 +196,7 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 							if old.RecoveryState == "RecoveryBlocked" {
 								return false, msg, fmt.Errorf("old primary %s RecoveryBlocked", activeSite)
 							}
-							healthyReplica := old.State == "read-only" && old.Replicating && readyOf(mfg) == "True"
+							healthyReplica := old.State == v1alpha1.SiteStateReadOnly && old.Replicating && readyOf(mfg) == "True"
 							recovering := old.RecoveryState == "RecoveryInProgress"
 							return healthyReplica || recovering, msg, nil
 						})

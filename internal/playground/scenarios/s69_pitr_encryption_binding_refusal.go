@@ -637,7 +637,7 @@ func s69ReadBindingWrongKey() runner.Step {
 				return err
 			}
 			refused, err := s69WatchReadBinding(ctx, env, p1, s69ReadEndpoint, start, name, func(b *v1alpha1.PITRArchiveBinding) bool {
-				return b.State == v1alpha1.PITRArchiveBindingRefused && b.Reason == "KeyMismatch"
+				return b.State == v1alpha1.PITRArchiveBindingRefused && b.Reason == v1alpha1.PITRArchiveBindingReasonKeyMismatch
 			}, true)
 			if err != nil {
 				return err
@@ -1038,7 +1038,7 @@ func s69FindBinding(mfg *v1alpha1.MysqlFailoverGroup, destination string) *v1alp
 }
 
 func s69BoundBound(b *v1alpha1.PITRArchiveBinding) bool {
-	return b != nil && b.State == v1alpha1.PITRArchiveBindingBound && b.Reason == "Bound"
+	return b != nil && b.State == v1alpha1.PITRArchiveBindingBound && b.Reason == v1alpha1.PITRArchiveBindingReasonBound
 }
 
 func s69BindingSummary(mfg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.PITRArchiveBinding) string {
@@ -1573,7 +1573,7 @@ func s69ExpectationAtM2(env *runner.Env, archiveProfile string) (pitrExpectation
 		return pitrExpectation{}, err
 	}
 	return pitrExpectation{
-		Backup: "b1", Mode: "timestamp", Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
+		Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
 		Markers: []string{"baseline", "M1", "M2"}, ArchiveProfile: archiveProfile,
 	}, nil
 }
@@ -1672,7 +1672,7 @@ func s69WaitEstablished(ctx context.Context, env *runner.Env, prefix string) (*v
 	establishing := false
 	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "P2 binding Establishing then Bound", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		b := s69FindBinding(mfg, dest)
-		if b != nil && b.State == v1alpha1.PITRArchiveBindingPending && b.Reason == "Establishing" {
+		if b != nil && b.State == v1alpha1.PITRArchiveBindingPending && b.Reason == v1alpha1.PITRArchiveBindingReasonEstablishing {
 			establishing = true
 		}
 		done := establishing && s69BoundBound(b) && pitrObservedArchiveID(mfg, prefix) == b.ArchiveID && b.ArchiveID != ""

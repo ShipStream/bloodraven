@@ -40,7 +40,7 @@ spec:
         size: 100Gi
     - name: reader
       serverID: 103
-      role: read-only
+      role: ReadOnly
       zone: us-east-1b
       mysqlConf:
         innodb_buffer_pool_size: 4G

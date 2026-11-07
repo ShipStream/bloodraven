@@ -29,12 +29,12 @@
       },
       {
         "name": "pdx",
-        "role": "primary-candidate",
+        "role": "PrimaryCandidate",
         "zone": "zone-pdx"
       },
       {
         "name": "reader",
-        "role": "read-only",
+        "role": "ReadOnly",
         "zone": "zone-reader"
       }
     ]
@@ -44,14 +44,14 @@
     "sites": [
       {
         "name": "iad",
-        "state": "writable",
+        "state": "Writable",
         "lastSeen": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
         "replicating": false
       },
       {
         "name": "pdx",
-        "state": "read-only",
+        "state": "ReadOnly",
         "lastSeen": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
         "replicating": true,
@@ -62,7 +62,7 @@
       },
       {
         "name": "reader",
-        "state": "read-only",
+        "state": "ReadOnly",
         "lastSeen": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-51004",
         "replicating": true,

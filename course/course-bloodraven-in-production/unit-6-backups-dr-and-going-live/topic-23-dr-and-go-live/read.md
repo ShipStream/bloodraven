@@ -89,10 +89,10 @@ in the DR cluster, shaped for the DR cluster's own nodes, IPs and zones, and poi
 spec:
   sites:                                    # DR-cluster topology, not the source's
     - name: east-1
-      role: primary-candidate
+      role: PrimaryCandidate
       lbIP: 10.1.20.11
     - name: east-2
-      role: primary-candidate
+      role: PrimaryCandidate
       lbIP: 10.1.20.12
   dns:
     hostname: playground-east.example.com
@@ -122,7 +122,7 @@ runs exactly as it did on day one of this course.
   "lines": [
     {
       "cmd": "kubectl bloodraven status playground --context=dr -n bloodraven-dr",
-      "out": "MysqlFailoverGroup: bloodraven-dr/playground\n  Active site: east-1\n  Ready: True\n  DNS: playground-east.example.com (TTL 60s)\n\nSites:\n  NAME    ROLE               ZONE        STATE      REPL  LAG  RECOVERY  LAST-SEEN\n  east-1  primary-candidate  us-east-1a  writable   no    -    -         2s\n  east-2  primary-candidate  us-east-1b  read-only  yes   0s   -         2s\n\nInitial restore (initFromBackup):\n  Phase: Succeeded\n  Target site: east-1"
+      "out": "MysqlFailoverGroup: bloodraven-dr/playground\n  Active site: east-1\n  Ready: True\n  DNS: playground-east.example.com (TTL 60s)\n\nSites:\n  NAME    ROLE              ZONE        STATE     REPL  LAG  RECOVERY  LAST-SEEN\n  east-1  PrimaryCandidate  us-east-1a  Writable  no    -    -         2s\n  east-2  PrimaryCandidate  us-east-1b  ReadOnly  yes   0s   -         2s\n\nInitial restore (initFromBackup):\n  Phase: Succeeded\n  Target site: east-1"
     }
   ],
   "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
@@ -159,7 +159,7 @@ Now commit to a verdict on each of these. Not "noted" — block or accept-with-a
 | The application-side write gap | No shipped alert covers it. Unowned, it is invisible until an incident. | **Block** until somebody owns it by name. |
 | `replication.maxLagSeconds` (whatever you set) | Drives only the `ReplicationLagging` condition. It is **not** a promotion gate — a replica beyond the threshold is still promoted. `playground` sets `30`; a group that omits the field gets `300`. Either way it gates nothing. | Accept, owner must know this. |
 | Runbook timings from the playground | The playground overrides the shipped defaults: `failoverCooldown: 30s` (vs 5m), `maxLagSeconds: 30` (vs 300), `dns.ttl: 10` (vs 60). No timing you measured there transfers. | Accept, owner re-measures on real config. |
-| A `role: read-only` reader in the group | It can neither be promoted nor source a backup. It is not a spare. | Accept, owner must know this. |
+| A `role: ReadOnly` reader in the group | It can neither be promoted nor source a backup. It is not a spare. | Accept, owner must know this. |
 
 Disagree with any of my verdicts if you can say *why*. That is the point of the exercise.
 

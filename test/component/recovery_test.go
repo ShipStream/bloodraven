@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -50,7 +51,7 @@ func TestRecovery_OldPrimaryReturnsReadOnly_NoDivergence(t *testing.T) {
 	// Establish normal: dc1 writable, dc2 read-only.
 	h.pollN(2)
 	s := h.tm.Status()
-	if s.Sites[0].State != "writable" || s.Sites[1].State != "read-only" {
+	if s.Sites[0].State != v1alpha1.SiteStateWritable || s.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Fatalf("setup: dc1=%s dc2=%s, want writable/read-only", s.Sites[0].State, s.Sites[1].State)
 	}
 

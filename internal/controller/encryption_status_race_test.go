@@ -191,8 +191,8 @@ func TestUpdateCRStatus_DoesNotResurrectDeletedEncryptionStatus(t *testing.T) {
 // TopologyConfig, the adoption path would rebuild the manager on its
 // own. The gate can stay always-on either way.
 func TestEncryptionToggleDoesNotRestartTheTopologyManager(t *testing.T) {
-	plain := CRConfigToTopologyConfig(newTestFG())
-	encrypted := CRConfigToTopologyConfig(encTestFG())
+	plain := mustTopologyConfig(newTestFG())
+	encrypted := mustTopologyConfig(encTestFG())
 
 	if !plain.Equal(encrypted) {
 		t.Fatal("TopologyConfig now distinguishes encrypted groups; the clone-gate wiring " +

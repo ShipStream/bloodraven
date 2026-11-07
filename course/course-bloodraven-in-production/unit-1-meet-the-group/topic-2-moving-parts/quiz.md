@@ -18,7 +18,7 @@ A nightly reporting job against `playground` runs long analytical SELECTs and mu
 
 **Explanation:**
 
-`mysql-playground-replicas` is the group read endpoint — instance, `shipstream.io/role=replica` and `shipstream.io/healthy=yes` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: read-only` site, its per-site Service *does* carry the same `healthy=yes` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)
+`mysql-playground-replicas` is the group read endpoint — instance, `shipstream.io/role=replica` and `shipstream.io/healthy=yes` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: ReadOnly` site, its per-site Service *does* carry the same `healthy=yes` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)
 
 ## Question 2
 
@@ -35,19 +35,19 @@ During the draining phase of a planned failover, the operator stamps the `iad` p
 
 **Explanation:**
 
-The per-site Services select on name, instance and `shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `primary-candidate`; on a `role: read-only` site the per-site Service adds a `healthy=yes` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)
+The per-site Services select on name, instance and `shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `PrimaryCandidate`; on a `role: ReadOnly` site the per-site Service adds a `healthy=yes` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)
 
 ## Question 3
 
 **Type:** TRUE_FALSE
 
-A `dr-only` site holds the freshest GTID set when the primary dies, so Bloodraven will promote it rather than lose those transactions.
+A `DisasterRecovery` site holds the freshest GTID set when the primary dies, so Bloodraven will promote it rather than lose those transactions.
 
 **Correct answer:** false
 
 **Explanation:**
 
-The reversal: GTID freshness never rescues a non-candidate, because promotability is checked first and is exactly `role == primary-candidate`. A `dr-only` site is counted in the topology tallies — unlike a `read-only` site it is a full core participant — which is what makes this tempting, but counting and being promotable are different properties. If such a site ever comes up writable it is routed to fencing rather than accepted. To make a site promotable you change its declared role; you cannot earn it with fresh data. (objective 6)
+The reversal: GTID freshness never rescues a non-candidate, because promotability is checked first and is exactly `role == PrimaryCandidate`. A `DisasterRecovery` site is counted in the topology tallies — unlike a `ReadOnly` site it is a full core participant — which is what makes this tempting, but counting and being promotable are different properties. If such a site ever comes up writable it is routed to fencing rather than accepted. To make a site promotable you change its declared role; you cannot earn it with fresh data. (objective 6)
 
 ## Question 4
 

@@ -861,7 +861,7 @@ func plannedFencedSourceAwaitingHeal(fg *v1alpha1.MysqlFailoverGroup, now time.T
 		return nil, false
 	}
 	for i := range fg.Status.Sites {
-		if fg.Status.Sites[i].Name == src.SourceSite && fg.Status.Sites[i].State == "writable" {
+		if fg.Status.Sites[i].Name == src.SourceSite && fg.Status.Sites[i].State == v1alpha1.SiteStateWritable {
 			return nil, false
 		}
 	}

@@ -64,21 +64,21 @@ read for the rest of the course.
 
 `status.sites[]` runs parallel to `spec.sites`. Per site:
 
-- **`.state`** — one of four values: `writable`, `read-only`, `unreachable`, `unknown`. It comes
-  from one query per poll, `SELECT @@read_only`: `0` is `writable`, `1` is `read-only`, a failed
-  connection is `unreachable`.
+- **`.state`** — one of four values: `Writable`, `ReadOnly`, `Unreachable`, `Unknown`. It comes
+  from one query per poll, `SELECT @@read_only`: `0` is `Writable`, `1` is `ReadOnly`, a failed
+  connection is `Unreachable`.
 - **`.replicating`** — whether the operator currently regards replication on that follower as
   healthy. It is a verdict, not a raw thread flag.
 - **`.secondsBehindSource`** — MySQL's `Seconds_Behind_Source` for that follower.
 - **`.gtidExecuted`** — the transaction history that follower has actually applied.
 
 There is a trap in that list. The operator probes replication only on sites whose state is
-`read-only`, so the writable primary's entry carries no `replicating`, no `secondsBehindSource`
+`ReadOnly`, so the writable primary's entry carries no `replicating`, no `secondsBehindSource`
 and no `gtidExecuted` at all — those keys are absent, not zero. Absence means "not measured
 here", never `false`.
 
 And `.role` is not there at all. Role lives in `spec.sites[].role`. To tell which of two
-`read-only` sites is the dedicated reader, read the spec.
+`ReadOnly` sites is the dedicated reader, read the spec.
 
 ```widget
 {
@@ -91,7 +91,7 @@ And `.role` is not there at all. Role lives in `spec.sites[].role`. To tell whic
     },
     {
       "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{range .status.sites[*]}{.name}{\"\\t\"}{.state}{\"\\t\"}{.replicating}{\"\\t\"}{.secondsBehindSource}{\"\\n\"}{end}'",
-      "out": "iad\twritable\t\t\npdx\tread-only\ttrue\t0\nreader\tread-only\ttrue\t0"
+      "out": "iad\tWritable\t\t\npdx\tReadOnly\ttrue\t0\nreader\tReadOnly\ttrue\t0"
     },
     {
       "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.conditions[?(@.type==\"Degraded\")].reason}{\"\\n\"}'",
@@ -119,7 +119,7 @@ Each describes a *shape*, not an action:
 | `TotalLoss` | Every core site is unreachable. |
 
 Two surprises. There is no `Failover` reason: the topology one promotion away from recovery
-reports `Degraded`. And **`role: read-only` sites are excluded from those tallies** — a dead
+reports `Degraded`. And **`role: ReadOnly` sites are excluded from those tallies** — a dead
 reader never reads as `TotalLoss`.
 
 What the operator *does* about each shape is Unit 2. Here, you only read them.

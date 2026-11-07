@@ -17,11 +17,11 @@ const (
 	// divergenceDetectedByRecovery marks a block recorded by old-primary
 	// recovery: a returning former primary held transactions the new
 	// primary never received.
-	divergenceDetectedByRecovery = "OldPrimaryRecovery"
+	divergenceDetectedByRecovery = v1alpha1.DivergenceDetectorOldPrimaryRecovery
 	// divergenceDetectedByAudit marks a block recorded by the replica GTID
 	// audit: a follower, possibly replicating normally, holds transactions
 	// the primary lacks.
-	divergenceDetectedByAudit = "ReplicaAudit"
+	divergenceDetectedByAudit = v1alpha1.DivergenceDetectorReplicaAudit
 
 	// gtidAuditInterval is how often each follower is audited. It is the
 	// recovery retry cadence: a divergence report is re-verified at the

@@ -80,24 +80,24 @@ func TestConfirmAdvances(t *testing.T) {
 func TestInPlaceRestoreScope(t *testing.T) {
 	// No LoadOptions => full.
 	scope, name := inPlaceRestoreScope(&v1alpha1.RestoreInPlaceSpec{})
-	if scope != "full" || name != "" {
-		t.Errorf("empty options: got (%q,%q)", scope, name)
+	if scope.Type != v1alpha1.RestoreScopeFull || scope.Schema != "" || name != "" {
+		t.Errorf("empty options: got (%+v,%q)", scope, name)
 	}
 
 	// Empty includeSchemas => full.
 	scope, name = inPlaceRestoreScope(&v1alpha1.RestoreInPlaceSpec{
 		LoadOptions: &v1alpha1.LoadOptions{},
 	})
-	if scope != "full" || name != "" {
-		t.Errorf("empty includeSchemas: got (%q,%q)", scope, name)
+	if scope.Type != v1alpha1.RestoreScopeFull || scope.Schema != "" || name != "" {
+		t.Errorf("empty includeSchemas: got (%+v,%q)", scope, name)
 	}
 
-	// Single-schema => schema:<name>.
+	// Single-schema => Schema with its name.
 	scope, name = inPlaceRestoreScope(&v1alpha1.RestoreInPlaceSpec{
 		LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"orders"}},
 	})
-	if scope != "schema:orders" || name != "orders" {
-		t.Errorf("per-schema: got (%q,%q)", scope, name)
+	if scope.Type != v1alpha1.RestoreScopeSchema || scope.Schema != "orders" || name != "orders" {
+		t.Errorf("per-schema: got (%+v,%q)", scope, name)
 	}
 }
 
@@ -167,7 +167,7 @@ func TestInPlaceRestoreInFlight(t *testing.T) {
 	for _, terminal := range []v1alpha1.RestoreInPlacePhase{
 		v1alpha1.RestoreInPlaceSucceeded,
 		v1alpha1.RestoreInPlaceFailed,
-		v1alpha1.RestoreInPlaceNone,
+		"",
 	} {
 		fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: terminal}
 		if inPlaceRestoreInFlight(fg) {
@@ -252,8 +252,8 @@ func fgInPlaceRestore(schema string) *v1alpha1.MysqlFailoverGroup {
 	fg := fgWithBackup()
 	fg.Status.ActiveSite = fg.Spec.Sites[0].Name
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: fg.Spec.Sites[0].Name, State: "writable"},
-		{Name: fg.Spec.Sites[1].Name, State: "read-only"},
+		{Name: fg.Spec.Sites[0].Name, State: v1alpha1.SiteStateWritable},
+		{Name: fg.Spec.Sites[1].Name, State: v1alpha1.SiteStateReadOnly},
 	}
 	ripSpec := &v1alpha1.RestoreInPlaceSpec{
 		Confirm: "2026-04-17T14:00:00Z",
@@ -350,7 +350,7 @@ func TestReconcileInPlaceRestore_FirstCallMovesToPreflight(t *testing.T) {
 	if fresh.Status.RestoreInPlace == nil || fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlacePreflight {
 		t.Fatalf("want Preflight, got %+v", fresh.Status.RestoreInPlace)
 	}
-	if fresh.Status.RestoreInPlace.Scope != "full" {
+	if fresh.Status.RestoreInPlace.Scope.Type != v1alpha1.RestoreScopeFull {
 		t.Errorf("want scope=full, got %q", fresh.Status.RestoreInPlace.Scope)
 	}
 }
@@ -358,10 +358,10 @@ func TestReconcileInPlaceRestore_FirstCallMovesToPreflight(t *testing.T) {
 func TestReconcileInPlaceRestore_Preflight_WaitsForWritableActive(t *testing.T) {
 	fg := fgInPlaceRestore("")
 	// Flip active to not-writable.
-	fg.Status.Sites[0].State = "unreachable"
+	fg.Status.Sites[0].State = v1alpha1.SiteStateUnreachable
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:     v1alpha1.RestoreInPlacePreflight,
-		Scope:     "full",
+		Scope:     &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
 		StartTime: ptrTime(time.Now()),
 	}
 
@@ -392,7 +392,7 @@ func TestReconcileInPlaceRestore_Preflight_TransitionsToFencing(t *testing.T) {
 	fg := fgInPlaceRestore("")
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:     v1alpha1.RestoreInPlacePreflight,
-		Scope:     "full",
+		Scope:     &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
 		StartTime: ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
@@ -420,7 +420,7 @@ func TestReconcileInPlaceRestore_FullInstance_CreatesJobWithDropAndReset(t *test
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: fg.Spec.Sites[0].Name,
-		Scope:      "full",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
@@ -461,7 +461,7 @@ func TestReconcileInPlaceRestore_PerSchema_CreatesJobWithDropAndSkipBinlogFalse(
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: fg.Spec.Sites[0].Name,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
@@ -560,7 +560,7 @@ func TestReconcileInPlaceRestore_StaleJobNotInherited(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: site,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		StartTime:  ptrTime(time.Now()),
 	}
 	// Stale Job: older confirm than the current spec, terminally Failed.
@@ -612,7 +612,7 @@ func TestReconcileInPlaceRestore_MatchingFailedJobIsHonored(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: site,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		JobName:    inPlaceRestoreJobName(fg.Name, site),
 		StartTime:  ptrTime(time.Now()),
 	}
@@ -654,7 +654,7 @@ func TestReconcileInPlaceRestore_RunningJobSurvivesConfirmChange(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: site,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		JobName:    inPlaceRestoreJobName(fg.Name, site),
 		StartTime:  ptrTime(time.Now()),
 	}
@@ -699,7 +699,7 @@ func TestReconcileInPlaceRestore_CredsErrorDoesNotFailAnInFlightJob(t *testing.T
 		fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 			Phase:      v1alpha1.RestoreInPlaceRestoring,
 			TargetSite: fg.Spec.Sites[0].Name,
-			Scope:      "schema:orders",
+			Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 			JobName:    inPlaceRestoreJobName(fg.Name, fg.Spec.Sites[0].Name),
 			StartTime:  ptrTime(time.Now()),
 		}
@@ -781,7 +781,7 @@ func TestReconcileInPlaceRestore_TerminalTokenComesFromTheJob(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: site,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		JobName:    inPlaceRestoreJobName(fg.Name, site),
 		StartTime:  ptrTime(time.Now()),
 	}
@@ -832,7 +832,7 @@ func TestReconcileInPlaceRestore_FailedJobRecordsTheJobsConfirm(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: site,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		JobName:    inPlaceRestoreJobName(fg.Name, site),
 		StartTime:  ptrTime(time.Now()),
 	}
@@ -894,7 +894,7 @@ func TestReconcileInPlaceRestore_FailedJobRecordsConfirmAndHolds(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: site,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		JobName:    inPlaceRestoreJobName(fg.Name, site),
 		StartTime:  ptrTime(time.Now()),
 	}
@@ -934,7 +934,7 @@ func TestReconcileInPlaceRestore_TerminalFailedStaysIdleOnSameConfirm(t *testing
 	fg := fgInPlaceRestore("orders")
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:            v1alpha1.RestoreInPlaceFailed,
-		Scope:            "schema:orders",
+		Scope:            &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		TargetSite:       fg.Spec.Sites[0].Name,
 		ConfirmTokenUsed: fg.Spec.RestoreInPlace.Confirm,
 	}
@@ -966,7 +966,7 @@ func TestReconcileInPlaceRestore_TerminalFailedRearmsOnNewerConfirm(t *testing.T
 	fg.Spec.RestoreInPlace.Confirm = "2026-04-17T15:00:00Z"
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:            v1alpha1.RestoreInPlaceFailed,
-		Scope:            "schema:orders",
+		Scope:            &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		TargetSite:       fg.Spec.Sites[0].Name,
 		ConfirmTokenUsed: "2026-04-17T14:00:00Z",
 	}
@@ -1015,7 +1015,7 @@ func TestReconcileInPlaceRestore_PerSchema_ResumingSkipsRecloneAnnotation(t *tes
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceResuming,
 		TargetSite: fg.Spec.Sites[0].Name,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
@@ -1044,7 +1044,7 @@ func TestReconcileInPlaceRestore_FullInstance_ResumingReleasesRecloneQueue(t *te
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceResuming,
 		TargetSite: fg.Spec.Sites[0].Name,
-		Scope:      "full",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
@@ -1107,7 +1107,7 @@ func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testi
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: site,
-		Scope:      "schema:orders",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
@@ -1163,12 +1163,12 @@ func TestReconcileInPlaceRestore_ValidationRejected(t *testing.T) {
 			fg.Spec.RestoreInPlace.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{"orders", "billing"}}
 			if tc.phase != "" {
 				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-					Phase: tc.phase, Scope: "full", StartTime: ptrTime(time.Now()),
+					Phase: tc.phase, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 				}
 			}
 			if tc.primaryBlocked {
 				// The rejection must not wait behind Preflight's waits.
-				fg.Status.Sites[0].State = "read-only"
+				fg.Status.Sites[0].State = v1alpha1.SiteStateReadOnly
 			}
 			gen := fg.Status.TopologyGeneration
 			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())

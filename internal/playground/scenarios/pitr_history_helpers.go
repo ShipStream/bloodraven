@@ -940,8 +940,8 @@ func pitrTrackedCRs(env *runner.Env, kind string) []string {
 type pitrExpectation struct {
 	// Backup is the backup key passed to pitrBackup.
 	Backup string
-	// Mode is timestamp or latest.
-	Mode string
+	// Mode is Timestamp or Latest.
+	Mode v1alpha1.PointInTimeMode
 	// Fence supplies T (timestamp mode) and the expected executed set.
 	Fence pitrFence
 	// Exclude is excludeGtids.
@@ -974,7 +974,7 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 		return fmt.Errorf("%s: status.pointInTime is not set", what)
 	}
 	wantMode := v1alpha1.PointInTimeModeTimestamp
-	if e.Mode == "latest" {
+	if e.Mode == v1alpha1.PointInTimeModeLatest {
 		wantMode = v1alpha1.PointInTimeModeLatest
 	}
 	if res.Mode != wantMode {
@@ -1047,7 +1047,7 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 // pitrVerifySpec builds the verification's pointInTime block.
 func pitrVerifySpec(e pitrExpectation) *v1alpha1.PointInTimeVerificationSpec {
 	pit := &v1alpha1.PointInTimeVerificationSpec{Mode: e.Mode, ExcludeGtids: e.Exclude, ArchiveProfileName: e.ArchiveProfile}
-	if e.Mode == "timestamp" {
+	if e.Mode == v1alpha1.PointInTimeModeTimestamp {
 		pit.Timestamp = e.Fence.T
 	}
 	return pit
@@ -1274,7 +1274,7 @@ func pitrSiteReplicating(mfg *v1alpha1.MysqlFailoverGroup, site string) (bool, s
 			continue
 		}
 		msg := fmt.Sprintf("state=%s replicating=%t recovery=%q lastSeen=%v", st.State, st.Replicating, st.RecoveryState, st.LastSeen)
-		return st.State == "read-only" && st.Replicating && st.RecoveryState != "RecoveryBlocked", msg, nil
+		return st.State == v1alpha1.SiteStateReadOnly && st.Replicating && st.RecoveryState != "RecoveryBlocked", msg, nil
 	}
 	return false, "site not in status", nil
 }
@@ -1332,7 +1332,7 @@ func pitrRecloneRequest(sites []v1alpha1.SiteStatus, site, group string, expectD
 		}
 		div := strings.TrimSpace(s.DivergentGtid)
 		msg = fmt.Sprintf("state=%s recovery=%s divergentGtid=%q", s.State, s.RecoveryState, div)
-		if s.State != "read-only" {
+		if s.State != v1alpha1.SiteStateReadOnly {
 			return false, "", msg
 		}
 		if expectDivergent {
@@ -1464,7 +1464,7 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 		replicating := false
 		for _, s := range m.Status.Sites {
 			if s.Name == site {
-				replicating = s.Replicating && s.State == "read-only"
+				replicating = s.Replicating && s.State == v1alpha1.SiteStateReadOnly
 			}
 		}
 		done, msg, err := watch.observe(findCondition(m.Status.Conditions, v1alpha1.ConditionBootstrapping), replicating)
@@ -1791,7 +1791,7 @@ func pitrWaitPastBackup(ctx context.Context, env *runner.Env, key string, b *v1a
 // past its backup's clear time: such a target would refuse
 // PITRBackupAfterTarget for a reason the scenario did not mean to test.
 func pitrCheckTargetAfterBackup(env *runner.Env, e pitrExpectation) error {
-	if e.Mode != "timestamp" {
+	if e.Mode != v1alpha1.PointInTimeModeTimestamp {
 		return nil
 	}
 	raw := ctxFetch(env, "backupClear:"+e.Backup)

@@ -87,7 +87,7 @@ func s43InjectWritableReaderWithErrantRow(state *s43RunState) runner.Step {
 			}
 			before, err := metricCounter(ctx, env, "bloodraven_planned_failovers_total", map[string]string{
 				"target_site": state.topo.reader,
-				"result":      "rejected",
+				"result":      "not-started",
 			})
 			if err != nil {
 				return err
@@ -289,7 +289,7 @@ func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"plannedFailover Failed with the only-primary-candidate role error",
+				"plannedFailover Failed with the only-PrimaryCandidate role error",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					pf := mfg.Status.PlannedFailover
 					if pf == nil {
@@ -311,7 +311,7 @@ func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {
 					if pf.TargetSite != state.topo.reader {
 						return false, msg, fmt.Errorf("rejected plannedFailover has target=%q, want %q", pf.TargetSite, state.topo.reader)
 					}
-					if !strings.Contains(pf.Message, "only primary-candidate sites may be promoted") {
+					if !strings.Contains(pf.Message, "only PrimaryCandidate sites may be promoted") {
 						return false, msg, fmt.Errorf("rejection message %q does not carry the role error", pf.Message)
 					}
 					return true, msg, nil
@@ -323,11 +323,11 @@ func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {
 			metricCtx, cancelMetric := context.WithTimeout(ctx, 30*time.Second)
 			defer cancelMetric()
 			return env.Wait.UntilMetric(metricCtx, env.Metrics,
-				fmt.Sprintf(`planned_failovers_total{target_site=%q,result="rejected"} increments from %g`, state.topo.reader, state.rejectedBefore),
+				fmt.Sprintf(`planned_failovers_total{target_site=%q,result="not-started"} increments from %g`, state.topo.reader, state.rejectedBefore),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
 					v, _ := snap.Counter("bloodraven_planned_failovers_total", map[string]string{
 						"target_site": state.topo.reader,
-						"result":      "rejected",
+						"result":      "not-started",
 					})
 					return v > state.rejectedBefore, fmt.Sprintf("counter=%g before=%g", v, state.rejectedBefore)
 				},
@@ -398,7 +398,7 @@ func s43VerifyErrantGtidBlocksConvergence(state *s43RunState) runner.Step {
 						return false, "reader status missing", nil
 					}
 					msg := fmt.Sprintf("convergence=%s/%s replicating=%v", status.SourceConvergenceState, status.SourceConvergenceReason, status.Replicating)
-					done := status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked && status.SourceConvergenceReason == "GTIDDiverged"
+					done := status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked && status.SourceConvergenceReason == v1alpha1.SourceReasonGTIDDiverged
 					return done, msg, nil
 				})
 			cancel()

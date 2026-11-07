@@ -11,7 +11,7 @@ func TestSiteRoleHelpers(t *testing.T) {
 	}{
 		{name: "default", promotable: true},
 		{name: "candidate", role: SiteRolePrimaryCandidate, promotable: true},
-		{name: "dr only", role: SiteRoleDROnly},
+		{name: "dr only", role: SiteRoleDisasterRecovery},
 		{name: "reader", role: SiteRoleReadOnly, reader: true},
 	}
 	for _, tt := range tests {

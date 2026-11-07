@@ -104,7 +104,7 @@ func TestInitRestoreReady_FollowsRestorePhaseWithoutTopologyEvent(t *testing.T) 
 			if err := c.Get(ctx, nn, &cur); err != nil {
 				t.Fatal(err)
 			}
-			cfg := CRConfigToTopologyConfig(&cur)
+			cfg := mustTopologyConfig(&cur)
 			hash, err := connectionMaterialHash(ctx, c, &cur)
 			if err != nil {
 				t.Fatal(err)

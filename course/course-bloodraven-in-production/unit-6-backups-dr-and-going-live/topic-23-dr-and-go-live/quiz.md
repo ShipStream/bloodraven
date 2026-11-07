@@ -11,7 +11,7 @@ The cluster hosting `playground` has stopped answering: `kubectl --context=sourc
 
 - Bootstrap the DR group now — an unreachable API server means the MySQL workloads are gone with it
 - Get a second independent signal before touching the DR cluster, because nothing in Bloodraven will catch a cross-cluster split brain if you are wrong
-- Bootstrap the DR group but declare its sites `role: dr-only`, so the operator fences the source copy automatically
+- Bootstrap the DR group but declare its sites `role: DisasterRecovery`, so the operator fences the source copy automatically
 - Wait until the source operator raises a `SPLIT BRAIN` alert, then bootstrap the DR group
 
 **Correct option index:** 1

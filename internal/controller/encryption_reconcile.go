@@ -22,6 +22,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/metrics"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -997,8 +998,11 @@ func eventTypeForKeyringPhase(p v1alpha1.SiteKeyringPhase) string {
 }
 
 func publishKeyringMetrics(namespace, group string, site *v1alpha1.SiteEncryptionStatus) {
-	phase := strings.ToLower(string(site.Phase))
-	for _, p := range metrics.AllKeyringPhases {
+	phase := ""
+	if site.Phase != "" {
+		phase = labels.KeyringPhase(site.Phase)
+	}
+	for _, p := range labels.KeyringPhases {
 		v := 0.0
 		if p == phase {
 			v = 1

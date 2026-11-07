@@ -113,7 +113,7 @@ func verifyActiveSiteUnchanged() runner.Step {
 			// promotion doesn't slip past the activeSite check.
 			var writable []string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "writable" {
+				if s.State == v1alpha1.SiteStateWritable {
 					writable = append(writable, s.Name)
 				}
 			}

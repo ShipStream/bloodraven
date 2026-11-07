@@ -187,7 +187,7 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 	}
 	if !targetSpec.IsPromotable() {
 		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetNotPromotable, fmt.Errorf(
-			"planned-failover: site %q has role %q; only primary-candidate sites may be promoted",
+			"planned-failover: site %q has role %s; only PrimaryCandidate sites may be promoted",
 			req.Site, targetSpec.EffectiveRole())
 	}
 
@@ -235,7 +235,7 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 			"planned-failover: site %q is divergent (%d transactions the primary lacks: %s); reclone it or make the primary contain them before it can be promoted",
 			req.Site, count, truncateGtidSet(targetStatus.DivergentGtid))
 	}
-	if targetStatus.State != "read-only" {
+	if targetStatus.State != v1alpha1.SiteStateReadOnly {
 		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetUnhealthy, fmt.Errorf(
 			"planned-failover: site %q is in state %q; target must be a healthy read-only replica",
 			req.Site, targetStatus.State)
@@ -341,11 +341,9 @@ func effectiveDrainTimeout(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
 // effectiveOnCooldown returns the spec.plannedFailover.onCooldown
 // policy, defaulting to Reject. An empty value or any unknown value
 // falls back to Reject so a malformed spec does not accidentally
-// enable the defer path. The comparison ignores case: releases before
-// v1beta1 wrote the lower-case `defer`, which CRD ratcheting keeps on an
-// object updated without touching the field.
+// enable the defer path.
 func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) v1alpha1.PlannedFailoverCooldownPolicy {
-	if fg.Spec.PlannedFailover != nil && strings.EqualFold(string(fg.Spec.PlannedFailover.OnCooldown), string(v1alpha1.PlannedFailoverCooldownDefer)) {
+	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.OnCooldown == v1alpha1.PlannedFailoverCooldownDefer {
 		return v1alpha1.PlannedFailoverCooldownDefer
 	}
 	return v1alpha1.PlannedFailoverCooldownReject
@@ -401,7 +399,7 @@ func plannedSettings(pf *v1alpha1.PlannedFailoverStatus) v1alpha1.PlannedFailove
 		if dd.MaxSyncWait.Duration <= 0 {
 			dd.MaxSyncWait.Duration = defaultDragonflySyncWait
 		}
-		dd.OnSyncTimeout = normalizeDragonflySyncTimeout(dd.OnSyncTimeout)
+		dd.OnSyncTimeout = dragonflySyncTimeoutPolicy(dd.OnSyncTimeout)
 		s.Dragonfly = &dd
 	}
 	return s

@@ -24,7 +24,7 @@ During a rolling image change on `playground`, `bloodraven_failovers_total` incr
 - The ordered-update handoff promoted `pdx`; that path calls `recordFailover` and increments the counter but is never cooldown-gated, so the guard was never reached
 - The operator restarted during the update and rehydrated an empty `lastFailover`, so the cooldown evaluated as expired
 - The counter increments on promotion attempts rather than completed promotions, and attempts are not gated
-- `spec.updateStrategy: Recreate` was set, which disables anti-flap for the duration of the rollout
+- `spec.updateStrategy.type: Recreate` was set, which disables anti-flap for the duration of the rollout
 
 **Correct option index:** 0
 

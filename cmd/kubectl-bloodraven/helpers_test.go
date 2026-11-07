@@ -106,10 +106,10 @@ func TestSiteCountSummary(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
-				{Name: "pdx", State: "read-only"},
-				{Name: "lhr", State: "unreachable"},
-				{Name: "fra", State: "unknown"},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly},
+				{Name: "lhr", State: v1alpha1.SiteStateUnreachable},
+				{Name: "fra", State: v1alpha1.SiteStateUnknown},
 			},
 		},
 	}
@@ -231,8 +231,8 @@ func TestPrintGroupStatus(t *testing.T) {
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable", LastSeen: &now},
-				{Name: "pdx", State: "read-only", LastSeen: &now, Replicating: true},
+				{Name: "iad", State: v1alpha1.SiteStateWritable, LastSeen: &now},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, LastSeen: &now, Replicating: true},
 			},
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
 		},
@@ -247,8 +247,8 @@ func TestPrintGroupStatus(t *testing.T) {
 		"Active site: iad",
 		"DNS: orders.example.com",
 		// Per-site row contents:
-		"writable",
-		"read-only",
+		"Writable",
+		"ReadOnly",
 		// Confirm both site names land in the table.
 		"iad",
 		"pdx",
@@ -347,7 +347,7 @@ func TestSiteCountSummaryBucketsUnknownStateAsUnhealthy(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
 				{Name: "pdx", State: ""},
 				{Name: "lhr", State: "weird-future-value"},
 			},

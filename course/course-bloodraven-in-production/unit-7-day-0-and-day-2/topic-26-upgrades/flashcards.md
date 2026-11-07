@@ -3,9 +3,9 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Front:** The six ordered-update phases, in order
+**Front:** The five ordered-update phases, in order
 
-**Back:** `UpdateReplica`, `WaitReplica`, `Failover`, `UpdateOldPrimary`, `WaitOldPrimary`, `Complete`. They appear verbatim in `status.updatePhase`, which is empty whenever no rollout is running.
+**Back:** `UpdateReplica`, `WaitReplica`, `Failover`, `UpdateOldPrimary`, `WaitOldPrimary`. They appear verbatim in `status.updatePhase`, which is empty whenever no rollout is running: a finished rollout clears it, and there is no `Complete` value.
 
 ---
 
@@ -39,7 +39,7 @@
 
 ---
 
-**Front:** `updateStrategy: Recreate`
+**Front:** `updateStrategy.type: Recreate`
 
 **Back:** Clears the drift list and patches every site Deployment in one pass, so pod restarts may overlap and both sites can be down at once. Never use it for a MySQL version bump: a stalled in-place upgrade leaves no healthy primary and no rollback.
 

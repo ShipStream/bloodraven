@@ -61,7 +61,7 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 						fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = prefix.template
 					}
 					fg.Status.ActiveSite = "iad"
-					fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+					fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 					mb := backupCR("metadata", fg.Name, "nightly-s3")
 					mb.UID = "literal-backup"
 					r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())

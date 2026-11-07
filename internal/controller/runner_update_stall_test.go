@@ -32,7 +32,7 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	stalled := base
 	stalled.UpdateStalled = "site dc2 was updated but its pod mysql-lion-dc2-1 is not Ready (" + sidecarCrashLoop + ")"
 	running := base
-	running.UpdatePhase = string(UpdatePhaseWaitReplica)
+	running.UpdatePhase = v1alpha1.UpdatePhaseWaitReplica
 
 	write := func(snap TopologySnapshot) (*metav1.Condition, []string) {
 		t.Helper()
@@ -61,7 +61,7 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	}
 
 	cond, events = write(running)
-	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(UpdatePhaseWaitReplica) || len(events) != 0 {
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(v1alpha1.UpdatePhaseWaitReplica) || len(events) != 0 {
 		t.Fatalf("Updating = %+v events %q while an attempt runs", cond, events)
 	}
 	if _, events = write(stalled); len(events) != 1 {

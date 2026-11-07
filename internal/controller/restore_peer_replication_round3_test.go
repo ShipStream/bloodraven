@@ -80,7 +80,7 @@ func TestRestoreOfflineFenceGuard(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgThreeSiteRestore()
-			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, TargetSite: "iad", Scope: "full"}
+			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, TargetSite: "iad", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: tc.queue, Pending: []string{"pdx"}}
 			fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, PriorOfflineMode: tc.prior}
 			if got, _ := restoreOfflineFenceGuard(fg); got != tc.want {

@@ -836,7 +836,7 @@ type RegistrySnapshot struct {
 type PlannedFailoverSink interface {
 	Event(fg *v1alpha1.MysqlFailoverGroup, eventType, reason, message string)
 	// RunTerminal records bloodraven_planned_failovers_total{target_site,
-	// result=mapOutcomeToMetricResult(pf.Result)} and the duration histogram.
+	// result=labels.PlannedFailoverResult(pf.Result.Outcome)} and the duration histogram.
 	RunTerminal(nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus)
 	LagWaitObserved(nn types.NamespacedName, target string, d time.Duration)
 	Deferred(nn types.NamespacedName, reason v1alpha1.PlannedFailoverDeferReason)

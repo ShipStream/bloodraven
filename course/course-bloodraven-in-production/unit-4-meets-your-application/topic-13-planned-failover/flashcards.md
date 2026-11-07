@@ -57,9 +57,9 @@
 
 ---
 
-**Front:** Verbatim refusal when a planned failover targets a `role: read-only` site.
+**Front:** Verbatim refusal when a planned failover targets a `role: ReadOnly` site.
 
-**Back:** `only primary-candidate sites may be promoted`.
+**Back:** `only PrimaryCandidate sites may be promoted`.
 
 ---
 

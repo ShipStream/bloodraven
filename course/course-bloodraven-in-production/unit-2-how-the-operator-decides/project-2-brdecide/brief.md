@@ -39,16 +39,16 @@ python starter/brdecide.py --status tests/fixtures/playground-iad-down-cooldown.
 The starter runs as given. It prints `Reason (unset)` and `coreCount 0`, because the four functions
 that matter are empty.
 
-The running example is `playground`: `iad` and `pdx` as `primary-candidate`, `reader` as
-`role: read-only`. Some fixtures add a fourth site to make a point.
+The running example is `playground`: `iad` and `pdx` as `PrimaryCandidate`, `reader` as
+`role: ReadOnly`. Some fixtures add a fourth site to make a point.
 
 ## Your tasks
 
 **TODO A — the pre-pass.** In `tally()`, walk the observations once. Increment `coreCount` for every
-site whose role is not `read-only` — a `dr-only` site counts, an `unknown` state counts. Route any
-site that is `writable` while its role is not `primary-candidate` into `fenceSites` and skip it, so it
-never reaches a tally. Skip `role: read-only` sites entirely. Everything left lands in the tally for
-its state; `unknown` lands in none of them.
+site whose role is not `ReadOnly` — a `DisasterRecovery` site counts, an `Unknown` state counts. Route any
+site that is `Writable` while its role is not `PrimaryCandidate` into `fenceSites` and skip it, so it
+never reaches a tally. Skip `role: ReadOnly` sites entirely. Everything left lands in the tally for
+its state; `Unknown` lands in none of them.
 
 **TODO B — the rows.** In `evaluate_cross_site()`, evaluate the rows in the order the code does and
 return at the first one that fires: fence-first, TotalLoss, SplitBrain, Failover, NoPrimary, Degraded,
@@ -70,7 +70,7 @@ Then run `python3 tests/harness.py` until it prints `PASS`.
 ## What the scaffolding is for
 
 Everything peripheral is wired: argument parsing, loading the object, the join of `spec.sites[].role`
-to `status.sites[].state` (a site absent from status is `unknown`, not missing), Go duration parsing,
+to `status.sites[].state` (a site absent from status is `Unknown`, not missing), Go duration parsing,
 reading both history copies, `rank_promotion_candidates()`, and both output formats. The `--json`
 output is what the tests read, so keep its keys as `new_action()` defines them.
 
@@ -82,7 +82,7 @@ verdict — sometimes stale by design. Do not read your answer out of it.
 ```
 brdecide — bloodraven-playground/playground at 2026-08-12T12:04:16Z
 
-  sites         iad=unreachable(primary-candidate)  pdx=read-only(primary-candidate)  reader=read-only(read-only)
+  sites         iad=Unreachable(PrimaryCandidate)  pdx=ReadOnly(PrimaryCandidate)  reader=ReadOnly(ReadOnly)
   coreCount     2
   tallies       writable=[] readOnly=['pdx'] unreachable=['iad']
   fenceSites    -

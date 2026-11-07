@@ -197,7 +197,7 @@ func TestMysqlDatabaseUsersRotationSurvivesFailedReadyStamp(t *testing.T) {
 	h.server.removeUser(mdbSupportUser)
 	h.server.addUser("acme_support_v2", "support-pw-2")
 	mdb := h.get()
-	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseCreating
+	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
 	mdb.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
 		SecretName:      mdbSupportSecretName,
 		Username:        mdbSupportUser,

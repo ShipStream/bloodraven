@@ -286,7 +286,7 @@ func writableSitesExcept(mfg *v1alpha1.MysqlFailoverGroup, prefer string) []stri
 		if s.Name == prefer {
 			continue
 		}
-		if s.State == "writable" {
+		if s.State == v1alpha1.SiteStateWritable {
 			out = append(out, s.Name)
 		}
 	}

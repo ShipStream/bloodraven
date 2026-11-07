@@ -330,7 +330,7 @@ func (tm *TopologyManager) plannedClaimRefusalLocked(req PlannedClaimRequest) (d
 		return claimDecisionReject(v1alpha1.PlannedFailoverReasonUnknownSite, "site %q is not in the topology", req.Target), "", true
 	case !target.isPromotable():
 		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetNotPromotable,
-			"site %q has role %q; only primary-candidate sites may be promoted", req.Target, target.role), "", true
+			"site %q has role %s; only PrimaryCandidate sites may be promoted", req.Target, APISiteRole(target.role)), "", true
 	case !tm.ready:
 		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerNotReady, "the topology manager has not completed a poll"), "", true
 	case tm.retired:

@@ -79,20 +79,20 @@ primary, and it records which happened as one of three reason strings you will s
 `"override"`, `"replica-preferred"`, `"primary-fallback"` (objective 2).
 
 `"replica-preferred"` is not a preference for "anything that is not the primary". A candidate
-replica qualifies only if its observed state is `read-only`, it is actually replicating, and its
+replica qualifies only if its observed state is `ReadOnly`, it is actually replicating, and its
 `secondsBehindSource` is at or below `maxLagSecondsForSource` — default **300**. Above that gate,
 the stale replica loses and the active site takes the job as `"primary-fallback"`, which itself
-requires the primary to be `writable` and promotable. Do not confuse the gate with
+requires the primary to be `Writable` and promotable. Do not confuse the gate with
 `spec.replication.maxLagSeconds`, which also defaults to 300 but drives only the
 `ReplicationLagging` condition and never picks a backup source.
 
-Sites with `role: read-only` are excluded from the replica pool outright. An explicit
+Sites with `role: ReadOnly` are excluded from the replica pool outright. An explicit
 `sourceSite` naming one is not silently ignored — it is **rejected**:
 
 > `sourceSite "reader" names a read-only site, which cannot be a backup source`
 
 The reader is the obvious place to put a dump, and it is the one site you cannot. This is the same
-logic you met in Unit 1 wearing different clothes: a site that is not a `primary-candidate` is not
+logic you met in Unit 1 wearing different clothes: a site that is not a `PrimaryCandidate` is not
 authoritative, so it is not promotable — and here, not sourceable.
 
 ## The artifact

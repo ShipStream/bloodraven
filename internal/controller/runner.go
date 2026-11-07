@@ -537,7 +537,27 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		nn := FailoverGroupNamespacedName(fg)
 		seen[nn] = struct{}{}
 
-		cfg := CRConfigToTopologyConfig(fg)
+		cfg, cfgErr := CRConfigToTopologyConfig(fg)
+		if cfgErr != nil {
+			// Fail closed: a manager configured from a role the operator
+			// cannot interpret could promote or fence the wrong site, so
+			// none runs for this group until the spec is valid again.
+			r.mu.RLock()
+			existing, ok := r.managers[nn]
+			r.mu.RUnlock()
+			if ok {
+				r.mu.Lock()
+				if r.managers[nn] == existing {
+					r.retireManagerLocked(nn, existing)
+				}
+				r.mu.Unlock()
+				stopManagedTopology(existing)
+				clearManagedSiteGauges(existing.tm)
+			}
+			r.logger.Error("failed to start topology manager", "fg", nn, "error", cfgErr)
+			r.noteStartFailure(fg, nn, cfgErr, ok)
+			continue
+		}
 
 		// Include operator secret + TLS material so credential or
 		// cert rotation (or TLS adoption) restarts the manager with
@@ -821,7 +841,7 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 	// Recreate is owned by the bulk reconciler, which patches every site
 	// Deployment in one pass. Never let a partial or transient drift snapshot
 	// route this strategy back through the ordered updater.
-	if fg.Spec.UpdateStrategy == "Recreate" {
+	if fg.Spec.UpdateStrategy.EffectiveType() == v1alpha1.UpdateStrategyRecreate {
 		tm.SetSpecDriftSites(nil)
 		return
 	}
@@ -1061,7 +1081,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}
 	for _, site := range fg.Status.Sites {
 		if site.SourceConvergenceState != "" || site.SourceHost != "" {
-			tm.SetSourceConvergence(site.Name, site.SourceHost, SourceConvergenceState(site.SourceConvergenceState), site.SourceConvergenceReason)
+			tm.SetSourceConvergence(site.Name, site.SourceHost, site.SourceConvergenceState, site.SourceConvergenceReason)
 		}
 		if site.RecoveryState != v1alpha1.RecoveryStateBlocked && site.RecoveryState != v1alpha1.RecoveryStateInProgress && site.DivergentGtid == "" {
 			continue
@@ -1941,7 +1961,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
-			Reason:             snap.UpdatePhase,
+			Reason:             string(snap.UpdatePhase),
 			Message:            fmt.Sprintf("Ordered update in progress: %s", snap.UpdatePhase),
 		})
 	} else if snap.UpdateStalled != "" {
@@ -2430,9 +2450,9 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	// Per-site recovery transitions: compare the previously persisted state
 	// against the new snapshot for each site independently, since multiple
 	// sites can be in recovery at once.
-	oldState := make(map[string]string, len(existingStatus.Sites))
+	oldState := make(map[string]v1alpha1.SiteRecoveryState, len(existingStatus.Sites))
 	oldDivergentCount := make(map[string]int64, len(existingStatus.Sites))
-	oldDetectedBy := make(map[string]string, len(existingStatus.Sites))
+	oldDetectedBy := make(map[string]v1alpha1.DivergenceDetector, len(existingStatus.Sites))
 	oldSet := make(map[string]string, len(existingStatus.Sites))
 	oldComparedTo := make(map[string]string, len(existingStatus.Sites))
 	for _, s := range existingStatus.Sites {
@@ -2443,7 +2463,7 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 			oldDivergentCount[s.Name] = *s.DivergentTransactionCount
 		}
 	}
-	recoveryActive := func(st string) bool {
+	recoveryActive := func(st v1alpha1.SiteRecoveryState) bool {
 		return st == v1alpha1.RecoveryStateInProgress || st == v1alpha1.RecoveryStateBlocked
 	}
 	for _, s := range snap.Sites {
@@ -2908,7 +2928,7 @@ func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context
 func siteStatusFromSnapshot(s SiteSnapshot) v1alpha1.SiteStatus {
 	status := v1alpha1.SiteStatus{
 		Name:                    s.Name,
-		State:                   s.State.String(),
+		State:                   apiSiteState(s.State),
 		SourceHost:              s.SourceHost,
 		SourceConvergenceState:  v1alpha1.SourceConvergenceState(s.SourceConvergenceState),
 		SourceConvergenceReason: s.SourceConvergenceReason,

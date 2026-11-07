@@ -70,7 +70,7 @@ The reversal: it is a hard CEL rejection at admission, not a recommendation — 
 
 **Type:** SHORT_ANSWER
 
-`playground` has three sites: `iad` (active primary), `pdx` (replica) and `reader` (`role: read-only`). You need every site's master key rotated. Which site cannot be rotated right now, why, and what do you do about it?
+`playground` has three sites: `iad` (active primary), `pdx` (replica) and `reader` (`role: ReadOnly`). You need every site's master key rotated. Which site cannot be rotated right now, why, and what do you do about it?
 
 **Sample answer:**
 

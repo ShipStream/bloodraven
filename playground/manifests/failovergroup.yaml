@@ -20,7 +20,7 @@ spec:
   sites:
     - name: iad
       serverID: 101
-      role: primary-candidate
+      role: PrimaryCandidate
       zone: zone-iad
       taintNodeSelector:
         shipstream.io/failover-group.playground: "true"
@@ -38,7 +38,7 @@ spec:
           memory: 1Gi
     - name: pdx
       serverID: 102
-      role: primary-candidate
+      role: PrimaryCandidate
       zone: zone-pdx
       taintNodeSelector:
         shipstream.io/failover-group.playground: "true"
@@ -56,7 +56,7 @@ spec:
           memory: 1Gi
     - name: reader
       serverID: 103
-      role: read-only
+      role: ReadOnly
       zone: zone-reader
       mysqlConf:
         max-connections: "150"

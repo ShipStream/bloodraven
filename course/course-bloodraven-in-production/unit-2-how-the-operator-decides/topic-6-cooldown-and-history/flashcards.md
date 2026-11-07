@@ -57,6 +57,6 @@
 
 ---
 
-**Front:** `spec.updateStrategy`
+**Front:** `spec.updateStrategy.type`
 
 **Back:** `OrderedUpdate` (default) leaves existing site Deployments untouched so the runner sees spec drift and rolls one site at a time; `Recreate` clears the drift list and patches every site Deployment in one pass, so pod restarts may overlap.

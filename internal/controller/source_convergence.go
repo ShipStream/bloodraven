@@ -7,7 +7,10 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+
 	"github.com/shipstream/bloodraven/internal/metrics"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -126,9 +129,9 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 			release()
 			cancel()
 			stateValue, reason := sourceConvergencePending, sourceReasonMutationFailed
-			if strings.Contains(err.Error(), sourceReasonGTIDDiverged) {
+			if strings.Contains(err.Error(), string(sourceReasonGTIDDiverged)) {
 				stateValue, reason = sourceConvergenceBlocked, sourceReasonGTIDDiverged
-			} else if strings.Contains(err.Error(), sourceReasonProbeFailed) {
+			} else if strings.Contains(err.Error(), string(sourceReasonProbeFailed)) {
 				reason = sourceReasonProbeFailed
 			}
 			changed = tm.setSourceConvergence(site, repl, stateValue, reason, active.host) || changed
@@ -186,7 +189,7 @@ func (tm *TopologyManager) repointReplica(ctx context.Context, active, follower 
 	if err := tm.ensureGTIDContained(ctx, active, follower, "post-stop-gtid"); err != nil {
 		// The unchanged channel is safe to resume when the failure was a probe;
 		// divergence deliberately remains stopped for operator review.
-		if !strings.Contains(err.Error(), sourceReasonGTIDDiverged) {
+		if !strings.Contains(err.Error(), string(sourceReasonGTIDDiverged)) {
 			_ = follower.mysql.StartReplica(rollbackCtx)
 		}
 		return err
@@ -259,7 +262,7 @@ func (tm *TopologyManager) logSourceFailure(follower, active *siteTracker, stage
 		"site", follower.name, "activeSite", active.name, "stage", stage, "error", err, "fg", tm.cfg.Name)
 }
 
-func (tm *TopologyManager) setSourceConvergence(site *siteTracker, repl *mysql.ReplicaStatus, convergence SourceConvergenceState, reason, expectedHost string) bool {
+func (tm *TopologyManager) setSourceConvergence(site *siteTracker, repl *mysql.ReplicaStatus, convergence SourceConvergenceState, reason v1alpha1.SourceConvergenceReason, expectedHost string) bool {
 	host := ""
 	if repl != nil {
 		host = repl.SourceHost
@@ -296,13 +299,16 @@ func (tm *TopologyManager) emitSourceConvergenceMetrics() {
 	for i := range tm.sites {
 		site := &tm.sites[i]
 		if site.name == active {
-			for _, value := range metrics.AllSourceStates {
+			for _, value := range labels.SourceStates {
 				metrics.ReplicationSourceState.DeleteLabelValues(tm.cfg.Namespace, tm.cfg.Name, site.name, value)
 			}
 			continue
 		}
-		current := strings.ToLower(string(site.sourceConvergenceState))
-		for _, value := range metrics.AllSourceStates {
+		current := ""
+		if site.sourceConvergenceState != "" {
+			current = labels.SourceState(site.sourceConvergenceState)
+		}
+		for _, value := range labels.SourceStates {
 			v := 0.0
 			if current == value {
 				v = 1

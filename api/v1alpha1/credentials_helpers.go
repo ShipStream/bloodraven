@@ -64,11 +64,11 @@ func (r PassphraseSecretKeyRef) PassphraseSecretKeyOrDefault() string {
 }
 
 // AlgorithmOrDefault returns the configured algorithm, defaulting to
-// AES-256-GCM when the field is empty (common on older CRs that were
-// created before Algorithm became optional).
-func (s *BackupEncryptionSpec) AlgorithmOrDefault() string {
+// AES-256-GCM when the field is empty (an object that bypassed CRD
+// defaulting).
+func (s *BackupEncryptionSpec) AlgorithmOrDefault() EncryptionAlgorithm {
 	if s == nil || s.Algorithm == "" {
-		return "AES-256-GCM"
+		return EncryptionAlgorithmAES256GCM
 	}
 	return s.Algorithm
 }

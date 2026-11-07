@@ -135,7 +135,7 @@ func (c *Client) AnnotateMFGNamed(ctx context.Context, namespace, name, key, val
 
 // SiteState returns the observed state for the named site, or "" if
 // the site is unknown to the status.
-func SiteState(mfg *v1alpha1.MysqlFailoverGroup, site string) string {
+func SiteState(mfg *v1alpha1.MysqlFailoverGroup, site string) v1alpha1.SiteState {
 	for _, s := range mfg.Status.Sites {
 		if s.Name == site {
 			return s.State

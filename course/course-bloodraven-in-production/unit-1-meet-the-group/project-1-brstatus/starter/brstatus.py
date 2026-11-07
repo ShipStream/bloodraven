@@ -23,8 +23,8 @@ from __future__ import annotations
 import json
 import sys
 
-# spec.sites[].role is enum-validated and defaults to primary-candidate.
-DEFAULT_ROLE = "primary-candidate"
+# spec.sites[].role is enum-validated and defaults to PrimaryCandidate.
+DEFAULT_ROLE = "PrimaryCandidate"
 
 # spec.replication.maxLagSeconds defaults to 300. An object built outside
 # admission may omit it, so the tool applies the same default the operator does.
@@ -140,7 +140,7 @@ def is_serving(site_spec, site_status, group):
 
     TODO B: replace the placeholder below with the operator's own rule.
 
-      * For a site whose role is "read-only", healthy=yes needs all five of
+      * For a site whose role is "ReadOnly", healthy=yes needs all five of
         these to hold at once:
           1. sourceConvergenceState is "Converged"
           2. replicating is true
@@ -149,8 +149,8 @@ def is_serving(site_spec, site_status, group):
              the active site - a chained replica does not count
           5. secondsBehindSource is at or under effective_readonly_max_lag(spec)
 
-      * For every other role, healthy=yes as soon as state is "writable" or
-        "read-only". There is no lag gate on those sites. Read that sentence
+      * For every other role, healthy=yes as soon as state is "Writable" or
+        "ReadOnly". There is no lag gate on those sites. Read that sentence
         twice before you write the code.
     """
     status = group.get("status") or {}
@@ -171,7 +171,7 @@ def is_serving(site_spec, site_status, group):
     expected = expected_source_host(group_name, namespace, active)
     role = site_role(site_spec)
 
-    return site_status.get("state") == "read-only"
+    return site_status.get("state") == "ReadOnly"
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +213,7 @@ def build_rows(group):
             (
                 name,
                 site_role(site_spec),
-                site_status.get("state") or "unknown",
+                site_status.get("state") or "Unknown",
                 "yes" if site_status.get("replicating") else "no",
                 format_lag(site_status),
                 "yes" if is_serving(site_spec, site_status, group) else "no",

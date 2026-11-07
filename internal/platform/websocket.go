@@ -29,7 +29,8 @@ type TopologyMessage struct {
 	PromotionGtidExecuted string         `json:"promotionGtidExecuted,omitempty"`
 }
 
-// TopologySite is a single site entry inside a TopologyMessage.
+// TopologySite is a single site entry inside a TopologyMessage. Role and
+// State carry the CR values (spec.sites[].role, status.sites[].state).
 type TopologySite struct {
 	Name                      string `json:"name"`
 	Role                      string `json:"role,omitempty"`

@@ -411,7 +411,7 @@ func TestDeploymentLeaseRestoreWaitAndSameSiteInvalidation(t *testing.T) {
 	if err := m.client.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full-instance"}
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	if err := m.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -559,7 +559,7 @@ func TestDeploymentLeaseStability(t *testing.T) {
 		change func(*v1alpha1.MysqlFailoverGroup)
 	}{
 		{"missing site", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites = fg.Status.Sites[:1] }},
-		{"primary read-only", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[0].State = "read-only" }},
+		{"primary read-only", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[0].State = v1alpha1.SiteStateReadOnly }},
 		{"recovery in progress", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[1].RecoveryState = "RecoveryInProgress" }},
 		{"recovery blocked", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[1].RecoveryState = "RecoveryBlocked" }},
 		{"source convergence", func(fg *v1alpha1.MysqlFailoverGroup) {

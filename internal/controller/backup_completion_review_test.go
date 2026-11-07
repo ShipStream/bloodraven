@@ -168,7 +168,7 @@ func TestBackupMetadataReview_RuntimeExpandedDestinations(t *testing.T) {
 						fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = raw
 					}
 					fg.Status.ActiveSite = "iad"
-					fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+					fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 					mb := backupCR("runtime", fg.Name, "nightly-s3")
 					mb.UID = "runtime-backup"
 					r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())

@@ -68,7 +68,7 @@ func s10InjectWipeReplicaPVC() runner.Step {
 			}
 			var replica string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "read-only" {
+				if s.State == v1alpha1.SiteStateReadOnly {
 					replica = s.Name
 					break
 				}
@@ -180,9 +180,9 @@ func s10ObserveClusterReconverged() runner.Step {
 					var writable, readOnly, other, blocked, divergent []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
@@ -219,7 +219,7 @@ func s10VerifyReplicaThreadsRunning() runner.Step {
 			if err != nil {
 				return err
 			}
-			var wipedState string
+			var wipedState v1alpha1.SiteState
 			for _, s := range mfg.Status.Sites {
 				if s.Name == wiped {
 					wipedState = s.State
@@ -229,7 +229,7 @@ func s10VerifyReplicaThreadsRunning() runner.Step {
 			if wipedState == "" {
 				return fmt.Errorf("wiped site %q missing at verify time (sites=%+v)", wiped, mfg.Status.Sites)
 			}
-			if wipedState != "read-only" {
+			if wipedState != v1alpha1.SiteStateReadOnly {
 				return fmt.Errorf("wiped site %s state=%q, want read-only replicating replica", wiped, wipedState)
 			}
 			env.Capture.Note(fmt.Sprintf("probing wiped read-only site %s", wiped))

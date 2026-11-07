@@ -1,6 +1,6 @@
-# Three-site playground variant: two primary-candidate sites (iad, pdx)
-# plus a cross-region dr-only follower (fra). Useful for exercising the
-# "primary-candidate only can be promoted" and "sitePriorities picks the
+# Three-site playground variant: two PrimaryCandidate sites (iad, pdx)
+# plus a cross-region DisasterRecovery follower (fra). Useful for exercising the
+# "only PrimaryCandidate can be promoted" and "sitePriorities picks the
 # split-brain winner" behaviours without touching the default 2-site
 # manifest.
 #
@@ -27,7 +27,7 @@ spec:
   sites:
     - name: iad
       serverID: 101
-      role: primary-candidate
+      role: PrimaryCandidate
       zone: zone-iad
       taintNodeSelector:
         shipstream.io/failover-group.playground: "true"
@@ -41,7 +41,7 @@ spec:
         limits:   { cpu: 500m, memory: 512Mi }
     - name: pdx
       serverID: 102
-      role: primary-candidate
+      role: PrimaryCandidate
       zone: zone-pdx
       taintNodeSelector:
         shipstream.io/failover-group.playground: "true"
@@ -55,7 +55,7 @@ spec:
         limits:   { cpu: 500m, memory: 512Mi }
     - name: fra
       serverID: 103
-      role: dr-only
+      role: DisasterRecovery
       zone: zone-fra
       taintNodeSelector:
         shipstream.io/failover-group.playground: "true"

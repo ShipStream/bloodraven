@@ -38,8 +38,8 @@ func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroup
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "dc1", TopologyGeneration: 7,
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "dc1", State: "writable"},
-				{Name: "dc2", State: "read-only", Replicating: true},
+				{Name: "dc1", State: v1alpha1.SiteStateWritable},
+				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
 			},
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.NewTime(clk.Now())}},
 		},
@@ -224,7 +224,7 @@ func TestDeploymentCoordination_DeferredHoldAllowsEmergencyPoll(t *testing.T) {
 		t.Fatal("emergency promotion did not fence the failed site and redirect DNS")
 	}
 	h.pollN(2)
-	if status := h.tm.Status(); status.Sites[0].State != "unreachable" || status.Sites[1].State != "writable" {
+	if status := h.tm.Status(); status.Sites[0].State != v1alpha1.SiteStateUnreachable || status.Sites[1].State != v1alpha1.SiteStateWritable {
 		t.Fatalf("emergency topology did not converge: %+v", status)
 	}
 }

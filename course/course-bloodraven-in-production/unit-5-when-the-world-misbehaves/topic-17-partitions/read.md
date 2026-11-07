@@ -23,7 +23,7 @@ rarely blinds both. The figure is the map; the match below is the taxonomy; the 
 }
 ```
 
-- **A — operator cannot reach site A, site B reachable.** `iad` goes `unreachable` after 6 s (2 s
+- **A — operator cannot reach site A, site B reachable.** `iad` goes `Unreachable` after 6 s (2 s
   `pollInterval` × 3 `failureThreshold`); `pdx` is promoted. An isolated-but-alive `iad` self-fences
   at roughly T+20 s, the shipped `leaseTimeout` the playground does not override.
 - **B — replica isolated, primary reachable.** Promoting away from a healthy primary costs
@@ -132,7 +132,7 @@ The rule, hard: a chaos experiment that injects nothing produces a confident fal
 run of a broken experiment is worse than none. Every partition test needs an independent check that
 the partition exists, run against a disposable canary before the real target is touched — scenario
 33 now refuses to proceed unless its canary reaches `dns=fail`. The reported state can never be that
-check: in Unit 2's frozen-poll incident the operator reported `activeSite=iad, state=writable,
+check: in Unit 2's frozen-poll incident the operator reported `activeSite=iad, state=Writable,
 Ready=True` for two minutes under a deny-all policy. Partitions surface as *believable* status, not
 as errors.
 

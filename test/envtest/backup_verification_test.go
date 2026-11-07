@@ -106,7 +106,7 @@ func TestEnvtest_Verification_CreationAndSchemaAcceptance(t *testing.T) {
 			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: "timestamp",
+				Mode: v1alpha1.PointInTimeModeTimestamp,
 				// RFC3339 with an explicit offset — exercises the
 				// CRD's string validation without any runtime parsing.
 				Timestamp: "2026-04-15T09:30:00+00:00",
@@ -128,7 +128,7 @@ func TestEnvtest_Verification_CreationAndSchemaAcceptance(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "verify-a", Namespace: ns}, &fetched); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if fetched.Spec.PointInTime == nil || fetched.Spec.PointInTime.Mode != "timestamp" {
+	if fetched.Spec.PointInTime == nil || fetched.Spec.PointInTime.Mode != v1alpha1.PointInTimeModeTimestamp {
 		t.Errorf("pointInTime.mode not persisted: %+v", fetched.Spec.PointInTime)
 	}
 	if fetched.Spec.SanityCheck == nil || fetched.Spec.SanityCheck.Query == "" {

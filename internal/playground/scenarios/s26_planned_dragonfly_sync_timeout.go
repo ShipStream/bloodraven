@@ -243,7 +243,7 @@ func verifyS26SessionsNotPreserved() runner.Step {
 					pf.Dragonfly.Sessions, pf.Dragonfly.Reason, pf.Dragonfly.Message)
 			}
 			switch pf.Dragonfly.Reason {
-			case "DragonflySyncTimeout", "DragonflyPromotionFailed":
+			case v1alpha1.DragonflyPlannedReasonSyncTimeout, v1alpha1.DragonflyPlannedReasonPromotionFailed:
 				return nil
 			default:
 				return fmt.Errorf("dragonfly.Reason=%q want DragonflySyncTimeout or DragonflyPromotionFailed (msg=%q)",

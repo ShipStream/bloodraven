@@ -199,7 +199,7 @@ func s37VerifyBetweenEras() runner.Step {
 				return err
 			}
 			if _, err := pitrVerifyRefused(ctx, env, s37ID, s37DBName, "t2-early", pitrExpectation{
-				Backup: "b1", Mode: "timestamp", Fence: f2,
+				Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2,
 				Markers: []string{"baseline", "M1", "M1b", "M2"},
 			}, string(v1alpha1.PITRTokenTargetNotCovered)); err != nil {
 				return err
@@ -209,7 +209,7 @@ func s37VerifyBetweenEras() runner.Step {
 				return err
 			}
 			return pitrVerify(ctx, env, s37ID, s37DBName, "latest-early", pitrExpectation{
-				Backup: "b1", Mode: "latest", Fence: flushed, Outcome: v1alpha1.PointInTimeArchiveHead,
+				Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: flushed, Outcome: v1alpha1.PointInTimeArchiveHead,
 				Markers: []string{"baseline", "M1", "M1b"},
 			})
 		},
@@ -247,14 +247,15 @@ func s37VerifyEveryEra() runner.Step {
 		Name:  "verify T1 (origin), T2 inside b's era (anchored), T3, and latest",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			cases := []struct {
-				label, fence, mode string
-				outcome            v1alpha1.PointInTimeOutcome
-				markers            []string
+				label, fence string
+				mode         v1alpha1.PointInTimeMode
+				outcome      v1alpha1.PointInTimeOutcome
+				markers      []string
 			}{
-				{"t1", "T1", "timestamp", v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1"}},
-				{"t2", "T2", "timestamp", v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1", "M1b", "M2"}},
-				{"t3", "T3", "timestamp", v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1", "M1b", "M2", "M2b", "M3"}},
-				{"latest", "A2-flush", "latest", v1alpha1.PointInTimeArchiveHead, []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b"}},
+				{"t1", "T1", v1alpha1.PointInTimeModeTimestamp, v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1"}},
+				{"t2", "T2", v1alpha1.PointInTimeModeTimestamp, v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1", "M1b", "M2"}},
+				{"t3", "T3", v1alpha1.PointInTimeModeTimestamp, v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1", "M1b", "M2", "M2b", "M3"}},
+				{"latest", "A2-flush", v1alpha1.PointInTimeModeLatest, v1alpha1.PointInTimeArchiveHead, []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b"}},
 			}
 			for _, c := range cases {
 				f, err := pitrFetchFence(env, c.fence)
@@ -281,7 +282,7 @@ func s37RestoreInsideBEra() runner.Step {
 			if err != nil {
 				return err
 			}
-			if err := pitrCheckTargetAfterBackup(env, pitrExpectation{Backup: "b1", Mode: "timestamp", Fence: f2}); err != nil {
+			if err := pitrCheckTargetAfterBackup(env, pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2}); err != nil {
 				return err
 			}
 			src, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
@@ -312,7 +313,7 @@ func s37RestoreInsideBEra() runner.Step {
 				return err
 			}
 			if err := assertPITRResult(env, "restore "+s37Restored, rs.PointInTime, pitrExpectation{
-				Backup: "b1", Mode: "timestamp", Fence: f2, Outcome: v1alpha1.PointInTimeTargetCovered, TargetLocal: true,
+				Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2, Outcome: v1alpha1.PointInTimeTargetCovered, TargetLocal: true,
 			}); err != nil {
 				return err
 			}

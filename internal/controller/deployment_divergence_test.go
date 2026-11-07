@@ -22,7 +22,7 @@ import (
 // otherwise hide.
 func TestDeploymentUnstableReason_ReplicaAuditDivergence(t *testing.T) {
 	count := int64(221)
-	block := func(fg *v1alpha1.MysqlFailoverGroup, site int, detectedBy string) {
+	block := func(fg *v1alpha1.MysqlFailoverGroup, site int, detectedBy v1alpha1.DivergenceDetector) {
 		s := &fg.Status.Sites[site]
 		s.RecoveryState = v1alpha1.RecoveryStateBlocked
 		s.DivergentGtid = issue202ErrantGTID
@@ -60,7 +60,7 @@ func TestDeploymentUnstableReason_ReplicaAuditDivergence(t *testing.T) {
 		{"replica audit block alongside recovery in progress", func(fg *v1alpha1.MysqlFailoverGroup) {
 			block(fg, 1, divergenceDetectedByAudit)
 			conditions(fg)
-			fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: "read-only", Replicating: true, RecoveryState: v1alpha1.RecoveryStateInProgress})
+			fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: v1alpha1.SiteStateReadOnly, Replicating: true, RecoveryState: v1alpha1.RecoveryStateInProgress})
 			fg.Spec.Sites = append(fg.Spec.Sites, fg.Spec.Sites[1])
 			fg.Spec.Sites[2].Name = "ord"
 		}, false},
@@ -101,14 +101,14 @@ func TestDeploymentUnstableReason_NamesTheGatingRecoveryState(t *testing.T) {
 	fg.Status.Sites[1].DivergenceDetectedBy = divergenceDetectedByAudit
 	fg.Spec.Sites = append(fg.Spec.Sites, fg.Spec.Sites[1])
 	fg.Spec.Sites[2].Name = "ord"
-	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: "read-only", Replicating: true, RecoveryState: v1alpha1.RecoveryStateInProgress})
+	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: v1alpha1.SiteStateReadOnly, Replicating: true, RecoveryState: v1alpha1.RecoveryStateInProgress})
 	fg.Status.Conditions = append(fg.Status.Conditions,
 		metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()},
 		metav1.Condition{Type: "RecoveryPending", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()})
 	if err := m.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if got := DeploymentUnstableReason(fg); got != v1alpha1.RecoveryStateInProgress {
+	if got := DeploymentUnstableReason(fg); got != string(v1alpha1.RecoveryStateInProgress) {
 		t.Fatalf("DeploymentUnstableReason = %q, want %q (the site whose recovery gates)", got, v1alpha1.RecoveryStateInProgress)
 	}
 }

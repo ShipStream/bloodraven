@@ -47,7 +47,7 @@ Writing the `DNSEndpoint` is where Bloodraven's authority ends. The operator can
 
 After promoting pdx, Bloodraven taints iad's nodes with `shipstream.io/db-readonly-playground=true:NoExecute`. On one of those nodes sit a batch worker with no tolerations and a metrics agent that tolerates the key with `tolerationSeconds: 600`. The `reader` site's MySQL pod sits on a third node. What happens?
 
-- The batch worker is evicted immediately. The metrics agent stays bound for its 600 s, after which the node lifecycle controller evicts it. The reader's node is never tainted at all — a `role: read-only` site is already read-only, so there is nothing to demote.
+- The batch worker is evicted immediately. The metrics agent stays bound for its 600 s, after which the node lifecycle controller evicts it. The reader's node is never tainted at all — a `role: ReadOnly` site is already read-only, so there is nothing to demote.
 - All three go immediately: `NoExecute` evicts every pod on a tainted node, and `tolerationSeconds` only has meaning under `NoSchedule`.
 - Nothing already running is touched. The taint stops new pods being scheduled onto iad's nodes; the existing ones leave only when you cordon and drain.
 - The batch worker is evicted, the metrics agent runs indefinitely because a toleration on the key is unbounded, and the reader's node is tainted too since it belongs to the same failover group.

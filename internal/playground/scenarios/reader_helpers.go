@@ -45,8 +45,8 @@ func canonicalMySQLHost(host string) string {
 // serving reader: read-only state, replicating, converged directly onto
 // expectedHost, with known lag at or below readOnlyMaxLagSeconds.
 func assertReaderServingStatus(mfg *v1alpha1.MysqlFailoverGroup, status *v1alpha1.SiteStatus, expectedHost string) error {
-	if status.State != "read-only" {
-		return fmt.Errorf("state=%q, want read-only", status.State)
+	if status.State != v1alpha1.SiteStateReadOnly {
+		return fmt.Errorf("state=%q, want %s", status.State, v1alpha1.SiteStateReadOnly)
 	}
 	if !status.Replicating {
 		return fmt.Errorf("replicating=false")

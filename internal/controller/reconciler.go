@@ -43,7 +43,6 @@ import (
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/sidecar"
-	"github.com/shipstream/bloodraven/internal/state"
 )
 
 const (
@@ -407,7 +406,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// The UpdateController manages site-by-site Deployment updates to avoid
 	// simultaneous restarts of both sites (which causes a TOTAL LOSS window).
 	orderedUpdateActive := fg.Status.UpdatePhase != ""
-	recreateUpdates := fg.Spec.UpdateStrategy == "Recreate"
+	recreateUpdates := fg.Spec.UpdateStrategy.EffectiveType() == v1alpha1.UpdateStrategyRecreate
 
 	// With OrderedUpdate (including its defaulted empty value in unit tests),
 	// defer every existing Deployment to the ordered update path: the
@@ -2172,7 +2171,7 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 			statusComplete = false
 			continue
 		}
-		if status.State == "writable" {
+		if status.State == v1alpha1.SiteStateWritable {
 			writableSites++
 		}
 	}
@@ -2187,7 +2186,7 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	authorityValid := false
 	if !restoreWithheld && statusComplete && fg.Status.ActiveSite != "" && writableSites == 1 {
 		for _, site := range fg.Spec.Sites {
-			if site.Name == fg.Status.ActiveSite && site.IsPromotable() && statusByName[site.Name].State == "writable" {
+			if site.Name == fg.Status.ActiveSite && site.IsPromotable() && statusByName[site.Name].State == v1alpha1.SiteStateWritable {
 				authorityValid = true
 				break
 			}
@@ -2287,13 +2286,13 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 
 		healthy := "no"
 		if si.spec.IsReadOnlyReader() {
-			if authorityValid && si.status.State == "read-only" && si.status.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
+			if authorityValid && si.status.State == v1alpha1.SiteStateReadOnly && si.status.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
 				si.status.Replicating && si.status.SecondsBehindSource != nil &&
 				canonicalSourceHost(si.status.SourceHost) == canonicalSourceHost(internalSiteServiceHost(fg.Name, fg.Status.ActiveSite, fg.Namespace)) &&
 				*si.status.SecondsBehindSource <= fg.Spec.EffectiveReadOnlyMaxLagSeconds() {
 				healthy = "yes"
 			}
-		} else if si.status.State == "writable" || si.status.State == "read-only" {
+		} else if si.status.State == v1alpha1.SiteStateWritable || si.status.State == v1alpha1.SiteStateReadOnly {
 			healthy = "yes"
 		}
 		if restoreWithheld {
@@ -2441,7 +2440,9 @@ func int32Ptr(i int32) *int32 { return &i }
 
 // CRConfigToTopologyConfig extracts topology manager configuration from a CR.
 // This bridges the CRD spec to the internal config used by TopologyManager.
-func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
+// It fails on a site role the operator cannot interpret (topologySiteRole),
+// so no topology manager runs on a role it might promote or fence wrongly.
+func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) (TopologyConfig, error) {
 	pollInterval := int64(2 * time.Second)
 	if fg.Spec.PollInterval != nil {
 		pollInterval = int64(fg.Spec.PollInterval.Duration)
@@ -2473,11 +2474,15 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 
 	sites := make([]SiteTopologyConfig, len(fg.Spec.Sites))
 	for i, s := range fg.Spec.Sites {
+		role, err := topologySiteRole(s.Role)
+		if err != nil {
+			return TopologyConfig{}, fmt.Errorf("site %q: %w", s.Name, err)
+		}
 		sites[i] = SiteTopologyConfig{
 			Name:          s.Name,
 			Zone:          s.Zone,
 			LBIP:          s.LBIP,
-			Role:          state.SiteRole(s.EffectiveRole()),
+			Role:          role,
 			TaintSelector: taintNodeSelectorString(s.TaintNodeSelector),
 			Host:          internalSiteServiceHost(fg.Name, s.Name, fg.Namespace),
 		}
@@ -2496,7 +2501,7 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 		ReadOnlyMaxLagSeconds:  fg.Spec.EffectiveReadOnlyMaxLagSeconds(),
 		SitePriorities:         sitePriorities,
 		DragonflyEnabled:       dragonflyEnabled(fg),
-	}
+	}, nil
 }
 
 func (r *MysqlFailoverGroupReconciler) cleanupLegacyConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr pitrRenderInputs) error {

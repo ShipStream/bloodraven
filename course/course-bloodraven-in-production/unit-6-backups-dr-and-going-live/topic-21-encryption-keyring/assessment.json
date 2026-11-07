@@ -109,7 +109,7 @@
       "explanation": "The reversal: it is a hard CEL rejection at admission, not a recommendation — `spec.encryptionAtRest.enabled requires spec.tls: MySQL requires a secure connection to clone encrypted data`. The reason is upstream, not defensive: MySQL requires a secure connection when cloning encrypted data regardless of any `REQUIRE SSL` clause, and `CLONE INSTANCE` is exactly how Bloodraven reseeds a diverged site. Enabling the pair without TLS would produce a group that cannot be reclone-recovered, so the CRD refuses the combination up front instead of failing you during a recovery. (objective 8)"
     },
     {
-      "question": "`playground` has three sites: `iad` (active primary), `pdx` (replica) and `reader` (`role: read-only`). You need every site's master key rotated. Which site cannot be rotated right now, why, and what do you do about it?",
+      "question": "`playground` has three sites: `iad` (active primary), `pdx` (replica) and `reader` (`role: ReadOnly`). You need every site's master key rotated. Which site cannot be rotated right now, why, and what do you do about it?",
       "type": "SHORT_ANSWER",
       "orderIndex": 4,
       "sampleAnswer": "`iad`, because it is the active primary and the operator refuses to rotate it — rotation runs with a writable keyring, and that is the only window in which a keyring can be lost, so on the primary a loss would cost data rather than a re-clone. Rotate `pdx` and `reader` first, one at a time, waiting for each to return to `Sealed`. Then run a planned failover onto `pdx`. `iad` is now a replica, so the refusal no longer applies and you rotate it last.",

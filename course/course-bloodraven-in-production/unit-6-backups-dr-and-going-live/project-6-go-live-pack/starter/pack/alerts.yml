@@ -1,9 +1,9 @@
 # Prometheus alerting rules for the MysqlFailoverGroup `playground`.
 #
 # `playground` runs three sites:
-#   iad     role: primary-candidate
-#   pdx     role: primary-candidate
-#   reader  role: read-only
+#   iad     role: PrimaryCandidate
+#   pdx     role: PrimaryCandidate
+#   reader  role: ReadOnly
 #
 # Thresholds you should keep as they are, because a fixture depends on them:
 #   BloodravenReplicationLagging  > 30    (playground sets spec.replication.maxLagSeconds: 30)
@@ -50,7 +50,7 @@ groups:
       #
       # Exclude the read-only site by label, and leave the threshold at 30 —
       # the value `playground` actually sets — so a genuinely lagging
-      # primary-candidate still pages. (The shipped CRD default is 300; the
+      # PrimaryCandidate still pages. (The shipped CRD default is 300; the
       # rule's number tracks the group's spec, not the default.)
       - alert: BloodravenReplicationLagging
         expr: 'bloodraven_replication_lag_seconds > 30'

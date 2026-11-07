@@ -384,10 +384,10 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 		}
 	}
 	for _, s := range fg.Status.Sites {
-		if s.Name == fg.Status.ActiveSite && s.State != "writable" {
+		if s.Name == fg.Status.ActiveSite && s.State != v1alpha1.SiteStateWritable {
 			return v1alpha1.UnstableReasonNoPrimary
 		}
-		if s.Name != fg.Status.ActiveSite && s.State != "read-only" {
+		if s.Name != fg.Status.ActiveSite && s.State != v1alpha1.SiteStateReadOnly {
 			return v1alpha1.UnstableReasonSiteNotReady
 		}
 		if s.Name != fg.Status.ActiveSite && restoreReclonePending(fg, s.Name) {
@@ -396,7 +396,7 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 			return v1alpha1.UnstableReasonRestoreReclonePending
 		}
 		if s.RecoveryState != "" && !(s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit) {
-			return s.RecoveryState
+			return string(s.RecoveryState)
 		}
 		if reason, ok := sourceConvergenceUnstableReasons[s.SourceConvergenceState]; ok {
 			return reason
@@ -452,7 +452,7 @@ func gatingRecoveryState(fg *v1alpha1.MysqlFailoverGroup) string {
 		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
 			return v1alpha1.ReasonDivergentTransactions
 		default:
-			return s.RecoveryState
+			return string(s.RecoveryState)
 		}
 	}
 	return ""

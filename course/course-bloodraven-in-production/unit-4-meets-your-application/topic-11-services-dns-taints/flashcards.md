@@ -33,7 +33,7 @@
 
 ---
 
-**Front:** Name the five conjuncts a `role: read-only` site must satisfy to be labelled `healthy=yes`.
+**Front:** Name the five conjuncts a `role: ReadOnly` site must satisfy to be labelled `healthy=yes`.
 
 **Back:** Source convergence `converged`; `replicating` true; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.
 
@@ -71,4 +71,4 @@
 
 **Front:** Which site role is never tainted?
 
-**Back:** `read-only`. A reader is already read-only, so there is no demotion to enforce; the tainter returns early for it (and for an empty taint selector).
+**Back:** `ReadOnly`. A reader is already read-only, so there is no demotion to enforce; the tainter returns early for it (and for an empty taint selector).

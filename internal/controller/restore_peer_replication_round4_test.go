@@ -165,7 +165,7 @@ func (i *interleavingReader) Get(_ context.Context, _ client.ObjectKey, obj clie
 // view is not cleared by that application.
 func TestApplyRestoreProtection_FenceArmedDuringReadIsKept(t *testing.T) {
 	running := fgThreeSiteRestore()
-	running.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: "iad", Scope: "full", RunID: "run-1"}
+	running.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: "iad", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, RunID: "run-1"}
 	running.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"}}
 	running.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, RunID: "run-1"} // prior not yet recorded
 

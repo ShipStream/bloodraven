@@ -34,9 +34,9 @@ func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup 
 	}
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: "writable"},
-		{Name: "dc2", State: "read-only", Replicating: true},
-		{Name: "reader", State: "read-only", Replicating: true, SourceHost: internalSiteServiceHost(fg.Name, "dc1", fg.Namespace),
+		{Name: "dc1", State: v1alpha1.SiteStateWritable},
+		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+		{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replicating: true, SourceHost: internalSiteServiceHost(fg.Name, "dc1", fg.Namespace),
 			SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
 	}
 	if phase != "" {
@@ -277,7 +277,7 @@ func TestStartManager_HydratesInitRestoreSeedBeforeRun(t *testing.T) {
 	fg.Status.ActiveSite = ""
 	fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: "restore-lion-dc1", TargetSite: "dc1"}
 
-	if err := r.startManager(context.Background(), fg, CRConfigToTopologyConfig(fg), nil); err != nil {
+	if err := r.startManager(context.Background(), fg, mustTopologyConfig(fg), nil); err != nil {
 		t.Fatalf("startManager: %v", err)
 	}
 	mt := registeredManager(r, nn)

@@ -473,7 +473,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// is actually dropped; the new one is recorded as pending, each with
 	// its own hosts.
 	if err := r.stampStatus(ctx, &mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
-		st.Phase = v1alpha1.MysqlDatabasePhaseCreating
+		st.Phase = v1alpha1.MysqlDatabasePhaseApplying
 		st.ObservedGeneration = mdb.Generation
 		st.DatabaseCreated = true
 		materializeLegacyPendingHosts(st)

@@ -22,9 +22,9 @@
       "maxLagSeconds": 30
     },
     "sites": [
-      {"name": "iad", "role": "primary-candidate", "zone": "zone-iad"},
-      {"name": "pdx", "role": "primary-candidate", "zone": "zone-pdx"},
-      {"name": "reader", "role": "read-only", "zone": "zone-reader"}
+      {"name": "iad", "role": "PrimaryCandidate", "zone": "zone-iad"},
+      {"name": "pdx", "role": "PrimaryCandidate", "zone": "zone-pdx"},
+      {"name": "reader", "role": "ReadOnly", "zone": "zone-reader"}
     ]
   },
   "status": {
@@ -35,7 +35,7 @@
     "sites": [
       {
         "name": "iad",
-        "state": "writable",
+        "state": "Writable",
         "lastSeen": "2026-05-02T05:39:44Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-24,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-12",
         "replicating": false,
@@ -43,14 +43,14 @@
       },
       {
         "name": "pdx",
-        "state": "unreachable",
+        "state": "Unreachable",
         "lastSeen": "2026-05-02T05:34:05Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-15",
         "replicating": false
       },
       {
         "name": "reader",
-        "state": "read-only",
+        "state": "ReadOnly",
         "lastSeen": "2026-05-02T05:39:44Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-24,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-12",
         "replicating": true,

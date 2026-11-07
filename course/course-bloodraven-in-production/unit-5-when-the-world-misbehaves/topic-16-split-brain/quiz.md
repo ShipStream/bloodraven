@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailoverTarget` empty. Dump B has `status.lastFailoverTarget: pdx`, with `pdx` writable and still `primary-candidate`. Which site ends up writable in each?
+`playground` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailoverTarget` empty. Dump B has `status.lastFailoverTarget: pdx`, with `pdx` writable and still `PrimaryCandidate`. Which site ends up writable in each?
 
 - `iad` in both — `sitePriorities` is your standing decision and the operator honours it either way
 - `iad` in A, `pdx` in B — usable history is tier 1 and pre-empts the policy list entirely
@@ -18,7 +18,7 @@
 
 **Explanation:**
 
-The tiers are evaluated in order. In B the recorded target is live, writable and promotable, so tier 1 fires and fences everything except `pdx` — `sitePriorities` is never consulted, which is exactly the case where policy and history give different answers and history wins. In A there is no usable history, so tier 2 runs `ResolveSplitBrain` and `iad`, the earliest currently-writable primary-candidate in the list, wins. Option 1 is the common misreading that policy is the top-level control; it is the fallback. Option 3 invents a conflict-detection behaviour the operator does not have — it does not compare the two and give up. Option 4 gets A wrong: a non-empty `sitePriorities` is precisely what stops the no-history case from being alert-only. (objective 4)
+The tiers are evaluated in order. In B the recorded target is live, writable and promotable, so tier 1 fires and fences everything except `pdx` — `sitePriorities` is never consulted, which is exactly the case where policy and history give different answers and history wins. In A there is no usable history, so tier 2 runs `ResolveSplitBrain` and `iad`, the earliest currently-writable primary candidate in the list, wins. Option 1 is the common misreading that policy is the top-level control; it is the fallback. Option 3 invents a conflict-detection behaviour the operator does not have — it does not compare the two and give up. Option 4 gets A wrong: a non-empty `sitePriorities` is precisely what stops the no-history case from being alert-only. (objective 4)
 
 ## Question 2
 

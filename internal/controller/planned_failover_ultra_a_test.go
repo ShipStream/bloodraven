@@ -140,7 +140,7 @@ func ultraASourceLeftFenced(now time.Time) *v1alpha1.PlannedFailoverStatus {
 // K015: a new request never replaces the only durable evidence that lets a
 // restarted manager name a fenced source for re-assert, until it healed.
 func TestUltraA_K015_FencedSourceEvidenceIsNotReplaced(t *testing.T) {
-	setSite := func(h *pfEngineHarness, state string) {
+	setSite := func(h *pfEngineHarness, state v1alpha1.SiteState) {
 		fg := h.fg()
 		for i := range fg.Status.Sites {
 			if fg.Status.Sites[i].Name == "iad" {
@@ -154,7 +154,7 @@ func TestUltraA_K015_FencedSourceEvidenceIsNotReplaced(t *testing.T) {
 
 	h := newPFEngineHarness(t, plannedFailoverFG(""))
 	h.setBlock(ultraASourceLeftFenced(h.clk.Now().Add(-time.Minute)))
-	setSite(h, "read-only")
+	setSite(h, v1alpha1.SiteStateReadOnly)
 	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	h.step()
 	if pf := h.pf(); pf.RunID != "run-1" || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
@@ -172,7 +172,7 @@ func TestUltraA_K015_FencedSourceEvidenceIsNotReplaced(t *testing.T) {
 	}
 
 	// Healed (the source is writable again): the request is admitted.
-	setSite(h, "writable")
+	setSite(h, v1alpha1.SiteStateWritable)
 	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	h.step()
 	if pf := h.pf(); pf.RunID == "run-1" {
@@ -377,7 +377,7 @@ func ultraARestoreFixture(t *testing.T, mutate func(fg *v1alpha1.MysqlFailoverGr
 	if err := m.client.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full-instance"}
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	if mutate != nil {
 		mutate(fg)
 	}
@@ -832,7 +832,7 @@ func TestUltraA_K048_ReservationRefusalIsABoundedWait(t *testing.T) {
 	// An in-place restore is reported as one.
 	g := plannedFailoverFG("pdx")
 	g.Spec.RestoreInPlace = fgInPlaceRestore("").Spec.RestoreInPlace
-	g.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: "full-instance"}
+	g.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	hg := newPFEngineHarness(t, g)
 	hg.e.admission = refusal
 	hg.step()
@@ -894,7 +894,7 @@ func TestUltraA_K050_UnsettledRequestDefersOnCooldown(t *testing.T) {
 	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: v1alpha1.PlannedFailoverCooldownDefer}
 	fg.Status.ActiveSite = "" // an emergency failover to pdx is in flight
 	// Mid-failover, dr's replication is stopped: validation would refuse it.
-	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "dr", State: "read-only", Replicating: false})
+	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "dr", State: v1alpha1.SiteStateReadOnly, Replicating: false})
 	h := newPFEngineHarness(t, fg)
 	h.step()
 	if pf := h.pf(); pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitAuthorityUnsettled {
@@ -904,7 +904,7 @@ func TestUltraA_K050_UnsettledRequestDefersOnCooldown(t *testing.T) {
 	cur := h.fg()
 	at := metav1.NewTime(h.clk.Now())
 	cur.Status.ActiveSite, cur.Status.LastFailover, cur.Status.LastFailoverTarget = "pdx", &at, "pdx"
-	cur.Status.Sites[0].State, cur.Status.Sites[1].State, cur.Status.Sites[1].Replicating = "read-only", "writable", false
+	cur.Status.Sites[0].State, cur.Status.Sites[1].State, cur.Status.Sites[1].Replicating = v1alpha1.SiteStateReadOnly, v1alpha1.SiteStateWritable, false
 	cur.Status.Sites[2].Replicating = true
 	if err := h.c.Status().Update(context.Background(), cur); err != nil {
 		t.Fatal(err)
@@ -1265,7 +1265,7 @@ func TestUltraA_K149_NewRequestSeesPublishedFailover(t *testing.T) {
 	h.e.admission = ultraAPublishingGuard{publish: func() {
 		fresh := h.fg()
 		fresh.Status.ActiveSite = "pdx"
-		fresh.Status.Sites[0].State, fresh.Status.Sites[1].State = "read-only", "writable"
+		fresh.Status.Sites[0].State, fresh.Status.Sites[1].State = v1alpha1.SiteStateReadOnly, v1alpha1.SiteStateWritable
 		if err := h.c.Status().Update(context.Background(), fresh); err != nil {
 			t.Fatal(err)
 		}

@@ -232,7 +232,7 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 							if old.RecoveryState == "RecoveryBlocked" {
 								return false, msg, fmt.Errorf("old primary %s RecoveryBlocked", activeSite)
 							}
-							healthyReplica := old.State == "read-only" && old.Replicating && readyOf(mfg) == "True"
+							healthyReplica := old.State == v1alpha1.SiteStateReadOnly && old.Replicating && readyOf(mfg) == "True"
 							return healthyReplica || old.RecoveryState == "RecoveryInProgress", msg, nil
 						})
 					if err != nil {

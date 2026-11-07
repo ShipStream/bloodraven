@@ -31,7 +31,7 @@ func tokenStrings[T ~string](ts []T) []string {
 // an error. Their results are catalog values, and
 // TestPITRTokenCatalogMatchesAPI pins the catalog to api/v1alpha1.
 var trustedSources = []trustedSource{
-	{name: modulePath + "/internal/controller.pitrFailureReason", values: tokenStrings(pitrarchive.AllTokens)},
+	{name: modulePath + "/internal/controller.pitrFailureReason", values: tokenStrings(pitrarchive.ServedTokens)},
 	{name: modulePath + "/internal/pitrarchive.ParseToken", values: tokenStrings(pitrarchive.AllTokens)},
 	{name: "(" + modulePath + "/internal/pitrarchive.Token).Reason", values: tokenStrings(pitrarchive.ArchiveReadyReasons)},
 }
@@ -66,7 +66,8 @@ func analysed(t *testing.T) (*analysis, []sink) {
 
 // registry is the set of values each kind of sink may carry.
 type registry struct {
-	events, conditionTypes, conditionReasons, unstable map[string]string // value -> constant
+	events, conditionTypes, conditionReasons, unstable map[string]string            // value -> constant
+	byType                                             map[string]map[string]string // API type -> value -> constant
 }
 
 func newRegistry(t *testing.T, a *analysis) registry {
@@ -84,6 +85,21 @@ func newRegistry(t *testing.T, a *analysis) registry {
 	for name, v := range consts["events.go"] {
 		r.events[v] = name
 	}
+	r.byType = map[string]map[string]string{}
+	scope := a.apiPackage(t).Types.Scope()
+	for _, name := range scope.Names() {
+		c, ok := scope.Lookup(name).(*types.Const)
+		if !ok || c.Val().Kind() != constant.String {
+			continue
+		}
+		if n, ok := c.Type().(*types.Named); ok {
+			tn := n.Obj().Name()
+			if r.byType[tn] == nil {
+				r.byType[tn] = map[string]string{}
+			}
+			r.byType[tn][constant.StringVal(c.Val())] = name
+		}
+	}
 	for name, v := range consts["conditions.go"] {
 		switch {
 		case strings.HasPrefix(name, "Condition"), strings.HasPrefix(name, "StandbyCondition"):
@@ -98,6 +114,9 @@ func newRegistry(t *testing.T, a *analysis) registry {
 }
 
 func (r registry) forKind(kind string) (map[string]string, string) {
+	if typ, ok := strings.CutPrefix(kind, sinkStatusReasonPrefix); ok {
+		return r.byType[typ], "an api/v1alpha1." + typ + " constant"
+	}
 	switch kind {
 	case sinkEvent:
 		return r.events, "an Event reason in events.go"
@@ -272,8 +291,10 @@ func TestPITRTokenCatalogMatchesAPI(t *testing.T) {
 		byType[tn][name] = constant.StringVal(c.Val())
 	}
 
+	// The API declares what the operator serves: the replay script's
+	// sentinel is served as PITRReplayFailed.
 	want := map[string]string{}
-	for _, tok := range pitrarchive.AllTokens {
+	for _, tok := range pitrarchive.ServedTokens {
 		want[string(tok)] = ""
 	}
 	got := map[string]string{}

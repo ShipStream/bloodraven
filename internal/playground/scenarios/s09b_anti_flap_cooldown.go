@@ -288,7 +288,7 @@ func s09bObserveOriginalPrimaryReadOnly() runner.Step {
 					if s == nil {
 						return false, "site missing from status", nil
 					}
-					caughtUp := s.State == "read-only" && s.Replicating && s.RecoveryState == "" &&
+					caughtUp := s.State == v1alpha1.SiteStateReadOnly && s.Replicating && s.RecoveryState == "" &&
 						s.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
 						s.SecondsBehindSource != nil && *s.SecondsBehindSource == 0
 					return caughtUp, fmt.Sprintf("site %s state=%q replicating=%v recovery=%q convergence=%q lag=%s",

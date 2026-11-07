@@ -42,7 +42,7 @@ func peerFencingRestore(t *testing.T, retrieved string) (*MysqlFailoverGroupReco
 	fg := fgInPlaceRestore("")
 	site, peer := fg.Spec.Sites[0].Name, fg.Spec.Sites[1].Name
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: "full", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 	}
 	no := false
 	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{
@@ -104,7 +104,7 @@ func TestInPlaceFencing_PerSchemaRestoreLeavesPeersReplicating(t *testing.T) {
 	fg := fgInPlaceRestore("tenant")
 	site := fg.Spec.Sites[0].Name
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: "schema:tenant", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "tenant"}, StartTime: ptrTime(time.Now()),
 	}
 	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
@@ -547,7 +547,7 @@ func waitBootstrapIdle(t *testing.T, tm *TopologyManager) {
 func failedRestoreFG(jobRan bool, fenced string) *v1alpha1.MysqlFailoverGroup {
 	fg := fgThreeSiteRestore()
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "iad", Scope: "full", ConfirmTokenUsed: testRestoreConfirm,
+		Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "iad", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: testRestoreConfirm,
 	}
 	if jobRan {
 		fg.Status.RestoreInPlace.JobName = "mysql-lion-iad-inplace-restore"

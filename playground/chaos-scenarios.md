@@ -28,7 +28,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 
 - `01-clean-primary-kill` (§1 below; uses `scale --replicas=0` for determinism, asserts failover only)
 - `02-operator-kill-restart` (§2; negative-assertion — verifies activeSite stable and no SELF-FENCING during operator restart)
-- `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Admitting→Fencing→Draining→WaitingForLag→Promoting→Publishing→Succeeded`, outcome `Succeeded` with `promotionGtidExecuted` equal to `fence.gtidSet`, and the `bloodraven_planned_failovers_total{result="success"}` increment)
+- `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Admitting→Fencing→Draining→WaitingForLag→Promoting→Publishing→Succeeded`, outcome `Succeeded` with `promotionGtidExecuted` equal to `fence.gtidSet`, and the `bloodraven_planned_failovers_total{result="succeeded"}` increment)
 - `04-data-integrity-on-failover` (§4; seeds rows, blocks on `WAIT_FOR_EXECUTED_GTID_SET`, kills primary, asserts `GTID_SUBSET(pre, post)=1` and full row count on the new primary)
 - `05-operator-kill-during-failover` (§5; scales the active primary to 0, sleeps 1s, kills the operator pod, asserts the cluster reconverges to 1 writable + all followers read-only with `Ready=True` and no sidecar exhausts its operator-and-peer lease during the short gap; an immediate topology-mismatch self-fence is allowed because it safely closes a promotion/publication race)
 - `05-split-brain-auto-resolve` (§SBR; requires `spec.splitBrainPolicy.sitePriorities` set — clears `super_read_only` on the read-only site to force both writable, asserts the operator fences the non-preferred site, increments `bloodraven_split_brain_auto_resolve_total{prefer_site=...}`, and logs `split-brain auto-resolve`)
@@ -39,7 +39,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `10-full-bootstrap-after-data-wipe` (§10; scales a candidate replica to 0, scrubs the per-FG readonly taint from every node, deletes that replica's data PVC, and waits for the operator's `Bootstrapping` condition to cycle through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done` with replica IO+SQL threads ON at the end)
 - `11-total-loss-recovery` (§11; scales every site to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
 - `12-old-primary-recovery-no-divergence` (§7 of this doc; recovery without divergence)
-- `12-rolling-update-healthy-state` (§12; patches `spec.sites[*].resources.requests.memory` and asserts `status.updatePhase` engages then returns to empty, both deployments end at the new memory request, no `TOTAL LOSS` log fires during the roll)
+- `12-rolling-update-healthy-state` (§12; patches `spec.sites[*].resources.requests.memory` and asserts `status.updatePhase` engages then is absent again, both deployments end at the new memory request, no `TOTAL LOSS` log fires during the roll)
 - `13-operator-kill-during-bootstrap` (§13; wipes the read-only site's PVC, scales it back up, then kills the operator pod once `Bootstrapping=True` and asserts the replacement operator drives the clone to `Status=False Reason=Done` with replica IO+SQL threads ON — runs `ResetBeforeRunAll` so `lastFailoverTarget` is empty when the precondition gate runs)
 - `14-failover-with-replication-lag` (§14; pauses the replica SQL applier, seeds rows over 5s on the primary so they sit in the relay log unapplied, then scales the primary to 0 and asserts the new primary's relay-log drain recovered every transaction — `GTID_SUBSET(post-write, current)=1` and full row count)
 - `15-sidecar-crash-no-failover` (§15; ephemeral container `kill 1` against the sidecar PID namespace, asserts restartCount increments and activeSite/SELF-FENC/failover all stay quiet)
@@ -64,7 +64,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `32-mfg-status-write-denial-emergency-promotion` (§32; denies the operator patch/update on `mysqlfailovergroups/status`, scales the active primary to 0, asserts MySQL promotes at the data layer while the CR status is frozen, then self-heals to the promoted site within 90s after RBAC restore)
 - `33-scoped-dns-outage` (§33; NetworkPolicy blocking only kube-dns egress from the active MySQL pod — proven with a DNS canary first — asserts the outage is DNS-scoped, not a pod partition and not the DNSEndpoint-API denial of §38)
 - `34-operator-kill-during-wait-replica` (§34; force-deletes the operator while an ordered update is held at `WaitReplica`; the replacement operator re-derives remaining drift from Deployment spec-hash mismatch and finishes with no double-roll and no `TOTAL LOSS`)
-- `35-planned-switchover-lag-timeout-rollback` (§35; `SOURCE_DELAY=60` on the target + `maxLagWait=5s` drives `WaitingForLag`→`Failed{LagTimeout}`; source stays active, `bloodraven_planned_failovers_total{result="failed_timeout"}` increments)
+- `35-planned-switchover-lag-timeout-rollback` (§35; `SOURCE_DELAY=60` on the target + `maxLagWait=5s` drives `WaitingForLag`→`Failed{LagTimeout}`; source stays active, `bloodraven_planned_failovers_total{result="rolled-back"}` increments)
 - `36-rustfs-outage-during-restore-in-place` (§36; a per-schema in-place restore whose RustFS storage is scaled to 0 mid-run terminates `Failed` with the topology frozen; the untouched canary schema survives and the terminal `Failed` holds on the same confirm — a retry needs a new monotonic confirm — `ResetBeforeRunAll`)
 - `37-pitr-planned-failback-no-reclone` ([§37](#37-pitr-planned-failback-no-reclone); release profile, `ResetBeforeRunAll`; planned A→B→A without reclone or a flush on b; every era, including b's anchored replica-copy era, and an `initFromBackup` restore certify exactly the fenced history)
 - `38-dnsendpoint-write-denial-during-failover` (§38; denies the operator write verbs on `dnsendpoints`, forces promotion; the DNSEndpoint target stays stale during denial then heals to the promoted LBIP within 90s after RBAC restore with no re-failover)
@@ -760,7 +760,7 @@ Live k3d status from May 3, 2026: scenarios 22, 23, 24, 25, 26, 27, and 29 pass 
 
 **Injection**: `make chaos-run SCENARIO=23-dragonfly-master-kill`
 
-**Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins as `role=replica` with `linkStatus=up`, and the Dragonfly promotion metric increments.
+**Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins with `status.dragonfly.sites[].role=Replica` and `linkStatus=up`, and the Dragonfly promotion metric increments.
 
 ---
 
@@ -847,7 +847,7 @@ The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `Mysql
 
 The scenario uses the same RustFS bucket/profile/credential Secret as scenario 30 but isolates objects under `e2e/31-pitr-verification-rustfs/<run-stamp>/` and enables `spec.backup.pitr` (`profileName=rustfs-e2e`, `maxBinlogSize=1M`, `archivePollInterval=2s`). It waits for `Ready=True` from the patched MFG generation with no ordered update in progress, then requires the active sidecar `/archiver/status` endpoint to report `enabled=true`, `primary=true`, `storageType=S3`, and manifest prefix `<prefix>/binlogs` before taking the baseline backup. The generation gate prevents stale pre-patch readiness from starting a backup during the PITR sidecar rollout.
 
-**Verify**: After the full backup succeeds, the scenario inserts a before-target marker row, captures a MySQL UTC timestamp, sleeps 2 seconds, inserts an after-target marker, executes `FLUSH BINARY LOGS`, and waits for sidecar archiver coverage with zero backlog. The pinned PITR verification uses `spec.pointInTime.mode=timestamp` and a sanity scalar that returns `1` only when baseline and before-target rows are present and the after-target row is absent. Success also requires `status.replayedThroughBinlog` and `Verified=True`.
+**Verify**: After the full backup succeeds, the scenario inserts a before-target marker row, captures a MySQL UTC timestamp, sleeps 2 seconds, inserts an after-target marker, executes `FLUSH BINARY LOGS`, and waits for sidecar archiver coverage with zero backlog. The pinned PITR verification uses `spec.pointInTime.mode=Timestamp` and a sanity scalar that returns `1` only when baseline and before-target rows are present and the after-target row is absent. Success also requires `status.replayedThroughBinlog` and `Verified=True`.
 
 **Timing**: Scenario timeout is 24 minutes; PITR rollout/archiver readiness has a 6-minute sub-budget, archive coverage has 3 minutes, and backup/verification waits each have 12 minutes. Cleanup deletes CRs, drops `chaos_s31_pitr`, restores the original `spec.backup` so PITR does not leak to later scenarios, and waits for a healthy baseline.
 
@@ -904,7 +904,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Injection**: Patch `spec.sites[*].resources.requests.memory`; wait for `status.updatePhase` to engage (preferably `WaitReplica`); apply an **ingress-only** deny NetworkPolicy to the standby MySQL pod so the operator's health check of the freshly-rolled standby fails (egress/replication stays open, satisfying the updater's replicating-standby precondition once lifted); force-delete the operator pod; after the replacement is Available, remove the hold.
 
-**Verify**: Never 0 writable (no double-roll / `TOTAL LOSS` window) and never >1 writable throughout; final `status.updatePhase == ""`; both Deployments run the patched memory request; one writable + one read-only; no `TOTAL LOSS` operator log. Then restore original memory and wait for the revert roll to settle.
+**Verify**: Never 0 writable (no double-roll / `TOTAL LOSS` window) and never >1 writable throughout; final `status.updatePhase` absent; both Deployments run the patched memory request; one writable + one read-only; no `TOTAL LOSS` operator log. Then restore original memory and wait for the revert roll to settle.
 
 **Timing**: 12-minute timeout; 8-minute completion sub-budget.
 
@@ -921,7 +921,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Injection**: Set `SOURCE_DELAY=60` on the target (both threads still running, so the operator's replica-health check stays true); write a marker on the source **after** the delay is active (so the fenced GTID cannot be covered in time); annotate `bloodraven.shipstream.io/planned-failover=<target>:maxLagWait=5s`.
 
-**Verify**: `plannedFailover.phase` reaches terminal `Failed` with outcome `RolledBack` and reason `LagTimeout` (the intermediate `Admitting` and `Fencing` phases are not asserted — they may not persist long enough to observe); `bloodraven_planned_failovers_total{result="failed_timeout"}` increments; `status.activeSite` stays the source; `lastFailoverTarget` does not advance to the target; the source becomes writable again (eventual — unfencing clears `super_read_only` first); the target stays read-only and replicating.
+**Verify**: `plannedFailover.phase` reaches terminal `Failed` with outcome `RolledBack` and reason `LagTimeout` (the intermediate `Admitting` and `Fencing` phases are not asserted — they may not persist long enough to observe); `bloodraven_planned_failovers_total{result="rolled-back"}` increments; `status.activeSite` stays the source; `lastFailoverTarget` does not advance to the target; the source becomes writable again (eventual — unfencing clears `super_read_only` first); the target stays read-only and replicating.
 
 **Timing**: 8-minute timeout.
 
@@ -1054,7 +1054,7 @@ These two scenarios cover state-machine paths that don't fit the §1-§30 emerge
 - `status.plannedFailover.phase` reaches `Succeeded` with `targetSite=<peer>` (stale plannedFailover blocks left over from prior runs are ignored via the `startTime` check, so this assertion is robust under rerun).
 - `result.outcome` is `Succeeded`; the `fence` record carries `gtidSet` and `sourceServerUUID`, the `promotion` record carries `confirmationTime` and `targetServerUUID`, and `status.promotionGtidExecuted` equals `fence.gtidSet`.
 - Direct `SHOW REPLICA STATUS` on every non-active follower reports both threads running and `Source_Host=mysql-playground-<new-active>-internal.bloodraven-playground.svc.cluster.local`; this explicitly covers the demoted old primary and the reader.
-- `bloodraven_planned_failovers_total{target_site=<peer>,result="success"}` increments.
+- `bloodraven_planned_failovers_total{target_site=<peer>,result="succeeded"}` increments.
 
 **Note**: Single-scenario `run` will fail precheck if the cluster already has an in-flight `plannedFailover` in a non-terminal phase. The runner's standard cleanup waits for `Ready=True` before the next scenario starts, so `run-all` does not need to reset between this and the next entry.
 
@@ -1076,7 +1076,7 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 
 **Verify**:
 
-- The non-preferred site stops being writable; only the priority site remains `state=writable`.
+- The non-preferred site stops being writable; only the priority site remains `state=Writable`.
 - `status.activeSite` equals `spec.splitBrainPolicy.sitePriorities[0]`.
 - The `bloodraven_split_brain_auto_resolve_total{prefer_site=...}` counter increments above the pre-injection baseline.
 - The operator log contains `split-brain auto-resolve` (canonical msg from `internal/controller/topology.go`).
@@ -1088,13 +1088,13 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 ### 40. Reader Data Loss and Auto-Clone {#40-reader-data-loss-and-auto-clone}
 **Category**: Reader recovery and endpoint safety | **Risk**: High
 
-**Hypothesis**: Losing only the dedicated `read-only` reader's local data does not affect failover-group readiness or the writable primary. The operator removes the unhealthy reader from its client Service, recreates it from the confirmed active primary, converges it to a direct source, and republishes it only after threads and lag are healthy.
+**Hypothesis**: Losing only the dedicated `ReadOnly` reader's local data does not affect failover-group readiness or the writable primary. The operator removes the unhealthy reader from its client Service, recreates it from the confirmed active primary, converges it to a direct source, and republishes it only after threads and lag are healthy.
 
 **Injection**: `make chaos-run SCENARIO=40-reader-data-loss-reclone`. The scenario verifies that the reader is on the `zone-reader` worker, scales its Deployment to zero, deletes and observes replacement of its PVC UID, then scales it back to one. This deterministic local-PV replacement is the playground interpretation of reader node/storage loss; it avoids relying on literal node deletion and cloud volume behavior.
 
 **Verify**:
 
-- Exactly one spec site has effective role `read-only`; its pod is on a dedicated `zone-reader` worker.
+- Exactly one spec site has effective role `ReadOnly`; its pod is on a dedicated `zone-reader` worker.
 - A marker written to the active primary is visible on the reader before loss and after recovery.
 - A continuous observer records any group `Ready` invariant violation during scale-down, empty-datadir detection, clone, or catch-up; `stopAndCheck` reports the first recorded error before the step completes.
 - Operator logs contain `starting bootstrap` with `source=auto-clone`, `donor=<captured-active>`, `recipient=reader`, and `donorHost=mysql-playground-<captured-active>-internal.bloodraven-playground.svc.cluster.local`.
@@ -1121,7 +1121,7 @@ Issue #115 chaos proposal R3.
 - `status.activeSite` flips to the promotable standby and nowhere else.
 - The reader's `SourceHost` history only ever moves old-primary → new-primary: any third host, or a return to the demoted primary after the repoint, fails the run.
 - The reader never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
-- Final reader status passes the serving contract against the new primary (`read-only`, replicating, `Converged`, lag ≤ `readOnlyMaxLagSeconds`), a marker written on the new primary replicates to the reader, and the client Service publishes exactly the reader pod again.
+- Final reader status passes the serving contract against the new primary (`ReadOnly`, replicating, `Converged`, lag ≤ `readOnlyMaxLagSeconds`), a marker written on the new primary replicates to the reader, and the client Service publishes exactly the reader pod again.
 
 **Cleanup**: The executor restores the old primary's scale; scenario cleanup reuses the scenario-08 auto-reclone path if the returning primary is divergent.
 
@@ -1140,9 +1140,9 @@ Issue #115 chaos proposal R4. Smoke-profile member: fast, no clone wait.
 
 - Group `Ready` stays `True` every tick; `status.activeSite` and `status.lastFailover` never change (no failover, no anti-flap cooldown consumed).
 - The promotable standby keeps replicating.
-- The reader stays `read-only` and never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
+- The reader stays `ReadOnly` and never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
 - Observed reader lag exceeds `readOnlyMaxLagSeconds` and the client Service sheds the reader endpoint.
-- `bloodraven_replication_lag_seconds{site=reader,role="read-only"}` exceeds the reader threshold while `bloodraven_replication_source_state{site=reader,state="converged"}` stays 1 — the metrics report the stall honestly. A core RPO alert on `{role=~"primary-candidate|dr-only"}` must stay silent.
+- `bloodraven_replication_lag_seconds{site=reader,role="read-only"}` exceeds the reader threshold while `bloodraven_replication_source_state{site=reader,state="converged"}` stays 1 — the metrics report the stall honestly. A core RPO alert on `{role=~"primary-candidate|disaster-recovery"}` must stay silent.
 
 **Rollback**: `SOURCE_DELAY=0`; the reader must catch up, pass the serving contract, and rejoin its client Service. Cleanup always clears the delay and drops the soak database through the primary.
 
@@ -1153,7 +1153,7 @@ Issue #115 chaos proposal R4. Smoke-profile member: fast, no clone wait.
 
 Issue #115 chaos proposal R5 — the regression gate for role semantics under the worst input (spec gap #2).
 
-**Hypothesis**: A reader that somehow becomes writable is fenced like a `dr-only` loser without debounce, its errant GTID trips the convergence containment gate instead of a silent repoint, and it is never a promotion target — not even by explicit admin request.
+**Hypothesis**: A reader that somehow becomes writable is fenced like a `DisasterRecovery` loser without debounce, its errant GTID trips the convergence containment gate instead of a silent repoint, and it is never a promotion target — not even by explicit admin request.
 
 Two independent actors can close the writable window and both are correct: the operator's poll loop (`pollInterval`, 2s in the playground) fences any writable non-promotable site without debounce, and the reader's own sidecar fencing monitor (`PEER_CHECK_INTERVAL`, 5s) self-fences on topology mismatch. Whichever ticks first wins, so the scenario asserts the invariant plus a fence from *either* actor rather than racing one specific log line (issue #119).
 
@@ -1165,7 +1165,7 @@ Note the coverage consequence: only the sidecar's fence kills connections, so th
 
 - `super_read_only` is back `ON` on the reader within 60s, and the fence was deliberate: either the operator logged `fenced writable non-promotable site` with `site=<reader>`, or the reader's sidecar logged `SELF-FENCING: topology mismatch`. Completion is already established by the `super_read_only` check, so the log only has to attribute the fence to a deliberate actor — which is why the sidecar is matched on its prompt decision line rather than the terminal `SELF-FENCED`, whose emission trails the connection eviction. Group `Ready` and `activeSite` untouched.
 - The fence costs the reader nothing but its writability: replication is sampled immediately and again 25s later, past the sidecar's whole-fence deadline (`fenceTimeout`, 20s), so whichever actor fenced, every `KILL` it was going to issue has happened or been abandoned before the last look under any realistic ordering. Treat this as a backstop rather than a proof: the sidecar is an independent process, so no sampling window is provably race-free against it, and the deterministic coverage for this regression is the `killableConnection` unit test. A fence that kills the site's own `system user` threads strands it — permanently, once it is diverged enough for source convergence to be `Blocked`.
-- Annotating a planned failover targeting the reader lands `status.plannedFailover.phase=Failed` carrying the "only primary-candidate sites may be promoted" role error, and `bloodraven_planned_failovers_total{target_site=<reader>,result="rejected"}` increments.
+- Annotating a planned failover targeting the reader lands `status.plannedFailover.phase=Failed` carrying the "only PrimaryCandidate sites may be promoted" role error, and `bloodraven_planned_failovers_total{target_site=<reader>,result="not-started"}` increments.
 - After `STOP REPLICA`, the operator logs `replication source convergence blocked`, the reader reaches `SourceConvergenceState=Blocked` with reason `GTIDDiverged` (never a silent restart), `bloodraven_replication_source_state{site=reader,state="blocked"}` flips to 1, and the reader is shed from its client Service.
 
 **Cleanup**: The scenario reconciles the errant transactions by committing them as empty transactions on the active primary (refusing if the errant set carries any UUID other than the reader's — that demands `kubectl bloodraven reclone`), waits for the convergence invariant to restart the reader, then drops the scenario database through the primary so replication removes the errant row itself.
@@ -1578,7 +1578,7 @@ Every era's marker, fence and witness run with the §37 background writer on the
 
 **Setup**: encrypted RustFS profile A (`rustfs-e2e`) on prefix P1 = `e2e/69-…/<run-stamp>-p1`. The passphrase bytes are stashed when the run creates the Secret; every archive object is decrypted with stashed bytes, never with the live Secret.
 
-1. `PITRArchiveBindingReady=True`; P1's entry is `Bound/Bound` with `encryption.keySecretName` (not the user Secret). Each primary-candidate Deployment mounts that snapshot with `optional: true`, never the user Secret, renders `BLOODRAVEN_PITR_KEY_REVISION` = the snapshot and no `BLOODRAVEN_PITR_PROFILE_NAME`, and its `bloodraven.shipstream.io/pitr-render` annotation names the snapshot; `status.pitr.archive.keyRevision` equals it. The snapshot is `immutable`, has no `ownerReferences`, carries the group-UID and binding-id labels and a `bloodraven.shipstream.io/pitr-accepted` annotation with a `keyCheck`, and holds the original bytes.
+1. `PITRArchiveBindingReady=True`; P1's entry is `Bound/Bound` with `encryption.keySecretName` (not the user Secret). Each PrimaryCandidate site Deployment mounts that snapshot with `optional: true`, never the user Secret, renders `BLOODRAVEN_PITR_KEY_REVISION` = the snapshot and no `BLOODRAVEN_PITR_PROFILE_NAME`, and its `bloodraven.shipstream.io/pitr-render` annotation names the snapshot; `status.pitr.archive.keyRevision` equals it. The snapshot is `immutable`, has no `ownerReferences`, carries the group-UID and binding-id labels and a `bloodraven.shipstream.io/pitr-accepted` annotation with a `keyCheck`, and holds the original bytes.
 2. Marker table and baseline; backup β1. Its `status.artifactStorage.passphraseSecretKeyRef` is its own immutable, ownerless `mysqlbackup-…-dump-key-…` snapshot (label `mysqlbackup-uid`) holding the original bytes. Marker M1, flush.
 3. Admission, as `dryRun=All` patches: removing A's encryption, renaming its `passphraseSecretKeyRef` to a same-bytes copy, and changing its `key` are each refused with the root rule's message.
 4. Rotate the user Secret in place: `PITRArchiveBindingReady=False/KeyChangeRefused` and Warning `PITRArchiveKeyChangeRefused`; P1's entry is unchanged and no Deployment `spec-hash` or pod changes for two operator polls (60 s).
@@ -1603,7 +1603,7 @@ Every era's marker, fence and witness run with the §37 background writer on the
 
 **Injection and verification**: plaintext RustFS archive, fences as in §37.
 
-1. Take β1. Wait out any anti-flap cooldown. Write era P on a (marker P with the background writer) and wait until b has applied it: P is history b keeps, so a's archive holds something beyond β1 that survives the loss (without it, latest with `excludeGtids` = L has nothing to replay and refuses `PITRNoArchivedReplay`). Delay b's applier with `SOURCE_DELAY=300` (the operator auto-recovers `STOP REPLICA SQL_THREAD`, see §14, and the failover's 30 s relay-log drain restarts a stopped applier, so a delay is what keeps L out of b). The delay covers the writer window, the flushing fence's upload wait (up to 3 minutes), detection and the bounded 30 s drain. Write the lost markers L on a with the §37 background writer (its commits are part of L), stop the writer, archive L with a flushing fence, then scale a to 0. b is promoted without L; the scenario computes the lost set as a's archived set minus b's `@@gtid_executed` and fails if it is empty. Every `read-only` reader site replicates straight from a with no delay, so it applied L: the operator refuses to repoint it (`SourceConvergenceBlocked`) and the replica GTID audit reports it `RecoveryBlocked` with L. The scenario reclones each reader that holds any of L from b, confirmed by the divergent GTID's prefix. Left blocked, the reader would never be rolled to the new prefix in step 5 (the ordered update keeps an unsafe follower's drift), so the new archive would never be Verified; and once a reissues L's GTIDs the reader could look contained in a's history and be restarted on a history it does not share.
+1. Take β1. Wait out any anti-flap cooldown. Write era P on a (marker P with the background writer) and wait until b has applied it: P is history b keeps, so a's archive holds something beyond β1 that survives the loss (without it, latest with `excludeGtids` = L has nothing to replay and refuses `PITRNoArchivedReplay`). Delay b's applier with `SOURCE_DELAY=300` (the operator auto-recovers `STOP REPLICA SQL_THREAD`, see §14, and the failover's 30 s relay-log drain restarts a stopped applier, so a delay is what keeps L out of b). The delay covers the writer window, the flushing fence's upload wait (up to 3 minutes), detection and the bounded 30 s drain. Write the lost markers L on a with the §37 background writer (its commits are part of L), stop the writer, archive L with a flushing fence, then scale a to 0. b is promoted without L; the scenario computes the lost set as a's archived set minus b's `@@gtid_executed` and fails if it is empty. Every `ReadOnly` reader site replicates straight from a with no delay, so it applied L: the operator refuses to repoint it (`SourceConvergenceBlocked`) and the replica GTID audit reports it `RecoveryBlocked` with L. The scenario reclones each reader that holds any of L from b, confirmed by the divergent GTID's prefix. Left blocked, the reader would never be rolled to the new prefix in step 5 (the ordered update keeps an unsafe follower's drift), so the new archive would never be Verified; and once a reissues L's GTIDs the reader could look contained in a's history and be restarted on a history it does not share.
 2. A latest verification refuses `PITRArchiveDivergentHistory`, and the message prints exactly the lost set (compared as GTID sets, not just a's UUID). With `excludeGtids` = the lost set it is Verified (`ArchiveHead`, a's archived set minus the lost set, which replays era P). `excludedDivergentTransactionCount` is not asserted here: it counts the timestamp-mode D window, which latest mode does not compute.
 3. b writes S (fence TS, with the writer) and flushes. A timestamp verification of β1 at TS refuses `PITRArchiveDivergentHistory` printing exactly the lost set; with `excludeGtids` it is Verified exactly and reports `excludedDivergentTransactionCount` = |lost set|. Take β2; b writes S2 (fence, with the writer) and flushes; a verification of β2 **without exclusions** is Verified exactly.
 4. Scale a back up, wait until it is `RecoveryBlocked` with a recorded `divergentGtid`, and reclone it with that GTID's prefix as the confirmation. The failback waits until a is replicating and no longer `RecoveryBlocked`: only the replica GTID audit's next clean proof clears the block, and a planned failover refuses a blocked target (`DivergentTarget`). Wait until a's sidecar reports `divergentRows`/`quarantinedRows` > 0 (a's own manifest still holds the archived lost row), then two operator archiver-poll intervals (the operator's reissue check reads its cached poll, and it publishes no suspect-row count), requiring that `status.pitr.message` reports no failed poll of a and that a still reports the rows. A planned failback to a emits Warning `PITRArchiveReissueRiskDetected`. The failback waits for a to be the primary on this run's prefix and archive ID with a promotion record after the request (read on a's server clock); it tolerates the archiver's `lastError` only when it is the divergence audit's error (`… divergent transactions=…; preserve objects and use pitr-quarantine …`) and those divergent or quarantined rows exist, because the audit keeps reporting them. a writes R and flushes, reissuing the lost GTIDs (FU-4: a reclone keeps `server_uuid`); a verification refuses `PITRArchiveHistoryReset`.

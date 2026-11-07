@@ -98,7 +98,7 @@ func observeFailover() runner.Step {
 func failoverObserved(mfg *v1alpha1.MysqlFailoverGroup, original string) (bool, string) {
 	var writable []string
 	for _, site := range mfg.Status.Sites {
-		if site.State == "writable" {
+		if site.State == v1alpha1.SiteStateWritable {
 			writable = append(writable, site.Name)
 		}
 	}

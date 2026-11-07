@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 )
 
@@ -15,10 +16,10 @@ func TestFailover_DC1Down_PromoteDC2(t *testing.T) {
 	h.pollN(2)
 
 	s := h.tm.Status()
-	if s.Sites[0].State != "writable" {
+	if s.Sites[0].State != v1alpha1.SiteStateWritable {
 		t.Fatalf("setup: dc1 state: got %s, want writable", s.Sites[0].State)
 	}
-	if s.Sites[1].State != "read-only" {
+	if s.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Fatalf("setup: dc2 state: got %s, want read-only", s.Sites[1].State)
 	}
 
@@ -29,7 +30,7 @@ func TestFailover_DC1Down_PromoteDC2(t *testing.T) {
 	h.pollN(3)
 
 	s = h.tm.Status()
-	if s.Sites[0].State != "unreachable" {
+	if s.Sites[0].State != v1alpha1.SiteStateUnreachable {
 		t.Errorf("after failure: dc1 state: got %s, want unreachable", s.Sites[0].State)
 	}
 
@@ -53,7 +54,7 @@ func TestFailover_DC1Down_PromoteDC2(t *testing.T) {
 	h.pollN(2)
 
 	s = h.tm.Status()
-	if s.Sites[1].State != "writable" {
+	if s.Sites[1].State != v1alpha1.SiteStateWritable {
 		t.Errorf("dc2 state after confirmation: got %s, want writable", s.Sites[1].State)
 	}
 }
@@ -69,7 +70,7 @@ func TestFailover_DC2Down_PromoteDC1(t *testing.T) {
 	h.pollN(2)
 
 	s := h.tm.Status()
-	if s.Sites[1].State != "writable" {
+	if s.Sites[1].State != v1alpha1.SiteStateWritable {
 		t.Fatalf("setup: dc2 state: got %s, want writable", s.Sites[1].State)
 	}
 

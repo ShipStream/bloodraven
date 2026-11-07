@@ -170,7 +170,7 @@ func s42SoakGroupUnaffected(state *s42RunState) runner.Step {
 				if status == nil {
 					return fmt.Errorf("reader %q missing from status during soak", state.topo.reader)
 				}
-				if status.State != "read-only" {
+				if status.State != v1alpha1.SiteStateReadOnly {
 					return fmt.Errorf("reader state=%q during stall, want read-only", status.State)
 				}
 				if status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {

@@ -70,7 +70,7 @@ const steps: Step[] = [
   { at: 2.0, msg: 'probe iad: dial tcp 10.0.1.1:3306 i/o timeout (2/3)', tone: 'warn', apply: () => { iad.detail = 'failed polls 2/3' } },
   { at: 4.0, msg: 'probe iad: dial tcp 10.0.1.1:3306 i/o timeout (3/3)', tone: 'warn', apply: () => { iad.detail = 'failed polls 3/3' } },
   { at: 6.0, msg: 'site iad unreachable · failureThreshold reached · taint applied', tone: 'danger', apply: () => { iad.state = 'unreachable'; iad.detail = 'unreachable'; reader.state = 'stale'; reader.detail = 'source gone · still serving' } },
-  { at: 6.4, msg: 'candidate pdx selected: freshest GTID set, primary-candidate', tone: 'primary', apply: () => { pdx.detail = 'candidate · GTID freshest' } },
+  { at: 6.4, msg: 'candidate pdx selected: freshest GTID set, PrimaryCandidate', tone: 'primary', apply: () => { pdx.detail = 'candidate · GTID freshest' } },
   { at: 6.8, msg: 'fence old primary: SET GLOBAL super_read_only=ON (best-effort)', tone: 'muted' },
   { at: 7.2, msg: 'evict application connections from iad', tone: 'muted' },
   { at: 7.6, msg: 'drain relay logs on pdx (bounded 30s)', tone: 'muted', apply: () => { pdx.detail = 'draining relay log' } },

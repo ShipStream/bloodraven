@@ -92,7 +92,7 @@ func guardsRunner(cached, authoritative *v1alpha1.MysqlFailoverGroup) *TopologyM
 func heldGroupViews() (cached, authoritative *v1alpha1.MysqlFailoverGroup) {
 	authoritative = newTestFG()
 	authoritative.Status.ActiveSite = "dc1"
-	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "dc1", Scope: "full"}
+	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"dc2"}}
 	cached = authoritative.DeepCopy()
 	cached.Status.RestoreInPlace, cached.Status.RestoreReclones = nil, nil
@@ -142,7 +142,7 @@ func TestRestoreGuards_StaleCacheKeepsFreezeAndFence(t *testing.T) {
 	no := false
 	authoritative := newTestFG()
 	authoritative.Status.ActiveSite = "dc1"
-	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: "dc1", Scope: "full", RunID: "run-1"}
+	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, RunID: "run-1"}
 	authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"dc2"}}
 	authoritative.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "dc1", ConfirmToken: testRestoreConfirm, RunID: "run-1", PriorOfflineMode: &no, SessionsEvicted: true}
 	cached := authoritative.DeepCopy()
@@ -238,7 +238,7 @@ func TestEarlierRunQueueHeldWhenNextRunEndsInPreflight(t *testing.T) {
 			no := false
 			now := metav1.Now()
 			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-				Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: site, Scope: "full", JobName: inPlaceRestoreJobName(fg.Name, site),
+				Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, JobName: inPlaceRestoreJobName(fg.Name, site),
 				ConfirmTokenUsed: confirmA, CompletionTime: &now,
 			}
 			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1alpha1.RestoreReclonesArmed,
@@ -320,7 +320,7 @@ func TestSyncPodLabels_StaleCacheKeepsQueuedSiteOutOfReaderServices(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			cached := newTestFG()
 			cached.Status.ActiveSite = "dc1"
-			cached.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}, {Name: "dc2", State: "read-only", Replicating: true}}
+			cached.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true}}
 			authoritative := cached.DeepCopy()
 			if tc.queued {
 				authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"dc2"}}

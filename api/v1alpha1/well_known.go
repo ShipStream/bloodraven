@@ -12,7 +12,7 @@ package v1alpha1
 // MysqlFailoverGroup annotations a user sets to request an action.
 const (
 	// PlannedFailoverAnnotation triggers a graceful, cooldown-respecting
-	// switchover to the named primary-candidate site. The operator removes
+	// switchover to the named PrimaryCandidate site. The operator removes
 	// it once the request is decided: accepted, rejected or skipped. A
 	// request that is deferred (onCooldown=Defer, a deployment hold), or
 	// that waits for admission, keeps it until then; removing it cancels a

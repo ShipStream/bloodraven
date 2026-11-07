@@ -28,10 +28,10 @@ The monitor evaluates two rules per tick, in a fixed order: rule #1 topology mis
 
 **Type:** MULTIPLE_CHOICE
 
-You added a `role: read-only` reader to `playground` for reporting. Months later the active site `iad` loses its network path to the operator and to `pdx`, but the reader sits in the same rack and its sidecar keeps answering `/peer/ping` on every tick. Defaults are unchanged (`leaseTimeout` 20 s, `peerCheckInterval` 5 s). Twenty-five seconds into the isolation, what is `iad` doing?
+You added a `role: ReadOnly` reader to `playground` for reporting. Months later the active site `iad` loses its network path to the operator and to `pdx`, but the reader sits in the same rack and its sidecar keeps answering `/peer/ping` on every tick. Defaults are unchanged (`leaseTimeout` 20 s, `peerCheckInterval` 5 s). Twenty-five seconds into the isolation, what is `iad` doing?
 
 - Fenced at T+20 s: the lease expired because a majority of the parties it tracks — the operator and `pdx` — went silent, and two out of three is a quorum loss.
-- Fenced at T+20 s: a `role: read-only` site is excluded from the peer set, so only the operator and `pdx` counted, and both were silent for the whole window.
+- Fenced at T+20 s: a `role: ReadOnly` site is excluded from the peer set, so only the operator and `pdx` counted, and both were silent for the whole window.
 - Still accepting writes: rule #2 fences only when the operator **and every peer** are silent for the full window, and a reader that answers `/peer/ping` is a peer, so it suppresses the fence.
 - Still accepting writes, but only until the next `peerCheckInterval` tick at T+30 s, when the fourth consecutive miss trips the fence.
 
@@ -39,7 +39,7 @@ You added a `role: read-only` reader to `playground` for reporting. Months later
 
 **Explanation:**
 
-The lease rule is an all-parties rule, not a vote. One reachable peer keeps the primary writable, and a `role: read-only` reader counts as a peer — it relays topology and answers `/peer/ping`, and a reachable peer without fresh authoritative topology can still suppress the lease-only fence. Adding a reader therefore makes the lease fence *less* likely to fire, which is worth knowing before you size a group. Options 1 and 2 both smuggle in counting: option 1 assumes a majority rule, but this is documented as retained compatibility behaviour, not a quorum guarantee — there is no counting, no majority, no tie-break; option 2 assumes readers are excluded from the peer set, which is true of the matrix's writable/read-only/unreachable tallies but not of sidecar peering. Option 4 invents a consecutive-miss counter: the rule is a single continuous silence window of `leaseTimeout`, and the reader is never silent, so no number of ticks changes the answer. Note also what this does *not* weaken — rule #1 still fences `iad` the moment anyone tells it the active site has moved. (objective 2)
+The lease rule is an all-parties rule, not a vote. One reachable peer keeps the primary writable, and a `role: ReadOnly` reader counts as a peer — it relays topology and answers `/peer/ping`, and a reachable peer without fresh authoritative topology can still suppress the lease-only fence. Adding a reader therefore makes the lease fence *less* likely to fire, which is worth knowing before you size a group. Options 1 and 2 both smuggle in counting: option 1 assumes a majority rule, but this is documented as retained compatibility behaviour, not a quorum guarantee — there is no counting, no majority, no tie-break; option 2 assumes readers are excluded from the peer set, which is true of the matrix's writable/read-only/unreachable tallies but not of sidecar peering. Option 4 invents a consecutive-miss counter: the rule is a single continuous silence window of `leaseTimeout`, and the reader is never silent, so no number of ticks changes the answer. Note also what this does *not* weaken — rule #1 still fences `iad` the moment anyone tells it the active site has moved. (objective 2)
 
 ## Question 3
 
@@ -57,7 +57,7 @@ False. `Server.RunSafetyNet` runs at sidecar startup, before the `FencingMonitor
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` has two core sites, `iad` and `pdx`, plus a `role: read-only` reader. Mid-upgrade, the `pdx` pod restarts before it has rolled onto the `--read-only=ON` mysqld flag, comes back writable, and the group goes to `SPLIT BRAIN: 2 sites are writable (iad, pdx)`. `spec.splitBrainPolicy` is omitted from the manifest entirely. `status.lastFailoverTarget` is `iad`, and `iad` is right now writable and still `role: primary-candidate`. What does the operator do?
+`playground` has two core sites, `iad` and `pdx`, plus a `role: ReadOnly` reader. Mid-upgrade, the `pdx` pod restarts before it has rolled onto the `--read-only=ON` mysqld flag, comes back writable, and the group goes to `SPLIT BRAIN: 2 sites are writable (iad, pdx)`. `spec.splitBrainPolicy` is omitted from the manifest entirely. `status.lastFailoverTarget` is `iad`, and `iad` is right now writable and still `role: PrimaryCandidate`. What does the operator do?
 
 - Nothing but alert. With no `sitePriorities` there is no policy to apply, so this is tier 3 and resolution is manual by design.
 - Falls back to the order the sites are declared in under `spec.sites` and keeps whichever is listed first.
@@ -92,7 +92,7 @@ The auto-resolve is the operator executing your standing decision about which wr
 
 **Type:** MULTIPLE_CHOICE
 
-A page on `playground`: "the network is partitioned". You look. `status.activeSite` is `iad`, `iad` is `writable`, `pdx` is `read-only`, `lastSeen` is fresh on every site including the reader, no site is `unreachable`, `pdx`'s IO thread is stopped and `secondsBehindSource` is climbing, and `bloodraven_failovers_total` has not moved. Which of the five documented shapes is this?
+A page on `playground`: "the network is partitioned". You look. `status.activeSite` is `iad`, `iad` is `Writable`, `pdx` is `ReadOnly`, `lastSeen` is fresh on every site including the reader, no site is `Unreachable`, `pdx`'s IO thread is stopped and `secondsBehindSource` is climbing, and `bloodraven_failovers_total` has not moved. Which of the five documented shapes is this?
 
 - A — the operator cannot reach `iad` while `pdx` stays reachable.
 - B — the replica is isolated while the primary stays reachable.
@@ -103,7 +103,7 @@ A page on `playground`: "the network is partitioned". You look. `status.activeSi
 
 **Explanation:**
 
-Fresh `lastSeen` on every site is the discriminator: both sites poll cleanly, so nothing is blind to the operator and only the binlog stream is severed — shape C. Option 1 (A) requires `iad` to go `unreachable` after 6 s and `pdx` to be promoted; neither happened. Option 2 (B) requires `pdx` to be unreachable to the operator, or at least for the isolation to be the replica's link to Bloodraven rather than to MySQL — here `pdx` polls fine and is merely not replicating. Option 4 (D) is a peer-reachability shape, visible as replication or peer checks failing one way only, and it is the one shape with no test of any kind — it is argued from the code, not observed, because the simulator's `pairKey` sorts the two site names and so cannot express one-way reachability at all. Shape C itself is DST-only, injected as `partitionPair`, with no live chaos scenario; knowing which shapes are exercised and which are merely argued is part of trusting the answer you just gave. (objective 7)
+Fresh `lastSeen` on every site is the discriminator: both sites poll cleanly, so nothing is blind to the operator and only the binlog stream is severed — shape C. Option 1 (A) requires `iad` to go `Unreachable` after 6 s and `pdx` to be promoted; neither happened. Option 2 (B) requires `pdx` to be unreachable to the operator, or at least for the isolation to be the replica's link to Bloodraven rather than to MySQL — here `pdx` polls fine and is merely not replicating. Option 4 (D) is a peer-reachability shape, visible as replication or peer checks failing one way only, and it is the one shape with no test of any kind — it is argued from the code, not observed, because the simulator's `pairKey` sorts the two site names and so cannot express one-way reachability at all. Shape C itself is DST-only, injected as `partitionPair`, with no live chaos scenario; knowing which shapes are exercised and which are merely argued is part of trusting the answer you just gave. (objective 7)
 
 ## Question 7
 
@@ -126,7 +126,7 @@ A broken cross-site replication link triggers no automatic action, and the reaso
 
 **Type:** MULTIPLE_CHOICE
 
-You inject a partition against `iad` with `iptables -A INPUT -p tcp --dport 3306 -j DROP` on its k3d node. Forty-five seconds later the group status still reads `activeSite=iad, state=writable, Ready=True`. What do you conclude first?
+You inject a partition against `iad` with `iptables -A INPUT -p tcp --dport 3306 -j DROP` on its k3d node. Forty-five seconds later the group status still reads `activeSite=iad, state=Writable, Ready=True`. What do you conclude first?
 
 - That you have proven nothing yet. Host-netns iptables does not partition Kubernetes Service traffic — kube-proxy's DNAT runs in different chains — so verify from an independent vantage point, against a disposable canary, that the partition exists before you treat any status as a symptom.
 - That the partition is real and detection simply has not completed: 6 s of detection plus the 30 s relay drain is a 36 s worst case, and you are barely past it.

@@ -19,7 +19,9 @@
       "hostname": "ledger-db.example.com",
       "ttl": 60
     },
-    "updateStrategy": "Recreate",
+    "updateStrategy": {
+      "type": "Recreate"
+    },
     "splitBrainPolicy": {
       "sitePriorities": [
         "iad",
@@ -52,7 +54,7 @@
       {
         "name": "iad",
         "serverID": 101,
-        "role": "primary-candidate",
+        "role": "PrimaryCandidate",
         "zone": "zone-iad",
         "storage": {
           "storageClassName": "fast-ssd",
@@ -77,7 +79,7 @@
       {
         "name": "pdx",
         "serverID": 102,
-        "role": "primary-candidate",
+        "role": "PrimaryCandidate",
         "zone": "zone-pdx",
         "storage": {
           "storageClassName": "fast-ssd",
@@ -102,7 +104,7 @@
       {
         "name": "reader",
         "serverID": 103,
-        "role": "read-only",
+        "role": "ReadOnly",
         "zone": "zone-reader",
         "storage": {
           "storageClassName": "fast-ssd",

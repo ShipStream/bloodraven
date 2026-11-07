@@ -25,8 +25,8 @@ func plannedFailoverFG(annotationValue string) *v1alpha1.MysqlFailoverGroup {
 	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: 5 * time.Minute}
 	fg.Status.ActiveSite = "iad"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: "writable", Replicating: false},
-		{Name: "pdx", State: "read-only", Replicating: true},
+		{Name: "iad", State: v1alpha1.SiteStateWritable, Replicating: false},
+		{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
 	}
 	if annotationValue != "" {
 		fg.SetAnnotations(map[string]string{
@@ -257,16 +257,9 @@ func TestEffectiveOnCooldown(t *testing.T) {
 	if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownDefer {
 		t.Errorf("Defer: got %q, want Defer", got)
 	}
-	// The released lower-case spelling, which CRD ratcheting keeps on a
-	// stored object, keeps its meaning (G-M1).
-	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"defer", "DEFER"} {
-		fg.Spec.PlannedFailover.OnCooldown = v
-		if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownDefer {
-			t.Errorf("%q: got %q, want Defer", v, got)
-		}
-	}
-	// Malformed values fall back to Reject (defence against typos).
-	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"skip", "reject", "Reject", ""} {
+	// Malformed values, including the pre-v1beta1 lower-case spelling
+	// (no longer read), fall back to Reject.
+	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"defer", "DEFER", "skip", "reject", "Reject", ""} {
 		fg.Spec.PlannedFailover.OnCooldown = v
 		if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownReject {
 			t.Errorf("%q: got %q, want Reject fallback", v, got)
@@ -274,16 +267,17 @@ func TestEffectiveOnCooldown(t *testing.T) {
 	}
 }
 
-// The released lower-case onSyncTimeout values keep their meaning, both in
-// the spec and in a run's frozen settings (G-M1).
-func TestDragonflyOnSyncTimeoutIgnoresCase(t *testing.T) {
+// onSyncTimeout reads only the CamelCase values, in the spec and in a
+// run's frozen settings: anything but Fail, including the pre-v1beta1
+// lower-case spelling, is the Proceed default.
+func TestDragonflyOnSyncTimeoutExactValues(t *testing.T) {
 	for _, tc := range []struct {
 		in   v1alpha1.DragonflySyncTimeoutPolicy
 		want v1alpha1.DragonflySyncTimeoutPolicy
 	}{
 		{"Fail", v1alpha1.DragonflySyncTimeoutFail},
-		{"fail", v1alpha1.DragonflySyncTimeoutFail},
-		{"FAIL", v1alpha1.DragonflySyncTimeoutFail},
+		{"fail", v1alpha1.DragonflySyncTimeoutProceed},
+		{"FAIL", v1alpha1.DragonflySyncTimeoutProceed},
 		{"Proceed", v1alpha1.DragonflySyncTimeoutProceed},
 		{"proceed", v1alpha1.DragonflySyncTimeoutProceed},
 		{"", v1alpha1.DragonflySyncTimeoutProceed},

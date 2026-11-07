@@ -39,8 +39,8 @@ func mdbTestGroup() *v1alpha1.MysqlFailoverGroup {
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", ServerID: 101, Role: "primary-candidate"},
-				{Name: "dc2", ServerID: 102, Role: "primary-candidate"},
+				{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
+				{Name: "dc2", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
 			},
 		},
 	}

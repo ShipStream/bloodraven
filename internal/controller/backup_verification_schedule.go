@@ -102,7 +102,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx cont
 		cj.Labels = labels
 
 		concurrency := batchv1.ForbidConcurrent
-		if v.ConcurrencyPolicy == "Replace" {
+		if v.ConcurrencyPolicy == batchv1.ReplaceConcurrent {
 			concurrency = batchv1.ReplaceConcurrent
 		}
 

@@ -212,7 +212,7 @@ const (
 
 // DragonflyPhase describes the high-level state of the Dragonfly subsystem
 // for a failover group.
-// +kubebuilder:validation:Enum="";Disabled;Reconciling;ConfiguringReplication;Ready;Degraded;Promoting
+// +kubebuilder:validation:Enum=Disabled;Reconciling;ConfiguringReplication;Ready;Degraded;Promoting
 type DragonflyPhase string
 
 const (
@@ -242,16 +242,27 @@ const (
 )
 
 // DragonflyRole describes a Dragonfly site's observed role.
-// +kubebuilder:validation:Enum=unknown;master;replica;stale-master;unconfigured;unreachable
+// +kubebuilder:validation:Enum=Unknown;Master;Replica;StaleMaster;Unconfigured;Unreachable
 type DragonflyRole string
 
 const (
-	DragonflyRoleUnknown      DragonflyRole = "unknown"
-	DragonflyRoleMaster       DragonflyRole = "master"
-	DragonflyRoleReplica      DragonflyRole = "replica"
-	DragonflyRoleStaleMaster  DragonflyRole = "stale-master"
-	DragonflyRoleUnconfigured DragonflyRole = "unconfigured"
-	DragonflyRoleUnreachable  DragonflyRole = "unreachable"
+	// DragonflyRoleUnknown: the site answered with a replication role the
+	// operator does not recognise.
+	DragonflyRoleUnknown DragonflyRole = "Unknown"
+	// DragonflyRoleMaster: the site reports master and is the expected
+	// active site.
+	DragonflyRoleMaster DragonflyRole = "Master"
+	// DragonflyRoleReplica: the site reports replica, whatever its link
+	// health.
+	DragonflyRoleReplica DragonflyRole = "Replica"
+	// DragonflyRoleStaleMaster: the site reports master but is not the
+	// expected active site.
+	DragonflyRoleStaleMaster DragonflyRole = "StaleMaster"
+	// DragonflyRoleUnconfigured: the site reports no replication role (a
+	// fresh pod, not yet wired).
+	DragonflyRoleUnconfigured DragonflyRole = "Unconfigured"
+	// DragonflyRoleUnreachable: the operator could not reach the site.
+	DragonflyRoleUnreachable DragonflyRole = "Unreachable"
 )
 
 // DragonflyStatus is the observed state of the Dragonfly subsystem for a
@@ -371,14 +382,36 @@ type DragonflyUpgradeStatus struct {
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// Reason is a machine-readable terminal or waiting reason.
+	// Reason is a machine-readable terminal reason.
 	// +optional
-	Reason string `json:"reason,omitempty"`
+	Reason DragonflyUpgradeReason `json:"reason,omitempty"`
 
 	// Message is a human-readable status line.
 	// +optional
 	Message string `json:"message,omitempty"`
 }
+
+// DragonflyUpgradeReason is status.dragonfly.upgrade.reason.
+// +kubebuilder:validation:MaxLength=1024
+// +kubebuilder:validation:Pattern=`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`
+type DragonflyUpgradeReason string
+
+const (
+	// DragonflyUpgradeReasonCompleted: the upgrade succeeded.
+	DragonflyUpgradeReasonCompleted DragonflyUpgradeReason = "Completed"
+	// DragonflyUpgradeReasonActiveSiteChanged: the MySQL active site moved
+	// while the upgrade ran.
+	DragonflyUpgradeReasonActiveSiteChanged DragonflyUpgradeReason = "ActiveSiteChanged"
+	// DragonflyUpgradeReasonUnknownPhase: the recorded phase is not one
+	// this operator knows.
+	DragonflyUpgradeReasonUnknownPhase DragonflyUpgradeReason = "UnknownPhase"
+	// DragonflyUpgradeReasonSnapshotDialFailed: the operator could not
+	// connect to the active Dragonfly to save the snapshot.
+	DragonflyUpgradeReasonSnapshotDialFailed DragonflyUpgradeReason = "DragonflySnapshotDialFailed"
+	// DragonflyUpgradeReasonSnapshotSaveFailed: SAVE failed on the active
+	// Dragonfly.
+	DragonflyUpgradeReasonSnapshotSaveFailed DragonflyUpgradeReason = "DragonflySnapshotSaveFailed"
+)
 
 // DragonflySiteStatus describes the observed state of one site's Dragonfly
 // instance.

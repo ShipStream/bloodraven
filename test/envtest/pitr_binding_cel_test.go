@@ -382,7 +382,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 			name: "algorithm-explicit-and-key-explicit",
 			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
 				e := pitrProfile(fg, "a").Encryption
-				e.Algorithm = string(v1alpha1.EncryptionAlgorithmAES256GCM)
+				e.Algorithm = v1alpha1.EncryptionAlgorithmAES256GCM
 				e.PassphraseSecretKeyRef.Key = "passphrase"
 			},
 		},
@@ -436,7 +436,7 @@ func TestPITRBindingCELAlgorithmEnum(t *testing.T) {
 	}
 
 	fg = newPITRBindingFG(ns, "good-alg")
-	pitrProfile(fg, "a").Encryption.Algorithm = string(v1alpha1.EncryptionAlgorithmAES256GCM)
+	pitrProfile(fg, "a").Encryption.Algorithm = v1alpha1.EncryptionAlgorithmAES256GCM
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("explicit AES-256-GCM refused: %v", err)
 	}
@@ -715,7 +715,7 @@ func TestPITRBindingCELVerificationArchiveProfileName(t *testing.T) {
 			Spec: v1alpha1.MysqlBackupVerificationSpec{
 				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 				ProfileName:      "nightly",
-				PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ArchiveProfileName: tc.value},
+				PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ArchiveProfileName: tc.value},
 			},
 		}
 		err := k8sClient.Create(ctx, v)

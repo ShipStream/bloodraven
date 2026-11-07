@@ -420,20 +420,24 @@ func TestPITRBindingTargets(t *testing.T) {
 	src := pbtProfile("src", "p9", "pass-src")
 	fg := pbtGroup(a, alias, src)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{PointInTime: &v1alpha1.PointInTimeSpec{ArchiveProfileName: "src"}}
-	mbv := func(name, mode, profile string, phase v1alpha1.VerificationPhase) v1alpha1.MysqlBackupVerification {
-		return v1alpha1.MysqlBackupVerification{
+	// mode "" is a verification without a pointInTime block (no replay).
+	mbv := func(name string, mode v1alpha1.PointInTimeMode, profile string, phase v1alpha1.VerificationPhase) v1alpha1.MysqlBackupVerification {
+		v := v1alpha1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: pbtNS},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: pbtName},
-				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: mode, ArchiveProfileName: profile}},
-			Status: v1alpha1.MysqlBackupVerificationStatus{Phase: phase},
+			Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: pbtName}},
+			Status:     v1alpha1.MysqlBackupVerificationStatus{Phase: phase},
 		}
+		if mode != "" {
+			v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: mode, ArchiveProfileName: profile}
+		}
+		return v
 	}
 	mbvs := []v1alpha1.MysqlBackupVerification{
-		mbv("z-alias", "latest", "alias", ""),
-		mbv("b-default", "timestamp", "", v1alpha1.VerificationPhasePending),
-		mbv("c-none", "none", "src", ""),
-		mbv("d-done", "latest", "src", v1alpha1.VerificationPhaseSucceeded),
-		mbv("e-missing", "latest", "nope", ""),
+		mbv("z-alias", v1alpha1.PointInTimeModeLatest, "alias", ""),
+		mbv("b-default", v1alpha1.PointInTimeModeTimestamp, "", v1alpha1.VerificationPhasePending),
+		mbv("c-none", "", "src", ""),
+		mbv("d-done", v1alpha1.PointInTimeModeLatest, "src", v1alpha1.VerificationPhaseSucceeded),
+		mbv("e-missing", v1alpha1.PointInTimeModeLatest, "nope", ""),
 	}
 	targets := pitrBindingTargets(fg, mbvs)
 	if len(targets) != 2 {

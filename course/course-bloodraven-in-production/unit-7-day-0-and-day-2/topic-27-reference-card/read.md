@@ -14,12 +14,12 @@ quote a version, an issue number or a documentation defect.
 | Setting | Shipped default | Playground | What it actually controls |
 |---|---|---|---|
 | `pollInterval` | `2s` | same | The poll tick. One `SELECT @@read_only` per site, in parallel, each under a 5 s ceiling. |
-| `failureThreshold` | `3` | same | Consecutive failed polls before `unreachable`. **Detection = `pollInterval` × `failureThreshold` = 6 s.** |
-| `recoveryThreshold` | `2` | same | Consecutive writable polls before `writable`. **Not a term in the detection sum.** |
+| `failureThreshold` | `3` | same | Consecutive failed polls before `Unreachable`. **Detection = `pollInterval` × `failureThreshold` = 6 s.** |
+| `recoveryThreshold` | `2` | same | Consecutive writable polls before `Writable`. **Not a term in the detection sum.** |
 | — | per site | same | Probe backoff: past `failureThreshold` a failing site's probe interval doubles per extra failure, exponent capped at 4, hard cap 30 s. Other sites keep `pollInterval`, so a second fault still takes 6 s; a long-down site can take up to 30 s to be noticed coming back. |
 | `failoverCooldown` | `5m` | `30s` | Gates **automatic promotion only**, at one call site, immediately before the promotion call. A blocked promotion is retried at expiry (`retryAt`). |
 | `connectionDrainTimeout` | `30s` | same | Bounds the post-promotion retry window for evicting sessions from a fenced former primary — only while it is reachable. |
-| `replication.maxLagSeconds` | `300` | `30` | The `ReplicationLagging` Degraded reason. **Never a promotion gate.** Skipped entirely for `role: read-only` sites. |
+| `replication.maxLagSeconds` | `300` | `30` | The `ReplicationLagging` Degraded reason. **Never a promotion gate.** Skipped entirely for `role: ReadOnly` sites. |
 | `replication.readOnlyMaxLagSeconds` | *(nil — inherits `maxLagSeconds`)* | `10` | Reader-endpoint membership only. An explicit `0` means zero reported lag, and is not the same as unset. |
 | `dns.ttl` | `60` | `10` | `recordTTL` on the `DNSEndpoint`. The floor on how long a stale answer survives. |
 | `sidecar.leaseTimeout` | `20s` | same | Rule #2 self-fence window. CEL: ≥ 3 s, and ≥ 3 × `peerCheckInterval`. |
@@ -51,7 +51,7 @@ There are exactly five, they come straight from `EvalCrossSite`, and **`Failover
 | `TotalLoss` | Every core site unreachable. |
 
 Replication adds its own reasons to `Degraded`: `ReplicationLagging`, `ReplicationBroken`,
-`ReplicationError`, `ReplicationSourceMismatch`. All four skip `role: read-only` sites entirely.
+`ReplicationError`, `ReplicationSourceMismatch`. All four skip `role: ReadOnly` sites entirely.
 
 **Evaluation order** (a row fires only if every row above declined):
 fence-first early return → `TotalLoss` → `SplitBrain` → failover → `NoPrimary` → degraded-with-peer-down → `Healthy`.
@@ -84,10 +84,10 @@ Node taints and source convergence are poll neighbours, not steps.
 |---|---|---|
 | `mysql-<group>-primary` | instance + `role=primary` | **writes** |
 | `mysql-<group>-replicas` | instance + `role=replica` + `healthy=yes` | **reads** |
-| `mysql-<group>-<site>` | name + instance + site, **plus `healthy=yes` on a `read-only` site** | site-pinned tooling only |
+| `mysql-<group>-<site>` | name + instance + site, **plus `healthy=yes` on a `ReadOnly` site** | site-pinned tooling only |
 | `mysql-<group>-<site>-internal` | name + instance + site, no health gate, `publishNotReadyAddresses: true` | never yours — sidecar and peer traffic |
 
-`role="fenced"` matches neither shared Service. A `read-only` site earns `healthy=yes` only when
+`role="fenced"` matches neither shared Service. A `ReadOnly` site earns `healthy=yes` only when
 **all five** hold: converged source, replicating, non-nil lag, canonical *direct* source host, and lag
 within `readOnlyMaxLagSeconds`.
 
@@ -130,9 +130,9 @@ Written **by the operator**, never by you: `bloodraven.shipstream.io/last-failov
 
 ## Roles, in one line each
 
-- **`primary-candidate`** — the only promotable role. Counted in every tally.
-- **`dr-only`** — never promoted, but **counted** in `coreCount` and the tallies. A full topology participant that cannot win.
-- **`read-only`** — never promoted, invisible to the matrix, never tainted, refused as a backup source, and skipped by every replication condition. Not a spare.
+- **`PrimaryCandidate`** — the only promotable role. Counted in every tally.
+- **`DisasterRecovery`** — never promoted, but **counted** in `coreCount` and the tallies. A full topology participant that cannot win.
+- **`ReadOnly`** — never promoted, invisible to the matrix, never tainted, refused as a backup source, and skipped by every replication condition. Not a spare.
 
 ## Glossary
 
@@ -141,7 +141,7 @@ empty; empty means authority is ambiguous, and every endpoint is shed.
 
 **Anti-flap cooldown** — `failoverCooldown`. Delays automatic promotion until it expires, then retries it; touches nothing else.
 
-**Core site** — any site whose role is not `read-only`. What the matrix counts.
+**Core site** — any site whose role is not `ReadOnly`. What the matrix counts.
 
 **Divergent GTID set** — `GTID_SUBTRACT(old primary, new primary)`: the transactions the old primary
 holds that the new one never saw. Its cardinality is your lost-transaction count.
@@ -157,7 +157,7 @@ is part of the identity — `uuid:A:1-3` and `uuid:B:1-3` are six transactions, 
 **Ordered update** — the operator-driven rollout of a spec change: standby first, then a real failover,
 then the old active. Triggered by spec-hash drift; not cooldown-gated.
 
-**Promotability** — exactly `role == primary-candidate`. Not earned by having the freshest data.
+**Promotability** — exactly `role == PrimaryCandidate`. Not earned by having the freshest data.
 
 **RPO / RTO** — how much recently committed data you accept losing / how long you accept being unable
 to write. Bloodraven's RPO on sudden primary loss is not zero, by design; its whole engineering budget

@@ -10,16 +10,16 @@ you learn, the hard way, that a lagging reader is not an unhealthy group.
 
 ## How this works
 
-`playground` is your three-site failover group: `iad` and `pdx` are `primary-candidate`, `reader` is
-`read-only`. From Unit 2 onward you will look at its status constantly, and
+`playground` is your three-site failover group: `iad` and `pdx` are `PrimaryCandidate`, `reader` is
+`ReadOnly`. From Unit 2 onward you will look at its status constantly, and
 `kubectl get mysqlfailovergroup playground -o json` is 400 lines. `brstatus` squeezes it to one screen:
 
 ```
 playground/bloodraven-playground  active=iad  ready=True  degraded=False(Healthy)
-SITE    ROLE               STATE      REPL  LAG      SERVING
-iad     primary-candidate  writable   no    unknown  no
-pdx     primary-candidate  read-only  yes   0s       yes
-reader  read-only          read-only  yes   0s       yes
+SITE    ROLE              STATE     REPL  LAG      SERVING
+iad     PrimaryCandidate  Writable  no    unknown  no
+pdx     PrimaryCandidate  ReadOnly  yes   0s       yes
+reader  ReadOnly          ReadOnly  yes   0s       yes
 VERDICT: OK
 ```
 
@@ -57,7 +57,7 @@ looking perfectly caught up.
 group read endpoint. That Service selects on three labels — instance, `role=replica`, and
 `healthy=yes` — and the operator's rule for stamping `healthy` depends on the site's role.
 
-For a site whose role is `read-only`, all five must hold together:
+For a site whose role is `ReadOnly`, all five must hold together:
 
 1. `sourceConvergenceState` is `Converged`
 2. `replicating` is true
@@ -66,7 +66,7 @@ For a site whose role is `read-only`, all five must hold together:
    chained off another replica does not count
 5. `secondsBehindSource` is at or under `effective_readonly_max_lag(spec)`
 
-For **every other role**, `healthy=yes` as soon as `state` is `writable` or `read-only`. There is no
+For **every other role**, `healthy=yes` as soon as `state` is `Writable` or `ReadOnly`. There is no
 lag gate on those sites at all. That asymmetry is real and it is the point of this project.
 
 **TODO C — `verdict`.** Return `(word, exit_code)` from the table above. Read the `Degraded`
@@ -87,7 +87,7 @@ python starter/brstatus.py artefacts/playground-live.json
 You do not have to write any of this, but you do have to call it:
 
 - `site_role(site_spec)` applies the CRD default — `spec.sites[].role` is optional and defaults to
-  `primary-candidate`.
+  `PrimaryCandidate`.
 - `effective_max_lag(spec)` is `spec.replication.maxLagSeconds`, defaulting to 300.
 - `effective_readonly_max_lag(spec)` is `spec.replication.readOnlyMaxLagSeconds`. It has **no
   default of its own**: absent inherits `maxLagSeconds`, but an explicit `0` is meaningful and means
@@ -107,10 +107,10 @@ seconds behind a 30 second threshold — must produce this, and exit **0**:
 
 ```
 playground/bloodraven-playground  active=iad  ready=True  degraded=False(Healthy)
-SITE    ROLE               STATE      REPL  LAG      SERVING
-iad     primary-candidate  writable   no    unknown  no
-pdx     primary-candidate  read-only  yes   0s       yes
-reader  read-only          read-only  yes   300s     no
+SITE    ROLE              STATE     REPL  LAG      SERVING
+iad     PrimaryCandidate  Writable  no    unknown  no
+pdx     PrimaryCandidate  ReadOnly  yes   0s       yes
+reader  ReadOnly          ReadOnly  yes   300s     no
 VERDICT: OK
 ```
 
@@ -186,7 +186,7 @@ kubectl -n bloodraven-playground get mysqlfailovergroup playground -o json | jq 
   "degraded=\($deg.status // "-")(\($deg.reason // "-"))",
   (["SITE","ROLE","STATE","REPL","LAG"] | @tsv),
   ( $st.sites[]? as $s
-    | ([$spec.sites[] | select(.name == $s.name)][0].role // "primary-candidate") as $role
+    | ([$spec.sites[] | select(.name == $s.name)][0].role // "PrimaryCandidate") as $role
     | [ $s.name, $role, ($s.state // "-"),
         (if $s.replicating == null then "-" else ($s.replicating|tostring) end),
         (if $s.secondsBehindSource == null then "unknown"

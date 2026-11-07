@@ -26,7 +26,7 @@
       "orderIndex": 4
     },
     {
-      "front": "Name the five conjuncts a `role: read-only` site must satisfy to be labelled `healthy=yes`.",
+      "front": "Name the five conjuncts a `role: ReadOnly` site must satisfy to be labelled `healthy=yes`.",
       "back": "Source convergence `converged`; `replicating` true; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.",
       "orderIndex": 5
     },
@@ -57,7 +57,7 @@
     },
     {
       "front": "Which site role is never tainted?",
-      "back": "`read-only`. A reader is already read-only, so there is no demotion to enforce; the tainter returns early for it (and for an empty taint selector).",
+      "back": "`ReadOnly`. A reader is already read-only, so there is no demotion to enforce; the tainter returns early for it (and for an empty taint selector).",
       "orderIndex": 11
     }
   ],
@@ -88,13 +88,13 @@
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
-        "`role: read-only` sites are never members of `-replicas`; they are reachable only through their own per-site Service",
+        "`role: ReadOnly` sites are never members of `-replicas`; they are reachable only through their own per-site Service",
         "The lag conjunct fails: `readOnlyMaxLagSeconds` is unset, so the effective reader threshold inherits `maxLagSeconds` = 30, and 45 > 30 leaves the pod labelled `healthy=no`",
         "`maxLagSeconds` only drives the `ReplicationLagging` condition, so it cannot affect Services — the pod must be failing its readiness probe instead",
         "Endpoints are withheld until the anti-flap cooldown from the last failover has expired"
       ],
       "correctOptionIndex": 1,
-      "explanation": "All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails, because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `read-only` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)"
+      "explanation": "All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails, because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `ReadOnly` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)"
     },
     {
       "question": "An RBAC rule denied the operator's `DNSEndpoint` apply during the promotion of `playground`. Once the rule is fixed, an operator has to re-run the failover or re-apply the record by hand to get DNS pointing at the new primary.",

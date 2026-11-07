@@ -9,7 +9,7 @@
 
 Your on-call runbook says 'the operator detects a dead site in about 10 seconds (2 s poll × 3 failures, plus 2 recovery polls × 2 s)'. Correct it.
 
-- Detection is 6 s — `pollInterval` × `failureThreshold`. `recoveryThreshold` gates the transition back to `writable` and is never a term in the detection sum
+- Detection is 6 s — `pollInterval` × `failureThreshold`. `recoveryThreshold` gates the transition back to `Writable` and is never a term in the detection sum
 - Detection is 11 s — the sum is right but the 5 s per-probe ceiling has to be added once
 - Detection is 10 s and the runbook is correct; `recoveryThreshold` is consulted before a site is declared unreachable
 - Detection cannot be stated as a fixed number because the poll interval is adaptive from the first failure onward
@@ -18,7 +18,7 @@ Your on-call runbook says 'the operator detects a dead site in about 10 seconds 
 
 **Explanation:**
 
-Adding `recoveryThreshold` to the detection sum is the single most common wrong answer about this operator. The two counters gate opposite transitions: `failureThreshold` guards the way to `unreachable`, `recoveryThreshold` guards the way back to `writable`. Option 2 adds the per-probe ceiling, which bounds one probe and does not pace the loop. Option 4 overstates the backoff: it is per site and engages only once that site's `failCount` climbs *past* `failureThreshold`, so detecting any site's failure takes 6 s, a second fault during an existing outage included. The caveat worth adding to the runbook is the other direction: a long-down site can take up to 30 s to be noticed coming back. (objectives 10, 11)
+Adding `recoveryThreshold` to the detection sum is the single most common wrong answer about this operator. The two counters gate opposite transitions: `failureThreshold` guards the way to `Unreachable`, `recoveryThreshold` guards the way back to `Writable`. Option 2 adds the per-probe ceiling, which bounds one probe and does not pace the loop. Option 4 overstates the backoff: it is per site and engages only once that site's `failCount` climbs *past* `failureThreshold`, so detecting any site's failure takes 6 s, a second fault during an existing outage included. The caveat worth adding to the runbook is the other direction: a long-down site can take up to 30 s to be noticed coming back. (objectives 10, 11)
 
 ## Question 2
 
@@ -74,7 +74,7 @@ You are handed a group you have never seen. Using only the reference card, write
 
 **Sample answer:**
 
-One: `kubectl get mysqlfailovergroup <group> -o jsonpath='{.status.activeSite}'` — an empty answer means authority is ambiguous and every Service endpoint has been shed, which is the shape of split brain and of no-primary; a name means there is one writable authority. Two: the `Degraded` condition's `reason`, which is one of exactly five strings and tells me the topology shape rather than the action — and specifically rules out looking for a `Failover` reason, which does not exist. Three: `status.updatePhase` — non-empty means somebody is mid-rollout and any failover I am looking at is theirs, not a fault. Four: the per-site rows, `state` plus `secondsBehindSource` plus `recoveryState`, remembering that the writable primary's replication keys are absent rather than zero, that a lag of `-1` means not replicating at all, and that `role` is not in status so I have to read `spec.sites[].role` to tell a `read-only` reader from a lagging candidate.
+One: `kubectl get mysqlfailovergroup <group> -o jsonpath='{.status.activeSite}'` — an empty answer means authority is ambiguous and every Service endpoint has been shed, which is the shape of split brain and of no-primary; a name means there is one writable authority. Two: the `Degraded` condition's `reason`, which is one of exactly five strings and tells me the topology shape rather than the action — and specifically rules out looking for a `Failover` reason, which does not exist. Three: `status.updatePhase` — non-empty means somebody is mid-rollout and any failover I am looking at is theirs, not a fault. Four: the per-site rows, `state` plus `secondsBehindSource` plus `recoveryState`, remembering that the writable primary's replication keys are absent rather than zero, that a lag of `-1` means not replicating at all, and that `role` is not in status so I have to read `spec.sites[].role` to tell a `ReadOnly` reader from a lagging candidate.
 
 **A full-credit answer shows:**
 

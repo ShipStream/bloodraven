@@ -13,6 +13,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
+	"github.com/shipstream/bloodraven/internal/pitrplan"
 )
 
 const (
@@ -603,32 +604,29 @@ var sanityQueryStartRE = regexp.MustCompile(`(?i)^(\(|(select|with)\b)`)
 
 // verificationPITRRequest normalizes a verification's
 // PointInTimeVerificationSpec into the replay request the shared PITR
-// builders render. It returns nil (no replay) for empty or "none" input.
+// builders render. It returns nil (no replay) when the block is absent.
 // Verifications read the group's own active PITR archive and never accept
 // a Partial outcome.
 func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrReplayRequest, error) {
 	if in == nil {
 		return nil, nil
 	}
+	mode, err := pitrWireMode(in.Mode)
+	if err != nil {
+		return nil, err
+	}
 	// archiveProfileName reads a retained archive (after a prefix switch);
 	// empty means the group's active PITR profile (Δ28).
-	req := &pitrReplayRequest{Verification: true, ArchiveProfileName: in.ArchiveProfileName}
-	switch in.Mode {
-	case "", "none":
-		return nil, nil
-	case "latest":
-		req.Mode = "latest"
-	case "timestamp":
+	req := &pitrReplayRequest{Verification: true, ArchiveProfileName: in.ArchiveProfileName, Mode: string(mode)}
+	if mode == pitrplan.ModeTimestamp {
 		if in.Timestamp == "" {
-			return nil, fmt.Errorf("%s: pointInTime.timestamp is required when mode=timestamp", pitrarchive.TokenTargetInvalid)
+			return nil, fmt.Errorf("%s: pointInTime.timestamp is required when mode=Timestamp", pitrarchive.TokenTargetInvalid)
 		}
 		stop, err := parsePITRTarget(in.Timestamp)
 		if err != nil {
 			return nil, fmt.Errorf("%s: pointInTime.timestamp: %v", pitrarchive.TokenTargetInvalid, err)
 		}
-		req.Mode, req.Stop = "timestamp", canonicalPITRTarget(stop)
-	default:
-		return nil, fmt.Errorf("pointInTime.mode %q is not one of none|latest|timestamp", in.Mode)
+		req.Stop = canonicalPITRTarget(stop)
 	}
 	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", in.ExcludeGtids)
 	if err != nil {

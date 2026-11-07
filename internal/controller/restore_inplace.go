@@ -61,7 +61,7 @@ func inPlaceRestoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 		return fg.Spec.RestoreInPlace != nil
 	}
 	switch fg.Status.RestoreInPlace.Phase {
-	case v1alpha1.RestoreInPlaceSucceeded, v1alpha1.RestoreInPlaceFailed, v1alpha1.RestoreInPlaceNone:
+	case v1alpha1.RestoreInPlaceSucceeded, v1alpha1.RestoreInPlaceFailed, "":
 		return false
 	}
 	return true
@@ -241,29 +241,54 @@ func confirmAdvances(specConfirm, lastUsed string) (bool, error) {
 	return specT.After(lastT), nil
 }
 
-// inPlaceRestoreScope returns ("full", "") for a full-instance restore
-// or ("schema:<name>", "<name>") for a per-schema restore. The second
-// return value is the bare schema name used for DROP DATABASE and for
-// the mysqlbinlog --database filter.
-func inPlaceRestoreScope(spec *v1alpha1.RestoreInPlaceSpec) (string, string) {
+// inPlaceRestoreScope returns the scope the spec asks for: Full, or Schema
+// with the one schema in loadOptions.includeSchemas. The second return
+// value is the bare schema name ("" for Full) used for DROP DATABASE and
+// for the mysqlbinlog --database filter.
+func inPlaceRestoreScope(spec *v1alpha1.RestoreInPlaceSpec) (*v1alpha1.RestoreScope, string) {
 	if spec == nil || spec.LoadOptions == nil || len(spec.LoadOptions.IncludeSchemas) == 0 {
-		return "full", ""
+		return &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ""
 	}
 	name := spec.LoadOptions.IncludeSchemas[0]
-	return "schema:" + name, name
+	return &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: name}, name
 }
 
 // inPlaceRunScope returns the scope of the observed run: the one recorded
 // in status at Preflight, which later spec edits do not change. It falls
-// back to the spec only for a status that predates the Scope field.
-func inPlaceRunScope(fg *v1alpha1.MysqlFailoverGroup) (string, string) {
-	if cur := fg.Status.RestoreInPlace; cur != nil && cur.Scope != "" {
-		if name, ok := strings.CutPrefix(cur.Scope, "schema:"); ok {
-			return cur.Scope, name
-		}
-		return "full", ""
+// back to the spec only before a run records one (a rejection before
+// Preflight).
+func inPlaceRunScope(fg *v1alpha1.MysqlFailoverGroup) (*v1alpha1.RestoreScope, string) {
+	if cur := fg.Status.RestoreInPlace; cur != nil && cur.Scope != nil {
+		return cur.Scope, restoreScopeSchema(cur.Scope)
 	}
 	return inPlaceRestoreScope(fg.Spec.RestoreInPlace)
+}
+
+// restoreScopeSchema is the schema a Schema scope restores, or "".
+func restoreScopeSchema(s *v1alpha1.RestoreScope) string {
+	if s == nil || s.Type != v1alpha1.RestoreScopeSchema {
+		return ""
+	}
+	return s.Schema
+}
+
+// sameRestoreScope reports whether a and b restore the same thing.
+func sameRestoreScope(a, b *v1alpha1.RestoreScope) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Type == b.Type && restoreScopeSchema(a) == restoreScopeSchema(b)
+}
+
+// restoreScopeString describes a scope in a message: Full, or Schema "x".
+func restoreScopeString(s *v1alpha1.RestoreScope) string {
+	if s == nil {
+		return "unset"
+	}
+	if s.Type == v1alpha1.RestoreScopeSchema {
+		return fmt.Sprintf("%s %q", s.Type, s.Schema)
+	}
+	return string(s.Type)
 }
 
 // validateInPlaceRestoreSpec enforces invariants that cannot be (or are
@@ -369,7 +394,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 			// consume the confirm (keeping the last executed one preserves
 			// the invalid-timestamp behavior and lets the user fix the spec
 			// and retry with the same confirm).
-			r.rejectInPlaceRestore(ctx, fg, prev, lastConsumedConfirm(prev), "", "", err.Error())
+			r.rejectInPlaceRestore(ctx, fg, prev, lastConsumedConfirm(prev), "", nil, err.Error())
 			return 0, nil
 		}
 		// The same privilege rejection inPlacePreflight applies, checked
@@ -382,7 +407,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 		msg, _ := r.inPlaceFencePrivilegeRejection(ctx, fg, spec, fg.Status.ActiveSite)
 		r.noteRestorePrivilegeCheck(fg, spec, msg != "")
 		if msg != "" {
-			r.rejectInPlaceRestore(ctx, fg, prev, lastConsumedConfirm(prev), "", "", msg)
+			r.rejectInPlaceRestore(ctx, fg, prev, lastConsumedConfirm(prev), "", nil, msg)
 			return 0, nil
 		}
 		scope, _ := inPlaceRestoreScope(spec)
@@ -537,10 +562,10 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 			break
 		}
 	}
-	if activeStatus == nil || activeStatus.State != "writable" {
+	if activeStatus == nil || activeStatus.State != v1alpha1.SiteStateWritable {
 		observedState := "<unknown>"
 		if activeStatus != nil {
-			observedState = activeStatus.State
+			observedState = string(activeStatus.State)
 		}
 		next := &v1alpha1.RestoreInPlaceStatus{
 			Phase:            v1alpha1.RestoreInPlacePreflight,
@@ -785,10 +810,10 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		// for a different scope would drop what the fence does not cover
 		// (or keep a whole-instance fence for a single schema), so an edit
 		// that lands before the Job exists ends this run instead.
-		if specScope, _ := inPlaceRestoreScope(spec); specScope != cur.Scope && cur.Scope != "" {
+		if specScope, _ := inPlaceRestoreScope(spec); cur.Scope != nil && !sameRestoreScope(specScope, cur.Scope) {
 			r.stampTerminalFailure(ctx, fg, target, cur.Scope, cur.ConfirmTokenUsed,
 				fmt.Sprintf("spec.restoreInPlace scope changed from %s to %s after the restore was accepted; nothing was restored. Bump confirm to restore with the new scope",
-					cur.Scope, specScope), v1alpha1.EventRestoreInPlaceRejected)
+					restoreScopeString(cur.Scope), restoreScopeString(specScope)), v1alpha1.EventRestoreInPlaceRejected)
 			return 0, nil
 		}
 		// A confirm bumped before the Job exists re-authorizes this run:
@@ -1134,7 +1159,7 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 // keeps the invalid-timestamp behavior (a still-invalid spec.Confirm keeps
 // failing confirmAdvances, so the status holds), and still stops an older
 // manifest from re-running the restore it already ran.
-func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, scope, confirmUsed, msg, eventReason string) {
+func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, scope *v1alpha1.RestoreScope, confirmUsed, msg, eventReason string) {
 	now := metav1.Now()
 	cur := fg.Status.RestoreInPlace
 	var start *metav1.Time
@@ -1172,7 +1197,7 @@ func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context,
 // prev already records this exact rejection it is left alone. Re-stamping
 // would bump completionTime, and that status write would trigger the next
 // reconcile, a hot loop of writes and events.
-func (r *MysqlFailoverGroupReconciler) rejectInPlaceRestore(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, prev *v1alpha1.RestoreInPlaceStatus, keepConfirm, target, scope, msg string) {
+func (r *MysqlFailoverGroupReconciler) rejectInPlaceRestore(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, prev *v1alpha1.RestoreInPlaceStatus, keepConfirm, target string, scope *v1alpha1.RestoreScope, msg string) {
 	if prev != nil && prev.Phase == v1alpha1.RestoreInPlaceFailed && prev.ConfirmTokenUsed == keepConfirm && prev.Message == msg {
 		return
 	}

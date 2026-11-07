@@ -267,7 +267,7 @@ func TestRecovery_EmptySiteDoesNotStarveDivergentSite(t *testing.T) {
 	blocked := ""
 	for _, s := range tm.Status().Sites {
 		if s.Name == "dc2" {
-			blocked = s.RecoveryState
+			blocked = string(s.RecoveryState)
 		}
 	}
 	if blocked != "RecoveryBlocked" {

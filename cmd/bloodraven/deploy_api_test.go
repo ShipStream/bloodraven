@@ -55,7 +55,7 @@ func newDeployAPIFixture(t *testing.T) *deployAPIFixture {
 	f.group.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	f.group.Status.ActiveSite = "iad"
 	f.group.Status.TopologyGeneration = 7
-	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}, {Name: "pdx", State: "read-only", Replicating: true}}
+	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true}}
 	f.group.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.NewTime(f.now)}}
 	f.db = &v1alpha1.MysqlDatabase{ObjectMeta: metav1.ObjectMeta{Name: "tenant", Namespace: f.group.Namespace}, Spec: v1alpha1.MysqlDatabaseSpec{
 		FailoverGroupRef:  v1alpha1.LocalFailoverGroupRef{Name: f.group.Name},
@@ -531,7 +531,7 @@ func TestDeployAPIUnstableAndFreshSnapshot(t *testing.T) {
 	lag := int64(9)
 	f.group.Status.ActiveSite = "pdx"
 	f.group.Status.TopologyGeneration = 8
-	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "pdx", State: "writable"}, {Name: "iad", State: "read-only", SecondsBehindSource: &lag, RecoveryState: "Recloning", SourceConvergenceState: v1alpha1.SourceConvergencePending}}
+	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "pdx", State: v1alpha1.SiteStateWritable}, {Name: "iad", State: v1alpha1.SiteStateReadOnly, SecondsBehindSource: &lag, RecoveryState: "Recloning", SourceConvergenceState: v1alpha1.SourceConvergencePending}}
 	f.group.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse}, {Type: "Degraded", Status: metav1.ConditionTrue, Reason: "ReplicaDown"}, {Type: "RecoveryPending", Status: metav1.ConditionTrue}}
 	f.group.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseDeferred,
 		Admission: &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferDeploymentHold}}

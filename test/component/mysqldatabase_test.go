@@ -161,8 +161,8 @@ func mdbGroup(activeSite string) *v1alpha1.MysqlFailoverGroup {
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", ServerID: 101, Role: "primary-candidate"},
-				{Name: "dc2", ServerID: 102, Role: "primary-candidate"},
+				{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
+				{Name: "dc2", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
 			},
 		},
 	}
@@ -937,7 +937,7 @@ func TestMysqlDatabaseRotationSurvivesFailedReadyStamp(t *testing.T) {
 	h.server.removeUser(mdbOwnerUser)
 	h.server.addUser("acme_app_v2", "owner-pw-2")
 	mdb := h.get()
-	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseCreating
+	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
 	mdb.Status.PendingOwnerUser = "acme_app_v2"
 	mdb.Status.LastAppliedHash = ""
 	if err := h.client.Status().Update(context.Background(), mdb); err != nil {

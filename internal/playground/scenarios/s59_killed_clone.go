@@ -336,11 +336,11 @@ func s59RestorePrimary(st *s59State) runner.Step {
 			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "original primary active again",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					s := statusSiteByName(mfg, st.primary)
-					state := ""
+					var state v1alpha1.SiteState
 					if s != nil {
 						state = s.State
 					}
-					return mfg.Status.ActiveSite == st.primary && state == "writable",
+					return mfg.Status.ActiveSite == st.primary && state == v1alpha1.SiteStateWritable,
 						fmt.Sprintf("activeSite=%q %s=%q", mfg.Status.ActiveSite, st.primary, state), nil
 				}); err != nil {
 				return err

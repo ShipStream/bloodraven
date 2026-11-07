@@ -24,11 +24,11 @@ The operator is on the failure-detection and promotion path, not the request pat
 
 **Type:** SHORT_ANSWER
 
-Chaos scenario 42 applies `SOURCE_DELAY` to the `read-only` site `reader` and soaks `playground` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?
+Chaos scenario 42 applies `SOURCE_DELAY` to the `ReadOnly` site `reader` and soaks `playground` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?
 
 **Sample answer:**
 
-`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!="reader"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-playground-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the read-only role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.
+`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!="reader"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-playground-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the `ReadOnly` role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.
 
 **A full-credit answer shows:**
 
@@ -36,7 +36,7 @@ A strong answer names `BloodravenReplicationLagging` (or an equivalent rule on `
 
 **Explanation:**
 
-The reader shedding its endpoint is the read-only role working as designed, so an alert on it is a page for a non-event the system already handled. Raising the threshold or extending `for:` would also mute a genuinely lagging `pdx`; the exclusion is surgical because it removes exactly the one site whose lag has no bearing on RPO. (objectives 10, 12)
+The reader shedding its endpoint is the `ReadOnly` role working as designed, so an alert on it is a page for a non-event the system already handled. Raising the threshold or extending `for:` would also mute a genuinely lagging `pdx`; the exclusion is surgical because it removes exactly the one site whose lag has no bearing on RPO. (objectives 10, 12)
 
 ## Question 3
 

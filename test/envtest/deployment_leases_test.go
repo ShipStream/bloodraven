@@ -33,8 +33,8 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.Now()}}
 			fg.Status.Sites = []v1alpha1.SiteStatus{
-				{Name: "dc1", State: "writable"},
-				{Name: "dc2", State: "read-only", Replicating: true},
+				{Name: "dc1", State: v1alpha1.SiteStateWritable},
+				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
 			}
 			if err := k8sClient.Status().Update(ctx, fg); err != nil {
 				t.Fatal(err)

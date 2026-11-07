@@ -270,7 +270,7 @@ const (
 // Condition-mirror Event reasons recorded on a MysqlBackupVerification: each repeats
 // the reason of the condition the same step sets.
 const (
-	EventPITRFailedSentinel            = string(PITRTokenPITRFailed)
+	EventPITRReplayFailed              = string(PITRTokenReplayFailed)
 	EventBackupIdentityMismatch        = ReasonBackupIdentityMismatch
 	EventBackupNotAvailable            = ReasonBackupNotAvailable
 	EventBlockedByActiveVerification   = ReasonBlockedByActiveVerification

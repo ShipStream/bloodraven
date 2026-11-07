@@ -32,17 +32,17 @@ decision, and it will disagree first on exactly the fixture that matters.
 
 `is_serving` branches on `site_role(...)`.
 
-The `read-only` branch tests all five conjuncts together: `sourceConvergenceState` is `Converged`,
+The `ReadOnly` branch tests all five conjuncts together: `sourceConvergenceState` is `Converged`,
 `replicating` is true, `secondsBehindSource` is present, `canonical_host(sourceHost)` equals
 `expected_source_host(...)` for the active site, and the lag is at or under
 `effective_readonly_max_lag(spec)`.
 
-Every other role is served on `state` alone — `writable` or `read-only` — with no lag gate. A
-`primary-candidate` replica 300 seconds behind stays behind `mysql-playground-replicas` and is still
+Every other role is served on `state` alone — `Writable` or `ReadOnly` — with no lag gate. A
+`PrimaryCandidate` replica 300 seconds behind stays behind `mysql-playground-replicas` and is still
 `SERVING yes`. That is the operator's real behaviour, not a simplification.
 
 - **27** — both branches correct, five conjuncts present, the correct threshold helper called.
-- **14** — the five conjuncts are right but the same gate is wrongly applied to `primary-candidate`
+- **14** — the five conjuncts are right but the same gate is wrongly applied to `PrimaryCandidate`
   sites, or one conjunct is missing.
 - **0** — the reader is gated on `effective_max_lag` instead of `effective_readonly_max_lag`.
 

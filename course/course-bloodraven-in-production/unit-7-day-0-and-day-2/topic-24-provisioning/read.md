@@ -144,7 +144,7 @@ much later — as a reclone that will not start, or a backup job that cannot tak
 `password` and the operator runs `ALTER USER` on the primary for you. `MYSQL_ROOT_PASSWORD` and a
 dedicated replication user's password are read only by the first-boot script, so changing them in
 the Secret changes what the operator *presents*, not what MySQL *accepts*, and the failure looks like
-a site going `unreachable` for no reason.
+a site going `Unreachable` for no reason.
 
 ## The manifest, decision by decision
 
@@ -177,10 +177,10 @@ spec:
   sites:
     - name: iad
       serverID: 101
-      role: primary-candidate
+      role: PrimaryCandidate
       zone: us-east-1a
-      lbIP: "10.20.30.11"                 # required unless role is read-only
-      taintNodeSelector:                  # required unless role is read-only
+      lbIP: "10.20.30.11"                 # required unless role is ReadOnly
+      taintNodeSelector:                  # required unless role is ReadOnly
         shipstream.io/failover-group.ledger: "true"
         shipstream.io/site.ledger: iad
       storage:
@@ -191,11 +191,11 @@ spec:
         limits:   { cpu: "4", memory: 8Gi }
     - name: pdx
       serverID: 102
-      role: primary-candidate
+      role: PrimaryCandidate
       # … same shape, its own zone, lbIP, node labels and storage class …
     - name: reader
       serverID: 103
-      role: read-only                     # no lbIP and no taintNodeSelector: never promoted, never tainted
+      role: ReadOnly                      # no lbIP and no taintNodeSelector: never promoted, never tainted
       storage:
         storageClassName: standard-west
         size: 500Gi
@@ -205,7 +205,7 @@ Four lines earn a second look.
 
 **`storageClassName` is per site, deliberately.** Sites are in different failure domains and often on
 different hardware. Nothing requires them to match, and a reader on cheaper storage is a legitimate
-choice — right up until you remember from Unit 6 that a `role: read-only` site can never source a
+choice — right up until you remember from Unit 6 that a `role: ReadOnly` site can never source a
 backup, so cheap reader storage buys you nothing on the recovery path.
 
 **`resources.limits.memory` should equal `requests.memory` for MySQL.** Kubernetes gives a Pod the
@@ -218,7 +218,7 @@ for memory pressure is an unplanned failover you did not schedule.
 labels. Get the label wrong and nothing errors — the taint is simply applied to nothing, and the
 eviction half of your failover strategy silently does not exist.
 
-**`lbIP` and `taintNodeSelector` are required unless the role is `read-only`.** That is a CEL rule, so
+**`lbIP` and `taintNodeSelector` are required unless the role is `ReadOnly`.** That is a CEL rule, so
 you find out at `kubectl apply`, which is the good case.
 
 ## What admission catches, and what it does not
@@ -232,9 +232,9 @@ Learn this split. It decides which of your mistakes cost you seconds and which c
 - `spec.sites[].name` must be unique (`spec.sites` is a list keyed by name)
 - every site has a `serverID` between 1 and 4294967295, unique in the group and immutable once set:
   it is the MySQL `server_id`, so it does not change when sites are reordered
-- at least two sites with role `primary-candidate`
-- `splitBrainPolicy.sitePriorities` entries must name `primary-candidate` sites
-- `taintNodeSelector` and `lbIP` are required unless the role is `read-only`
+- at least two sites with role `PrimaryCandidate`
+- `splitBrainPolicy.sitePriorities` entries must name `PrimaryCandidate` sites
+- `taintNodeSelector` and `lbIP` are required unless the role is `ReadOnly`
 - `sidecar.peerCheckInterval` ≥ 1s, `sidecar.leaseTimeout` ≥ 3s, and `leaseTimeout` ≥ 3 × `peerCheckInterval`
 - `encryptionAtRest.enabled` requires `spec.tls`
 - `serviceTemplate.externalTrafficPolicy` requires an effective type of `NodePort` or `LoadBalancer`
@@ -261,8 +261,8 @@ no active site has been named yet. From Unit 2 you know what the matrix does wit
 read-only and none unreachable: `NoPrimary`, and it refuses to elect. That is not what happens, and
 the reason is a separate, deliberately conservative check.
 
-`isFreshDeploy` requires **three** things of *every* site at once: it is reachable (`read-only`, or
-`writable` if its pod predates the boot flag), it has never had replication configured
+`isFreshDeploy` requires **three** things of *every* site at once: it is reachable (`ReadOnly`, or
+`Writable` if its pod predates the boot flag), it has never had replication configured
 (`SHOW REPLICA STATUS` returns nothing), and it holds no data — an empty `GTID_EXECUTED`,
 cross-checked against user schemas where the probe is available. Only then does the operator seed
 the group: pick a site by `sitePriorities`, lift its fence, report it as the active site at once,

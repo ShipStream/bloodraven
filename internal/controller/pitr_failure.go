@@ -21,16 +21,18 @@ import (
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
-// pitrFailureReason returns the first refusal token in message (§7.1), or
-// "". Every PITR step writes its token as the first word of its termination
-// message; the controller may prefix it ("PITRCoverageInvalid: " when it
-// refuses a verdict), so the earliest whole-word token wins.
-func pitrFailureReason(message string) string {
+// pitrFailureReason returns the served reason for the first refusal token
+// in message (§7.1), or "". Every PITR step writes its token as the first
+// word of its termination message; the controller may prefix it
+// ("PITRCoverageInvalid: " when it refuses a verdict), so the earliest
+// whole-word token wins. The replay script's sentinel is served as
+// PITRReplayFailed; the message keeps the raw sentinel.
+func pitrFailureReason(message string) v1alpha1.PITRToken {
 	for _, field := range strings.FieldsFunc(message, func(r rune) bool {
 		return strings.ContainsRune(" \t\n\r:,;()\"{}=", r)
 	}) {
 		if t := pitrarchive.Token(strings.TrimSuffix(field, ".")); t.Known() {
-			return string(t)
+			return v1alpha1.PITRToken(t.Served())
 		}
 	}
 	return ""
@@ -188,7 +190,7 @@ func renderedPITRRequest(job *batchv1.Job) pitrRenderedRequest {
 		Destination:       init["BLOODRAVEN_PITR_DESTINATION"],
 		EncryptionMode:    init["BLOODRAVEN_PITR_ENCRYPTION_MODE"],
 		ExpectedSourceUID: main["BLOODRAVEN_PITR_EXPECTED_SOURCE_UID"],
-		Verification:      main["BLOODRAVEN_VERIFY_PITR_MODE"] != "" && main["BLOODRAVEN_VERIFY_PITR_MODE"] != "none",
+		Verification:      main["BLOODRAVEN_VERIFY_PITR_MODE"] != "",
 	}
 }
 

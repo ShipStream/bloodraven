@@ -49,7 +49,7 @@ func TestAssertReaderServingStatus(t *testing.T) {
 	}
 	status := v1alpha1.SiteStatus{
 		Name:                   "reader",
-		State:                  "read-only",
+		State:                  v1alpha1.SiteStateReadOnly,
 		Replicating:            true,
 		SecondsBehindSource:    &lag,
 		SourceHost:             "mysql-playground-iad-internal.ns.svc.cluster.local:3306",

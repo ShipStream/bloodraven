@@ -250,7 +250,7 @@ func TestInPlaceRestorePreservesMetadataThroughResuming(t *testing.T) {
 		Phase:              v1alpha1.RestoreInPlaceResuming,
 		JobName:            "job",
 		TargetSite:         "iad",
-		Scope:              "full",
+		Scope:              &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
 		StartTime:          ptrTime(time.Now()),
 		SourceSizeBytes:    777,
 		TargetGtidExecuted: "uuid:1-7",

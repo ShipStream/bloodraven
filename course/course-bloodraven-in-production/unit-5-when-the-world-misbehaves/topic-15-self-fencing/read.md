@@ -129,7 +129,7 @@ You must move both.
 
 Now the hard part. Rule #2 requires the operator **and every peer** to be silent for the whole window.
 One reachable peer keeps the primary writable. That is documented as "retained compatibility
-behavior, not a quorum guarantee" — no counting, no majority, no tie-break. And a `role: read-only`
+behavior, not a quorum guarantee" — no counting, no majority, no tie-break. And a `role: ReadOnly`
 reader counts as a peer: it relays topology and answers `/peer/ping`, and "A reachable peer without
 fresh authoritative topology can still suppress the lease-only all-peers-unreachable fence."
 

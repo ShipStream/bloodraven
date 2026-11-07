@@ -20,7 +20,7 @@ func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 							KeepOnFailure:           &truePtr,
 							TTLSecondsAfterFinished: 600,
 							PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-								Mode: "latest",
+								Mode: v1alpha1.PointInTimeModeLatest,
 							},
 							SanityCheck: &v1alpha1.SanityCheckSpec{
 								Query: "SELECT 1",
@@ -48,7 +48,7 @@ func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 	if cr.Spec.TTLSecondsAfterFinished != 600 {
 		t.Errorf("TTLSecondsAfterFinished = %d, want 600", cr.Spec.TTLSecondsAfterFinished)
 	}
-	if cr.Spec.PointInTime == nil || cr.Spec.PointInTime.Mode != "latest" {
+	if cr.Spec.PointInTime == nil || cr.Spec.PointInTime.Mode != v1alpha1.PointInTimeModeLatest {
 		t.Errorf("PointInTime not deep-copied from VerificationSpec; got %+v", cr.Spec.PointInTime)
 	}
 	if cr.Spec.SanityCheck == nil || cr.Spec.SanityCheck.Query != "SELECT 1" {

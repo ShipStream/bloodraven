@@ -20,7 +20,7 @@ func init() {
 // trigger and waits for the state machine to reach Succeeded. Asserts
 // outcome Succeeded with the promotion watermark equal to the fenced set (the
 // planned-switchover invariant: nothing acknowledged is lost) and that
-// bloodraven_planned_failovers_total{result="success"} incremented.
+// bloodraven_planned_failovers_total{result="succeeded"} incremented.
 func scenario02PlannedSwitchover() runner.Scenario {
 	return runner.Scenario{
 		ID:    "02-planned-switchover",
@@ -136,7 +136,7 @@ func injectPlannedFailoverAnnotation() runner.Step {
 			}
 			if err := stashMetricCounter(ctx, env, "plannedFailoversBefore", "bloodraven_planned_failovers_total", map[string]string{
 				"target_site": peer,
-				"result":      "success",
+				"result":      "succeeded",
 			}); err != nil {
 				return err
 			}
@@ -228,7 +228,7 @@ func verifyPlannedFailoverWatermark() runner.Step {
 func verifyPlannedFailoverMetric() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  `bloodraven_planned_failovers_total{result="success"} increments`,
+		Name:  `bloodraven_planned_failovers_total{result="succeeded"} increments`,
 		Do: func(ctx context.Context, env *runner.Env) error {
 			target := ctxFetch(env, "switchoverTarget")
 			before, err := fetchStashedFloat(env, "plannedFailoversBefore")
@@ -238,11 +238,11 @@ func verifyPlannedFailoverMetric() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			return env.Wait.UntilMetric(waitCtx, env.Metrics,
-				fmt.Sprintf(`planned_failovers_total{target_site=%q,result="success"} increments from %g`, target, before),
+				fmt.Sprintf(`planned_failovers_total{target_site=%q,result="succeeded"} increments from %g`, target, before),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
 					v, _ := snap.Counter("bloodraven_planned_failovers_total", map[string]string{
 						"target_site": target,
-						"result":      "success",
+						"result":      "succeeded",
 					})
 					return v > before, fmt.Sprintf("counter=%g before=%g delta=%g", v, before, v-before)
 				},

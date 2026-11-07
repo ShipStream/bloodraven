@@ -1,7 +1,7 @@
 # The six-row table that decides everything
 
 You can name each site's state. A site takes `pollInterval × failureThreshold` = 2 s × 3 = **6 s**
-to reach `unreachable`. What you cannot yet do is turn three of those labels into one decision.
+to reach `Unreachable`. What you cannot yet do is turn three of those labels into one decision.
 
 That is one function: `EvalCrossSite` in `internal/state/matrix.go`. It takes the per-site
 observations and returns a single action. The condition reason, the alert text, and whether a
@@ -11,7 +11,7 @@ promotion happens at all all fall out of it.
 
 The function is a sequence of guarded early returns. A row can only fire if every row above it declined. Reading the table as an unordered list of cases is the commonest way to predict the operator wrongly.
 
-Before any row is evaluated, one loop walks the observations and does three things. It counts `coreCount`, incrementing for every site whose role is **not** `read-only`. It routes any site that is `writable` while its role is not `primary-candidate` into `action.FenceSites` and `continue`s — so that site never reaches a tally. And it drops `role: read-only` sites entirely. The consequence people get wrong: a `dr-only` site is **not** excluded. `dr-only` is non-promotable, but it still counts toward `coreCount` and it still lands in the `readOnly` or `unreachable` tally. Only `role: read-only` is invisible to the matrix (objective 4).
+Before any row is evaluated, one loop walks the observations and does three things. It counts `coreCount`, incrementing for every site whose role is **not** `ReadOnly`. It routes any site that is `Writable` while its role is not `PrimaryCandidate` into `action.FenceSites` and `continue`s — so that site never reaches a tally. And it drops `role: ReadOnly` sites entirely. The consequence people get wrong: a `DisasterRecovery` site is **not** excluded. `DisasterRecovery` is non-promotable, but it still counts toward `coreCount` and it still lands in the `readOnly` or `unreachable` tally. Only `role: ReadOnly` is invisible to the matrix (objective 4).
 
 ```widget
 {
@@ -61,9 +61,9 @@ Take the habit rather than the grievance. The CRD is the contract, the code is t
 
 ## Worked: two states of `playground`
 
-**A — `iad` dies.** After 6 s of failed polls `iad` is `unreachable`, `pdx` is `read-only`, `reader` is `read-only`. The loop: `reader` is excluded, so `coreCount = 2`. No writable non-candidate, so `FenceSites` is empty. Tallies: `writable = []`, `readOnly = [pdx]`, `unreachable = [iad]`. Row by row — fence-first declines (empty); `TotalLoss` declines (1 ≠ 2); `SplitBrain` declines (0 is not > 1); the failover row's three conjuncts all hold, so `PromotionCandidates = [pdx]` and `Reason = "Degraded"`, with no alert. The caller then runs `pickFreshestCandidate` over that list.
+**A — `iad` dies.** After 6 s of failed polls `iad` is `Unreachable`, `pdx` is `ReadOnly`, `reader` is `ReadOnly`. The loop: `reader` is excluded, so `coreCount = 2`. No writable non-candidate, so `FenceSites` is empty. Tallies: `writable = []`, `readOnly = [pdx]`, `unreachable = [iad]`. Row by row — fence-first declines (empty); `TotalLoss` declines (1 ≠ 2); `SplitBrain` declines (0 is not > 1); the failover row's three conjuncts all hold, so `PromotionCandidates = [pdx]` and `Reason = "Degraded"`, with no alert. The caller then runs `pickFreshestCandidate` over that list.
 
-**B — `reader` turns writable.** Every `mysqld` starts with `read_only=ON`, so a restart alone no longer does this; a manual `SET GLOBAL read_only=OFF`, or a reader pod not yet rolled onto that flag mid-upgrade, does. Now `iad` is `writable`, `pdx` is `read-only`, `reader` is `writable`. The loop: `reader` is not counted in `coreCount` (still 2), and because it is writable while non-candidate it goes to `FenceSites` and is skipped — it never joins the `writable` tally. So `writable = [iad]`. Fence-first fires: alert `writable non-promotable site requires fencing (reader)`, `Reason = "Degraded"`, return. Note what did *not* happen: two sites in the group were genuinely accepting writes, and the operator did **not** report split brain, because `len(writable) > 1` counts core sites only and the reader was already removed (objective 6).
+**B — `reader` turns writable.** Every `mysqld` starts with `read_only=ON`, so a restart alone no longer does this; a manual `SET GLOBAL read_only=OFF`, or a reader pod not yet rolled onto that flag mid-upgrade, does. Now `iad` is `Writable`, `pdx` is `ReadOnly`, `reader` is `Writable`. The loop: `reader` is not counted in `coreCount` (still 2), and because it is writable while non-candidate it goes to `FenceSites` and is skipped — it never joins the `writable` tally. So `writable = [iad]`. Fence-first fires: alert `writable non-promotable site requires fencing (reader)`, `Reason = "Degraded"`, return. Note what did *not* happen: two sites in the group were genuinely accepting writes, and the operator did **not** report split brain, because `len(writable) > 1` counts core sites only and the reader was already removed (objective 6).
 
 ```widget
 {

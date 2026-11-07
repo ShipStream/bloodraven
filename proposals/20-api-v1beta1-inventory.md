@@ -12,8 +12,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - Root required: `spec`
 - Root CEL: `!has(oldSelf.spec.backup) || !has(self.spec.backup) || !has(oldSelf.spec.backup.pitr) || !has(self.spec.backup.pitr) || !(has(oldSelf.spec.backup.pitr.enabled) && oldSelf.spec.backup.pitr.enabled) || !(has(self.spec.backup.pitr.enabled) && self.spec.backup.pitr.enabled) || !has(oldSelf.spec.backup.pitr.profileName) || !has(self.spec.backup.pitr.profileName) || oldSelf.spec.backup.pitr.profileName != self.spec.backup.pitr.profileName || !has(oldSelf.spec.backup.profiles) || !has(self.spec.backup.profiles) || self.spec.backup.profiles.all(p, p.name != self.spec.backup.pitr.profileName || oldSelf.spec.backup.profiles.all(o, o.name != p.name || !(o.storage.type == p.storage.type && has(o.storage.s3) == has(p.storage.s3) && (!has(o.storage.s3) || (o.storage.s3.bucket == p.storage.s3.bucket && (has(o.storage.s3.prefix) ? o.storage.s3.prefix : '') == (has(p.storage.s3.prefix) ? p.storage.s3.prefix : '') && (has(o.storage.s3.endpointURL) ? o.storage.s3.endpointURL : '') == (has(p.storage.s3.endpointURL) ? p.storage.s3.endpointURL : ''))) && has(o.storage.pvc) == has(p.storage.pvc) && (!has(o.storage.pvc) || ((has(o.storage.pvc.claimName) ? o.storage.pvc.claimName : '') == (has(p.storage.pvc.claimName) ? p.storage.pvc.claimName : '') && (has(o.storage.pvc.subPath) ? o.storage.pvc.subPath : '') == (has(p.storage.pvc.subPath) ? p.storage.pvc.subPath : '')))) || (has(o.encryption) == has(p.encryption) && (!has(o.encryption) || ((has(o.encryption.algorithm) ? o.encryption.algorithm : 'AES-256-GCM') == (has(p.encryption.algorithm) ? p.encryption.algorithm : 'AES-256-GCM') && o.encryption.passphraseSecretKeyRef.name == p.encryption.passphraseSecretKeyRef.name && (has(o.encryption.passphraseSecretKeyRef.key) ? o.encryption.passphraseSecretKeyRef.key : 'passphrase') == (has(p.encryption.passphraseSecretKeyRef.key) ? p.encryption.passphraseSecretKeyRef.key : 'passphrase'))))))`
 - `spec` CEL: `self.sites.all(x, self.sites.filter(y, y.serverID == x.serverID).size() == 1)`
-- `spec` CEL: `self.sites.filter(s, s.role == 'primary-candidate').size() >= 2`
-- `spec` CEL: `!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))`
+- `spec` CEL: `self.sites.filter(s, s.role == 'PrimaryCandidate').size() >= 2`
+- `spec` CEL: `!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'PrimaryCandidate'))`
 - `spec` CEL: `!has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || (has(self.serviceTemplate.type) && self.serviceTemplate.type in ['NodePort', 'LoadBalancer'])`
 - `spec` CEL: `self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`
 - `spec` CEL: `self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.nodePort) || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`
@@ -21,7 +21,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)`
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))`
 
-### MysqlFailoverGroup `spec` (243 fields)
+### MysqlFailoverGroup `spec` (244 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -81,7 +81,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].verification.pointInTime` | object |  |  |  |
 | `spec.backup.profiles[].verification.pointInTime.archiveProfileName` | string |  |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `spec.backup.profiles[].verification.pointInTime.excludeGtids` | string |  |  | maxLength=131072 |
-| `spec.backup.profiles[].verification.pointInTime.mode` | string |  | `"none"` | enum: `none`, `latest`, `timestamp` |
+| `spec.backup.profiles[].verification.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
 | `spec.backup.profiles[].verification.pointInTime.timestamp` | string |  |  | maxLength=40; pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z\|[+-]([01][0-9]\|2[0-3]):[0-5][0-9])?$` |
 | `spec.backup.profiles[].verification.retentionPolicy` | object |  |  |  |
 | `spec.backup.profiles[].verification.retentionPolicy.keepFailures` | integer (int32) |  | `10` | minimum=0 |
@@ -245,12 +245,12 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.sidecar.peerCheckInterval` | string |  | `"5s"` |  |
 | `spec.sidecarImage` | string |  | `"ghcr.io/shipstream/bloodraven-sidecar:1.3.2"` | minLength=1 |
 | `spec.sidecarResources` | corev1.ResourceRequirements |  |  |  |
-| `spec.sites` | []object | yes |  | minItems=2; maxItems=16; listType=map keys=name; items CEL: `self.role == 'read-only' \|\| (has(self.taintNodeSelector) && has(self.lbIP))` |
+| `spec.sites` | []object | yes |  | minItems=2; maxItems=16; listType=map keys=name; items CEL: `self.role == 'ReadOnly' \|\| (has(self.taintNodeSelector) && has(self.lbIP))` |
 | `spec.sites[].lbIP` | string |  |  | minLength=1 |
 | `spec.sites[].mysqlConf` | map[string]string |  |  |  |
 | `spec.sites[].name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9-]+$` |
 | `spec.sites[].resources` | corev1.ResourceRequirements |  |  |  |
-| `spec.sites[].role` | string |  | `"primary-candidate"` | enum: `primary-candidate`, `dr-only`, `read-only` |
+| `spec.sites[].role` | string |  | `"PrimaryCandidate"` | enum: `PrimaryCandidate`, `DisasterRecovery`, `ReadOnly` |
 | `spec.sites[].serverID` | integer (int64) | yes |  | minimum=1; maximum=4294967295; CEL(transition): `self == oldSelf` |
 | `spec.sites[].serviceTemplate` | object |  |  |  |
 | `spec.sites[].serviceTemplate.annotations` | map[string]string |  |  |  |
@@ -267,10 +267,11 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.terminationGracePeriodSeconds` | integer (int64) |  | `60` | minimum=1 |
 | `spec.tls` | object |  |  |  |
 | `spec.tls.secretName` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
-| `spec.updateStrategy` | string |  | `"OrderedUpdate"` | enum: `OrderedUpdate`, `Recreate` |
+| `spec.updateStrategy` | object |  | `{}` |  |
+| `spec.updateStrategy.type` | string |  | `"OrderedUpdate"` | enum: `OrderedUpdate`, `Recreate` |
 
 
-### MysqlFailoverGroup `status` (310 fields)
+### MysqlFailoverGroup `status` (312 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -278,7 +279,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.backupSchedules` | []object |  |  | listType=map keys=name |
 | `status.backupSchedules[].cronJobName` | string |  |  |  |
 | `status.backupSchedules[].lastBackupName` | string |  |  |  |
-| `status.backupSchedules[].lastBackupPhase` | string |  |  |  |
+| `status.backupSchedules[].lastBackupPhase` | string |  |  | enum: `Pending`, `Running`, `Succeeded`, `Failed` |
 | `status.backupSchedules[].lastRetryAttempt` | integer (int32) |  |  |  |
 | `status.backupSchedules[].lastScheduleTime` | string (date-time) |  |  |  |
 | `status.backupSchedules[].lastSuccessfulBackupName` | string |  |  |  |
@@ -293,7 +294,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.dragonfly.lastPromotionTarget` | string |  |  |  |
 | `status.dragonfly.lastPromotionTime` | string (date-time) |  |  |  |
 | `status.dragonfly.message` | string |  |  |  |
-| `status.dragonfly.phase` | string |  |  | enum: ``, `Disabled`, `Reconciling`, `ConfiguringReplication`, `Ready`, `Degraded`, `Promoting` |
+| `status.dragonfly.phase` | string |  |  | enum: `Disabled`, `Reconciling`, `ConfiguringReplication`, `Ready`, `Degraded`, `Promoting` |
 | `status.dragonfly.replTakeoverProbeMessage` | string |  |  |  |
 | `status.dragonfly.replTakeoverProbeTime` | string (date-time) |  |  |  |
 | `status.dragonfly.replTakeoverSupported` | boolean |  |  |  |
@@ -306,7 +307,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.dragonfly.sites[].reachable` | boolean |  |  |  |
 | `status.dragonfly.sites[].ready` | boolean |  |  |  |
 | `status.dragonfly.sites[].replicationState` | string |  |  |  |
-| `status.dragonfly.sites[].role` | string |  |  | enum: `unknown`, `master`, `replica`, `stale-master`, `unconfigured`, `unreachable` |
+| `status.dragonfly.sites[].role` | string |  |  | enum: `Unknown`, `Master`, `Replica`, `StaleMaster`, `Unconfigured`, `Unreachable` |
 | `status.dragonfly.sites[].serviceName` | string |  |  |  |
 | `status.dragonfly.sites[].syncInProgress` | boolean |  |  |  |
 | `status.dragonfly.upgrade` | object |  |  |  |
@@ -314,7 +315,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.dragonfly.upgrade.completionTime` | string (date-time) |  |  |  |
 | `status.dragonfly.upgrade.message` | string |  |  |  |
 | `status.dragonfly.upgrade.phase` | string |  |  | enum: `Pending`, `SavingSnapshot`, `UpdatingActive`, `WaitingForActiveRestore`, `ReattachingReplicas`, `Succeeded`, `Failed` |
-| `status.dragonfly.upgrade.reason` | string |  |  |  |
+| `status.dragonfly.upgrade.reason` | string |  |  | maxLength=1024; pattern=`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$` |
 | `status.dragonfly.upgrade.snapshotDir` | string |  |  |  |
 | `status.dragonfly.upgrade.snapshotTime` | string (date-time) |  |  |  |
 | `status.dragonfly.upgrade.sourceImage` | string |  |  |  |
@@ -339,8 +340,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.encryptionAtRest.sites[].lastEscrowTime` | string (date-time) |  |  |  |
 | `status.encryptionAtRest.sites[].message` | string |  |  |  |
 | `status.encryptionAtRest.sites[].name` | string | yes |  |  |
-| `status.encryptionAtRest.sites[].phase` | string |  |  | enum: ``, `Pending`, `Unsealed`, `Escrowed`, `Sealed`, `Failed` |
-| `status.encryptionAtRest.sites[].unsealReason` | string |  |  | enum: ``, `Bootstrap`, `Clone`, `Rotation` |
+| `status.encryptionAtRest.sites[].phase` | string |  |  | enum: `Pending`, `Unsealed`, `Escrowed`, `Sealed`, `Failed` |
+| `status.encryptionAtRest.sites[].unsealReason` | string |  |  | enum: `Bootstrap`, `Clone`, `Rotation` |
 | `status.encryptionAtRest.sites[].unsealedSince` | string (date-time) |  |  |  |
 | `status.lastBackupTime` | string (date-time) |  |  |  |
 | `status.lastFailover` | string (date-time) |  |  |  |
@@ -490,7 +491,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restore.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
 | `status.restore.pointInTime.segmentCount` | integer (int32) |  |  |  |
 | `status.restore.pointInTime.stopTime` | string (date-time) |  |  |  |
-| `status.restore.reason` | string |  |  |  |
+| `status.restore.reason` | string |  |  | maxLength=1024; pattern=`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$` |
 | `status.restore.sourceBinlogFile` | string |  |  |  |
 | `status.restore.sourceBinlogPos` | integer (int64) |  |  |  |
 | `status.restore.sourceGtidExecuted` | string |  |  |  |
@@ -506,7 +507,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restoreInPlace.jobCreating` | boolean |  |  |  |
 | `status.restoreInPlace.jobName` | string |  |  |  |
 | `status.restoreInPlace.message` | string |  |  |  |
-| `status.restoreInPlace.phase` | string |  |  | enum: ``, `Preflight`, `Fencing`, `Restoring`, `Resuming`, `Succeeded`, `Failed` |
+| `status.restoreInPlace.phase` | string |  |  | enum: `Preflight`, `Fencing`, `Restoring`, `Resuming`, `Succeeded`, `Failed` |
 | `status.restoreInPlace.pointInTime` | object |  |  |  |
 | `status.restoreInPlace.pointInTime.archive` | object |  |  |  |
 | `status.restoreInPlace.pointInTime.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
@@ -536,7 +537,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restoreInPlace.pointInTime.stopTime` | string (date-time) |  |  |  |
 | `status.restoreInPlace.runConfirm` | string |  |  |  |
 | `status.restoreInPlace.runID` | string |  |  |  |
-| `status.restoreInPlace.scope` | string |  |  |  |
+| `status.restoreInPlace.scope` | object |  |  | CEL: `self.type == 'Schema' ? has(self.schema) : !has(self.schema)` |
+| `status.restoreInPlace.scope.schema` | string |  |  | minLength=1; maxLength=64 |
+| `status.restoreInPlace.scope.type` | string | yes |  | enum: `Full`, `Schema` |
 | `status.restoreInPlace.sourceBinlogFile` | string |  |  |  |
 | `status.restoreInPlace.sourceBinlogPos` | integer (int64) |  |  |  |
 | `status.restoreInPlace.sourceGtidExecuted` | string |  |  |  |
@@ -569,21 +572,21 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restoreReclones.superseded.pending` | []string |  |  | listType=atomic |
 | `status.sites` | []object |  |  | listType=map keys=name |
 | `status.sites[].divergenceComparedTo` | string |  |  |  |
-| `status.sites[].divergenceDetectedBy` | string |  |  | enum: ``, `OldPrimaryRecovery`, `ReplicaAudit` |
+| `status.sites[].divergenceDetectedBy` | string |  |  | enum: `OldPrimaryRecovery`, `ReplicaAudit` |
 | `status.sites[].divergentGtid` | string |  |  |  |
 | `status.sites[].divergentTransactionCount` | integer (int64) |  |  |  |
 | `status.sites[].gtidExecuted` | string |  |  |  |
 | `status.sites[].lastSeen` | string (date-time) |  |  |  |
 | `status.sites[].name` | string | yes |  | minLength=1 |
-| `status.sites[].recoveryState` | string |  |  | enum: ``, `RecoveryInProgress`, `RecoveryBlocked` |
+| `status.sites[].recoveryState` | string |  |  | enum: `RecoveryInProgress`, `RecoveryBlocked` |
 | `status.sites[].replicating` | boolean |  |  |  |
 | `status.sites[].secondsBehindSource` | integer (int64) |  |  |  |
-| `status.sites[].sourceConvergenceReason` | string |  |  |  |
-| `status.sites[].sourceConvergenceState` | string |  |  | enum: ``, `Converged`, `Pending`, `Blocked` |
+| `status.sites[].sourceConvergenceReason` | string |  |  | enum: `DirectSource`, `SourceMismatch`, `ProbeFailed`, `MutationFailed`, `GTIDDiverged`, `RestorePeerHold` |
+| `status.sites[].sourceConvergenceState` | string |  |  | enum: `Converged`, `Pending`, `Blocked` |
 | `status.sites[].sourceHost` | string |  |  |  |
-| `status.sites[].state` | string |  |  | enum: `writable`, `read-only`, `unreachable`, `unknown` |
+| `status.sites[].state` | string |  |  | enum: `Writable`, `ReadOnly`, `Unreachable`, `Unknown` |
 | `status.topologyGeneration` | integer (int64) |  |  | minimum=0 |
-| `status.updatePhase` | string |  |  |  |
+| `status.updatePhase` | string |  |  | enum: `UpdateReplica`, `WaitReplica`, `Failover`, `UpdateOldPrimary`, `WaitOldPrimary` |
 
 ## MysqlBackup
 
@@ -659,7 +662,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.pointInTime` | object |  |  |  |
 | `spec.pointInTime.archiveProfileName` | string |  |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `spec.pointInTime.excludeGtids` | string |  |  | maxLength=131072 |
-| `spec.pointInTime.mode` | string |  | `"none"` | enum: `none`, `latest`, `timestamp` |
+| `spec.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
 | `spec.pointInTime.timestamp` | string |  |  | maxLength=40; pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z\|[+-]([01][0-9]\|2[0-3]):[0-5][0-9])?$` |
 | `spec.profileName` | string | yes |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `spec.resources` | corev1.ResourceRequirements |  |  |  |
@@ -786,7 +789,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.ownerUser` | string |  |  |  |
 | `status.pendingOwnerHosts` | []string |  |  | listType=atomic |
 | `status.pendingOwnerUser` | string |  |  |  |
-| `status.phase` | string |  |  | enum: `Pending`, `Creating`, `Ready`, `Failed`, `Deleting` |
+| `status.phase` | string |  |  | enum: `Pending`, `Applying`, `Ready`, `Failed`, `Deleting` |
 
 ## MysqlStandbyCluster
 

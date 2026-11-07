@@ -101,7 +101,7 @@ func TestPlannedFailover_EngineOverRealFacadeSucceeds(t *testing.T) {
 	fg := newTestFG()
 	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}, {Name: "dc2", State: "read-only", Replicating: true}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true}}
 	faults := &pfFaults{}
 	c := newPFFakeClient(faults, fg)
 	clk := clock.NewFakeClock(f.clk.Now())

@@ -839,7 +839,7 @@ func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 		{
 			name: "an ordered update is running",
 			mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Status.UpdatePhase = string(UpdatePhaseWaitReplica)
+				fg.Status.UpdatePhase = v1alpha1.UpdatePhaseWaitReplica
 			},
 			wantMsg: "ordered update",
 		},

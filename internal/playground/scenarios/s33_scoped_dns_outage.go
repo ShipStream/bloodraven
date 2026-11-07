@@ -226,7 +226,7 @@ func s33ObserveDNSScoped() runner.Step {
 				}
 				writable := 0
 				for _, s := range mfg.Status.Sites {
-					if s.State == "writable" {
+					if s.State == v1alpha1.SiteStateWritable {
 						writable++
 					}
 					if s.RecoveryState == "RecoveryBlocked" {
@@ -308,7 +308,7 @@ func s33RemovePolicyAndRecover() runner.Step {
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					writable, replicatingPeers := 0, 0
 					for _, s := range mfg.Status.Sites {
-						if s.State == "writable" {
+						if s.State == v1alpha1.SiteStateWritable {
 							writable++
 						}
 						if s.RecoveryState == "RecoveryBlocked" {

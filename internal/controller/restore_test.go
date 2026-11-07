@@ -83,7 +83,7 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 func seedPublished(fg *v1alpha1.MysqlFailoverGroup) {
 	seed := fg.Spec.DefaultSeedSite().Name
 	fg.Status.ActiveSite = seed
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: seed, State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: seed, State: v1alpha1.SiteStateWritable}}
 }
 
 // primaryReadyDeployment returns a Deployment matching the first site with
@@ -393,7 +393,7 @@ func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
 		{"not seeded", v1alpha1.MysqlFailoverGroupStatus{}, `waiting for the operator to seed site "iad"`},
 		{"seeded, still observed read-only", v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
-			Sites:      []v1alpha1.SiteStatus{{Name: "iad", State: "read-only"}, {Name: "pdx", State: "read-only"}},
+			Sites:      []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly}},
 		}, `waiting for active site "iad" to be observed writable`},
 	}
 	for _, step := range steps {
@@ -442,7 +442,7 @@ func TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced(t *testing.T) {
 		t.Fatalf("status.restore = %+v, want Running", rs)
 	}
 
-	for _, st := range []string{"read-only", "unreachable"} {
+	for _, st := range []v1alpha1.SiteState{v1alpha1.SiteStateReadOnly, v1alpha1.SiteStateUnreachable} {
 		fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: st}}
 		if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 			t.Fatal(err)

@@ -188,11 +188,11 @@ func s40ObserverTestEnv(t *testing.T, clientset *k8sfake.Clientset) (*runner.Env
 			ActiveSite: "iad",
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
-				{Name: "pdx", State: "read-only", Replicating: true},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
 				{
 					Name:                   "reader",
-					State:                  "read-only",
+					State:                  v1alpha1.SiteStateReadOnly,
 					Replicating:            true,
 					SecondsBehindSource:    &lag,
 					SourceHost:             playgroundInternalSiteHost(pgkube.FailoverGroupName, "iad", pgkube.PlaygroundNamespace),

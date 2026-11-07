@@ -157,7 +157,7 @@ def canonical() -> None:
 # 2. Awkward topologies and the two durable history copies
 # --------------------------------------------------------------------------
 AWKWARD = {
-    # A dr-only site is non-promotable but still counts toward coreCount and
+    # A DisasterRecovery site is non-promotable but still counts toward coreCount and
     # still lands in a tally. Excluding it like a reader would read 2 == 2 and
     # report TotalLoss; promoting it would name lhr as a candidate.
     "playground-dr-only.json": {
@@ -173,7 +173,7 @@ AWKWARD = {
         "alert": "writable non-promotable site requires fencing (reader)",
         "willRun": ["fence:reader"],
     },
-    # Every site unknown at startup: no tally holds anything, and the message is
+    # Every site Unknown at startup: no tally holds anything, and the message is
     # the general one, not the two-site one.
     "playground-unknown-startup.json": {
         "coreCount": 2, "writable": [], "readOnly": [], "unreachable": [],
@@ -184,7 +184,7 @@ AWKWARD = {
         "coreCount": 3, "reason": "Degraded", "promotionCandidates": ["sfo", "pdx"],
         "willRun": ["promote"],
     },
-    # A site absent from status.sites is unknown, not missing.
+    # A site absent from status.sites is Unknown, not missing.
     "playground-reader-unpolled.json": {
         "coreCount": 2, "writable": ["iad"], "readOnly": ["pdx"], "reason": "Healthy",
     },
@@ -309,9 +309,9 @@ def purity() -> None:
     # The table must return the same action whatever the clock says.
     Observation = module.Observation
     observations = [
-        Observation("iad", "primary-candidate", "unreachable"),
-        Observation("pdx", "primary-candidate", "read-only"),
-        Observation("reader", "read-only", "read-only"),
+        Observation("iad", "PrimaryCandidate", "Unreachable"),
+        Observation("pdx", "PrimaryCandidate", "ReadOnly"),
+        Observation("reader", "ReadOnly", "ReadOnly"),
     ]
     action = module.evaluate_cross_site(observations, ["iad", "pdx"])
     if action["reason"] != "Degraded" or action["promotionCandidates"] != ["pdx"]:

@@ -152,9 +152,9 @@ func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
 			var writable, readOnly, blocked, div []string
 			for _, s := range mfg.Status.Sites {
 				switch s.State {
-				case "writable":
+				case v1alpha1.SiteStateWritable:
 					writable = append(writable, s.Name)
-				case "read-only":
+				case v1alpha1.SiteStateReadOnly:
 					readOnly = append(readOnly, s.Name)
 				}
 				if s.RecoveryState == "RecoveryBlocked" {

@@ -199,7 +199,7 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 				t.Fatalf("digest-only result: %+v", res)
 			}
 		}},
-		{name: "partial", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial"}), reason: "PointInTimePartial", warnings: []string{"Warning PointInTimePartial"}},
+		{name: "partial", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial"}), warnings: []string{"Warning PointInTimePartial"}},
 		{name: "divergent and on-history exclusions", pit: v1alpha1.PointInTimeSpec{ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3"},
 			verdict:  testVerdict(verdictFields{divergent: 2, onHistory: 1, onHistorySet: "3e11fa47-71ca-11e1-9e33-c80aa9429562:3"}),
 			warnings: []string{"Warning PITRDivergentHistoryExcluded replay excluded 2 transactions", "Warning PITROnHistoryTransactionsExcluded excluded 3e11fa47-71ca-11e1-9e33-c80aa9429562:3 precedes"},
@@ -249,7 +249,7 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			status := fg.Status.Restore
-			if (status.Phase == v1alpha1.BackupPhaseFailed) != tc.failed || status.Reason != tc.reason {
+			if (status.Phase == v1alpha1.BackupPhaseFailed) != tc.failed || string(status.Reason) != tc.reason {
 				t.Fatalf("outcome: %+v", status)
 			}
 			if tc.failed {
@@ -317,7 +317,7 @@ func TestPITRRestoreFailureDetail(t *testing.T) {
 		{name: "dump-meta refusal", init: []corev1.ContainerStatus{terminated(restorePITRDumpMetaContainerName, 2, "PITRBackupIdentityUnknown: the dump has no backup stamp; take a new backup")}, want: "no backup stamp", reason: "PITRBackupIdentityUnknown"},
 		{name: "init refusal", init: []corev1.ContainerStatus{terminated(restorePITRDumpMetaContainerName, 0, ""), terminated(restorePITRInitContainerName, 2, "PITRArchiveDivergentHistory: 2 archived transactions committed between the backup's newest transaction and the target are not in the history of a:9")}, want: "not in the history", reason: "PITRArchiveDivergentHistory"},
 		{name: "main refusal after successful init", init: []corev1.ContainerStatus{terminated(restorePITRInitContainerName, 0, `{"msg":"pitr plan"}`)}, main: []corev1.ContainerStatus{terminated(backupJobContainerName, 2, "PITRReplayMismatch: R6: replay left gtid_executed a:1-9 but the target history minus excludeGtids is a:1-10")}, want: "R6", reason: "PITRReplayMismatch"},
-		{name: "mysqlbinlog failure", init: []corev1.ContainerStatus{terminated(restorePITRInitContainerName, 0, "")}, main: []corev1.ContainerStatus{terminated(backupJobContainerName, 2, "BLOODRAVEN_PITR_FAILED: mysqlbinlog exit=1 segment=1")}, want: "segment=1", reason: "BLOODRAVEN_PITR_FAILED"},
+		{name: "mysqlbinlog failure", init: []corev1.ContainerStatus{terminated(restorePITRInitContainerName, 0, "")}, main: []corev1.ContainerStatus{terminated(backupJobContainerName, 2, "BLOODRAVEN_PITR_FAILED: mysqlbinlog exit=1 segment=1")}, want: "segment=1", reason: "PITRReplayFailed"},
 		{name: "main killed without message", init: []corev1.ContainerStatus{terminated(restorePITRInitContainerName, 0, `{"msg":"pitr-download complete"}`)}, main: []corev1.ContainerStatus{{Name: backupJobContainerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}}}}, want: "exited 137 (OOMKilled)", notWant: "pitr-download complete"},
 		{name: "decrypt failure", init: []corev1.ContainerStatus{terminated(restorePITRInitContainerName, 0, `{"msg":"pitr-download complete"}`), terminated("decrypt-download", 1, "decrypt: authentication failed")}, want: "authentication failed", notWant: "pitr-download complete"},
 	} {
@@ -340,7 +340,7 @@ func TestPITRRestoreFailureDetail(t *testing.T) {
 				}
 			}
 			status := fg.Status.Restore
-			if status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(status.Message, tc.want) || (tc.notWant != "" && strings.Contains(status.Message, tc.notWant)) || status.Reason != tc.reason {
+			if status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(status.Message, tc.want) || (tc.notWant != "" && strings.Contains(status.Message, tc.notWant)) || string(status.Reason) != tc.reason {
 				t.Fatalf("failure detail: %+v", status)
 			}
 			if events := drainEventsMatching(rec, "RestoreFailed"); events != 1 {
@@ -440,7 +440,7 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 			if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 				t.Fatal(err)
 			}
-			if fg.Status.Restore == nil || fg.Status.Restore.Reason != tc.reason || !strings.HasPrefix(fg.Status.Restore.Message, tc.reason+": ") {
+			if fg.Status.Restore == nil || string(fg.Status.Restore.Reason) != tc.reason || !strings.HasPrefix(fg.Status.Restore.Message, tc.reason+": ") {
 				t.Fatalf("render refusal: %+v", fg.Status.Restore)
 			}
 		})
@@ -480,7 +480,7 @@ func TestPITRTargetNotBoundedByBackupCompletion(t *testing.T) {
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	backup.Status.CompletionTime = &completed
 	v := verifyCR("verify-before-completion", "lion", "nightly-s3")
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: "2030-01-01T13:00:00Z"}
+	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2030-01-01T13:00:00Z"}
 	job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: vfg, Profile: vfg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
 	if err != nil {
 		t.Fatalf("target after the dump but before the upload finished refused: %v", err)
@@ -519,8 +519,9 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 	if frags.InitContainer.TerminationMessagePolicy != corev1.TerminationMessageFallbackToLogsOnError {
 		t.Fatal("init refusals need a termination message")
 	}
-	for _, mode := range []string{"timestamp", "latest"} {
-		v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"}, Spec: v1alpha1.MysqlBackupVerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: mode, Timestamp: outcomeStop, ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1"}}}
+	for _, apiMode := range []v1alpha1.PointInTimeMode{v1alpha1.PointInTimeModeTimestamp, v1alpha1.PointInTimeModeLatest} {
+		mode := wireModeOf(t, apiMode)
+		v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"}, Spec: v1alpha1.MysqlBackupVerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: apiMode, Timestamp: outcomeStop, ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1"}}}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		backup.Status.FailoverGroupUID = outcomeSourceUID
 		job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
@@ -555,7 +556,7 @@ func outcomeVerification(t *testing.T, mode string) (*MysqlBackupVerificationRec
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	backup.Status.FailoverGroupUID = outcomeSourceUID
 	v := verifyCR("verify-outcome", "lion", "nightly-s3")
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: mode, Timestamp: outcomeStop}
+	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: apiModeOf(t, mode), Timestamp: outcomeStop}
 	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	job := &batchv1.Job{}
@@ -694,12 +695,12 @@ func TestPITRFailureReasonPrefersFirstToken(t *testing.T) {
 		"PITRArchiveDivergentHistory: 3 archived transactions ...; or use a backup taken after PITRTargetNotCovered": "PITRArchiveDivergentHistory",
 		"PITRCoverageInvalid: PITRTargetNotCovered: missing upper coverage":                                          "PITRCoverageInvalid",
 		`{"msg":"download site binlogs","error":"PITRArchiveGap: the target history needs a:5"}`:                     "PITRArchiveGap",
-		"BLOODRAVEN_PITR_FAILED: mysqlbinlog exit=1 segment=0":                                                       "BLOODRAVEN_PITR_FAILED",
+		"BLOODRAVEN_PITR_FAILED: mysqlbinlog exit=1 segment=0":                                                       "PITRReplayFailed",
 		"container restore exited 137 (OOMKilled)":                                                                   "",
 		"PITRArchiveGapish is not a token":                                                                           "",
 		"PITRCrossSiteOrder: removed in v2":                                                                          "",
 	} {
-		if got := pitrFailureReason(message); got != want {
+		if got := string(pitrFailureReason(message)); got != want {
 			t.Errorf("%q: got %q, want %q", message, got, want)
 		}
 	}

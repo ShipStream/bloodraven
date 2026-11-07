@@ -67,14 +67,13 @@ var (
 	// PlannedFailoversTotal counts admin-triggered (graceful)
 	// switchovers separately from the automatic failover counter above,
 	// so existing dashboards and alerts keyed on bloodraven_failovers_total
-	// keep their meaning. The "result" label is one of:
-	//   success         — promotion completed, target is writable
-	//   rejected        — validation failed (unknown site, cooldown, ...)
-	//   failed_timeout  — lag gate timed out; source was unfenced
-	//   failed_other    — any other mid-flight failure
+	// keep their meaning. The "result" label is the kebab-case of the run's
+	// status.plannedFailover.result.outcome (labels.PlannedFailoverResult):
+	// succeeded, not-started, rolled-back, source-left-fenced,
+	// promoted-unconfirmed or manual-recovery-required.
 	PlannedFailoversTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "bloodraven_planned_failovers_total",
-		Help: "Total number of admin-triggered (graceful) planned failovers, labelled by result.",
+		Help: "Total number of admin-triggered (graceful) planned failovers, labelled by the run's outcome.",
 	}, []string{"target_site", "result"})
 
 	// PlannedFailoverDurationSeconds is the end-to-end wall-clock
@@ -116,12 +115,12 @@ var (
 
 	ReplicationLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_lag_seconds",
-		Help: "Replication lag in seconds on a follower site. -1 if lag is NULL (not replicating). role is spec.sites[].role (primary-candidate, dr-only, or read-only).",
+		Help: "Replication lag in seconds on a follower site. -1 if lag is NULL (not replicating). role is spec.sites[].role in kebab-case (primary-candidate, disaster-recovery, or read-only).",
 	}, []string{"namespace", "group", "site", "role"})
 
 	ReplicationRunning = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_running",
-		Help: "Whether a replication thread is running (1=yes, 0=no). Thread label is 'io' or 'sql'. role is spec.sites[].role.",
+		Help: "Whether a replication thread is running (1=yes, 0=no). Thread label is 'io' or 'sql'. role is spec.sites[].role in kebab-case.",
 	}, []string{"namespace", "group", "site", "role", "thread"})
 
 	ReplicationSourceState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -131,7 +130,7 @@ var (
 
 	SiteState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_site_state",
-		Help: "Current site state as a state-set (1 for current state, 0 for others). State is 'writable', 'read-only', 'unreachable', or 'unknown'. role is spec.sites[].role.",
+		Help: "Current site state as a state-set (1 for current state, 0 for others). State is 'writable', 'read-only', 'unreachable', or 'unknown'. role is spec.sites[].role in kebab-case.",
 	}, []string{"namespace", "group", "site", "role", "state"})
 
 	// --- Recovery metrics -----------------------------------------------
@@ -399,12 +398,6 @@ var (
 	}, []string{"namespace", "name"})
 )
 
-// AllStates is the set of possible site states, used to emit the full state-set.
-var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
-
-// AllSourceStates is the bounded source-convergence state set.
-var AllSourceStates = []string{"converged", "pending", "blocked"}
-
 // --- encryption at rest ---------------------------------------------
 
 // KeyringPhase reports the per-site keyring lifecycle phase as a set of
@@ -415,10 +408,6 @@ var KeyringPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_keyring_phase",
 	Help: "1 for the site's current keyring phase, 0 for the others.",
 }, []string{"namespace", "group", "site", "phase"})
-
-// AllKeyringPhases is the bounded keyring phase set, used to zero out
-// stale series when a site transitions.
-var AllKeyringPhases = []string{"pending", "unsealed", "escrowed", "sealed", "failed"}
 
 // KeyringEscrowVersion is the escrow Secret version a site is currently
 // sealed against. Monotonic per site; a jump means a rotation or a

@@ -804,7 +804,7 @@ spec:
                 description: Phase is the lifecycle phase of this database.
                 enum:
                 - Pending
-                - Creating
+                - Applying
                 - Ready
                 - Failed
                 - Deleting

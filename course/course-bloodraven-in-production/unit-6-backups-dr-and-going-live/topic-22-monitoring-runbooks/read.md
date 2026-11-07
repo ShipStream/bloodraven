@@ -19,7 +19,7 @@ Two of those need naming. `bloodraven_divergent_transactions{site} > 0` means a 
 
 ## The alert that must not page: reader lag
 
-`playground` has three sites — `iad` and `pdx` as `primary-candidate`, `reader` as `read-only`. Chaos scenario 42 applies `SOURCE_DELAY` to `reader` and soaks the group for three times `maxLagSeconds` — 3 × 30 s = 90 s in the playground config — while writing a row a second to the primary. Both replication threads keep running against the correct source, so the reader is converged-but-slow, not stopped.
+`playground` has three sites — `iad` and `pdx` as `PrimaryCandidate`, `reader` as `ReadOnly`. Chaos scenario 42 applies `SOURCE_DELAY` to `reader` and soaks the group for three times `maxLagSeconds` — 3 × 30 s = 90 s in the playground config — while writing a row a second to the primary. Both replication threads keep running against the correct source, so the reader is converged-but-slow, not stopped.
 
 The scenario asserts on every iteration of that soak: `Ready` stays `True`, `activeSite` never changes, `lastFailover` is unchanged so no anti-flap cooldown is consumed, and `reader` never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`. The only reaction anywhere is that `reader` leaves the endpoints of `mysql-playground-replicas` once its lag passes `readOnlyMaxLagSeconds`. That is Unit 1's role model working as designed, not a fault.
 

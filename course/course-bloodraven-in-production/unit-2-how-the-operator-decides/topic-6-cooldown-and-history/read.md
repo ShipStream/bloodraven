@@ -135,10 +135,10 @@ Every one of these must hold:
 - No subsystem gate active — bootstrap blocking cross-site, ordered update, topology frozen, planned
   failover in flight.
 - The re-assert rate limit is satisfied, and no promotion is still pending confirmation.
-- Every non-target peer is `read-only` — not writable, not unreachable, not unknown — both in the
+- Every non-target peer is `ReadOnly` — not writable, not unreachable, not unknown — both in the
   operator's debounced state and on a live `@@read_only` read just before the re-assert, so a peer
   that has only just turned writable cannot become a second primary.
-- The target is `read-only` **and** promotable (`role: primary-candidate`).
+- The target is `ReadOnly` **and** promotable (`role: PrimaryCandidate`).
 - The target's `GTID_EXECUTED` contains the recorded promotion GTID set **and** every peer's
   `GTID_EXECUTED`.
 
@@ -173,7 +173,7 @@ same asymmetry compresses: automatic promotion is blocked until T+30s (leaving 3
 block after a 12.0 s failover), while the first re-assert is available immediately.
 
 One last field while you are here, because its history is a lesson in itself. `spec.updateStrategy`
-takes `OrderedUpdate` (the default) or `Recreate`, and it does two different things to the same spec
+is an object whose `type` takes `OrderedUpdate` (the default) or `Recreate`, and it does two different things to the same spec
 change. Under `OrderedUpdate` the reconciler deliberately leaves existing site Deployments alone; the
 runner then notices the drift between the desired spec hash and the live Deployment annotation and
 hands the rollout to the ordered updater, one site at a time. Under `Recreate` the runner clears the

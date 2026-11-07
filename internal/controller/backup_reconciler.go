@@ -509,7 +509,7 @@ func backupJobEncryption(job *batchv1.Job) (bool, string) {
 	if !encrypted {
 		return false, ""
 	}
-	return true, (&v1alpha1.BackupEncryptionSpec{Algorithm: algorithm}).AlgorithmOrDefault()
+	return true, string((&v1alpha1.BackupEncryptionSpec{Algorithm: v1alpha1.EncryptionAlgorithm(algorithm)}).AlgorithmOrDefault())
 }
 
 func (r *MysqlBackupReconciler) repairTerminalAttribution(ctx context.Context, backup *v1alpha1.MysqlBackup) (ctrl.Result, error) {
@@ -1873,7 +1873,7 @@ func selectSourceSite(fg *v1alpha1.MysqlFailoverGroup, override string, maxLagSe
 	}
 
 	for _, replica := range replicas {
-		if replica.State == "read-only" && replica.Replicating {
+		if replica.State == v1alpha1.SiteStateReadOnly && replica.Replicating {
 			if replica.SecondsBehindSource == nil || *replica.SecondsBehindSource <= maxLagSeconds {
 				return replica.Name, "replica-preferred", nil
 			}
@@ -1881,7 +1881,7 @@ func selectSourceSite(fg *v1alpha1.MysqlFailoverGroup, override string, maxLagSe
 	}
 
 	primarySpec := fg.Spec.SiteByName(status.ActiveSite)
-	if primary != nil && primary.State == "writable" && primarySpec != nil && primarySpec.IsPromotable() {
+	if primary != nil && primary.State == v1alpha1.SiteStateWritable && primarySpec != nil && primarySpec.IsPromotable() {
 		return primary.Name, "primary-fallback", nil
 	}
 

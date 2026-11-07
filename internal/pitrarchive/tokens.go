@@ -50,8 +50,33 @@ const (
 	TokenPlanTooLarge              Token = "PITRPlanTooLarge"
 	TokenCoverageInvalid           Token = "PITRCoverageInvalid"
 	TokenReplayMismatch            Token = "PITRReplayMismatch"
-	TokenPITRFailed                Token = "BLOODRAVEN_PITR_FAILED"
+	// TokenPITRFailed is the replay script's failure sentinel. It stays in
+	// Job messages and logs; the operator serves it as TokenReplayFailed.
+	TokenPITRFailed Token = "BLOODRAVEN_PITR_FAILED"
 )
+
+// TokenReplayFailed is the reason the operator serves for TokenPITRFailed.
+// It is not parsed out of messages, so it is not in AllTokens.
+const TokenReplayFailed Token = "PITRReplayFailed"
+
+// Served returns the reason the operator serves for t: t itself, except
+// that the replay script's sentinel is served as TokenReplayFailed.
+func (t Token) Served() Token {
+	if t == TokenPITRFailed {
+		return TokenReplayFailed
+	}
+	return t
+}
+
+// ServedTokens lists every reason the operator serves for the catalog:
+// AllTokens, each through Served.
+var ServedTokens = func() []Token {
+	out := make([]Token, len(AllTokens))
+	for i, t := range AllTokens {
+		out[i] = t.Served()
+	}
+	return out
+}()
 
 // AllTokens lists every token in the catalog.
 var AllTokens = []Token{

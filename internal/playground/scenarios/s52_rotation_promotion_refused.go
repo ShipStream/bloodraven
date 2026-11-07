@@ -151,7 +151,7 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 			var err error
 			state.plannedRejectedBefore, err = metricCounter(ctx, env, "bloodraven_planned_failovers_total", map[string]string{
 				"target_site": state.replicaSite,
-				"result":      "rejected",
+				"result":      "not-started",
 			})
 			if err != nil {
 				return err
@@ -221,13 +221,13 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 
 			after, err := metricCounter(ctx, env, "bloodraven_planned_failovers_total", map[string]string{
 				"target_site": state.replicaSite,
-				"result":      "rejected",
+				"result":      "not-started",
 			})
 			if err != nil {
 				return err
 			}
 			if after < state.plannedRejectedBefore+1 {
-				return fmt.Errorf("bloodraven_planned_failovers_total{result=rejected} did not increment (before=%v after=%v)",
+				return fmt.Errorf("bloodraven_planned_failovers_total{result=not-started} did not increment (before=%v after=%v)",
 					state.plannedRejectedBefore, after)
 			}
 			env.Logger.Info("planned failover rejected mid-rotation",
@@ -457,7 +457,7 @@ func s52RestoreAndReseal(state *s52RunState) runner.Step {
 			_, err = env.Wait.UntilCR(rollCtx, env.Namespace, "ordered update idle after rotation reseal",
 				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.UpdatePhase != "" {
-						return false, "updatePhase=" + m.Status.UpdatePhase, nil
+						return false, "updatePhase=" + string(m.Status.UpdatePhase), nil
 					}
 					return true, "", nil
 				})
@@ -499,7 +499,7 @@ func s52Cleanup(state *s52RunState) func(context.Context, *runner.Env) error {
 func s52SiteWritable(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 	for _, s := range mfg.Status.Sites {
 		if s.Name == name {
-			return s.State == "writable"
+			return s.State == v1alpha1.SiteStateWritable
 		}
 	}
 	return false
@@ -508,7 +508,7 @@ func s52SiteWritable(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 func s52WritableCandidates(mfg *v1alpha1.MysqlFailoverGroup) []string {
 	var out []string
 	for _, s := range mfg.Status.Sites {
-		if s.State == "writable" && isPromotableSite(mfg, s.Name) {
+		if s.State == v1alpha1.SiteStateWritable && isPromotableSite(mfg, s.Name) {
 			out = append(out, s.Name)
 		}
 	}

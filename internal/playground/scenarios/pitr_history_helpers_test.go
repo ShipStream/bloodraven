@@ -100,13 +100,14 @@ func TestPITRCheckTargetAfterBackup(t *testing.T) {
 	env := &runner.Env{}
 	stashSet(env, "backupClear:b2", "2026-11-05T10:00:06.250000Z")
 	cases := []struct {
-		name, mode, backup, target string
-		wantErr                    string
+		name                    string
+		mode                    v1alpha1.PointInTimeMode
+		backup, target, wantErr string
 	}{
-		{"after clear", "timestamp", "b2", "2026-11-05T10:00:07Z", ""},
-		{"before clear", "timestamp", "b2", "2026-11-05T10:00:06Z", "before backup b2's clear time"},
-		{"latest needs no target", "latest", "b2", "", ""},
-		{"untracked backup", "timestamp", "b9", "2026-11-05T10:00:07Z", "no recorded clear time"},
+		{"after clear", v1alpha1.PointInTimeModeTimestamp, "b2", "2026-11-05T10:00:07Z", ""},
+		{"before clear", v1alpha1.PointInTimeModeTimestamp, "b2", "2026-11-05T10:00:06Z", "before backup b2's clear time"},
+		{"latest needs no target", v1alpha1.PointInTimeModeLatest, "b2", "", ""},
+		{"untracked backup", v1alpha1.PointInTimeModeTimestamp, "b9", "2026-11-05T10:00:07Z", "no recorded clear time"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -355,17 +356,17 @@ func TestPITRRecloneRequest(t *testing.T) {
 		ready     bool
 		value     string
 	}{
-		{"divergent site not yet blocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only"}, true, false, ""},
-		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only", DivergentGtid: div}, true, false, ""},
-		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: "read-only", RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, true, "iad:3e11fa47"},
-		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: "unreachable", RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, false, ""},
-		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: "read-only", Replicating: true}, false, true, "iad:confirm=mfg"},
-		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: "read-only", DivergentGtid: div}, false, false, ""},
-		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only", RecoveryState: "RecoveryBlocked"}, false, false, ""},
+		{"divergent site not yet blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly}, true, false, ""},
+		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, true, false, ""},
+		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, true, "iad:3e11fa47"},
+		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateUnreachable, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, false, ""},
+		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, Replicating: true}, false, true, "iad:confirm=mfg"},
+		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, false, false, ""},
+		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked"}, false, false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ready, value, msg := pitrRecloneRequest([]v1alpha1.SiteStatus{{Name: "pdx", State: "writable"}, c.site}, "iad", "mfg", c.divergent)
+			ready, value, msg := pitrRecloneRequest([]v1alpha1.SiteStatus{{Name: "pdx", State: v1alpha1.SiteStateWritable}, c.site}, "iad", "mfg", c.divergent)
 			if ready != c.ready || value != c.value {
 				t.Fatalf("ready=%v value=%q, want %v %q (%s)", ready, value, c.ready, c.value, msg)
 			}
@@ -536,7 +537,7 @@ func TestPITRAssertResultReplayCount(t *testing.T) {
 		Archive:      &v1alpha1.PITRArchiveIdentity{ArchiveID: "ar1-abc"},
 		GtidExecuted: u + ":1-15:18-20", ReplayedTransactionCount: 8,
 	}
-	e := pitrExpectation{Backup: "b1", Mode: "latest", Fence: pitrFence{GTID: u + ":1-20"}, Exclude: u + ":16-17", Outcome: v1alpha1.PointInTimeArchiveHead}
+	e := pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: pitrFence{GTID: u + ":1-20"}, Exclude: u + ":16-17", Outcome: v1alpha1.PointInTimeArchiveHead}
 	if err := assertPITRResult(env, "t", res, e); err != nil {
 		t.Fatal(err)
 	}
@@ -678,8 +679,8 @@ func TestPITRDecryptObjectReadsEncryptedManifest(t *testing.T) {
 func TestPITRSiteReplicating(t *testing.T) {
 	mfg := &v1alpha1.MysqlFailoverGroup{}
 	mfg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: "writable"},
-		{Name: "pdx", State: "read-only"},
+		{Name: "iad", State: v1alpha1.SiteStateWritable},
+		{Name: "pdx", State: v1alpha1.SiteStateReadOnly},
 	}
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
 		t.Fatal("a read-only site that is not replicating counted as replicating")

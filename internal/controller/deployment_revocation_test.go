@@ -349,12 +349,12 @@ func TestDeploymentLeaseCompletionRetryDoesNotRestoreUpdatePhase(t *testing.T) {
 				tm.statusWriteFailed = tm.deploymentEpoch != snap.DeploymentEpoch
 				tm.mu.Unlock()
 			}
-			tm.updater.setPhase(UpdatePhaseWaitReplica)
+			tm.updater.setPhase(v1alpha1.UpdatePhaseWaitReplica)
 			if !tm.beginDeploymentTopologyChange() {
 				t.Fatal("mutation window unavailable")
 			}
 			tm.Poll(ctx)
-			if tm.statusRetrySnapshot == nil || tm.statusRetrySnapshot.UpdatePhase != string(UpdatePhaseWaitReplica) {
+			if tm.statusRetrySnapshot == nil || tm.statusRetrySnapshot.UpdatePhase != v1alpha1.UpdatePhaseWaitReplica {
 				t.Fatal("did not cache in-flight phase")
 			}
 			tm.updater.setPhase(UpdatePhaseNone)

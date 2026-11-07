@@ -124,9 +124,9 @@ func s22ObserveRecovery() runner.Step {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
@@ -171,7 +171,7 @@ func s22VerifyCRReplicatingTrue() runner.Step {
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var replica *v1alpha1.SiteStatus
 					for i := range mfg.Status.Sites {
-						if mfg.Status.Sites[i].State == "read-only" {
+						if mfg.Status.Sites[i].State == v1alpha1.SiteStateReadOnly {
 							replica = &mfg.Status.Sites[i]
 							break
 						}
@@ -207,7 +207,7 @@ func s22VerifySidecarReplicatingTrue() runner.Step {
 			}
 			var replica string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "read-only" {
+				if s.State == v1alpha1.SiteStateReadOnly {
 					replica = s.Name
 					break
 				}

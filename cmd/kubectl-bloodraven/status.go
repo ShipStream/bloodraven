@@ -185,10 +185,10 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 			site.Name,
 			string(site.EffectiveRole()),
 			site.Zone,
-			emptyDash(st.State),
+			emptyDash(string(st.State)),
 			boolYesNo(st.Replicating),
 			lagString(st.SecondsBehindSource),
-			emptyDash(st.RecoveryState),
+			emptyDash(string(st.RecoveryState)),
 			timeAge(st.LastSeen),
 		)
 	}
@@ -299,8 +299,12 @@ func printRestore(out io.Writer, r *v1alpha1.RestoreStatus) {
 func printRestoreInPlace(out io.Writer, r *v1alpha1.RestoreInPlaceStatus) {
 	fmt.Fprintln(out, "In-place restore:")
 	fmt.Fprintf(out, "  Phase: %s\n", emptyDash(string(r.Phase)))
-	if r.Scope != "" {
-		fmt.Fprintf(out, "  Scope: %s\n", r.Scope)
+	if r.Scope != nil {
+		scope := string(r.Scope.Type)
+		if r.Scope.Schema != "" {
+			scope += " " + r.Scope.Schema
+		}
+		fmt.Fprintf(out, "  Scope: %s\n", scope)
 	}
 	if r.TargetSite != "" {
 		fmt.Fprintf(out, "  Target site: %s\n", r.TargetSite)
@@ -325,7 +329,7 @@ func printBackupSchedules(out io.Writer, ss []v1alpha1.BackupScheduleStatus) {
 			s.Name,
 			timeAge(s.LastScheduleTime),
 			timeAge(s.LastSuccessfulTime),
-			emptyDash(s.LastBackupPhase),
+			emptyDash(string(s.LastBackupPhase)),
 			emptyDash(s.LastBackupName),
 			s.LastRetryAttempt,
 		)

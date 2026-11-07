@@ -41,7 +41,7 @@ func (s *MysqlFailoverGroupSpec) SiteNames() []string {
 }
 
 // PrimaryCandidates returns pointers to every site whose effective role
-// is primary-candidate, preserving declared order. These are the sites
+// is PrimaryCandidate, preserving declared order. These are the sites
 // eligible for auto-promotion.
 func (s *MysqlFailoverGroupSpec) PrimaryCandidates() []*SiteSpec {
 	out := make([]*SiteSpec, 0, len(s.Sites))
@@ -55,10 +55,10 @@ func (s *MysqlFailoverGroupSpec) PrimaryCandidates() []*SiteSpec {
 
 // DefaultSeedSite returns the site that should be seeded with the
 // initial primary during fresh-deploy bootstrap. When
-// spec.splitBrainPolicy.sitePriorities is set, the first primary-
-// candidate that appears in the priority list wins; otherwise the first
-// primary-candidate in declared order wins. Returns nil when there is
-// no primary-candidate — callers must guard against that (it is a CRD
+// spec.splitBrainPolicy.sitePriorities is set, the first PrimaryCandidate
+// that appears in the priority list wins; otherwise the first
+// PrimaryCandidate in declared order wins. Returns nil when there is
+// no PrimaryCandidate — callers must guard against that (it is a CRD
 // validation error in a valid spec).
 func (s *MysqlFailoverGroupSpec) DefaultSeedSite() *SiteSpec {
 	if s.SplitBrainPolicy != nil {

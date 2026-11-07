@@ -10,10 +10,10 @@ and each emits its exact `REJECT <rule>` token in the declared order. A manifest
 produces several lines.
 
 Two specifics carry most of the weight. **The role default**: `spec.sites[].role` is optional and
-defaults to `primary-candidate`, so a site with no `role` key counts toward the two-candidate minimum
+defaults to `PrimaryCandidate`, so a site with no `role` key counts toward the two-candidate minimum
 and is required to carry `lbIP` and `taintNodeSelector`. **The reader exemption**: those two fields
-are required *unless* the role is `read-only`. `reader-lbip.json` is the discriminator — a legitimate
-reader without them beside a `primary-candidate` missing both, and exactly one `REJECT` is correct. A
+are required *unless* the role is `ReadOnly`. `reader-lbip.json` is the discriminator — a legitimate
+reader without them beside a `PrimaryCandidate` missing both, and exactly one `REJECT` is correct. A
 check that demands the fields unconditionally fails it; one that never demands them fails it too.
 
 Full marks need the interval rules done as arithmetic through `secs`, not as string comparison:

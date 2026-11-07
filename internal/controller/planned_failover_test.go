@@ -14,7 +14,7 @@ import (
 // the planned-failover parser + validator. Sites are declared as
 // primary-candidate by default; the drOnly set overrides specific
 // names. statusStates and replicating configure status.sites entries.
-func plannedFG(sites, drOnly []string, active string, statusStates map[string]string, replicating map[string]bool) *v1alpha1.MysqlFailoverGroup {
+func plannedFG(sites, drOnly []string, active string, statusStates map[string]v1alpha1.SiteState, replicating map[string]bool) *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
 	}
@@ -25,22 +25,22 @@ func plannedFG(sites, drOnly []string, active string, statusStates map[string]st
 	for i, name := range sites {
 		role := v1alpha1.SiteRolePrimaryCandidate
 		if drSet[name] {
-			role = v1alpha1.SiteRoleDROnly
+			role = v1alpha1.SiteRoleDisasterRecovery
 		}
 		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: role})
 		st := v1alpha1.SiteStatus{Name: name}
 		if s, ok := statusStates[name]; ok {
 			st.State = s
 		} else {
-			st.State = "read-only"
+			st.State = v1alpha1.SiteStateReadOnly
 		}
 		if r, ok := replicating[name]; ok {
 			st.Replicating = r
 		} else {
-			st.Replicating = st.State == "read-only"
+			st.Replicating = st.State == v1alpha1.SiteStateReadOnly
 		}
 		if name == active {
-			st.State = "writable"
+			st.State = v1alpha1.SiteStateWritable
 			st.Replicating = false
 		}
 		fg.Status.Sites = append(fg.Status.Sites, st)
@@ -134,8 +134,8 @@ func TestValidatePlannedFailover_DROnlyTargetRejected(t *testing.T) {
 	if result != PlannedFailoverReject || reason != v1alpha1.PlannedFailoverReasonTargetNotPromotable {
 		t.Fatalf("expected TargetNotPromotable reject for dr-only target, got result=%v reason=%q err=%v", result, reason, err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "primary-candidate") {
-		t.Errorf("err = %v, want to mention primary-candidate", err)
+	if err == nil || !strings.Contains(err.Error(), "PrimaryCandidate") {
+		t.Errorf("err = %v, want to mention PrimaryCandidate", err)
 	}
 }
 
@@ -166,7 +166,7 @@ func TestValidatePlannedFailover_TargetMidRotation(t *testing.T) {
 
 func TestValidatePlannedFailover_TargetMidRotationBeatsUnhealthy(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]string{"pdx": "unreachable"},
+		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateUnreachable},
 		map[string]bool{"pdx": false})
 	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
@@ -182,7 +182,7 @@ func TestValidatePlannedFailover_TargetMidRotationBeatsUnhealthy(t *testing.T) {
 
 func TestValidatePlannedFailover_UnreachableTarget(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]string{"pdx": "unreachable"},
+		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateUnreachable},
 		map[string]bool{"pdx": false})
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" {
@@ -192,7 +192,7 @@ func TestValidatePlannedFailover_UnreachableTarget(t *testing.T) {
 
 func TestValidatePlannedFailover_TargetNotReplicating(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]string{"pdx": "read-only"},
+		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateReadOnly},
 		map[string]bool{"pdx": false})
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" {

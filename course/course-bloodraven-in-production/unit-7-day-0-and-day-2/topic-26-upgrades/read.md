@@ -13,7 +13,7 @@ whether anybody notices.
 Change `spec.image` and apply. What follows is not a Deployment rollout — the operator deliberately
 takes that away from Kubernetes and runs it itself.
 
-The mechanism is the spec hash from the last topic. Under `updateStrategy: OrderedUpdate` (the
+The mechanism is the spec hash from the last topic. Under `updateStrategy.type: OrderedUpdate` (the
 default) the reconciler **leaves existing site Deployments untouched**, so the desired hash and the
 live Deployment annotation diverge. The runner notices that drift on its next pass and hands the
 rollout to the ordered updater, which does this:
@@ -21,7 +21,7 @@ rollout to the ordered updater, which does this:
 ```widget
 {
   "type": "flow",
-  "title": "Ordered update — status.updatePhase, one value per step",
+  "title": "Ordered update — status.updatePhase, one value per step until it clears",
   "steps": [
     {
       "label": "UpdateReplica",
@@ -44,8 +44,8 @@ rollout to the ordered updater, which does this:
       "detail": "Wait up to 5 minutes for it to come back. A timeout here only warns — the rollout is already complete in the sense that matters."
     },
     {
-      "label": "Complete",
-      "detail": "updatePhase clears. Both sites are on the new image, and the primary is on the site that was your standby."
+      "label": "Done",
+      "detail": "updatePhase is removed; there is no Complete value. Both sites are on the new image, and the primary is on the site that was your standby."
     }
   ]
 }
@@ -103,7 +103,7 @@ issues `START REPLICA` itself rather than waiting for something else to.
 
 ## `Recreate` is a decision about write availability
 
-`spec.updateStrategy` takes `OrderedUpdate` or `Recreate`, and the difference is not cosmetic. Under
+`spec.updateStrategy.type` takes `OrderedUpdate` or `Recreate`, and the difference is not cosmetic. Under
 `Recreate` the runner clears the drift list entirely and the reconciler patches every site Deployment
 in one pass — so their pod restarts may overlap, and a group with two sites can have both of them down
 at the same moment. That is the total-loss window `OrderedUpdate` exists to prevent.

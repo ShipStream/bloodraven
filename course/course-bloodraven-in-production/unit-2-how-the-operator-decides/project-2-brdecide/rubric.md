@@ -46,14 +46,14 @@ and the code never emits.
 
 ## 20 — The pre-pass tallies sites by role the way the matrix does
 
-- `tally()` increments `coreCount` for every non-`read-only` role, so a `dr-only` site counts toward
-  `coreCount` and lands in a tally while a `read-only` site does neither.
-- A writable non-`primary-candidate` site goes to `fenceSites` and is skipped before any tally sees
+- `tally()` increments `coreCount` for every non-`ReadOnly` role, so a `DisasterRecovery` site counts toward
+  `coreCount` and lands in a tally while a `ReadOnly` site does neither.
+- A writable non-`PrimaryCandidate` site goes to `fenceSites` and is skipped before any tally sees
   it.
-- `unknown` sites count toward `coreCount` and appear in no tally.
+- `Unknown` sites count toward `coreCount` and appear in no tally.
 
-Deduct if `dr-only` is treated as a reader, if a fenced site is double-counted in the writable tally,
-or if the promotion candidate list can contain a non-`primary-candidate` site.
+Deduct if `DisasterRecovery` is treated as a reader, if a fenced site is double-counted in the writable tally,
+or if the promotion candidate list can contain a non-`PrimaryCandidate` site.
 
 ## 20 — Craft: the decision is separated from its gate, and the output is readable under pressure
 

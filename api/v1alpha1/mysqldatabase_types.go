@@ -488,7 +488,7 @@ type MysqlDatabaseUserState struct {
 }
 
 // MysqlDatabasePhase is the lifecycle phase of a MysqlDatabase.
-// +kubebuilder:validation:Enum=Pending;Creating;Ready;Failed;Deleting
+// +kubebuilder:validation:Enum=Pending;Applying;Ready;Failed;Deleting
 type MysqlDatabasePhase string
 
 const (
@@ -499,8 +499,9 @@ const (
 	// an error — a MysqlDatabase applied before its group is normal
 	// ordering.
 	MysqlDatabasePhasePending MysqlDatabasePhase = "Pending"
-	// MysqlDatabasePhaseCreating means the reconciler is applying DDL.
-	MysqlDatabasePhaseCreating MysqlDatabasePhase = "Creating"
+	// MysqlDatabasePhaseApplying means the reconciler is applying DDL: the
+	// first creation, and every later change or credential rotation.
+	MysqlDatabasePhaseApplying MysqlDatabasePhase = "Applying"
 	// MysqlDatabasePhaseReady means the database, owner and grants are
 	// applied on the current active primary.
 	MysqlDatabasePhaseReady MysqlDatabasePhase = "Ready"

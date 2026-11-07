@@ -53,7 +53,7 @@
 
 **Front:** The three roles in one line each
 
-**Back:** `primary-candidate` — the only promotable role, counted everywhere. `dr-only` — never promoted but **counted** in `coreCount` and the tallies. `read-only` — never promoted, invisible to the matrix, never tainted, refused as a backup source, skipped by every replication condition.
+**Back:** `PrimaryCandidate` — the only promotable role, counted everywhere. `DisasterRecovery` — never promoted but **counted** in `coreCount` and the tallies. `ReadOnly` — never promoted, invisible to the matrix, never tainted, refused as a backup source, skipped by every replication condition.
 
 ---
 

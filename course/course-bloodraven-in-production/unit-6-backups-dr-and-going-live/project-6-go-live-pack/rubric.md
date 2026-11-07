@@ -13,7 +13,7 @@
 
 ## The alert set discriminates real loss from designed behaviour — 30
 
-All ten required alerts are present. `BloodravenReplicationLagging` excludes the `read-only` site by label matcher while keeping the threshold at 30 — the value `playground` sets — so the scenario 42 soak is silent and a 64-second `pdx` still pages. The rule was excluded, not deleted, not defanged by a raised threshold, and not narrowed to a hard-coded single site. `BloodravenFailoverOccurred` carries `severity: info`; every paging rule carries a non-zero `for:`. Full marks require both halves — silence on the reader and noise on the candidate.
+All ten required alerts are present. `BloodravenReplicationLagging` excludes the `ReadOnly` site by label matcher while keeping the threshold at 30 — the value `playground` sets — so the scenario 42 soak is silent and a 64-second `pdx` still pages. The rule was excluded, not deleted, not defanged by a raised threshold, and not narrowed to a hard-coded single site. `BloodravenFailoverOccurred` carries `severity: info`; every paging rule carries a non-zero `for:`. Full marks require both halves — silence on the reader and noise on the candidate.
 
 ## Every rule is built from a metric the shipped operator exports — 20
 
