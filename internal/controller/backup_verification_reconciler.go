@@ -58,6 +58,10 @@ type MysqlBackupVerificationReconciler struct {
 	// MysqlBackups. SetupWithManager defaults it to mgr.GetAPIReader();
 	// unit tests leave it nil and read the client.
 	APIReader client.Reader
+
+	// graceClock says when a terminal verification's
+	// terminalRetentionGrace starts.
+	graceClock retentionGraceClock
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications,verbs=get;list;watch;create;update;patch;delete
@@ -473,10 +477,14 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		return ctrl.Result{RequeueAfter: shorterRequeue(requeue, pruneRequeue)}, nil
 	}
 
+	wasTerminal := v.Status.Phase == next.Phase
 	patch := client.MergeFrom(v.DeepCopy())
 	v.Status = next
 	if err := r.Status().Patch(ctx, v, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch final status: %w", err)
+	}
+	if !wasTerminal {
+		r.graceClock.recordVerdict(v, time.Now())
 	}
 
 	execution := v.DeepCopy()
@@ -517,6 +525,7 @@ func (r *MysqlBackupVerificationReconciler) SetupWithManager(mgr ctrl.Manager) e
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
+	r.graceClock.countFromFirstUse()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlBackupVerification{}).
 		Owns(&batchv1.Job{}).
@@ -1013,8 +1022,8 @@ func parseSanitySentinel(line string) (*v1alpha1.SanityCheckResult, bool) {
 // pruneRetention deletes old MysqlBackupVerification CRs for the same
 // (group, profile). Succeeded and Failed buckets are capped
 // independently; failed-keep defaults to 10 so operators can always
-// find the last few failures to debug. A verification that completed less
-// than terminalRetentionGrace ago is kept whatever the counts say, and the
+// find the last few failures to debug. A verification still inside its
+// terminalRetentionGrace is kept whatever the counts say, and the
 // returned duration says when the first such grace ends (0 when none).
 func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, trigger *v1alpha1.MysqlBackupVerification) (time.Duration, error) {
 	var list v1alpha1.MysqlBackupVerificationList
@@ -1095,7 +1104,7 @@ func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx contex
 	var requeue time.Duration
 	for i := keep; i < len(bucket); i++ {
 		victim := bucket[i]
-		if grace := terminalRetentionGraceLeft(victim.Status.CompletionTime, now); grace > 0 {
+		if grace := r.graceClock.left(&victim, victim.Status.CompletionTime, now); grace > 0 {
 			requeue = shorterRequeue(requeue, grace)
 			continue
 		}

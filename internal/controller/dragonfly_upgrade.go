@@ -251,11 +251,12 @@ func dragonflyLiveImages(ctx context.Context, reader client.Reader, fg *v1alpha1
 // would keep the reconcile from re-creating the StatefulSet once it is
 // deleted, which is the refusal's only remedy. Once the active site's
 // image has moved (UpdatingActive after the image update, and
-// WaitingForActiveRestore), only the active's own refusal ends the run: the
-// active may still be loading its snapshot, and ending the run gives its
-// traffic back. A refused replica is recorded and ends the run at
-// ReattachingReplicas, the step that touches it, once the active has
-// restored.
+// WaitingForActiveRestore), the active may still be loading its snapshot,
+// and ending the run gives its traffic back. A refused replica is recorded
+// and ends the run at ReattachingReplicas, the step that touches it, once
+// the active has restored. The active's own refusal is recorded at once and
+// ends the run once the active answers as loaded; until then the run keeps
+// the active's traffic off and holds.
 //
 // A deleted StatefulSet must not wedge the run either: the run holds the
 // reconcile before the render that would re-create it. Where the run's own
@@ -288,6 +289,25 @@ func (r *MysqlFailoverGroupReconciler) checkDragonflyUpgradeWorkloads(ctx contex
 		}
 	}
 	if why := r.noteDragonflySelectorRefusals(fg, blocking); why != "" {
+		if activeMoved {
+			// Only the active's own refusal blocks here, and ending the run
+			// gives the active's traffic back, as does the label sweep of
+			// the reconcile the run stops holding. While the active may
+			// still be loading its snapshot, keep its traffic off and hold;
+			// deleting the refused StatefulSet re-creates it above and the
+			// run continues.
+			loaded, state, err := r.dragonflySiteLoaded(ctx, fg, cur.ActiveSite)
+			if err != nil {
+				return dragonflyUpgradeStep{}, true, err
+			}
+			if !loaded {
+				if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.ActiveSite, false); err != nil {
+					return dragonflyUpgradeStep{}, true, err
+				}
+				msg := why + "; the run ends once the active site has loaded its snapshot (" + state + "), and its traffic stays off until then"
+				return dragonflyUpgradeStep{hold: dragonflyUpgradePollInterval}, true, r.updateDragonflyUpgradeMessage(ctx, fg, cur, msg)
+			}
+		}
 		step, err := r.failDragonflyUpgrade(ctx, fg, cur, v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch, why)
 		return step, true, err
 	}
@@ -869,6 +889,36 @@ func (r *MysqlFailoverGroupReconciler) dragonflySiteReadyOnImage(ctx context.Con
 	}
 	ready := dragonfly.CandidateSyncReady(info, persist, 0)
 	return ready, fmt.Sprintf("site %s role=%s link=%s sync=%v", siteName, info.Role, info.MasterLinkStatus, info.MasterSyncInProgress), nil
+}
+
+// dragonflySiteLoaded reports whether siteName's Dragonfly can take
+// traffic again whatever workload runs it: exactly one Ready pod that is
+// not terminating, answers INFO and is not loading a snapshot. Anything it
+// cannot confirm counts as not loaded; state says why.
+func (r *MysqlFailoverGroupReconciler) dragonflySiteLoaded(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string) (bool, string, error) {
+	pods, err := listDragonflyPodsForSite(ctx, r.Client, fg, siteName)
+	if err != nil {
+		return false, "", err
+	}
+	if len(pods) != 1 {
+		return false, fmt.Sprintf("site %s has %d pods", siteName, len(pods)), nil
+	}
+	if pod := pods[0]; pod.DeletionTimestamp != nil || !podReady(&pod) {
+		return false, fmt.Sprintf("site %s pod not Ready", siteName), nil
+	}
+	conn, err := r.dragonflyDial(ctx, fg, siteName)
+	if err != nil {
+		return false, fmt.Sprintf("site %s not reachable: %v", siteName, err), nil
+	}
+	persist, persistErr := conn.InfoPersistence(ctx)
+	_ = conn.Close()
+	switch {
+	case persistErr != nil:
+		return false, fmt.Sprintf("site %s INFO persistence failed: %v", siteName, persistErr), nil
+	case persist.Loading || persist.LoadState != "":
+		return false, fmt.Sprintf("site %s still loading snapshot", siteName), nil
+	}
+	return true, fmt.Sprintf("site %s loaded", siteName), nil
 }
 
 func (r *MysqlFailoverGroupReconciler) dragonflyReplicaReadyOrAttach(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, activeSite, image string) (bool, string, error) {

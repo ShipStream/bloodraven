@@ -143,8 +143,8 @@ func TestInitScriptSocketResolution(t *testing.T) {
 // TestInitUsersScriptCreatesReplicationUser runs the generated script under
 // bash against a fake mysql client and checks the statements it sends for
 // the replication account. MYSQL_REPLICATION_USER / MYSQL_REPLICATION_PASSWORD
-// arrive as replication/username and replication/password, and each falls
-// back to the operator's value, as the topology manager resolves them. The
+// arrive as replication/username and replication/password, set together or
+// not at all, as the topology manager resolves them. The
 // account must get the grants bootstrap, clone and old-primary recovery use.
 func TestInitUsersScriptCreatesReplicationUser(t *testing.T) {
 	bash, err := exec.LookPath("bash")
@@ -170,12 +170,22 @@ func TestInitUsersScriptCreatesReplicationUser(t *testing.T) {
 			wantOutput: "creating replication user 'replicator'",
 		},
 		{
-			name:        "password falls back to the operator's",
+			name:        "user without password creates nothing",
 			replication: map[string]string{"username": "replicator"},
-			wantSQL: []string{
-				"CREATE USER IF NOT EXISTS 'replicator'@'%' IDENTIFIED BY 'op-pw';",
-				grant + "'replicator'@'%';",
-			},
+			wantNoSQL:   []string{"REPLICATION SLAVE", "'replicator'"},
+			wantOutput:  "must be set together",
+		},
+		{
+			name:        "password without user creates nothing",
+			replication: map[string]string{"password": "repl-pw"},
+			wantNoSQL:   []string{"REPLICATION SLAVE", "repl-pw"},
+			wantOutput:  "must be set together",
+		},
+		{
+			name:        "empty keys count as absent",
+			replication: map[string]string{"username": "", "password": ""},
+			wantNoSQL:   []string{"REPLICATION SLAVE"},
+			wantOutput:  "replication uses the operator account",
 		},
 		{
 			name:        "quotes are escaped",

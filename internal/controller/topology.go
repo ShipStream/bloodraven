@@ -208,10 +208,6 @@ type TopologySnapshot struct {
 	// Bootstrapping keeps reporting the last clone's outcome. A new
 	// bootstrap or a new failure resets it.
 	BootstrapFailureResolved bool
-	// AwaitingObservedPrimary is set while the lost-status wait stands (see
-	// TopologyManager.awaitingObservedPrimary). ActiveSite is then "" and
-	// TopologyGeneration is not advanced.
-	AwaitingObservedPrimary bool
 	// AppliedGeneration is the .metadata.generation the manager has
 	// applied: the one its configuration was built from, or a newer one
 	// whose unchanged configuration the runner resynchronised. The status
@@ -415,22 +411,6 @@ type TopologyManager struct {
 	// operator history a fence stays for a human. Both protected by mu.
 	lastActiveSite      string
 	lastActiveSiteNamed bool
-	// awaitingObservedPrimary is the lost-status wait (A-89). A restore
-	// whose status names no authority although the group has failover
-	// history sets it; only a poll that observes a unique writable primary
-	// (observedPrimaryAfterLostStatusLocked) clears it. While it is set:
-	//
-	//   - activeSiteLocked, the authority every consumer reads (status,
-	//     DNS, /active-site, deployment authority, planned failover,
-	//     ordered updates, recovery, convergence, clone donors), is "";
-	//   - deploymentAuthorityLocked neither names a site nor advances the
-	//     topology generation, so every status write keeps the lost shape
-	//     and any manager restored from it re-arms the wait;
-	//   - the claims before every operator-issued read_only=OFF refuse
-	//     (automaticWritabilityRefusedLocked).
-	//
-	// Protected by mu.
-	awaitingObservedPrimary bool
 
 	// failoverState persists lastFailover/lastFailoverTarget out of band
 	// from the CR status subresource, so a status-write outage that spans
@@ -1197,35 +1177,10 @@ func (tm *TopologyManager) SetSourceConvergence(site, host string, convergence S
 	}
 }
 
-// activeSiteLocked returns the site the operator treats as the group's
-// authoritative primary: the unique writable primary-candidate
-// (uniqueWritableCandidateLocked), or "" while the lost-status wait stands
-// (awaitingObservedPrimary). Every consumer of authority reads this, so a
-// path added later inherits the wait without checking it. Must be called
-// with tm.mu held.
+// activeSiteLocked returns the unique writable primary-candidate. Any second
+// writable site, including a reader or dr-only anomaly, makes authority
+// ambiguous and returns empty. Must be called with tm.mu held.
 func (tm *TopologyManager) activeSiteLocked() string {
-	if tm.awaitingObservedPrimary {
-		return ""
-	}
-	return tm.uniqueWritableCandidateLocked()
-}
-
-// automaticWritabilityRefusedLocked reports whether the operator must not
-// make any site writable on its own authority: the lost-status wait
-// stands. The claims taken before every operator-issued read_only=OFF
-// (beginAutoPromotionOf, the ordered-update claim, the fresh-deploy seed)
-// check it under the same lock. Must be called with tm.mu held.
-func (tm *TopologyManager) automaticWritabilityRefusedLocked() bool {
-	return tm.awaitingObservedPrimary
-}
-
-// uniqueWritableCandidateLocked returns the unique writable
-// primary-candidate as observed, whatever the lost-status wait says. Any
-// second writable site, including a reader or dr-only anomaly, makes
-// authority ambiguous and returns empty. Only the observation that ends
-// the wait reads it directly; everything else reads activeSiteLocked.
-// Must be called with tm.mu held.
-func (tm *TopologyManager) uniqueWritableCandidateLocked() string {
 	var active *siteTracker
 	for i := range tm.sites {
 		// A reader that is writable *because the operator is cloning into it*
@@ -1256,46 +1211,6 @@ func (tm *TopologyManager) uniqueWritableCandidateLocked() string {
 		return active.name
 	}
 	return ""
-}
-
-// observedPrimaryAfterLostStatusLocked returns the site whose observation
-// ends the wait a lost status arms (awaitingObservedPrimary), or "". It is
-// the only evidence of a primary the operator has, so it is stricter than
-// the normal authority rule, and self-contained (it does not build on
-// activeSiteLocked, which the wait itself gates):
-//
-//   - exactly one site is classified Writable, it is a primary candidate,
-//     and its latest probe answered, writable: a debounced state whose
-//     latest probe failed never ends the wait;
-//   - no other site, a clone recipient included, is Writable or holds a
-//     writable answer (still debouncing to Writable, or unclassified after
-//     one): a writable reader or disaster-recovery site is being fenced,
-//     never the primary. A site classified Unreachable holds none: its
-//     last answer expires with the classification (Poll), so a writer
-//     that went away cannot hold the wait forever.
-//
-// Caller holds tm.mu.
-func (tm *TopologyManager) observedPrimaryAfterLostStatusLocked() string {
-	var primary *siteTracker
-	for i := range tm.sites {
-		s := &tm.sites[i]
-		if s.state != state.StateWritable {
-			continue
-		}
-		if primary != nil {
-			return ""
-		}
-		primary = s
-	}
-	if primary == nil || !primary.isPromotable() || primary.probeFailed || !primary.lastAnswerWritable {
-		return ""
-	}
-	for i := range tm.sites {
-		if s := &tm.sites[i]; s != primary && s.lastAnswerWritable {
-			return ""
-		}
-	}
-	return primary.name
 }
 
 func (tm *TopologyManager) Status() StatusResponse {
@@ -1594,13 +1509,6 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		prevStates[i] = tm.sites[i].state
 		if newStates[i] != prevStates[i] {
 			tm.sites[i].state = newStates[i]
-			// A site classified Unreachable has no current answer: the
-			// writable one it gave before it went away is not evidence of a
-			// second writer any more (it would otherwise hold the lost-status
-			// wait until the site answered again, possibly never).
-			if newStates[i] == state.StateUnreachable {
-				tm.sites[i].lastAnswerWritable = false
-			}
 			// Leaving StateReadOnly invalidates any prior replication-health signal.
 			if newStates[i] != state.StateReadOnly {
 				tm.sites[i].replicating = false
@@ -1611,14 +1519,6 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 			classificationLapsed = true
 			tm.logger.Warn("site not classified after its probe budget; probes alternate between answers and errors",
 				"site", tm.sites[i].name, "probes", tm.sites[i].probes)
-		}
-	}
-	lostStatusWaitCleared := false
-	if tm.awaitingObservedPrimary {
-		if tm.observedPrimaryAfterLostStatusLocked() != "" {
-			tm.awaitingObservedPrimary = false
-			lostStatusWaitCleared = true
-			tm.logger.Info("observed a unique writable primary after a lost status; automatic promotion re-enabled")
 		}
 	}
 	tm.mu.Unlock()
@@ -1904,7 +1804,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		tm.statusRefreshRequested = false
 	}
 	tm.mu.Unlock()
-	statusChanged := lostStatusWaitCleared || anyTransition || classificationLapsed || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted || refreshRequested
+	statusChanged := anyTransition || classificationLapsed || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted || refreshRequested
 	if (statusChanged || statusRetry) && tm.StatusCallback != nil {
 		var snapshot TopologySnapshot
 		haveSnapshot := false
@@ -2348,7 +2248,6 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		RestoreReclonePromotionRefused: append([]string(nil), tm.restoreReclonePromotionRefused...),
 		BootstrapRefusedRestoreHold:    tm.bootstrapRefusedSite,
 		BootstrapFailureResolved:       tm.bootstrapFailureResolvedLocked(),
-		AwaitingObservedPrimary:        tm.awaitingObservedPrimary,
 	}
 	if tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation {
 		snap.DeploymentEpoch = 0
@@ -2758,18 +2657,6 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			tm.logger.Info("failover blocked by anti-flap cooldown",
 				"lastFailover", lastFailover, "cooldown", tm.failoverCooldown, "retryAt", retryAt)
 			tm.armCrossSiteRetryAfter(retryAt)
-			return
-		}
-		tm.mu.RLock()
-		awaiting := tm.awaitingObservedPrimary
-		tm.mu.RUnlock()
-		if awaiting {
-			// No retry is armed: the observation that ends the wait is a
-			// unique writable primary, after which there is nothing to
-			// promote. beginAutoPromotionOf refuses as well; this check
-			// only keeps the refusal's log line.
-			tm.logger.Warn("promotion refused: the status was lost and no writable primary has been observed since the operator started",
-				"site", promote)
 			return
 		}
 
@@ -4519,17 +4406,6 @@ func (tm *TopologyManager) seedFreshDeploy(ctx context.Context) string {
 	}
 	// The seed's sidecar may have fenced it on startup. The operator is the
 	// authority that lifts that fence, as it does for a promoted candidate.
-	// Not while the lost-status wait stands: a group with failover history
-	// is never seeded (a rejected annotation arms the wait with an empty
-	// lastFailoverTarget, so the caller's check is not enough).
-	tm.mu.RLock()
-	refused := tm.automaticWritabilityRefusedLocked()
-	tm.mu.RUnlock()
-	if refused {
-		tm.logger.Warn("promotion refused: the status was lost and no writable primary has been observed since the operator started",
-			"site", seed)
-		return ""
-	}
 	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
 		if err := seedSite.mysql.SetSuperReadOnly(probeCtx, false); err != nil {
 			return err
@@ -5172,14 +5048,6 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 
 	tm.mu.RLock()
-	// The lost-status wait refuses every automatic writability change, and
-	// this one's authority (lastFailoverTarget) is exactly the restored
-	// record the wait does not trust. beginAutoPromotionOf decides; this
-	// only skips the GTID probes.
-	if tm.automaticWritabilityRefusedLocked() {
-		tm.mu.RUnlock()
-		return false
-	}
 	target, authority := tm.lastFailoverTarget, "lastFailoverTarget"
 	named := true
 	restoreSeed := false

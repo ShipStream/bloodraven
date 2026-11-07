@@ -628,8 +628,9 @@ type SiteServiceTemplate struct {
 type CredentialsSpec struct {
 	// OperatorSecretName names the Secret for operator and sidecar connections.
 	// Required keys: username, password, MYSQL_ROOT_PASSWORD.
-	// Optional keys: MYSQL_REPLICATION_USER, MYSQL_REPLICATION_PASSWORD
-	// (default to operator username/password if omitted). A dedicated
+	// Optional keys: MYSQL_REPLICATION_USER and MYSQL_REPLICATION_PASSWORD,
+	// set together (with neither, the operator username/password
+	// replicate). A dedicated
 	// replication account is created on first boot with replication and
 	// clone grants.
 	// Grants: ALL PRIVILEGES WITH GRANT OPTION.
@@ -701,11 +702,7 @@ type MysqlFailoverGroupStatus struct {
 
 	// ActiveSite is the name of the site currently acting as primary (writable).
 	// Durable: the topology manager restores it after a restart, before it
-	// has observed the sites. Lost beside a failover record (empty, with
-	// topologyGeneration 0), it makes the manager refuse automatic
-	// promotion until it observes a unique writable primary candidate; the
-	// status stays empty until then, so a replaced or restarted manager
-	// keeps refusing.
+	// has observed the sites.
 	// +optional
 	ActiveSite string `json:"activeSite,omitempty"`
 

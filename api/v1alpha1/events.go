@@ -796,7 +796,8 @@ const (
 	// Referenced Secret not found.
 	EventSecretNotFound = "SecretNotFound"
 	// A credential Secret is missing a required key, has an empty
-	// `username` or `password`, or names the operator account in
+	// `username` or `password`, sets only one of `MYSQL_REPLICATION_USER` and
+	// `MYSQL_REPLICATION_PASSWORD`, or names the operator account in
 	// `MYSQL_REPLICATION_USER` with a different `MYSQL_REPLICATION_PASSWORD`;
 	// the message names the Secret and key.
 	EventSecretMissingKey = "SecretMissingKey"

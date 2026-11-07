@@ -65,6 +65,9 @@ type MysqlBackupReconciler struct {
 
 	// now is the clock for wait deadlines; nil means time.Now.
 	now func() time.Time
+
+	// graceClock says when a Failed backup's terminalRetentionGrace starts.
+	graceClock retentionGraceClock
 }
 
 func (r *MysqlBackupReconciler) clock() time.Time {
@@ -465,6 +468,9 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Status().Patch(ctx, &backup, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch final status: %w", err)
 	}
+	if previous.Phase != phase {
+		r.graceClock.recordVerdict(&backup, time.Now())
+	}
 	if correctedEncryption {
 		r.Recorder.Event(&backup, corev1.EventTypeWarning, v1alpha1.EventEncryptionAttributionCorrected,
 			"corrected backup encryption attribution from its producing Job")
@@ -657,6 +663,7 @@ func (r *MysqlBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
+	r.graceClock.countFromFirstUse()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlBackup{}).
 		Owns(&batchv1.Job{}).
@@ -1972,9 +1979,8 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 // status reports it (lastBackupPhase Failed); deleting it would cancel the
 // retry and show the previous success instead.
 //
-// A Failed backup that completed less than terminalRetentionGrace ago is
-// kept too, and the returned duration says when the first such grace
-// ends.
+// A Failed backup still inside its terminalRetentionGrace is kept too,
+// and the returned duration says when the first such grace ends.
 func (r *MysqlBackupReconciler) pruneFailed(ctx context.Context, all []v1alpha1.MysqlBackup, keep int, scheduleLatest map[string]bool, now time.Time) (time.Duration, error) {
 	keep = max(keep, 0)
 	bucket := make([]v1alpha1.MysqlBackup, 0, len(all))
@@ -1997,7 +2003,7 @@ func (r *MysqlBackupReconciler) pruneFailed(ctx context.Context, all []v1alpha1.
 		if scheduleLatest[victim.Name] {
 			continue
 		}
-		if grace := terminalRetentionGraceLeft(victim.Status.CompletionTime, now); grace > 0 {
+		if grace := r.graceClock.left(&victim, victim.Status.CompletionTime, now); grace > 0 {
 			requeue = shorterRequeue(requeue, grace)
 			continue
 		}
@@ -2009,25 +2015,13 @@ func (r *MysqlBackupReconciler) pruneFailed(ctx context.Context, all []v1alpha1.
 }
 
 // terminalRetentionGrace is how long a terminal backup or verification is
-// kept after it completes whatever the retention counts say. With a
+// kept after its verdict, whatever the retention counts say (see
+// retentionGraceClock for when it starts). With a
 // keep-none rule (keepFailed: 0, verification keepLast: 0) the object would
 // otherwise be deleted in its own terminal pass, before `kubectl bloodraven
 // backup --wait` or `verify --wait` (which poll every 5 seconds) or anyone
 // else reads the verdict.
 const terminalRetentionGrace = 2 * time.Minute
-
-// terminalRetentionGraceLeft is how much of terminalRetentionGrace is left
-// for an object that completed at completion, or 0. An object without a
-// completion time has none.
-func terminalRetentionGraceLeft(completion *metav1.Time, now time.Time) time.Duration {
-	if completion == nil {
-		return 0
-	}
-	if left := completion.Add(terminalRetentionGrace).Sub(now); left > 0 {
-		return left
-	}
-	return 0
-}
 
 func timeOrZero(t *metav1.Time) time.Time {
 	if t == nil {

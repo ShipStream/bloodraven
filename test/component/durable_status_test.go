@@ -2,18 +2,13 @@ package component
 
 import (
 	"context"
-	"log/slog"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
-	"github.com/shipstream/bloodraven/internal/platform"
-	"github.com/shipstream/bloodraven/internal/state"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -92,59 +87,6 @@ func TestDurableStatus_LostStatusOnRunningGroup(t *testing.T) {
 	}
 }
 
-// Status lost while the primary is down: the operator has not observed a
-// unique writable primary since it started, so it must not promote the
-// replica on the strength of the lost status.
-func TestDurableStatus_LostStatusRefusesPromotionBeforeAPrimaryIsObserved(t *testing.T) {
-	dc1, dc2 := runningGroupSites()
-	dc1.setError(errDown)
-	h := newBootstrapHarness(t, dc1, dc2)
-	ann, err := controller.FailoverRecordAnnotations(controller.FailoverRecord{
-		LastFailover: h.clock.Now().Add(-time.Hour).UTC().Truncate(time.Second), LastFailoverTarget: "dc1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.tm.RestoreFailoverStateForSim(durableTestGroup(ann), noopRecorder())
-	h.pollN(10)
-	if !dc2.isReadOnly() {
-		t.Fatal("promoted dc2 without having observed a unique writable primary since the status was lost")
-	}
-	dc2.mu.Lock()
-	cloned := dc2.cloneInstanceCalled
-	dc2.mu.Unlock()
-	if cloned {
-		t.Fatal("dc2 was recloned with the primary down")
-	}
-
-	// The primary comes back: once a unique writable primary is observed
-	// the wait ends, and a later loss of that primary fails over.
-	dc1.setError(nil)
-	h.pollN(4)
-	if dc1.isReadOnly() || !dc2.isReadOnly() {
-		t.Fatalf("roles after dc1 returned: dc1 read-only=%t dc2 read-only=%t", dc1.isReadOnly(), dc2.isReadOnly())
-	}
-	dc1.setError(errDown)
-	h.pollN(10)
-	if dc2.isReadOnly() {
-		t.Fatal("no failover after a writable primary was observed and lost: the wait did not end")
-	}
-
-	// Control: the same outage with the status intact (it names the
-	// active site) fails over, so the refusal above is the lost status's.
-	dc1c, dc2c := runningGroupSites()
-	dc1c.setError(errDown)
-	hc := newBootstrapHarness(t, dc1c, dc2c)
-	intact := durableTestGroup(ann)
-	intact.Status.ActiveSite, intact.Status.TopologyGeneration = "dc1", 3
-	intact.Status.SetLastFailover(&metav1.Time{Time: hc.clock.Now().Add(-time.Hour).UTC().Truncate(time.Second)}, "dc1", "")
-	hc.tm.RestoreFailoverStateForSim(intact, noopRecorder())
-	hc.pollN(10)
-	if dc2c.isReadOnly() {
-		t.Fatal("control: an intact status did not fail over either, so the refusal proves nothing")
-	}
-}
-
 // publishStatus records every snapshot tm publishes into fg's status the way
 // the runner's status write does, so a later manager can be restored from
 // what the first one wrote. Poll calls the callback synchronously; the
@@ -154,128 +96,6 @@ func publishStatus(tm *controller.TopologyManager, fg *v1alpha1.MysqlFailoverGro
 		mu.Lock()
 		defer mu.Unlock()
 		controller.MergeTopologySnapshotStatus(&fg.Status, snap)
-	}
-}
-
-// The wait a lost status arms must outlive the manager that armed it. Its
-// status writes must not publish the annotation's target as the active
-// site, or a manager replaced by a topology edit or an operator restart
-// finds a status that no longer looks lost and promotes the replica
-// without any primary having been observed (O-01).
-func TestDurableStatus_LostStatusWaitSurvivesManagerRestart(t *testing.T) {
-	dc1, dc2 := runningGroupSites()
-	dc1.setError(errDown)
-	h := newBootstrapHarness(t, dc1, dc2)
-	ann, err := controller.FailoverRecordAnnotations(controller.FailoverRecord{
-		LastFailover: h.clock.Now().Add(-time.Hour).UTC().Truncate(time.Second), LastFailoverTarget: "dc1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fg := durableTestGroup(ann)
-	var mu sync.Mutex
-	written := func() *v1alpha1.MysqlFailoverGroup {
-		mu.Lock()
-		defer mu.Unlock()
-		return fg.DeepCopy()
-	}
-	publishStatus(h.tm, fg, &mu)
-	h.tm.RestoreFailoverStateForSim(fg.DeepCopy(), noopRecorder())
-	h.pollN(10)
-	if !dc2.isReadOnly() {
-		t.Fatal("the first manager promoted dc2 without having observed a primary")
-	}
-	first := written()
-	if first.Status.LastFailoverTarget() != "dc1" {
-		t.Fatalf("the status write did not carry the restored failover record: target %q", first.Status.LastFailoverTarget())
-	}
-	if first.Status.ActiveSite != "" || first.Status.TopologyGeneration != 0 {
-		t.Fatalf("a status written while no primary was observed names authority: activeSite %q, topologyGeneration %d",
-			first.Status.ActiveSite, first.Status.TopologyGeneration)
-	}
-
-	// The manager is replaced with the primary still down: restored from
-	// the status the first one wrote, the second one must wait too.
-	h.tm.StatusCallback = nil
-	h2 := newBootstrapHarness(t, dc1, dc2)
-	publishStatus(h2.tm, fg, &mu)
-	h2.tm.RestoreFailoverStateForSim(first, noopRecorder())
-	h2.pollN(10)
-	if !dc2.isReadOnly() {
-		t.Fatal("a manager restored from the first one's status promoted dc2 without having observed a primary")
-	}
-
-	// The primary returns: the observation ends the wait and names it,
-	// and the status a restored manager reads is then intact.
-	dc1.setError(nil)
-	h2.pollN(4)
-	second := written()
-	if second.Status.ActiveSite != "dc1" || second.Status.TopologyGeneration == 0 {
-		t.Fatalf("the observed primary was not published: activeSite %q, topologyGeneration %d",
-			second.Status.ActiveSite, second.Status.TopologyGeneration)
-	}
-	dc1.setError(errDown)
-	h3 := newBootstrapHarness(t, dc1, dc2)
-	h3.tm.RestoreFailoverStateForSim(second, noopRecorder())
-	h3.pollN(10)
-	if dc2.isReadOnly() {
-		t.Fatal("control: a manager restored from a status that names the observed primary did not fail over")
-	}
-}
-
-// lostStatusThreeSiteTM is the bootstrap harness's two candidates plus a
-// third site of the given role.
-func lostStatusThreeSiteTM(t *testing.T, dc1, dc2, dc3 *mockMySQL, dc3Role state.SiteRole) (*controller.TopologyManager, *clock.FakeClock) {
-	t.Helper()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
-	sites := append(defaultTwoSiteConfig(), controller.SiteTopologyConfig{
-		Name: "dc3", Zone: "lion-dc3", Role: dc3Role,
-		TaintSelector: taintSelector("dc3"), Host: "mysql-lion-dc3.default.svc.cluster.local",
-	})
-	if dc3Role != state.SiteRoleReadOnly {
-		sites[2].LBIP = "3.3.3.3"
-	}
-	cfg := controller.TopologyConfig{
-		Name: "lion", Sites: sites, PollInterval: int64(50 * time.Millisecond),
-		FailureThreshold: 3, RecoveryThreshold: 2, FailoverCooldown: int64(5 * time.Minute),
-	}
-	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2, dc3}, controller.NewFailoverController(logger), nil,
-		controller.NewBootstrapController(logger), controller.BootstrapConfig{ReplUser: "replicator", ReplPassword: "secret", CloneTimeout: 30 * time.Second},
-		newMockTainter(), platform.NewHub(logger), &mockDNS{}, logger, clk)
-	return tm, clk
-}
-
-// A writable reader or disaster-recovery site is fenced, never taken for
-// the primary: its observation must not end the wait a lost status arms,
-// or the fence it triggers is followed by the promotion of the replica the
-// wait exists to refuse (O-02).
-func TestDurableStatus_LostStatusWaitIgnoresWritableNonPromotableSite(t *testing.T) {
-	for _, role := range []state.SiteRole{state.SiteRoleReadOnly, state.SiteRoleDROnly} {
-		t.Run(string(controller.APISiteRole(role)), func(t *testing.T) {
-			dc1, dc2 := runningGroupSites()
-			dc1.setError(errDown)
-			dc3 := &mockMySQL{readOnly: false, gtidExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100"}
-			tm, clk := lostStatusThreeSiteTM(t, dc1, dc2, dc3, role)
-			ann, err := controller.FailoverRecordAnnotations(controller.FailoverRecord{
-				LastFailover: clk.Now().Add(-time.Hour).UTC().Truncate(time.Second), LastFailoverTarget: "dc1",
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			fg := durableTestGroup(ann)
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "dc3", ServerID: 103, Role: controller.APISiteRole(role)})
-			tm.RestoreFailoverStateForSim(fg, noopRecorder())
-			for i := 0; i < 10; i++ {
-				tm.Poll(context.Background())
-			}
-			if !dc3.isReadOnly() {
-				t.Fatal("the writable non-promotable site was not fenced")
-			}
-			if !dc2.isReadOnly() {
-				t.Fatal("promoted dc2 after observing only a writable non-promotable site since the status was lost")
-			}
-		})
 	}
 }
 
@@ -350,231 +170,9 @@ func lostStatusAnnotations(t *testing.T, now time.Time, target string) map[strin
 	return ann
 }
 
-// requireLostShape fails unless the written status still carries the shape a
-// restored manager re-arms the wait from: no active site, generation 0.
-func requireLostShape(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, when string) {
-	t.Helper()
-	if fg.Status.ActiveSite != "" || fg.Status.TopologyGeneration != 0 {
-		t.Fatalf("%s: a status written while the wait stands names authority: activeSite %q, topologyGeneration %d",
-			when, fg.Status.ActiveSite, fg.Status.TopologyGeneration)
-	}
-}
-
-// R2-01: both candidates answer writable on the first poll, then dc2 stops
-// answering. dc1 is the only Writable site, but dc2's writable answer is
-// still current (it is not classified Unreachable yet), so no unique
-// primary has been observed. Every status written meanwhile, every DNS
-// write and the served active site must name no authority: a manager
-// restored from that status (operator restart, leader change, a config
-// edit that replaces the manager) then re-arms and must not promote dc2
-// once dc1 is gone. Once dc2 is classified Unreachable its old answer
-// expires (N-01), the wait ends on dc1, and the status names it.
-func TestDurableStatus_LostStatusPendingWritablePeerPublishesNoAuthority(t *testing.T) {
-	dc1, dc2 := runningGroupSites()
-	dc2.setReadOnly(false) // poll 1: both candidates answer writable
-	h := newBootstrapHarness(t, dc1, dc2)
-	fg := durableTestGroup(lostStatusAnnotations(t, h.clock.Now(), "dc1"))
-	var mu sync.Mutex
-	written := func() *v1alpha1.MysqlFailoverGroup {
-		mu.Lock()
-		defer mu.Unlock()
-		return fg.DeepCopy()
-	}
-	var snaps []controller.TopologySnapshot
-	h.tm.StatusCallback = func(snap controller.TopologySnapshot) {
-		mu.Lock()
-		defer mu.Unlock()
-		snaps = append(snaps, snap)
-		controller.MergeTopologySnapshotStatus(&fg.Status, snap)
-	}
-	h.tm.RestoreFailoverStateForSim(fg.DeepCopy(), noopRecorder())
-
-	h.pollN(1)
-	dc2.setReadOnly(true)
-	dc2.setError(errDown)
-	// Polls 2 and 3: dc1 classified Writable, dc2 failing but under the
-	// failure threshold (3), so its writable answer is still current.
-	h.pollN(2)
-	requireLostShape(t, written(), "dc2 pending writable")
-	if got := h.tm.Status().ActiveSite; got != "" {
-		t.Fatalf("/active-site serves %q while the wait stands", got)
-	}
-	if n := h.dns.getCalls(); n != 0 {
-		t.Fatalf("DNS written %d times (last %q) while the wait stands", n, h.dns.getLastIP())
-	}
-	mu.Lock()
-	last := snaps[len(snaps)-1]
-	mu.Unlock()
-	if !last.AwaitingObservedPrimary || last.ActiveSite != "" || last.DeploymentActiveSite != "" {
-		t.Fatalf("snapshot while the wait stands: awaiting=%t activeSite=%q deploymentActiveSite=%q",
-			last.AwaitingObservedPrimary, last.ActiveSite, last.DeploymentActiveSite)
-	}
-
-	// Replace the manager from what the first one wrote, with dc1 now down
-	// and dc2 answering read-only: it must re-arm and promote nothing.
-	lost := written()
-	dc1r, dc2r := runningGroupSites()
-	dc1r.setError(errDown)
-	h2 := newBootstrapHarness(t, dc1r, dc2r)
-	h2.tm.RestoreFailoverStateForSim(lost, noopRecorder())
-	h2.pollN(10)
-	if !dc2r.isReadOnly() {
-		t.Fatal("a manager restored from a status written while the wait stood promoted dc2")
-	}
-
-	// The first manager: dc2 reaches the failure threshold, its writable
-	// answer expires, and the wait ends on dc1.
-	h.pollN(3)
-	got := written()
-	if got.Status.ActiveSite != "dc1" || got.Status.TopologyGeneration == 0 {
-		t.Fatalf("the wait did not end once dc2 was unreachable: activeSite %q, topologyGeneration %d",
-			got.Status.ActiveSite, got.Status.TopologyGeneration)
-	}
-	if got := h.tm.Status().ActiveSite; got != "dc1" {
-		t.Fatalf("/active-site serves %q after the wait ended, want dc1", got)
-	}
-}
-
-// R2-02: status lost while every candidate is reachable and read-only (for
-// example after sidecar fencing). Primary re-assert's authority is the
-// annotation-restored lastFailoverTarget, which is exactly what the wait
-// does not trust: no site becomes writable. The control, the same sites
-// with the status intact, re-asserts dc1, so the path is otherwise eligible.
-func TestDurableStatus_LostStatusAllReadOnlyIsNotReasserted(t *testing.T) {
-	sites := func() (*mockMySQL, *mockMySQL) {
-		dc1, dc2 := runningGroupSites()
-		dc1.setReadOnly(true)
-		return dc1, dc2
-	}
-	dc1, dc2 := sites()
-	h := newBootstrapHarness(t, dc1, dc2)
-	fg := durableTestGroup(lostStatusAnnotations(t, h.clock.Now(), "dc1"))
-	h.tm.RestoreFailoverStateForSim(fg, noopRecorder())
-	for i := 0; i < 10; i++ {
-		h.pollN(1)
-		h.clock.Advance(time.Minute)
-	}
-	if !dc1.isReadOnly() || !dc2.isReadOnly() {
-		t.Fatalf("a site was made writable while no primary was observed: dc1 read-only=%t dc2 read-only=%t",
-			dc1.isReadOnly(), dc2.isReadOnly())
-	}
-
-	dc1c, dc2c := sites()
-	hc := newBootstrapHarness(t, dc1c, dc2c)
-	intact := durableTestGroup(lostStatusAnnotations(t, hc.clock.Now(), "dc1"))
-	intact.Status.ActiveSite, intact.Status.TopologyGeneration = "dc1", 3
-	intact.Status.SetLastFailover(&metav1.Time{Time: hc.clock.Now().Add(-time.Hour).UTC().Truncate(time.Second)}, "dc1", "")
-	hc.tm.RestoreFailoverStateForSim(intact, noopRecorder())
-	hc.pollN(6)
-	if dc1c.isReadOnly() {
-		t.Fatal("control: an intact status did not re-assert dc1 either, so the refusal above proves nothing")
-	}
-}
-
-// N-01: a reader answers writable once, is fenced, and goes away before it
-// answers again. Its stale writable answer must not hold the wait beside a
-// healthy primary for as long as it stays down: it expires when the reader
-// is classified Unreachable, the wait ends on dc1, the status names dc1,
-// and a later loss of dc1 fails over.
-func TestDurableStatus_LostStatusWaitEndsWhenStaleWriterIsUnreachable(t *testing.T) {
-	dc1, dc2 := runningGroupSites()
-	dc3 := &mockMySQL{readOnly: false, gtidExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100"}
-	tm, clk := lostStatusThreeSiteTM(t, dc1, dc2, dc3, state.SiteRoleReadOnly)
-	fg := durableTestGroup(lostStatusAnnotations(t, clk.Now(), "dc1"))
-	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "dc3", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
-	var mu sync.Mutex
-	written := func() *v1alpha1.MysqlFailoverGroup {
-		mu.Lock()
-		defer mu.Unlock()
-		return fg.DeepCopy()
-	}
-	publishStatus(tm, fg, &mu)
-	tm.RestoreFailoverStateForSim(fg.DeepCopy(), noopRecorder())
-	ctx := context.Background()
-	tm.Poll(ctx)
-	if !dc3.isReadOnly() {
-		t.Fatal("setup: the writable reader was not fenced")
-	}
-	dc3.setError(errDown)
-	tm.Poll(ctx)
-	requireLostShape(t, written(), "reader's writable answer current")
-	for i := 0; i < 6; i++ {
-		tm.Poll(ctx)
-	}
-	got := written()
-	if got.Status.ActiveSite != "dc1" || got.Status.TopologyGeneration == 0 {
-		t.Fatalf("the wait still stands beside a healthy primary while the stale writer is unreachable: activeSite %q, topologyGeneration %d",
-			got.Status.ActiveSite, got.Status.TopologyGeneration)
-	}
-	dc1.setError(errDown)
-	for i := 0; i < 10; i++ {
-		tm.Poll(ctx)
-	}
-	if dc2.isReadOnly() {
-		t.Fatal("no failover after the wait ended and dc1 was lost")
-	}
-}
-
-// N-11: an annotation copy that is present but rejected (future-dated past
-// the skew grace, a target not in spec, malformed) is still evidence that
-// the group has run. It arms the wait, so dc2 is not promoted with dc1
-// down. The control, no failover record at all, promotes dc2.
-func TestDurableStatus_RejectedAnnotationArmsTheWait(t *testing.T) {
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) // the harness clock
-	cases := map[string]map[string]string{
-		"future-dated": {
-			v1alpha1.LastFailoverAnnotation:       now.Add(time.Hour).Format(time.RFC3339),
-			v1alpha1.LastFailoverTargetAnnotation: "dc1",
-		},
-		"unknown target": {
-			v1alpha1.LastFailoverAnnotation:       now.Add(-time.Hour).Format(time.RFC3339),
-			v1alpha1.LastFailoverTargetAnnotation: "dc9",
-		},
-		"malformed": {
-			v1alpha1.LastFailoverAnnotation:       "yesterday",
-			v1alpha1.LastFailoverTargetAnnotation: "dc1",
-		},
-		"unpaired": {
-			v1alpha1.LastFailoverTargetAnnotation: "dc1",
-		},
-	}
-	for name, ann := range cases {
-		t.Run(name, func(t *testing.T) {
-			dc1, dc2 := runningGroupSites()
-			dc1.setError(errDown)
-			h := newBootstrapHarness(t, dc1, dc2)
-			if !h.clock.Now().Equal(now) {
-				t.Fatalf("setup: harness clock %s, cases assume %s", h.clock.Now(), now)
-			}
-			h.tm.RestoreFailoverStateForSim(durableTestGroup(ann), noopRecorder())
-			h.pollN(10)
-			if !dc2.isReadOnly() {
-				t.Fatal("promoted dc2 beside a rejected failover-record annotation: the wait did not arm")
-			}
-			dc2.mu.Lock()
-			cloned := dc2.cloneInstanceCalled
-			dc2.mu.Unlock()
-			if cloned {
-				t.Fatal("dc2 was recloned")
-			}
-		})
-	}
-	t.Run("control: no record", func(t *testing.T) {
-		dc1, dc2 := runningGroupSites()
-		dc1.setError(errDown)
-		h := newBootstrapHarness(t, dc1, dc2)
-		h.tm.RestoreFailoverStateForSim(durableTestGroup(nil), noopRecorder())
-		h.pollN(10)
-		if dc2.isReadOnly() {
-			t.Fatal("control: without any failover record dc2 is not promoted either, so the cases above prove nothing")
-		}
-	})
-}
-
-// Control: a lost status beside a healthy unique primary ends the wait on
-// the first poll that classifies it, names it, and a later loss fails over
-// normally.
-func TestDurableStatus_LostStatusHealthyPrimaryClearsAndFailsOver(t *testing.T) {
+// A lost status beside a healthy unique primary: the status names it once
+// it is classified, and a later loss of it fails over normally.
+func TestDurableStatus_LostStatusBesideHealthyPrimaryFailsOver(t *testing.T) {
 	dc1, dc2 := runningGroupSites()
 	h := newBootstrapHarness(t, dc1, dc2)
 	fg := durableTestGroup(lostStatusAnnotations(t, h.clock.Now(), "dc1"))
@@ -586,19 +184,18 @@ func TestDurableStatus_LostStatusHealthyPrimaryClearsAndFailsOver(t *testing.T) 
 	active, gen := fg.Status.ActiveSite, fg.Status.TopologyGeneration
 	mu.Unlock()
 	if active != "dc1" || gen == 0 {
-		t.Fatalf("a healthy unique primary did not end the wait: activeSite %q, topologyGeneration %d", active, gen)
+		t.Fatalf("a healthy unique primary was not published: activeSite %q, topologyGeneration %d", active, gen)
 	}
 	dc1.setError(errDown)
 	h.pollN(10)
 	if dc2.isReadOnly() {
-		t.Fatal("no failover after the wait ended on a healthy primary")
+		t.Fatal("no failover after the healthy primary was lost")
 	}
 }
 
-// Control: an initFromBackup restore into a new group (no status, no
-// annotations) is not a lost status: its seed is made writable and
-// published as before.
-func TestDurableStatus_RestoreSeedIsNotHeld(t *testing.T) {
+// An initFromBackup restore into a new group (no status, no annotations)
+// is not a lost status: its seed is made writable and published.
+func TestDurableStatus_RestoreSeedIsMadeWritable(t *testing.T) {
 	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
 	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
 	h := newBootstrapHarness(t, dc1, dc2)

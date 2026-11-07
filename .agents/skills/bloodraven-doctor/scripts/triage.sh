@@ -277,9 +277,6 @@ echo "Degraded: ${DEGRADED:-unavailable}"
 if [[ "$DEGRADED" == *Initializing* ]]; then
     echo "  The operator just started and has not classified every PrimaryCandidate site yet; this is not an outage. Re-run in a few seconds; a site still unclassified after failureThreshold+recoveryThreshold probes is reported as NoPrimary instead."
 fi
-if [[ "$DEGRADED" == *AwaitingPrimaryObservation* ]]; then
-    echo "  The operator started on a lost status (activeSite empty, topologyGeneration 0, failover history recorded) and has not observed a unique writable primary since: it makes no site writable, names no active site and refuses deployment leases. It ends by itself once one primary answers writable; if no site is writable, make the right one writable by hand: see the AwaitingPrimaryObservation row of the alert matrix."
-fi
 if [[ "$DEGRADED" == *BootstrapFailed* ]]; then
     echo "  The last clone (bootstrap, reclone or auto-clone) failed and its target does not replicate; deployment leases are refused until it replicates or a new clone starts. Fix the cause in the message, then reclone it: see the BootstrapFailed row of the alert matrix."
 fi

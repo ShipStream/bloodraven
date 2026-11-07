@@ -77,16 +77,7 @@ func (tm *TopologyManager) deploymentPromotionExecuted(site string) {
 	tm.deploymentAuthorityLocked(site)
 }
 
-// deploymentAuthorityLocked names site as the deployment's active site and
-// advances the topology generation when that changes. It does nothing while
-// the lost-status wait stands: no authority is published, and the
-// generation does not advance, until a unique writable primary has been
-// observed, so every status write keeps the lost shape a restored manager
-// re-arms from. Must be called with tm.mu held.
 func (tm *TopologyManager) deploymentAuthorityLocked(site string) {
-	if tm.awaitingObservedPrimary {
-		return
-	}
 	if site != "" && site != tm.deploymentActiveSite {
 		tm.topologyGeneration++
 		tm.deploymentActiveSite = site

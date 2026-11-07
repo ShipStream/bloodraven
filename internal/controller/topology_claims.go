@@ -46,7 +46,6 @@ import (
 //	planned-failover hold        R    R   R   R   R     R12
 //	(ManualRecoveryRequired)
 //	promotion not yet observed   R    R   R   R   A1    W
-//	lost-status wait             R    R   R13 A   A14   W15
 //	ordered update claimed       R    R   R   R   R     W
 //	ordered update pending       A2   A2  R   A2  A2    A2
 //	rotation of the target       R    A3  A   A4  A4    W8 / R8
@@ -83,17 +82,6 @@ import (
 //	W11 The runner routes the claim to the current manager; the next pass
 //	   reaches the replacement.
 //	R12 A new request ends Failed{NotStarted, ManualRecoveryPending}.
-//	R13 Rotation admission needs an observed primary (activeSiteLocked),
-//	   which the wait withholds.
-//	A14 Boot needs a confirmed active primary as donor (activeSiteLocked),
-//	   which the wait withholds; the fresh-deploy seed, which makes a site
-//	   writable without a claim, checks the wait itself.
-//	W15 Not a claim cell: the planned-failover claim waits
-//	   (AuthorityUnsettled) because activeSiteLocked names no primary.
-//
-// The lost-status wait (awaitingObservedPrimary) is set only before the
-// manager runs and only ever clears, so a check of it before an unlocked
-// action is not a race.
 //
 // A bootstrap into a read-only reader does not hold off Auto (see
 // bootstrapBlocksCrossSite); its row is otherwise the promotable one's.
@@ -143,10 +131,9 @@ func (tm *TopologyManager) predecessorMutating() bool {
 // dirty bit is re-armed so the next poll re-decides without target. It also
 // refuses anything another actor holds: a
 // planned failover, an in-place restore, a topology-relevant bootstrap, an
-// unobserved promotion, a predecessor still changing the sites, this
-// manager being retired, or the lost-status wait (no unique writable
-// primary observed since a lost status). The caller's earlier checks of
-// the same flags are only a fast path; this decides.
+// unobserved promotion, a predecessor still changing the sites, or this
+// manager being retired. The caller's earlier checks of the same flags are
+// only a fast path; this decides.
 func (tm *TopologyManager) beginAutoPromotionOf(target string) (began, rotationBlocked bool) {
 	if tm.predecessorMutating() {
 		return false, false
@@ -157,8 +144,7 @@ func (tm *TopologyManager) beginAutoPromotionOf(target string) (began, rotationB
 		tm.keyringRotationBlockedDirty = true
 		return false, true
 	}
-	if tm.retired || tm.automaticWritabilityRefusedLocked() || tm.plannedClaimHeldLocked() || tm.topologyFrozen ||
-		tm.promotionUnobservedLocked() || tm.bootstrapBlocksCrossSiteLocked() {
+	if tm.retired || tm.plannedClaimHeldLocked() || tm.topologyFrozen || tm.promotionUnobservedLocked() || tm.bootstrapBlocksCrossSiteLocked() {
 		return false, false
 	}
 	return tm.beginDeploymentTopologyChangeLocked(), false
@@ -167,7 +153,7 @@ func (tm *TopologyManager) beginAutoPromotionOf(target string) (began, rotationB
 // orderedUpdateClaimRefusedLocked reports whether an ordered update planned
 // at authority epoch against active may not claim now. Must hold tm.mu.
 func (tm *TopologyManager) orderedUpdateClaimRefusedLocked(epoch uint64, active string) bool {
-	return tm.retired || tm.automaticWritabilityRefusedLocked() || tm.authorityEpoch != epoch || tm.activeSiteLocked() != active ||
+	return tm.retired || tm.authorityEpoch != epoch || tm.activeSiteLocked() != active ||
 		tm.deploymentChanging > 0 || tm.promotionUnobservedLocked() || tm.topologyFrozen ||
 		tm.plannedClaimHeldLocked() || !bootstrapIdlePhase(tm.bootstrapPhase) || tm.predecessorUpdateInFlight
 }

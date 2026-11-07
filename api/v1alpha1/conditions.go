@@ -255,14 +255,6 @@ const (
 	// the operator renders. The selector is immutable, so the workload is
 	// not updated until it is deleted and re-created.
 	ReasonWorkloadSelectorMismatch = "WorkloadSelectorMismatch"
-	// ReasonAwaitingPrimaryObservation is the Degraded=True and Ready=False
-	// reason while the operator waits to observe a unique writable primary
-	// after a lost status: status.activeSite was empty and
-	// status.topologyGeneration 0 while a failover record (status or
-	// annotations, usable or not) shows the group has run. Until then it
-	// makes no site writable, publishes no active site, and the deployment
-	// API refuses leases.
-	ReasonAwaitingPrimaryObservation = "AwaitingPrimaryObservation"
 )
 
 // MysqlBackup condition reasons.
@@ -505,10 +497,6 @@ const (
 	UnstableReasonSiteNotReady          = "SiteNotReady"
 	UnstableReasonRestoreReclonePending = ReasonRestoreReclonePending
 	UnstableReasonReplicationNotRunning = "ReplicationNotRunning"
-	// UnstableReasonAwaitingPrimaryObservation: status names no active site
-	// because the status was lost, and the operator has not observed a
-	// unique writable primary since (Ready and Degraded carry the reason).
-	UnstableReasonAwaitingPrimaryObservation = ReasonAwaitingPrimaryObservation
 
 	// The Dragonfly subsystem is in a phase other than Disabled or Ready:
 	// "Dragonfly" followed by the DragonflyPhase.

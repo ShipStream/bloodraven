@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -179,15 +181,72 @@ func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing
 		t.Fatalf("the refused StatefulSet was written (resourceVersion %s -> %s)", rv, got)
 	}
 
+	// GPT R3-05: the active's own refusal must not give traffic back while
+	// it loads either. The run records the refusal at once, keeps (and
+	// puts) the active's traffic off and holds, so the reconcile's label
+	// sweep does not run; once the active answers as loaded the run ends
+	// and its traffic returns.
 	t.Run("active refused", func(t *testing.T) {
 		r, c, fg, conn := inFlightUpgradeFixture(t, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore)
 		conn.persist = dragonfly.PersistenceInfo{Loading: true}
-		foreignSelectorDragonflySite(t, c, fg, "dc1")
-		if _, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
+		_, rv := foreignSelectorDragonflySite(t, c, fg, "dc1")
+		// The replacement's pod carries the traffic label.
+		if err := setDragonflyTrafficOnSite(ctx, c, fg, "dc1", true); err != nil {
 			t.Fatal(err)
+		}
+		activeKey := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, "dc1") + "-0"}
+		activeTraffic := func() bool {
+			t.Helper()
+			var p corev1.Pod
+			if err := c.Get(ctx, activeKey, &p); err != nil {
+				t.Fatal(err)
+			}
+			_, has := p.Labels[v1alpha1.DragonflyTrafficLabel]
+			return has
+		}
+
+		for pass := range 2 {
+			step, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg)))
+			if err != nil || step.hold == 0 {
+				t.Fatalf("pass %d while loading: step %+v err %v, want a hold", pass, step, err)
+			}
+		}
+		up := upgradeRecord(t, c, fg)
+		if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore {
+			t.Fatalf("upgrade = %+v, want it still waiting for the active", up)
+		}
+		if !strings.Contains(up.Message, "WorkloadSelectorMismatch") || !strings.Contains(up.Message, "still loading") {
+			t.Fatalf("message = %q, want the refusal and the loading wait", up.Message)
+		}
+		if activeTraffic() {
+			t.Fatal("a loading active kept its traffic label")
+		}
+		if reason, _ := r.Runner.refusalDegraded(fgNN(fg)); reason != v1alpha1.ReasonWorkloadSelectorMismatch {
+			t.Fatalf("refusal = %q, want WorkloadSelectorMismatch recorded at once", reason)
+		}
+		// An unanswered persistence probe is not "loaded" either.
+		conn.persist = dragonfly.PersistenceInfo{}
+		conn.persistErr = errors.New("connection reset")
+		if step, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg))); err != nil || step.hold == 0 {
+			t.Fatalf("unanswered probe: step %+v err %v, want a hold", step, err)
+		}
+		if activeTraffic() {
+			t.Fatal("traffic given back on an unanswered probe")
+		}
+
+		conn.persistErr = nil
+		step, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg)))
+		if err != nil || step.hold != 0 {
+			t.Fatalf("after load: step %+v err %v, want the run ended without a hold", step, err)
 		}
 		if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch {
 			t.Fatalf("upgrade = %+v, want Failed/WorkloadSelectorMismatch", up)
+		}
+		if !activeTraffic() {
+			t.Fatal("the loaded active did not get its traffic back")
+		}
+		if got := dragonflyStatefulSetResourceVersion(t, c, fg, "dc1"); got != rv {
+			t.Fatalf("the refused StatefulSet was written (resourceVersion %s -> %s)", rv, got)
 		}
 	})
 }

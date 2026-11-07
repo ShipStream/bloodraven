@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -155,5 +156,63 @@ func TestDegradedReason_BootstrapFailedRank(t *testing.T) {
 	snap.BootstrapTarget = "iad"
 	if got := degradedReason(snap); got != v1alpha1.ReasonHealthy {
 		t.Errorf("target became the primary: Degraded reason %s, want Healthy", got)
+	}
+}
+
+// N-02: once the failed bootstrap's target has been seen replicating, the
+// failure no longer stands. A later, unrelated replication error on that
+// site must not bring Degraded=BootstrapFailed and its old clone error back,
+// while Bootstrapping keeps reporting the last clone's outcome. A new
+// bootstrap resets the latch.
+func TestBootstrapFailure_ResolutionLatches(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false}
+	dc2 := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+	tm, _, _ := newTestTopologyManager(dc1, dc2)
+	tm.mu.Lock()
+	tm.bootstrapPhase = BootstrapPhaseFailed
+	tm.bootstrapErr = errors.New("clone plugin error")
+	tm.bootstrapFailedTarget = "dc2"
+	tm.mu.Unlock()
+	stands := func() (TopologySnapshot, bool) {
+		snap := tm.buildSnapshot(nil)
+		return snap, bootstrapFailureStands(snap)
+	}
+	if _, ok := stands(); !ok {
+		t.Fatal("setup: the failure does not stand before the target replicates")
+	}
+	pollN(tm, 4)
+	snap, ok := stands()
+	if ok || !snap.BootstrapFailureResolved {
+		t.Fatalf("target replicates: BootstrapFailed stands=%t resolved=%t", ok, snap.BootstrapFailureResolved)
+	}
+
+	// The target breaks later for an unrelated reason.
+	dc2.mu.Lock()
+	dc2.replicaStatusVal = &mysql.ReplicaStatus{IORunning: false, SQLRunning: true, SourceHost: "mysql-dc1", LastIOError: "error reconnecting to source"}
+	dc2.mu.Unlock()
+	pollN(tm, 2)
+	snap, ok = stands()
+	if ok {
+		t.Fatalf("an unrelated replication error brought the old clone failure back: %+v", snap)
+	}
+	if BootstrapPhase(snap.BootstrapPhase) != BootstrapPhaseFailed || snap.BootstrapError == "" {
+		t.Fatalf("Bootstrapping no longer reports the last clone's outcome: phase %q error %q", snap.BootstrapPhase, snap.BootstrapError)
+	}
+	dc2.setError(errors.New("connection refused"))
+	pollN(tm, 4)
+	if snap, ok = stands(); ok {
+		t.Fatalf("an outage of the target brought the old clone failure back: %+v", snap)
+	}
+
+	// A new bootstrap and its failure start over.
+	if _, why := tm.claimBootstrap("dc2", "reclone"); why != "" {
+		t.Fatalf("setup: %s", why)
+	}
+	tm.mu.Lock()
+	tm.bootstrapPhase = BootstrapPhaseFailed
+	tm.bootstrapFailedTarget = "dc2"
+	tm.mu.Unlock()
+	if _, ok := stands(); !ok {
+		t.Fatal("a new failure does not stand: the latch survived a new bootstrap")
 	}
 }

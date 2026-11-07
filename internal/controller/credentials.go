@@ -57,12 +57,42 @@ const appAdminPrivilegeQuery = `SELECT
 		Repl_slave_priv = 'Y' OR Repl_client_priv = 'Y' OR
 		Create_tablespace_priv = 'Y' OR Create_role_priv = 'Y' OR Drop_role_priv = 'Y'))`
 
-// Optional operator Secret keys naming a dedicated replication account. Each
-// defaults to the operator's own username or password when absent.
+// Optional operator Secret keys naming a dedicated replication account. They
+// are set together or not at all; with neither, the operator's own username
+// and password replicate.
 const (
 	replicationUserKey     = "MYSQL_REPLICATION_USER"
 	replicationPasswordKey = "MYSQL_REPLICATION_PASSWORD"
 )
+
+// replicationCredentials resolves the account replicas, clones and
+// old-primary recovery use from the operator Secret's data, as the first-boot
+// init script resolves it. An empty value counts as absent. With neither
+// replication key it returns the operator's username and password. It
+// returns a non-empty problem, and no credentials, when only one key is set
+// (one half would be borrowed from the operator account, so a password-only
+// Secret would present the replication password for the operator account,
+// which MySQL does not hold), or when MYSQL_REPLICATION_USER names the
+// operator account with a different password (two passwords for one
+// account).
+func replicationCredentials(data map[string][]byte) (user, pass, problem string) {
+	opUser, opPass := string(data["username"]), string(data["password"])
+	user, pass = string(data[replicationUserKey]), string(data[replicationPasswordKey])
+	switch {
+	case user == "" && pass == "":
+		return opUser, opPass, ""
+	case user == "":
+		return "", "", fmt.Sprintf("%s is set without %s; set both to name a dedicated replication account, or omit both to replicate as the operator",
+			replicationPasswordKey, replicationUserKey)
+	case pass == "":
+		return "", "", fmt.Sprintf("%s is set without %s; set both to name a dedicated replication account, or omit both to replicate as the operator",
+			replicationUserKey, replicationPasswordKey)
+	case user == opUser && pass != opPass:
+		return "", "", fmt.Sprintf("%s names the operator account %q, but %s differs from its password; omit both keys to replicate as the operator, or name a dedicated account",
+			replicationUserKey, user, replicationPasswordKey)
+	}
+	return user, pass, ""
+}
 
 // replicationGrants is what a dedicated replication account needs: the
 // replica IO thread (REPLICATION SLAVE), the replica-status reads the

@@ -29,9 +29,10 @@ import (
 // fakeDragonflyConn is a hand-rolled stub for DragonflyConnection. Each
 // site addr maps to a scripted ReplicationInfo and an optional error.
 type fakeDragonflyConn struct {
-	infoErr error
-	info    dragonfly.ReplicationInfo
-	persist dragonfly.PersistenceInfo
+	infoErr    error
+	info       dragonfly.ReplicationInfo
+	persist    dragonfly.PersistenceInfo
+	persistErr error
 
 	replicaOfErr  error
 	replicaOfArgs []string
@@ -61,7 +62,7 @@ func (c *fakeDragonflyConn) InfoReplication(_ context.Context) (dragonfly.Replic
 }
 
 func (c *fakeDragonflyConn) InfoPersistence(_ context.Context) (dragonfly.PersistenceInfo, error) {
-	return c.persist, nil
+	return c.persist, c.persistErr
 }
 
 func (c *fakeDragonflyConn) ReplicaOf(_ context.Context, host string, port int32) error {

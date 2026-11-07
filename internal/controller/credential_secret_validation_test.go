@@ -16,8 +16,10 @@ import (
 // TestValidateCredentialSecrets_RefusesUnusableValues pins the start check:
 // an empty operator or role username/password is refused like a missing
 // key (a manager dialing an empty account only reports every site
-// unreachable), and a replication key naming the operator account with a
-// different password is refused (two passwords for one MySQL account).
+// unreachable), a replication key naming the operator account with a
+// different password is refused (two passwords for one MySQL account), and
+// so is either replication key without the other (the missing half would be
+// borrowed from the operator account).
 func TestValidateCredentialSecrets_RefusesUnusableValues(t *testing.T) {
 	operator := func(edit func(map[string][]byte)) *corev1.Secret {
 		data := map[string][]byte{
@@ -71,6 +73,20 @@ func TestValidateCredentialSecrets_RefusesUnusableValues(t *testing.T) {
 			d[replicationUserKey] = []byte("bloodraven")
 			d[replicationPasswordKey] = []byte("other-pw")
 		}), app("app", "app-pw")}, wantEvent: "names the operator account"},
+		{name: "replication password without a user", secrets: []client.Object{operator(func(d map[string][]byte) {
+			d[replicationPasswordKey] = []byte("other-pw")
+		}), app("app", "app-pw")}, wantEvent: "MYSQL_REPLICATION_PASSWORD is set without MYSQL_REPLICATION_USER"},
+		{name: "replication password with an empty user", secrets: []client.Object{operator(func(d map[string][]byte) {
+			d[replicationUserKey] = []byte{}
+			d[replicationPasswordKey] = []byte("op-pw")
+		}), app("app", "app-pw")}, wantEvent: "MYSQL_REPLICATION_PASSWORD is set without MYSQL_REPLICATION_USER"},
+		{name: "replication user without a password", secrets: []client.Object{operator(func(d map[string][]byte) {
+			d[replicationUserKey] = []byte("replicator")
+		}), app("app", "app-pw")}, wantEvent: "MYSQL_REPLICATION_USER is set without MYSQL_REPLICATION_PASSWORD"},
+		{name: "empty replication keys count as absent", secrets: []client.Object{operator(func(d map[string][]byte) {
+			d[replicationUserKey] = []byte{}
+			d[replicationPasswordKey] = []byte{}
+		}), app("app", "app-pw")}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -157,5 +173,47 @@ func TestReconcile_ReplicationCredentialsMountedForInitScript(t *testing.T) {
 		if (ctr.Name == "mysql") != mounted {
 			t.Errorf("container %s: creds-replication mounted read-only at /etc/mysql/creds/replication = %v", ctr.Name, mounted)
 		}
+	}
+}
+
+// TestReplicationCredentials pins the one resolution the start check, the
+// topology manager and the init script share: both replication keys or
+// neither, and never the replication password on the operator account.
+func TestReplicationCredentials(t *testing.T) {
+	base := func(kv ...string) map[string][]byte {
+		d := map[string][]byte{"username": []byte("bloodraven"), "password": []byte("op-pw")}
+		for i := 0; i+1 < len(kv); i += 2 {
+			d[kv[i]] = []byte(kv[i+1])
+		}
+		return d
+	}
+	tests := []struct {
+		name               string
+		data               map[string][]byte
+		wantUser, wantPass string
+		wantProblem        string // substring; "" means usable
+	}{
+		{name: "neither key: the operator replicates", data: base(), wantUser: "bloodraven", wantPass: "op-pw"},
+		{name: "empty keys count as absent", data: base(replicationUserKey, "", replicationPasswordKey, ""), wantUser: "bloodraven", wantPass: "op-pw"},
+		{name: "dedicated account", data: base(replicationUserKey, "replicator", replicationPasswordKey, "repl-pw"), wantUser: "replicator", wantPass: "repl-pw"},
+		{name: "operator account named with its own password", data: base(replicationUserKey, "bloodraven", replicationPasswordKey, "op-pw"), wantUser: "bloodraven", wantPass: "op-pw"},
+		{name: "password only", data: base(replicationPasswordKey, "repl-pw"), wantProblem: "set without " + replicationUserKey},
+		{name: "password only, even the operator's", data: base(replicationPasswordKey, "op-pw"), wantProblem: "set without " + replicationUserKey},
+		{name: "user only", data: base(replicationUserKey, "replicator"), wantProblem: "set without " + replicationPasswordKey},
+		{name: "operator account with another password", data: base(replicationUserKey, "bloodraven", replicationPasswordKey, "repl-pw"), wantProblem: "names the operator account"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			user, pass, problem := replicationCredentials(tt.data)
+			if tt.wantProblem != "" {
+				if !strings.Contains(problem, tt.wantProblem) || user != "" || pass != "" {
+					t.Fatalf("got (%q, %q, %q), want no credentials and a problem containing %q", user, pass, problem, tt.wantProblem)
+				}
+				return
+			}
+			if problem != "" || user != tt.wantUser || pass != tt.wantPass {
+				t.Fatalf("got (%q, %q, %q), want (%q, %q, \"\")", user, pass, problem, tt.wantUser, tt.wantPass)
+			}
+		})
 	}
 }

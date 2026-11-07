@@ -832,7 +832,7 @@ func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Con
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
-	if msg := replicationAccountConflict(secret.Data); msg != "" {
+	if _, _, msg := replicationCredentials(secret.Data); msg != "" {
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretMissingKey,
 			"operator secret %q: %s", operatorSecretName, msg)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -884,20 +884,6 @@ func credentialKeyProblem(data map[string][]byte, key string, nonEmpty bool) str
 		return "has an empty value for key"
 	}
 	return ""
-}
-
-// replicationAccountConflict refuses an operator Secret whose
-// MYSQL_REPLICATION_USER names the operator account with a different
-// MYSQL_REPLICATION_PASSWORD: the two keys would set two passwords on one
-// MySQL account, and replication would present the one MySQL does not
-// hold. It returns "" when there is no conflict.
-func replicationAccountConflict(data map[string][]byte) string {
-	user, pass := string(data[replicationUserKey]), string(data[replicationPasswordKey])
-	if user == "" || pass == "" || user != string(data["username"]) || pass == string(data["password"]) {
-		return ""
-	}
-	return fmt.Sprintf("%s names the operator account %q, but %s differs from its password; omit both keys to replicate as the operator, or name a dedicated account",
-		replicationUserKey, user, replicationPasswordKey)
 }
 
 // resourceName returns a deterministic name for a per-site resource.

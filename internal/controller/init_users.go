@@ -125,18 +125,21 @@ EOSQL
 
 # The replication account resolves as the topology manager resolves it:
 # MYSQL_REPLICATION_USER / MYSQL_REPLICATION_PASSWORD (mounted as
-# replication/username and replication/password), each defaulting to the
-# operator's own value. The operator account already holds every privilege,
-# so only a dedicated account is created.
+# replication/username and replication/password) are set together, and with
+# neither the operator account replicates. The operator refuses a Secret that
+# sets only one, so nothing is created for it here. The operator account
+# already holds every privilege, so only a dedicated account is created.
 create_replication_user() {
     local op_user repl_user repl_pass
     op_user=$(read_cred operator username)
     repl_user=$(read_cred replication username)
     repl_pass=$(read_cred replication password)
-    [ -n "$repl_user" ] || repl_user="$op_user"
-    [ -n "$repl_pass" ] || repl_pass=$(read_cred operator password)
+    if [ -z "$repl_user" ] && [ -z "$repl_pass" ]; then
+        echo "bloodraven-init: replication uses the operator account"
+        return
+    fi
     if [ -z "$repl_user" ] || [ -z "$repl_pass" ]; then
-        echo "bloodraven-init: skipping replication (credentials not mounted)"
+        echo "bloodraven-init: skipping replication (MYSQL_REPLICATION_USER and MYSQL_REPLICATION_PASSWORD must be set together)"
         return
     fi
     if [ "$repl_user" = "$op_user" ]; then
