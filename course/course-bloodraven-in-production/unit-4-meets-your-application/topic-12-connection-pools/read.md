@@ -189,7 +189,7 @@ Each of these is reached for first, and each is wrong for a specific reason.
 }
 ```
 
-Shortening the DNS TTL belongs in the same bin. `spec.dns.ttl` defaults to 60 and the playground
+Shortening the DNS TTL belongs in the same bin. `spec.dns.ttlSeconds` defaults to 60 and the playground
 runs it at 10, and both numbers are irrelevant to an established socket — a resolver TTL governs the
 *next* lookup, and against a caching runtime it may govern nothing at all.
 

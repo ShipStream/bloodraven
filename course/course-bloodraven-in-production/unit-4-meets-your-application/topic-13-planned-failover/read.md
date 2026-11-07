@@ -15,10 +15,11 @@ Only planned failover actually drains. Nothing else does.
 ## The trigger
 
 One annotation, `bloodraven.shipstream.io/planned-failover`. Its value is a bare site name, or a site
-name followed by `:key=value` overrides; `maxLagWait` is the only supported key, and an unknown or
-repeated key is rejected outright (a `PlannedFailoverRejected` Event, no run) so a typo cannot quietly run
-with defaults. A valid request is given a `runID` and the annotation is removed as the run enters
-`Admitting`; only a `Deferred` request keeps it.
+name followed by `:key=value` overrides; `maxLagWait` is the only supported key and takes the spec
+field's 1s–1h range, and an unknown or repeated key, or an out-of-range value, is rejected outright
+(a `PlannedFailoverRejected` Event, no run) so a typo cannot quietly run with defaults. A valid
+request is given a `runID` and the annotation is removed as the run enters `Admitting`; only a
+`Deferred` request keeps it.
 
 ```widget
 {
@@ -142,6 +143,8 @@ so it reads 0 when the IO thread has stalled.
 ## Draining is a deadline, not a barrier
 
 The defaults on `spec.plannedFailover`: `maxLagWait` 5m, `drainTimeout` 30s, `onCooldown` `Reject`.
+Admission bounds the two timers, `maxLagWait` to 1s–1h and `drainTimeout` to 1s–10m; a `0` is refused,
+not quietly replaced by the default.
 
 Two things take the write endpoint away. At `Fencing` the source's primary role label is stripped to
 `fenced`, which matches neither the `-primary` selector nor the `-replicas` selector, so the write

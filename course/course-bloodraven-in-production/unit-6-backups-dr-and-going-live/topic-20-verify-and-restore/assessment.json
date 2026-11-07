@@ -17,16 +17,16 @@
     },
     {
       "front": "Verification terminal reason: SanityCheckFailed",
-      "back": "The sanity query returned a scalar below expect.minRows (or errored outright) — the data is wrong.",
+      "back": "The sanity query returned a scalar below sanityCheck.minResult (or errored outright) — the data is wrong. status.sanityCheck.outcome reads Failed.",
       "orderIndex": 3
     },
     {
       "front": "Verification terminal reason: SanityCheckTimeout",
-      "back": "The sanity query exceeded expect.maxDurationSeconds (default 60) — the instance is wedged rather than wrong.",
+      "back": "The sanity query ran longer than sanityCheck.timeout (default 60s) — the instance is wedged rather than wrong. status.sanityCheck.outcome reads TimedOut.",
       "orderIndex": 4
     },
     {
-      "front": "A verification sanity query runs cleanly but returns zero rows. What scalar does the check compare against minRows?",
+      "front": "A verification sanity query runs cleanly but returns zero rows. What scalar does the check compare against minResult?",
       "back": "0. An empty result set is deliberately treated as scalar 0, so a silently-empty restore fails instead of passing.",
       "orderIndex": 5
     },
@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.resultRow: \"1\"` against a `minRows: 1` floor. What has it proved?",
+      "question": "A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.result: \"1\"` against a `minResult: 1` floor. What has it proved?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [

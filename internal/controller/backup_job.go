@@ -270,9 +270,9 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	if activeDeadline <= 0 {
 		activeDeadline = 7200
 	}
-	backoffLimit := bspec.BackoffLimit
-	if backoffLimit < 0 {
-		backoffLimit = 0
+	backoffLimit := int32(2)
+	if bspec.BackoffLimit != nil {
+		backoffLimit = *bspec.BackoffLimit
 	}
 
 	podSC, containerSC := mergeSecurityContexts(bspec.PodSecurityContext, bspec.ContainerSecurityContext)

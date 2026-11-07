@@ -141,7 +141,7 @@ done
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=pitr-archive-check" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp,KEY_SECRET:.metadata.labels.bloodraven\.shipstream\.io/pitr-key-secret,ACTIVE:.status.active,SUCCEEDED:.status.succeeded,FAILED:.status.failed' > "$OUTPUT_DIR/pitr-archive-check-jobs.txt" 2>/dev/null || true
 kubectl get pods -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=pitr-archive-check" -o 'custom-columns=POD:.metadata.name,JOB:.metadata.labels.job-name,PHASE:.status.phase,WAITING:.status.containerStatuses[*].state.waiting.reason,EXIT:.status.containerStatuses[*].state.terminated.exitCode,RESULT:.status.containerStatuses[*].state.terminated.message' > "$OUTPUT_DIR/pitr-archive-check-pods.txt" 2>/dev/null || true
 kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o json 2>/dev/null | \
-    jq '[.items[] | {name: .metadata.name, mode: .spec.pointInTime.mode, timestamp: .spec.pointInTime.timestamp,
+    jq '[.items[] | {name: .metadata.name, mode: .spec.pointInTime.mode, stopTime: .spec.pointInTime.stopTime,
          excludeGtids: .spec.pointInTime.excludeGtids, phase: .status.phase,
          verified: [.status.conditions[]? | select(.type == "Verified")], pointInTime: .status.pointInTime,
          replayedThroughBinlog: .status.replayedThroughBinlog}]' \

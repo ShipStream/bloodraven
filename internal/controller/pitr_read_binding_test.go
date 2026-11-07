@@ -31,7 +31,7 @@ func readBindingVerification(t *testing.T, state v1alpha1.PITRArchiveBindingStat
 	backup.Status.FailoverGroupUID = "lion-uid"
 	v := verifyCR("verify-binding", "lion", "nightly-s3")
 	v.UID = "verify-binding-uid"
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: outcomeStop}
+	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr(outcomeStop)}
 	r, c := newVerificationReconciler(t, append([]client.Object{fg, backup, v, operatorCredsSecret()}, extra...)...)
 	return r, c, v
 }
@@ -298,7 +298,7 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 			fg.Status.PITRArchiveBindings = nil
 			e := bindTestPITRArchive(t, fg, name)
 			e.State, e.Reason = tc.state, tc.reason
-			fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, ArchiveProfileName: name}
+			fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopTime: stopAt(outcomeStop), ArchiveProfileName: name}
 			r, c := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), operatorCredsSecret())
 			if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 				t.Fatal(err)

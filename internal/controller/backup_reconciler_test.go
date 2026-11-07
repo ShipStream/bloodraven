@@ -165,12 +165,12 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 				{Name: "pdx", ServerID: 102, Zone: "az-pdx", LBIP: "10.0.0.2",
 					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "lion.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "lion.example.com", TTLSeconds: 60},
 			Backup: &v1alpha1.BackupSpec{
 				Image:                  "mysql/mysql-shell:8.0.34",
-				MaxLagSecondsForSource: 60,
+				MaxLagSecondsForSource: new(int64(60)),
 				ActiveDeadlineSeconds:  3600,
-				BackoffLimit:           1,
+				BackoffLimit:           new(int32(1)),
 				Profiles: []v1alpha1.BackupProfile{
 					{
 						Name: "nightly-s3",

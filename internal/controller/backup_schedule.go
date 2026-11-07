@@ -556,6 +556,27 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 	return minRequeue, nil
 }
 
+// Defaults of spec.backup.retry.{initialBackoff,maxBackoff} for objects
+// built outside admission.
+const (
+	defaultBackupRetryInitialBackoff = time.Minute
+	defaultBackupRetryMaxBackoff     = 30 * time.Minute
+)
+
+// backupRetryBackoffBounds returns the effective initial and maximum retry
+// backoff. Admission bounds both (1s..1h, 1s..24h, max >= initial); only
+// nil takes the default.
+func backupRetryBackoffBounds(retry *v1alpha1.BackupRetrySpec) (initial, maxBackoff time.Duration) {
+	initial, maxBackoff = defaultBackupRetryInitialBackoff, defaultBackupRetryMaxBackoff
+	if retry.InitialBackoff != nil {
+		initial = retry.InitialBackoff.Duration
+	}
+	if retry.MaxBackoff != nil {
+		maxBackoff = retry.MaxBackoff.Duration
+	}
+	return initial, maxBackoff
+}
+
 // maybeScheduleRetry considers materializing a retry MysqlBackup for a
 // Failed latest attempt on a scheduled CR. Returns (next, wait, conflict, err):
 //
@@ -579,25 +600,17 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 		return nil, 0, "", nil
 	}
 
-	initial := retry.InitialBackoffSeconds
-	if initial <= 0 {
-		initial = 60
-	}
-	maxBackoff := retry.MaxBackoffSeconds
-	if maxBackoff <= 0 {
-		maxBackoff = 1800
-	}
+	initial, maxBackoff := backupRetryBackoffBounds(retry)
 
 	// Exponential backoff starting at initial, doubling each step,
 	// capped at maxBackoff. For the Nth retry (1-indexed), wait
-	// initial * 2^(N-1) seconds.
-	step := int32(1)
-	for i := int32(1); i < current; i++ {
-		step *= 2
+	// initial * 2^(N-1).
+	backoff := initial
+	for i := int32(1); i < current && backoff < maxBackoff; i++ {
+		backoff *= 2
 	}
-	backoffSeconds := initial * step
-	if backoffSeconds > maxBackoff {
-		backoffSeconds = maxBackoff
+	if backoff > maxBackoff {
+		backoff = maxBackoff
 	}
 
 	var base time.Time
@@ -606,7 +619,7 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 	} else {
 		base = time.Now()
 	}
-	when := base.Add(time.Duration(backoffSeconds) * time.Second)
+	when := base.Add(backoff)
 	now := time.Now()
 	if when.After(now) {
 		wait := when.Sub(now)

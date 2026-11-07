@@ -11,7 +11,7 @@ spec:
     appSecretName: orders-mysql-app
   dns:
     hostname: orders.az.example.com
-    ttl: 60
+    ttlSeconds: 60
   replication:
     maxLagSeconds: 300
     readOnlyMaxLagSeconds: 30

@@ -86,7 +86,8 @@ group health from the site rows.</p>
 <ul>
 <li><code>site_role(site_spec)</code> applies the CRD default — <code>spec.sites[].role</code> is optional and defaults to
 <code>PrimaryCandidate</code>.</li>
-<li><code>effective_max_lag(spec)</code> is <code>spec.replication.maxLagSeconds</code>, defaulting to 300.</li>
+<li><code>effective_max_lag(spec)</code> is <code>spec.replication.maxLagSeconds</code>, defaulting to 300 when absent. An
+explicit <code>0</code> is kept, and means the replica must be fully caught up.</li>
 <li><code>effective_readonly_max_lag(spec)</code> is <code>spec.replication.readOnlyMaxLagSeconds</code>. It has <strong>no
 default of its own</strong>: absent inherits <code>maxLagSeconds</code>, but an explicit <code>0</code> is meaningful and means
 the reader must report zero lag. <code>.get("readOnlyMaxLagSeconds") or ...</code> gets that wrong.</li>
@@ -178,7 +179,7 @@ that is what the Python is for — but it gets you a one-screen summary today:</
 worth reading rather than pasting.</p>
 <p><strong><code>// 300</code> on <code>maxLagSeconds</code>, and <code>// $maxlag</code> on <code>readOnlyMaxLagSeconds</code>.</strong> The first is the CRD
 default. The second is <em>inheritance</em>, not a default — and note that <code>//</code> in <code>jq</code> treats <code>false</code> and
-<code>null</code> as absent but <strong>not</strong> <code>0</code>, which is exactly the behaviour this field needs: an explicit <code>0</code> is
+<code>null</code> as absent but <strong>not</strong> <code>0</code>, which is exactly the behaviour both fields need: an explicit <code>0</code> is
 meaningful and must survive.</p>
 <p><strong><code>if $s.secondsBehindSource == null then "unknown"</code>.</strong> Never <code>// 0</code>. Absent and zero are different
 facts, and collapsing them is how a detached replica ends up looking perfectly caught up.</p>
@@ -247,10 +248,11 @@ def site_role(site_spec):
 
 
 def effective_max_lag(spec):
-    &quot;&quot;&quot;spec.replication.maxLagSeconds, or the API default.&quot;&quot;&quot;
+    &quot;&quot;&quot;spec.replication.maxLagSeconds, or the API default when absent. An
+    explicit 0 is kept: it means the replica must be fully caught up.&quot;&quot;&quot;
     replication = spec.get(&quot;replication&quot;) or {}
     value = replication.get(&quot;maxLagSeconds&quot;)
-    if not value:
+    if value is None:
         return DEFAULT_MAX_LAG_SECONDS
     return int(value)
 

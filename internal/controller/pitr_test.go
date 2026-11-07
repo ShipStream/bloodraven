@@ -273,7 +273,7 @@ func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
 func TestBuildRestorePITRFragments_RequiresSourceArchive(t *testing.T) {
 	fg := withBackup(nil)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"},
+		PointInTime: &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z")},
 	}
 	_, err := buildRestorePITRFragments(fg)
 	if err == nil || !strings.HasPrefix(err.Error(), string(pitrarchive.TokenTargetInvalid)+": pointInTime.archiveProfileName is required") {
@@ -370,7 +370,7 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	source.Storage.S3.Prefix = "source-dumps"
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source"},
+		PointInTime: &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source"},
 	}
 	bindTestPITRArchive(t, fg, "source")
 
@@ -455,7 +455,7 @@ func TestValidateRestoreArchiveProfile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := withBackup(tt.pitr)
 			fg.Spec.Backup.Profiles = tt.profiles
-			err := validateRestoreArchiveProfile(fg, &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: tt.archive})
+			err := validateRestoreArchiveProfile(fg, &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: tt.archive})
 			if tt.want == "" {
 				if err != nil {
 					t.Fatalf("unexpected refusal: %v", err)
@@ -511,7 +511,7 @@ func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
 		{name: "unparsable", in: u + ":9-2", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			restore, rerr := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ExcludeGtids: tc.in})
+			restore, rerr := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:00:00Z"), ExcludeGtids: tc.in})
 			verify, verr := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ExcludeGtids: tc.in})
 			for name, err := range map[string]error{"restore": rerr, "verification": verr} {
 				if tc.wantErr {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
@@ -320,27 +321,18 @@ type pitrReplayRequest struct {
 	Verification bool
 }
 
-// pitrStopPattern is the stopDatetime/timestamp CRD pattern (§6.1). The
-// controller enforces it again because objects admitted before the pattern
-// existed, and every caller of the builders, must not reach a Job.
-var pitrStopPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`)
-
-// parsePITRTarget parses a point-in-time target, a whole second: RFC 3339
-// with an optional zone, or the MySQL form, neither with a fraction (A-39:
-// the v1beta1 field is a second-precision metav1.Time); no zone means UTC.
-// Callers refuse any other spelling with PITRTargetInvalid. The planner
-// still compares µs commit times against it (commit < T).
-func parsePITRTarget(value string) (time.Time, error) {
-	if len(value) > 40 || !pitrStopPattern.MatchString(value) {
-		return time.Time{}, fmt.Errorf("%q is not a target instant (YYYY-MM-DDTHH:MM:SS[Z|±HH:MM], whole seconds; fractional seconds are not accepted)", value)
+// pitrTarget checks a point-in-time target. The CRD pattern admits only
+// RFC 3339 with an explicit zone and whole seconds (A-39), and metav1.Time
+// carries second precision, so an object read from the API always passes;
+// the check guards objects built in memory, which must not reach a Job with
+// a sub-second or missing target. The planner still compares µs commit times
+// against it (commit < T).
+func pitrTarget(field string, t *metav1.Time) (time.Time, error) {
+	if t == nil || t.IsZero() {
+		return time.Time{}, fmt.Errorf("%s: %s is required", pitrarchive.TokenTargetInvalid, field)
 	}
-	normalized := strings.Replace(value, " ", "T", 1)
-	if !strings.HasSuffix(normalized, "Z") && !strings.ContainsAny(normalized[19:], "+-") {
-		normalized += "Z"
-	}
-	t, err := time.Parse(time.RFC3339Nano, normalized)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("%q: %v", value, err)
+	if t.Nanosecond() != 0 {
+		return time.Time{}, fmt.Errorf("%s: %s %s has a fractional second; targets are whole seconds", pitrarchive.TokenTargetInvalid, field, t.UTC().Format(time.RFC3339Nano))
 	}
 	return t.UTC(), nil
 }
@@ -356,12 +348,9 @@ func pitrRequestFromSpec(pit *v1alpha1.PointInTimeSpec) (*pitrReplayRequest, err
 	if pit == nil {
 		return nil, nil
 	}
-	if pit.StopDatetime == "" {
-		return nil, fmt.Errorf("%s: pointInTime.stopDatetime is required", pitrarchive.TokenTargetInvalid)
-	}
-	stop, err := parsePITRTarget(pit.StopDatetime)
+	stop, err := pitrTarget("pointInTime.stopTime", &pit.StopTime)
 	if err != nil {
-		return nil, fmt.Errorf("%s: pointInTime.stopDatetime: %v", pitrarchive.TokenTargetInvalid, err)
+		return nil, err
 	}
 	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", pit.ExcludeGtids)
 	if err != nil {

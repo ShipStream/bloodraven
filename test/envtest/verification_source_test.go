@@ -35,7 +35,7 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 	if err := k8sClient.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3", TTLSecondsAfterFinished: 3600}}
+	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3", TTLSecondsAfterFinished: new(int32(3600))}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
 	}

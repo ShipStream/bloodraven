@@ -217,8 +217,8 @@ RULE_SITE_NAMES=&quot;spec.sites[].name must be unique&quot;
 RULE_TWO_CANDIDATES=&quot;spec.sites must contain at least two sites with role PrimaryCandidate&quot;
 RULE_PRIORITIES=&quot;splitBrainPolicy.sitePriorities entries must match the names of sites with role PrimaryCandidate&quot;
 RULE_SITE_FIELDS=&quot;taintNodeSelector and lbIP are required unless role is ReadOnly&quot;
-RULE_PEER_INTERVAL=&quot;sidecar.peerCheckInterval must be at least 1s&quot;
-RULE_LEASE_MIN=&quot;sidecar.leaseTimeout must be at least 3s&quot;
+RULE_PEER_INTERVAL=&quot;sidecar.peerCheckInterval must be between 1s and 1m&quot;
+RULE_LEASE_RANGE=&quot;sidecar.leaseTimeout must be between 3s and 10m&quot;
 RULE_LEASE_RATIO=&quot;sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval&quot;
 
 # The six silent findings, in the fixed order brprep reports them.
@@ -255,8 +255,9 @@ WARN_RECREATE=&quot;updateStrategy.type Recreate patches every site Deployment i
 #                       both .lbIP and .taintNodeSelector. A ReadOnly site
 #                       needs neither — it is never promoted and never tainted.
 #                       This is the one the fixtures try hardest to break.
-#   RULE_PEER_INTERVAL  secs(.spec.sidecar.peerCheckInterval) &gt;= 1, when set.
-#   RULE_LEASE_MIN      secs(.spec.sidecar.leaseTimeout) &gt;= 3, when set.
+#   RULE_PEER_INTERVAL  1 &lt;= secs(.spec.sidecar.peerCheckInterval) &lt;= 60,
+#                       when set.
+#   RULE_LEASE_RANGE    3 &lt;= secs(.spec.sidecar.leaseTimeout) &lt;= 600, when set.
 #   RULE_LEASE_RATIO    secs(leaseTimeout) &gt;= 3 * secs(peerCheckInterval),
 #                       when both are set.
 #

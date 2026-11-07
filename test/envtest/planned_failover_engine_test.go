@@ -353,8 +353,9 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	// (A-02), and every write evaluates the rule that keeps serverID
 	// unique, so the upgrade adds them first. The old CRD also defaulted
 	// the lower-case role primary-candidate and the string updateStrategy
-	// OrderedUpdate, which the final schema refuses (A-27), so the upgrade
-	// rewrites them too.
+	// OrderedUpdate, which the final schema refuses (A-27), and the integer
+	// cloneTimeout 3600, which is now a bounded Duration (A-35, A-36), so
+	// the upgrade rewrites them too.
 	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
@@ -373,6 +374,9 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := unstructured.SetNestedField(u.Object, "mysql-credentials", "spec", "credentials", "operatorSecretName"); err != nil {
+			t.Fatal(err)
+		}
+		if err := unstructured.SetNestedField(u.Object, "1h", "spec", "cloneTimeout"); err != nil {
 			t.Fatal(err)
 		}
 		if err := c.Update(ctx, u); err != nil {

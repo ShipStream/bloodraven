@@ -206,8 +206,8 @@ func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
 			if s.LinkStatus != "up" {
 				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has linkStatus=%q (want up)", s.Name, s.LinkStatus)
 			}
-			if s.LastIOSecondsAgo < 0 {
-				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has lastIOSecondsAgo=%d (never synced)", s.Name, s.LastIOSecondsAgo)
+			if s.LastIOSecondsAgo == nil || *s.LastIOSecondsAgo < 0 {
+				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has lastIOSecondsAgo=%s (never synced)", s.Name, lastIOString(s.LastIOSecondsAgo))
 			}
 			if s.SyncInProgress {
 				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has syncInProgress=true", s.Name)
@@ -374,4 +374,13 @@ func emptyAsNone(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// lastIOString renders status.dragonfly.sites[].lastIOSecondsAgo; "unset"
+// when Dragonfly did not report it.
+func lastIOString(v *int64) string {
+	if v == nil {
+		return "unset"
+	}
+	return fmt.Sprint(*v)
 }

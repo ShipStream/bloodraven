@@ -98,7 +98,7 @@
         "Raise the pool size so more connections are available after the promotion",
         "Set `reconnect=true` so the driver re-establishes broken connections",
         "Bound the connection lifetime so every socket is retired and reopened",
-        "Shorten `spec.dns.ttl` from 60 to 10 so the record is re-resolved sooner"
+        "Shorten `spec.dns.ttlSeconds` from 60 to 10 so the record is re-resolved sooner"
       ],
       "correctOptionIndex": 2,
       "explanation": "Only a bounded lifetime forces an established socket to close, and the ceiling on staleness becomes the lifetime you chose. Raising the pool size makes it worse: more connections, all established the same way, all pinned to the same backend, held longer. `reconnect=true` acts after something has already broken — a stale read succeeds, so the reconnect path is never entered. A shorter DNS TTL governs the next lookup, not an open socket, and against a runtime that caches DNS for the process lifetime it may govern nothing at all. (objectives 4, 6)"

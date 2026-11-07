@@ -281,7 +281,7 @@ func TestPITRTokenCatalogMatchesAPI(t *testing.T) {
 			continue
 		}
 		n, ok := c.Type().(*types.Named)
-		if !ok {
+		if !ok || c.Val().Kind() != constant.String {
 			continue
 		}
 		tn := n.Obj().Name()

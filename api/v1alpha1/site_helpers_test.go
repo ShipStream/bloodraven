@@ -39,6 +39,7 @@ func TestPeerSiteNamesIncludesReaders(t *testing.T) {
 
 func TestEffectiveReplicationLag(t *testing.T) {
 	zero := int64(0)
+	fortyTwo := int64(42)
 	tests := []struct {
 		name string
 		spec MysqlFailoverGroupSpec
@@ -46,8 +47,10 @@ func TestEffectiveReplicationLag(t *testing.T) {
 		read int64
 	}{
 		{name: "defaults", max: 300, read: 300},
-		{name: "inherits", spec: MysqlFailoverGroupSpec{Replication: &ReplicationSpec{MaxLagSeconds: 42}}, max: 42, read: 42},
-		{name: "explicit zero", spec: MysqlFailoverGroupSpec{Replication: &ReplicationSpec{MaxLagSeconds: 42, ReadOnlyMaxLagSeconds: &zero}}, max: 42, read: 0},
+		{name: "inherits", spec: MysqlFailoverGroupSpec{Replication: &ReplicationSpec{MaxLagSeconds: &fortyTwo}}, max: 42, read: 42},
+		{name: "explicit zero", spec: MysqlFailoverGroupSpec{Replication: &ReplicationSpec{MaxLagSeconds: &fortyTwo, ReadOnlyMaxLagSeconds: &zero}}, max: 42, read: 0},
+		// A-37: a zero maxLagSeconds means caught up and is never rewritten to 300.
+		{name: "zero max lag", spec: MysqlFailoverGroupSpec{Replication: &ReplicationSpec{MaxLagSeconds: &zero}}, max: 0, read: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

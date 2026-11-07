@@ -332,7 +332,7 @@ func (r *TopologyManagerRunner) LeaderContext() context.Context {
 	return r.leaderContext
 }
 
-// SetDNSRecordSpec pushes spec.dns.hostname and spec.dns.ttl onto the
+// SetDNSRecordSpec pushes spec.dns.hostname and spec.dns.ttlSeconds onto the
 // running topology manager's DNS updater. Returns true when a manager
 // is running for nn. A false return is safe — the next startManager
 // constructs the updater from the live spec.
@@ -445,12 +445,13 @@ func (r *TopologyManagerRunner) Start(ctx context.Context) error {
 }
 
 // cloneTimeoutFromSpec returns the clone budget from spec.cloneTimeout.
-// Zero means the bootstrap path applies its own default.
+// An unset field returns 0, for which the bootstrap path applies the API
+// default (1h); admission bounds a set value to 1m..24h.
 func cloneTimeoutFromSpec(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if fg == nil || fg.Spec.CloneTimeout <= 0 {
+	if fg == nil || fg.Spec.CloneTimeout == nil {
 		return 0
 	}
-	return time.Duration(fg.Spec.CloneTimeout) * time.Second
+	return fg.Spec.CloneTimeout.Duration
 }
 
 // connectionMaterialHash fingerprints the secrets the operator's MySQL
@@ -601,7 +602,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			}
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			_ = r.applyRestoreProtection(ctx, existing.tm, fg, false)
-			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			r.syncDragonflyUpgradePause(ctx, nn, existing.dragonfly, upgradePaused)
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
@@ -984,9 +985,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	failoverCtl := NewFailoverController(r.logger.With("fg", nn.String()))
 	tainter := platform.NewNodeTainter(r.clientset, r.logger.With("fg", nn.String()))
 
-	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
+	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds)
 	if spec, ok := dns.(platform.DNSSpecController); ok {
-		spec.SetRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+		spec.SetRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds, fg.Generation)
 	}
 
 	// Build bootstrap configuration: the operator username/password are the

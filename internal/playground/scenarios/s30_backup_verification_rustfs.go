@@ -255,8 +255,8 @@ func s30WaitVerificationSucceeded(v s30Variant) runner.Step {
 			if backupUID != "" && vr.Status.BackupRef.UID != "" && vr.Status.BackupRef.UID != backupUID {
 				return fmt.Errorf("verification backupRef UID=%q, want %q", vr.Status.BackupRef.UID, backupUID)
 			}
-			if vr.Status.SanityCheck == nil || !vr.Status.SanityCheck.Ran || vr.Status.SanityCheck.ResultRow != "2" {
-				return fmt.Errorf("verification sanity=%v, want ran=true resultRow=2", vr.Status.SanityCheck)
+			if vr.Status.SanityCheck == nil || vr.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomePassed || vr.Status.SanityCheck.Result != "2" {
+				return fmt.Errorf("verification sanity=%v, want outcome=Passed result=2", vr.Status.SanityCheck)
 			}
 			if !conditionTrue(vr.Status.Conditions, v1alpha1.ConditionVerified) {
 				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(vr.Status.Conditions))

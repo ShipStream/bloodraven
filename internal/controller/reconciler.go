@@ -310,7 +310,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// visible to the next topology poll even if this reconcile bails on
 	// restore, planned failover, or another subsystem.
 	if r.Runner != nil {
-		r.Runner.SetDNSRecordSpec(req.NamespacedName, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+		r.Runner.SetDNSRecordSpec(req.NamespacedName, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds, fg.Generation)
 		r.Runner.SetCloneTimeout(req.NamespacedName, cloneTimeoutFromSpec(&fg))
 	}
 
@@ -2458,11 +2458,8 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) (TopologyConfig, 
 		recoveryThreshold = fg.Spec.RecoveryThreshold
 	}
 
-	var failoverCooldown int64
-	if fg.Spec.FailoverCooldown != nil {
-		failoverCooldown = int64(fg.Spec.FailoverCooldown.Duration)
-	}
-	var connectionDrainTimeout int64
+	failoverCooldown := int64(failoverCooldownFromSpec(fg))
+	connectionDrainTimeout := int64(defaultConnectionDrainTimeout)
 	if fg.Spec.ConnectionDrainTimeout != nil {
 		connectionDrainTimeout = int64(fg.Spec.ConnectionDrainTimeout.Duration)
 	}

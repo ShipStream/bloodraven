@@ -35,7 +35,7 @@ func mustMicro(t *testing.T, s string) time.Time {
 }
 
 // TestPITRFenceTargetIsWholeSecondAfterNow pins the fence's T: a whole
-// second (stopDatetime admits no fraction, A-39) strictly after the clock
+// second (stopTime admits no fraction, A-39) strictly after the clock
 // read under the lock, and at most one second after it.
 func TestPITRFenceTargetIsWholeSecondAfterNow(t *testing.T) {
 	for _, now := range []string{
@@ -479,14 +479,14 @@ func TestPITRWriterAwaitFirst(t *testing.T) {
 
 // TestPITRScenarioTargetsAreAdmissible pins F068: every target the PITR
 // scenarios generate (pitrFenceTarget, used by s31 and every fence) passes
-// the CRDs' admission patterns for verification timestamps and
-// stopDatetime, which refuse fractional seconds.
+// the admission pattern of both stopTime fields, which refuse fractional
+// seconds.
 func TestPITRScenarioTargetsAreAdmissible(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "config", "crd", "bases")
 	var patterns []*regexp.Regexp
 	for _, f := range []struct{ file, field string }{
-		{"shipstream.io_mysqlbackupverifications.yaml", "timestamp"},
-		{"shipstream.io_mysqlfailovergroups.yaml", "stopDatetime"},
+		{"shipstream.io_mysqlbackupverifications.yaml", "stopTime"},
+		{"shipstream.io_mysqlfailovergroups.yaml", "stopTime"},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, f.file))
 		if err != nil {
@@ -498,7 +498,9 @@ func TestPITRScenarioTargetsAreAdmissible(t *testing.T) {
 			if strings.TrimSpace(l) != f.field+":" {
 				continue
 			}
-			for j := i + 1; j < len(lines) && j < i+30; j++ {
+			indent := len(l) - len(strings.TrimLeft(l, " "))
+			// Only this property's own keys: stop at the next sibling.
+			for j := i + 1; j < len(lines) && len(lines[j])-len(strings.TrimLeft(lines[j], " ")) > indent; j++ {
 				if v, ok := strings.CutPrefix(strings.TrimSpace(lines[j]), "pattern: "); ok {
 					patterns = append(patterns, regexp.MustCompile(strings.Trim(v, `'"`)))
 					found++

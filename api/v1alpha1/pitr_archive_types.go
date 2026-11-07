@@ -185,7 +185,7 @@ type PointInTimeResult struct {
 	// StopTime is the requested target (a whole second; commit times are
 	// compared against it to the microsecond). Unset in Latest mode.
 	// +optional
-	StopTime *metav1.MicroTime `json:"stopTime,omitempty"`
+	StopTime *metav1.Time `json:"stopTime,omitempty"`
 	// Outcome is how the end point was reached.
 	// +required
 	Outcome PointInTimeOutcome `json:"outcome"`

@@ -83,8 +83,8 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 			},
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			DNS: v1alpha1.DNSSpec{
-				Hostname: "lion.az.example.com",
-				TTL:      60,
+				Hostname:   "lion.az.example.com",
+				TTLSeconds: 60,
 			},
 			PollInterval:      &metav1.Duration{Duration: 2 * time.Second},
 			FailureThreshold:  3,

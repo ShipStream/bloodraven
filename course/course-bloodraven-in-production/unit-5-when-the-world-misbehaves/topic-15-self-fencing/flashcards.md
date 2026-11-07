@@ -29,7 +29,7 @@
 
 **Front:** The three CEL invariants on spec.sidecar
 
-**Back:** peerCheckInterval >= 1s, leaseTimeout >= 3s, and leaseTimeout >= 3 x peerCheckInterval.
+**Back:** peerCheckInterval between 1s and 1m, leaseTimeout between 3s and 10m, and leaseTimeout >= 3 x peerCheckInterval.
 
 ---
 

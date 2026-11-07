@@ -302,7 +302,7 @@ func s31InsertPITRMarkers() runner.Step {
 				return ctx.Err()
 			case <-time.After(2 * time.Second):
 			}
-			// The verification timestamp admits no fraction (A-39): the
+			// The verification stopTime admits no fraction (A-39): the
 			// target is the next whole second on the server clock, and the
 			// after-target row is written only once the clock has passed
 			// it (F068).
@@ -431,7 +431,11 @@ func s31CreateVerification() runner.Step {
 			}
 			runStem := ctxFetch(env, "backupRunStem")
 			query := "SELECT IF(SUM(phase='baseline') = 1 AND SUM(phase='before-target') = 1 AND SUM(phase='after-target') = 0, 1, 0) FROM " + s31DBName + ".marker WHERE run_id=" + quoteSQLString(runStem)
-			pit := &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: ctxFetch(env, "pitrTargetTimestamp")}
+			stop, err := pitrTargetTime(ctxFetch(env, "pitrTargetTimestamp"))
+			if err != nil {
+				return err
+			}
+			pit := &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop}
 			return createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backupName"), s31ID, pit, query, 1)
 		},
 	}
@@ -457,8 +461,8 @@ func s31WaitVerificationSucceeded() runner.Step {
 			if backupUID != "" && v.Status.BackupRef.UID != "" && v.Status.BackupRef.UID != backupUID {
 				return fmt.Errorf("verification backupRef UID=%q, want %q", v.Status.BackupRef.UID, backupUID)
 			}
-			if v.Status.SanityCheck == nil || !v.Status.SanityCheck.Ran || v.Status.SanityCheck.ResultRow != "1" {
-				return fmt.Errorf("verification sanity=%v, want ran=true resultRow=1", v.Status.SanityCheck)
+			if v.Status.SanityCheck == nil || v.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomePassed || v.Status.SanityCheck.Result != "1" {
+				return fmt.Errorf("verification sanity=%v, want outcome=Passed result=1", v.Status.SanityCheck)
 			}
 			if v.Status.ReplayedThroughBinlog == nil {
 				return fmt.Errorf("verification replay mark is nil for PITR run")

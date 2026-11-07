@@ -152,8 +152,17 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 		cr.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: backupName}
 	}
 	if vs := profileVerificationSpec(fg, profile); vs != nil {
-		cr.Spec.KeepOnFailure = vs.KeepOnFailure
-		cr.Spec.TTLSecondsAfterFinished = vs.TTLSecondsAfterFinished
+		// Copy the pointers so an unset field stays unset on the CR
+		// (ttlSecondsAfterFinished: unset keeps resources until
+		// retention, 0 cleans up at once).
+		if vs.KeepOnFailure != nil {
+			keep := *vs.KeepOnFailure
+			cr.Spec.KeepOnFailure = &keep
+		}
+		if vs.TTLSecondsAfterFinished != nil {
+			ttl := *vs.TTLSecondsAfterFinished
+			cr.Spec.TTLSecondsAfterFinished = &ttl
+		}
 		if vs.PointInTime != nil {
 			cr.Spec.PointInTime = vs.PointInTime.DeepCopy()
 		}

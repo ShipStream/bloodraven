@@ -36,7 +36,7 @@ type DNSRecordReader interface {
 
 // DNSSpecController is the optional live-update and inspect side of a
 // DNSUpdater. The topology manager uses it so spec.dns.hostname and
-// spec.dns.ttl can change on a running group without restarting the
+// spec.dns.ttlSeconds can change on a running group without restarting the
 // manager, and so reconcileDNS can compare the full owned record
 // (dnsName, recordTTL, target) instead of the target IP alone.
 type DNSSpecController interface {

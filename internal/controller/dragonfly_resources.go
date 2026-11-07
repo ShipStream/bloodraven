@@ -259,11 +259,14 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 		// DragonflyManager re-issue REPLICAOF on the next tick.
 		"--break_replication_on_master_restart",
 	}
-	if spec.MaxMemoryMb > 0 {
-		args = append(args, fmt.Sprintf("--maxmemory=%dmb", spec.MaxMemoryMb))
+	// Admission requires maxMemory > 0 and proactorThreads >= 1; unset leaves
+	// Dragonfly's defaults. --maxmemory takes bytes; Value rounds a
+	// fractional quantity up to the next byte.
+	if spec.MaxMemory != nil && spec.MaxMemory.Sign() > 0 {
+		args = append(args, fmt.Sprintf("--maxmemory=%d", spec.MaxMemory.Value()))
 	}
-	if spec.ProactorThreads > 0 {
-		args = append(args, fmt.Sprintf("--proactor_threads=%d", spec.ProactorThreads))
+	if spec.ProactorThreads != nil && *spec.ProactorThreads > 0 {
+		args = append(args, fmt.Sprintf("--proactor_threads=%d", *spec.ProactorThreads))
 	}
 	if spec.Snapshot != nil && spec.Snapshot.Dir != "" {
 		args = append(args, "--dir="+spec.Snapshot.Dir)

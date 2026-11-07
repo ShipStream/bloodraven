@@ -163,7 +163,7 @@ A timing you observe here is **not** the shipped default:
 | --- | --- | --- |
 | `failoverCooldown` | `30s` | `5m` |
 | `replication.maxLagSeconds` | `30` | `300` |
-| `dns.ttl` | `10` | `60` |
+| `dns.ttlSeconds` | `10` | `60` |
 
 Everything else matches: `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`,
 `peerCheckInterval` and `maxSyncWait` sit at their defaults. MySQL is `mysql:9.7`, the operator

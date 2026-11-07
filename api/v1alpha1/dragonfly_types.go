@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -40,17 +41,18 @@ type DragonflySpec struct {
 	// +optional
 	AdminPort int32 `json:"adminPort,omitempty"`
 
-	// MaxMemoryMb caps Dragonfly's memory budget per pod. Translates to
-	// the --maxmemory flag. 0 means leave unset (Dragonfly default).
-	// +kubebuilder:validation:Minimum=0
+	// MaxMemory caps Dragonfly's memory budget per pod (for example
+	// "512Mi"), rendered as --maxmemory in bytes. Must be positive. Unset
+	// leaves Dragonfly's default.
+	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="dragonfly.maxMemory must be greater than 0"
 	// +optional
-	MaxMemoryMb int32 `json:"maxMemoryMb,omitempty"`
+	MaxMemory *resource.Quantity `json:"maxMemory,omitempty"`
 
-	// ProactorThreads sets Dragonfly's --proactor_threads flag. 0 means
-	// leave unset (Dragonfly default: one per CPU).
-	// +kubebuilder:validation:Minimum=0
+	// ProactorThreads sets Dragonfly's --proactor_threads flag. Unset
+	// leaves Dragonfly's default (one per CPU).
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	ProactorThreads int32 `json:"proactorThreads,omitempty"`
+	ProactorThreads *int32 `json:"proactorThreads,omitempty"`
 
 	// Args are additional command-line arguments appended to the
 	// Dragonfly container command. Operator-managed flags (for example
@@ -179,9 +181,10 @@ type DragonflyPlannedFailoverSpec struct {
 	// up to the source's replication offset. The same duration is used
 	// as the REPLTAKEOVER timeout argument during PromotingDragonfly;
 	// Dragonfly takes that argument in whole seconds, so it is rounded up
-	// to the next second (minimum 1s).
-	// Default: 30s.
+	// to the next second.
+	// Default: 30s. Bounds: 1s to 10m.
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('10m')",message="dragonfly.plannedFailover.maxSyncWait must be between 1s and 10m"
 	// +optional
 	MaxSyncWait *metav1.Duration `json:"maxSyncWait,omitempty"`
 
@@ -455,9 +458,10 @@ type DragonflySiteStatus struct {
 
 	// LastIOSecondsAgo is the parsed master_last_io_seconds_ago field from
 	// INFO replication on a replica. A value of -1 means the replica has
-	// never received data from its master.
+	// never received data from its master. Unset when Dragonfly did not
+	// report it.
 	// +optional
-	LastIOSecondsAgo int `json:"lastIOSecondsAgo,omitempty"`
+	LastIOSecondsAgo *int64 `json:"lastIOSecondsAgo,omitempty"`
 
 	// Ready reports operator-level readiness: a master must be reachable
 	// and accepting writes; a replica must additionally have its link up,

@@ -28,7 +28,7 @@ func TestVerificationSource_RemainsPinnedWhenNewBackupCompletes(t *testing.T) {
 			a.Status.CompletionTime = &metav1.Time{Time: time.Now().Add(-time.Hour)}
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
 			v.UID = "pinned-verification-uid"
-			v.Spec.TTLSecondsAfterFinished = 3600
+			v.Spec.TTLSecondsAfterFinished = new(int32(3600))
 			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 			key := client.ObjectKeyFromObject(v)
 			if beforeJob {
@@ -177,7 +177,7 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 			a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 			a.Status.Location = "backup-a/artifact"
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
-			v.Spec.TTLSecondsAfterFinished = 3600
+			v.Spec.TTLSecondsAfterFinished = new(int32(3600))
 			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 			reconcileVerifUntilStable(t, r, v.Name)
 			if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {

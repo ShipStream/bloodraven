@@ -421,6 +421,7 @@ func TestDragonflyManager_Tick_ReplicaNeverSyncedNotReady(t *testing.T) {
 			MasterPort:             6379,
 			MasterLinkStatus:       "up",
 			MasterLastIOSecondsAgo: -1,
+			MasterLastIOReported:   true,
 			SlaveReplOffset:        100,
 		},
 	})
@@ -440,8 +441,8 @@ func TestDragonflyManager_Tick_ReplicaNeverSyncedNotReady(t *testing.T) {
 			if s.Ready {
 				t.Fatal("dc2 Ready = true, want false for never-synced replica")
 			}
-			if s.LastIOSecondsAgo != -1 {
-				t.Fatalf("dc2 LastIOSecondsAgo = %d, want -1", s.LastIOSecondsAgo)
+			if s.LastIOSecondsAgo == nil || *s.LastIOSecondsAgo != -1 {
+				t.Fatalf("dc2 LastIOSecondsAgo = %v, want -1", s.LastIOSecondsAgo)
 			}
 			return
 		}

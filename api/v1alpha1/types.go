@@ -90,8 +90,9 @@ type MysqlFailoverGroupSpec struct {
 	// PollInterval is the interval for polling MySQL instances. After a site
 	// reaches FailureThreshold and continues failing, that site's probes back
 	// off exponentially to a 30s cap; other sites keep this interval.
-	// Default: 2s.
+	// Default: 2s. Bounds: 1s to 5m.
 	// +kubebuilder:default="2s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('5m')",message="pollInterval must be between 1s and 5m"
 	// +optional
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
 
@@ -107,8 +108,11 @@ type MysqlFailoverGroupSpec struct {
 	// +optional
 	RecoveryThreshold int32 `json:"recoveryThreshold,omitempty"`
 
-	// FailoverCooldown is the minimum time between failovers. Default: 5m
-	// +kubebuilder:default="5m"
+	// FailoverCooldown is the minimum time between failovers, the
+	// anti-flap guard; it cannot be disabled. Default: 5m. Bounds: 30s to
+	// 24h.
+	// +kubebuilder:default="5m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('24h')",message="failoverCooldown must be between 30s and 24h"
 	// +optional
 	FailoverCooldown *metav1.Duration `json:"failoverCooldown,omitempty"`
 
@@ -116,8 +120,9 @@ type MysqlFailoverGroupSpec struct {
 	// evicting application sessions from a fenced former primary after an
 	// emergency failover or autonomous self-fence. This drain runs only
 	// after promotion has completed, so it cannot kill the operator's
-	// promotion session. Default: 30s.
+	// promotion session. Default: 30s. Bounds: 1s to 10m.
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('10m')",message="connectionDrainTimeout must be between 1s and 10m"
 	// +optional
 	ConnectionDrainTimeout *metav1.Duration `json:"connectionDrainTimeout,omitempty"`
 
@@ -125,14 +130,15 @@ type MysqlFailoverGroupSpec struct {
 	// +optional
 	Sidecar SidecarSpec `json:"sidecar,omitempty"`
 
-	// CloneTimeout is the timeout in seconds for CLONE INSTANCE operations. It
-	// controls the session variables net_read_timeout and net_write_timeout
-	// (set per-session before cloning) and the global variable clone_ddl_timeout
-	// (GLOBAL-only; set via SET GLOBAL before cloning). Default: 3600 (1 hour).
-	// +kubebuilder:default=3600
-	// +kubebuilder:validation:Minimum=60
+	// CloneTimeout bounds CLONE INSTANCE operations. It sets the session
+	// variables net_read_timeout and net_write_timeout (per session before
+	// cloning) and the global variable clone_ddl_timeout (GLOBAL-only; set
+	// via SET GLOBAL before cloning), all in whole seconds, rounded up.
+	// Default: 1h. Bounds: 1m to 24h.
+	// +kubebuilder:default="1h0m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1m') && duration(self) <= duration('24h')",message="cloneTimeout must be between 1m and 24h"
 	// +optional
-	CloneTimeout int `json:"cloneTimeout,omitempty"`
+	CloneTimeout *metav1.Duration `json:"cloneTimeout,omitempty"`
 
 	// MysqlConf allows overriding default my.cnf settings.
 	// +optional
@@ -311,11 +317,13 @@ type SplitBrainPolicySpec struct {
 
 // ReplicationSpec configures replication health monitoring.
 type ReplicationSpec struct {
-	// MaxLagSeconds is the maximum acceptable replication lag before marking degraded. Default: 300
+	// MaxLagSeconds is the maximum acceptable replication lag, in seconds,
+	// before marking degraded. 0 requires the replica to be fully caught
+	// up. Default: 300.
 	// +kubebuilder:default=300
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	MaxLagSeconds int64 `json:"maxLagSeconds,omitempty"`
+	MaxLagSeconds *int64 `json:"maxLagSeconds,omitempty"`
 
 	// ReadOnlyMaxLagSeconds is the maximum lag for a read-only site's
 	// client-facing endpoint. Nil inherits MaxLagSeconds; explicit zero
@@ -511,11 +519,11 @@ type DNSSpec struct {
 	// +required
 	Hostname string `json:"hostname"`
 
-	// TTL is the DNS record TTL in seconds. Default: 60
+	// TTLSeconds is the DNS record TTL in seconds. Default: 60
 	// +kubebuilder:default=60
 	// +kubebuilder:validation:Minimum=1
 	// +optional
-	TTL int64 `json:"ttl,omitempty"`
+	TTLSeconds int64 `json:"ttlSeconds,omitempty"`
 }
 
 // SidecarSpec configures the sidecar container behavior.
@@ -525,19 +533,19 @@ type DNSSpec struct {
 // spec.template.spec.sidecar in MysqlStandbyCluster, and a struct-level
 // marker emits the same message in both, so a fully-qualified path would
 // be wrong in one of them.
-// +kubebuilder:validation:XValidation:rule="!has(self.peerCheckInterval) || duration(self.peerCheckInterval) >= duration('1s')",message="sidecar.peerCheckInterval must be at least 1s"
-// +kubebuilder:validation:XValidation:rule="!has(self.leaseTimeout) || duration(self.leaseTimeout) >= duration('3s')",message="sidecar.leaseTimeout must be at least 3s"
 // +kubebuilder:validation:XValidation:rule="duration(has(self.leaseTimeout) ? self.leaseTimeout : '20s') >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s')",message="sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval"
 type SidecarSpec struct {
 	// LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
-	// Must be at least 3s and at least 3x PeerCheckInterval.
+	// Bounds: 3s to 10m, and at least 3x PeerCheckInterval.
 	// +kubebuilder:default="20s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('3s') && duration(self) <= duration('10m')",message="sidecar.leaseTimeout must be between 3s and 10m"
 	// +optional
 	LeaseTimeout *metav1.Duration `json:"leaseTimeout,omitempty"`
 
 	// PeerCheckInterval is how often the sidecar checks its peer. Default: 5s.
-	// Must be at least 1s.
+	// Bounds: 1s to 1m.
 	// +kubebuilder:default="5s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1m')",message="sidecar.peerCheckInterval must be between 1s and 1m"
 	// +optional
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
 

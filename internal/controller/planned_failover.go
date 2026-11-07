@@ -44,10 +44,11 @@ type PlannedFailoverRequest struct {
 	Site string
 
 	// MaxLagWait is the per-request override for the zero-lag wait
-	// timeout, or zero when the annotation did not include one. The
-	// effective timeout applied by the state machine is the first
-	// non-zero value among: this field, spec.plannedFailover.maxLagWait,
-	// defaultPlannedFailoverMaxLagWait.
+	// timeout, or zero when the annotation did not include one (the
+	// parser refuses an override outside
+	// v1alpha1.PlannedFailoverMaxLagWait{Min,Max}). The effective timeout
+	// is this override when present, else spec.plannedFailover.maxLagWait
+	// when set, else defaultPlannedFailoverMaxLagWait.
 	MaxLagWait time.Duration
 }
 
@@ -113,9 +114,10 @@ func parsePlannedFailoverAnnotation(raw string) (PlannedFailoverRequest, error) 
 				return PlannedFailoverRequest{}, fmt.Errorf(
 					"planned-failover annotation: maxLagWait=%q is not a valid duration: %w", val, err)
 			}
-			if d <= 0 {
+			if d < v1alpha1.PlannedFailoverMaxLagWaitMin || d > v1alpha1.PlannedFailoverMaxLagWaitMax {
 				return PlannedFailoverRequest{}, fmt.Errorf(
-					"planned-failover annotation: maxLagWait must be positive (got %s)", d)
+					"planned-failover annotation: maxLagWait must be between %s and %s (got %s)",
+					compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMin), compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMax), d)
 			}
 			req.MaxLagWait = d
 		default:
@@ -306,23 +308,26 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 }
 
 // failoverCooldownFromSpec returns the effective anti-flap cooldown for
-// the CR: spec.failoverCooldown when set, otherwise the default 5m. The
-// topology manager applies the same default at startup.
+// the CR: spec.failoverCooldown when set (admission bounds it to 30s..24h),
+// otherwise the API default 5m. The topology manager receives the same
+// value through CRConfigToTopologyConfig.
 func failoverCooldownFromSpec(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if fg.Spec.FailoverCooldown != nil && fg.Spec.FailoverCooldown.Duration > 0 {
+	if fg.Spec.FailoverCooldown != nil {
 		return fg.Spec.FailoverCooldown.Duration
 	}
-	return 5 * time.Minute
+	return defaultFailoverCooldown
 }
 
 // effectiveMaxLagWait returns the max-lag-wait for a planned failover,
 // honoring the annotation override first, then
-// spec.plannedFailover.maxLagWait, then the package default.
+// spec.plannedFailover.maxLagWait, then the package default. Only an absent
+// value falls through; admission and the annotation parser bound a present
+// one to 1s..1h, so a zero is never rewritten to the default (A-37).
 func effectiveMaxLagWait(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest) time.Duration {
-	if req.MaxLagWait > 0 {
+	if req.MaxLagWait != 0 {
 		return req.MaxLagWait
 	}
-	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.MaxLagWait != nil && fg.Spec.PlannedFailover.MaxLagWait.Duration > 0 {
+	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.MaxLagWait != nil {
 		return fg.Spec.PlannedFailover.MaxLagWait.Duration
 	}
 	return defaultPlannedFailoverMaxLagWait
@@ -330,9 +335,9 @@ func effectiveMaxLagWait(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverReq
 
 // effectiveDrainTimeout returns the drain timeout for a planned
 // failover, honoring spec.plannedFailover.drainTimeout first, then the
-// package default.
+// package default. Only an unset field takes the default.
 func effectiveDrainTimeout(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.DrainTimeout != nil && fg.Spec.PlannedFailover.DrainTimeout.Duration > 0 {
+	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.DrainTimeout != nil {
 		return fg.Spec.PlannedFailover.DrainTimeout.Duration
 	}
 	return defaultPlannedFailoverDrainTimeout

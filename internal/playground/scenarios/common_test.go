@@ -167,7 +167,7 @@ func testBaselineMFG(dragonflyEnabled bool) *v1alpha1.MysqlFailoverGroup {
 					Role:             v1alpha1.DragonflyRoleReplica,
 					Reachable:        true,
 					LinkStatus:       "up",
-					LastIOSecondsAgo: 0,
+					LastIOSecondsAgo: new(int64(0)),
 				},
 			},
 		}

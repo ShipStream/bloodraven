@@ -57,7 +57,7 @@ retry logic can see. A successful read of yesterday's data is not.
 
 Outside the cluster, Bloodraven writes one object: a `DNSEndpoint` on
 `externaldns.k8s.io/v1alpha1`, named `bloodraven-<group>`, always an `A` record, with `recordTTL`
-taken from `spec.dns.ttl` (default 60; the playground overrides it to 10).
+taken from `spec.dns.ttlSeconds` (default 60; the playground overrides it to 10).
 
 ```widget
 {
@@ -66,7 +66,7 @@ taken from `spec.dns.ttl` (default 60; the playground overrides it to 10).
   "lines": [
     {
       "cmd": "kubectl -n bloodraven-playground get dnsendpoint bloodraven-playground -o yaml",
-      "out": "apiVersion: externaldns.k8s.io/v1alpha1\nkind: DNSEndpoint\nmetadata:\n  name: bloodraven-playground\nspec:\n  endpoints:\n  - dnsName: playground-db.example.local   # spec.dns.hostname\n    recordType: A\n    recordTTL: 10                       # spec.dns.ttl (default 60)\n    targets:\n    - 10.96.100.20                        # CHANGED: was 10.96.100.10"
+      "out": "apiVersion: externaldns.k8s.io/v1alpha1\nkind: DNSEndpoint\nmetadata:\n  name: bloodraven-playground\nspec:\n  endpoints:\n  - dnsName: playground-db.example.local   # spec.dns.hostname\n    recordType: A\n    recordTTL: 10                       # spec.dns.ttlSeconds (default 60)\n    targets:\n    - 10.96.100.20                        # CHANGED: was 10.96.100.10"
     }
   ],
   "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."

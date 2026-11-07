@@ -14,7 +14,7 @@ package scenarios
 // on the active primary, which blocks every commit, then reads
 // @@gtid_executed and the server clock under the lock, and holds the lock
 // until the server clock has passed the next whole second, which is the
-// target T (stopDatetime admits no fraction, A-39). Every transaction
+// target T (stopTime admits no fraction, A-39). Every transaction
 // committed before the lock is in the set and has an original commit time
 // before T; every transaction committed after UNLOCK TABLES has one after T.
 // So the expected history at T is exact even while a writer commits
@@ -64,9 +64,17 @@ import (
 const pitrMicroLayout = "2006-01-02T15:04:05.000000Z"
 
 // pitrTargetLayout is the whole-second UTC RFC 3339 form every PITR target
-// is written in: stopDatetime and the verification timestamp admit no
-// fraction (A-39).
+// is written in: both pointInTime.stopTime fields admit no fraction (A-39).
 const pitrTargetLayout = time.RFC3339
+
+// pitrTargetTime parses a fence target into the API's stopTime.
+func pitrTargetTime(target string) (metav1.Time, error) {
+	t, err := time.Parse(pitrTargetLayout, target)
+	if err != nil {
+		return metav1.Time{}, fmt.Errorf("PITR target %q: %w", target, err)
+	}
+	return metav1.NewTime(t), nil
+}
 
 // pitrFenceTarget is the target T for a fence whose server clock read now
 // under the lock: the next whole second, strictly after now, so every
@@ -1045,12 +1053,16 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 }
 
 // pitrVerifySpec builds the verification's pointInTime block.
-func pitrVerifySpec(e pitrExpectation) *v1alpha1.PointInTimeVerificationSpec {
+func pitrVerifySpec(e pitrExpectation) (*v1alpha1.PointInTimeVerificationSpec, error) {
 	pit := &v1alpha1.PointInTimeVerificationSpec{Mode: e.Mode, ExcludeGtids: e.Exclude, ArchiveProfileName: e.ArchiveProfile}
 	if e.Mode == v1alpha1.PointInTimeModeTimestamp {
-		pit.Timestamp = e.Fence.T
+		stop, err := pitrTargetTime(e.Fence.T)
+		if err != nil {
+			return nil, err
+		}
+		pit.StopTime = &stop
 	}
-	return pit
+	return pit, nil
 }
 
 // pitrVerify runs one MysqlBackupVerification of e.Backup and asserts the
@@ -1072,7 +1084,11 @@ func pitrStartVerify(ctx context.Context, env *runner.Env, scenarioID, db, label
 	name := fmt.Sprintf("%s-%s", pitrShortName(scenarioID, label), backupRunStamp(env))
 	pitrTrackCR(ctx, env, "MysqlBackupVerification", name)
 	query := pitrMarkerQuery(db, ctxFetch(env, "backupRunStem"), e.Markers)
-	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pitrVerifySpec(e), query, 1); err != nil {
+	pit, err := pitrVerifySpec(e)
+	if err != nil {
+		return "", err
+	}
+	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pit, query, 1); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -1087,7 +1103,7 @@ func pitrFinishVerify(ctx context.Context, env *runner.Env, name string, e pitrE
 	if err != nil {
 		return err
 	}
-	if v.Status.SanityCheck == nil || !v.Status.SanityCheck.Ran || v.Status.SanityCheck.ResultRow != "1" {
+	if v.Status.SanityCheck == nil || v.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomePassed || v.Status.SanityCheck.Result != "1" {
 		return fmt.Errorf("verification %s: marker rows are not exactly %v (sanity=%+v)", name, e.Markers, v.Status.SanityCheck)
 	}
 	if !conditionTrue(v.Status.Conditions, v1alpha1.ConditionVerified) {
@@ -1105,7 +1121,11 @@ func pitrVerifyRefused(ctx context.Context, env *runner.Env, scenarioID, db, lab
 	name := fmt.Sprintf("%s-%s", pitrShortName(scenarioID, label), backupRunStamp(env))
 	pitrTrackCR(ctx, env, "MysqlBackupVerification", name)
 	query := pitrMarkerQuery(db, ctxFetch(env, "backupRunStem"), e.Markers)
-	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pitrVerifySpec(e), query, 1); err != nil {
+	pit, err := pitrVerifySpec(e)
+	if err != nil {
+		return nil, err
+	}
+	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pit, query, 1); err != nil {
 		return nil, err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
@@ -1500,6 +1520,10 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 // taint must never land on a node where the source's MySQL runs, since the
 // source does not tolerate it.
 func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName, stop string) (*v1alpha1.MysqlFailoverGroup, error) {
+	stopTime, err := pitrTargetTime(stop)
+	if err != nil {
+		return nil, err
+	}
 	spec := src.Spec.DeepCopy()
 	untaintedZone := ""
 	for _, s := range spec.Sites {
@@ -1532,7 +1556,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 	}
 	spec.Sites = sites
 	spec.SplitBrainPolicy = &v1alpha1.SplitBrainPolicySpec{SitePriorities: priorities}
-	spec.DNS = v1alpha1.DNSSpec{Hostname: name + "-db.example.local", TTL: src.Spec.DNS.TTL}
+	spec.DNS = v1alpha1.DNSSpec{Hostname: name + "-db.example.local", TTLSeconds: src.Spec.DNS.TTLSeconds}
 	spec.Dragonfly = nil
 	spec.EncryptionAtRest = nil
 	spec.RestoreInPlace = nil
@@ -1545,7 +1569,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 	spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
 		Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
 		PointInTime: &v1alpha1.PointInTimeSpec{
-			StopDatetime:       stop,
+			StopTime:           stopTime,
 			ArchiveProfileName: backupE2EProfile,
 		},
 	}

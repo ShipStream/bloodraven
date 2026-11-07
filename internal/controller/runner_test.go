@@ -1102,7 +1102,7 @@ func TestConnectionMaterialHash_TLSAdoptionAndRotationRestart(t *testing.T) {
 		t.Fatal("plaintext group with operator secret must have a connection hash")
 	}
 
-	fg.Spec.CloneTimeout = 120
+	fg.Spec.CloneTimeout = &metav1.Duration{Duration: 120 * time.Second}
 	if mustConnectionMaterialHash(t, ctx, c, fg) != plain {
 		t.Fatal("cloneTimeout must not change the connection hash (it is live-updated)")
 	}
@@ -1142,7 +1142,7 @@ func TestCloneTimeoutFromSpec(t *testing.T) {
 	if cloneTimeoutFromSpec(fg) != 0 {
 		t.Fatal("unset cloneTimeout should be 0 (bootstrap default)")
 	}
-	fg.Spec.CloneTimeout = 7200
+	fg.Spec.CloneTimeout = &metav1.Duration{Duration: 7200 * time.Second}
 	if got := cloneTimeoutFromSpec(fg); got != 2*time.Hour {
 		t.Fatalf("got %s, want 2h", got)
 	}

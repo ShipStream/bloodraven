@@ -33,6 +33,11 @@ type ReplicationInfo struct {
 	// any byte from the master. -1 when not present on the wire.
 	MasterLastIOSecondsAgo int
 
+	// MasterLastIOReported is true when master_last_io_seconds_ago was on
+	// the wire and parsed, so a reported -1 ("never received data") is
+	// distinguishable from an absent field.
+	MasterLastIOReported bool
+
 	// SlaveReplOffset is the replica's applied offset (bytes).
 	SlaveReplOffset int64
 
@@ -93,7 +98,9 @@ func ParseInfoReplication(body string) ReplicationInfo {
 		case "master_sync_in_progress":
 			info.MasterSyncInProgress = value == "1" || strings.EqualFold(value, "true")
 		case "master_last_io_seconds_ago":
-			info.MasterLastIOSecondsAgo = atoiOrNeg1(value)
+			if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				info.MasterLastIOSecondsAgo, info.MasterLastIOReported = n, true
+			}
 		case "slave_repl_offset", "replica_repl_offset":
 			info.SlaveReplOffset = atoi64OrZero(value)
 		case "master_repl_offset":
@@ -151,14 +158,6 @@ func atoiOrZero(s string) int {
 	n, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil {
 		return 0
-	}
-	return n
-}
-
-func atoiOrNeg1(s string) int {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return -1
 	}
 	return n
 }

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -180,19 +181,17 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			return nil, fmt.Errorf("verification job: %w", err)
 		}
 		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_QUERY", Value: query})
-		maxSec := int32(60)
-		var minRows int64
-		if v.Spec.SanityCheck.Expect != nil {
-			if v.Spec.SanityCheck.Expect.MaxDurationSeconds > 0 {
-				maxSec = v.Spec.SanityCheck.Expect.MaxDurationSeconds
-			}
-			if v.Spec.SanityCheck.Expect.MinRows > 0 {
-				minRows = v.Spec.SanityCheck.Expect.MinRows
-			}
+		timeout := defaultSanityCheckTimeout
+		if v.Spec.SanityCheck.Timeout != nil {
+			timeout = v.Spec.SanityCheck.Timeout.Duration
+		}
+		var minResult int64
+		if v.Spec.SanityCheck.MinResult != nil {
+			minResult = *v.Spec.SanityCheck.MinResult
 		}
 		env = append(env,
-			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS", Value: strconv.FormatInt(int64(maxSec), 10)},
-			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MIN_ROWS", Value: strconv.FormatInt(minRows, 10)},
+			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS", Value: strconv.FormatInt(wholeSecondsCeil(timeout), 10)},
+			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MIN_ROWS", Value: strconv.FormatInt(minResult, 10)},
 		)
 	}
 
@@ -602,6 +601,9 @@ func validateSanityQuery(q string) (string, error) {
 
 var sanityQueryStartRE = regexp.MustCompile(`(?i)^(\(|(select|with)\b)`)
 
+// defaultSanityCheckTimeout is spec.sanityCheck.timeout's API default.
+const defaultSanityCheckTimeout = 60 * time.Second
+
 // verificationPITRRequest normalizes a verification's
 // PointInTimeVerificationSpec into the replay request the shared PITR
 // builders render. It returns nil (no replay) when the block is absent.
@@ -618,15 +620,15 @@ func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrRep
 	// archiveProfileName reads a retained archive (after a prefix switch);
 	// empty means the group's active PITR profile (Δ28).
 	req := &pitrReplayRequest{Verification: true, ArchiveProfileName: in.ArchiveProfileName, Mode: string(mode)}
-	if mode == pitrplan.ModeTimestamp {
-		if in.Timestamp == "" {
-			return nil, fmt.Errorf("%s: pointInTime.timestamp is required when mode=Timestamp", pitrarchive.TokenTargetInvalid)
-		}
-		stop, err := parsePITRTarget(in.Timestamp)
+	switch {
+	case mode == pitrplan.ModeTimestamp:
+		stop, err := pitrTarget("pointInTime.stopTime (mode=Timestamp)", in.StopTime)
 		if err != nil {
-			return nil, fmt.Errorf("%s: pointInTime.timestamp: %v", pitrarchive.TokenTargetInvalid, err)
+			return nil, err
 		}
 		req.Stop = canonicalPITRTarget(stop)
+	case in.StopTime != nil:
+		return nil, fmt.Errorf("%s: pointInTime.stopTime is forbidden when mode=Latest", pitrarchive.TokenTargetInvalid)
 	}
 	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", in.ExcludeGtids)
 	if err != nil {

@@ -444,7 +444,7 @@ func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
 			if s.SyncInProgress {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=syncing", s.Name))
 			}
-			if s.LastIOSecondsAgo < 0 {
+			if s.LastIOSecondsAgo == nil || *s.LastIOSecondsAgo < 0 {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=never-synced", s.Name))
 			}
 		case v1alpha1.DragonflyRoleUnreachable:

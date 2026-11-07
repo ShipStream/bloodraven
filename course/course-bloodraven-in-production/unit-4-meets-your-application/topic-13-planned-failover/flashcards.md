@@ -35,7 +35,7 @@
 
 **Front:** `spec.plannedFailover.maxLagWait` — default value and what it bounds.
 
-**Back:** 5m. It bounds time spent in `WaitingForLag` before the state machine rolls back to the source.
+**Back:** 5m. It bounds time spent in `WaitingForLag` before the state machine rolls back to the source. Admission accepts 1s to 1h, for the field and for the annotation's `maxLagWait=` override alike.
 
 ---
 

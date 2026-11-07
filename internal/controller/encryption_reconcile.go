@@ -693,7 +693,7 @@ func (r *MysqlFailoverGroupReconciler) verifySealedSite(
 }
 
 // checkEscrowDeadline flips a stuck site to Failed once
-// keyring.escrowTimeoutSeconds has elapsed.
+// keyring.escrowTimeout has elapsed.
 //
 // This is a reporting decision, not a safety one. The site stays
 // unsealed either way and the operator keeps retrying — the point is to

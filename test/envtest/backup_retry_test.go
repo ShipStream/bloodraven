@@ -22,7 +22,7 @@ func TestEnvtest_BackupRetryLineageSurvivesLostStatus(t *testing.T) {
 	ns := createNamespace(t, "backup-retry-lineage")
 	ensureSecret(t, ns)
 	fg := newVerificationFG(ns)
-	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 3, InitialBackoffSeconds: 1, MaxBackoffSeconds: 60}
+	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 3, InitialBackoff: &metav1.Duration{Duration: time.Second}, MaxBackoff: &metav1.Duration{Duration: time.Minute}}
 	fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"}}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestEnvtest_BackupRetryConflictWarningPersistsAcrossRestarts(t *testing.T) 
 	ns := createNamespace(t, "retry-conflict-warning")
 	ensureSecret(t, ns)
 	fg := newVerificationFG(ns)
-	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 3, InitialBackoffSeconds: 1, MaxBackoffSeconds: 60}
+	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 3, InitialBackoff: &metav1.Duration{Duration: time.Second}, MaxBackoff: &metav1.Duration{Duration: time.Minute}}
 	fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"}}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)

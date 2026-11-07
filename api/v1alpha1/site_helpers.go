@@ -93,13 +93,17 @@ func (s SiteSpec) IsReadOnlyReader() bool {
 	return s.EffectiveRole() == SiteRoleReadOnly
 }
 
+// DefaultMaxLagSeconds is spec.replication.maxLagSeconds' API default.
+const DefaultMaxLagSeconds = int64(300)
+
 // EffectiveMaxLagSeconds returns the group replication threshold, including
-// the API default for objects constructed outside admission.
+// the API default for objects constructed outside admission. An explicit
+// zero is meaningful (the replica must be caught up); only nil defaults.
 func (s *MysqlFailoverGroupSpec) EffectiveMaxLagSeconds() int64 {
-	if s.Replication == nil || s.Replication.MaxLagSeconds == 0 {
-		return 300
+	if s.Replication == nil || s.Replication.MaxLagSeconds == nil {
+		return DefaultMaxLagSeconds
 	}
-	return s.Replication.MaxLagSeconds
+	return *s.Replication.MaxLagSeconds
 }
 
 // EffectiveReadOnlyMaxLagSeconds returns the reader endpoint threshold. An

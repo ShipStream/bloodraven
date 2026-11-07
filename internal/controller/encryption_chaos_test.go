@@ -331,11 +331,11 @@ func assertSiteRestartable(
 // escrow-outage timeline the plan asks for: the site must stay unsealed
 // (never sealed against nothing), the sidecar's own reason must reach
 // .status so the stall is diagnosable without reading pod logs, and once
-// escrowTimeoutSeconds elapses the site must go Failed so an alert fires
+// escrowTimeout elapses the site must go Failed so an alert fires
 // instead of it sitting quietly in Unsealed forever.
 func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeoutSeconds: 60}
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 60 * time.Second}}
 	ctx := context.Background()
 
 	stalled := liveKeyring(keyringDigest([]byte("live-but-unescrowed")), false)
@@ -375,7 +375,7 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 	}
 	s = siteStatus(fg, "dc1")
 	if s.Phase != v1alpha1.KeyringPhaseFailed {
-		t.Fatalf("phase = %q, want Failed once escrowTimeoutSeconds has elapsed", s.Phase)
+		t.Fatalf("phase = %q, want Failed once escrowTimeout has elapsed", s.Phase)
 	}
 	if fg.SiteKeyringSealed("dc1") {
 		t.Fatal("a site that failed to escrow must not be sealed by the failure itself")

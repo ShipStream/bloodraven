@@ -30,16 +30,16 @@ Applications get two of the four Service kinds: `-primary` for writes, `-replica
 
 pdx has been promoted. `kubectl get dnsendpoint bloodraven-playground -o yaml` shows `recordType: A`, `recordTTL: 60`, and `targets` already holding pdx's IP; the operator logged `failover complete` fifty seconds ago. Clients resolving the hostname are still being sent to iad. Which reading of the situation is correct?
 
-- `recordTTL` is the cadence at which Bloodraven re-applies the record, so lowering `spec.dns.ttl` would have made the operator publish the new target sooner.
+- `recordTTL` is the cadence at which Bloodraven re-applies the record, so lowering `spec.dns.ttlSeconds` would have made the operator publish the new target sooner.
 - The record moves only on a create-or-update transition, so an apply that was rejected once stays stale until somebody re-applies it by hand.
 - Bloodraven has already finished: the desired target is re-derived from live topology and server-side applied on every poll. The TTL is the floor on how long a cached stale answer can survive, and everything past the CR — external-dns, your resolver, your client's cache — is outside the operator's reach.
-- Lowering `spec.dns.ttl` from 60 to 10 would also have shortened the window in which the application's existing connections kept talking to iad.
+- Lowering `spec.dns.ttlSeconds` from 60 to 10 would also have shortened the window in which the application's existing connections kept talking to iad.
 
 **Correct option index:** 2
 
 **Explanation:**
 
-Writing the `DNSEndpoint` is where Bloodraven's authority ends. The operator cannot accelerate DNS propagation; chaos scenario 38 makes the point by denying the operator write verbs on `dnsendpoints` and watching the CR promote perfectly while the record stays stale. Option 1 confuses the record's TTL with the operator's write cadence — there is no such cadence to tune, because `reconcileDNS` runs on every poll regardless of the TTL. Option 2 assumes a create/update split that does not exist: the write is one idempotent server-side apply with forced field ownership, and because nothing is memoized, a rejected apply self-heals on a later poll with no human involved. Option 4 is the one that will actually cost you an incident — a TTL governs the *next* lookup. An established socket never performs one, so `spec.dns.ttl` (60 shipped, 10 in the playground) does nothing at all for the connections already open against the demoted site. (objective 2)
+Writing the `DNSEndpoint` is where Bloodraven's authority ends. The operator cannot accelerate DNS propagation; chaos scenario 38 makes the point by denying the operator write verbs on `dnsendpoints` and watching the CR promote perfectly while the record stays stale. Option 1 confuses the record's TTL with the operator's write cadence — there is no such cadence to tune, because `reconcileDNS` runs on every poll regardless of the TTL. Option 2 assumes a create/update split that does not exist: the write is one idempotent server-side apply with forced field ownership, and because nothing is memoized, a rejected apply self-heals on a later poll with no human involved. Option 4 is the one that will actually cost you an incident — a TTL governs the *next* lookup. An established socket never performs one, so `spec.dns.ttlSeconds` (60 shipped, 10 in the playground) does nothing at all for the connections already open against the demoted site. (objective 2)
 
 ## Question 3
 
@@ -78,7 +78,7 @@ The counter app's pods run on the cluster's general application nodes, not on ia
 
 - The `-primary` selector flip removed iad from the Service's endpoint list, and kube-proxy resets flows whose backend it no longer has.
 - Fencing did it — `SET GLOBAL super_read_only = ON` terminates client sessions on the demoted site, so the pool reopened through `-primary`.
-- DNS did it — the playground runs `spec.dns.ttl` at 10, so the pool re-resolved the hostname and landed on pdx within about ten seconds.
+- DNS did it — the playground runs `spec.dns.ttlSeconds` at 10, so the pool re-resolved the hostname and landed on pdx within about ten seconds.
 - None of them. A selector flip routes new connections only, a DNS record governs only the next lookup, and the `NoExecute` taint is the one surface that removes a running process — and it reaches only pods on the demoted site's nodes, which these were not.
 
 **Correct option index:** 3
@@ -96,7 +96,7 @@ A long-running JVM service talks to `playground`. It runs in a third site with n
 - Taint-based: drop the service's toleration for `shipstream.io/db-readonly-playground` so the `NoExecute` taint evicts it at a promotion and it returns with a fresh pool.
 - Service-based: keep it up, bound the pool's connection lifetime, retry specifically on the read-only write errors 1290 and 1792, and split reads to `mysql-playground-replicas` while writes resolve through `mysql-playground-primary`.
 - Site-local warm standby: run an instance at every site and let only the one co-located with the current primary take writes.
-- Service-based, tuned for the failure: raise the pool size so a promotion has spare connections, set `reconnect=true`, and drop `spec.dns.ttl` to 10.
+- Service-based, tuned for the failure: raise the pool size so a promotion has spare connections, set `reconnect=true`, and drop `spec.dns.ttlSeconds` to 10.
 
 **Correct option index:** 1
 

@@ -287,7 +287,7 @@ yaml: |-
   spec:
     dns:
       hostname: orders.az.example.com
-      ttl: 60
+      ttlSeconds: 60
     replication:
       readOnlyMaxLagSeconds: 30
     sites:

@@ -63,6 +63,9 @@ spec:
   failoverGroupRef:
     name: ${GROUP}
   profileName: ${profile}
+  # Clean up the Job and Pod once the run succeeds, like the scheduled
+  # profile does; unset would keep them until retention prunes the run.
+  ttlSecondsAfterFinished: 0
 YAML
 }
 

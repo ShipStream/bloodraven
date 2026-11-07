@@ -218,8 +218,8 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// Pending and retry instead of turning an ordinary failover window into
 		// a terminal backup failure.
 		maxLag := int64(300)
-		if fg.Spec.Backup != nil && fg.Spec.Backup.MaxLagSecondsForSource > 0 {
-			maxLag = fg.Spec.Backup.MaxLagSecondsForSource
+		if fg.Spec.Backup != nil && fg.Spec.Backup.MaxLagSecondsForSource != nil {
+			maxLag = *fg.Spec.Backup.MaxLagSecondsForSource
 		}
 		sourceSite, reason, err := selectSourceSite(&fg, backup.Spec.SourceSite, maxLag)
 		if err != nil {

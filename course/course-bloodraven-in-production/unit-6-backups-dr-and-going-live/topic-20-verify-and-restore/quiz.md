@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.resultRow: "1"` against a `minRows: 1` floor. What has it proved?
+A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.result: "1"` against a `minResult: 1` floor. What has it proved?
 
 - The artifact loads into a real mysqld, and your scalar assertion held. Nothing about the live primary.
 - The artifact is logically equivalent to the live primary as it stood when the dump was taken.

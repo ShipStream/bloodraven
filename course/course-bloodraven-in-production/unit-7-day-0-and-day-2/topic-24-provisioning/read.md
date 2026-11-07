@@ -168,7 +168,7 @@ spec:
     backupSecretName: ledger-backup
   dns:
     hostname: ledger-db.example.com
-    ttl: 60                               # the shipped default; the playground's 10 is not
+    ttlSeconds: 60                        # the shipped default; the playground's 10 is not
   splitBrainPolicy:
     sitePriorities: [iad, pdx]            # Unit 5: a standing decision about whose writes to discard
   replication:
@@ -235,7 +235,11 @@ Learn this split. It decides which of your mistakes cost you seconds and which c
 - at least two sites with role `PrimaryCandidate`
 - `splitBrainPolicy.sitePriorities` entries must name `PrimaryCandidate` sites
 - `taintNodeSelector` and `lbIP` are required unless the role is `ReadOnly`
-- `sidecar.peerCheckInterval` ≥ 1s, `sidecar.leaseTimeout` ≥ 3s, and `leaseTimeout` ≥ 3 × `peerCheckInterval`
+- `sidecar.peerCheckInterval` between 1s and 1m, `sidecar.leaseTimeout` between 3s and 10m, and
+  `leaseTimeout` ≥ 3 × `peerCheckInterval`
+- every timer is bounded, and a zero is refused rather than replaced by the default:
+  `pollInterval` 1s–5m, `failoverCooldown` 30s–24h, `connectionDrainTimeout` 1s–10m, `cloneTimeout`
+  1m–24h, `plannedFailover.maxLagWait` 1s–1h, `plannedFailover.drainTimeout` 1s–10m
 - `encryptionAtRest.enabled` requires `spec.tls`
 - `serviceTemplate.externalTrafficPolicy` requires an effective type of `NodePort` or `LoadBalancer`
 - `spec.sites` has between 2 and 16 entries

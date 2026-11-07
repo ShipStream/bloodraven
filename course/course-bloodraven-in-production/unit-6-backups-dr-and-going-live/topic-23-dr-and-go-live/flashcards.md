@@ -65,7 +65,7 @@
 
 **Front:** The three playground values that are not the shipped defaults
 
-**Back:** failoverCooldown 30s (default 5m), replication.maxLagSeconds 30 (default 300), and dns.ttl 10 (default 60).
+**Back:** failoverCooldown 30s (default 5m), replication.maxLagSeconds 30 (default 300), and dns.ttlSeconds 10 (default 60).
 
 ---
 

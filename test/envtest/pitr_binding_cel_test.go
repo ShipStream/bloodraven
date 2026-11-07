@@ -807,7 +807,7 @@ func TestPITRBindingSSAProfilesListMap(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, typed); err != nil {
 		t.Fatal(err)
 	}
-	typed.Spec.Backup.MaxLagSecondsForSource = 42
+	typed.Spec.Backup.MaxLagSecondsForSource = new(int64(42))
 	if err := k8sClient.Update(ctx, typed, client.FieldOwner("bloodraven")); err != nil {
 		t.Fatalf("typed Update: %v", err)
 	}

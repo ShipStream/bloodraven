@@ -5,7 +5,7 @@
 
 **Front:** `spec.failoverCooldown` — default, and what the playground uses
 
-**Back:** `5m` by default (CRD default and the operator's own fallback when the field is nil). The playground manifest overrides it to `30s` for fast experimentation.
+**Back:** `5m` by default (CRD default and the operator's own fallback when the field is nil). The playground manifest overrides it to `30s` for fast experimentation. It cannot be disabled: admission accepts 30s to 24h and refuses `0`.
 
 ---
 

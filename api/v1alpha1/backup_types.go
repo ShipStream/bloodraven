@@ -63,11 +63,12 @@ type BackupSpec struct {
 	// MaxLagSecondsForSource is the threshold for replica-first source
 	// selection. The backup reconciler prefers the replica site as the
 	// dump source, but only if secondsBehindSource is at or below this
-	// value. Above it, the reconciler falls back to the primary.
+	// value. Above it, the reconciler falls back to the primary. 0 accepts
+	// only a fully caught-up replica. Default: 300.
 	// +kubebuilder:default=300
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	MaxLagSecondsForSource int64 `json:"maxLagSecondsForSource,omitempty"`
+	MaxLagSecondsForSource *int64 `json:"maxLagSecondsForSource,omitempty"`
 
 	// Resources for the backup Job's mysqlsh container.
 	// +optional
@@ -80,11 +81,12 @@ type BackupSpec struct {
 	// +optional
 	ActiveDeadlineSeconds int64 `json:"activeDeadlineSeconds,omitempty"`
 
-	// BackoffLimit is the Job backoffLimit applied to backup Jobs.
+	// BackoffLimit is the Job backoffLimit applied to backup Jobs. 0 runs
+	// each Job's pod once. Default: 2.
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	BackoffLimit int32 `json:"backoffLimit,omitempty"`
+	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
 	// Retry configures operator-level retries for scheduled MysqlBackup
 	// CRs that land in Failed. This is independent of Job-level
@@ -166,8 +168,9 @@ type PITRSpec struct {
 
 	// ArchivePollInterval is how often the archiver reconciles the list
 	// of binlog files against storage as a belt-and-suspenders safety
-	// net alongside inotify. Default: 60s.
-	// +kubebuilder:default="60s"
+	// net alongside inotify. Default: 60s. Bounds: 5s to 1h.
+	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5s') && duration(self) <= duration('1h')",message="archivePollInterval must be between 5s and 1h"
 	// +optional
 	ArchivePollInterval *metav1.Duration `json:"archivePollInterval,omitempty"`
 }
@@ -251,27 +254,25 @@ type PointInTimeSpec struct {
 	ArchiveProfileName string `json:"archiveProfileName,omitempty"`
 
 	// AllowPartial accepts an archive with no transaction at or after
-	// StopDatetime: the restore then replays to the archive head (outcome
+	// StopTime: the restore then replays to the archive head (outcome
 	// Partial). It relaxes nothing else; archive identity, lineage and
 	// continuity checks still apply.
 	// +optional
 	// +kubebuilder:default=false
 	AllowPartial bool `json:"allowPartial,omitempty"`
 
-	// StopDatetime is the target instant, a whole second: RFC 3339
-	// ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00") or
-	// "YYYY-MM-DD HH:MM:SS", which is read as UTC. Fractional seconds are
-	// refused. Replay restores the history of the first archived
-	// transaction committed at or after it (commit times are compared to
-	// the microsecond), cut just before that transaction. Required.
-	// An object stored with a fractional target before this rule existed
-	// fails every update (finalizer removal included) on clusters without
-	// CRD validation ratcheting until an update also corrects the target;
-	// correct such targets before applying the CRD.
+	// StopTime is the target instant: RFC 3339 with an explicit zone and
+	// whole seconds ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00").
+	// Fractional seconds, a lowercase "t" or "z", and an offset outside
+	// -23:59..+23:59 are refused. Replay restores the history of the first
+	// archived transaction committed at or after it (commit times are
+	// compared to the microsecond), cut just before that transaction.
 	// +required
-	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$`
 	// +kubebuilder:validation:MaxLength=40
-	StopDatetime string `json:"stopDatetime"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	StopTime metav1.Time `json:"stopTime"`
 
 	// ExcludeGtids are never replayed and must not intersect the backup.
 	// Every archived transaction committed between the backup's newest
@@ -288,6 +289,7 @@ type PointInTimeSpec struct {
 
 // BackupRetrySpec configures operator-level retries for scheduled
 // MysqlBackup CRs. MaxAttempts includes the original attempt.
+// +kubebuilder:validation:XValidation:rule="!has(self.initialBackoff) || !has(self.maxBackoff) || duration(self.maxBackoff) >= duration(self.initialBackoff)",message="retry.maxBackoff must be at least retry.initialBackoff"
 type BackupRetrySpec struct {
 	// MaxAttempts is the total number of attempts (including the
 	// original). 1 disables retries. Values are clamped to [1, 10].
@@ -297,19 +299,20 @@ type BackupRetrySpec struct {
 	// +optional
 	MaxAttempts int32 `json:"maxAttempts,omitempty"`
 
-	// InitialBackoffSeconds is the delay between the first failure and
-	// the first retry. Subsequent retries double the backoff until
-	// MaxBackoffSeconds.
-	// +kubebuilder:default=60
-	// +kubebuilder:validation:Minimum=1
+	// InitialBackoff is the delay between the first failure and the first
+	// retry. Subsequent retries double the backoff until MaxBackoff.
+	// Default: 1m. Bounds: 1s to 1h.
+	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="retry.initialBackoff must be between 1s and 1h"
 	// +optional
-	InitialBackoffSeconds int32 `json:"initialBackoffSeconds,omitempty"`
+	InitialBackoff *metav1.Duration `json:"initialBackoff,omitempty"`
 
-	// MaxBackoffSeconds caps the exponential backoff. Default: 1800 (30m).
-	// +kubebuilder:default=1800
-	// +kubebuilder:validation:Minimum=1
+	// MaxBackoff caps the exponential backoff. Default: 30m. Bounds: 1s to
+	// 24h, and at least InitialBackoff.
+	// +kubebuilder:default="30m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('24h')",message="retry.maxBackoff must be between 1s and 24h"
 	// +optional
-	MaxBackoffSeconds int32 `json:"maxBackoffSeconds,omitempty"`
+	MaxBackoff *metav1.Duration `json:"maxBackoff,omitempty"`
 }
 
 // BackupProfile is a named, reusable backup configuration.
@@ -708,6 +711,7 @@ type BackupSchedule struct {
 	Suspend bool `json:"suspend,omitempty"`
 
 	// StartingDeadlineSeconds is forwarded to the CronJob spec.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	StartingDeadlineSeconds *int64 `json:"startingDeadlineSeconds,omitempty"`
 

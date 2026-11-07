@@ -77,16 +77,18 @@ spec:
                 description: Freshness configures the bucket-discovery cadence.
                 properties:
                   discoveryInterval:
-                    default: 5m
+                    default: 5m0s
                     description: |-
                       DiscoveryInterval controls how often the controller re-scans
                       the source bucket to refresh status.discovered.
-                      Default: 5m. Minimum: 30s (shorter intervals produce no scheduled
-                      poll; the reconciler also enforces this floor as defense-in-depth).
+                      Default: 5m. Bounds: 30s to 24h (shorter intervals produce no
+                      scheduled poll; the reconciler also enforces the floor as
+                      defense-in-depth).
                     type: string
                     x-kubernetes-validations:
-                    - message: discoveryInterval must be at least 30s
-                      rule: duration(self) >= duration('30s')
+                    - message: discoveryInterval must be between 30s and 24h
+                      rule: duration(self) >= duration('30s') && duration(self) <=
+                        duration('24h')
                 type: object
               source:
                 description: |-

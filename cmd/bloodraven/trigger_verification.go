@@ -69,10 +69,25 @@ func runTriggerVerification(args []string) {
 		logger.Error("get failover group", "error", err, "group", *group)
 		os.Exit(1)
 	}
+	verify := buildScheduledVerification(&fg, *group, *profile, ns)
+
+	if err := cl.Create(ctx, verify); err != nil {
+		logger.Error("create mysqlbackupverification", "error", err, "group", *group, "profile", *profile)
+		os.Exit(1)
+	}
+	logger.Info("created mysqlbackupverification", "name", verify.Name, "namespace", verify.Namespace)
+}
+
+// buildScheduledVerification is the MysqlBackupVerification a verification
+// CronJob creates for one profile. It inherits the profile's verification
+// block; every optional pointer is copied so an unset field stays unset
+// (ttlSecondsAfterFinished: unset keeps resources until retention, 0 cleans
+// up at once).
+func buildScheduledVerification(fg *v1alpha1.MysqlFailoverGroup, group, profile, ns string) *v1alpha1.MysqlBackupVerification {
 	var verifSpec *v1alpha1.VerificationSpec
 	if fg.Spec.Backup != nil {
 		for i := range fg.Spec.Backup.Profiles {
-			if fg.Spec.Backup.Profiles[i].Name == *profile {
+			if fg.Spec.Backup.Profiles[i].Name == profile {
 				verifSpec = fg.Spec.Backup.Profiles[i].Verification
 				break
 			}
@@ -80,26 +95,32 @@ func runTriggerVerification(args []string) {
 	}
 
 	labels := map[string]string{
-		v1alpha1.FailoverGroupLabel:    *group,
-		v1alpha1.BackupProfileLabel:    *profile,
+		v1alpha1.FailoverGroupLabel:    group,
+		v1alpha1.BackupProfileLabel:    profile,
 		"app.kubernetes.io/managed-by": "bloodraven",
 	}
 
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: fmt.Sprintf("%s-%s-verify-", *group, *profile),
+			GenerateName: fmt.Sprintf("%s-%s-verify-", group, profile),
 			Namespace:    ns,
 			Labels:       labels,
 			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: "schedule"},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: *group},
-			ProfileName:      *profile,
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
+			ProfileName:      profile,
 		},
 	}
 	if verifSpec != nil {
-		verify.Spec.KeepOnFailure = verifSpec.KeepOnFailure
-		verify.Spec.TTLSecondsAfterFinished = verifSpec.TTLSecondsAfterFinished
+		if verifSpec.KeepOnFailure != nil {
+			keep := *verifSpec.KeepOnFailure
+			verify.Spec.KeepOnFailure = &keep
+		}
+		if verifSpec.TTLSecondsAfterFinished != nil {
+			ttl := *verifSpec.TTLSecondsAfterFinished
+			verify.Spec.TTLSecondsAfterFinished = &ttl
+		}
 		if verifSpec.PointInTime != nil {
 			verify.Spec.PointInTime = verifSpec.PointInTime.DeepCopy()
 		}
@@ -107,10 +128,5 @@ func runTriggerVerification(args []string) {
 			verify.Spec.SanityCheck = verifSpec.SanityCheck.DeepCopy()
 		}
 	}
-
-	if err := cl.Create(ctx, verify); err != nil {
-		logger.Error("create mysqlbackupverification", "error", err, "group", *group, "profile", *profile)
-		os.Exit(1)
-	}
-	logger.Info("created mysqlbackupverification", "name", verify.Name, "namespace", verify.Namespace)
+	return verify
 }

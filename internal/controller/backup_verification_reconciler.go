@@ -379,8 +379,13 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	// verification is certified only by its termination verdict, which is
 	// also the only source of replay detail.
 	sentinels := r.tailVerificationSentinels(ctx, v, job)
-	if sentinels.Sanity != nil {
+	switch {
+	case sentinels.Sanity != nil:
 		next.SanityCheck = sentinels.Sanity
+	case jobFailed && sentinels.LogsRead && v.Spec.SanityCheck != nil && v.Spec.SanityCheck.Query != "":
+		// The whole log tail was read and the sanity phase never reported:
+		// the Job failed before it (load or replay).
+		next.SanityCheck = &v1alpha1.SanityCheckResult{Outcome: v1alpha1.SanityCheckOutcomeSkipped}
 	}
 	pitr := jobHasPITR(job)
 	var pod *corev1.Pod
@@ -429,9 +434,9 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		switch {
 		case pitrFailureReason(message) != "":
 			reason = string(pitrFailureReason(message))
-		case strings.HasPrefix(message, "SanityCheckTimeout"), sentinels.Sanity != nil && strings.EqualFold(sentinels.Sanity.Error, "timeout"):
+		case strings.HasPrefix(message, "SanityCheckTimeout"), sentinels.Sanity != nil && sentinels.Sanity.Outcome == v1alpha1.SanityCheckOutcomeTimedOut:
 			reason = v1alpha1.ReasonSanityCheckTimeout
-		case strings.HasPrefix(message, "SanityCheckFailed"), sentinels.Sanity != nil && sentinels.Sanity.Error != "":
+		case strings.HasPrefix(message, "SanityCheckFailed"), sentinels.Sanity != nil && sentinels.Sanity.Outcome == v1alpha1.SanityCheckOutcomeFailed:
 			reason = v1alpha1.ReasonSanityCheckFailed
 		}
 	}
@@ -715,9 +720,11 @@ func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context
 }
 
 // maybeCleanupAfterTerminal implements the success/failure cleanup
-// policy. Success always deletes ephemeral resources after the TTL
-// elapses; failure retains them iff spec.keepOnFailure is true (the
-// default).
+// policy. Success deletes ephemeral resources once
+// spec.ttlSecondsAfterFinished elapses (0: at once) and keeps them until
+// retention deletes the verification when the TTL is unset; failure
+// retains them iff spec.keepOnFailure is true (the default), and
+// otherwise deletes them after the TTL, or at once when it is unset.
 //
 // Returns a non-zero requeue duration when the TTL gate is currently
 // deferring deletion — the caller must propagate it via
@@ -731,6 +738,9 @@ func (r *MysqlBackupVerificationReconciler) maybeCleanupAfterTerminal(ctx contex
 	}
 	switch v.Status.Phase {
 	case v1alpha1.VerificationPhaseSucceeded:
+		if v.Spec.TTLSecondsAfterFinished == nil {
+			return 0, nil
+		}
 		return r.cleanupEphemeral(ctx, v, false)
 	case v1alpha1.VerificationPhaseFailed:
 		if keepOnFailure {
@@ -748,7 +758,10 @@ func (r *MysqlBackupVerificationReconciler) maybeCleanupAfterTerminal(ctx contex
 // (0, err) on hard failure.
 func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context, v *v1alpha1.MysqlBackupVerification, force bool) (time.Duration, error) {
 	if !force {
-		ttl := time.Duration(v.Spec.TTLSecondsAfterFinished) * time.Second
+		var ttl time.Duration
+		if v.Spec.TTLSecondsAfterFinished != nil {
+			ttl = time.Duration(*v.Spec.TTLSecondsAfterFinished) * time.Second
+		}
 		if ttl > 0 && v.Status.CompletionTime != nil {
 			elapsed := time.Since(v.Status.CompletionTime.Time)
 			if elapsed < ttl {
@@ -876,9 +889,12 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 
 // verifySentinels bundles the parsed output of the verify.sh post-load
 // sentinel. Sanity is nil when the phase did not run or the log is
-// unreadable; it never decides the outcome.
+// unreadable; it never decides the outcome. LogsRead is true only after
+// the complete bounded log scan, so a nil Sanity with LogsRead means the
+// sanity phase did not run.
 type verifySentinels struct {
-	Sanity *v1alpha1.SanityCheckResult
+	Sanity   *v1alpha1.SanityCheckResult
+	LogsRead bool
 }
 
 // tailVerificationSentinels reads the verification Job pod's logs and
@@ -943,26 +959,34 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 		return out
 	}
 	out.Sanity = sanity
+	out.LogsRead = true
 	return out
 }
 
 // parseSanitySentinel decodes version-2 sanity values and legacy errors.
+// verify.sh prints the sentinel only after the query ran: error=timeout is
+// a timeout, any other error a failed query or a result below minResult.
 func parseSanitySentinel(line string) (*v1alpha1.SanityCheckResult, bool) {
 	tokens, ok := backupmeta.ParseTokens(line, "BLOODRAVEN_VERIFY_SANITY_COMPLETE")
 	if !ok {
 		return nil, false
 	}
-	res := &v1alpha1.SanityCheckResult{}
-	res.Ran = tokens["ran"] == "1" || strings.EqualFold(tokens["ran"], "true")
+	res := &v1alpha1.SanityCheckResult{Outcome: v1alpha1.SanityCheckOutcomePassed}
 	if n, err := strconv.ParseInt(tokens["durationMs"], 10, 64); err == nil {
-		res.DurationMs = n
+		res.DurationMilliseconds = &n
 	}
-	res.ResultRow = tokens["resultRow"]
+	res.Result = tokens["resultRow"]
 	res.Error = tokens["error"]
 	if tokens["v"] == "" {
 		// Older scripts encoded spaces in errors as underscores. Their
 		// original scalars contain no whitespace and remain literal.
 		res.Error = strings.ReplaceAll(res.Error, "_", " ")
+	}
+	switch {
+	case strings.EqualFold(res.Error, "timeout"):
+		res.Outcome = v1alpha1.SanityCheckOutcomeTimedOut
+	case res.Error != "":
+		res.Outcome = v1alpha1.SanityCheckOutcomeFailed
 	}
 	return res, true
 }

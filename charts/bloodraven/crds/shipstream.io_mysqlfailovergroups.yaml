@@ -71,8 +71,9 @@ spec:
                     type: integer
                   backoffLimit:
                     default: 2
-                    description: BackoffLimit is the Job backoffLimit applied to backup
-                      Jobs.
+                    description: |-
+                      BackoffLimit is the Job backoffLimit applied to backup Jobs. 0 runs
+                      each Job's pod once. Default: 2.
                     format: int32
                     minimum: 0
                     type: integer
@@ -310,7 +311,8 @@ spec:
                       MaxLagSecondsForSource is the threshold for replica-first source
                       selection. The backup reconciler prefers the replica site as the
                       dump source, but only if secondsBehindSource is at or below this
-                      value. Above it, the reconciler falls back to the primary.
+                      value. Above it, the reconciler falls back to the primary. 0 accepts
+                      only a fully caught-up replica. Default: 300.
                     format: int64
                     minimum: 0
                     type: integer
@@ -324,12 +326,16 @@ spec:
                       Omit the field to disable PITR entirely.
                     properties:
                       archivePollInterval:
-                        default: 60s
+                        default: 1m0s
                         description: |-
                           ArchivePollInterval is how often the archiver reconciles the list
                           of binlog files against storage as a belt-and-suspenders safety
-                          net alongside inotify. Default: 60s.
+                          net alongside inotify. Default: 60s. Bounds: 5s to 1h.
                         type: string
+                        x-kubernetes-validations:
+                        - message: archivePollInterval must be between 5s and 1h
+                          rule: duration(self) >= duration('5s') && duration(self)
+                            <= duration('1h')
                       enabled:
                         default: false
                         description: |-
@@ -953,20 +959,25 @@ spec:
                                   - Timestamp
                                   - Latest
                                   type: string
-                                timestamp:
+                                stopTime:
                                   description: |-
-                                    Timestamp is the target instant, a whole second in the same forms as
-                                    PointInTimeSpec.StopDatetime (fractional seconds are refused; a
-                                    stored fractional value must be corrected in the same update, as for
-                                    StopDatetime). Replay restores the history of the first archived
-                                    transaction committed at or after it, cut just before that
-                                    transaction. Required when Mode=Timestamp; ignored otherwise.
+                                    StopTime is the target instant, in the same form as
+                                    PointInTimeSpec.StopTime (RFC 3339, an explicit zone, whole seconds).
+                                    Replay restores the history of the first archived transaction
+                                    committed at or after it, cut just before that transaction. Required
+                                    when Mode=Timestamp; forbidden when Mode=Latest.
+                                  format: date-time
                                   maxLength: 40
-                                  pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
+                                  pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$
                                   type: string
                               required:
                               - mode
                               type: object
+                              x-kubernetes-validations:
+                              - message: pointInTime.stopTime is required when mode
+                                  is Timestamp and forbidden when mode is Latest
+                                rule: 'self.mode == ''Timestamp'' ? has(self.stopTime)
+                                  : !has(self.stopTime)'
                             retentionPolicy:
                               description: |-
                                 RetentionPolicy caps how many verification CRs per profile are
@@ -995,30 +1006,14 @@ spec:
                                 SanityCheck is copied onto each scheduled verification CR by
                                 trigger-verification. See SanityCheckSpec.
                               properties:
-                                expect:
+                                minResult:
                                   description: |-
-                                    Expect configures the pass/fail thresholds applied to the query
-                                    result. When nil, a non-error return with any scalar result
-                                    passes.
-                                  properties:
-                                    maxDurationSeconds:
-                                      default: 60
-                                      description: |-
-                                        MaxDurationSeconds is the client-side timeout for the sanity
-                                        query. Exceeding it fails the verification with
-                                        reason=SanityCheckTimeout. Default: 60.
-                                      format: int32
-                                      minimum: 1
-                                      type: integer
-                                    minRows:
-                                      description: |-
-                                        MinRows is the floor applied to the scalar result. When >0 and
-                                        the scalar result is less than MinRows, the verification fails
-                                        with reason=SanityCheckFailed. Default: 0 (disabled).
-                                      format: int64
-                                      minimum: 0
-                                      type: integer
-                                  type: object
+                                    MinResult is the floor applied to an integer scalar result: a
+                                    smaller result fails the verification with reason=SanityCheckFailed.
+                                    A non-integer result is not compared. Unset applies no floor.
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
                                 query:
                                   description: |-
                                     Query is a single SQL statement. Must return a scalar
@@ -1026,6 +1021,18 @@ spec:
                                     rejected to keep the timeout budget predictable.
                                   minLength: 1
                                   type: string
+                                timeout:
+                                  default: 1m0s
+                                  description: |-
+                                    Timeout is the client-side timeout for the sanity query, applied in
+                                    whole seconds (rounded up). Exceeding it fails the verification with
+                                    reason=SanityCheckTimeout. Default: 60s. Bounds: 1s to 1h.
+                                  type: string
+                                  x-kubernetes-validations:
+                                  - message: sanityCheck.timeout must be between 1s
+                                      and 1h
+                                    rule: duration(self) >= duration('1s') && duration(self)
+                                      <= duration('1h')
                               required:
                               - query
                               type: object
@@ -1038,6 +1045,7 @@ spec:
                               description: StartingDeadlineSeconds is forwarded to
                                 the CronJob spec.
                               format: int64
+                              minimum: 0
                               type: integer
                             successfulJobsHistoryLimit:
                               default: 3
@@ -1059,10 +1067,10 @@ spec:
                                 reasons as BackupSchedule.TimeZone.
                               type: string
                             ttlSecondsAfterFinished:
-                              default: 0
                               description: |-
-                                TTLSecondsAfterFinished mirrors the per-CR field for scheduled
-                                CRs. Default: 0.
+                                TTLSecondsAfterFinished is copied onto each scheduled verification
+                                CR; unset stays unset there. See
+                                MysqlBackupVerificationSpec.TTLSecondsAfterFinished.
                               format: int32
                               minimum: 0
                               type: integer
@@ -1143,15 +1151,17 @@ spec:
                       retries the whole CR, producing a new MysqlBackup with its own
                       Job and attempt counter. Omit to disable.
                     properties:
-                      initialBackoffSeconds:
-                        default: 60
+                      initialBackoff:
+                        default: 1m0s
                         description: |-
-                          InitialBackoffSeconds is the delay between the first failure and
-                          the first retry. Subsequent retries double the backoff until
-                          MaxBackoffSeconds.
-                        format: int32
-                        minimum: 1
-                        type: integer
+                          InitialBackoff is the delay between the first failure and the first
+                          retry. Subsequent retries double the backoff until MaxBackoff.
+                          Default: 1m. Bounds: 1s to 1h.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: retry.initialBackoff must be between 1s and 1h
+                          rule: duration(self) >= duration('1s') && duration(self)
+                            <= duration('1h')
                       maxAttempts:
                         default: 1
                         description: |-
@@ -1161,14 +1171,21 @@ spec:
                         maximum: 10
                         minimum: 1
                         type: integer
-                      maxBackoffSeconds:
-                        default: 1800
-                        description: 'MaxBackoffSeconds caps the exponential backoff.
-                          Default: 1800 (30m).'
-                        format: int32
-                        minimum: 1
-                        type: integer
+                      maxBackoff:
+                        default: 30m0s
+                        description: |-
+                          MaxBackoff caps the exponential backoff. Default: 30m. Bounds: 1s to
+                          24h, and at least InitialBackoff.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: retry.maxBackoff must be between 1s and 24h
+                          rule: duration(self) >= duration('1s') && duration(self)
+                            <= duration('24h')
                     type: object
+                    x-kubernetes-validations:
+                    - message: retry.maxBackoff must be at least retry.initialBackoff
+                      rule: '!has(self.initialBackoff) || !has(self.maxBackoff) ||
+                        duration(self.maxBackoff) >= duration(self.initialBackoff)'
                   schedules:
                     description: |-
                       Schedules describe cron-driven recurring backups, each referencing
@@ -1222,6 +1239,7 @@ spec:
                           description: StartingDeadlineSeconds is forwarded to the
                             CronJob spec.
                           format: int64
+                          minimum: 0
                           type: integer
                         successfulJobsHistoryLimit:
                           default: 3
@@ -1275,14 +1293,17 @@ spec:
                     x-kubernetes-int-or-string: true
                 type: object
               cloneTimeout:
-                default: 3600
+                default: 1h0m0s
                 description: |-
-                  CloneTimeout is the timeout in seconds for CLONE INSTANCE operations. It
-                  controls the session variables net_read_timeout and net_write_timeout
-                  (set per-session before cloning) and the global variable clone_ddl_timeout
-                  (GLOBAL-only; set via SET GLOBAL before cloning). Default: 3600 (1 hour).
-                minimum: 60
-                type: integer
+                  CloneTimeout bounds CLONE INSTANCE operations. It sets the session
+                  variables net_read_timeout and net_write_timeout (per session before
+                  cloning) and the global variable clone_ddl_timeout (GLOBAL-only; set
+                  via SET GLOBAL before cloning), all in whole seconds, rounded up.
+                  Default: 1h. Bounds: 1m to 24h.
+                type: string
+                x-kubernetes-validations:
+                - message: cloneTimeout must be between 1m and 24h
+                  rule: duration(self) >= duration('1m') && duration(self) <= duration('24h')
               connectionDrainTimeout:
                 default: 30s
                 description: |-
@@ -1290,8 +1311,11 @@ spec:
                   evicting application sessions from a fenced former primary after an
                   emergency failover or autonomous self-fence. This drain runs only
                   after promotion has completed, so it cannot kill the operator's
-                  promotion session. Default: 30s.
+                  promotion session. Default: 30s. Bounds: 1s to 10m.
                 type: string
+                x-kubernetes-validations:
+                - message: connectionDrainTimeout must be between 1s and 10m
+                  rule: duration(self) >= duration('1s') && duration(self) <= duration('10m')
               containerSecurityContext:
                 description: |-
                   ContainerSecurityContext optionally sets the container-level security
@@ -1556,9 +1580,10 @@ spec:
                       (e.g. "lion.az.example.com"). Apps should CNAME to this hostname.
                     minLength: 1
                     type: string
-                  ttl:
+                  ttlSeconds:
                     default: 60
-                    description: 'TTL is the DNS record TTL in seconds. Default: 60'
+                    description: 'TTLSeconds is the DNS record TTL in seconds. Default:
+                      60'
                     format: int64
                     minimum: 1
                     type: integer
@@ -1828,13 +1853,19 @@ spec:
                       Image is the pinned Dragonfly container image. Required when
                       Enabled is true. Tag ":latest" is rejected.
                     type: string
-                  maxMemoryMb:
+                  maxMemory:
+                    anyOf:
+                    - type: integer
+                    - type: string
                     description: |-
-                      MaxMemoryMb caps Dragonfly's memory budget per pod. Translates to
-                      the --maxmemory flag. 0 means leave unset (Dragonfly default).
-                    format: int32
-                    minimum: 0
-                    type: integer
+                      MaxMemory caps Dragonfly's memory budget per pod (for example
+                      "512Mi"), rendered as --maxmemory in bytes. Must be positive. Unset
+                      leaves Dragonfly's default.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                    x-kubernetes-validations:
+                    - message: dragonfly.maxMemory must be greater than 0
+                      rule: quantity(string(self)).isGreaterThan(quantity('0'))
                   plannedFailover:
                     description: PlannedFailover configures planned-switchover behavior.
                     properties:
@@ -1846,9 +1877,14 @@ spec:
                           up to the source's replication offset. The same duration is used
                           as the REPLTAKEOVER timeout argument during PromotingDragonfly;
                           Dragonfly takes that argument in whole seconds, so it is rounded up
-                          to the next second (minimum 1s).
-                          Default: 30s.
+                          to the next second.
+                          Default: 30s. Bounds: 1s to 10m.
                         type: string
+                        x-kubernetes-validations:
+                        - message: dragonfly.plannedFailover.maxSyncWait must be between
+                            1s and 10m
+                          rule: duration(self) >= duration('1s') && duration(self)
+                            <= duration('10m')
                       onSyncTimeout:
                         default: Proceed
                         description: |-
@@ -2112,10 +2148,10 @@ spec:
                     type: integer
                   proactorThreads:
                     description: |-
-                      ProactorThreads sets Dragonfly's --proactor_threads flag. 0 means
-                      leave unset (Dragonfly default: one per CPU).
+                      ProactorThreads sets Dragonfly's --proactor_threads flag. Unset
+                      leaves Dragonfly's default (one per CPU).
                     format: int32
-                    minimum: 0
+                    minimum: 1
                     type: integer
                   resources:
                     description: Resources defines the compute resources for the Dragonfly
@@ -2325,17 +2361,19 @@ spec:
                           datadirs must be checked manually.
                         pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                         type: string
-                      escrowTimeoutSeconds:
-                        default: 600
+                      escrowTimeout:
+                        default: 10m0s
                         description: |-
-                          EscrowTimeoutSeconds is how long the operator waits for a freshly
-                          unsealed site to escrow its keyring before reporting the site as
-                          failed on status. The site is not sealed and not admitted to
-                          service until escrow succeeds; the timeout only controls when the
-                          condition flips to a loud failure.
-                        format: int32
-                        minimum: 30
-                        type: integer
+                          EscrowTimeout is how long the operator waits for a freshly unsealed
+                          site to escrow its keyring before reporting the site as failed on
+                          status. The site is not sealed and not admitted to service until
+                          escrow succeeds; the timeout only controls when the condition flips
+                          to a loud failure. Default: 10m. Bounds: 30s to 1h.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: keyring.escrowTimeout must be between 30s and 1h
+                          rule: duration(self) >= duration('30s') && duration(self)
+                            <= duration('1h')
                       mysqldDir:
                         default: /usr/sbin
                         description: |-
@@ -5540,10 +5578,15 @@ spec:
                 - name
                 x-kubernetes-list-type: map
               failoverCooldown:
-                default: 5m
-                description: 'FailoverCooldown is the minimum time between failovers.
-                  Default: 5m'
+                default: 5m0s
+                description: |-
+                  FailoverCooldown is the minimum time between failovers, the
+                  anti-flap guard; it cannot be disabled. Default: 5m. Bounds: 30s to
+                  24h.
                 type: string
+                x-kubernetes-validations:
+                - message: failoverCooldown must be between 30s and 24h
+                  rule: duration(self) >= duration('30s') && duration(self) <= duration('24h')
               failureThreshold:
                 default: 3
                 description: 'FailureThreshold is how many consecutive failures before
@@ -5663,7 +5706,7 @@ spec:
                         default: false
                         description: |-
                           AllowPartial accepts an archive with no transaction at or after
-                          StopDatetime: the restore then replays to the archive head (outcome
+                          StopTime: the restore then replays to the archive head (outcome
                           Partial). It relaxes nothing else; archive identity, lineage and
                           continuity checks still apply.
                         type: boolean
@@ -5691,23 +5734,20 @@ spec:
                           effects; such exclusions are reported as onHistoryExclusions.
                         maxLength: 131072
                         type: string
-                      stopDatetime:
+                      stopTime:
                         description: |-
-                          StopDatetime is the target instant, a whole second: RFC 3339
-                          ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00") or
-                          "YYYY-MM-DD HH:MM:SS", which is read as UTC. Fractional seconds are
-                          refused. Replay restores the history of the first archived
-                          transaction committed at or after it (commit times are compared to
-                          the microsecond), cut just before that transaction. Required.
-                          An object stored with a fractional target before this rule existed
-                          fails every update (finalizer removal included) on clusters without
-                          CRD validation ratcheting until an update also corrects the target;
-                          correct such targets before applying the CRD.
+                          StopTime is the target instant: RFC 3339 with an explicit zone and
+                          whole seconds ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00").
+                          Fractional seconds, a lowercase "t" or "z", and an offset outside
+                          -23:59..+23:59 are refused. Replay restores the history of the first
+                          archived transaction committed at or after it (commit times are
+                          compared to the microsecond), cut just before that transaction.
+                        format: date-time
                         maxLength: 40
-                        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
+                        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$
                         type: string
                     required:
-                    - stopDatetime
+                    - stopTime
                     type: object
                   source:
                     description: Source is a tagged reference to the artifact to restore.
@@ -5847,16 +5887,27 @@ spec:
                       During this window the reconciler repeatedly calls
                       KillAppConnections; if any connections remain after the timeout
                       the state machine proceeds anyway so a stuck client cannot block
-                      a planned switchover indefinitely. Default: 30s.
+                      a planned switchover indefinitely. Default: 30s. Bounds: 1s to 10m.
                     type: string
+                    x-kubernetes-validations:
+                    - message: plannedFailover.drainTimeout must be between 1s and
+                        10m
+                      rule: duration(self) >= duration('1s') && duration(self) <=
+                        duration('10m')
                   maxLagWait:
-                    default: 5m
+                    default: 5m0s
                     description: |-
                       MaxLagWait bounds the time spent waiting for the target's
                       GTID_EXECUTED to cover the fenced source's GTID_EXECUTED before
-                      the state machine rolls back to the source. Must be expressible
-                      as a Go time.Duration. Default: 5m.
+                      the state machine rolls back to the source. The source is fenced
+                      while the run waits, so this also bounds the write outage.
+                      Default: 5m. Bounds: 1s to 1h, the same bounds as the
+                      planned-failover annotation's maxLagWait= override.
                     type: string
+                    x-kubernetes-validations:
+                    - message: plannedFailover.maxLagWait must be between 1s and 1h
+                      rule: duration(self) >= duration('1s') && duration(self) <=
+                        duration('1h')
                   onCooldown:
                     default: Reject
                     description: |-
@@ -6129,8 +6180,11 @@ spec:
                   PollInterval is the interval for polling MySQL instances. After a site
                   reaches FailureThreshold and continues failing, that site's probes back
                   off exponentially to a 30s cap; other sites keep this interval.
-                  Default: 2s.
+                  Default: 2s. Bounds: 1s to 5m.
                 type: string
+                x-kubernetes-validations:
+                - message: pollInterval must be between 1s and 5m
+                  rule: duration(self) >= duration('1s') && duration(self) <= duration('5m')
               recoveryThreshold:
                 default: 2
                 description: 'RecoveryThreshold is how many consecutive successes
@@ -6143,8 +6197,10 @@ spec:
                 properties:
                   maxLagSeconds:
                     default: 300
-                    description: 'MaxLagSeconds is the maximum acceptable replication
-                      lag before marking degraded. Default: 300'
+                    description: |-
+                      MaxLagSeconds is the maximum acceptable replication lag, in seconds,
+                      before marking degraded. 0 requires the replica to be fully caught
+                      up. Default: 300.
                     format: int64
                     minimum: 0
                     type: integer
@@ -6413,8 +6469,12 @@ spec:
                     default: 20s
                     description: |-
                       LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
-                      Must be at least 3s and at least 3x PeerCheckInterval.
+                      Bounds: 3s to 10m, and at least 3x PeerCheckInterval.
                     type: string
+                    x-kubernetes-validations:
+                    - message: sidecar.leaseTimeout must be between 3s and 10m
+                      rule: duration(self) >= duration('3s') && duration(self) <=
+                        duration('10m')
                   operatorEndpoint:
                     description: |-
                       OperatorEndpoint is the host:port of the Bloodraven operator's
@@ -6428,16 +6488,14 @@ spec:
                     default: 5s
                     description: |-
                       PeerCheckInterval is how often the sidecar checks its peer. Default: 5s.
-                      Must be at least 1s.
+                      Bounds: 1s to 1m.
                     type: string
+                    x-kubernetes-validations:
+                    - message: sidecar.peerCheckInterval must be between 1s and 1m
+                      rule: duration(self) >= duration('1s') && duration(self) <=
+                        duration('1m')
                 type: object
                 x-kubernetes-validations:
-                - message: sidecar.peerCheckInterval must be at least 1s
-                  rule: '!has(self.peerCheckInterval) || duration(self.peerCheckInterval)
-                    >= duration(''1s'')'
-                - message: sidecar.leaseTimeout must be at least 3s
-                  rule: '!has(self.leaseTimeout) || duration(self.leaseTimeout) >=
-                    duration(''3s'')'
                 - message: sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval
                   rule: 'duration(has(self.leaseTimeout) ? self.leaseTimeout : ''20s'')
                     >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval
@@ -7045,7 +7103,9 @@ spec:
                           description: |-
                             LastIOSecondsAgo is the parsed master_last_io_seconds_ago field from
                             INFO replication on a replica. A value of -1 means the replica has
-                            never received data from its master.
+                            never received data from its master. Unset when Dragonfly did not
+                            report it.
+                          format: int64
                           type: integer
                         linkStatus:
                           description: |-
@@ -7281,7 +7341,7 @@ spec:
                         unsealedSince:
                           description: |-
                             UnsealedSince is when the site entered the Unsealed phase. Used to
-                            evaluate keyring.escrowTimeoutSeconds.
+                            evaluate keyring.escrowTimeout.
                           format: date-time
                           type: string
                       required:

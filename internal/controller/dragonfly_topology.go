@@ -636,7 +636,7 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 			ReplicationState: s.Info.Role,
 			LinkStatus:       linkStatus,
 			SyncInProgress:   s.Info.MasterSyncInProgress,
-			LastIOSecondsAgo: s.Info.MasterLastIOSecondsAgo,
+			LastIOSecondsAgo: dragonflyLastIOSecondsAgo(s.Info),
 			Ready:            ready,
 			Message:          dragonflySiteMessage(s, role),
 		})
@@ -1194,7 +1194,7 @@ func (m *DragonflyManager) rolloutPromoteLocked(work context.Context, target, ol
 // group the caller made under the gate and validated with
 // rolloutPromotionBlocked.
 func (m *DragonflyManager) rolloutPromoteFG(work context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) bool {
-	return m.promoteLocked(work, fg, target, oldSource, effectiveDragonflyMaxSyncWaitFromFG(fg)/2)
+	return m.promoteLocked(work, fg, target, oldSource, effectiveDragonflyMaxSyncWait(fg)/2)
 }
 
 // rolloutPromotionBlocked returns why a rollout promotion of target, taking
@@ -1664,16 +1664,6 @@ func (m *DragonflyManager) setTrafficLabel(ctx context.Context, fg *v1alpha1.Mys
 	return setDragonflyTrafficOnSite(ctx, m.client, fg, siteName, set)
 }
 
-// effectiveDragonflyMaxSyncWaitFromFG mirrors the planned-failover
-// helper but works against a freshly-fetched FG. Returns
-// defaultDragonflySyncWait when no override is set.
-func effectiveDragonflyMaxSyncWaitFromFG(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil && d.PlannedFailover.MaxSyncWait != nil && d.PlannedFailover.MaxSyncWait.Duration > 0 {
-		return d.PlannedFailover.MaxSyncWait.Duration
-	}
-	return defaultDragonflySyncWait
-}
-
 // stampPromotion writes lastPromotionTime/Target, and writes
 // status.dragonfly.activeSite only after a successful promotion. Wrapped in RetryOnConflict so a concurrent
 // patchStatus write from the manager's own poll loop or the
@@ -1814,4 +1804,14 @@ func dragonflyStatusEqual(a, b *v1alpha1.DragonflyStatus) bool {
 		}
 	}
 	return true
+}
+
+// dragonflyLastIOSecondsAgo is status.dragonfly.sites[].lastIOSecondsAgo:
+// nil when Dragonfly did not report master_last_io_seconds_ago.
+func dragonflyLastIOSecondsAgo(info dragonfly.ReplicationInfo) *int64 {
+	if !info.MasterLastIOReported {
+		return nil
+	}
+	v := int64(info.MasterLastIOSecondsAgo)
+	return &v
 }

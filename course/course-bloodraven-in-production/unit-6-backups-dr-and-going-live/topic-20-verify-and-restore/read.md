@@ -12,11 +12,11 @@ The API type says it plainly. A verification "restores a MysqlBackup artifact in
 
 Loading is the default contract. `spec.sanityCheck` extends it from "it loaded" to "it loaded something". The query is a single statement, run through the `mysql` CLI as `mysql -B -N -e` wrapped in `timeout`, and it must return **one row and one column**. Multi-statement input is rejected to keep the timeout budget predictable.
 
-The detail that earns its keep: **an empty result set is treated as scalar 0**. That is precisely the shape a silently-empty restore produces — the query runs, nothing errors, no rows come back. Without that rule, "returned nothing" would look like success. With it, a `minRows: 1` floor catches it.
+The detail that earns its keep: **an empty result set is treated as scalar 0**. That is precisely the shape a silently-empty restore produces — the query runs, nothing errors, no rows come back. Without that rule, "returned nothing" would look like success. With it, a `minResult: 1` floor catches it.
 
-Failures split into two reasons, not one. `SanityCheckFailed` means the scalar came back below `expect.minRows`, or the query errored — the data is wrong. `SanityCheckTimeout` means the query exceeded `expect.maxDurationSeconds` (default 60) — the instance is wedged. Different problems, different pagers.
+Failures split into two reasons, not one. `SanityCheckFailed` means the scalar came back below `sanityCheck.minResult`, or the query errored — the data is wrong. `SanityCheckTimeout` means the query ran longer than `sanityCheck.timeout` (default `60s`; admission accepts 1s to 1h) — the instance is wedged. Different problems, different pagers. `status.sanityCheck.outcome` records which one you got: `Passed`, `Failed`, `TimedOut`, or `Skipped` when the load or the replay failed first and the query never ran.
 
-Pick an assertion whose expected value is structural rather than a moving row count. `SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'counter_db'` returns 1 when the schema landed and 0 when it did not, and `minRows: 1` turns that into a pass/fail.
+Pick an assertion whose expected value is structural rather than a moving row count. `SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'counter_db'` returns 1 when the schema landed and 0 when it did not, and `minResult: 1` turns that into a pass/fail.
 
 ```widget
 {
@@ -28,8 +28,8 @@ Pick an assertion whose expected value is structural rather than a moving row co
       "out": "Created MysqlBackupVerification bloodraven-playground/playground-nightly-verify-9k2rt (profile=nightly, triggeredBy=manual)\nWatch with: kubectl get mysqlbackupverification playground-nightly-verify-9k2rt -n bloodraven-playground -w"
     },
     {
-      "cmd": "kubectl get mysqlbackupverification playground-nightly-verify-9k2rt -o jsonpath='{.status.phase} {.status.sanityCheck.ran} {.status.sanityCheck.resultRow}'",
-      "out": "Succeeded true 1"
+      "cmd": "kubectl get mysqlbackupverification playground-nightly-verify-9k2rt -o jsonpath='{.status.phase} {.status.sanityCheck.outcome} {.status.sanityCheck.result}'",
+      "out": "Succeeded Passed 1"
     }
   ],
   "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."

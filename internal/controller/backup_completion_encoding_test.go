@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 )
 
@@ -67,7 +68,8 @@ func TestVerifyScriptSentinelEncoding(t *testing.T) {
 				t.Fatalf("verification encoder: %v: %s", err, out)
 			}
 			res, ok := parseSanitySentinel(string(out))
-			if !ok || res.ResultRow != value || res.Error != value || !res.Ran || res.DurationMs != 12 {
+			if !ok || res.Result != value || res.Error != value || res.Outcome != v1alpha1.SanityCheckOutcomeFailed ||
+				res.DurationMilliseconds == nil || *res.DurationMilliseconds != 12 {
 				t.Fatalf("sanity round trip failed: ok=%v result=%+v", ok, res)
 			}
 			if !strings.Contains(string(out), "resultRow="+backupmeta.EscapeValue(value)) {
@@ -84,7 +86,7 @@ func TestVerifyScriptSentinelEncoding(t *testing.T) {
 
 func TestParseSanitySentinel_LiteralUnderscore(t *testing.T) {
 	res, ok := parseSanitySentinel("BLOODRAVEN_VERIFY_SANITY_COMPLETE ran=1 resultRow=order_count")
-	if !ok || res.ResultRow != "order_count" {
+	if !ok || res.Result != "order_count" || res.Outcome != v1alpha1.SanityCheckOutcomePassed {
 		t.Fatalf("scalar identity changed: ok=%v result=%+v", ok, res)
 	}
 }

@@ -84,12 +84,13 @@ type MysqlBackupVerificationSpec struct {
 
 	// TTLSecondsAfterFinished controls how long the verification Job and
 	// its Pod persist after a successful verification before the
-	// reconciler cleans them up. Default: 0 (clean up immediately).
-	// Failed verifications with KeepOnFailure=true ignore this value.
-	// +kubebuilder:default=0
+	// reconciler cleans them up. 0 cleans them up as soon as the
+	// verification finishes; unset keeps them until retention deletes the
+	// verification. Failed verifications with KeepOnFailure=true ignore
+	// this value.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	TTLSecondsAfterFinished int32 `json:"ttlSecondsAfterFinished,omitempty"`
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
 	// Resources sets requests and limits for the verification MySQL
 	// container. Forwarded to the Job pod verbatim; when unset, no
@@ -112,7 +113,7 @@ type MysqlBackupVerificationSpec struct {
 
 	// SanityCheck runs a single scalar-returning SELECT against the
 	// ephemeral mysqld after the dump load (and optional PITR replay)
-	// succeeds. Failures (errors, timeouts, or minRows mismatch) flip
+	// succeeds. Failures (errors, timeouts, or a result below minResult) flip
 	// the verification to Failed with a SanityCheckFailed /
 	// SanityCheckTimeout reason so an otherwise-loadable but obviously
 	// corrupt dump does not quietly pass the freshness gauge.
@@ -127,21 +128,23 @@ type MysqlBackupVerificationSpec struct {
 // replays to a caller-supplied instant, which drills a specific known-good
 // point or checks that archives covering a past incident still replay. A
 // verification never accepts a Partial outcome.
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Timestamp' ? has(self.stopTime) : !has(self.stopTime)",message="pointInTime.stopTime is required when mode is Timestamp and forbidden when mode is Latest"
 type PointInTimeVerificationSpec struct {
 	// Mode selects the replay end point: Latest or Timestamp.
 	// +required
 	Mode PointInTimeMode `json:"mode"`
 
-	// Timestamp is the target instant, a whole second in the same forms as
-	// PointInTimeSpec.StopDatetime (fractional seconds are refused; a
-	// stored fractional value must be corrected in the same update, as for
-	// StopDatetime). Replay restores the history of the first archived
-	// transaction committed at or after it, cut just before that
-	// transaction. Required when Mode=Timestamp; ignored otherwise.
+	// StopTime is the target instant, in the same form as
+	// PointInTimeSpec.StopTime (RFC 3339, an explicit zone, whole seconds).
+	// Replay restores the history of the first archived transaction
+	// committed at or after it, cut just before that transaction. Required
+	// when Mode=Timestamp; forbidden when Mode=Latest.
 	// +optional
-	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$`
 	// +kubebuilder:validation:MaxLength=40
-	Timestamp string `json:"timestamp,omitempty"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	StopTime *metav1.Time `json:"stopTime,omitempty"`
 
 	// ExcludeGtids are never replayed and must not intersect the backup,
 	// with the same meaning as PointInTimeSpec.ExcludeGtids: every archived
@@ -166,8 +169,8 @@ type PointInTimeVerificationSpec struct {
 // verification runs the named Query via the `mysql` CLI (`mysql -B -N
 // -e`, wrapped in `timeout`) against the ephemeral mysqld, expects a
 // single row / single column result (empty result sets are treated as
-// scalar 0), and fails the verification if the scalar is less than
-// Expect.MinRows or if the query exceeds MaxDurationSeconds.
+// scalar 0), and fails the verification if an integer scalar is less
+// than MinResult or if the query runs longer than Timeout.
 type SanityCheckSpec struct {
 	// Query is a single SQL statement. Must return a scalar
 	// (single-row, single-column) result. Multi-statement inputs are
@@ -176,30 +179,20 @@ type SanityCheckSpec struct {
 	// +required
 	Query string `json:"query"`
 
-	// Expect configures the pass/fail thresholds applied to the query
-	// result. When nil, a non-error return with any scalar result
-	// passes.
-	// +optional
-	Expect *SanityCheckExpectation `json:"expect,omitempty"`
-}
-
-// SanityCheckExpectation captures the pass/fail thresholds applied to
-// the sanity query scalar result.
-type SanityCheckExpectation struct {
-	// MinRows is the floor applied to the scalar result. When >0 and
-	// the scalar result is less than MinRows, the verification fails
-	// with reason=SanityCheckFailed. Default: 0 (disabled).
+	// MinResult is the floor applied to an integer scalar result: a
+	// smaller result fails the verification with reason=SanityCheckFailed.
+	// A non-integer result is not compared. Unset applies no floor.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	MinRows int64 `json:"minRows,omitempty"`
+	MinResult *int64 `json:"minResult,omitempty"`
 
-	// MaxDurationSeconds is the client-side timeout for the sanity
-	// query. Exceeding it fails the verification with
-	// reason=SanityCheckTimeout. Default: 60.
-	// +kubebuilder:default=60
-	// +kubebuilder:validation:Minimum=1
+	// Timeout is the client-side timeout for the sanity query, applied in
+	// whole seconds (rounded up). Exceeding it fails the verification with
+	// reason=SanityCheckTimeout. Default: 60s. Bounds: 1s to 1h.
+	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="sanityCheck.timeout must be between 1s and 1h"
 	// +optional
-	MaxDurationSeconds int32 `json:"maxDurationSeconds,omitempty"`
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
 }
 
 // VerificationPhase is the lifecycle phase of a MysqlBackupVerification.
@@ -266,7 +259,7 @@ type MysqlBackupVerificationStatus struct {
 	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
 
 	// SanityCheck is populated when spec.sanityCheck is set. Records
-	// whether the query ran, its duration, and the scalar result so
+	// the check's outcome, its duration, and the scalar result so
 	// operators can look at `kubectl describe` and tell what the
 	// verification actually asserted.
 	// +optional
@@ -313,24 +306,40 @@ type BinlogReplayMark struct {
 	Timestamp *metav1.Time `json:"timestamp,omitempty"`
 }
 
+// SanityCheckOutcome is status.sanityCheck.outcome.
+// +kubebuilder:validation:Enum=Passed;Failed;TimedOut;Skipped
+type SanityCheckOutcome string
+
+const (
+	// SanityCheckOutcomePassed: the query ran and its result met MinResult.
+	SanityCheckOutcomePassed SanityCheckOutcome = "Passed"
+	// SanityCheckOutcomeFailed: the query errored or its result was below
+	// MinResult.
+	SanityCheckOutcomeFailed SanityCheckOutcome = "Failed"
+	// SanityCheckOutcomeTimedOut: the query ran longer than Timeout.
+	SanityCheckOutcomeTimedOut SanityCheckOutcome = "TimedOut"
+	// SanityCheckOutcomeSkipped: the verification ended before the sanity
+	// phase (the load or the replay failed), so the query never ran.
+	SanityCheckOutcomeSkipped SanityCheckOutcome = "Skipped"
+)
+
 // SanityCheckResult captures the observed outcome of
-// spec.sanityCheck.query. ResultRow is the scalar column rendered as a
+// spec.sanityCheck.query. Result is the scalar column rendered as a
 // string so the status subresource stays generic over MySQL type.
 type SanityCheckResult struct {
-	// Ran is true when the verification Job actually executed the
-	// sanity query. Useful for distinguishing "skipped because upstream
-	// phase failed" from "ran but returned 0 rows".
-	// +optional
-	Ran bool `json:"ran,omitempty"`
+	// Outcome is the sanity check's result.
+	// +required
+	Outcome SanityCheckOutcome `json:"outcome"`
 
-	// DurationMs is the client-side wall-clock duration of the query.
+	// DurationMilliseconds is the client-side wall-clock duration of the
+	// query. Unset when the query did not run.
 	// +optional
-	DurationMs int64 `json:"durationMs,omitempty"`
+	DurationMilliseconds *int64 `json:"durationMilliseconds,omitempty"`
 
-	// ResultRow is the scalar result rendered as a string. Empty when
-	// the query returned zero rows.
+	// Result is the scalar result rendered as a string ("0" when the
+	// query returned zero rows). Empty when the query did not return.
 	// +optional
-	ResultRow string `json:"resultRow,omitempty"`
+	Result string `json:"result,omitempty"`
 
 	// Error is the error message from a failed sanity query. Set on
 	// SanityCheckFailed or SanityCheckTimeout terminal transitions.
@@ -395,6 +404,7 @@ type VerificationSpec struct {
 	ConcurrencyPolicy batchv1.ConcurrencyPolicy `json:"concurrencyPolicy,omitempty"`
 
 	// StartingDeadlineSeconds is forwarded to the CronJob spec.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	StartingDeadlineSeconds *int64 `json:"startingDeadlineSeconds,omitempty"`
 
@@ -416,12 +426,12 @@ type VerificationSpec struct {
 	// +optional
 	KeepOnFailure *bool `json:"keepOnFailure,omitempty"`
 
-	// TTLSecondsAfterFinished mirrors the per-CR field for scheduled
-	// CRs. Default: 0.
-	// +kubebuilder:default=0
+	// TTLSecondsAfterFinished is copied onto each scheduled verification
+	// CR; unset stays unset there. See
+	// MysqlBackupVerificationSpec.TTLSecondsAfterFinished.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	TTLSecondsAfterFinished int32 `json:"ttlSecondsAfterFinished,omitempty"`
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
 	// RetentionPolicy caps how many verification CRs per profile are
 	// retained after they reach a terminal phase.

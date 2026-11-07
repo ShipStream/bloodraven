@@ -851,7 +851,8 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
-		FailoverCooldown:  0, // no cooldown by default
+		// The API default; the manager uses the config as given (A-37).
+		FailoverCooldown: int64(5 * time.Minute),
 	}
 
 	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2}, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)

@@ -118,7 +118,7 @@ func dragonflySyncTimeoutPolicy(p v1alpha1.DragonflySyncTimeoutPolicy) v1alpha1.
 // effectiveDragonflyMaxSyncWait returns the configured budget or the
 // default. The run snapshots it into settings.dragonfly at acceptance.
 func effectiveDragonflyMaxSyncWait(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil && d.PlannedFailover.MaxSyncWait != nil && d.PlannedFailover.MaxSyncWait.Duration > 0 {
+	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil && d.PlannedFailover.MaxSyncWait != nil {
 		return d.PlannedFailover.MaxSyncWait.Duration
 	}
 	return defaultDragonflySyncWait

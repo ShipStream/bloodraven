@@ -157,15 +157,15 @@ type KeyringSpec struct {
 	// +optional
 	RetainVersions int32 `json:"retainVersions,omitempty"`
 
-	// EscrowTimeoutSeconds is how long the operator waits for a freshly
-	// unsealed site to escrow its keyring before reporting the site as
-	// failed on status. The site is not sealed and not admitted to
-	// service until escrow succeeds; the timeout only controls when the
-	// condition flips to a loud failure.
-	// +kubebuilder:default=600
-	// +kubebuilder:validation:Minimum=30
+	// EscrowTimeout is how long the operator waits for a freshly unsealed
+	// site to escrow its keyring before reporting the site as failed on
+	// status. The site is not sealed and not admitted to service until
+	// escrow succeeds; the timeout only controls when the condition flips
+	// to a loud failure. Default: 10m. Bounds: 30s to 1h.
+	// +kubebuilder:default="10m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('1h')",message="keyring.escrowTimeout must be between 30s and 1h"
 	// +optional
-	EscrowTimeoutSeconds int32 `json:"escrowTimeoutSeconds,omitempty"`
+	EscrowTimeout *metav1.Duration `json:"escrowTimeout,omitempty"`
 }
 
 // SiteKeyringPhase is the per-site keyring lifecycle state. It drives
@@ -278,7 +278,7 @@ type SiteEncryptionStatus struct {
 	LastEscrowTime *metav1.Time `json:"lastEscrowTime,omitempty"`
 
 	// UnsealedSince is when the site entered the Unsealed phase. Used to
-	// evaluate keyring.escrowTimeoutSeconds.
+	// evaluate keyring.escrowTimeout.
 	// +optional
 	UnsealedSince *metav1.Time `json:"unsealedSince,omitempty"`
 

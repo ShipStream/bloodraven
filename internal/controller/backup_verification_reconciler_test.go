@@ -542,12 +542,13 @@ func TestVerificationPITRRequest(t *testing.T) {
 		{name: "empty mode", in: &v1alpha1.PointInTimeVerificationSpec{}, wantErr: "not one of"},
 		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:1 "},
 			want: &pitrReplayRequest{Mode: "latest", ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1", Verification: true}},
-		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20 03:00:00+02:00"},
+		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T03:00:00+02:00")},
 			want: &pitrReplayRequest{Mode: "timestamp", Stop: "2026-04-20T01:00:00.000000Z", Verification: true}},
 		// C2 / A-39: whole seconds only.
-		{name: "fraction refused", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20T01:00:00.5Z"}, wantErr: "PITRTargetInvalid"},
+		{name: "fraction refused", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00.5Z")}, wantErr: "PITRTargetInvalid"},
 		{name: "timestamp required", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp}, wantErr: "PITRTargetInvalid"},
-		{name: "seven digits", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20T01:00:00.1234567Z"}, wantErr: "PITRTargetInvalid"},
+		{name: "seven digits", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00.1234567Z")}, wantErr: "PITRTargetInvalid"},
+		{name: "latest forbids stopTime", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, StopTime: stopAtPtr("2026-04-20T01:00:00Z")}, wantErr: "PITRTargetInvalid"},
 		{name: "unknown mode", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "head"}, wantErr: "not one of"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -578,7 +579,7 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20T01:00:00Z",
+				Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00Z"),
 			},
 		},
 	}
@@ -638,7 +639,7 @@ func TestBuildVerificationJob_PITRRequiresPITREnabled(t *testing.T) {
 			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: "2026-04-20T01:00:00Z",
+				Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00Z"),
 			},
 		},
 	}
@@ -664,11 +665,9 @@ func TestBuildVerificationJob_SanityCheck_SetsEnvVars(t *testing.T) {
 			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			SanityCheck: &v1alpha1.SanityCheckSpec{
-				Query: "SELECT COUNT(*) FROM orders.orders",
-				Expect: &v1alpha1.SanityCheckExpectation{
-					MinRows:            5,
-					MaxDurationSeconds: 30,
-				},
+				Query:     "SELECT COUNT(*) FROM orders.orders",
+				MinResult: new(int64(5)),
+				Timeout:   &metav1.Duration{Duration: 1500 * time.Millisecond},
 			},
 		},
 	}
@@ -693,7 +692,8 @@ func TestBuildVerificationJob_SanityCheck_SetsEnvVars(t *testing.T) {
 	if env["BLOODRAVEN_VERIFY_SANITY_MIN_ROWS"] != "5" {
 		t.Errorf("sanity min_rows env: %q", env["BLOODRAVEN_VERIFY_SANITY_MIN_ROWS"])
 	}
-	if env["BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS"] != "30" {
+	// A sub-second remainder rounds up to the next whole second.
+	if env["BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS"] != "2" {
 		t.Errorf("sanity max_seconds env: %q", env["BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS"])
 	}
 }
@@ -777,7 +777,7 @@ func TestParseSanitySentinel_Scalar(t *testing.T) {
 	if !ok || res == nil {
 		t.Fatal("want ok")
 	}
-	if !res.Ran || res.DurationMs != 140 || res.ResultRow != "42" || res.Error != "" {
+	if res.Outcome != v1alpha1.SanityCheckOutcomePassed || res.DurationMilliseconds == nil || *res.DurationMilliseconds != 140 || res.Result != "42" || res.Error != "" {
 		t.Errorf("sanity fields: %+v", res)
 	}
 }
@@ -787,8 +787,8 @@ func TestParseSanitySentinel_Timeout(t *testing.T) {
 	if !ok || res == nil {
 		t.Fatal("want ok")
 	}
-	if res.Error != "timeout" {
-		t.Errorf("want error=timeout, got %q", res.Error)
+	if res.Error != "timeout" || res.Outcome != v1alpha1.SanityCheckOutcomeTimedOut {
+		t.Errorf("want error=timeout outcome=TimedOut, got %+v", res)
 	}
 }
 

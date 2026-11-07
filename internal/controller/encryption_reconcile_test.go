@@ -925,7 +925,7 @@ func TestReconcileEncryption_CloneHoldDoesNotAdvanceToEscrowed(t *testing.T) {
 
 func TestReconcileEncryption_CloneHoldIgnoresEscrowDeadline(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeoutSeconds: 1}
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 1 * time.Second}}
 	stale := metav1.NewTime(time.Now().Add(-time.Hour))
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
 		Sites: []v1alpha1.SiteEncryptionStatus{
@@ -1153,7 +1153,7 @@ func TestAlignSiteEncryptionStatus(t *testing.T) {
 
 func TestCheckEscrowDeadline(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeoutSeconds: 60}
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 60 * time.Second}}
 
 	t.Run("within the window stays unsealed", func(t *testing.T) {
 		recent := metav1.NewTime(time.Now().Add(-10 * time.Second))

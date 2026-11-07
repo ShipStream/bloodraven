@@ -49,6 +49,7 @@ func TestParseInfoReplication(t *testing.T) {
 				MasterLinkStatus:       "up",
 				MasterSyncInProgress:   false,
 				MasterLastIOSecondsAgo: 1,
+				MasterLastIOReported:   true,
 				SlaveReplOffset:        123456000,
 				MasterReplOffset:       123456789,
 			},
@@ -63,6 +64,7 @@ func TestParseInfoReplication(t *testing.T) {
 				MasterLinkStatus:       "up",
 				MasterSyncInProgress:   true,
 				MasterLastIOSecondsAgo: 0,
+				MasterLastIOReported:   true,
 			},
 		},
 		{
@@ -74,6 +76,7 @@ func TestParseInfoReplication(t *testing.T) {
 				MasterPort:             6379,
 				MasterLinkStatus:       "down",
 				MasterLastIOSecondsAgo: 42,
+				MasterLastIOReported:   true,
 			},
 		},
 		{

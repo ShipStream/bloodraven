@@ -35,7 +35,7 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", LBIP: "203.0.113.2", TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
 			Backup: &v1alpha1.BackupSpec{
 				Image: "container-registry.oracle.com/mysql/community-server:9.7",
 				Profiles: []v1alpha1.BackupProfile{
@@ -106,17 +106,13 @@ func TestEnvtest_Verification_CreationAndSchemaAcceptance(t *testing.T) {
 			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: v1alpha1.PointInTimeModeTimestamp,
-				// RFC3339 with an explicit offset — exercises the
-				// CRD's string validation without any runtime parsing.
-				Timestamp: "2026-04-15T09:30:00+00:00",
+				Mode:     v1alpha1.PointInTimeModeTimestamp,
+				StopTime: &metav1.Time{Time: time.Date(2026, 4, 15, 9, 30, 0, 0, time.UTC)},
 			},
 			SanityCheck: &v1alpha1.SanityCheckSpec{
-				Query: "SELECT COUNT(*) FROM information_schema.tables",
-				Expect: &v1alpha1.SanityCheckExpectation{
-					MinRows:            1,
-					MaxDurationSeconds: 30,
-				},
+				Query:     "SELECT COUNT(*) FROM information_schema.tables",
+				MinResult: new(int64(1)),
+				Timeout:   &metav1.Duration{Duration: 30 * time.Second},
 			},
 		},
 	}

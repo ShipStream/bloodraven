@@ -59,7 +59,7 @@ You want to shorten the window in which your application can read stale data fro
 - Raise the pool size so more connections are available after the promotion
 - Set `reconnect=true` so the driver re-establishes broken connections
 - Bound the connection lifetime so every socket is retired and reopened
-- Shorten `spec.dns.ttl` from 60 to 10 so the record is re-resolved sooner
+- Shorten `spec.dns.ttlSeconds` from 60 to 10 so the record is re-resolved sooner
 
 **Correct option index:** 2
 

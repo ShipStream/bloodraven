@@ -46,7 +46,7 @@
       "orderIndex": 8
     },
     {
-      "front": "Default value of `spec.dns.ttl`?",
+      "front": "Default value of `spec.dns.ttlSeconds`?",
       "back": "60 seconds. The playground overrides it to 10.",
       "orderIndex": 9
     },

@@ -554,9 +554,9 @@ func TestReconcileBackupAssets_PITREnabledWithValidProfile(t *testing.T) {
 func fgWithRetrySpec(maxAttempts, initial int32) *v1alpha1.MysqlFailoverGroup {
 	fg := fgWithBackup()
 	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{
-		MaxAttempts:           maxAttempts,
-		InitialBackoffSeconds: initial,
-		MaxBackoffSeconds:     1800,
+		MaxAttempts:    maxAttempts,
+		InitialBackoff: &metav1.Duration{Duration: time.Duration(initial) * time.Second},
+		MaxBackoff:     &metav1.Duration{Duration: 30 * time.Minute},
 	}
 	return fg
 }

@@ -84,7 +84,7 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 	}
 	cloneCtx, cancel := context.WithTimeout(ctx, cloneTimeout)
 	defer cancel()
-	cloneTimeoutSec := int(cloneTimeout.Seconds())
+	cloneTimeoutSec := int(wholeSecondsCeil(cloneTimeout))
 	if err := opts.Replica.CloneInstance(cloneCtx, opts.ReplUser, opts.PrimaryHost, opts.ReplPassword, opts.UseSSL, cloneTimeoutSec); err != nil {
 		if !isCloneConnectionDrop(err) {
 			if fenceErr := opts.Replica.SetSuperReadOnly(ctx, true); fenceErr != nil {

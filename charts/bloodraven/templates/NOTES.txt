@@ -98,7 +98,7 @@ Next steps:
        sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:{{ .Chart.AppVersion }}
        dns:
          hostname: orders.az.example.com
-         ttl: 60
+         ttlSeconds: 60
        sites:
          - name: iad
            serverID: 101

@@ -155,7 +155,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	fmt.Fprintf(out, "  Active site: %s\n", emptyDash(fg.Status.ActiveSite))
 	fmt.Fprintf(out, "  Ready: %s\n", readyString(fg))
 	if fg.Spec.DNS.Hostname != "" {
-		fmt.Fprintf(out, "  DNS: %s (TTL %ds)\n", fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
+		fmt.Fprintf(out, "  DNS: %s (TTL %ds)\n", fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds)
 	}
 	if failoverRecord, _, _ := brcontroller.EffectiveFailoverRecord(fg, time.Now()); !failoverRecord.LastFailover.IsZero() {
 		target := failoverRecord.LastFailoverTarget

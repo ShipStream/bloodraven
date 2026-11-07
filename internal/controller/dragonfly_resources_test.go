@@ -26,8 +26,8 @@ func fgWithDragonfly(opts ...func(*v1alpha1.MysqlFailoverGroup)) *v1alpha1.Mysql
 		Image:           "docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0",
 		Port:            6379,
 		AdminPort:       9999,
-		MaxMemoryMb:     256,
-		ProactorThreads: 2,
+		MaxMemory:       new(resource.MustParse("256Mi")),
+		ProactorThreads: new(int32(2)),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("250m"),
@@ -88,7 +88,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 		for _, want := range []string{
 			"--port=6379",
 			"--admin_port=9999",
-			"--maxmemory=256mb",
+			"--maxmemory=268435456",
 			"--proactor_threads=2",
 			"--break_replication_on_master_restart",
 		} {
@@ -611,7 +611,7 @@ func TestReconcileDragonflyResources_HoldsActiveImageUntilReplicaReady(t *testin
 // the split-brain guard. Verify the filter strips matching flags.
 func TestBuildDragonflyArgs_FiltersOperatorOwnedFlags(t *testing.T) {
 	spec := &v1alpha1.DragonflySpec{
-		MaxMemoryMb: 256,
+		MaxMemory: new(resource.MustParse("256Mi")),
 		Args: []string{
 			// Forms gflags accepts: try both for each flag we filter.
 			"--break_replication_on_master_restart=false",
@@ -789,4 +789,26 @@ func (r statefulSetOverrideReader) Get(ctx context.Context, key client.ObjectKey
 		return r.sts.Get(ctx, key, obj, opts...)
 	}
 	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// TestBuildDragonflyArgs_MaxMemoryBytes (A-41, F-12): maxMemory renders as
+// --maxmemory in bytes, a fractional quantity rounds up to the next byte,
+// and an unset maxMemory or proactorThreads renders no flag.
+func TestBuildDragonflyArgs_MaxMemoryBytes(t *testing.T) {
+	for in, want := range map[string]string{
+		"512Mi": "--maxmemory=536870912",
+		"1G":    "--maxmemory=1000000000",
+		"1.5Gi": "--maxmemory=1610612736",
+		"1.5":   "--maxmemory=2",
+	} {
+		q := resource.MustParse(in)
+		joined := joinArgs(buildDragonflyArgs(&v1alpha1.DragonflySpec{MaxMemory: &q}, 6379, 9999))
+		if !contains(joined, want) {
+			t.Errorf("maxMemory %s: args %s, want %s", in, joined, want)
+		}
+	}
+	joined := joinArgs(buildDragonflyArgs(&v1alpha1.DragonflySpec{}, 6379, 9999))
+	if contains(joined, "--maxmemory") || contains(joined, "--proactor_threads") {
+		t.Errorf("unset maxMemory/proactorThreads rendered flags: %s", joined)
+	}
 }

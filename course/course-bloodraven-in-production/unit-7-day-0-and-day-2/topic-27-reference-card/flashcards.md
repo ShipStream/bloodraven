@@ -11,7 +11,7 @@
 
 **Front:** The three playground overrides
 
-**Back:** `failoverCooldown` 30s (shipped 5m), `replication.maxLagSeconds` 30 (shipped 300), `dns.ttl` 10 (shipped 60). Everything else matches the shipped defaults, so no timing measured in the playground transfers unchanged.
+**Back:** `failoverCooldown` 30s (shipped 5m), `replication.maxLagSeconds` 30 (shipped 300), `dns.ttlSeconds` 10 (shipped 60). Everything else matches the shipped defaults, so no timing measured in the playground transfers unchanged.
 
 ---
 

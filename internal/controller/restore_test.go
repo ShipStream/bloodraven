@@ -613,7 +613,7 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 	f, tr := false, true
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source-archive"}
+	pit := &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source-archive"}
 
 	for _, tc := range []struct {
 		name        string
@@ -692,7 +692,7 @@ func TestSetTerminationMessageLimit(t *testing.T) {
 func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source-archive"}
+	pit := &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source-archive"}
 
 	newFG := func() *v1alpha1.MysqlFailoverGroup {
 		fg := fgInPlaceRestore("")
@@ -771,7 +771,7 @@ func TestBuildRestoreJob_DirectSourcePITR(t *testing.T) {
 		fg := fgWithBackup()
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src}
-		fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
+		fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
 		if decrypt {
 			fg.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pp"}}
 		}

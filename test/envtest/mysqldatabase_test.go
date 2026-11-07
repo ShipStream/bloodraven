@@ -636,7 +636,7 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 					TaintNodeSelector: map[string]string{"shipstream.io/site.main": "dc2"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "main.az.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "main.az.example.com", TTLSeconds: 60},
 		},
 	}
 	if err := k8sClient.Create(ctx, fg); err != nil {

@@ -7,7 +7,7 @@
     },
     {
       "front": "The three playground overrides",
-      "back": "`failoverCooldown` 30s (shipped 5m), `replication.maxLagSeconds` 30 (shipped 300), `dns.ttl` 10 (shipped 60). Everything else matches the shipped defaults, so no timing measured in the playground transfers unchanged.",
+      "back": "`failoverCooldown` 30s (shipped 5m), `replication.maxLagSeconds` 30 (shipped 300), `dns.ttlSeconds` 10 (shipped 60). Everything else matches the shipped defaults, so no timing measured in the playground transfers unchanged.",
       "orderIndex": 1
     },
     {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	equality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,7 +39,7 @@ func newEncryptionFG(namespace, name string) *v1alpha1.MysqlFailoverGroup {
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 				},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
 			TLS: &v1alpha1.TLSSpec{
 				SecretName: "mysql-tls",
 			},
@@ -168,7 +169,10 @@ func TestKeyringDefaultsAppliedByAPIServer(t *testing.T) {
 	}
 	// The Go-side helper must agree with what admission produced,
 	// otherwise the operator would render one path and validate another.
-	if eff := got.Spec.EffectiveKeyring(); eff != *kr {
+	if kr.EscrowTimeout == nil || kr.EscrowTimeout.Duration != v1alpha1.DefaultKeyringEscrowTimeout {
+		t.Errorf("escrowTimeout = %v, want the CRD default %v", kr.EscrowTimeout, v1alpha1.DefaultKeyringEscrowTimeout)
+	}
+	if eff := got.Spec.EffectiveKeyring(); !equality.Semantic.DeepEqual(eff, *kr) {
 		t.Errorf("EffectiveKeyring() = %+v, admission produced %+v", eff, *kr)
 	}
 }

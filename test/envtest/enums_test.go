@@ -111,7 +111,7 @@ func TestEnvtest_SpecEnumsRefuseReleasedSpellings(t *testing.T) {
 		v := &v1alpha1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: "mode-ok-" + string(rune('a'+i)), Namespace: ns},
 			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
-				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: mode, Timestamp: "2026-04-15T09:30:00Z"}},
+				PointInTime: e8VerificationPointInTime(mode)},
 		}
 		if err := k8sClient.Create(ctx, v); err != nil {
 			t.Errorf("pointInTime.mode=%s: %v", mode, err)

@@ -507,7 +507,7 @@ In-place PITR cannot work against a live primary. The replay keeps the archived 
 
 ### Symptoms
 - A manifest with `restoreInPlace.pointInTime` restores to the backup: the field was pruned, so the restore is a plain in-place restore.
-- Or, after an older operator ran in-place PITR: rows written between the backup and `stopDatetime` are missing, although the restore reported success.
+- Or, after an older operator ran in-place PITR: rows written between the backup and `stopTime` are missing, although the restore reported success.
 
 ### Diagnostic steps
 1. For a past run, compare the expected post-backup rows with what the primary holds. An older operator's `status.restoreInPlace.pitrReplayedBinlogCount > 0` does not mean anything was applied (the field is gone in v1.7.0).

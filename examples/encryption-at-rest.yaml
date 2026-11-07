@@ -89,11 +89,11 @@ spec:
       pluginDir: /usr/lib64/mysql/plugin
 
       retainVersions: 5
-      escrowTimeoutSeconds: 600
+      escrowTimeout: 10m
 
   dns:
     hostname: orders.az.example.com
-    ttl: 60
+    ttlSeconds: 60
 
   sites:
     - name: iad

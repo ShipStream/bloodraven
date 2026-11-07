@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 						Verification: &v1alpha1.VerificationSpec{
 							Enabled:                 true,
 							KeepOnFailure:           &truePtr,
-							TTLSecondsAfterFinished: 600,
+							TTLSecondsAfterFinished: new(int32(600)),
 							PointInTime: &v1alpha1.PointInTimeVerificationSpec{
 								Mode: v1alpha1.PointInTimeModeLatest,
 							},
@@ -45,8 +46,8 @@ func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 	if cr.Spec.KeepOnFailure == nil || !*cr.Spec.KeepOnFailure {
 		t.Errorf("KeepOnFailure not inherited from VerificationSpec")
 	}
-	if cr.Spec.TTLSecondsAfterFinished != 600 {
-		t.Errorf("TTLSecondsAfterFinished = %d, want 600", cr.Spec.TTLSecondsAfterFinished)
+	if cr.Spec.TTLSecondsAfterFinished == nil || *cr.Spec.TTLSecondsAfterFinished != 600 {
+		t.Errorf("TTLSecondsAfterFinished = %v, want 600", cr.Spec.TTLSecondsAfterFinished)
 	}
 	if cr.Spec.PointInTime == nil || cr.Spec.PointInTime.Mode != v1alpha1.PointInTimeModeLatest {
 		t.Errorf("PointInTime not deep-copied from VerificationSpec; got %+v", cr.Spec.PointInTime)
@@ -92,5 +93,34 @@ func TestBuildVerificationCR_HandlesMissingVerificationSpec(t *testing.T) {
 	}
 	if cr.Spec.PointInTime != nil {
 		t.Errorf("PointInTime should default to nil; got %+v", cr.Spec.PointInTime)
+	}
+}
+
+// TestBuildVerificationCR_KeepsTTLPresence (F-11): the plugin copies the
+// profile's ttlSecondsAfterFinished pointer, so an omitted TTL stays omitted
+// and an explicit 0 stays 0 on the created CR and on the wire.
+func TestBuildVerificationCR_KeepsTTLPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ttl  *int32
+	}{{name: "omitted"}, {name: "zero", ttl: new(int32(0))}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := &v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Backup: &v1alpha1.BackupSpec{
+				Profiles: []v1alpha1.BackupProfile{{Name: "nightly", Verification: &v1alpha1.VerificationSpec{Enabled: true, TTLSecondsAfterFinished: tc.ttl}}},
+			}}}
+			cr := buildVerificationCR(fg, "default", "orders", "nightly", "", "manual")
+			got := cr.Spec.TTLSecondsAfterFinished
+			if (got == nil) != (tc.ttl == nil) || (got != nil && (*got != *tc.ttl || got == tc.ttl)) {
+				t.Fatalf("ttlSecondsAfterFinished = %v, want a copy of %v", got, tc.ttl)
+			}
+			b, err := json.Marshal(cr.Spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]bool{"omitted": false, "zero": true}[tc.name]
+			if has := strings.Contains(string(b), `"ttlSecondsAfterFinished":0`); has != want {
+				t.Fatalf("serialized spec %s: explicit 0 present = %v, want %v", b, has, want)
+			}
+		})
 	}
 }

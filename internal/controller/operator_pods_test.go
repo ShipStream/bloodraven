@@ -118,7 +118,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	}
 
 	src := v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: seed.Name}}
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
+	pit := &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, PointInTime: pit}
 	// In-place restores refuse pointInTime, so that variant has no PITR init container.
 	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "c1", Source: src}

@@ -88,7 +88,8 @@ You do not have to write any of this, but you do have to call it:
 
 - `site_role(site_spec)` applies the CRD default — `spec.sites[].role` is optional and defaults to
   `PrimaryCandidate`.
-- `effective_max_lag(spec)` is `spec.replication.maxLagSeconds`, defaulting to 300.
+- `effective_max_lag(spec)` is `spec.replication.maxLagSeconds`, defaulting to 300 when absent. An
+  explicit `0` is kept, and means the replica must be fully caught up.
 - `effective_readonly_max_lag(spec)` is `spec.replication.readOnlyMaxLagSeconds`. It has **no
   default of its own**: absent inherits `maxLagSeconds`, but an explicit `0` is meaningful and means
   the reader must report zero lag. `.get("readOnlyMaxLagSeconds") or ...` gets that wrong.
@@ -199,7 +200,7 @@ worth reading rather than pasting.
 
 **`// 300` on `maxLagSeconds`, and `// $maxlag` on `readOnlyMaxLagSeconds`.** The first is the CRD
 default. The second is *inheritance*, not a default — and note that `//` in `jq` treats `false` and
-`null` as absent but **not** `0`, which is exactly the behaviour this field needs: an explicit `0` is
+`null` as absent but **not** `0`, which is exactly the behaviour both fields need: an explicit `0` is
 meaningful and must survive.
 
 **`if $s.secondsBehindSource == null then "unknown"`.** Never `// 0`. Absent and zero are different

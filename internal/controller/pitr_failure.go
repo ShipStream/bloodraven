@@ -290,8 +290,8 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		if err != nil {
 			return nil, fmt.Errorf("PITR verdict stop: %w", err)
 		}
-		mt := metav1.NewMicroTime(stop.Time)
-		res.StopTime = &mt
+		st := metav1.NewTime(stop.Time)
+		res.StopTime = &st
 	case "latest":
 		res.Mode = v1alpha1.PointInTimeModeLatest
 		if fields["stop"] != "" {

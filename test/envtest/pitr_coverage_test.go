@@ -40,7 +40,7 @@ func TestPITRInitFromBackupRequiresArchiveProfile(t *testing.T) {
 	} {
 		ns := fmt.Sprintf("pitr-archive-profile-%d", i)
 		ensureNamespace(t, ns)
-		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ArchiveProfileName: tc.profile}))
+		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)), ArchiveProfileName: tc.profile}))
 		if tc.want == "" {
 			if err != nil {
 				t.Fatalf("%q refused: %v", tc.profile, err)
@@ -63,7 +63,7 @@ func TestPITRInitFromBackupRequiresArchiveProfile(t *testing.T) {
 func TestPITRRemovedFieldsArePruned(t *testing.T) {
 	ns := "pitr-removed-fields"
 	ensureNamespace(t, ns)
-	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ArchiveProfileName: "nightly-s3"})
+	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)), ArchiveProfileName: "nightly-s3"})
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(fg)
 	if err != nil {
 		t.Fatal(err)
@@ -192,49 +192,36 @@ func TestPITRStatusArchiveObservation(t *testing.T) {
 	}
 }
 
-// §6.1 / A-39: stopDatetime and the verification timestamp accept a whole
-// second only (RFC 3339 or the MySQL form, bounded offset, no fraction);
-// excludeGtids is bounded at 131072 bytes (A-23), and verifications accept
-// it.
-func TestPITRTargetPatternAndExclusions(t *testing.T) {
+// A-23: excludeGtids is bounded at 131072 bytes on both carriers, and
+// verifications accept it. The stopTime pattern is covered by
+// TestEnvtest_StopTimePattern.
+func TestPITRExcludeGtidsBound(t *testing.T) {
+	stop := metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	for i, tc := range []struct {
-		stop    string
 		exclude string
 		ok      bool
 	}{
-		{stop: "2030-01-01T00:00:00Z", ok: true},
-		{stop: "2030-01-01 00:00:00", ok: true},
-		{stop: "2030-01-01T02:00:00+02:00", ok: true},
-		{stop: "2030-01-01T02:00:00-23:59", ok: true},
-		{stop: "2030-01-01T00:00:00.123456Z"},
-		{stop: "2030-01-01 00:00:00.5"},
-		{stop: "2030-01-01T02:00:00.000001+02:00"},
-		{stop: "2030-01-01T00:00:00.1234567Z"},
-		{stop: "2030-01-01T00:00:00,5Z"},
-		{stop: "2030-01-01T00:00:00+25:00"},
-		{stop: "2030-01-01T00:00:00+05:99"},
-		{stop: "yesterday"},
-		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 131072), ok: true},
-		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 131073)},
+		{exclude: strings.Repeat("a", 131072), ok: true},
+		{exclude: strings.Repeat("a", 131073)},
 	} {
-		ns := fmt.Sprintf("pitr-target-pattern-%d", i)
+		ns := fmt.Sprintf("pitr-exclude-bound-%d", i)
 		ensureNamespace(t, ns)
-		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: tc.stop, ArchiveProfileName: "nightly-s3", ExcludeGtids: tc.exclude}))
+		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: stop, ArchiveProfileName: "nightly-s3", ExcludeGtids: tc.exclude}))
 		if (err == nil) != tc.ok {
-			t.Fatalf("restore stop %q exclude %d chars: %v", tc.stop, len(tc.exclude), err)
+			t.Fatalf("restore exclude %d chars: %v", len(tc.exclude), err)
 		}
 		v := &v1alpha1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: ns},
 			Spec: v1alpha1.MysqlBackupVerificationSpec{
 				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
-				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, Timestamp: tc.stop, ExcludeGtids: tc.exclude},
+				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop, ExcludeGtids: tc.exclude},
 			},
 		}
 		err = k8sClient.Create(ctx, v)
 		if (err == nil) != tc.ok {
-			t.Fatalf("verification timestamp %q exclude %d chars: %v", tc.stop, len(tc.exclude), err)
+			t.Fatalf("verification exclude %d chars: %v", len(tc.exclude), err)
 		}
-		if tc.ok && tc.exclude != "" {
+		if tc.ok {
 			got := &v1alpha1.MysqlBackupVerification{}
 			if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "verify"}, got); err != nil {
 				t.Fatal(err)
@@ -242,24 +229,6 @@ func TestPITRTargetPatternAndExclusions(t *testing.T) {
 			if got.Spec.PointInTime.ExcludeGtids != tc.exclude {
 				t.Fatal("verification excludeGtids did not round-trip")
 			}
-		}
-	}
-	// The anchored pattern rejects trailing whitespace.
-	ensureNamespace(t, "pitr-target-pattern-long")
-	if err := k8sClient.Create(ctx, pitrRestoreFG("pitr-target-pattern-long", &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00+02:00" + strings.Repeat(" ", 20), ArchiveProfileName: "nightly-s3"})); err == nil {
-		t.Fatal("stopDatetime with trailing whitespace accepted")
-	}
-	// No string the pattern admits is longer than 25 characters, so the
-	// maxLength of 40 (which bounds the pattern's CEL/regex cost) is never
-	// the deciding rejection; assert the installed schema carries it
-	// (F233).
-	for _, path := range [][]string{
-		{"mysqlfailovergroups.shipstream.io", "spec", "initFromBackup", "pointInTime", "stopDatetime"},
-		{"mysqlbackupverifications.shipstream.io", "spec", "pointInTime", "timestamp"},
-	} {
-		prop := installedSchemaProperty(t, path[0], path[1:]...)
-		if prop.MaxLength == nil || *prop.MaxLength != 40 {
-			t.Fatalf("%s %v: maxLength %v, want 40", path[0], path[1:], prop.MaxLength)
 		}
 	}
 }
@@ -324,7 +293,7 @@ func TestS3PrefixRefusesAmbiguousSegments(t *testing.T) {
 }
 
 func pointInTimeFixture() *v1alpha1.PointInTimeResult {
-	stop := metav1.NewMicroTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	stop := metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	newest := metav1.NewMicroTime(time.Date(2029, 12, 31, 23, 59, 59, 654321000, time.UTC))
 	return &v1alpha1.PointInTimeResult{
 		Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop, Outcome: v1alpha1.PointInTimeTargetCovered,
@@ -358,7 +327,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 	ns := "pitr-result-shape"
 	ensureNamespace(t, ns)
 
-	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ArchiveProfileName: "nightly-s3"})
+	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)), ArchiveProfileName: "nightly-s3"})
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}

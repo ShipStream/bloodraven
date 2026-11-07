@@ -1,7 +1,18 @@
 package v1alpha1
 
 import (
+	"time"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// PlannedFailoverMaxLagWaitMin and PlannedFailoverMaxLagWaitMax bound
+// spec.plannedFailover.maxLagWait (its CEL rule) and the planned-failover
+// annotation's maxLagWait= override, which the operator checks against the
+// same pair.
+const (
+	PlannedFailoverMaxLagWaitMin = time.Second
+	PlannedFailoverMaxLagWaitMax = time.Hour
 )
 
 // PlannedFailoverSpec configures admin-triggered graceful switchover.
@@ -10,9 +21,12 @@ import (
 type PlannedFailoverSpec struct {
 	// MaxLagWait bounds the time spent waiting for the target's
 	// GTID_EXECUTED to cover the fenced source's GTID_EXECUTED before
-	// the state machine rolls back to the source. Must be expressible
-	// as a Go time.Duration. Default: 5m.
-	// +kubebuilder:default="5m"
+	// the state machine rolls back to the source. The source is fenced
+	// while the run waits, so this also bounds the write outage.
+	// Default: 5m. Bounds: 1s to 1h, the same bounds as the
+	// planned-failover annotation's maxLagWait= override.
+	// +kubebuilder:default="5m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="plannedFailover.maxLagWait must be between 1s and 1h"
 	// +optional
 	MaxLagWait *metav1.Duration `json:"maxLagWait,omitempty"`
 
@@ -21,8 +35,9 @@ type PlannedFailoverSpec struct {
 	// During this window the reconciler repeatedly calls
 	// KillAppConnections; if any connections remain after the timeout
 	// the state machine proceeds anyway so a stuck client cannot block
-	// a planned switchover indefinitely. Default: 30s.
+	// a planned switchover indefinitely. Default: 30s. Bounds: 1s to 10m.
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('10m')",message="plannedFailover.drainTimeout must be between 1s and 10m"
 	// +optional
 	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
 

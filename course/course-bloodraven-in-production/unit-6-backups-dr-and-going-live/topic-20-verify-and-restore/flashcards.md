@@ -23,17 +23,17 @@
 
 **Front:** Verification terminal reason: SanityCheckFailed
 
-**Back:** The sanity query returned a scalar below expect.minRows (or errored outright) — the data is wrong.
+**Back:** The sanity query returned a scalar below sanityCheck.minResult (or errored outright) — the data is wrong. status.sanityCheck.outcome reads Failed.
 
 ---
 
 **Front:** Verification terminal reason: SanityCheckTimeout
 
-**Back:** The sanity query exceeded expect.maxDurationSeconds (default 60) — the instance is wedged rather than wrong.
+**Back:** The sanity query ran longer than sanityCheck.timeout (default 60s) — the instance is wedged rather than wrong. status.sanityCheck.outcome reads TimedOut.
 
 ---
 
-**Front:** A verification sanity query runs cleanly but returns zero rows. What scalar does the check compare against minRows?
+**Front:** A verification sanity query runs cleanly but returns zero rows. What scalar does the check compare against minResult?
 
 **Back:** 0. An empty result set is deliberately treated as scalar 0, so a silently-empty restore fails instead of passing.
 

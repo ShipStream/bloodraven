@@ -16,7 +16,7 @@ spec:
     sitePriorities: [iad, pdx]
   dns:
     hostname: playground-db.example.local
-    ttl: 10
+    ttlSeconds: 10
   sites:
     - name: iad
       serverID: 101
@@ -91,7 +91,7 @@ spec:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0
     port: 6379
     adminPort: 9999
-    maxMemoryMb: 256
+    maxMemory: 256Mi
     proactorThreads: 1
     plannedFailover:
       maxSyncWait: 30s

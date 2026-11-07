@@ -58,10 +58,11 @@ def site_role(site_spec):
 
 
 def effective_max_lag(spec):
-    """spec.replication.maxLagSeconds, or the API default."""
+    """spec.replication.maxLagSeconds, or the API default when absent. An
+    explicit 0 is kept: it means the replica must be fully caught up."""
     replication = spec.get("replication") or {}
     value = replication.get("maxLagSeconds")
-    if not value:
+    if value is None:
         return DEFAULT_MAX_LAG_SECONDS
     return int(value)
 

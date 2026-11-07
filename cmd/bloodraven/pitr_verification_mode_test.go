@@ -2,10 +2,12 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/pitrplan"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // F-10: a verification's CamelCase pointInTime.mode reaches pitr-download
@@ -21,7 +23,7 @@ func TestPITRDownloadAcceptsEveryVerificationMode(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			spec := &v1alpha1.PointInTimeVerificationSpec{Mode: mode, ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1"}
 			if mode == v1alpha1.PointInTimeModeTimestamp {
-				spec.Timestamp = "2030-01-01T00:00:25Z"
+				spec.StopTime = &metav1.Time{Time: time.Date(2030, 1, 1, 0, 0, 25, 0, time.UTC)}
 			}
 			env, err := controller.VerificationPITRRequestEnvForTest(spec)
 			if err != nil {

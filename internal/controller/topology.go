@@ -61,8 +61,8 @@ type TopologyConfig struct {
 	PollInterval           int64 // nanoseconds
 	FailureThreshold       int
 	RecoveryThreshold      int
-	FailoverCooldown       int64 // nanoseconds, default 5m
-	ConnectionDrainTimeout int64 // nanoseconds, default 30s
+	FailoverCooldown       int64 // nanoseconds; used as given (CRConfigToTopologyConfig applies the API default)
+	ConnectionDrainTimeout int64 // nanoseconds; CRConfigToTopologyConfig applies the API default, 0 (internal configs only) means 30s
 	MaxLagSeconds          int64
 	ReadOnlyMaxLagSeconds  int64
 
@@ -833,6 +833,10 @@ type StatusResponse struct {
 }
 
 const (
+	// defaultFailoverCooldown and defaultConnectionDrainTimeout are the API
+	// defaults of spec.failoverCooldown and spec.connectionDrainTimeout,
+	// applied to an unset field only; admission rejects a zero.
+	defaultFailoverCooldown       = 5 * time.Minute
 	defaultConnectionDrainTimeout = 30 * time.Second
 	// recoveryRetryDelay is the stabilization window after RecoverOldPrimary.
 	// During this window the operator waits for replication to report healthy
@@ -870,9 +874,6 @@ func NewTopologyManager(cfg TopologyConfig, siteCheckers []mysql.Checker, failov
 // NewTopologyManagerWithClock creates a TopologyManager with an injectable clock for testing.
 func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
 	cooldown := time.Duration(cfg.FailoverCooldown)
-	if cooldown == 0 {
-		cooldown = 5 * time.Minute
-	}
 	if len(siteCheckers) != len(cfg.Sites) {
 		panic(fmt.Sprintf("topology manager: got %d MySQL checkers for %d configured sites", len(siteCheckers), len(cfg.Sites)))
 	}
@@ -2029,7 +2030,7 @@ func (tm *TopologyManager) dnsHostname() string {
 	return ""
 }
 
-// SetDNSRecordSpec pushes a live spec.dns.hostname / spec.dns.ttl into the
+// SetDNSRecordSpec pushes a live spec.dns.hostname / spec.dns.ttlSeconds into the
 // updater. No-op when the updater does not implement DNSSpecController.
 func (tm *TopologyManager) SetDNSRecordSpec(hostname string, ttl int64, generation int64) {
 	if spec, ok := tm.dns.(platform.DNSSpecController); ok {
@@ -5292,6 +5293,8 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 func (tm *TopologyManager) advanceSiteAppConnectionDrain(ctx context.Context, site *siteTracker) bool {
 	timeout := time.Duration(tm.cfg.ConnectionDrainTimeout)
 	if timeout <= 0 {
+		// Only an internally built config leaves it unset; the API path
+		// (CRConfigToTopologyConfig) always supplies the bounded value.
 		timeout = defaultConnectionDrainTimeout
 	}
 

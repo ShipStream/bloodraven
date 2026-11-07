@@ -963,7 +963,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Setup**: an encrypted RustFS archive under `e2e/37-pitr-planned-failback-no-reclone/<run-stamp>` (`maxBinlogSize=64M`, so nothing rotates by size and the scenario decides what is sealed). The playground counter app writes only on request, so the scenario drives its own load: a background writer commits about 20 rows a second into `chaos_s37_pitr.load` on the era's primary across each era's marker, fence and witness marker. A window starts only after the writer's first commit (its first insert runs at once), and the writer is stopped, with its last insert committed, before every flush, failover, restore and backup, so the archive boundaries the scenario asserts stay exact; each window fails if the writer committed nothing.
 
-**Fences**: each expected set comes from a fence on the active primary: `FLUSH TABLES WITH READ LOCK`, read `@@gtid_executed` and the server clock under the lock, hold the lock until the clock has passed the next whole second (the target T; `stopDatetime` admits no fraction), optionally `FLUSH BINARY LOGS` under the lock, then `UNLOCK TABLES`. Every transaction committed before the lock is in the set and older than T; every later one is newer. So the expected history is exact while the writer commits concurrently. A flushing fence's set is exactly the sealed file's exec set (the latest-mode expectation). A flushing fence (and every plain flush) reads the file being sealed (`SHOW BINARY LOG STATUS`) on the same connection just before `FLUSH BINARY LOGS`, and waits until the site's manifest in RustFS holds a row for that file that was not there before the flush; the archiver uploading some earlier file does not count.
+**Fences**: each expected set comes from a fence on the active primary: `FLUSH TABLES WITH READ LOCK`, read `@@gtid_executed` and the server clock under the lock, hold the lock until the clock has passed the next whole second (the target T; `stopTime` admits no fraction), optionally `FLUSH BINARY LOGS` under the lock, then `UNLOCK TABLES`. Every transaction committed before the lock is in the set and older than T; every later one is newer. So the expected history is exact while the writer commits concurrently. A flushing fence's set is exactly the sealed file's exec set (the latest-mode expectation). A flushing fence (and every plain flush) reads the file being sealed (`SHOW BINARY LOG STATUS`) on the same connection just before `FLUSH BINARY LOGS`, and waits until the site's manifest in RustFS holds a row for that file that was not there before the flush; the archiver uploading some earlier file does not count.
 
 **Backups**: after a backup Succeeds, the scenario waits until the server clock is a second past both the clock it read once the backup reported Succeeded (which bounds the stamp's `serverClock.end`) and the dump's `@.done.json` end rounded up to the second, so no later target refuses `PITRBackupAfterTarget` (D-52). Each timestamp verification asserts its T is past that bound.
 
@@ -1284,7 +1284,7 @@ watch -n2 "kubectl -n bloodraven-playground get mysqlfailovergroup playground \
   without also cutting the sidecar's lease traffic to the operator —
   a chaos primitive that does not exist yet. The state-machine
   behaviour (stay `Unsealed`, surface the sidecar's own reason in
-  `.status`, go `Failed` after `escrowTimeoutSeconds`, never seal) is
+  `.status`, go `Failed` after `escrowTimeout`, never seal) is
   covered by unit tests.
 
 ---

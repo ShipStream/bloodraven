@@ -13,26 +13,26 @@ quote a version, an issue number or a documentation defect.
 
 | Setting | Shipped default | Playground | What it actually controls |
 |---|---|---|---|
-| `pollInterval` | `2s` | same | The poll tick. One `SELECT @@read_only` per site, in parallel, each under a 5 s ceiling. |
+| `pollInterval` | `2s` | same | The poll tick. One `SELECT @@read_only` per site, in parallel, each under a 5 s ceiling. CEL: 1 s–5 m. |
 | `failureThreshold` | `3` | same | Consecutive failed polls before `Unreachable`. **Detection = `pollInterval` × `failureThreshold` = 6 s.** |
 | `recoveryThreshold` | `2` | same | Consecutive writable polls before `Writable`. **Not a term in the detection sum.** |
 | — | per site | same | Probe backoff: past `failureThreshold` a failing site's probe interval doubles per extra failure, exponent capped at 4, hard cap 30 s. Other sites keep `pollInterval`, so a second fault still takes 6 s; a long-down site can take up to 30 s to be noticed coming back. |
-| `failoverCooldown` | `5m` | `30s` | Gates **automatic promotion only**, at one call site, immediately before the promotion call. A blocked promotion is retried at expiry (`retryAt`). |
-| `connectionDrainTimeout` | `30s` | same | Bounds the post-promotion retry window for evicting sessions from a fenced former primary — only while it is reachable. |
-| `replication.maxLagSeconds` | `300` | `30` | The `ReplicationLagging` Degraded reason. **Never a promotion gate.** Skipped entirely for `role: ReadOnly` sites. |
+| `failoverCooldown` | `5m` | `30s` | Gates **automatic promotion only**, at one call site, immediately before the promotion call. A blocked promotion is retried at expiry (`retryAt`). CEL: 30 s–24 h; it cannot be switched off, and `0` is refused. |
+| `connectionDrainTimeout` | `30s` | same | Bounds the post-promotion retry window for evicting sessions from a fenced former primary — only while it is reachable. CEL: 1 s–10 m. |
+| `replication.maxLagSeconds` | `300` | `30` | The `ReplicationLagging` Degraded reason. **Never a promotion gate.** Skipped entirely for `role: ReadOnly` sites. An explicit `0` means fully caught up; it is not read as unset. |
 | `replication.readOnlyMaxLagSeconds` | *(nil — inherits `maxLagSeconds`)* | `10` | Reader-endpoint membership only. An explicit `0` means zero reported lag, and is not the same as unset. |
-| `dns.ttl` | `60` | `10` | `recordTTL` on the `DNSEndpoint`. The floor on how long a stale answer survives. |
-| `sidecar.leaseTimeout` | `20s` | same | Rule #2 self-fence window. CEL: ≥ 3 s, and ≥ 3 × `peerCheckInterval`. |
-| `sidecar.peerCheckInterval` | `5s` | same | Sidecar tick. CEL: ≥ 1 s. 20 / 5 = **4 ticks** of silence before a lease fence. |
+| `dns.ttlSeconds` | `60` | `10` | `recordTTL` on the `DNSEndpoint`. The floor on how long a stale answer survives. |
+| `sidecar.leaseTimeout` | `20s` | same | Rule #2 self-fence window. CEL: 3 s–10 m, and ≥ 3 × `peerCheckInterval`. |
+| `sidecar.peerCheckInterval` | `5s` | same | Sidecar tick. CEL: 1 s–1 m. 20 / 5 = **4 ticks** of silence before a lease fence. |
 | relay-log drain | `30s` | same | Step 3 of the promotion. Done when `Executed_Gtid_Set` contains the `Retrieved_Gtid_Set` read at its first poll; only an SQL-thread error ends it early. Non-fatal on timeout. |
 | source convergence | `20s` | same | A separate poll stage, not a failover step. |
-| `plannedFailover.maxLagWait` | `5m` | same | The GTID-superset gate. Expiry rolls back (`RolledBack{LagTimeout}`): nothing was written to the target yet. |
-| `plannedFailover.drainTimeout` | `30s` | same | Connection drain before the write endpoint moves. Exhaustion proceeds anyway. |
+| `plannedFailover.maxLagWait` | `5m` | same | The GTID-superset gate. Expiry rolls back (`RolledBack{LagTimeout}`): nothing was written to the target yet. CEL: 1 s–1 h, and the annotation's `maxLagWait=` override takes the same range. |
+| `plannedFailover.drainTimeout` | `30s` | same | Connection drain before the write endpoint moves. Exhaustion proceeds anyway. CEL: 1 s–10 m. |
 | `plannedFailover.onCooldown` | `Reject` | same | `Defer` parks the request instead of refusing it. CamelCase only: the CRD rejects `reject`/`defer`. |
-| `dragonfly.plannedFailover.maxSyncWait` | `30s` | same | Also the `REPLTAKEOVER` timeout argument; the client waits 12 s beyond it for the reply. |
+| `dragonfly.plannedFailover.maxSyncWait` | `30s` | same | Also the `REPLTAKEOVER` timeout argument; the client waits 12 s beyond it for the reply. CEL: 1 s–10 m. |
 | Dragonfly emergency steps | 1 s probe, 2 s takeover, ≤ 14 s fallback, 5 s other steps | same | Hard-coded, per step. MySQL only queues the promotion, so failover is never delayed by cache. |
-| `backup.maxLagSecondsForSource` | `300` | — | Picks the backup source. A different setting from `maxLagSeconds`, with the same default. |
-| `backup.pitr.archivePollInterval` | `60s` | — | Archiver ticker beside inotify. |
+| `backup.maxLagSecondsForSource` | `300` | — | Picks the backup source. A different setting from `maxLagSeconds`, with the same default. `0` accepts only a fully caught-up replica. |
+| `backup.pitr.archivePollInterval` | `60s` | — | Archiver ticker beside inotify. CEL: 5 s–1 h. |
 | `backup.pitr.maxBinlogSize` | `100M` | — | Written *before* `spec.mysqlConf`, so your override wins. |
 | `backup.retention` | `7` | — | Backups kept per profile. |
 | Measured failover, clean | **12.0 s** | — | Nine-plus recorded runs, 12.004–12.02 s, one outlier at 13.008 s. |

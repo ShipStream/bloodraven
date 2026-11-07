@@ -7,7 +7,9 @@ stops that flap is memory: `spec.failoverCooldown`. Almost everyone overestimate
 ## One guard, and only one
 
 `spec.failoverCooldown` defaults to `5m`, both in the CRD and in the operator's own fallback when the
-pointer is nil. The playground overrides it to `30s` so you can experiment without waiting.
+pointer is nil. The playground overrides it to `30s` so you can experiment without waiting. It cannot
+be switched off: admission accepts 30s to 24h and refuses `0` outright, rather than reading it as the
+default.
 
 It is enforced in exactly one place: immediately before the promotion call, after the table has
 already chosen a candidate.

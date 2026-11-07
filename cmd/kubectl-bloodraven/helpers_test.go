@@ -226,7 +226,7 @@ func TestPrintGroupStatus(t *testing.T) {
 				{Name: "iad", ServerID: 101, Zone: "us-east-1a"},
 				{Name: "pdx", ServerID: 102, Zone: "us-west-2a"},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "orders.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "orders.example.com", TTLSeconds: 60},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",

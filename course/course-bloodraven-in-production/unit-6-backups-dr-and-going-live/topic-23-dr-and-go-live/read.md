@@ -96,7 +96,7 @@ spec:
       lbIP: 10.1.20.12
   dns:
     hostname: playground-east.example.com
-    ttl: 60                                 # shipped default, not the playground's 10
+    ttlSeconds: 60                          # shipped default, not the playground's 10
   initFromBackup:                           # the same one-shot restore field from Unit 6
     source:
       s3:
@@ -108,7 +108,7 @@ spec:
       passphraseSecretKeyRef:
         name: playground-backup-passphrase      # mirrored into the DR namespace in advance
     pointInTime:
-      stopDatetime: "2026-05-20T14:32:00Z"  # omit to recover to the dump's GTID
+      stopTime: "2026-05-20T14:32:00Z"      # RFC 3339, explicit zone, whole seconds; drop pointInTime to stop at the dump
 ```
 
 `initFromBackup` is one-shot and gates bootstrap: nothing else proceeds until
@@ -130,7 +130,7 @@ runs exactly as it did on day one of this course.
 ```
 
 Then DNS, by the same `DNSEndpoint` path from Unit 4: one object named `bloodraven-playground`,
-server-side-applied every poll, one `A` record at `spec.dns.ttl`. The catch is the same catch —
+server-side-applied every poll, one `A` record at `spec.dns.ttlSeconds`. The catch is the same catch —
 **the operator cannot accelerate DNS propagation**, and here it is worse, because the operator only
 owns the per-cluster record. The global application-facing name is yours to flip, by weight,
 CNAME or GSLB. A perfect restore behind a stale CNAME is still an outage.
@@ -158,7 +158,7 @@ Now commit to a verdict on each of these. Not "noted" — block or accept-with-a
 | No backup ever verified | An unverified backup is an assumption. Schrödinger backups. | **Block.** |
 | The application-side write gap | No shipped alert covers it. Unowned, it is invisible until an incident. | **Block** until somebody owns it by name. |
 | `replication.maxLagSeconds` (whatever you set) | Drives only the `ReplicationLagging` condition. It is **not** a promotion gate — a replica beyond the threshold is still promoted. `playground` sets `30`; a group that omits the field gets `300`. Either way it gates nothing. | Accept, owner must know this. |
-| Runbook timings from the playground | The playground overrides the shipped defaults: `failoverCooldown: 30s` (vs 5m), `maxLagSeconds: 30` (vs 300), `dns.ttl: 10` (vs 60). No timing you measured there transfers. | Accept, owner re-measures on real config. |
+| Runbook timings from the playground | The playground overrides the shipped defaults: `failoverCooldown: 30s` (vs 5m), `maxLagSeconds: 30` (vs 300), `dns.ttlSeconds: 10` (vs 60). No timing you measured there transfers. | Accept, owner re-measures on real config. |
 | A `role: ReadOnly` reader in the group | It can neither be promoted nor source a backup. It is not a spare. | Accept, owner must know this. |
 
 Disagree with any of my verdicts if you can say *why*. That is the point of the exercise.

@@ -113,7 +113,7 @@ course; the comments say which.</p>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">    backupSecretName</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">ledger-backup</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">  dns</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">    hostname</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">ledger-db.example.com</span></span>
-<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">    ttl</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#005CC5;--shiki-dark:#6CB6FF">60</span><span style="color:#6A737D;--shiki-dark:#768390">                               # the shipped default; the playground's 10 is not</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">    ttlSeconds</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#005CC5;--shiki-dark:#6CB6FF">60</span><span style="color:#6A737D;--shiki-dark:#768390">                        # the shipped default; the playground's 10 is not</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">  splitBrainPolicy</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">    sitePriorities</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: [</span><span style="color:#032F62;--shiki-dark:#96D0FF">iad</span><span style="color:#24292E;--shiki-dark:#ADBAC7">, </span><span style="color:#032F62;--shiki-dark:#96D0FF">pdx</span><span style="color:#24292E;--shiki-dark:#ADBAC7">]            </span><span style="color:#6A737D;--shiki-dark:#768390"># Unit 5: a standing decision about whose writes to discard</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">  replication</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:</span></span>
@@ -171,7 +171,11 @@ it is the MySQL <code>server_id</code>, so it does not change when sites are reo
 <li>at least two sites with role <code>PrimaryCandidate</code></li>
 <li><code>splitBrainPolicy.sitePriorities</code> entries must name <code>PrimaryCandidate</code> sites</li>
 <li><code>taintNodeSelector</code> and <code>lbIP</code> are required unless the role is <code>ReadOnly</code></li>
-<li><code>sidecar.peerCheckInterval</code> ≥ 1s, <code>sidecar.leaseTimeout</code> ≥ 3s, and <code>leaseTimeout</code> ≥ 3 × <code>peerCheckInterval</code></li>
+<li><code>sidecar.peerCheckInterval</code> between 1s and 1m, <code>sidecar.leaseTimeout</code> between 3s and 10m, and
+<code>leaseTimeout</code> ≥ 3 × <code>peerCheckInterval</code></li>
+<li>every timer is bounded, and a zero is refused rather than replaced by the default:
+<code>pollInterval</code> 1s–5m, <code>failoverCooldown</code> 30s–24h, <code>connectionDrainTimeout</code> 1s–10m, <code>cloneTimeout</code>
+1m–24h, <code>plannedFailover.maxLagWait</code> 1s–1h, <code>plannedFailover.drainTimeout</code> 1s–10m</li>
 <li><code>encryptionAtRest.enabled</code> requires <code>spec.tls</code></li>
 <li><code>serviceTemplate.externalTrafficPolicy</code> requires an effective type of <code>NodePort</code> or <code>LoadBalancer</code></li>
 <li><code>spec.sites</code> has between 2 and 16 entries</li>

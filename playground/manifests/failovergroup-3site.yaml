@@ -21,7 +21,7 @@ spec:
   failoverCooldown: 30s
   dns:
     hostname: playground-db.example.local
-    ttl: 10
+    ttlSeconds: 10
   splitBrainPolicy:
     sitePriorities: [iad, pdx]
   sites:

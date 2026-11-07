@@ -22,7 +22,7 @@
     },
     {
       "front": "The three CEL invariants on spec.sidecar",
-      "back": "peerCheckInterval >= 1s, leaseTimeout >= 3s, and leaseTimeout >= 3 x peerCheckInterval.",
+      "back": "peerCheckInterval between 1s and 1m, leaseTimeout between 3s and 10m, and leaseTimeout >= 3 x peerCheckInterval.",
       "orderIndex": 4
     },
     {

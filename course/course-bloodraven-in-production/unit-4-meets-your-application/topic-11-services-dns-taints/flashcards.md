@@ -57,7 +57,7 @@
 
 ---
 
-**Front:** Default value of `spec.dns.ttl`?
+**Front:** Default value of `spec.dns.ttlSeconds`?
 
 **Back:** 60 seconds. The playground overrides it to 10.
 

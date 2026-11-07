@@ -60,9 +60,9 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 	consistent := true
 	spec := v1alpha1.BackupSpec{
 		Image:                  v1alpha1.DefaultBackupImage,
-		MaxLagSecondsForSource: 60,
+		MaxLagSecondsForSource: new(int64(60)),
 		ActiveDeadlineSeconds:  1800,
-		BackoffLimit:           0,
+		BackoffLimit:           new(int32(0)),
 		Profiles: []v1alpha1.BackupProfile{{
 			Name: backupE2EProfile,
 			RetentionPolicy: &v1alpha1.RetentionPolicy{
@@ -309,7 +309,7 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 	return nil
 }
 
-func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, backupName, scenarioID string, pit *v1alpha1.PointInTimeVerificationSpec, query string, minRows int64) error {
+func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, backupName, scenarioID string, pit *v1alpha1.PointInTimeVerificationSpec, query string, minResult int64) error {
 	keep := true
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{
@@ -328,14 +328,12 @@ func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, b
 			ProfileName:             backupE2EProfile,
 			BackupRef:               &v1alpha1.LocalMysqlBackupRef{Name: backupName},
 			KeepOnFailure:           &keep,
-			TTLSecondsAfterFinished: 0,
+			TTLSecondsAfterFinished: new(int32(0)),
 			PointInTime:             pit,
 			SanityCheck: &v1alpha1.SanityCheckSpec{
-				Query: query,
-				Expect: &v1alpha1.SanityCheckExpectation{
-					MinRows:            minRows,
-					MaxDurationSeconds: 30,
-				},
+				Query:     query,
+				MinResult: new(minResult),
+				Timeout:   &metav1.Duration{Duration: 30 * time.Second},
 			},
 		},
 	}

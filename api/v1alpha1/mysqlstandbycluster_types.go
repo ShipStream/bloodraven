@@ -139,10 +139,11 @@ type StandbyS3Source struct {
 type StandbyFreshnessSpec struct {
 	// DiscoveryInterval controls how often the controller re-scans
 	// the source bucket to refresh status.discovered.
-	// Default: 5m. Minimum: 30s (shorter intervals produce no scheduled
-	// poll; the reconciler also enforces this floor as defense-in-depth).
-	// +kubebuilder:default="5m"
-	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s')",message="discoveryInterval must be at least 30s"
+	// Default: 5m. Bounds: 30s to 24h (shorter intervals produce no
+	// scheduled poll; the reconciler also enforces the floor as
+	// defense-in-depth).
+	// +kubebuilder:default="5m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('24h')",message="discoveryInterval must be between 30s and 24h"
 	// +optional
 	DiscoveryInterval *metav1.Duration `json:"discoveryInterval,omitempty"`
 }

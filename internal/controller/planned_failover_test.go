@@ -72,7 +72,14 @@ func TestParsePlannedFailoverAnnotation(t *testing.T) {
 		{"pdx:foo=bar", "", 0, "unknown key"},
 		{"pdx:maxLagWait=", "", 0, "the value must match"},
 		{"pdx:maxLagWait=soon", "", 0, "not a valid duration"},
-		{"pdx:maxLagWait=0s", "", 0, "must be positive"},
+		// WE-Q3: the override takes spec.plannedFailover.maxLagWait's 1s..1h.
+		{"pdx:maxLagWait=0s", "", 0, "maxLagWait must be between 1s and 1h (got 0s)"},
+		{"pdx:maxLagWait=-5s", "", 0, "maxLagWait must be between 1s and 1h"},
+		{"pdx:maxLagWait=999ms", "", 0, "maxLagWait must be between 1s and 1h"},
+		{"pdx:maxLagWait=1s", "pdx", time.Second, ""},
+		{"pdx:maxLagWait=1h", "pdx", time.Hour, ""},
+		{"pdx:maxLagWait=1h0m1s", "", 0, "maxLagWait must be between 1s and 1h"},
+		{"pdx:maxLagWait=24h", "", 0, "maxLagWait must be between 1s and 1h"},
 		{"pdx:abcdef", "", 0, "must be key=value"},
 	}
 	for _, tc := range cases {

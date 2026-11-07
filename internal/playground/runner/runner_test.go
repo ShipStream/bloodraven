@@ -255,7 +255,7 @@ func testReconvergeMFG(dfPhase v1alpha1.DragonflyPhase) *v1alpha1.MysqlFailoverG
 						Reachable:        true,
 						Ready:            true,
 						LinkStatus:       "up",
-						LastIOSecondsAgo: 0,
+						LastIOSecondsAgo: new(int64(0)),
 					},
 				},
 			},
