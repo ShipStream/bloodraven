@@ -1549,13 +1549,13 @@ func (m *DragonflyManager) stampPromotionWithin(ctx context.Context, target stri
 	m.stampPromotion(stampCtx, target, success)
 }
 
-// applyEmergencyPromotionLabels stamps role=master+traffic=enabled on
+// applyEmergencyPromotionLabels stamps role=master+traffic=true on
 // the target site and demotes the old source to role=replica with its
 // traffic label restored.
 //
 // Demote MUST succeed before we restore the source's traffic label.
 // Otherwise the source pod stays labelled dragonfly-role=master with
-// traffic=enabled and gets selected by the active Service alongside
+// traffic=true and gets selected by the active Service alongside
 // the newly-promoted target — split-brain at the routing layer.
 //
 // Other patches are logged-and-dropped because the reconciler's
@@ -1566,7 +1566,7 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 		m.logger.Info("emergency: stamp target role=master", "site", target, "error", err)
 	}
 	if err := m.setTrafficLabel(ctx, fg, target, true); err != nil {
-		m.logger.Info("emergency: stamp target traffic=enabled", "site", target, "error", err)
+		m.logger.Info("emergency: stamp target traffic=true", "site", target, "error", err)
 	}
 	if oldSource == "" {
 		return true
@@ -1583,7 +1583,7 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 	if err := m.setTrafficLabel(ctx, fg, oldSource, true); err != nil {
 		// Demote succeeded so the active Service ignores the source
 		// (role=replica). Traffic-label drift is cosmetic; log only.
-		m.logger.Info("emergency: restore old source traffic=enabled", "site", oldSource, "error", err)
+		m.logger.Info("emergency: restore old source traffic=true", "site", oldSource, "error", err)
 	}
 	return true
 }

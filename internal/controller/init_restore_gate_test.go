@@ -46,11 +46,11 @@ func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup 
 }
 
 // sitePod is a MySQL pod of site already labelled as a serving primary
-// (role=primary, healthy=yes), so a gate that fails to strip the labels
+// (role=primary, healthy=true), so a gate that fails to strip the labels
 // shows up as an endpoint.
 func sitePod(fg *v1alpha1.MysqlFailoverGroup, site string) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: site + "-pod", Namespace: fg.Namespace, Labels: map[string]string{
-		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: site, v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: "yes",
+		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: site, v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
 	}}}
 }
 

@@ -51,7 +51,7 @@
     {
       "id": "step-stale-reads",
       "title": "TODO C — find the stale-read window",
-      "description": "Implement `stale_read_window`. Successful reads served by the demoted site at or after `status.lastFailover.time`. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the `shipstream.io/db-readonly-playground:NoExecute` taint's `tolerationSeconds` expires and the pod is evicted.",
+      "description": "Implement `stale_read_window`. Successful reads served by the demoted site at or after `status.lastFailover.time`. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground:NoExecute` taint's `tolerationSeconds` expires and the pod is evicted.",
       "completionCriteria": "`brdrill.py --probe tests/fixtures/planned-probe-unbounded.jsonl --drill tests/fixtures/planned-drill-unbounded.json` prints `staleReads` as `56` and `staleReadSeconds` as `27.5`, while the emergency capture prints `staleReads` as `0`."
     },
     {

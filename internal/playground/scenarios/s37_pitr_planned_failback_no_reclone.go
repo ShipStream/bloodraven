@@ -33,7 +33,7 @@ const (
 
 // pitrRunAnnotation marks a group a scenario run created, with the run
 // stem, so cleanup deletes only its own (F190).
-const pitrRunAnnotation = "chaos.playground.bloodraven.io/run"
+const pitrRunAnnotation = "playground.bloodraven.shipstream.io/run"
 
 // scenario37PITRPlannedFailbackNoReclone is DESIGN §9.4 s37 and §4.15
 // Example 3: a planned failover A→B and failback B→A without a reclone or a

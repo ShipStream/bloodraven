@@ -163,7 +163,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		v1alpha1.ResourceLabel:      "backup",
 	}
 	if encrypted {
-		labels[v1alpha1.BackupEncryptedLabel] = "true"
+		labels[v1alpha1.BackupEncryptedLabel] = v1alpha1.LabelValueTrue
 	}
 
 	// --- Shared base envVars / storage / credentials volumes -----------
@@ -585,7 +585,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 					// its Service and may mount a node-pinned backup PVC, so
 					// it must be schedulable on, and not evicted from, the
 					// read-only side by a failover.
-					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					Tolerations:    groupReadOnlyTolerations(fg),
 					InitContainers: initContainers,
 					Containers:     []corev1.Container{mainContainer},
 					Volumes:        volumes,

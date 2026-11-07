@@ -53,7 +53,12 @@ type DeploymentLeaseError struct {
 
 func (e *DeploymentLeaseError) Error() string { return e.Code + ": " + e.Reason }
 
+// deploymentLeaseRecordSchemaVersion is deploymentLeaseRecord.SchemaVersion
+// (A-80). A record with another version is refused (errLeaseRecordVersion).
+const deploymentLeaseRecordSchemaVersion = 1
+
 type deploymentLeaseRecord struct {
+	SchemaVersion int `json:"schemaVersion"`
 	DeploymentLeaseView
 	Namespace      string    `json:"namespace"`
 	ServiceAccount string    `json:"serviceAccount"`
@@ -88,6 +93,9 @@ type DeploymentLeaseManager struct {
 	// plannedHoldHeld reports whether that slot holds an automation hold
 	// (rather than a run's claim). Nil means no runner.
 	plannedHoldHeld atomic.Pointer[func(types.NamespacedName) bool]
+	// refusals reports a lease record of an unknown schemaVersion. Nil
+	// means no runner.
+	refusals atomic.Pointer[leaseRefusalReporter]
 }
 
 // The operations that take BeginPlanned's admission reservation. A refusal
@@ -195,11 +203,60 @@ func (m *DeploymentLeaseManager) read(ctx context.Context, fg *v1alpha1.MysqlFai
 	if len(l.OwnerReferences) != 1 || l.OwnerReferences[0].UID != fg.UID {
 		return nil, nil, fmt.Errorf("deployment Lease belongs to another group UID")
 	}
-	var r deploymentLeaseRecord
-	if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &r); err != nil {
-		return nil, nil, fmt.Errorf("invalid deployment Lease: %w", err)
+	r, err := m.decodeRecord(fg, l)
+	if err != nil {
+		return nil, nil, err
 	}
-	return l, &r, nil
+	return l, r, nil
+}
+
+// decodeRecord reads l's lease record. A record with a schemaVersion this
+// operator does not know is refused, and reported as a group refusal
+// (Degraded=True/MetadataVersionUnsupported and a Warning Event); a
+// readable one clears that refusal.
+func (m *DeploymentLeaseManager) decodeRecord(fg *v1alpha1.MysqlFailoverGroup, l *coordinationv1.Lease) (*deploymentLeaseRecord, error) {
+	raw := l.Annotations[v1alpha1.DeploymentLeaseAnnotation]
+	key := "lease/" + l.Name
+	var r deploymentLeaseRecord
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		return nil, fmt.Errorf("invalid deployment Lease: %w", err)
+	}
+	if r.SchemaVersion != deploymentLeaseRecordSchemaVersion {
+		msg := fmt.Sprintf("deployment Lease %s has a %s record with schemaVersion %d, which this operator does not know (it reads %d); "+
+			"lease requests for the group are refused until the Lease is deleted or an operator release that reads it runs",
+			l.Name, v1alpha1.DeploymentLeaseAnnotation, r.SchemaVersion, deploymentLeaseRecordSchemaVersion)
+		if report := m.refusals.Load(); report != nil {
+			(*report).set(fg, key, v1alpha1.ReasonMetadataVersionUnsupported, msg)
+		}
+		return nil, errLeaseRecordVersion{msg: msg}
+	}
+	if report := m.refusals.Load(); report != nil {
+		(*report).clear(client.ObjectKeyFromObject(fg), key)
+	}
+	return &r, nil
+}
+
+// errLeaseRecordVersion is a lease record with an unknown schemaVersion.
+type errLeaseRecordVersion struct{ msg string }
+
+func (e errLeaseRecordVersion) Error() string { return e.msg }
+
+// leaseRefusalReporter is the runner's group refusal registry, as the
+// lease manager uses it.
+type leaseRefusalReporter struct {
+	set   func(fg *v1alpha1.MysqlFailoverGroup, key, reason, message string)
+	clear func(nn types.NamespacedName, key string)
+}
+
+// SetGroupRefusals injects the runner's group refusal registry
+// (TopologyManagerRunner.SetGroupRefusal and ClearGroupRefusal), which
+// reports a lease record of an unknown schemaVersion. Nil reports nothing.
+func (m *DeploymentLeaseManager) SetGroupRefusals(r *TopologyManagerRunner) {
+	if r == nil {
+		m.refusals.Store(nil)
+		return
+	}
+	m.refusals.Store(&leaseRefusalReporter{set: r.SetGroupRefusal, clear: r.ClearGroupRefusal})
 }
 
 func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, l *coordinationv1.Lease, r *deploymentLeaseRecord, operation string) error {
@@ -208,6 +265,7 @@ func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1alpha1.MysqlFa
 		l = &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: deploymentLeaseName(fg.Name, r.Kind, operation), Namespace: fg.Namespace,
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "MysqlFailoverGroup", Name: fg.Name, UID: fg.UID}}}}
 	}
+	r.SchemaVersion = deploymentLeaseRecordSchemaVersion
 	b, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -303,8 +361,8 @@ func (m *DeploymentLeaseManager) currentHolds(ctx context.Context, fg *v1alpha1.
 		if len(l.OwnerReferences) != 1 || l.OwnerReferences[0].UID != fg.UID {
 			continue
 		}
-		var record deploymentLeaseRecord
-		if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &record); err != nil {
+		record, err := m.decodeRecord(fg, l)
+		if err != nil {
 			return nil, err
 		}
 		_, r, err := m.current(ctx, fg, "failover-hold", record.OperationID)

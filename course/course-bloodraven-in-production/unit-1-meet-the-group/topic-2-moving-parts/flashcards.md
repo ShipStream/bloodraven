@@ -5,13 +5,13 @@
 
 **Front:** The `mysql-playground-primary` Service selects on which pod labels?
 
-**Back:** Two: `app.kubernetes.io/instance=playground` and `shipstream.io/role=primary`. No health label.
+**Back:** Two: `app.kubernetes.io/instance=playground` and `bloodraven.shipstream.io/role=primary`. No health label.
 
 ---
 
 **Front:** The `mysql-playground-replicas` Service selects on which pod labels?
 
-**Back:** Three: `app.kubernetes.io/instance=playground`, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.
+**Back:** Three: `app.kubernetes.io/instance=playground`, `bloodraven.shipstream.io/role=replica`, and `bloodraven.shipstream.io/healthy=true`.
 
 ---
 
@@ -21,7 +21,7 @@
 
 ---
 
-**Front:** A pod is stamped `shipstream.io/role=fenced`. What changes at the Service layer?
+**Front:** A pod is stamped `bloodraven.shipstream.io/role=fenced`. What changes at the Service layer?
 
 **Back:** It matches neither the `-primary` nor the `-replicas` selector, so it drops out of both group endpoints while still running.
 

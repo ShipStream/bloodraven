@@ -561,7 +561,7 @@ func backupStatusEncrypted(status *v1alpha1.MysqlBackupStatus) bool {
 }
 
 func backupJobEncryptionChoice(job *batchv1.Job) (bool, v1alpha1.EncryptionAlgorithm) {
-	encrypted := job.Labels[v1alpha1.BackupEncryptedLabel] == "true"
+	encrypted := job.Labels[v1alpha1.BackupEncryptedLabel] == v1alpha1.LabelValueTrue
 	algorithm := ""
 	for _, container := range job.Spec.Template.Spec.Containers {
 		if container.Name != backupEncryptUploadContainerName {

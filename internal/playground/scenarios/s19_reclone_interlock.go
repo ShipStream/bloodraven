@@ -6,6 +6,8 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
+	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -292,7 +294,13 @@ func verifyRecloneRejectedBare() runner.Step {
 		Name:  "sub-case A: bare site name is rejected against divergent site",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			site := ctxFetch(env, "divergentSite")
-			return submitAndExpectRejection(ctx, env, site, "must include the divergent-GTID prefix")
+			// The cold form, confirmed: the divergence still needs its
+			// gtidPrefix interlock.
+			value, err := recloneValueForCold(ctx, env, site)
+			if err != nil {
+				return err
+			}
+			return submitAndExpectRejection(ctx, env, value, "must include gtidPrefix=")
 		},
 	}
 }
@@ -307,7 +315,11 @@ func verifyRecloneRejectedMismatch() runner.Step {
 			site := ctxFetch(env, "divergentSite")
 			// "deadbeef" is intentionally chosen to be the right length
 			// (8 chars passes the length check) and obviously wrong.
-			return submitAndExpectRejection(ctx, env, site+":deadbeef", "does not match the observed divergentGtid")
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return fmt.Errorf("get MFG: %w", err)
+			}
+			return submitAndExpectRejection(ctx, env, controller.RecloneAnnotationValueWithPrefix(mfg, site, "deadbeef"), "does not match the observed divergentGtid")
 		},
 	}
 }
@@ -328,7 +340,11 @@ func verifyRecloneAcceptedMatching() runner.Step {
 				return fmt.Errorf("recorded divergentGtid %q shorter than 8 characters", gtid)
 			}
 			prefix := gtid[:8]
-			value := site + ":" + prefix
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return fmt.Errorf("get MFG: %w", err)
+			}
+			value := controller.RecloneAnnotationValueWithPrefix(mfg, site, prefix)
 			env.Capture.Note(fmt.Sprintf("submitting reclone-site=%s (gtid prefix from %q)", value, gtid))
 			before := time.Now()
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
@@ -434,4 +450,14 @@ func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expec
 		case <-tick.C:
 		}
 	}
+}
+
+// recloneValueForCold reads the group and returns the confirmed cold form
+// for site, <site>:confirm=<name>:uid=<uid>, without gtidPrefix.
+func recloneValueForCold(ctx context.Context, env *runner.Env, site string) (string, error) {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return "", fmt.Errorf("get MFG: %w", err)
+	}
+	return actionvalue.Format(site, actionvalue.ConfirmPairs(mfg.Name, string(mfg.UID))...), nil
 }

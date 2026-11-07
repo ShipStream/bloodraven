@@ -90,7 +90,7 @@ def test_lagging_reader_is_not_an_unhealthy_group():
     )
     assert lagging.site("pdx")["SERVING"] == "yes", lagging.explain(
         "the lag gate applies only to ReadOnly sites; a lagging "
-        "PrimaryCandidate replica keeps healthy=yes and stays behind "
+        "PrimaryCandidate replica keeps healthy=true and stays behind "
         "mysql-playground-replicas"
     )
     assert lagging.site("reader")["SERVING"] == "yes", lagging.explain(

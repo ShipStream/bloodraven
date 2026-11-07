@@ -73,7 +73,7 @@ playground rather than a copied fixture — its `metadata.creationTimestamp`, `m
   cell rather than a traceback.
 - Unreadable input exits 3 with a message on stderr, not a stack trace on stdout.
 - The three completed functions carry a comment a colleague could follow: it names the rule
-  (`readOnlyMaxLagSeconds`, `role=replica` + `healthy=yes`, the `Degraded` condition), rather than
+  (`readOnlyMaxLagSeconds`, `role=replica` + `healthy=true`, the `Degraded` condition), rather than
   restating the code in English.
 
 Deduct for debug prints left in the output, for hard-coded thresholds where a helper exists, and for

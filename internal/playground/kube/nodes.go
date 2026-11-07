@@ -76,7 +76,7 @@ func (c *Client) ListNodes(ctx context.Context) (*corev1.NodeList, error) {
 // RemoveNodeTaint removes every taint with the given key from a node.
 // Idempotent: returns nil if the node has no taint with that key. Used
 // by scenarios that need to scrub the operator-applied
-// `db-readonly-<fg>` taint so a fresh PVC can be provisioned on a node
+// `<namespace>.db-readonly.bloodraven.shipstream.io/<fg>` taint so a fresh PVC can be provisioned on a node
 // the local-path-provisioner helper pod doesn't tolerate.
 func (c *Client) RemoveNodeTaint(ctx context.Context, name, key string) error {
 	node, err := c.GetNode(ctx, name)

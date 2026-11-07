@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 )
@@ -1455,7 +1456,7 @@ func (p *pitrBindingPass) condition(ctx context.Context) (*metav1.Condition, err
 		if len(p.overflow) > 0 {
 			parts = append(parts, fmt.Sprintf("accepted bindings %s could not be rebuilt (at most %d bindings)", strings.Join(p.overflow, ", "), pitrArchiveBindingsMax))
 		}
-		set(metav1.ConditionFalse, v1alpha1.ReasonBindingLimitReached, strings.Join(parts, "; ")+"; release bindings that are no longer needed (bloodraven.shipstream.io/release-pitr-archive-binding=<id>:confirm=<group>)")
+		set(metav1.ConditionFalse, v1alpha1.ReasonBindingLimitReached, strings.Join(parts, "; ")+"; release bindings that are no longer needed ("+v1alpha1.ReleasePITRArchiveBindingAnnotation+"="+actionvalue.Format("<id>", actionvalue.ConfirmPairs(p.fg.Name, string(p.fg.UID))...)+")")
 	case refused != nil:
 		set(metav1.ConditionFalse, refused.reason, refused.text)
 	case len(eligibility) > 0:

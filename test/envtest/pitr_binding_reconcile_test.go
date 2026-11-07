@@ -30,7 +30,7 @@ const (
 	bindingCondition = "PITRArchiveBindingReady"
 	pitrRenderKey    = "bloodraven.shipstream.io/pitr-render"
 	acceptedKey      = "bloodraven.shipstream.io/pitr-accepted"
-	specHashKey      = "shipstream.io/spec-hash"
+	specHashKey      = "bloodraven.shipstream.io/spec-hash"
 )
 
 func bindingFG(ns string) *v1alpha1.MysqlFailoverGroup {
@@ -175,7 +175,7 @@ func (h *bindingHarness) condition() *metav1.Condition {
 func (h *bindingHarness) checkJobs() []batchv1.Job {
 	h.t.Helper()
 	var jobs batchv1.JobList
-	if err := k8sClient.List(ctx, &jobs, client.InNamespace(h.ns), client.MatchingLabels{"shipstream.io/resource": "pitr-archive-check"}); err != nil {
+	if err := k8sClient.List(ctx, &jobs, client.InNamespace(h.ns), client.MatchingLabels{"bloodraven.shipstream.io/resource": "pitr-archive-check"}); err != nil {
 		h.t.Fatal(err)
 	}
 	return jobs.Items
@@ -354,7 +354,7 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 		fg.Annotations = map[string]string{}
 	}
 	id := h.binding("a").ID
-	fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = id + ":confirm=lion"
+	fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = id + ":confirm=lion:uid=" + string(fg.UID)
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -398,8 +398,8 @@ func TestEnvtest_PITRBindingDefersPre203Deployment(t *testing.T) {
 	}
 	fg := h.fg()
 	for _, site := range []string{"dc1", "dc2"} {
-		sel := map[string]string{"app.kubernetes.io/name": "mysql", "app.kubernetes.io/instance": "lion", "shipstream.io/site": site}
-		labels := map[string]string{"shipstream.io/failover-group": "lion"}
+		sel := map[string]string{"app.kubernetes.io/name": "mysql", "app.kubernetes.io/instance": "lion", "bloodraven.shipstream.io/site": site}
+		labels := map[string]string{"bloodraven.shipstream.io/failover-group": "lion"}
 		for k, v := range sel {
 			labels[k] = v
 		}

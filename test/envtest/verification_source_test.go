@@ -71,11 +71,11 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 		t.Fatal(err)
 	}
 	var snapshot v1alpha1.VerificationBackupRef
-	if err := json.Unmarshal([]byte(job.Spec.Template.Annotations["shipstream.io/verification-backup"]), &snapshot); err != nil || !reflect.DeepEqual(&snapshot, want) {
+	if err := json.Unmarshal([]byte(job.Spec.Template.Annotations["bloodraven.shipstream.io/verification-backup"]), &snapshot); err != nil || !reflect.DeepEqual(&snapshot, want) {
 		t.Fatalf("Job snapshot does not match persisted pin: err=%v snapshot=%+v want=%+v", err, snapshot, want)
 	}
 	modified := job.DeepCopy()
-	modified.Spec.Template.Annotations["shipstream.io/verification-backup"] = "{}"
+	modified.Spec.Template.Annotations["bloodraven.shipstream.io/verification-backup"] = "{}"
 	if err := k8sClient.Update(ctx, modified); err == nil {
 		t.Fatal("API server allowed the execution source snapshot to change")
 	}

@@ -619,7 +619,7 @@ func (r *MysqlFailoverGroupReconciler) processPITRBindingRelease(ctx context.Con
 	if !ok {
 		return nil, nil
 	}
-	id, err := parsePITRBindingRelease(value, fg.Name)
+	id, err := parsePITRBindingRelease(value, fg)
 	if err != nil {
 		return &pitrReleaseOutcome{rejected: err.Error(), value: value}, nil
 	}
@@ -747,7 +747,7 @@ func pitrReleasePending(fg *v1alpha1.MysqlFailoverGroup) string {
 	if !ok {
 		return ""
 	}
-	id, err := parsePITRBindingRelease(value, fg.Name)
+	id, err := parsePITRBindingRelease(value, fg)
 	if err != nil {
 		return ""
 	}

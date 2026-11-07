@@ -2428,7 +2428,7 @@ func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTra
 	}
 	if action.Taint != nil {
 		selector := tm.taintSelector(site)
-		if err := tm.tainter.SetTaint(ctx, selector, tm.cfg.Name, *action.Taint); err != nil {
+		if err := tm.tainter.SetTaint(ctx, selector, tm.cfg.Namespace, tm.cfg.Name, *action.Taint); err != nil {
 			tm.logger.Error("taint operation failed", "site", site.name, "apply", *action.Taint, "error", err)
 		} else {
 			op := "remove"

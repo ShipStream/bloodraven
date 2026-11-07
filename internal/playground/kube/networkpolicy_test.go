@@ -25,7 +25,7 @@ func TestBuildDNSEgressDenyPolicy(t *testing.T) {
 	}
 	// Selects only the MySQL pod for the site.
 	sel := np.Spec.PodSelector.MatchLabels
-	if sel["app.kubernetes.io/name"] != "mysql" || sel["app.kubernetes.io/instance"] != "playground" || sel["shipstream.io/site"] != "iad" {
+	if sel["app.kubernetes.io/name"] != "mysql" || sel["app.kubernetes.io/instance"] != "playground" || sel["bloodraven.shipstream.io/site"] != "iad" {
 		t.Errorf("pod selector = %v, want mysql/playground/iad", sel)
 	}
 	// Egress-only, allow 0.0.0.0/0 except the kube-dns ClusterIP and pod IPs.
@@ -127,7 +127,7 @@ func TestBuildStandbyIngressHoldPolicy(t *testing.T) {
 	// Selector must target ONLY the standby site's MySQL pod, never the
 	// active pod — a mis-scoped hold would freeze the wrong site.
 	sel := np.Spec.PodSelector.MatchLabels
-	if sel["app.kubernetes.io/name"] != "mysql" || sel["app.kubernetes.io/instance"] != "playground" || sel["shipstream.io/site"] != "pdx" {
+	if sel["app.kubernetes.io/name"] != "mysql" || sel["app.kubernetes.io/instance"] != "playground" || sel["bloodraven.shipstream.io/site"] != "pdx" {
 		t.Errorf("pod selector = %v, want mysql/playground/pdx only", sel)
 	}
 	// Ingress-only deny: egress (outbound replication) must stay open.
@@ -149,7 +149,7 @@ func TestBuildDragonflyPartitionPolicy(t *testing.T) {
 		t.Errorf("missing chaos-partition label: %v", np.Labels)
 	}
 	sel := np.Spec.PodSelector.MatchLabels
-	if sel["app.kubernetes.io/name"] != "dragonfly" || sel["app.kubernetes.io/instance"] != "playground" || sel["shipstream.io/site"] != "iad" {
+	if sel["app.kubernetes.io/name"] != "dragonfly" || sel["app.kubernetes.io/instance"] != "playground" || sel["bloodraven.shipstream.io/site"] != "iad" {
 		t.Errorf("pod selector = %v, want dragonfly/playground/iad", sel)
 	}
 	// Deny-all: both ingress and egress policy types, empty rule slices.

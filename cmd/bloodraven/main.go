@@ -183,6 +183,7 @@ func main() {
 	// (a provisional grant or an automation hold) that status does not show.
 	deploymentLeases.SetPlannedClaimHeld(runner.PlannedClaimHeld)
 	deploymentLeases.SetPlannedHoldHeld(runner.PlannedHoldHeld)
+	deploymentLeases.SetGroupRefusals(runner)
 
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)

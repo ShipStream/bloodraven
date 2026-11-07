@@ -325,7 +325,7 @@ func TestReaderHealthyLabel_AcceptsLaggingReader(t *testing.T) {
 			if err := c.Get(context.Background(), types.NamespacedName{Name: readerPod.Name, Namespace: fg.Namespace}, &got); err != nil {
 				t.Fatal(err)
 			}
-			if (got.Labels[v1alpha1.HealthyLabel] == "yes") != tc.yes {
+			if (got.Labels[v1alpha1.HealthyLabel] == v1alpha1.LabelValueTrue) != tc.yes {
 				t.Fatalf("healthy label %q, want yes=%t", got.Labels[v1alpha1.HealthyLabel], tc.yes)
 			}
 		})

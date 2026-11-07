@@ -17,11 +17,11 @@ import (
 // syncDragonflyPodLabels enforces the steady-state Dragonfly pod
 // labels for a failover group:
 //
-//   - master pod: dragonfly-role=master, dragonfly-traffic=enabled
-//   - replica pod: dragonfly-role=replica, dragonfly-traffic=enabled
+//   - master pod: dragonfly-role=master, dragonfly-traffic=true
+//   - replica pod: dragonfly-role=replica, dragonfly-traffic=true
 //
 // The traffic label is the canonical "this pod serves writes" gate:
-// the active Service selects on (role=master AND traffic=enabled), so
+// the active Service selects on (role=master AND traffic=true), so
 // removing the traffic label sheds the endpoint atomically without
 // depending on the order of role-label flips. The planned-failover
 // state machine drives the strip→takeover→restore sequence directly
@@ -130,7 +130,7 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 // Service endpoint independent of the role label. Removing the label
 // (set=false) is preferred over stamping a "disabled" value because
 // the active-Service selector is an exists-and-equals check on
-// "enabled" — a missing key sheds the endpoint without ambiguity.
+// "true" — a missing key sheds the endpoint without ambiguity.
 func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string, set bool) error {
 	return setDragonflyTrafficOnSite(ctx, r.Client, fg, siteName, set)
 }

@@ -61,7 +61,7 @@ not poll, a replica whose threads are stopped. Return <code>"unknown"</code> whe
 looking perfectly caught up.</p>
 <p><strong>TODO B — <code>is_serving</code>.</strong> Decide whether a site is currently behind <code>mysql-playground-replicas</code>, the
 group read endpoint. That Service selects on three labels — instance, <code>role=replica</code>, and
-<code>healthy=yes</code> — and the operator’s rule for stamping <code>healthy</code> depends on the site’s role.</p>
+<code>healthy=true</code> — and the operator’s rule for stamping <code>healthy</code> depends on the site’s role.</p>
 <p>For a site whose role is <code>ReadOnly</code>, all five must hold together:</p>
 <ol>
 <li><code>sourceConvergenceState</code> is <code>Converged</code></li>
@@ -71,7 +71,7 @@ group read endpoint. That Service selects on three labels — instance, <code>ro
 chained off another replica does not count</li>
 <li><code>secondsBehindSource</code> is at or under <code>effective_readonly_max_lag(spec)</code></li>
 </ol>
-<p>For <strong>every other role</strong>, <code>healthy=yes</code> as soon as <code>state</code> is <code>Writable</code> or <code>ReadOnly</code>. There is no
+<p>For <strong>every other role</strong>, <code>healthy=true</code> as soon as <code>state</code> is <code>Writable</code> or <code>ReadOnly</code>. There is no
 lag gate on those sites at all. That asymmetry is real and it is the point of this project.</p>
 <p><strong>TODO C — <code>verdict</code>.</strong> Return <code>(word, exit_code)</code> from the table above. Read the <code>Degraded</code>
 condition the operator already wrote — its <code>reason</code> is one of <code>Healthy</code>, <code>SiteUnhealthy</code>, <code>SplitBrain</code>,
@@ -326,12 +326,12 @@ def is_serving(site_spec, site_status, group):
     mysql-&lt;group&gt;-replicas?
 
     That Service selects on three labels: instance, role=replica and
-    healthy=yes. The operator stamps healthy on each pod, and the rule it
+    healthy=true. The operator stamps healthy on each pod, and the rule it
     uses depends on the site&#39;s role.
 
     TODO B: replace the placeholder below with the operator&#39;s own rule.
 
-      * For a site whose role is &quot;ReadOnly&quot;, healthy=yes needs all five of
+      * For a site whose role is &quot;ReadOnly&quot;, healthy=true needs all five of
         these to hold at once:
           1. sourceConvergenceState is &quot;Converged&quot;
           2. replication is &quot;Healthy&quot; or &quot;Lagging&quot; (Lagging only means past
@@ -341,7 +341,7 @@ def is_serving(site_spec, site_status, group):
              the active site - a chained replica does not count
           5. secondsBehindSource is at or under effective_readonly_max_lag(spec)
 
-      * For every other role, healthy=yes as soon as state is &quot;Writable&quot; or
+      * For every other role, healthy=true as soon as state is &quot;Writable&quot; or
         &quot;ReadOnly&quot;. There is no lag gate on those sites. Read that sentence
         twice before you write the code.
     &quot;&quot;&quot;

@@ -174,8 +174,8 @@ func mysqlImageFor(fg *v1alpha1.MysqlFailoverGroup) string {
 //
 // The three labels are:
 //
-//	shipstream.io/failover-group   -> spec.failoverGroupRef.name
-//	shipstream.io/backup-profile   -> spec.profileName
+//	bloodraven.shipstream.io/failover-group   -> spec.failoverGroupRef.name
+//	bloodraven.shipstream.io/backup-profile   -> spec.profileName
 //	app.kubernetes.io/managed-by   -> bloodraven
 //
 // Stamping them for every MysqlBackup (including ad-hoc CRs created by

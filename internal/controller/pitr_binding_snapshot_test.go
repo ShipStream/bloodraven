@@ -286,11 +286,14 @@ func (e *pbtEnv) releaseAnnotation() (string, bool) {
 }
 
 // Rows 27, 29, 35: release of an unused binding deletes its snapshots,
-// removes the entry and the annotation; a malformed or unconfirmed value is
-// rejected and removed; an id with no entry releases its snapshots.
+// removes the entry and the annotation; a malformed or unconfirmed value,
+// or one without this group's uid (WE-Q9), is rejected and removed; an id
+// with no entry releases its snapshots.
 func TestPITRBindingRelease(t *testing.T) {
 	e, a, entry := pbtReleaseEnv(t, interceptor.Funcs{})
-	for _, bad := range []string{entry.ID + ":confirm=other", entry.ID, "pab-xyz:confirm=" + pbtName} {
+	uid := ":uid=" + string(pbtUID)
+	for _, bad := range []string{entry.ID + ":confirm=other" + uid, entry.ID, "pab-xyz:confirm=" + pbtName + uid,
+		entry.ID + ":confirm=" + pbtName, entry.ID + ":confirm=" + pbtName + ":uid=another-incarnation"} {
 		e.release(bad)
 		e.pass()
 		if _, ok := e.releaseAnnotation(); ok {
@@ -299,7 +302,7 @@ func TestPITRBindingRelease(t *testing.T) {
 		e.expectEvents(v1alpha1.EventPITRArchiveBindingReleaseRejected)
 		e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
 	}
-	e.release(entry.ID + ":confirm=" + pbtName)
+	e.release(entry.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 	e.pass()
 	if e.entry(a) != nil {
 		t.Fatal("released entry kept")
@@ -331,7 +334,7 @@ func TestPITRBindingRelease(t *testing.T) {
 		t.Fatal("dropped entry's snapshot deleted implicitly")
 	}
 	e.events()
-	e.release(cand.ID + ":confirm=" + pbtName)
+	e.release(cand.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 	e.pass()
 	if _, ok := e.secret(cand.Encryption.KeySecretName); ok {
 		t.Fatal("release by id kept the snapshot")
@@ -425,7 +428,7 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 			e, a, entry := pbtReleaseEnv(t, interceptor.Funcs{})
 			use(e, entry)
 			e.events()
-			e.release(entry.ID + ":confirm=" + pbtName)
+			e.release(entry.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 			e.pass()
 			if e.entry(a) == nil {
 				t.Fatal("entry removed while in use")
@@ -453,7 +456,7 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 	if err := e.c.Update(context.Background(), s); err != nil {
 		t.Fatal(err)
 	}
-	e.release(entry.ID + ":confirm=" + pbtName)
+	e.release(entry.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 	e.pass()
 	if e.entry(a) != nil {
 		t.Fatal("a dead hold blocked the release")
@@ -487,7 +490,7 @@ func TestPITRBindingReleaseRacesHold(t *testing.T) {
 		return c.Delete(ctx, obj, opts...)
 	}}
 	e, _, entry := pbtReleaseEnv(t, funcs)
-	e.release(entry.ID + ":confirm=" + pbtName)
+	e.release(entry.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 	e.pass()
 	if !raced {
 		t.Fatal("the delete never ran")
@@ -512,7 +515,7 @@ func TestPITRBindingReleaseRacesHold(t *testing.T) {
 // release and never reports the missing snapshot as lost key material.
 func TestPITRBindingReleaseCrashFinishes(t *testing.T) {
 	e, a, entry := pbtReleaseEnv(t, interceptor.Funcs{})
-	e.release(entry.ID + ":confirm=" + pbtName)
+	e.release(entry.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 	s, _ := e.secret(entry.Encryption.KeySecretName)
 	e.deleteObj(s)
 	e.pass()

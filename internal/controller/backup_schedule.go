@@ -372,7 +372,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 					Spec: corev1.PodSpec{
 						RestartPolicy:      corev1.RestartPolicyOnFailure,
 						ServiceAccountName: scheduleTriggerName(fg.Name),
-						Tolerations:        groupReadOnlyTolerations(fg.Name),
+						Tolerations:        groupReadOnlyTolerations(fg),
 						Containers: []corev1.Container{
 							{
 								Name:  "trigger",

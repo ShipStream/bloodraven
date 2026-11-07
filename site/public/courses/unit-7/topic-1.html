@@ -125,8 +125,8 @@ course; the comments say which.</p>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      zone</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">us-east-1a</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      lbIP</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">"10.20.30.11"</span><span style="color:#6A737D;--shiki-dark:#768390">                 # required unless role is ReadOnly</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      taintNodeSelector</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:                  </span><span style="color:#6A737D;--shiki-dark:#768390"># required unless role is ReadOnly</span></span>
-<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        shipstream.io/failover-group.ledger</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">"true"</span></span>
-<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        shipstream.io/site.ledger</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">iad</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        bloodraven.shipstream.io/failover-group.ledger</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">"true"</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        bloodraven.shipstream.io/site.ledger</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">iad</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      storage</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        storageClassName</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">fast-ssd-east</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        size</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">500Gi</span></span>
@@ -153,7 +153,7 @@ backup, so cheap reader storage buys you nothing on the recovery path.</p>
 memory, and <code>Guaranteed</code> is the class the kubelet evicts last under node pressure. A primary evicted
 for memory pressure is an unplanned failover you did not schedule.</p>
 <p><strong><code>taintNodeSelector</code> labels must already be on the nodes.</strong> The operator applies the
-<code>shipstream.io/db-readonly-&#x3C;group></code> <code>NoExecute</code> taint from Unit 4 by selecting nodes with these
+<code>&#x3C;namespace>.db-readonly.bloodraven.shipstream.io/&#x3C;group></code> <code>NoExecute</code> taint from Unit 4 by selecting nodes with these
 labels. Get the label wrong and nothing errors — the taint is simply applied to nothing, and the
 eviction half of your failover strategy silently does not exist.</p>
 <p><strong><code>lbIP</code> and <code>taintNodeSelector</code> are required unless the role is <code>ReadOnly</code>.</strong> That is a CEL rule, so

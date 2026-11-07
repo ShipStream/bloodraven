@@ -93,13 +93,13 @@ Before treating a site stuck in `RecoveryInProgress` (or an old primary that has
    DIGEST=$(kubectl get mysqlfailovergroup <group> -n <ns> \
      -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="<site>")].keyringDigest}')
    kubectl get secret -n <ns> "$SECRET"
-   kubectl get secret -n <ns> -l shipstream.io/failover-group=<group>,app.kubernetes.io/name=mysql-keyring
+   kubectl get secret -n <ns> -l bloodraven.shipstream.io/failover-group=<group>,app.kubernetes.io/name=mysql-keyring
    ```
 
 ### Safe Remediation Steps
 The only surviving copy of a sealed site's keys is the keyring file in its running pod's `mysql` container (`$KEYRING_DIR/keyring`; `KEYRING_DIR` is `spec.encryptionAtRest.keyring.dataFileDir`, default `/run/mysql-keyring`). Do not delete, restart, evict or drain that pod, and do not force an unseal or rollout.
 
-1. `KeyringEscrowMissing` (the Secret is gone): recreate it from the running pod with the helper. It runs only on a site that is `Sealed` or `Failed` with no `unsealReason` (a rotation, bootstrap or clone in progress owns its Secret). It reads the pod's keyring and checks it against `status…keyringDigest` before writing anything, refuses if the Secret exists, never deletes a Secret, and re-reads the group before writing, stopping if its UID or the site's phase, unseal reason, Secret, version or digest changed. It then adds the labels (including `shipstream.io/keyring-version`), the digest annotation, the ownerReference and `immutable: true`. It never writes the group's status: the operator returns the site to `Sealed` itself once MySQL confirms it runs that keyring (Event `KeyringRecovered`), and the script waits up to `KEYRING_RECOVER_WAIT` seconds (default 120) to report it:
+1. `KeyringEscrowMissing` (the Secret is gone): recreate it from the running pod with the helper. It runs only on a site that is `Sealed` or `Failed` with no `unsealReason` (a rotation, bootstrap or clone in progress owns its Secret). It reads the pod's keyring and checks it against `status…keyringDigest` before writing anything, refuses if the Secret exists, never deletes a Secret, and re-reads the group before writing, stopping if its UID or the site's phase, unseal reason, Secret, version or digest changed. It then adds the labels (including `bloodraven.shipstream.io/keyring-version`), the digest annotation, the ownerReference and `immutable: true`. It never writes the group's status: the operator returns the site to `Sealed` itself once MySQL confirms it runs that keyring (Event `KeyringRecovered`), and the script waits up to `KEYRING_RECOVER_WAIT` seconds (default 120) to report it:
    ```bash
    ./.agents/skills/bloodraven-doctor/scripts/keyring-escrow-recover.sh -n <ns> <group> <site>
    ```
@@ -279,7 +279,7 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
    kubectl exec -n <ns> <primary-pod> -c mysql -- mysql -N -e \
      "SELECT User_attributes FROM mysql.user WHERE User='<app-user>'"
    ```
-   It should list a `Restrictions` entry for `"Database": "mysql"`. The group's `shipstream.io/system-schema-restriction` annotation equals `shipstream.io/credential-hash` once it has.
+   It should list a `Restrictions` entry for `"Database": "mysql"`. The group's `bloodraven.shipstream.io/system-schema-restriction` annotation equals `bloodraven.shipstream.io/credential-hash` once it has.
 
 ### Safe remediation
 1. Pending restriction: bring the named site back. The operator retries every minute and turns `partial_revokes` ON itself. Nothing to run by hand.
@@ -334,7 +334,7 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
    ```bash
    kubectl get mysqlbackup <backup> -n <ns> -o jsonpath='{.status.jobName}{" mode="}{.status.encryption.mode}{" algorithm="}{.status.encryption.algorithm}{"\n"}'
    ```
-2. Inspect that Job's owner reference, `shipstream.io/backup-encrypted` label, container names, and the uploader's `BLOODRAVEN_ENCRYPTION_ALGORITHM`. The `backup-encrypt-upload` main container identifies an encrypted launch. A `mysqlsh` main container without the encryption label identifies a plaintext launch. Use the original Job configuration rather than today's profile. Do not collect Secret contents or passphrases.
+2. Inspect that Job's owner reference, `bloodraven.shipstream.io/backup-encrypted` label, container names, and the uploader's `BLOODRAVEN_ENCRYPTION_ALGORITHM`. The `backup-encrypt-upload` main container identifies an encrypted launch. A `mysqlsh` main container without the encryption label identifies a plaintext launch. Use the original Job configuration rather than today's profile. Do not collect Secret contents or passphrases.
 3. If the owned Job is gone, preserve the audit record and verify the artifact's format through an approved storage inspection. Missing BRV1 magic on an encrypted launch can indicate tampering or a wrong source location.
 
 ### Safe remediation
@@ -423,7 +423,7 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
 ### Diagnostic steps
 
 1. Check `spec.backup.retry.maxAttempts`, the failed run's completion time, and `status.backupSchedules[].nextRetryTime`. Backoff doubles per attempt up to the configured cap; ad-hoc backups do not participate.
-2. Use the backup projections in `triage.sh` or `support-bundle.sh`. Match the failed run's UID to a successor's `shipstream.io/backup-retry-of` label. The root name/UID annotations identify the original scheduled run, and `shipstream.io/backup-attempt` is durable launch metadata. A retained higher attempt from another run does not prove that this run has a successor.
+2. Use the backup projections in `triage.sh` or `support-bundle.sh`. Match the failed run's UID to a successor's `bloodraven.shipstream.io/backup-retry-of` label. The root name/UID annotations identify the original scheduled run, and `bloodraven.shipstream.io/backup-attempt` is durable launch metadata. A retained higher attempt from another run does not prove that this run has a successor.
 3. Compare status and launch attempts. Retry limits use the greater value; a lost status patch does not reset a chain to attempt 1. The backup reconciler restores status from the annotation before launch or terminal observation.
 4. New names use `backup-retry-<predecessor UID hash>-r<N>`. Repeated reconciles and stale lists reuse that name and verify predecessor, root, attempt, schedule, group and profile. `BackupRetryConflict` means a name collision or altered metadata; inspect those public fields without changing credential Secrets. `status.backupSchedules[].retryConflict` names the blocking object. The operator emits the warning and log when that persisted marker changes, clears it when the conflict is no longer observed, and warns again if a resolved conflict recurs. Reconciles and operator restarts do not repeat an unchanged conflict warning. Only that retry is skipped; other schedules and group status rollups continue. An AlreadyExists/cache-NotFound race requests a five-second wake-up instead of group-wide error backoff; genuine API read failures still propagate.
 
@@ -446,7 +446,7 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
 ### Diagnostic steps
 
 1. Collect the verification name, phase, Job name and `status.backupRef` name/UID/location/storage type. The triage and support-bundle projections include these public fields. Compare the selected UID rather than relying on a reused backup name or today's latest successful backup.
-2. Inspect the producing Job's pod-template `shipstream.io/verification-backup` JSON annotation. New Jobs pin the same tuple in immutable Job spec; the operator checks it against the source env and restores missing or drifted status from it. Existing Jobs are observed without re-fetching the source CR or current profile/derived credentials.
+2. Inspect the producing Job's pod-template `bloodraven.shipstream.io/verification-backup` JSON annotation. New Jobs pin the same tuple in immutable Job spec; the operator checks it against the source env and restores missing or drifted status from it. Existing Jobs are observed without re-fetching the source CR or current profile/derived credentials.
 3. For plaintext, compare the main container's `BLOODRAVEN_INPUT_URL` with the pinned location using the normal S3/PVC trailing-slash convention. For encrypted sources, inspect `decrypt-download` storage, bucket and `BLOODRAVEN_SOURCE_PREFIX`; its target and the main input are temporary decrypted paths. Do not collect passphrases, Secrets or arbitrary env.
 4. A legacy Job without the snapshot can continue only with a complete status reference matching its source inputs. If the status claims a different location, or its identity is incomplete, the fixed operator fails it with `BackupIdentityMismatch` instead of certifying another backup. Historical terminal records produced by an older operator still require comparison with retained Job evidence.
 
@@ -529,7 +529,7 @@ A full-instance in-place restore replaces the primary's data. The other sites st
 - Every queued site shows `Replica_IO_Running: No` (or `performance_schema.replication_connection_status.SERVICE_STATE = OFF`), `sourceConvergenceReason: RestorePeerHold`, `Degraded=RestoreReclonePending`, and `bloodraven_replication_running{thread="io"}=0`. This is by design: the restore stopped the receivers before its Job dropped anything, and only each site's reclone restarts replication.
 - A full-instance restore waits in Preflight with `waiting for the running clone of <site> to finish before restoring`: a clone was running when the restore was accepted. It proceeds once the clone ends.
 - `PromotionRefusedReclonePending` events, or `Degraded=NoPrimary` with a `pending post-restore reclone` message after the primary failed.
-- Readers return old data from a site that is still queued. A queued site is labelled `shipstream.io/healthy=no`, which takes it out of the `-replica` Service and a `ReadOnly` site's Service; the per-site Service of a `PrimaryCandidate` or `DisasterRecovery` site does not select on it, so check for clients that connect there directly.
+- Readers return old data from a site that is still queued. A queued site is labelled `bloodraven.shipstream.io/healthy=false`, which takes it out of the `-replica` Service and a `ReadOnly` site's Service; the per-site Service of a `PrimaryCandidate` or `DisasterRecovery` site does not select on it, so check for clients that connect there directly.
 
 ### Diagnostic steps
 1. Queue state:
@@ -735,7 +735,7 @@ A binding becomes `Bound` only by proof: a sidecar reports `Verified` for the de
      -o 'custom-columns=NAME:.metadata.name,BINDING:.metadata.labels.bloodraven\.shipstream\.io/pitr-binding-id,DEST:.metadata.annotations.bloodraven\.shipstream\.io/pitr-destination,IMMUTABLE:.immutable'
    ```
 3. What the pods load: the Deployment's `pitr-passphrase` volume `secretName` must equal the Bound entry's `keySecretName`, and the sidecar env `BLOODRAVEN_PITR_KEY_REVISION` must equal it (or `plaintext`). `status.pitr.archive.keyRevision` is what the sidecars reported.
-4. Check Jobs (`kubectl get jobs,pods -n <ns> -l shipstream.io/failover-group=<group>,shipstream.io/resource=pitr-archive-check`): the result line is the pod's termination message `BLOODRAVEN_PITR_ARCHIVE_CHECK v=2 state=<Absent|Verified|Refused> reason=... archiveID=... sourceUID=... sourceNamespace=... sourceName=... destinationDigest=<64 hex>` (the digest is of the normalized destination; the operator compares it with the Job's own `BLOODRAVEN_PITR_DESTINATION`, which must equal the binding's). Only the Job whose UID equals `check.jobUID` counts. The Job carries annotation `bloodraven.shipstream.io/pitr-key-secret-uid` (the candidate snapshot's UID at creation): a `Verified` verdict for a snapshot replaced under the same name is dropped and the entry re-checked ("the key snapshot the check verified was replaced: ...; checking it again"). A check Job for the other role (Writer vs Reader) is dropped and re-checked ("check Job <j> ran as <role>, but the destination is now checked as <role>; checking again"); an `Establishing` entry whose destination is no longer written becomes `Pending/Authenticating` ("the destination is no longer written; authenticating it for its readers") with a Reader check. Refusal messages read "<token> reported by the writer check of ..." / "... reported by the reader check of ...". A pod Pending more than 60 s, or a failure without a result line, is deleted and retried after 1 min; the entry stays `Pending/Authenticating` with the cause (image pull, quota, admission, storage egress). Also retried: an exit 0 with an unparsable line ("check Job <j> reported a verdict line that does not parse: <parser error>"), and exit 4 (`bloodraven pitr-archive-check` could not write the verdict to the termination log; ERROR "write the verdict to the termination log; the check fails"; reported as "check Job <j> failed: ..."). Finished check Jobs no entry records are deleted after each successful status write, never before it.
+4. Check Jobs (`kubectl get jobs,pods -n <ns> -l bloodraven.shipstream.io/failover-group=<group>,bloodraven.shipstream.io/resource=pitr-archive-check`): the result line is the pod's termination message `BLOODRAVEN_PITR_ARCHIVE_CHECK v=2 state=<Absent|Verified|Refused> reason=... archiveID=... sourceUID=... sourceNamespace=... sourceName=... destinationDigest=<64 hex>` (the digest is of the normalized destination; the operator compares it with the Job's own `BLOODRAVEN_PITR_DESTINATION`, which must equal the binding's). Only the Job whose UID equals `check.jobUID` counts. The Job carries annotation `bloodraven.shipstream.io/pitr-key-secret-uid` (the candidate snapshot's UID at creation): a `Verified` verdict for a snapshot replaced under the same name is dropped and the entry re-checked ("the key snapshot the check verified was replaced: ...; checking it again"). A check Job for the other role (Writer vs Reader) is dropped and re-checked ("check Job <j> ran as <role>, but the destination is now checked as <role>; checking again"); an `Establishing` entry whose destination is no longer written becomes `Pending/Authenticating` ("the destination is no longer written; authenticating it for its readers") with a Reader check. Refusal messages read "<token> reported by the writer check of ..." / "... reported by the reader check of ...". A pod Pending more than 60 s, or a failure without a result line, is deleted and retried after 1 min; the entry stays `Pending/Authenticating` with the cause (image pull, quota, admission, storage egress). Also retried: an exit 0 with an unparsable line ("check Job <j> reported a verdict line that does not parse: <parser error>"), and exit 4 (`bloodraven pitr-archive-check` could not write the verdict to the termination log; ERROR "write the verdict to the termination log; the check fails"; reported as "check Job <j> failed: ..."). Finished check Jobs no entry records are deleted after each successful status write, never before it.
 5. Operator log lines: `pitr archive binding changed` (`cause` = `proof`, `check`, `recovery`, `integrity`, `c3` or `input`; `input` is a spec, Secret or snapshot change, such as a new target's first entry, a missing key Secret, a retried `Refused` entry or a superseded candidate), `pitr archive binding released`, `pitr render annotation ignored` and `pitr render deferred` (both with `fg` and `namespace`).
 
 ### Safe remediation
@@ -747,9 +747,9 @@ A binding becomes `Bound` only by proof: a sidecar reports `Verified` for the de
 - **Binding limit.** Release unused bindings (below).
 - **Release** removes an unused binding and deletes its key snapshots. One id per annotation:
   ```bash
-  kubectl annotate mfg <group> -n <ns> bloodraven.shipstream.io/release-pitr-archive-binding=<id>:confirm=<group>
+  kubectl annotate mfg <group> -n <ns> bloodraven.shipstream.io/release-pitr-archive-binding="<id>:confirm=<group>:uid=$(kubectl get mfg <group> -n <ns> -o jsonpath='{.metadata.uid}')"
   ```
-  It is refused (`PITRArchiveBindingReleaseRefused`, annotation kept, retried every minute) while the destination is a current target, or a snapshot is named by a site Deployment's render annotation, a site Deployment's decoded render targets the released destination ("Deployment <d> renders <destination>"), a site Deployment's pod template references a snapshot (even scaled to zero), a site Deployment carries a `pitr-render` annotation that does not decode ("... so what it renders cannot be told; repair or remove it"), a non-terminal pod references a snapshot (mounted, projected volume, env `secretKeyRef` or `envFrom`: an old ReplicaSet mid-roll, restore, verification, check, staging or a `pitr-quarantine` maintenance pod, which you must delete when done), a running Job is labelled `bloodraven.shipstream.io/pitr-key-secret`, or a live verification holds one (`hold.verification.shipstream.io/<uid>`). A malformed value or wrong `confirm` is rejected and the annotation removed. Never commit this annotation in GitOps. Releasing a binding makes its archive unreadable unless you kept the passphrase elsewhere.
+  It is refused (`PITRArchiveBindingReleaseRefused`, annotation kept, retried every minute) while the destination is a current target, or a snapshot is named by a site Deployment's render annotation, a site Deployment's decoded render targets the released destination ("Deployment <d> renders <destination>"), a site Deployment's pod template references a snapshot (even scaled to zero), a site Deployment carries a `pitr-render` annotation that does not decode ("... so what it renders cannot be told; repair or remove it"), a non-terminal pod references a snapshot (mounted, projected volume, env `secretKeyRef` or `envFrom`: an old ReplicaSet mid-roll, restore, verification, check, staging or a `pitr-quarantine` maintenance pod, which you must delete when done), a running Job is labelled `bloodraven.shipstream.io/pitr-key-secret`, or a live verification holds one (`verification-hold.bloodraven.shipstream.io/<uid>`). A malformed value, a wrong `confirm` or a `uid` that is not this group's (a request left over for an earlier group of the same name) is rejected and the annotation removed. Never commit this annotation in GitOps. Releasing a binding makes its archive unreadable unless you kept the passphrase elsewhere.
 - **Group deleted.** Snapshots survive. When no archive needs them: `kubectl delete secret -n <ns> -l app.kubernetes.io/name=mysql-pitr-key,bloodraven.shipstream.io/failover-group-uid=<uid>`.
 
 Never delete a key snapshot to "unstick" a binding, never edit its data (it is immutable; replacing it by hand trips `KeyMaterialLost`), never delete `archive.json` or rewrite manifests, and never enable plaintext fallback as a repair.
@@ -966,12 +966,12 @@ A replica can apply every new transaction from the primary while holding transac
 ### Safe remediation
 Pick one. Both end with the audit clearing the block on its own (INFO `divergence cleared: replica holds no transactions the primary lacks`, Event `DivergenceResolved`, `Degraded` back to `Healthy`) within about 30s, and a stalled ordered update then resumes without further action. Re-annotate a refused planned failover.
 
-1. **Discard** (the transactions are not needed, or have been re-applied by hand): reclone the replica from the primary. The plugin fills in the required `divergentGtid` prefix:
+1. **Discard** (the transactions are not needed, or have been re-applied by hand): reclone the replica from the primary. The plugin builds the value, with the group's name and uid and the required `divergentGtid` prefix:
    ```bash
    kubectl bloodraven reclone <group> <site> -n <ns>
-   # equivalent annotation: bloodraven.shipstream.io/reclone-site=<site>:<first 8+ characters of divergentGtid>
+   # equivalent annotation: bloodraven.shipstream.io/reclone-site=<site>:confirm=<group>:uid=<group uid>:gtidPrefix=<first 8+ characters of the divergentGtid's source UUID>
    ```
-   (`reclone-site=<site>:confirm=<group>` is the cold form for a site with no recorded `divergentGtid`.) The replica is unavailable for the clone and the group has one copy less until it finishes.
+   (`reclone-site=<site>:confirm=<group>:uid=<group uid>` is the cold form for a site with no recorded `divergentGtid`.) The replica is unavailable for the clone and the group has one copy less until it finishes.
 2. **Keep** (the transactions belong in the primary's history): make the primary contain the set. Either replay the decoded events on the primary (review for conflicts first), or, when the transactions must not change the primary's data, commit one empty transaction per GTID on the primary:
    ```sql
    SET GTID_NEXT='<uuid>:<n>'; BEGIN; COMMIT;
@@ -1032,7 +1032,7 @@ Do not:
 ## 35. Deleted `MysqlBackup` stuck Terminating (artifact cleanup)
 
 ### Symptoms
-- A `MysqlBackup` deleted by hand or by retention stays Terminating with the `shipstream.io/mysqlbackup` finalizer.
+- A `MysqlBackup` deleted by hand or by retention stays Terminating with the `bloodraven.shipstream.io/mysqlbackup` finalizer.
 - `ArtifactCleanupFailed` or `ArtifactCleanupBlocked` Warning Events; `bloodraven_backup_artifact_cleanup_failures_total` rising.
 - After an upgrade from an operator whose cleanup ran `cleanup.py`: old Terminating S3 backups with Failed `mysqlbackup-<name>-cleanup` Jobs (new cleanup Jobs are named `mysqlcleanup-<name>`; an old-named Job counts only if the backup owns it). That script needed `util.rmdump`, which MySQL Shell does not have, so S3 cleanup never worked. The new operator replaces those Jobs on its own; let it.
 
@@ -1040,7 +1040,7 @@ Do not:
 1. Read the cause and the recorded destination (`scripts/triage.sh` section 8 prints both):
    ```bash
    kubectl get mysqlbackup <name> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="ArtifactCleanup")]}{"\n"}{.status.artifactStorage}{"\n"}'
-   kubectl get pods -n <ns> -l shipstream.io/resource=backup-cleanup,shipstream.io/mysqlbackup=<name> \
+   kubectl get pods -n <ns> -l bloodraven.shipstream.io/resource=backup-cleanup,bloodraven.shipstream.io/mysqlbackup=<name> \
      -o jsonpath='{range .items[*]}{.metadata.name}{" exit="}{.status.containerStatuses[0].state.terminated.exitCode}{" "}{.status.containerStatuses[0].state.terminated.message}{"\n"}{end}'
    ```
 2. Reasons:
@@ -1083,13 +1083,13 @@ Do not:
 ### Diagnostic steps
 1. List the holds on the backup and the verifications that reference it:
    ```bash
-   kubectl get mysqlbackup <backup> -n <ns> -o json | jq '.metadata.annotations // {} | with_entries(select(.key | startswith("hold.verification.shipstream.io/")))'
+   kubectl get mysqlbackup <backup> -n <ns> -o json | jq '.metadata.annotations // {} | with_entries(select(.key | startswith("verification-hold.bloodraven.shipstream.io/")))'
    kubectl get mysqlbackupverifications -n <ns> -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,BACKUP_UID:.status.backupRef.uid,JOB:.status.jobName'
    ```
 2. For each holding verification, check whether anything still runs:
    ```bash
    kubectl get job mysqlverify-<verification> -n <ns> -o jsonpath='{.status.conditions[*].type}{"\n"}'
-   kubectl get pods -n <ns> -l shipstream.io/mysqlbackup-verification=<verification> -o 'custom-columns=POD:.metadata.name,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp'
+   kubectl get pods -n <ns> -l bloodraven.shipstream.io/mysqlbackup-verification=<verification> -o 'custom-columns=POD:.metadata.name,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp'
    ```
 3. A hold is live while the verification is not finished, or while its Job is unfinished, or while any labelled pod is `Pending` or `Running`. A hold whose verification is gone counts only while that verification's pods still run. An unfinished verification that is not yet pinned holds every successful backup of its group and profile.
 
@@ -1099,7 +1099,7 @@ Do not:
 3. A verification that stays Terminating is waiting for its pods to be gone; it releases its hold and finalizer once they are.
 
 Do not:
-- Remove a `hold.verification.shipstream.io/*` annotation by hand while a pod of that verification runs: retention or cleanup could then delete the artifact under it.
+- Remove a `verification-hold.bloodraven.shipstream.io/*` annotation by hand while a pod of that verification runs: retention or cleanup could then delete the artifact under it.
 - Remove the verification finalizer to hurry deletion. The hold then stays on the backup; it stops counting once the pods are gone, but retention only notices on its next pass.
 
 ## 37. Planned failover left the source fenced
@@ -1358,3 +1358,35 @@ A restore or verification fails with one of `PITRArchiveDivergentHistory`, `PITR
 ### Safe remediation
 - Change `retention` on the profile; it applies the next time a finished backup or verification of that profile is reconciled. To keep failed runs for investigation, set `keepFailed` above 0 (or omit it for 10).
 - Do not delete a held backup by hand to enforce retention (playbook 36), and do not delete backups to free the PITR archive faster than retention would: the binlog cutoff follows the oldest successful backup still kept.
+
+## 44. A site workload is refused (`WorkloadSelectorMismatch`) or an internal payload is unreadable (`MetadataVersionUnsupported`)
+
+### Symptoms
+- `Degraded=True` with reason `WorkloadSelectorMismatch` and a `WorkloadSelectorMismatch` Warning Event naming a Deployment (`mysql-<group>-<site>`) or a Dragonfly StatefulSet (`<group>-dragonfly-<site>`). Spec changes no longer reach that site; its Services may have no endpoints when the old pods carry other label keys. The deployment API reports `unstableReason: WorkloadSelectorMismatch`.
+- `Degraded=True` with reason `MetadataVersionUnsupported` and a Warning Event of the same reason naming `bloodraven.shipstream.io/planned-failover-terminal` or a deployment Lease (`bloodraven.shipstream.io/deployment-lease`). Lease requests fail while a lease record is unreadable. On a `MysqlBackupVerification`, `Verified=False/MetadataVersionUnsupported` ends the run.
+
+### Diagnostic steps
+1. Compare the live selector with what the message says the operator renders:
+   ```bash
+   kubectl get deployment mysql-<group>-<site> -n <ns> -o jsonpath='{.spec.selector.matchLabels}{"\n"}'
+   kubectl get statefulset <group>-dragonfly-<site> -n <ns> -o jsonpath='{.spec.selector.matchLabels}{"\n"}'
+   ```
+   The operator renders `app.kubernetes.io/name`, `app.kubernetes.io/instance` and `bloodraven.shipstream.io/site`. A selector with `shipstream.io/site` is an object left by an earlier release; one with other keys was created by hand under the operator's name.
+2. For `MetadataVersionUnsupported`, read the payload's `schemaVersion`. A higher number than this operator reads means a newer operator wrote it (a downgrade, or two operator versions running against one group):
+   ```bash
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/planned-failover-terminal}{"\n"}'
+   kubectl get leases -n <ns> -l bloodraven.shipstream.io/deployment-kind -o json | jq -r '.items[] | [.metadata.name, (.metadata.annotations["bloodraven.shipstream.io/deployment-lease"] | fromjson? | .schemaVersion)] | @tsv'
+   ```
+
+### Safe remediation
+- **Selector mismatch.** The selector is immutable, so the operator never updates the object and does not retry in a loop. Delete the object and the operator re-creates it with the rendered selector:
+  ```bash
+  kubectl delete deployment mysql-<group>-<site> -n <ns>      # the PVC mysql-<group>-<site>-data is kept
+  kubectl delete statefulset <group>-dragonfly-<site> -n <ns>
+  ```
+  Delete one site at a time, and never the active primary's Deployment while the other sites cannot take over: its MySQL pod stops until the new Deployment's pod starts. Prefer a planned failover away from the site first. The condition clears on the next reconcile after the object is re-created.
+- **Unknown payload version.** Run the operator release that wrote it. A terminal marker naming a run with outcome `ManualRecoveryRequired` still holds automatic failover (fail closed): resolve the run and acknowledge it (playbook 38); any other terminal marker proves nothing and is ignored. A Lease record of an unknown version: once no deployment client uses it, delete the Lease. A refused verification: create a new verification.
+
+Do not:
+- Patch the selector of a refused workload (the API server rejects it) or edit a payload's `schemaVersion` by hand: a payload of a known version but foreign content can be read as proof.
+

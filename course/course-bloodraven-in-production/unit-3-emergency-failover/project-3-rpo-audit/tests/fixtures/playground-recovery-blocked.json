@@ -4,6 +4,7 @@
   "metadata": {
     "name": "playground",
     "namespace": "bloodraven-playground",
+    "uid": "5b0c6a2e-8d1f-4c7a-9e3b-2f6d1a4c8e90",
     "annotations": {
       "bloodraven.shipstream.io/last-failover": "2026-04-30T20:55:52Z",
       "bloodraven.shipstream.io/last-failover-target": "pdx"
@@ -69,7 +70,7 @@
         "type": "Degraded",
         "status": "True",
         "reason": "DivergentTransactions",
-        "message": "Old primary iad has 4 divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=iad to recover",
+        "message": "Old primary iad has 4 divergent transactions — reclone it (kubectl bloodraven reclone playground iad, or annotate bloodraven.shipstream.io/reclone-site=iad:confirm=playground:uid=5b0c6a2e-8d1f-4c7a-9e3b-2f6d1a4c8e90:gtidPrefix=a2cc879c-5f9d-11f1-9fae-8e47bc2a4544) to recover",
         "lastTransitionTime": "2026-04-30T20:58:12Z"
       }
     ]

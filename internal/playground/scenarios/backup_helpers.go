@@ -120,7 +120,7 @@ func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string,
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
-			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
+			Labels: map[string]string{"playground.bloodraven.shipstream.io/created-by-e2e": "true"},
 		},
 		StringData: map[string]string{
 			backupE2EEncryption(name).PassphraseSecretKeyRef.PassphraseSecretKeyOrDefault(): text,
@@ -289,10 +289,10 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel:                     env.FG,
-				v1alpha1.BackupProfileLabel:                     profile,
-				"chaos.playground.bloodraven.io/scenario":       scenarioID,
-				"chaos.playground.bloodraven.io/created-by-e2e": "true",
+				v1alpha1.FailoverGroupLabel:                          env.FG,
+				v1alpha1.BackupProfileLabel:                          profile,
+				"playground.bloodraven.shipstream.io/scenario":       scenarioID,
+				"playground.bloodraven.shipstream.io/created-by-e2e": "true",
 			},
 			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
@@ -315,10 +315,10 @@ func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, b
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel:                     env.FG,
-				v1alpha1.BackupProfileLabel:                     backupE2EProfile,
-				"chaos.playground.bloodraven.io/scenario":       scenarioID,
-				"chaos.playground.bloodraven.io/created-by-e2e": "true",
+				v1alpha1.FailoverGroupLabel:                          env.FG,
+				v1alpha1.BackupProfileLabel:                          backupE2EProfile,
+				"playground.bloodraven.shipstream.io/scenario":       scenarioID,
+				"playground.bloodraven.shipstream.io/created-by-e2e": "true",
 			},
 			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},

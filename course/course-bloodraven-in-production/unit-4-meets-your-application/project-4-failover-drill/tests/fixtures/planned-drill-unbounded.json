@@ -14,7 +14,7 @@
       "retryOnErrorCodes": []
     },
     "appToleration": {
-      "key": "shipstream.io/db-readonly-playground",
+      "key": "bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground",
       "value": "true",
       "effect": "NoExecute",
       "tolerationSeconds": 60

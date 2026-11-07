@@ -13,7 +13,7 @@ make chaos-run SCENARIO=01-clean-primary-kill
 make chaos-run-all                        # bail on first failure (default)
 ```
 
-The runner stamps an in-progress marker (`chaos.playground.bloodraven.io/in-progress` annotation on the MFG) after Precheck and clears it on cleanup or on the pass path. A subsequent run that finds a leftover marker refuses to start and tells you whether the prior owner is still alive (same host + live pid), abandoned (same host + dead pid), or on another host. Override with:
+The runner stamps an in-progress marker (`playground.bloodraven.shipstream.io/in-progress` annotation on the MFG) after Precheck and clears it on cleanup or on the pass path. A subsequent run that finds a leftover marker refuses to start and tells you whether the prior owner is still alive (same host + live pid), abandoned (same host + dead pid), or on another host. Override with:
 
 - `--force` — delete any prior marker before preflight (banner printed).
 - `--auto-reset` — on Precheck failure, shell out to `./playground/reset-mysql.sh && ./playground/setup.sh`, then retry the scenario once. Wipes data; 3-second confirmation pause unless `CI=1`.
@@ -47,7 +47,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `17-partition-replica-no-failover` (§17; asymmetric partition — asserts NO failover and NO self-fence on read-only site)
 - `18-rapid-cr-spec-changes-during-failover` (§18; triggers a failover and applies five rapid memory-request JSON patches at 2s intervals; asserts the cluster converges to {1 writable, 1 read-only, no RecoveryBlocked} with the last-applied memory request landing on every site deployment)
 - `19-reclone-interlock` (§19; self-contained — manufactures divergence, then exercises rejected/accepted reclone annotation cases)
-- `20-shared-node-selector-isolation` (§20; labels primary node into a fake `inventory` FG and asserts that a playground failover taints only `db-readonly-playground`, leaving `db-readonly-inventory` absent and the inventory canary still Running)
+- `20-shared-node-selector-isolation` (§20; labels primary node into a fake `inventory` FG and asserts that a playground failover taints only `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground`, leaving `bloodraven-playground.db-readonly.bloodraven.shipstream.io/inventory` absent and the inventory canary still Running)
 - `21-noexecute-eviction-semantics` (§21; deploys tolerating + non-tolerating canaries on the primary's node, asserts the non-tolerating one is deletion-marked or gone post-failover and the tolerating one stays Running)
 - `22-planned-dragonfly-switchover` (§24; planned MySQL+Dragonfly failover, session-preservation status, active Service endpoint convergence, and Dragonfly promotion metrics)
 - `22-replication-status-after-recovery` (§22; WISHLIST #36 guard — clean primary kill + old-primary auto-recovery, asserts the read-only site's `status.sites[].replication` becomes `Healthy` or `Lagging` within 30s without an operator restart and cross-checks against the sidecar `/status` endpoint)
@@ -104,7 +104,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 - **Relay log drain**: Failover takes up to ~37s when the primary is dead (detection + a drain of at most 30s + promotion). The drain ends as soon as the replica has applied what it already received, so without a backlog it is much shorter. Plan wait times for the bound.
 - **Replication user**: Survives pod restarts but not PVC wipes. After `reset-mysql.sh` the init-users script recreates it on MySQL first boot.
 - **Verify replication between scenarios**: After any failover, always verify replication is actually working (`SELECT SERVICE_STATE FROM performance_schema.replication_connection_status` should show `ON`) before proceeding. GTID divergence from the respawn race (see scenario 1 note) can silently break replication, causing false results in subsequent scenarios.
-- **db-readonly taint blocks PVC provisioning**: The operator applies `shipstream.io/db-readonly-playground:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. `reset-mysql.sh` now scales the operator to 0 before stripping taints (single-shot, no race), so a manual taint clear after a reset is no longer needed. If you wipe state by hand, mirror the same order: scale operator → 0, scale MySQL → 0, delete PVCs, strip taints, scale MySQL → 1, clear stale `status.lastFailover`/`plannedFailover`, scale operator → 1.
+- **db-readonly taint blocks PVC provisioning**: The operator applies `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. `reset-mysql.sh` now scales the operator to 0 before stripping taints (single-shot, no race), so a manual taint clear after a reset is no longer needed. If you wipe state by hand, mirror the same order: scale operator → 0, scale MySQL → 0, delete PVCs, strip taints, scale MySQL → 1, clear stale `status.lastFailover`/`plannedFailover`, scale operator → 1.
 - **`reset-mysql.sh` dumps on timeout**: If the post-reset wait loop times out without both pods Ready, the script writes pods/events/PVC+PV/node-taint/per-container-log forensics under `playground/chaos-results/reset-<timestamp>/` and exits non-zero — no more "two commands you should have remembered" footer.
 - **Distroless containers**: The sidecar and operator images use distroless base images with no shell or userspace tools. Use `kubectl debug --target=<container> --image=busybox` to get a shell with tools like `kill`, `ps`, etc.
 - **JSON patch vs merge patch**: When patching the MysqlFailoverGroup CR, always use `--type json` (JSON Patch). Merge patches on the `spec.sites` array drop required fields (lbIP, storage, zone) and fail validation.
@@ -328,7 +328,7 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 
 **Verify**: New operator either waits for the in-progress clone to finish (MySQL tracks clone state in `performance_schema.clone_status`) or starts a fresh clone. End state: healthy primary/replica pair. No stuck bootstrap phase.
 
-**Caution**: Before deleting the replica PVC, clear the `shipstream.io/db-readonly-playground` taint from the replica's node. Otherwise the local-path-provisioner's helper pod gets evicted by the NoExecute taint and the replacement PVC never provisions, leaving the replica pod stuck in Pending.
+**Caution**: Before deleting the replica PVC, clear the `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground` taint from the replica's node. Otherwise the local-path-provisioner's helper pod gets evicted by the NoExecute taint and the replacement PVC never provisions, leaving the replica pod stuck in Pending.
 
 ---
 
@@ -398,7 +398,7 @@ kubectl -n $NS exec deploy/mysql-playground-$REPLICA -c mysql -- \
 ```bash
 NS=bloodraven-playground
 SITE=<active-site>
-POD=$(kubectl -n $NS get pods -l shipstream.io/site=$SITE -o name)
+POD=$(kubectl -n $NS get pods -l bloodraven.shipstream.io/site=$SITE -o name)
 
 # Kill PID 1 in the sidecar container (triggers container restart, not pod restart)
 # Distroless container has no kill binary — use kubectl debug:
@@ -422,7 +422,7 @@ kubectl -n $NS debug $POD --target=sidecar --image=busybox -- kill 1
 ```bash
 NS=bloodraven-playground
 PRIMARY=$(kubectl -n $NS get mysqlfailovergroups playground -o jsonpath='{.status.activeSite}')
-POD=$(kubectl -n $NS get pods -l shipstream.io/site=$PRIMARY -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl -n $NS get pods -l bloodraven.shipstream.io/site=$PRIMARY -o jsonpath='{.items[0].metadata.name}')
 
 # Record restart count
 kubectl -n $NS get pod/$POD -o jsonpath='{.status.containerStatuses[?(@.name=="mysql")].restartCount}'
@@ -498,7 +498,7 @@ done
 ### 19. Reclone Safety Interlock
 **Category**: Admin-action safety / divergent-GTID confirmation | **Risk**: Medium
 
-**Hypothesis**: The `bloodraven.shipstream.io/reclone-site` annotation rejects bare site names and mismatched GTID prefixes when the target site has a non-empty `status.sites[].divergentGtid`, preventing a fat-fingered `reclone-site=<wrong-site>` from destroying the wrong replica. Cold reclones (no divergence recorded) still accept the bare form.
+**Hypothesis**: The `bloodraven.shipstream.io/reclone-site` annotation rejects a value without a `gtidPrefix`, and a mismatched GTID prefix, when the target site has a non-empty `status.sites[].divergentGtid`, preventing a fat-fingered `reclone-site=<wrong-site>` from destroying the wrong replica. Both forms carry the group's name and uid (`<site>:confirm=<group>:uid=<uid>`, plus `:gtidPrefix=<prefix>` on a diverged site); a cold reclone (no divergence recorded) is accepted in the form without `gtidPrefix`.
 
 **Prerequisite**: Scenario 8 (GTID Divergence Detection) — it creates a site with `divergentGtid` and `recoveryState=RecoveryBlocked` that the interlock gates can be exercised against. Do NOT run `reset-mysql.sh` until this scenario completes; the interlock needs the divergent state scenario 8 leaves behind.
 
@@ -511,22 +511,23 @@ FG=playground
 # Identify the divergent site from scenario 8's aftermath.
 SITE=$(kubectl -n $NS get mfg $FG -o jsonpath='{range .status.sites[?(@.recoveryState=="RecoveryBlocked")]}{.name}{end}')
 DG=$(kubectl -n $NS get mfg $FG -o jsonpath="{.status.sites[?(@.name==\"$SITE\")].divergentGtid}")
-echo "divergent site=$SITE gtid=$DG"
+UID=$(kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.uid}')
+echo "divergent site=$SITE gtid=$DG uid=$UID"
 
-# --- A) Rejected: bare site name against a divergent site ---
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE
+# --- A) Rejected: the confirmed cold form against a divergent site ---
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$UID
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -5
 kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/reclone-site}'; echo
 
 # --- B) Rejected: mismatched GTID prefix ---
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:deadbeef
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$UID:gtidPrefix=deadbeef
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -5
 
-# --- C) Accepted: matching 8-char prefix of divergentGtid ---
+# --- C) Accepted: matching 8-char prefix of divergentGtid's source UUID ---
 PREFIX=$(echo -n "$DG" | cut -c1-8)
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:$PREFIX
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$UID:gtidPrefix=$PREFIX
 # Watch for RecloneRequested and the Bootstrapping condition entering Cloning.
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp -w &
 EVENT_WATCH_PID=$!
@@ -535,8 +536,8 @@ kill $EVENT_WATCH_PID 2>/dev/null
 
 # --- D) Cold reclone still works (no divergence) ---
 # After sub-case C completes the site has rejoined as replica and no longer
-# has divergentGtid in status. The bare form should now be accepted.
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE
+# has divergentGtid in status. The cold form (no gtidPrefix) is accepted.
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$UID
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -3
 ```
@@ -545,35 +546,35 @@ kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.la
 
 | Sub-case | Expected outcome |
 |---|---|
-| A. bare site, divergent | `RecloneRejected` Warning event with "annotation must include the divergent-GTID prefix" text; annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
+| A. cold form, divergent | `RecloneRejected` Warning event saying the value must include `gtidPrefix=` and printing the full form (`…:confirm=<group>:uid=<uid>:gtidPrefix=<prefix>`); annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
 | B. mismatched prefix | `RecloneRejected` Warning event with "does not match the observed divergentGtid" text; annotation removed; site still fenced; no clone executed. |
 | C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` (`True`) and returns to `False`/`NotBootstrapping`, with the recloned site replicating; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
-| D. cold bare site | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms we didn't accidentally make the interlock mandatory in the non-divergent case. |
+| D. cold form | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms the non-divergent case needs no `gtidPrefix`. |
 
 **Timing**: Sub-cases A and B resolve within one sync cycle (~30s; the runner's `sync()` ticker). Sub-case C takes 30-60s for the clone + restart. Sub-case D is the same.
 
 **Important — sync interval**: The runner re-reads CRs every 30s, so the annotation may sit briefly before being processed. If you see no event after 5s, wait up to 35s before concluding rejection isn't firing.
 
-**Cleanup**: `./playground/reset-mysql.sh` is advisable after sub-case D to restore a clean matrix for subsequent scenarios. Clear the `shipstream.io/db-readonly-playground` taint from both nodes after the reset.
+**Cleanup**: `./playground/reset-mysql.sh` is advisable after sub-case D to restore a clean matrix for subsequent scenarios. Clear the `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground` taint from both nodes after the reset.
 
 ---
 
 ### 20. Shared-Node Selector Isolation
 **Category**: Placement / multi-tenant isolation | **Risk**: Low
 
-**Hypothesis**: A node can advertise membership in multiple failover groups at the same site, and a failover for `playground` only applies `shipstream.io/db-readonly-playground`. Workloads for an unrelated group that tolerate `playground`'s taint are not evicted.
+**Hypothesis**: A node can advertise membership in multiple failover groups at the same site, and a failover for `playground` only applies `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground`. Workloads for an unrelated group that tolerate `playground`'s taint are not evicted.
 
 **Injection**:
 ```bash
 NS=bloodraven-playground
 FG=playground
 PRIMARY=$(kubectl -n $NS get mfg $FG -o jsonpath='{.status.activeSite}')
-NODE=$(kubectl get nodes -l "shipstream.io/failover-group.playground=true,shipstream.io/site.playground=$PRIMARY" -o jsonpath='{.items[0].metadata.name}')
+NODE=$(kubectl get nodes -l "bloodraven.shipstream.io/failover-group.playground=true,bloodraven.shipstream.io/site.playground=$PRIMARY" -o jsonpath='{.items[0].metadata.name}')
 
 # Mark the same physical node as also serving an unrelated inventory group.
 kubectl label node $NODE \
-  shipstream.io/failover-group.inventory=true \
-  shipstream.io/site.inventory=$PRIMARY \
+  bloodraven.shipstream.io/failover-group.inventory=true \
+  bloodraven.shipstream.io/site.inventory=$PRIMARY \
   --overwrite
 
 # Simulated inventory workload: it tolerates playground's taint because
@@ -587,10 +588,10 @@ metadata:
     app: inventory-shared-node-canary
 spec:
   nodeSelector:
-    shipstream.io/failover-group.inventory: "true"
-    shipstream.io/site.inventory: "$PRIMARY"
+    bloodraven.shipstream.io/failover-group.inventory: "true"
+    bloodraven.shipstream.io/site.inventory: "$PRIMARY"
   tolerations:
-    - key: shipstream.io/db-readonly-playground
+    - key: bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground
       operator: Exists
       effect: NoExecute
   containers:
@@ -608,8 +609,8 @@ sleep 45
 ```bash
 # The old-primary node should have the playground taint only.
 kubectl get node $NODE -o jsonpath='{.spec.taints[*].key}{"\n"}'
-# Expected includes: shipstream.io/db-readonly-playground
-# Expected excludes: shipstream.io/db-readonly-inventory
+# Expected includes: bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground
+# Expected excludes: bloodraven-playground.db-readonly.bloodraven.shipstream.io/inventory
 
 # The unrelated inventory pod should still be running on the shared node.
 kubectl -n $NS get pod inventory-shared-node-canary -o wide
@@ -619,7 +620,7 @@ kubectl -n $NS get pod inventory-shared-node-canary -o wide
 **Cleanup**:
 ```bash
 kubectl -n $NS delete pod inventory-shared-node-canary --ignore-not-found
-kubectl label node $NODE shipstream.io/failover-group.inventory- shipstream.io/site.inventory- 2>/dev/null || true
+kubectl label node $NODE bloodraven.shipstream.io/failover-group.inventory- bloodraven.shipstream.io/site.inventory- 2>/dev/null || true
 ./playground/chaos.sh recover
 ```
 
@@ -628,7 +629,7 @@ kubectl label node $NODE shipstream.io/failover-group.inventory- shipstream.io/s
 ### 21. NoExecute Eviction Semantics
 **Category**: Placement / eviction contract | **Risk**: Low
 
-**Hypothesis**: During failover, the old active site's selected nodes receive `shipstream.io/db-readonly-playground=true:NoExecute`. Pods without that toleration are evicted; pods with the toleration remain.
+**Hypothesis**: During failover, the old active site's selected nodes receive `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground=true:NoExecute`. Pods without that toleration are evicted; pods with the toleration remain.
 
 **Injection**:
 ```bash
@@ -645,8 +646,8 @@ metadata:
     app: noexecute-evict-canary
 spec:
   nodeSelector:
-    shipstream.io/failover-group.playground: "true"
-    shipstream.io/site.playground: "$PRIMARY"
+    bloodraven.shipstream.io/failover-group.playground: "true"
+    bloodraven.shipstream.io/site.playground: "$PRIMARY"
   containers:
     - name: sleep
       image: busybox:1.36
@@ -660,10 +661,10 @@ metadata:
     app: noexecute-tolerate-canary
 spec:
   nodeSelector:
-    shipstream.io/failover-group.playground: "true"
-    shipstream.io/site.playground: "$PRIMARY"
+    bloodraven.shipstream.io/failover-group.playground: "true"
+    bloodraven.shipstream.io/site.playground: "$PRIMARY"
   tolerations:
-    - key: shipstream.io/db-readonly-playground
+    - key: bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground
       operator: Exists
       effect: NoExecute
   containers:
@@ -985,7 +986,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Timing**: 60-minute timeout.
 
-**Cleanup** (32-minute budget plus the group deletion): deletes `s37-restored` (its Deployments and PVCs are owned by it) only if it carries this run's `chaos.playground.bloodraven.io/run` annotation, with a UID precondition, so a group left by an earlier `--no-cleanup` run is kept; a `Create` that returns `AlreadyExists` fails the step and marks nothing for deletion. Its archive and dump key snapshots have no owner (#203), so after it is gone they are deleted by its UID label (`bloodraven.shipstream.io/failover-group-uid`). Then it deletes the verifications and backups (asserting their RustFS artifacts are removed), drops `chaos_s37_pitr`, restores the original `spec.backup`, deletes the run's passphrase Secret, and waits for a healthy baseline past the anti-flap cooldown. It then waits up to 3 minutes until no non-terminal pod in the namespace (a terminating pod of an old ReplicaSet, a deleted verification's pod) mounts a key snapshot under the run's prefixes, since the operator refuses to release a snapshot a pod still mounts, and releases every archive binding of the run's prefixes, one `bloodraven.shipstream.io/release-pitr-archive-binding=<id>:confirm=<group>` annotation per id, waiting up to 2 minutes each (a failed release is a cleanup warning, and the annotation is taken back), and deletes any key snapshot under those prefixes that no binding names. Finally it deletes every object under each archive prefix the run configured (`e2e/<scenario>/<run-stamp>[-<suffix>]/`). Archive objects are always decrypted with the passphrase bytes stashed when the run created its Secret, never with the live Secret.
+**Cleanup** (32-minute budget plus the group deletion): deletes `s37-restored` (its Deployments and PVCs are owned by it) only if it carries this run's `playground.bloodraven.shipstream.io/run` annotation, with a UID precondition, so a group left by an earlier `--no-cleanup` run is kept; a `Create` that returns `AlreadyExists` fails the step and marks nothing for deletion. Its archive and dump key snapshots have no owner (#203), so after it is gone they are deleted by its UID label (`bloodraven.shipstream.io/failover-group-uid`). Then it deletes the verifications and backups (asserting their RustFS artifacts are removed), drops `chaos_s37_pitr`, restores the original `spec.backup`, deletes the run's passphrase Secret, and waits for a healthy baseline past the anti-flap cooldown. It then waits up to 3 minutes until no non-terminal pod in the namespace (a terminating pod of an old ReplicaSet, a deleted verification's pod) mounts a key snapshot under the run's prefixes, since the operator refuses to release a snapshot a pod still mounts, and releases every archive binding of the run's prefixes, one `bloodraven.shipstream.io/release-pitr-archive-binding=<id>:confirm=<group>:uid=<uid>` annotation per id, waiting up to 2 minutes each (a failed release is a cleanup warning, and the annotation is taken back), and deletes any key snapshot under those prefixes that no binding names. Finally it deletes every object under each archive prefix the run configured (`e2e/<scenario>/<run-stamp>[-<suffix>]/`). Archive objects are always decrypted with the passphrase bytes stashed when the run created its Secret, never with the live Secret.
 
 **Status**: written and compiled against the #206 series-2 API. Its first live runs are the e2e `pitr` job on the #206 PR (label `e2e`), which runs 31, 37, 68 and 70 through `run-all --scenarios`, so each `ResetBeforeRunAll` reset happens; record the run stamps here once they pass. The pre-#206 version of this scenario (`37-pitr-archive-handoff-across-failover`, which expected `PITRCrossSiteOrder`) is gone.
 
@@ -1359,7 +1360,7 @@ is what defers it.
 
 1. **The cold-reclone interlock accepts the documented form.** The
    recipient has no divergent GTID, so the annotation must carry
-   `:confirm=<group>`.
+   `:confirm=<group>:uid=<uid>` and no `gtidPrefix`.
 2. **The unseal really flips the rendering.** When the transient
    `Unsealed`/`Clone` window is caught, the Deployment's keyring volume
    must be an `emptyDir`, not the Secret. A status field alone is not
@@ -1493,7 +1494,7 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 
 **Hypothesis**: Killing a candidate reclone's CLONE INSTANCE session after it has dropped the recipient's data fails the bootstrap: the operator logs `bootstrap failed`, never `bootstrap completed successfully`, and the recipient stays `super_read_only`. With the primary then scaled to 0, the operator logs `failover picker: refusing candidate whose data regressed` and promotes nothing for 45s. When the primary returns it is active again with its data, and the candidate is recloned.
 
-**Injection**: 120 MiB of incompressible filler, `clone_max_data_bandwidth=1` on the recipient, a `reclone-site=<candidate>:confirm=<fg>` request, then `KILL` of the CLONE session once `performance_schema.clone_progress` shows FILE COPY in progress. The session is found through `performance_schema.clone_status.PID`. Its processlist `info` is NULL, because MySQL hides statements that carry a password.
+**Injection**: 120 MiB of incompressible filler, `clone_max_data_bandwidth=1` on the recipient, a `reclone-site=<candidate>:confirm=<fg>:uid=<uid>` request, then `KILL` of the CLONE session once `performance_schema.clone_progress` shows FILE COPY in progress. The session is found through `performance_schema.clone_status.PID`. Its processlist `info` is NULL, because MySQL hides statements that carry a password.
 
 **History (total data loss)**: The operator cleared `read_only` on the recipient for CLONE. The recipient's own sidecar then saw a writable non-active site, fenced it and killed the CLONE session. The operator treated the dropped connection as the expected post-clone restart and reported success on an empty site. This happened unprompted in 2 of about 8 reclones. When the primary later died, the picker promoted the empty site. The sidecar's first fix matched CLONE by processlist `info`, which MySQL hides. It now uses `clone_status`.
 
@@ -1569,7 +1570,7 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 
 Every era's marker, fence and witness run with the §37 background writer on the era's primary; the writer is stopped before the era's flush.
 
-1. Cycle 1: era A (marker, fence T1, witness, flush a); planned A→B; era B (marker, fence T2, witness, **flush b**; the writer is already stopped, so nothing commits on b between the flush and the reclone, which would be an unarchived tail); reclone a (`bloodraven.shipstream.io/reclone-site=<a>:confirm=<group>`, once a is read-only with no recorded divergence; a `RecloneRejected` Event or a failed attempt fails the step at once); planned B→A; era A' (marker, fence T3, witness, flush a). Verifications of β1 at T1, T2 and T3 are each Verified with the exact fenced set, the replay count against the dump's `@.json`, the archive ID and the marker rows.
+1. Cycle 1: era A (marker, fence T1, witness, flush a); planned A→B; era B (marker, fence T2, witness, **flush b**; the writer is already stopped, so nothing commits on b between the flush and the reclone, which would be an unarchived tail); reclone a (`bloodraven.shipstream.io/reclone-site=<a>:confirm=<group>:uid=<uid>`, once a is read-only with no recorded divergence; a `RecloneRejected` Event or a failed attempt fails the step at once); planned B→A; era A' (marker, fence T3, witness, flush a). Verifications of β1 at T1, T2 and T3 are each Verified with the exact fenced set, the replay count against the dump's `@.json`, the archive ID and the marker rows.
 2. Cycle 2: planned A→B; marker M4 on b, with the writer, and **no flush**; reclone a, which wipes a's unarchived binlogs; planned B→A; era A'' (marker, fence T5, witness, flush a). A verification of β1 at T5 refuses `PITRArchiveGap`; the message names b's `server_uuid` and "unarchived tail", and prints exactly b's unarchived tail as a GTID set (what b executed between a's `@@gtid_executed` before the failover and the end of the writer window).
 3. Take backup β2 after the failback, then marker, fence T6, witness, flush a. A verification of β2 at T6 is Verified exactly (a target before β2's dump end would refuse `PITRBackupAfterTarget`, so the covered check uses a new target).
 
@@ -1594,7 +1595,7 @@ Every era's marker, fence and witness run with the §37 background writer on the
 10. **Read binding with the wrong key (C1)**: profile D reads P1 through another spelling of the RustFS endpoint (`http://rustfs.bloodraven-playground.svc:9000`, a distinct destination over the same objects) with a Secret holding wrong bytes. A verification of β1 with `archiveProfileName: D` starts a `pitr-archive-check` Job (a Reader check, carrying annotation `bloodraven.shipstream.io/pitr-key-secret-uid`), D's entry ends `Refused/KeyMismatch` (Warning `PITRArchiveBindingRefused`; the message says the refusal was "reported by the reader check of ..."), and the verification waits, reporting `PITRArchiveBindingNotReady`. Putting the right bytes in D's Secret runs a new check, D's entry is `Bound` and the verification is Verified exactly.
 11. **Status wipe and operator restart**: scale the operator to 0, JSON-patch away `/status/pitrArchiveBindings`, scale it back. P1's and D's entries come back `Bound` with the same snapshots, with the operator line `pitr archive binding changed` `cause=recovery` for each, no `pitr-archive-check` Job and no recorded check (watched for 30 s after the rebuild), and no Deployment or pod change.
 12. **Procedure**: profile C on P2 with a new passphrase; switch to it. P2's entry passes through `Pending/Establishing` (a check Job found the prefix empty) and ends `Bound` on the archive the sidecars report, after one roll; P1's entry is retained. The condition carries the baseline note until a full backup β2 of C, whose stamp's `pitrArchiveID` is P2's and whose dump key is its own snapshot of C's bytes; then the note is gone. A's user Secret is deleted.
-13. **Release**: a release of P1 with a wrong `confirm` is rejected (Warning `PITRArchiveBindingReleaseRejected`, annotation removed, entry unchanged). A verification of β1 with `archiveProfileName: A` starts; once P1's snapshot carries its hold (`hold.verification.shipstream.io/<uid>`), a release with the right `confirm` is refused (Warning `PITRArchiveBindingReleaseRefused`, entry unchanged; a site Deployment that renders P1's destination, references its snapshot in a pod template or carries an undecodable `pitr-render` annotation, or a non-terminal pod referencing the snapshot, would refuse it too). The verification is Verified exactly with A's user Secret gone (the retained snapshot). Then the kept annotation completes: Normal `PITRArchiveBindingReleased`, P1's entry, annotation and snapshots are gone. D's binding is released too.
+13. **Release**: a release of P1 with a wrong `confirm`, and one with this group's name but a stale `uid` (WE-Q9), are rejected (Warning `PITRArchiveBindingReleaseRejected`, annotation removed, entry unchanged). A verification of β1 with `archiveProfileName: A` starts; once P1's snapshot carries its hold (`verification-hold.bloodraven.shipstream.io/<uid>`), a release with the right `confirm` and `uid` is refused (Warning `PITRArchiveBindingReleaseRefused`, entry unchanged; a site Deployment that renders P1's destination, references its snapshot in a pod template or carries an undecodable `pitr-render` annotation, or a non-terminal pod referencing the snapshot, would refuse it too). The verification is Verified exactly with A's user Secret gone (the retained snapshot). Then the kept annotation completes: Normal `PITRArchiveBindingReleased`, P1's entry, annotation and snapshots are gone. D's binding is released too.
 
 **Timing**: 60-minute timeout (unmeasured; the steps add up to about 35-40 minutes). **Cleanup** (32-minute budget plus 4 minutes): removes a leftover release annotation, then as §37 (no restored group; the cleanup releases P2's binding and any binding left under P1), and deletes the extra passphrase Secrets the run created (UID precondition).
 

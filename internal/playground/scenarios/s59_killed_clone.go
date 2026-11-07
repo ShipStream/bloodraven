@@ -6,6 +6,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/controller"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -170,7 +171,10 @@ func s59KillReclone(st *s59State) runner.Step {
 				return fmt.Errorf("open operator tailer: %w", err)
 			}
 			st.recloneAt = time.Now()
-			value := fmt.Sprintf("%s:confirm=%s", st.candidate, env.FG)
+			value, err := recloneValueFor(ctx, env, st.candidate)
+			if err != nil {
+				return err
+			}
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("annotate reclone: %w", err)
 			}
@@ -387,7 +391,7 @@ func s59RepairCandidate(st *s59State) runner.Step {
 					// A failed bootstrap reports Status=False,
 					// Reason=BootstrapFailed (and Degraded=BootstrapFailed).
 					if !requested && time.Since(start) > time.Minute && bootstrapFailed(boot) {
-						value := fmt.Sprintf("%s:confirm=%s", st.candidate, env.FG)
+						value := controller.RecloneAnnotationValue(mfg, st.candidate)
 						if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
 							v1alpha1.RecloneAnnotation, value); err != nil {
 							return false, "", fmt.Errorf("annotate repair reclone: %w", err)

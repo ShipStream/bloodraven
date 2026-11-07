@@ -2,12 +2,12 @@
   "flashcards": [
     {
       "front": "The `mysql-playground-primary` Service selects on which pod labels?",
-      "back": "Two: `app.kubernetes.io/instance=playground` and `shipstream.io/role=primary`. No health label.",
+      "back": "Two: `app.kubernetes.io/instance=playground` and `bloodraven.shipstream.io/role=primary`. No health label.",
       "orderIndex": 0
     },
     {
       "front": "The `mysql-playground-replicas` Service selects on which pod labels?",
-      "back": "Three: `app.kubernetes.io/instance=playground`, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.",
+      "back": "Three: `app.kubernetes.io/instance=playground`, `bloodraven.shipstream.io/role=replica`, and `bloodraven.shipstream.io/healthy=true`.",
       "orderIndex": 1
     },
     {
@@ -16,7 +16,7 @@
       "orderIndex": 2
     },
     {
-      "front": "A pod is stamped `shipstream.io/role=fenced`. What changes at the Service layer?",
+      "front": "A pod is stamped `bloodraven.shipstream.io/role=fenced`. What changes at the Service layer?",
       "back": "It matches neither the `-primary` nor the `-replicas` selector, so it drops out of both group endpoints while still running.",
       "orderIndex": 3
     },
@@ -73,10 +73,10 @@
         "`mysql-playground-reader-internal`, the stable in-cluster address"
       ],
       "correctOptionIndex": 0,
-      "explanation": "`mysql-playground-replicas` is the group read endpoint — instance, `shipstream.io/role=replica` and `shipstream.io/healthy=yes` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: ReadOnly` site, its per-site Service *does* carry the same `healthy=yes` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)"
+      "explanation": "`mysql-playground-replicas` is the group read endpoint — instance, `bloodraven.shipstream.io/role=replica` and `bloodraven.shipstream.io/healthy=true` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: ReadOnly` site, its per-site Service *does* carry the same `healthy=true` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)"
     },
     {
-      "question": "During the draining phase of a planned failover, the operator stamps the `iad` pod `shipstream.io/role=fenced`. Which Service still resolves to that pod?",
+      "question": "During the draining phase of a planned failover, the operator stamps the `iad` pod `bloodraven.shipstream.io/role=fenced`. Which Service still resolves to that pod?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 1,
       "options": [
@@ -86,7 +86,7 @@
         "None; the operator deletes the pod as part of fencing"
       ],
       "correctOptionIndex": 0,
-      "explanation": "The per-site Services select on name, instance and `shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `PrimaryCandidate`; on a `role: ReadOnly` site the per-site Service adds a `healthy=yes` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)"
+      "explanation": "The per-site Services select on name, instance and `bloodraven.shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `PrimaryCandidate`; on a `role: ReadOnly` site the per-site Service adds a `healthy=true` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)"
     },
     {
       "question": "A `DisasterRecovery` site holds the freshest GTID set when the primary dies, so Bloodraven will promote it rather than lose those transactions.",

@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -494,7 +493,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	}
 	podSC, containerSC := mergeSecurityContexts(userPod, userCont)
 
-	sourceSnapshot, err := json.Marshal(verificationBackupSnapshot(backup))
+	sourceSnapshot, err := encodeVerificationSource(verificationBackupSnapshot(backup))
 	if err != nil {
 		return nil, fmt.Errorf("encode verification source snapshot: %w", err)
 	}
@@ -522,7 +521,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 					// this pod and never touches the group's MySQL, so the
 					// read-only side is a fine place for it and a failover
 					// must not evict a long-running run.
-					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					Tolerations:    groupReadOnlyTolerations(fg),
 					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{

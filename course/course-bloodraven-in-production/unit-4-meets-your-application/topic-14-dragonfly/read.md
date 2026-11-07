@@ -19,17 +19,17 @@ record of truth.
 ## One Service, two labels, AND-gated
 
 Bloodraven creates one app-facing Service, `playground-dragonfly`, whose selector AND-gates two labels the
-operator stamps on Dragonfly pods: `shipstream.io/dragonfly-role=master` and
-`shipstream.io/dragonfly-traffic=enabled`. A pod is an endpoint only when **both** match. Role says
+operator stamps on Dragonfly pods: `bloodraven.shipstream.io/dragonfly-role=master` and
+`bloodraven.shipstream.io/dragonfly-traffic=true`. A pod is an endpoint only when **both** match. Role says
 which pod is master; traffic is the canonical "this pod serves writes" gate.
 
 Now the part worth slowing down for. To shed an endpoint the operator **deletes** the traffic key. It
 does not stamp a disabled value. The code says why: "Removing the label (set=false) is preferred over
 stamping a 'disabled' value because the active-Service selector is an exists-and-equals check on
-'enabled'" (`internal/controller/dragonfly_labels.go`).
+'true'" (`internal/controller/dragonfly_labels.go`).
 
 ```widget
-{"type":"anatomy","title":"shipstream.io/dragonfly-traffic=enabled","parts":[{"text":"shipstream.io/","label":"prefix","note":"Bloodraven's own label namespace. Nothing outside the operator writes it."},{"text":"dragonfly-traffic","label":"key","note":"The gate. The active Service selector is an exists-and-equals check on this key: absent key, no match, no endpoint."},{"text":"enabled","label":"the only value that means anything","note":"There is no 'disabled' value. Shedding deletes the key, because a deleted key cannot be misread — a written value depends on the selector agreeing what it means."}]}
+{"type":"anatomy","title":"bloodraven.shipstream.io/dragonfly-traffic=true","parts":[{"text":"bloodraven.shipstream.io/","label":"prefix","note":"Bloodraven's own label domain; every Bloodraven key uses it. Nothing outside the operator writes this label."},{"text":"dragonfly-traffic","label":"key","note":"The gate. The active Service selector is an exists-and-equals check on this key: absent key, no match, no endpoint."},{"text":"true","label":"the only value that means anything","note":"A boolean label value is always true or false, and this one is only ever true: there is no 'false' value written. Shedding deletes the key, because a deleted key cannot be misread — a written value depends on the selector agreeing what it means."}]}
 ```
 
 Derive the consequence yourself. The takeover sequence strips the source's traffic key *before* it

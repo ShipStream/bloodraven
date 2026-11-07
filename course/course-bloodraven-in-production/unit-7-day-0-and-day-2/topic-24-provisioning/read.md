@@ -180,8 +180,8 @@ spec:
       zone: us-east-1a
       lbIP: "10.20.30.11"                 # required unless role is ReadOnly
       taintNodeSelector:                  # required unless role is ReadOnly
-        shipstream.io/failover-group.ledger: "true"
-        shipstream.io/site.ledger: iad
+        bloodraven.shipstream.io/failover-group.ledger: "true"
+        bloodraven.shipstream.io/site.ledger: iad
       storage:
         storageClassName: fast-ssd-east
         size: 500Gi
@@ -213,7 +213,7 @@ memory, and `Guaranteed` is the class the kubelet evicts last under node pressur
 for memory pressure is an unplanned failover you did not schedule.
 
 **`taintNodeSelector` labels must already be on the nodes.** The operator applies the
-`shipstream.io/db-readonly-<group>` `NoExecute` taint from Unit 4 by selecting nodes with these
+`<namespace>.db-readonly.bloodraven.shipstream.io/<group>` `NoExecute` taint from Unit 4 by selecting nodes with these
 labels. Get the label wrong and nothing errors — the taint is simply applied to nothing, and the
 eviction half of your failover strategy silently does not exist.
 

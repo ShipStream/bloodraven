@@ -16,13 +16,12 @@ package controller
 
 import (
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 )
 
 const (
@@ -52,80 +51,44 @@ type PlannedFailoverRequest struct {
 	MaxLagWait time.Duration
 }
 
-// annotationValueRE is A-78's value charset for one-shot action
-// annotations: a value never contains ':' or '=', so the pair split is
-// unambiguous.
-var annotationValueRE = regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
+// plannedFailoverGrammar is the planned-failover annotation's A-78
+// grammar: the target site, optionally with a maxLagWait override.
+var plannedFailoverGrammar = actionvalue.Grammar{Keys: []string{"maxLagWait"}}
 
 // parsePlannedFailoverAnnotation parses a planned-failover annotation
-// value. The grammar is A-78's <subject>(:<key>=<value>)*:
+// value. The grammar is A-78's <subject>(:<key>=<value>)*
+// (internal/actionvalue):
 //
 //	<siteName>
 //	<siteName>:maxLagWait=<duration>
 //
-// The subject is the target site. Each pair splits at its first '=', its
-// value matches ^[A-Za-z0-9._/+-]+$, and a key appears at most once.
-// Whitespace around the whole value is trimmed (a shell heredoc's trailing
-// newline). Unknown keys are rejected so typos do not silently accept a
-// request with default knobs. Returns a PlannedFailoverRequest on success;
-// an error on an empty pair, an unknown or repeated key, or a malformed
-// value.
+// The subject is the target site. Unknown keys are rejected so typos do
+// not silently accept a request with default knobs. Returns a
+// PlannedFailoverRequest on success; an error on an empty value or pair,
+// an unknown or repeated key, or a malformed value.
 func parsePlannedFailoverAnnotation(raw string) (PlannedFailoverRequest, error) {
-	v := strings.TrimSpace(raw)
-	if v == "" {
+	v, err := actionvalue.Parse(raw, plannedFailoverGrammar)
+	if err != nil {
+		// ":maxLagWait=5s" (overrides with no target) is rejected here,
+		// so every caller's parse-error path consumes it; a run must
+		// never be built with an empty targetSite.
 		return PlannedFailoverRequest{}, fmt.Errorf(
-			"planned-failover annotation is empty; expected <site>[:maxLagWait=<duration>]")
+			"planned-failover annotation %w; expected <site>[:maxLagWait=<duration>]", err)
 	}
-
-	parts := strings.Split(v, ":")
-	req := PlannedFailoverRequest{Site: parts[0]}
-	if req.Site == "" {
-		// ":maxLagWait=5s": overrides with no target. Rejected here, so
-		// every caller's parse-error path consumes it; a run must never
-		// be built with an empty targetSite.
-		return PlannedFailoverRequest{}, fmt.Errorf(
-			"planned-failover annotation %q names no site; expected <site>[:maxLagWait=<duration>]", v)
+	req := PlannedFailoverRequest{Site: v.Subject()}
+	if val, ok := v.Get("maxLagWait"); ok {
+		d, err := time.ParseDuration(val)
+		if err != nil {
+			return PlannedFailoverRequest{}, fmt.Errorf(
+				"planned-failover annotation: maxLagWait=%q is not a valid duration: %w", val, err)
+		}
+		if d < v1alpha1.PlannedFailoverMaxLagWaitMin || d > v1alpha1.PlannedFailoverMaxLagWaitMax {
+			return PlannedFailoverRequest{}, fmt.Errorf(
+				"planned-failover annotation: maxLagWait must be between %s and %s (got %s)",
+				compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMin), compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMax), d)
+		}
+		req.MaxLagWait = d
 	}
-	if !annotationValueRE.MatchString(req.Site) {
-		return PlannedFailoverRequest{}, fmt.Errorf(
-			"planned-failover annotation: site %q contains characters outside [A-Za-z0-9._/+-]", req.Site)
-	}
-
-	seen := map[string]bool{}
-	for _, kv := range parts[1:] {
-		key, val, ok := strings.Cut(kv, "=")
-		if !ok || key == "" {
-			return PlannedFailoverRequest{}, fmt.Errorf(
-				"planned-failover annotation override %q must be key=value", kv)
-		}
-		if seen[key] {
-			return PlannedFailoverRequest{}, fmt.Errorf(
-				"planned-failover annotation: key %q appears more than once", key)
-		}
-		seen[key] = true
-		if !annotationValueRE.MatchString(val) {
-			return PlannedFailoverRequest{}, fmt.Errorf(
-				"planned-failover annotation: %s=%q: the value must match [A-Za-z0-9._/+-]+", key, val)
-		}
-		switch key {
-		case "maxLagWait":
-			d, err := time.ParseDuration(val)
-			if err != nil {
-				return PlannedFailoverRequest{}, fmt.Errorf(
-					"planned-failover annotation: maxLagWait=%q is not a valid duration: %w", val, err)
-			}
-			if d < v1alpha1.PlannedFailoverMaxLagWaitMin || d > v1alpha1.PlannedFailoverMaxLagWaitMax {
-				return PlannedFailoverRequest{}, fmt.Errorf(
-					"planned-failover annotation: maxLagWait must be between %s and %s (got %s)",
-					compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMin), compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMax), d)
-			}
-			req.MaxLagWait = d
-		default:
-			return PlannedFailoverRequest{}, fmt.Errorf(
-				"planned-failover annotation: unknown key %q (supported: maxLagWait)", key)
-		}
-	}
-
 	return req, nil
 }
 

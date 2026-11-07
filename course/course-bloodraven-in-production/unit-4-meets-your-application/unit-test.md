@@ -45,7 +45,7 @@ Writing the `DNSEndpoint` is where Bloodraven's authority ends. The operator can
 
 **Type:** MULTIPLE_CHOICE
 
-After promoting pdx, Bloodraven taints iad's nodes with `shipstream.io/db-readonly-playground=true:NoExecute`. On one of those nodes sit a batch worker with no tolerations and a metrics agent that tolerates the key with `tolerationSeconds: 600`. The `reader` site's MySQL pod sits on a third node. What happens?
+After promoting pdx, Bloodraven taints iad's nodes with `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground=true:NoExecute`. On one of those nodes sit a batch worker with no tolerations and a metrics agent that tolerates the key with `tolerationSeconds: 600`. The `reader` site's MySQL pod sits on a third node. What happens?
 
 - The batch worker is evicted immediately. The metrics agent stays bound for its 600 s, after which the node lifecycle controller evicts it. The reader's node is never tainted at all — a `role: ReadOnly` site is already read-only, so there is nothing to demote.
 - All three go immediately: `NoExecute` evicts every pod on a tainted node, and `tolerationSeconds` only has meaning under `NoSchedule`.
@@ -93,7 +93,7 @@ Every mechanism fired correctly and every one of them missed, which is the whole
 
 A long-running JVM service talks to `playground`. It runs in a third site with no MySQL in it, and restarting it is expensive — a cold instance takes a long warm-up before it serves at rate. Cross-site write latency is comfortably within budget. Which approach gets it across a primary move?
 
-- Taint-based: drop the service's toleration for `shipstream.io/db-readonly-playground` so the `NoExecute` taint evicts it at a promotion and it returns with a fresh pool.
+- Taint-based: drop the service's toleration for `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground` so the `NoExecute` taint evicts it at a promotion and it returns with a fresh pool.
 - Service-based: keep it up, bound the pool's connection lifetime, retry specifically on the read-only write errors 1290 and 1792, and split reads to `mysql-playground-replicas` while writes resolve through `mysql-playground-primary`.
 - Site-local warm standby: run an instance at every site and let only the one co-located with the current primary take writes.
 - Service-based, tuned for the failure: raise the pool size so a promotion has spare connections, set `reconnect=true`, and drop `spec.dns.ttlSeconds` to 10.
@@ -167,7 +167,7 @@ While Bloodraven moves the Dragonfly master, both the old and the new instance b
 
 **Explanation:**
 
-False — and the mechanism that prevents it is deliberate. The active Service AND-gates two labels the operator stamps on Dragonfly pods, `shipstream.io/dragonfly-role=master` and `shipstream.io/dragonfly-traffic=enabled`, and a pod is an endpoint only when both match. To shed an endpoint the operator *deletes* the traffic key rather than stamping some disabled value, because the selector is an exists-and-equals check on `enabled` and an absent key cannot match. The takeover strips the source's traffic key before it promotes the target and stamps the target's key only afterwards, so there is no instant at which both carry it; the steady-state label sweep honours the same window by skipping the source mid-takeover, since re-stamping it would re-attach the old master to the active Service — exactly the bug the strip prevents. Had the operator written `dragonfly-traffic=disabled` instead, correctness would depend on the selector and the writer agreeing about a magic string. Deletion needs no agreement. (objective 12)
+False — and the mechanism that prevents it is deliberate. The active Service AND-gates two labels the operator stamps on Dragonfly pods, `bloodraven.shipstream.io/dragonfly-role=master` and `bloodraven.shipstream.io/dragonfly-traffic=true`, and a pod is an endpoint only when both match. To shed an endpoint the operator *deletes* the traffic key rather than stamping some disabled value, because the selector is an exists-and-equals check on `true` and an absent key cannot match. The takeover strips the source's traffic key before it promotes the target and stamps the target's key only afterwards, so there is no instant at which both carry it; the steady-state label sweep honours the same window by skipping the source mid-takeover, since re-stamping it would re-attach the old master to the active Service — exactly the bug the strip prevents. Had the operator written `dragonfly-traffic=disabled` instead, correctness would depend on the selector and the writer agreeing about a magic string. Deletion needs no agreement. (objective 12)
 
 ## Question 11
 

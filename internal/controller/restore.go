@@ -1581,7 +1581,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 					// Evicting it mid-load because a failover tainted its
 					// node would leave a half-dropped or half-loaded schema;
 					// let it finish or fail on its own instead.
-					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					Tolerations:    groupReadOnlyTolerations(fg),
 					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{

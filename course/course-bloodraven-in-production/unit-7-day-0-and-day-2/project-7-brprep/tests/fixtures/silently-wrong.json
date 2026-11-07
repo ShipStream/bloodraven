@@ -74,8 +74,8 @@
         },
         "lbIP": "10.20.30.11",
         "taintNodeSelector": {
-          "shipstream.io/failover-group.ledger": "true",
-          "shipstream.io/site.ledger": "iad"
+          "bloodraven.shipstream.io/failover-group.ledger": "true",
+          "bloodraven.shipstream.io/site.ledger": "iad"
         }
       },
       {
@@ -99,8 +99,8 @@
         },
         "lbIP": "10.20.30.12",
         "taintNodeSelector": {
-          "shipstream.io/failover-group.ledger": "true",
-          "shipstream.io/site.ledger": "pdx"
+          "bloodraven.shipstream.io/failover-group.ledger": "true",
+          "bloodraven.shipstream.io/site.ledger": "pdx"
         }
       },
       {

@@ -54,7 +54,7 @@ func TestBackupRetry_HistoryDoesNotSuppressNewRun(t *testing.T) {
 			}
 			for _, b := range backups.Items {
 				if b.Annotations[v1alpha1.TriggeredByAnnotation] == "retry/nightly/attempt-2" {
-					if b.Labels["shipstream.io/backup-retry-of"] != string(failed.UID) || b.Annotations["shipstream.io/backup-attempt"] != "2" {
+					if b.Labels["bloodraven.shipstream.io/backup-retry-of"] != string(failed.UID) || b.Annotations["bloodraven.shipstream.io/backup-attempt"] != "2" {
 						t.Fatalf("retry lacks durable predecessor/attempt: %+v", b.ObjectMeta)
 					}
 					return
@@ -98,7 +98,7 @@ func TestBackupRetry_CreateConvergesAfterLostStatusAndStaleList(t *testing.T) {
 		t.Fatalf("created duplicate successors after lost status/stale list: backups=%d", len(backups.Items))
 	}
 	for _, b := range backups.Items {
-		if b.Name != failed.Name && b.Annotations["shipstream.io/backup-attempt"] != "2" {
+		if b.Name != failed.Name && b.Annotations["bloodraven.shipstream.io/backup-attempt"] != "2" {
 			t.Fatalf("retry attempt was lost with status: %+v", b)
 		}
 	}

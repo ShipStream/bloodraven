@@ -123,7 +123,7 @@ func TestPITRBindingReleaseSerializedWithOrderedRender(t *testing.T) {
 			if got := e.siteRender("iad").KeySecretName; got == entryA.Encryption.KeySecretName {
 				t.Fatalf("fixture: iad already renders A's snapshot %s", got)
 			}
-			e.release(entryA.ID + ":confirm=" + pbtName)
+			e.release(entryA.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 			armed = true
 			e.pass()
 			wg.Wait()
@@ -203,7 +203,7 @@ func TestPITRBindingReleaseWaitsForInFlightRender(t *testing.T) {
 		if fg.Annotations == nil {
 			fg.Annotations = map[string]string{}
 		}
-		fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = entryA.ID + ":confirm=" + pbtName
+		fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = entryA.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID)
 	})
 	e.pass()
 	close(proceed)
@@ -234,7 +234,7 @@ func TestPITRBindingReleaseCrashAfterStatusWrite(t *testing.T) {
 		return c.Delete(ctx, obj, opts...)
 	}}
 	e, a, entry := pbtReleaseEnv(t, funcs)
-	e.release(entry.ID + ":confirm=" + pbtName)
+	e.release(entry.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 	fg := e.fg()
 	if _, err := e.r.reconcilePITRArchiveBindings(context.Background(), fg); err == nil {
 		t.Fatal("the crashed release reported success")

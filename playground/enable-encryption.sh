@@ -366,7 +366,7 @@ warn "sites did not all seal within 15 minutes"
 report_status
 echo
 info "forensics: keyring component files and status on one MySQL pod"
-pod=$(kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=mysql,shipstream.io/site" \
+pod=$(kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=mysql,bloodraven.shipstream.io/site" \
 	-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [[ -n "$pod" ]]; then
 	kubectl -n "$NAMESPACE" exec "$pod" -c mysql -- sh -c '

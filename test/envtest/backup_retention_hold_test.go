@@ -20,7 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const holdAnnotationPrefix = "hold.verification.shipstream.io/"
+const holdAnnotationPrefix = v1alpha1.VerificationHoldAnnotationPrefix
 
 func hasHold(b *v1alpha1.MysqlBackup) bool {
 	for key := range b.Annotations {
@@ -35,7 +35,7 @@ func createHeldTestBackup(t *testing.T, ns, fgName, name string, completed time.
 	t.Helper()
 	b := newSucceededBackup(ns, fgName, "nightly-s3")
 	b.Name = name
-	b.Finalizers = []string{"shipstream.io/mysqlbackup"}
+	b.Finalizers = []string{"bloodraven.shipstream.io/mysqlbackup"}
 	if err := k8sClient.Create(ctx, b); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 		t.Fatalf("launch did not stamp the hold: %v %v", err, backup.Annotations)
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "reader-pod", Namespace: ns, Labels: map[string]string{"shipstream.io/mysqlbackup-verification": v.Name}},
+		ObjectMeta: metav1.ObjectMeta{Name: "reader-pod", Namespace: ns, Labels: map[string]string{"bloodraven.shipstream.io/mysqlbackup-verification": v.Name}},
 		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "verify", Image: "verify"}}},
 	}
 	if err := k8sClient.Create(ctx, pod); err != nil {

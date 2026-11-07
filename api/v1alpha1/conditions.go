@@ -65,10 +65,13 @@ const (
 	// ConditionDegraded is False/Healthy, Unknown/Initializing, or True
 	// with the most important problem: a cross-site alert (SplitBrain,
 	// NoPrimary, TotalLoss, CrossSiteAlert), BootstrapFailed, a site that
-	// is not healthy (SiteUnhealthy), or a per-site replication problem
+	// is not healthy (SiteUnhealthy), DivergentTransactions, something the
+	// operator refuses to act on (WorkloadSelectorMismatch: a site
+	// workload whose immutable selector differs from the rendered one;
+	// MetadataVersionUnsupported: an internal annotation payload with an
+	// unknown schemaVersion), a per-site replication problem
 	// (ReplicationBroken, ReplicationError, ReplicationLagging,
-	// ReplicationSourceMismatch), DivergentTransactions or
-	// RestoreReclonePending.
+	// ReplicationSourceMismatch) or RestoreReclonePending.
 	ConditionDegraded = "Degraded"
 	// ConditionDivergentPromotion records that a site holding transactions its
 	// former primary lacked was promoted. Set by the operator, removed only by
@@ -247,6 +250,11 @@ const (
 	ReasonWaitOldPrimary            = "WaitOldPrimary"
 	ReasonWaitReplica               = "WaitReplica"
 	ReasonWaitingForRestart         = "WaitingForRestart"
+	// ReasonWorkloadSelectorMismatch is the Degraded reason while a site's
+	// Deployment or Dragonfly StatefulSet has a selector other than the one
+	// the operator renders. The selector is immutable, so the workload is
+	// not updated until it is deleted and re-created.
+	ReasonWorkloadSelectorMismatch = "WorkloadSelectorMismatch"
 )
 
 // MysqlBackup condition reasons.
@@ -363,8 +371,13 @@ const (
 	ReasonBuildJobFailed         = "BuildJobFailed"         // MysqlBackup, MysqlBackupVerification
 	ReasonFailed                 = "Failed"                 // MysqlBackup, MysqlBackupVerification
 	ReasonGroupNotFound          = "GroupNotFound"          // MysqlBackup, MysqlBackupVerification
-	ReasonProfileNotFound        = "ProfileNotFound"        // MysqlBackup, MysqlBackupVerification
-	ReasonSucceeded              = "Succeeded"              // MysqlBackup, MysqlBackupVerification
+	// ReasonMetadataVersionUnsupported: an internal annotation payload
+	// (A-80) carries a schemaVersion this operator does not know. On a
+	// MysqlFailoverGroup it is a Degraded reason; on a
+	// MysqlBackupVerification the Verified reason of the failed run.
+	ReasonMetadataVersionUnsupported = "MetadataVersionUnsupported" // MysqlFailoverGroup, MysqlBackupVerification
+	ReasonProfileNotFound            = "ProfileNotFound"            // MysqlBackup, MysqlBackupVerification
+	ReasonSucceeded                  = "Succeeded"                  // MysqlBackup, MysqlBackupVerification
 )
 
 // PITRToken is a PITR refusal token: the first word of a PITR Job's

@@ -358,21 +358,23 @@ func TestPITRRecloneRequest(t *testing.T) {
 	}{
 		{"divergent site not yet blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly}, true, false, ""},
 		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, true, false, ""},
-		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, true, "iad:3e11fa47"},
+		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, true, "iad:confirm=mfg:uid=u-1:gtidPrefix=3e11fa47"},
 		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateUnreachable, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, false, ""},
-		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}, false, true, "iad:confirm=mfg"},
+		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}, false, true, "iad:confirm=mfg:uid=u-1"},
 		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, false, false, ""},
 		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked"}, false, false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ready, value, msg := pitrRecloneRequest([]v1alpha1.SiteStatus{{Name: "pdx", State: v1alpha1.SiteStateWritable}, c.site}, "iad", "mfg", c.divergent)
+			mfg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "mfg", UID: "u-1"},
+				Status: v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{{Name: "pdx", State: v1alpha1.SiteStateWritable}, c.site}}}
+			ready, value, msg := pitrRecloneRequest(mfg, "iad", c.divergent)
 			if ready != c.ready || value != c.value {
 				t.Fatalf("ready=%v value=%q, want %v %q (%s)", ready, value, c.ready, c.value, msg)
 			}
 		})
 	}
-	if ready, _, _ := pitrRecloneRequest(nil, "iad", "mfg", false); ready {
+	if ready, _, _ := pitrRecloneRequest(&v1alpha1.MysqlFailoverGroup{}, "iad", false); ready {
 		t.Error("an absent site is not ready")
 	}
 }
@@ -1013,8 +1015,8 @@ func TestPITRBindingIDsUnderPrefixes(t *testing.T) {
 	if got := pitrBindingIDsUnderPrefixes(mfg, nil, nil); len(got) != 0 {
 		t.Errorf("no prefix must select nothing, got %v", got)
 	}
-	if pitrReleaseValue("pab-0000000000000001", "playground") != "pab-0000000000000001:confirm=playground" {
-		t.Error("the release value must be <id>:confirm=<group>")
+	if pitrReleaseValue("pab-0000000000000001", "playground", "u-1") != "pab-0000000000000001:confirm=playground:uid=u-1" {
+		t.Error("the release value must be <id>:confirm=<group>:uid=<uid>")
 	}
 	if !strings.Contains(pitrGroupSnapshotSelector("u-1"), "bloodraven.shipstream.io/failover-group-uid=u-1") ||
 		!strings.Contains(pitrGroupSnapshotSelector("u-1"), "mysql-pitr-key") || !strings.Contains(pitrGroupSnapshotSelector("u-1"), "mysql-dump-key") {

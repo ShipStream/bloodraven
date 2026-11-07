@@ -347,7 +347,7 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 					// The check only talks to storage, never to the
 					// Kubernetes API.
 					AutomountServiceAccountToken: boolPtr(false),
-					Tolerations:                  groupReadOnlyTolerations(fg.Name),
+					Tolerations:                  groupReadOnlyTolerations(fg),
 					Containers: []corev1.Container{{
 						Name:                     pitrCheckContainerName,
 						Image:                    operatorImageFromEnv,

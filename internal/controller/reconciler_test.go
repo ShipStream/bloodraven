@@ -51,7 +51,7 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					ServerID:          101,
 					Zone:              "lion-dc1",
 					LBIP:              "203.0.113.1",
-					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "local-dc1",
 						Size:             resource.MustParse("100Gi"),
@@ -68,7 +68,7 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					ServerID:          102,
 					Zone:              "lion-dc2",
 					LBIP:              "203.0.113.2",
-					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc2"},
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "local-dc2",
 						Size:             resource.MustParse("100Gi"),
@@ -230,7 +230,7 @@ func TestReconcile_CreatesDeployments(t *testing.T) {
 
 		// Verify per-group taint toleration key
 		tolerations := deploy.Spec.Template.Spec.Tolerations
-		expectedKey := v1alpha1.ReadOnlyTaintKey("lion")
+		expectedKey := v1alpha1.ReadOnlyTaintKey("shared-lion", "lion")
 		found := false
 		for _, tol := range tolerations {
 			if tol.Key == expectedKey && tol.Operator == corev1.TolerationOpExists && tol.Effect == "" {
@@ -316,7 +316,7 @@ func TestReconcile_ReplicasServiceSelector(t *testing.T) {
 	if svc.Spec.Selector[v1alpha1.RoleLabel] != "replica" {
 		t.Errorf("replicas service selector role: expected 'replica', got %q", svc.Spec.Selector[v1alpha1.RoleLabel])
 	}
-	if svc.Spec.Selector[v1alpha1.HealthyLabel] != "yes" {
+	if svc.Spec.Selector[v1alpha1.HealthyLabel] != v1alpha1.LabelValueTrue {
 		t.Errorf("replicas service selector healthy: expected 'yes', got %q", svc.Spec.Selector[v1alpha1.HealthyLabel])
 	}
 }
@@ -460,10 +460,10 @@ func TestCRConfigToTopologyConfig(t *testing.T) {
 	if time.Duration(tc.ConnectionDrainTimeout) != 17*time.Second {
 		t.Errorf("expected connection drain timeout 17s, got %v", time.Duration(tc.ConnectionDrainTimeout))
 	}
-	if tc.Sites[0].TaintSelector != "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc1" {
+	if tc.Sites[0].TaintSelector != "bloodraven.shipstream.io/failover-group.lion=true,bloodraven.shipstream.io/site.lion=dc1" {
 		t.Errorf("expected dc1 taint selector, got %q", tc.Sites[0].TaintSelector)
 	}
-	if tc.Sites[1].TaintSelector != "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc2" {
+	if tc.Sites[1].TaintSelector != "bloodraven.shipstream.io/failover-group.lion=true,bloodraven.shipstream.io/site.lion=dc2" {
 		t.Errorf("expected dc2 taint selector, got %q", tc.Sites[1].TaintSelector)
 	}
 }
@@ -520,8 +520,8 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 	fg.DeletionTimestamp = &now
 
 	tainter := testutil.NewFakeTainter()
-	tainter.Taints["shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc1"] = true
-	tainter.Taints["shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc2"] = true
+	tainter.Taints["bloodraven.shipstream.io/failover-group.lion=true,bloodraven.shipstream.io/site.lion=dc1"] = true
+	tainter.Taints["bloodraven.shipstream.io/failover-group.lion=true,bloodraven.shipstream.io/site.lion=dc2"] = true
 
 	scheme := testScheme()
 	allObjs := []client.Object{newTestSecret(), fg}
@@ -541,10 +541,10 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 	}
 
 	// Verify taints were removed for both sites
-	if tainter.IsTainted("shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc1") {
+	if tainter.IsTainted("bloodraven.shipstream.io/failover-group.lion=true,bloodraven.shipstream.io/site.lion=dc1") {
 		t.Error("expected taint to be removed for dc1")
 	}
-	if tainter.IsTainted("shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc2") {
+	if tainter.IsTainted("bloodraven.shipstream.io/failover-group.lion=true,bloodraven.shipstream.io/site.lion=dc2") {
 		t.Error("expected taint to be removed for dc2")
 	}
 
@@ -996,7 +996,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-reader", Namespace: fg.Namespace}, &external); err != nil {
 		t.Fatal(err)
 	}
-	if external.Spec.Selector[v1alpha1.HealthyLabel] != "yes" || len(external.Spec.Ports) != 1 || external.Spec.Ports[0].Name != "mysql" {
+	if external.Spec.Selector[v1alpha1.HealthyLabel] != v1alpha1.LabelValueTrue || len(external.Spec.Ports) != 1 || external.Spec.Ports[0].Name != "mysql" {
 		t.Fatalf("reader service = %#v", external.Spec)
 	}
 	if external.Spec.Ports[0].NodePort != 31001 || external.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
@@ -1249,10 +1249,10 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 			fg := base()
 			tc.configure(fg)
 			primaryPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc1", v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: "yes",
+				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc1", v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
 			}}}
 			readerPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "reader-pod", Namespace: fg.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "reader", v1alpha1.RoleLabel: "replica", v1alpha1.HealthyLabel: "yes",
+				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "reader", v1alpha1.RoleLabel: "replica", v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
 			}}}
 			r, c := newReconciler(fg, primaryPod, readerPod)
 			if err := r.syncPodLabels(context.Background(), fg); err != nil {
@@ -1268,7 +1268,7 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 			if (gotPrimary.Labels[v1alpha1.RoleLabel] == "primary") != tc.wantPrimary {
 				t.Fatalf("primary role label = %q, wantPrimary=%t", gotPrimary.Labels[v1alpha1.RoleLabel], tc.wantPrimary)
 			}
-			if (gotReader.Labels[v1alpha1.HealthyLabel] == "yes") != tc.wantReaderYes {
+			if (gotReader.Labels[v1alpha1.HealthyLabel] == v1alpha1.LabelValueTrue) != tc.wantReaderYes {
 				t.Fatalf("reader healthy label = %q, wantHealthy=%t", gotReader.Labels[v1alpha1.HealthyLabel], tc.wantReaderYes)
 			}
 		})

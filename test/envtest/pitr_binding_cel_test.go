@@ -489,7 +489,7 @@ func TestPITRBindingCELDefaultsOmitted(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, typed); err != nil {
 		t.Fatal(err)
 	}
-	typed.Finalizers = append(typed.Finalizers, "shipstream.io/envtest-t1")
+	typed.Finalizers = append(typed.Finalizers, "bloodraven.shipstream.io/envtest-t1")
 	if err := k8sClient.Update(ctx, typed); err != nil {
 		t.Fatalf("typed finalizer Update refused: %v", err)
 	}

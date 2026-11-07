@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -119,10 +119,20 @@ func nextBlockedSite(mfg *v1alpha1.MysqlFailoverGroup, requested map[string]bool
 		if !blocked {
 			continue
 		}
-		if gtid := strings.TrimSpace(s.DivergentGtid); len(gtid) >= 8 {
-			return s.Name, s.Name + ":" + gtid[:8]
-		}
-		return s.Name, s.Name + ":confirm=" + mfg.Name
+		// The operator's own form (confirm=, uid= and, for a divergent
+		// site, gtidPrefix= with the source UUID).
+		return s.Name, controller.RecloneAnnotationValue(mfg, s.Name)
 	}
 	return "", ""
+}
+
+// recloneValueFor reads the group and returns the operator's reclone-site
+// value for site (controller.RecloneAnnotationValue): confirm= and uid=,
+// plus gtidPrefix= when the site has diverged.
+func recloneValueFor(ctx context.Context, env *runner.Env, site string) (string, error) {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return "", fmt.Errorf("get MFG for the reclone value: %w", err)
+	}
+	return controller.RecloneAnnotationValue(mfg, site), nil
 }

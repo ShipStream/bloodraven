@@ -748,24 +748,34 @@ func TestPITRAcceptance(t *testing.T) {
 	}
 }
 
+// TestPITRBindingReleaseParse: the release value is A-78's
+// <pab-id>:confirm=<name>:uid=<uid> (WE-Q9). The id is derived from the
+// destination, so a stale request written for an earlier group of the
+// same name (another uid) is refused.
 func TestPITRBindingReleaseParse(t *testing.T) {
 	id := pitrBindingID(pbcS3Dest(t, "p1"))
+	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "orders", UID: "1111-2222"}}
 	cases := []struct {
 		in   string
 		ok   bool
 		want string
 	}{
-		{id + ":confirm=orders", true, id},
-		{" " + id + ":confirm=orders\n", true, id},
-		{id + ":confirm=other", false, ""},
-		{id + ":confirm=", false, ""},
+		{id + ":confirm=orders:uid=1111-2222", true, id},
+		{" " + id + ":confirm=orders:uid=1111-2222\n", true, id},
+		{id + ":uid=1111-2222:confirm=orders", true, id},
+		{id + ":confirm=orders", false, ""},                   // no uid
+		{id + ":confirm=orders:uid=3333-4444", false, ""},     // a re-created group
+		{id + ":confirm=other:uid=1111-2222", false, ""},      // another group
+		{id + ":confirm=:uid=1111-2222", false, ""},           // empty value
+		{id + ":confirm=orders:uid=1111-2222:x=y", false, ""}, // unknown key
+		{id + ":confirm=orders:confirm=orders:uid=1111-2222", false, ""},
 		{id, false, ""},
-		{id + "," + id + ":confirm=orders", false, ""},
-		{"pab-XYZ:confirm=orders", false, ""},
+		{id + "," + id + ":confirm=orders:uid=1111-2222", false, ""}, // a list
+		{"pab-XYZ:confirm=orders:uid=1111-2222", false, ""},
 		{"", false, ""},
 	}
 	for _, c := range cases {
-		got, err := parsePITRBindingRelease(c.in, "orders")
+		got, err := parsePITRBindingRelease(c.in, fg)
 		if (err == nil) != c.ok || got != c.want {
 			t.Errorf("parsePITRBindingRelease(%q) = %q,%v; want %q ok=%v", c.in, got, err, c.want, c.ok)
 		}

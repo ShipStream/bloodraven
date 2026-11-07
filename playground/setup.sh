@@ -143,8 +143,8 @@ ok "Cluster reachable with ${#WORKERS[@]} worker nodes"
 info "Labeling nodes as site zones..."
 for i in "${!SITE_NAMES[@]}"; do
   kubectl label node "${WORKERS[$i]}" "topology.kubernetes.io/zone=${SITE_ZONES[$i]}" --overwrite
-  kubectl label node "${WORKERS[$i]}" shipstream.io/failover-group.playground=true --overwrite
-  kubectl label node "${WORKERS[$i]}" "shipstream.io/site.playground=${SITE_NAMES[$i]}" --overwrite
+  kubectl label node "${WORKERS[$i]}" bloodraven.shipstream.io/failover-group.playground=true --overwrite
+  kubectl label node "${WORKERS[$i]}" "bloodraven.shipstream.io/site.playground=${SITE_NAMES[$i]}" --overwrite
 done
 ok "Nodes labeled: ${WORKERS[0]}=iad, ${WORKERS[1]}=pdx, ${WORKERS[2]}=reader"
 
@@ -324,7 +324,7 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set 'tolerations[0].key=node.kubernetes.io/disk-pressure' \
   --set 'tolerations[0].operator=Exists' \
   --set 'tolerations[0].effect=NoSchedule' \
-  --set 'tolerations[1].key=shipstream.io/db-readonly-playground' \
+  --set 'tolerations[1].key=bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground' \
   --set 'tolerations[1].operator=Exists' \
   --set 'tolerations[1].effect=NoExecute' \
   --set leaderElection.enabled="$LEADER_ELECTION_ENABLED" \
@@ -370,7 +370,7 @@ for i in $(seq 1 180); do
   # Clear taints each second: local-path helper pods do not tolerate the
   # operator's readonly taint, and one eviction can stall provisioning.
   for node in $(kubectl get nodes -o name 2>/dev/null); do
-    kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
+    kubectl taint "$node" bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground- 2>/dev/null || true
   done
   PVCS_BOUND=$(kubectl -n "$NAMESPACE" get pvc -l app.kubernetes.io/name=mysql \
     -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null \
@@ -393,7 +393,7 @@ READY=0
 for i in $(seq 1 36); do
   # Clear taints each iteration — operator may apply them before pods are ready
   for node in $(kubectl get nodes -o name 2>/dev/null); do
-    kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
+    kubectl taint "$node" bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground- 2>/dev/null || true
   done
   READY=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=mysql \
     -o jsonpath='{range .items[*]}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null \

@@ -30,12 +30,12 @@ func newEncryptionFG(namespace, name string) *v1alpha1.MysqlFailoverGroup {
 			Sites: []v1alpha1.SiteSpec{
 				{
 					Name: "dc1", ServerID: 101, Zone: "lion-dc1", LBIP: "203.0.113.1",
-					TaintNodeSelector: map[string]string{"shipstream.io/site.lion": "dc1"},
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.lion": "dc1"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 				},
 				{
 					Name: "dc2", ServerID: 102, Zone: "lion-dc2", LBIP: "203.0.113.2",
-					TaintNodeSelector: map[string]string{"shipstream.io/site.lion": "dc2"},
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.lion": "dc2"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 				},
 			},
@@ -295,7 +295,7 @@ func createNamespace(t *testing.T, prefix string) string {
 // rotation-stamp PUT conditioned on that version (one whose response was
 // lost) still commits afterwards: a successful no-op write is no proof the
 // stamp cannot land. The conditional metadata write settlement uses
-// (the shipstream.io/encryption-status-fence annotation, optimistic lock)
+// (the bloodraven.shipstream.io/encryption-status-fence annotation, optimistic lock)
 // does move the version, and the stale PUT is then rejected.
 func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 	ns := createNamespace(t, "enc-noop")
@@ -354,7 +354,7 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 	if fence.Annotations == nil {
 		fence.Annotations = map[string]string{}
 	}
-	fence.Annotations["shipstream.io/encryption-status-fence"] = "1"
+	fence.Annotations["bloodraven.shipstream.io/encryption-status-fence"] = "1"
 	if err := k8sClient.Patch(ctx, fence, client.MergeFromWithOptions(read.DeepCopy(), client.MergeFromWithOptimisticLock{})); err != nil {
 		t.Fatalf("fence: %v", err)
 	}

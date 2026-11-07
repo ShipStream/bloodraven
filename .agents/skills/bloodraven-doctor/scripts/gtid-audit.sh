@@ -125,7 +125,7 @@ site_pod() {
     local site="$1" pods
     # name<TAB>deletionTimestamp; a terminating pod still reports Running.
     pods=$(kubectl get pods -n "$NAMESPACE" \
-        -l "app.kubernetes.io/name=mysql,app.kubernetes.io/instance=$MFG_NAME,shipstream.io/site=$site" \
+        -l "app.kubernetes.io/name=mysql,app.kubernetes.io/instance=$MFG_NAME,bloodraven.shipstream.io/site=$site" \
         --field-selector=status.phase=Running \
         -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null \
         | awk -F'\t' 'NF && $2 == "" {print $1}' || true)

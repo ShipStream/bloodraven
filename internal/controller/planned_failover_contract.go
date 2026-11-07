@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 )
 
 // ---------- annotations ----------
@@ -310,32 +311,30 @@ func statusHoldNames(st *v1alpha1.MysqlFailoverGroupStatus, runID string) bool {
 	return st.PlannedFailoverHold != nil && st.PlannedFailoverHold.RunID == runID
 }
 
-// deadlineStartLayout is the ISO 8601 basic UTC form of a deadline start
-// (A-78: an instant inside an annotation value has no colons).
-const deadlineStartLayout = "20060102T150405Z"
+// deadlineStartGrammar is the A-78 grammar of a durable deadline start:
+// the run id, then since=<instant> in the ISO 8601 basic UTC form (an
+// instant inside an annotation value has no colons).
+var deadlineStartGrammar = actionvalue.Grammar{Keys: []string{"since"}, Required: []string{"since"}}
 
 // FormatDeadlineStart renders a durable deadline start:
 // "<runID>:since=<YYYYMMDDThhmmssZ>", at second precision.
 func FormatDeadlineStart(runID string, start time.Time) string {
-	return runID + ":since=" + start.UTC().Truncate(time.Second).Format(deadlineStartLayout)
+	return actionvalue.Format(runID, actionvalue.Pair{Key: "since", Value: actionvalue.FormatInstant(start)})
 }
 
 // ParseDeadlineStart reads a FormatDeadlineStart value; false when it is
 // absent or malformed.
 func ParseDeadlineStart(v string) (runID string, start time.Time, ok bool) {
-	id, pair, found := strings.Cut(v, ":")
-	if !found || id == "" {
-		return "", time.Time{}, false
-	}
-	key, ts, found := strings.Cut(pair, "=")
-	if !found || key != "since" {
-		return "", time.Time{}, false
-	}
-	t, err := time.Parse(deadlineStartLayout, ts)
+	parsed, err := actionvalue.Parse(v, deadlineStartGrammar)
 	if err != nil {
 		return "", time.Time{}, false
 	}
-	return id, t.UTC(), true
+	since, _ := parsed.Get("since")
+	t, err := actionvalue.ParseInstant(since)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	return parsed.Subject(), t.UTC(), true
 }
 
 // statusFenceLayout is the ISO 8601 basic UTC form with nanoseconds, so

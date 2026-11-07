@@ -62,7 +62,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 			t.Errorf("%s: nodeSelector zone = %q, want lion-%s", siteName, got, siteName)
 		}
 		// Tolerates the failover group's db-readonly taint.
-		taintKey := v1alpha1.ReadOnlyTaintKey(fg.Name)
+		taintKey := v1alpha1.ReadOnlyTaintKey(fg.Namespace, fg.Name)
 		found := false
 		for _, tol := range sts.Spec.Template.Spec.Tolerations {
 			if tol.Key == taintKey && tol.Operator == corev1.TolerationOpExists {
@@ -300,7 +300,7 @@ func TestReconcileDragonflyActiveService_SelectsMasterRoleAndTraffic(t *testing.
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "lion-dragonfly", Namespace: "shared-lion"}, &svc); err != nil {
 		t.Fatalf("active service not created: %v", err)
 	}
-	// Selector AND-gates role=master AND traffic=enabled. Both labels
+	// Selector AND-gates role=master AND traffic=true. Both labels
 	// must be present so that removing the traffic label sheds an
 	// endpoint atomically without depending on role-flip ordering.
 	if got := svc.Spec.Selector[v1alpha1.DragonflyRoleLabel]; got != "master" {

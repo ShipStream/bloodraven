@@ -120,7 +120,7 @@ You press **+ Increment** five times in the counter app, which writes through `m
 
 **Explanation:**
 
-Only reading the row out of `pdx` by name proves the row is on `pdx`. `secondsBehindSource: 0` does not: it compares the last transaction executed against the last event *downloaded*, so it reads zero when the receiver thread has stalled or the replica is idle — a replica that stopped fetching an hour ago still reports 0. `replication: Healthy` is a verdict on replication health, not a statement that any particular transaction has landed. And `mysql-playground-replicas` is the wrong endpoint for this experiment: it selects every replica currently carrying `shipstream.io/healthy=yes`, so the answer might have come from `reader` rather than `pdx` and you would have proved nothing about the site you asked about. Write through the group endpoint, read back by site name. (objective 9)
+Only reading the row out of `pdx` by name proves the row is on `pdx`. `secondsBehindSource: 0` does not: it compares the last transaction executed against the last event *downloaded*, so it reads zero when the receiver thread has stalled or the replica is idle — a replica that stopped fetching an hour ago still reports 0. `replication: Healthy` is a verdict on replication health, not a statement that any particular transaction has landed. And `mysql-playground-replicas` is the wrong endpoint for this experiment: it selects every replica currently carrying `bloodraven.shipstream.io/healthy=true`, so the answer might have come from `reader` rather than `pdx` and you would have proved nothing about the site you asked about. Write through the group endpoint, read back by site name. (objective 9)
 
 ## Question 8
 
@@ -131,13 +131,13 @@ Authority in `playground` moves from `iad` to `pdx`. Your application holds no c
 - The operator rewrites the `mysql-playground-primary` Service's selector so it names the `pdx` site instead of `iad`
 - The `DNSEndpoint` A record for the group hostname is repointed at the `pdx` load-balancer IP, which is what moves in-cluster traffic
 - The `pdx` sidecar takes over the primary role and forwards traffic to its local `mysqld` on behalf of the group endpoint
-- The operator stamps `shipstream.io/role=primary` on the `pdx` pod and removes it from `iad`; the Service's fixed selector then matches a different pod and the endpoint follows
+- The operator stamps `bloodraven.shipstream.io/role=primary` on the `pdx` pod and removes it from `iad`; the Service's fixed selector then matches a different pod and the endpoint follows
 
 **Correct option index:** 3
 
 **Explanation:**
 
-The `-primary` Service selector is fixed at two labels — `app.kubernetes.io/instance=playground` and `shipstream.io/role=primary` — and never changes. The operator owns the pod labels, so moving authority is a label write; the endpoint controller does the rest, which is also exactly how a pod stamped `role=fenced` drops out of both group endpoints without being deleted. Rewriting the selector to name a site is the plausible-sounding inversion of that mechanism and would defeat the point: the selector is stable so the Service object never has to change. The `DNSEndpoint` object matters for clients resolving the group's external hostname; a pod resolving `mysql-playground-primary` inside the cluster never consults it. And nothing proxies MySQL traffic — the sidecar decides nothing about routing and forwards no queries; it fences its own `mysqld` locally, which is what it can do when the operator is gone, while the operator is the only component that decides across sites. (objectives 4, 5)
+The `-primary` Service selector is fixed at two labels — `app.kubernetes.io/instance=playground` and `bloodraven.shipstream.io/role=primary` — and never changes. The operator owns the pod labels, so moving authority is a label write; the endpoint controller does the rest, which is also exactly how a pod stamped `role=fenced` drops out of both group endpoints without being deleted. Rewriting the selector to name a site is the plausible-sounding inversion of that mechanism and would defeat the point: the selector is stable so the Service object never has to change. The `DNSEndpoint` object matters for clients resolving the group's external hostname; a pod resolving `mysql-playground-primary` inside the cluster never consults it. And nothing proxies MySQL traffic — the sidecar decides nothing about routing and forwards no queries; it fences its own `mysqld` locally, which is what it can do when the operator is gone, while the operator is the only component that decides across sites. (objectives 4, 5)
 
 ## Question 9
 

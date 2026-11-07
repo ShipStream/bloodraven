@@ -55,7 +55,7 @@ looking perfectly caught up.
 
 **TODO B — `is_serving`.** Decide whether a site is currently behind `mysql-playground-replicas`, the
 group read endpoint. That Service selects on three labels — instance, `role=replica`, and
-`healthy=yes` — and the operator's rule for stamping `healthy` depends on the site's role.
+`healthy=true` — and the operator's rule for stamping `healthy` depends on the site's role.
 
 For a site whose role is `ReadOnly`, all five must hold together:
 
@@ -66,7 +66,7 @@ For a site whose role is `ReadOnly`, all five must hold together:
    chained off another replica does not count
 5. `secondsBehindSource` is at or under `effective_readonly_max_lag(spec)`
 
-For **every other role**, `healthy=yes` as soon as `state` is `Writable` or `ReadOnly`. There is no
+For **every other role**, `healthy=true` as soon as `state` is `Writable` or `ReadOnly`. There is no
 lag gate on those sites at all. That asymmetry is real and it is the point of this project.
 
 **TODO C — `verdict`.** Return `(word, exit_code)` from the table above. Read the `Degraded`

@@ -819,7 +819,7 @@ func TestDragonflyManager_TryEmergencyPromote_RedialsAfterTakeoverError(t *testi
 // TestDragonflyManager_TryEmergencyPromote_DemoteFails_DoesNotRestoreSourceTraffic
 // regression-tests B5: applyEmergencyPromotionLabels used to log-and-
 // continue on demote failure, then restore the source's traffic
-// label — leaving a pod with role=master+traffic=enabled selectable by
+// label — leaving a pod with role=master+traffic=true selectable by
 // the active Service alongside the new master. Split-brain at the
 // routing layer.
 //

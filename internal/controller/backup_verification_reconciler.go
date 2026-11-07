@@ -341,6 +341,10 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ref, err := verificationJobSource(v, job)
+	var versionErr errVerificationSourceVersion
+	if errors.As(err, &versionErr) {
+		return r.failVerification(ctx, v, v1alpha1.ReasonMetadataVersionUnsupported, err.Error())
+	}
 	if err != nil {
 		return r.failVerification(ctx, v, v1alpha1.ReasonBackupIdentityMismatch, err.Error())
 	}

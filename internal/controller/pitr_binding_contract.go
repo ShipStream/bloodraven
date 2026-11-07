@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
@@ -38,7 +39,7 @@ const (
 	// appNameBackupJob is the app.kubernetes.io/name of backup, cleanup and
 	// (Δ26) PITR archive check Jobs.
 	appNameBackupJob = "mysql-backup"
-	// resourcePITRArchiveCheck is the shipstream.io/resource label value of
+	// resourcePITRArchiveCheck is the bloodraven.shipstream.io/resource label value of
 	// a PITR archive check Job. Every Job list selecting
 	// app.kubernetes.io/name=mysql-backup must exclude it (§4.9).
 	resourcePITRArchiveCheck = "pitr-archive-check"
@@ -793,20 +794,31 @@ func verifyPITRAcceptance(secret *corev1.Secret) (pitrAcceptance, error) {
 // ---------------------------------------------------------------------------
 // Release annotation (Δ10).
 
+// pitrBindingReleaseGrammar is the release annotation's A-78 grammar. The
+// subject is a binding id, which is derived from the destination and so
+// recurs in a re-created group of the same name: the value carries the
+// group's name and uid (WE-Q9).
+var pitrBindingReleaseGrammar = actionvalue.Grammar{
+	Keys:     []string{actionvalue.ConfirmKey, actionvalue.UIDKey},
+	Required: []string{actionvalue.ConfirmKey, actionvalue.UIDKey},
+}
+
 // parsePITRBindingRelease parses a release annotation value
-// "<id>:confirm=<fgName>". It returns the id, or an error for a malformed
-// value or a confirm that is not fgName (Warning ReleaseRejected; the
-// annotation is removed).
-func parsePITRBindingRelease(value, fgName string) (string, error) {
-	id, confirm, ok := strings.Cut(strings.TrimSpace(value), ":confirm=")
-	if !ok {
-		return "", fmt.Errorf("release value %q is not <id>:confirm=<group name>", value)
+// "<id>:confirm=<fg name>:uid=<fg uid>". It returns the id, or an error
+// for a malformed value or a confirm or uid that is not fg's (Warning
+// ReleaseRejected; the annotation is removed).
+func parsePITRBindingRelease(value string, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
+	full := actionvalue.Format("<id>", actionvalue.ConfirmPairs(fg.Name, string(fg.UID))...)
+	v, err := actionvalue.Parse(value, pitrBindingReleaseGrammar)
+	if err != nil {
+		return "", fmt.Errorf("release value %v; expected %s", err, full)
 	}
+	id := v.Subject()
 	if !pitrBindingIDRE(id) {
 		return "", fmt.Errorf("release id %q is not a binding id (pab- and 16 hex digits)", id)
 	}
-	if confirm != fgName {
-		return "", fmt.Errorf("release confirm %q does not name this group %q", confirm, fgName)
+	if err := actionvalue.Confirm(v, fg.Name, string(fg.UID)); err != nil {
+		return "", fmt.Errorf("release of %s rejected: %v; expected %s", id, err, full)
 	}
 	return id, nil
 }

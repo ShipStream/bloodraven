@@ -83,11 +83,11 @@ Node taints and source convergence are poll neighbours, not steps.
 | Service | Selector | Application use |
 |---|---|---|
 | `mysql-<group>-primary` | instance + `role=primary` | **writes** |
-| `mysql-<group>-replicas` | instance + `role=replica` + `healthy=yes` | **reads** |
-| `mysql-<group>-<site>` | name + instance + site, **plus `healthy=yes` on a `ReadOnly` site** | site-pinned tooling only |
+| `mysql-<group>-replicas` | instance + `role=replica` + `healthy=true` | **reads** |
+| `mysql-<group>-<site>` | name + instance + site, **plus `healthy=true` on a `ReadOnly` site** | site-pinned tooling only |
 | `mysql-<group>-<site>-internal` | name + instance + site, no health gate, `publishNotReadyAddresses: true` | never yours — sidecar and peer traffic |
 
-`role="fenced"` matches neither shared Service. A `ReadOnly` site earns `healthy=yes` only when
+`role="fenced"` matches neither shared Service. A `ReadOnly` site earns `healthy=true` only when
 **all five** hold: converged source, replication `Healthy` or `Lagging`, non-nil lag, canonical *direct* source host, and lag
 within `readOnlyMaxLagSeconds`.
 
@@ -122,7 +122,7 @@ not a typo in this table.
 | Key | Value | Notes |
 |---|---|---|
 | `bloodraven.shipstream.io/planned-failover` | `<site>` or `<site>:maxLagWait=10m` | Consumed and cleared. Unknown override keys are rejected. |
-| `bloodraven.shipstream.io/reclone-site` | `<site>:<divergentGtid prefix ≥8 chars>` | Cold form, when nothing is recorded: `<site>:confirm=<group>`. |
+| `bloodraven.shipstream.io/reclone-site` | `<site>:confirm=<group>:uid=<uid>:gtidPrefix=<divergentGtid prefix ≥8 chars>` | Cold form, when nothing is recorded: `<site>:confirm=<group>:uid=<uid>`. `kubectl bloodraven reclone` builds either. |
 | `bloodraven.shipstream.io/rotate-keyring` | `<site>` | Refused on the active primary. |
 
 Written **by the operator**, never by you: `bloodraven.shipstream.io/last-failover` and

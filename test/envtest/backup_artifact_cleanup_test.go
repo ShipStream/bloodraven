@@ -32,7 +32,7 @@ func TestEnvtest_ArtifactCleanupRetriesFailedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	backup := newSucceededBackup(ns, fg.Name, "nightly-s3")
-	backup.Finalizers = []string{"shipstream.io/mysqlbackup"}
+	backup.Finalizers = []string{"bloodraven.shipstream.io/mysqlbackup"}
 	if err := k8sClient.Create(ctx, backup); err != nil {
 		t.Fatal(err)
 	}

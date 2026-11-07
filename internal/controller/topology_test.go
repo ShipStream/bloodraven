@@ -523,7 +523,7 @@ func newMockTainter() *mockTainter {
 	return &mockTainter{taints: make(map[string]bool)}
 }
 
-func (m *mockTainter) SetTaint(_ context.Context, selector string, _ string, taint bool) error {
+func (m *mockTainter) SetTaint(_ context.Context, selector, _, _ string, taint bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.taints[selector] = taint
@@ -567,7 +567,7 @@ func (m *mockDNS) getLastIP() string {
 // taintSelector returns the expected taint selector for a given site name,
 // matching the format produced by TopologyManager.taintSelector.
 func taintSelector(siteName string) string {
-	return "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=" + siteName
+	return "bloodraven.shipstream.io/failover-group.lion=true,bloodraven.shipstream.io/site.lion=" + siteName
 }
 
 func testTopologyConfig() TopologyConfig {

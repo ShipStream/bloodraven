@@ -827,18 +827,27 @@ func s69Release() runner.Step {
 			// The rejection needs no reader; it runs first so the refusal
 			// below is tried as soon as the verification holds P1's
 			// snapshot, well before it can finish.
-			rejectedAt := time.Now()
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, pitrReleaseValue(idP1, "not-"+env.FG)); err != nil {
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
 				return err
 			}
-			if _, err := s69WaitEvent(ctx, env, rejectedAt, v1alpha1.EventPITRArchiveBindingReleaseRejected, ""); err != nil {
-				return err
-			}
-			if err := s69WaitAnnotationGone(ctx, env); err != nil {
-				return err
-			}
-			if err := s69AssertP1Unchanged(ctx, env); err != nil {
-				return fmt.Errorf("after a rejected release: %w", err)
+			uid := string(mfg.UID)
+			// Another group's name, and this name with an earlier
+			// incarnation's uid (WE-Q9), are both rejected.
+			for _, bad := range []string{pitrReleaseValue(idP1, "not-"+env.FG, uid), pitrReleaseValue(idP1, env.FG, "00000000-0000-4000-8000-000000000000")} {
+				rejectedAt := time.Now()
+				if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, bad); err != nil {
+					return err
+				}
+				if _, err := s69WaitEvent(ctx, env, rejectedAt, v1alpha1.EventPITRArchiveBindingReleaseRejected, ""); err != nil {
+					return err
+				}
+				if err := s69WaitAnnotationGone(ctx, env); err != nil {
+					return err
+				}
+				if err := s69AssertP1Unchanged(ctx, env); err != nil {
+					return fmt.Errorf("after a rejected release %q: %w", bad, err)
+				}
 			}
 
 			name, err := pitrStartVerify(ctx, env, s69ID, s69DBName, "retained", e)
@@ -851,7 +860,7 @@ func s69Release() runner.Step {
 				return err
 			}
 			refusedAt := time.Now()
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, pitrReleaseValue(idP1, env.FG)); err != nil {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, pitrReleaseValue(idP1, env.FG, uid)); err != nil {
 				return err
 			}
 			if _, err := s69WaitEvent(ctx, env, refusedAt, v1alpha1.EventPITRArchiveBindingReleaseRefused, ""); err != nil {
@@ -932,7 +941,7 @@ func s69CreateSecret(ctx context.Context, env *runner.Env, suffix string, pass [
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
-			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
+			Labels: map[string]string{"playground.bloodraven.shipstream.io/created-by-e2e": "true"},
 		},
 		Data: map[string][]byte{"passphrase": pass},
 	}
@@ -1813,7 +1822,7 @@ func s69WaitRecoveryLog(ctx context.Context, env *runner.Env, want map[string]st
 }
 
 // s69WaitVerificationHold waits until the key snapshot carries the
-// running verification's hold (hold.verification.shipstream.io/<uid> =
+// running verification's hold (verification-hold.bloodraven.shipstream.io/<uid> =
 // name), which the operator's release in-use scan honours.
 func s69WaitVerificationHold(ctx context.Context, env *runner.Env, name, snapshot string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)

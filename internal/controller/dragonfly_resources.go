@@ -28,9 +28,9 @@ import (
 const (
 	dragonflyAppName = "dragonfly"
 
-	// dragonflyTrafficEnabled is the only meaningful value of
-	// v1alpha1.DragonflyTrafficLabel. Centralized so we don't repeat the literal.
-	dragonflyTrafficEnabled = "enabled"
+	// dragonflyTrafficEnabled is the only value of
+	// v1alpha1.DragonflyTrafficLabel; an ineligible pod has no label.
+	dragonflyTrafficEnabled = v1alpha1.LabelValueTrue
 
 	dragonflyDefaultPort      = int32(6379)
 	dragonflyDefaultAdminPort = int32(9999)
@@ -198,19 +198,16 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 		SecurityContext: spec.ContainerSecurityContext.DeepCopy(),
 	}
 
-	// Selector is immutable on a StatefulSet. Only set it on create.
+	// Selector is immutable on a StatefulSet: set it on create, and refuse
+	// a live one that differs (workload_selector.go).
 	if sts.Spec.Selector == nil {
-		sts.Spec.Selector = &metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				labelAppName:       dragonflyAppName,
-				labelInstance:      fg.Name,
-				v1alpha1.SiteLabel: site.Name,
-			},
-		}
+		sts.Spec.Selector = dragonflyStatefulSetSelector(fg, site.Name)
+	} else if mismatch := statefulSetSelectorMismatch(sts, fg, site.Name); mismatch != nil {
+		return mismatch
 	}
 
 	// Pod labels include the operator-assigned dragonfly-role (default
-	// "replica") and dragonfly-traffic=enabled. The DragonflyManager /
+	// "replica") and dragonfly-traffic=true. The DragonflyManager /
 	// planned-failover handlers rewrite these on the active site during
 	// promotion. Static labels here must not depend on mutable status,
 	// otherwise every status change would trigger a rollout.
@@ -232,7 +229,7 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 			NodeSelector: map[string]string{
 				"topology.kubernetes.io/zone": site.Zone,
 			},
-			Tolerations: groupReadOnlyTolerations(fg.Name),
+			Tolerations: groupReadOnlyTolerations(fg),
 			Containers:  []corev1.Container{container},
 			Volumes: []corev1.Volume{
 				{
@@ -582,6 +579,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context
 // traffic to a Dragonfly the operator no longer manages.
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	if !dragonflyEnabled(fg) {
+		r.clearDragonflySelectorRefusals(fg)
 		return 0, r.teardownDragonflyResources(ctx, fg)
 	}
 	for _, site := range fg.Spec.Sites {
@@ -662,12 +660,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 		key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
 		if err := reader.Get(ctx, key, &current); err != nil {
 			if apierrors.IsNotFound(err) {
+				r.noteWorkloadSelector(fg, "StatefulSet", key.Name, nil)
 				if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
 					return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
 				}
 				continue
 			}
 			return 0, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
+		}
+		// A StatefulSet whose immutable selector differs is refused: the
+		// site is skipped, not updated, and not retried in a loop.
+		mismatch := statefulSetSelectorMismatch(&current, fg, site.Name)
+		r.noteWorkloadSelector(fg, "StatefulSet", key.Name, mismatch)
+		if mismatch != nil {
+			continue
 		}
 
 		desired, err := r.desiredDragonflyStatefulSet(fg, site, &current)

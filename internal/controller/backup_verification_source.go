@@ -118,17 +118,47 @@ func verificationJobReadsBackup(job *batchv1.Job, ref *v1alpha1.VerificationBack
 	return false
 }
 
+// verificationSourceSchemaVersion is verificationSourceRecord.SchemaVersion
+// (A-80).
+const verificationSourceSchemaVersion = 1
+
+// verificationSourceRecord is the verification-backup annotation's payload:
+// the pinned source, with its schema version.
+type verificationSourceRecord struct {
+	SchemaVersion int `json:"schemaVersion"`
+	v1alpha1.VerificationBackupRef
+}
+
+// encodeVerificationSource renders ref as the verification-backup
+// annotation value.
+func encodeVerificationSource(ref *v1alpha1.VerificationBackupRef) ([]byte, error) {
+	return json.Marshal(verificationSourceRecord{SchemaVersion: verificationSourceSchemaVersion, VerificationBackupRef: *ref})
+}
+
+// errVerificationSourceVersion is a verification-backup record with a
+// schemaVersion this operator does not know: it proves no source.
+type errVerificationSourceVersion struct{ version int }
+
+func (e errVerificationSourceVersion) Error() string {
+	return fmt.Sprintf("the verification Job's %s record has schemaVersion %d, which this operator does not know (it reads %d); "+
+		"it proves no source, so the run cannot be certified: create a new verification",
+		v1alpha1.VerificationBackupAnnotation, e.version, verificationSourceSchemaVersion)
+}
+
 func verificationJobSource(v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) (*v1alpha1.VerificationBackupRef, error) {
 	if !metav1.IsControlledBy(job, v) {
 		return nil, fmt.Errorf("verification Job is not owned by this verification")
 	}
 	ref := v.Status.BackupRef
 	if encoded, exists := job.Spec.Template.Annotations[v1alpha1.VerificationBackupAnnotation]; exists {
-		var recorded v1alpha1.VerificationBackupRef
+		var recorded verificationSourceRecord
 		if err := json.Unmarshal([]byte(encoded), &recorded); err != nil {
 			return nil, fmt.Errorf("decode verification Job source snapshot: %w", err)
 		}
-		ref = &recorded
+		if recorded.SchemaVersion != verificationSourceSchemaVersion {
+			return nil, errVerificationSourceVersion{version: recorded.SchemaVersion}
+		}
+		ref = &recorded.VerificationBackupRef
 	}
 	if err := validateVerificationBackupRef(ref); err != nil {
 		return nil, err

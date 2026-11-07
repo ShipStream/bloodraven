@@ -14,8 +14,8 @@ failover, split-brain, and recovery paths and are not repeated here.
    the third worker; in a smaller lab, reuse a worker node intentionally.
    ```bash
    kubectl label node <fra-node> topology.kubernetes.io/zone=zone-fra --overwrite
-   kubectl label node <fra-node> shipstream.io/failover-group.playground=true --overwrite
-   kubectl label node <fra-node> shipstream.io/site.playground=fra --overwrite
+   kubectl label node <fra-node> bloodraven.shipstream.io/failover-group.playground=true --overwrite
+   kubectl label node <fra-node> bloodraven.shipstream.io/site.playground=fra --overwrite
    ```
 3. Swap the default 2-site manifest for the 3-site variant:
    ```bash
@@ -356,13 +356,13 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      shipstream.io/site: iad
+      bloodraven.shipstream.io/site: iad
   policyTypes: [Egress]
   egress:
     - to:
         - podSelector:
             matchLabels:
-              shipstream.io/site: fra
+              bloodraven.shipstream.io/site: fra
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
@@ -395,7 +395,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      shipstream.io/site: iad
+      bloodraven.shipstream.io/site: iad
   policyTypes: [Egress]
   egress:
     - ports: [{protocol: UDP, port: 53}]
@@ -443,9 +443,9 @@ NS=bloodraven-playground
 
 # Clear the db-readonly taint on fra's node before the PVC delete,
 # otherwise local-path-provisioner helper pods get evicted.
-NODE=$(kubectl -n $NS get pods -l shipstream.io/site=fra \
+NODE=$(kubectl -n $NS get pods -l bloodraven.shipstream.io/site=fra \
   -o jsonpath='{.items[0].spec.nodeName}')
-kubectl taint nodes $NODE shipstream.io/db-readonly-playground- 2>/dev/null || true
+kubectl taint nodes $NODE bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground- 2>/dev/null || true
 
 # Stop fra, wipe its PVC, let it respawn.
 kubectl -n $NS scale deployment mysql-playground-fra --replicas=0
@@ -494,7 +494,7 @@ kubectl -n $NS apply -f playground/manifests/failovergroup.yaml
 kubectl -n $NS patch mfg playground --type json -p '[
   {"op":"add","path":"/spec/sites/-","value":{
     "name":"fra","role":"DisasterRecovery","zone":"zone-fra","lbIP":"10.96.100.30",
-    "taintNodeSelector":{"shipstream.io/failover-group.playground":"true","shipstream.io/site.playground":"fra"},
+    "taintNodeSelector":{"bloodraven.shipstream.io/failover-group.playground":"true","bloodraven.shipstream.io/site.playground":"fra"},
     "storage":{"storageClassName":"playground-fast","size":"1Gi"},
     "resources":{
       "requests":{"cpu":"100m","memory":"256Mi"},
@@ -540,7 +540,7 @@ kubectl -n $NS patch mfg playground --type json \
 **Verify**:
 - `kubectl -n $NS get deployment mysql-playground-fra` → NotFound
   within ~10s.
-- `kubectl -n $NS get svc,pvc -l shipstream.io/site=fra` → empty.
+- `kubectl -n $NS get svc,pvc -l bloodraven.shipstream.io/site=fra` → empty.
 - `status.sites[]` now has two entries.
 - `status.activeSite` unchanged; primary still writable.
 - Dashboard reflects the two-site layout without reload errors.

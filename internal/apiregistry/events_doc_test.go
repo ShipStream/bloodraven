@@ -30,7 +30,7 @@ import (
 // the registry: run `make events-doc` (this test with -update) after
 // changing events.go or an Event's type.
 
-var updateEventsDoc = flag.Bool("update", false, "rewrite the generated Event reason section of "+eventsDoc)
+var updateEventsDoc = flag.Bool("update", false, "rewrite the generated pages: the Event reason section of "+eventsDoc+" and "+wellKnownDoc)
 
 const (
 	eventsDoc = "../../site/content/docs/8.observability/2.monitoring.md"

@@ -244,11 +244,11 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 
 func deploymentClientPod(meta metav1.ObjectMeta, operation, group, mode string) *corev1.Pod {
 	no, seconds, deadline := false, int64(3600), int64(600)
-	meta.Labels = map[string]string{"bloodraven.shipstream.io/deploy-client": "true"}
+	meta.Labels = map[string]string{v1alpha1.DeployClientLabel: v1alpha1.LabelValueTrue}
 	return &corev1.Pod{ObjectMeta: meta, Spec: corev1.PodSpec{
 		ServiceAccountName: meta.Name, AutomountServiceAccountToken: &no, RestartPolicy: corev1.RestartPolicyNever,
 		ActiveDeadlineSeconds: &deadline,
-		Tolerations:           []corev1.Toleration{{Key: v1alpha1.ReadOnlyTaintKey(group), Operator: corev1.TolerationOpExists}},
+		Tolerations:           []corev1.Toleration{{Key: v1alpha1.ReadOnlyTaintKey(meta.Namespace, group), Operator: corev1.TolerationOpExists}},
 		Containers: []corev1.Container{{Name: "client", Image: "python:3.13-alpine", Command: []string{"python", "-u", "-c", deployClientScript},
 			Env: []corev1.EnvVar{{Name: "DEPLOY_URL", Value: "https://bloodraven." + meta.Namespace + ".svc.cluster.local:8443/deploy/v1/groups/" + group},
 				{Name: "OPERATION_ID", Value: operation}, {Name: "INSTANCE", Value: meta.Name}, {Name: "MODE", Value: mode}},

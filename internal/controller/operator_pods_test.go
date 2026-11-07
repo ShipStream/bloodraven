@@ -16,7 +16,6 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
-	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 // operatorPodsTestImage is a sentinel operator image so the walk below
@@ -262,14 +261,14 @@ func TestNoBareOperatorBinaryCommand(t *testing.T) {
 // TestOperatorPodsTolerateOwnGroupReadOnlyTaint pins the placement rule:
 // every pod the operator builds for a group survives, and can schedule
 // onto, nodes carrying that group's read-only NoExecute taint, exactly
-// like the group's MySQL pods. Other groups' taints (shared nodes) and
-// the legacy unscoped key stay untolerated.
+// like the group's MySQL pods. Other groups' taints (shared nodes), also
+// a same-name group's in another namespace, stay untolerated.
 func TestOperatorPodsTolerateOwnGroupReadOnlyTaint(t *testing.T) {
 	fg, pods := renderOperatorPods(t)
 
-	own := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Name), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
-	other := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Name + "-other"), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
-	legacy := corev1.Taint{Key: platform.LegacyTaintKey, Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
+	own := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Namespace, fg.Name), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
+	other := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Namespace, fg.Name+"-other"), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
+	sameName := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Namespace+"-other", fg.Name), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
 
 	if len(pods) != 10 {
 		t.Fatalf("rendered %d pod templates, want 10", len(pods))
@@ -281,8 +280,8 @@ func TestOperatorPodsTolerateOwnGroupReadOnlyTaint(t *testing.T) {
 		if tolerates(p.spec.Tolerations, other) {
 			t.Errorf("%s: tolerates another group's taint %s", p.name, other.Key)
 		}
-		if tolerates(p.spec.Tolerations, legacy) {
-			t.Errorf("%s: tolerates legacy taint %s", p.name, legacy.Key)
+		if tolerates(p.spec.Tolerations, sameName) {
+			t.Errorf("%s: tolerates a same-name group's taint in another namespace %s", p.name, sameName.Key)
 		}
 		if p.spec.NodeSelector != nil || p.spec.Affinity != nil {
 			t.Errorf("%s: unexpected nodeSelector/affinity %v/%v; Jobs reach MySQL via Services and may be pinned by PVC topology", p.name, p.spec.NodeSelector, p.spec.Affinity)

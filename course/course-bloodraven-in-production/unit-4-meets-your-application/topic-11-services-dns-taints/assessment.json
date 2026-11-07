@@ -12,12 +12,12 @@
     },
     {
       "front": "Which labels are in the `mysql-<group>-primary` selector?",
-      "back": "Two: `app.kubernetes.io/instance=<group>` and `shipstream.io/role=primary`. No `healthy` key, and `publishNotReadyAddresses` is false.",
+      "back": "Two: `app.kubernetes.io/instance=<group>` and `bloodraven.shipstream.io/role=primary`. No `healthy` key, and `publishNotReadyAddresses` is false.",
       "orderIndex": 2
     },
     {
       "front": "Which labels are in the `mysql-<group>-replicas` selector?",
-      "back": "Three: `app.kubernetes.io/instance=<group>`, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.",
+      "back": "Three: `app.kubernetes.io/instance=<group>`, `bloodraven.shipstream.io/role=replica`, and `bloodraven.shipstream.io/healthy=true`.",
       "orderIndex": 3
     },
     {
@@ -26,7 +26,7 @@
       "orderIndex": 4
     },
     {
-      "front": "Name the five conjuncts a `role: ReadOnly` site must satisfy to be labelled `healthy=yes`.",
+      "front": "Name the five conjuncts a `role: ReadOnly` site must satisfy to be labelled `healthy=true`.",
       "back": "Source convergence `converged`; `replication` `Healthy` or `Lagging`; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.",
       "orderIndex": 5
     },
@@ -52,7 +52,7 @@
     },
     {
       "front": "Give the full taint Bloodraven applies to a demoted site's nodes in group `playground`.",
-      "back": "`shipstream.io/db-readonly-playground=true:NoExecute` — prefix `shipstream.io/db-readonly-`, group suffix, constant value `true`, effect `NoExecute`.",
+      "back": "`bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground=true:NoExecute` — the group's namespace, the fixed `.db-readonly.bloodraven.shipstream.io/` part, the group name, constant value `true`, effect `NoExecute`.",
       "orderIndex": 10
     },
     {
@@ -73,13 +73,13 @@
         "Both jobs → `mysql-playground-primary`, because only the primary is guaranteed to have current data"
       ],
       "correctOptionIndex": 0,
-      "explanation": "`-primary` selects on `role=primary` and follows the promotion; `-replicas` selects on `role=replica` plus `healthy=yes` and drops a lagging or non-converged reader automatically. Option 2 pins writes to whichever site is active today — the per-site Service does not follow a promotion, so the job writes to a read-only MySQL the moment `playground` fails over. Option 3 sends reads at the internal per-site Service, which exists for sidecar and peer traffic and applies no health gate at all. Option 4 is the common over-caution: it works, but it puts every reporting query on the write path and throws away the reader tier you are paying for. (objective 1)"
+      "explanation": "`-primary` selects on `role=primary` and follows the promotion; `-replicas` selects on `role=replica` plus `healthy=true` and drops a lagging or non-converged reader automatically. Option 2 pins writes to whichever site is active today — the per-site Service does not follow a promotion, so the job writes to a read-only MySQL the moment `playground` fails over. Option 3 sends reads at the internal per-site Service, which exists for sidecar and peer traffic and applies no health gate at all. Option 4 is the common over-caution: it works, but it puts every reporting query on the write path and throws away the reader tier you are paying for. (objective 1)"
     },
     {
       "question": "A planned failover has stamped `role=\"fenced\"` on the source site's MySQL pod. Which Services still reach that pod, and which do not?",
       "type": "SHORT_ANSWER",
       "orderIndex": 1,
-      "sampleAnswer": "Neither shared Service reaches it. `mysql-playground-primary` requires `role=primary` and `mysql-playground-replicas` requires `role=replica` plus `healthy=yes`; `\"fenced\"` matches neither, so the pod drops out of both at once. Its own per-site Service, `mysql-playground-<site>`, selects on name/instance/site and does not look at `role`, so that one still reaches it — which is how you keep an operator path to a fenced instance.",
+      "sampleAnswer": "Neither shared Service reaches it. `mysql-playground-primary` requires `role=primary` and `mysql-playground-replicas` requires `role=replica` plus `healthy=true`; `\"fenced\"` matches neither, so the pod drops out of both at once. Its own per-site Service, `mysql-playground-<site>`, selects on name/instance/site and does not look at `role`, so that one still reaches it — which is how you keep an operator path to a fenced instance.",
       "graderNotes": "A strong answer names both shared Services and why the label misses each selector, and says the per-site Service still selects the pod because `role` is not in its selector. Credit answers that note this is what fencing looks like at the Service layer. Do not credit an answer claiming the pod is unreachable from everywhere, or that fencing works by deleting the Service.",
       "explanation": "Fencing at the Service layer is a label change, not an object deletion. Because the two shared selectors name mutually exclusive role values, one label edit removes the pod from application writes and application reads in a single step, while the per-site Service keeps it reachable for diagnosis. (objective 1)"
     },
@@ -89,12 +89,12 @@
       "orderIndex": 2,
       "options": [
         "`role: ReadOnly` sites are never members of `-replicas`; they are reachable only through their own per-site Service",
-        "The lag conjunct fails: `readOnlyMaxLagSeconds` is unset, so the effective reader threshold inherits `maxLagSeconds` = 30, and 45 > 30 leaves the pod labelled `healthy=no`",
+        "The lag conjunct fails: `readOnlyMaxLagSeconds` is unset, so the effective reader threshold inherits `maxLagSeconds` = 30, and 45 > 30 leaves the pod labelled `healthy=false`",
         "`maxLagSeconds` only drives the `ReplicationLagging` condition, so it cannot affect Services — the pod must be failing its readiness probe instead",
         "Endpoints are withheld until the anti-flap cooldown from the last failover has expired"
       ],
       "correctOptionIndex": 1,
-      "explanation": "All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails (`Lagging` still satisfies the replication conjunct), because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `ReadOnly` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)"
+      "explanation": "All five reader conjuncts must hold; four of five is `healthy=false`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails (`Lagging` still satisfies the replication conjunct), because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `ReadOnly` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)"
     },
     {
       "question": "An RBAC rule denied the operator's `DNSEndpoint` apply during the promotion of `playground`. Once the rule is fixed, an operator has to re-run the failover or re-apply the record by hand to get DNS pointing at the new primary.",
@@ -104,7 +104,7 @@
       "explanation": "The reverse is true: nobody has to do anything. `reconcileDNS` runs on every poll, re-derives the desired target from live topology rather than replaying a memoized one, and the write itself is one idempotent server-side apply with forced ownership — no create/update split. So the record heals on a later poll, with no second failover and no MySQL mutation, and the heal survives an operator restart because nothing needed to be remembered. Chaos scenario 38 is exactly this experiment. What manual action cannot fix is the other half: the operator cannot accelerate DNS propagation once the record is written. (objective 2)"
     },
     {
-      "question": "Bloodraven taints iad's nodes with `shipstream.io/db-readonly-playground=true:NoExecute` after promoting pdx. What happens to workloads already running on those nodes?",
+      "question": "Bloodraven taints iad's nodes with `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground=true:NoExecute` after promoting pdx. What happens to workloads already running on those nodes?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 4,
       "options": [

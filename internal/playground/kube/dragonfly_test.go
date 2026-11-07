@@ -27,7 +27,7 @@ func TestDragonflyNameHelpers(t *testing.T) {
 
 func TestDragonflyPodSelector(t *testing.T) {
 	got := DragonflyPodSelector("playground", "iad")
-	want := "app.kubernetes.io/name=dragonfly,app.kubernetes.io/instance=playground,shipstream.io/site=iad"
+	want := "app.kubernetes.io/name=dragonfly,app.kubernetes.io/instance=playground,bloodraven.shipstream.io/site=iad"
 	if got != want {
 		t.Errorf("DragonflyPodSelector = %q, want %q", got, want)
 	}

@@ -59,7 +59,7 @@
 
 **Front:** The three annotations you apply by hand
 
-**Back:** `planned-failover=<site>[:maxLagWait=…]`, `reclone-site=<site>:<divergentGtid prefix ≥8 chars>` (cold form `<site>:confirm=<group>`), and `rotate-keyring=<site>`. All under `bloodraven.shipstream.io/`, all consumed and cleared.
+**Back:** `planned-failover=<site>[:maxLagWait=…]`, `reclone-site=<site>:confirm=<group>:uid=<uid>:gtidPrefix=<divergentGtid prefix ≥8 chars>` (cold form without `gtidPrefix=`), and `rotate-keyring=<site>`. All under `bloodraven.shipstream.io/`, all consumed and cleared.
 
 ---
 

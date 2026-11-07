@@ -26,7 +26,7 @@ const retentionTestSID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 func retentionBoundaryBackup(name, gtids string, start time.Time) *v1alpha1.MysqlBackup {
 	s, c := metav1.NewTime(start), metav1.NewTime(start.Add(2*time.Hour))
-	return &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{"shipstream.io/failover-group": "fg", "shipstream.io/backup-profile": "p"}}, Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "p"}, Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, StartTime: &s, CompletionTime: &c, GtidExecuted: gtids}}
+	return &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{"bloodraven.shipstream.io/failover-group": "fg", "bloodraven.shipstream.io/backup-profile": "p"}}, Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "p"}, Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, StartTime: &s, CompletionTime: &c, GtidExecuted: gtids}}
 }
 
 func TestPITRCutoffRequiresEveryBackupGTIDBoundary(t *testing.T) {
@@ -170,9 +170,9 @@ func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
 			deleting.UID = "uid-deleting"
 			now := metav1.Now()
 			deleting.DeletionTimestamp = &now
-			deleting.Finalizers = []string{"shipstream.io/mysqlbackup"}
+			deleting.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 			if tc.held {
-				deleting.Annotations = map[string]string{"hold.verification.shipstream.io/uid-v": "v"}
+				deleting.Annotations = map[string]string{v1alpha1.VerificationHoldAnnotationPrefix + "uid-v": "v"}
 			}
 			kept := retentionBoundaryBackup("kept", retentionTestSID+":1-20", start.Add(time.Hour))
 			objs := []client.Object{deleting, kept}
@@ -225,7 +225,7 @@ func TestPITRCutoffListsVerificationsOnce(t *testing.T) {
 		b := retentionBoundaryBackup(name, retentionTestSID+":1-10", start)
 		b.UID = types.UID("uid-" + name)
 		b.DeletionTimestamp = &now
-		b.Finalizers = []string{"shipstream.io/mysqlbackup"}
+		b.Finalizers = []string{"bloodraven.shipstream.io/mysqlbackup"}
 		objs = append(objs, b)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()

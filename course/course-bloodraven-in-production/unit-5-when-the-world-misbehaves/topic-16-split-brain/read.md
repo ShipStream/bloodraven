@@ -77,6 +77,6 @@ Four steps, in order:
 1. **Pick a winner.** By policy if `sitePriorities` is set, by hand otherwise. There is no freshest — decide whose writes are authoritative.
 2. **Fence the loser.** `SET GLOBAL super_read_only = ON`. It blocks rather than cuts off; surviving sessions can still serve stale reads until the site is next demoted.
 3. **Audit the divergence.** `status.sites[].divergentGtid` holds the exact set the loser has and the winner never saw; the `bloodraven_divergent_transactions` gauge holds the count. The condition reason is `DivergentTransactions` and its message names the annotation you need.
-4. **Reclone.** The `bloodraven.shipstream.io/reclone-site` annotation you already met — `<siteName>:<divergentGtidPrefix>`, at least 8 characters, matched against the observed `divergentGtid` so you cannot fat-finger it.
+4. **Reclone.** The `bloodraven.shipstream.io/reclone-site` annotation you already met — `<siteName>:confirm=<groupName>:uid=<groupUID>:gtidPrefix=<divergentGtidPrefix>`, at least 8 characters, matched against the observed `divergentGtid` so you cannot fat-finger it.
 
 You can now state which tier `playground` is on, justify or change its `sitePriorities`, and run pick-fence-audit-reclone without guessing. What you cannot yet say is what happens to any of it when the operator itself is not there to run it.

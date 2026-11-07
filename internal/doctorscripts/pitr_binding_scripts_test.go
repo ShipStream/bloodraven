@@ -80,11 +80,11 @@ func TestTriagePITRBindings(t *testing.T) {
 // the pitr-archive-check Jobs and pods.
 func TestSupportBundlePITRKeySnapshotsMetadataOnly(t *testing.T) {
 	e := newRuleEnv(t)
-	e.rule(t, "get secrets -n orders -l app.kubernetes.io/name=mysql-pitr-key,shipstream.io/failover-group=lion -o custom-columns=*",
+	e.rule(t, "get secrets -n orders -l app.kubernetes.io/name=mysql-pitr-key,bloodraven.shipstream.io/failover-group=lion -o custom-columns=*",
 		"NAME                             IMMUTABLE\nmysql-lion-pitr-key-a1b2c3d4e5   true\n", false)
-	e.rule(t, "get secrets -n orders -l app.kubernetes.io/name=mysql-dump-key,shipstream.io/failover-group=lion -o custom-columns=*",
+	e.rule(t, "get secrets -n orders -l app.kubernetes.io/name=mysql-dump-key,bloodraven.shipstream.io/failover-group=lion -o custom-columns=*",
 		"NAME                                         IMMUTABLE\nmysqlbackup-nightly-1-dump-key-1a2b3c4d   true\n", false)
-	e.rule(t, "get jobs -n orders -l shipstream.io/failover-group=lion,shipstream.io/resource=pitr-archive-check -o custom-columns=*",
+	e.rule(t, "get jobs -n orders -l bloodraven.shipstream.io/failover-group=lion,bloodraven.shipstream.io/resource=pitr-archive-check -o custom-columns=*",
 		"NAME                         KEY_SECRET\nmysql-lion-pitr-check-0a1b2c3d   mysql-lion-pitr-key-a1b2c3d4e5\n", false)
 	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o custom-columns=ID:.status.pitrArchiveBindings*",
 		"ID                     STATE\npab-0123456789abcdef   Bound\n", false)

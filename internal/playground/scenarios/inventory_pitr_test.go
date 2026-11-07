@@ -157,7 +157,7 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 		if s.LBIP == "" || s.LBIP == "10.0.0.1" || s.LBIP == "10.0.0.2" {
 			t.Errorf("site %s lbIP %q, want its own placeholder", s.Name, s.LBIP)
 		}
-		if len(s.TaintNodeSelector) != 1 || s.TaintNodeSelector["shipstream.io/failover-group.s37-restored"] != "true" {
+		if len(s.TaintNodeSelector) != 1 || s.TaintNodeSelector["bloodraven.shipstream.io/failover-group.s37-restored"] != "true" {
 			t.Errorf("site %s taintNodeSelector %v must name only the restored group's own label", s.Name, s.TaintNodeSelector)
 		}
 	}

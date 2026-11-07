@@ -136,12 +136,12 @@ def is_serving(site_spec, site_status, group):
     mysql-<group>-replicas?
 
     That Service selects on three labels: instance, role=replica and
-    healthy=yes. The operator stamps healthy on each pod, and the rule it
+    healthy=true. The operator stamps healthy on each pod, and the rule it
     uses depends on the site's role.
 
     TODO B: replace the placeholder below with the operator's own rule.
 
-      * For a site whose role is "ReadOnly", healthy=yes needs all five of
+      * For a site whose role is "ReadOnly", healthy=true needs all five of
         these to hold at once:
           1. sourceConvergenceState is "Converged"
           2. replication is "Healthy" or "Lagging" (Lagging only means past
@@ -151,7 +151,7 @@ def is_serving(site_spec, site_status, group):
              the active site - a chained replica does not count
           5. secondsBehindSource is at or under effective_readonly_max_lag(spec)
 
-      * For every other role, healthy=yes as soon as state is "Writable" or
+      * For every other role, healthy=true as soon as state is "Writable" or
         "ReadOnly". There is no lag gate on those sites. Read that sentence
         twice before you write the code.
     """

@@ -121,6 +121,32 @@ const (
 	EventMysqlConfIgnored = "MysqlConfIgnored"
 )
 
+// Events: Refused workloads and metadata. On: MysqlFailoverGroup, MysqlBackupVerification.
+//
+// The operator refuses to act on something until a human fixes it, and
+// does not retry in a loop. Each Event repeats the condition reason it
+// sets and is recorded once per finding.
+const (
+	// A site's Deployment or Dragonfly StatefulSet has a selector other
+	// than the one the operator renders (for example an object left from
+	// an older release with other label keys). The selector is immutable,
+	// so the operator does not update the object and reports
+	// `Degraded=True/WorkloadSelectorMismatch`; the message names the
+	// object. Delete it so the operator re-creates it (a MySQL site keeps
+	// its PVC).
+	EventWorkloadSelectorMismatch = ReasonWorkloadSelectorMismatch
+	// An internal annotation payload carries a `schemaVersion` this
+	// operator does not know (a newer operator wrote it, or it was
+	// edited). It proves nothing: on a MysqlFailoverGroup (the
+	// planned-failover terminal marker, a deployment lease record) it is
+	// reported as `Degraded=True/MetadataVersionUnsupported` and the
+	// payload is refused, except that a terminal marker naming a run with
+	// outcome `ManualRecoveryRequired` still holds automatic failover; on
+	// a MysqlBackupVerification (the verification Job's source record) the
+	// run fails with `Verified=False/MetadataVersionUnsupported`.
+	EventMetadataVersionUnsupported = ReasonMetadataVersionUnsupported
+)
+
 // Events: Planned failover. On: MysqlFailoverGroup.
 //
 // See [Planned failover](/docs/operations/planned-failover) for the phases,

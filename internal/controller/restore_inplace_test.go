@@ -249,8 +249,13 @@ func TestInPlaceRestoreFencesPrimaryService(t *testing.T) {
 // fgInPlaceRestore returns a MysqlFailoverGroup with status.activeSite
 // set and a RestoreInPlace spec pointing at the same seed MysqlBackup
 // the bootstrap tests use.
+// testRestoreUID is the uid of fgInPlaceRestore's group.
+const testRestoreUID = "1c0ffee0-0000-4000-8000-00000000a11a"
+
 func fgInPlaceRestore(schema string) *v1alpha1.MysqlFailoverGroup {
 	fg := fgWithBackup()
+	// The reclone queue's requests carry the group's uid (A-78).
+	fg.UID = testRestoreUID
 	fg.Status.ActiveSite = fg.Spec.Sites[0].Name
 	fg.Status.Sites = []v1alpha1.SiteStatus{
 		{Name: fg.Spec.Sites[0].Name, State: v1alpha1.SiteStateWritable},

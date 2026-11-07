@@ -37,9 +37,6 @@ const (
 	resetBaselineStableDuration = 20 * time.Second
 )
 
-// readonlyTaintKey is the read-only taint key of the playground group.
-var readonlyTaintKey = v1alpha1.ReadOnlyTaintKey("playground")
-
 type resetter struct {
 	k          *pgkube.Client
 	namespace  string
@@ -785,12 +782,12 @@ func podReady(pod *corev1.Pod) bool {
 }
 
 func (r *resetter) siteNode(ctx context.Context, site string) (string, error) {
-	nodes, err := r.k.Kubernetes.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: "shipstream.io/site.playground=" + site})
+	nodes, err := r.k.Kubernetes.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: "bloodraven.shipstream.io/site.playground=" + site})
 	if err != nil {
 		return "", err
 	}
 	if len(nodes.Items) == 0 {
-		return "", fmt.Errorf("no node has shipstream.io/site.playground=%s", site)
+		return "", fmt.Errorf("no node has bloodraven.shipstream.io/site.playground=%s", site)
 	}
 	return nodes.Items[0].Name, nil
 }
@@ -831,6 +828,7 @@ func (r *resetter) createManualPV(ctx context.Context, site v1alpha1.SiteSpec, n
 }
 
 func (r *resetter) clearReadOnlyTaints(ctx context.Context) error {
+	readonlyTaintKey := v1alpha1.ReadOnlyTaintKey(r.namespace, r.fg)
 	nodes, err := r.k.ListNodes(ctx)
 	if err != nil {
 		return err

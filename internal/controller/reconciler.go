@@ -455,9 +455,20 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 					return ctrl.Result{}, fmt.Errorf("get deployment %s: %w", site.Name, err)
 				}
 			}
-			if !deferDeployment {
-				if err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender); err != nil {
+			deployName := resourceName(fg.Name, site.Name)
+			if deferDeployment {
+				r.noteWorkloadSelector(&fg, "Deployment", deployName, deploymentSelectorMismatch(&existing, &fg, site.Name))
+			} else {
+				err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender)
+				var mismatch *workloadSelectorMismatchError
+				if stderrors.As(err, &mismatch) {
+					// Refused, not retried: the next reconcile checks again
+					// without writing.
+					r.noteWorkloadSelector(&fg, "Deployment", deployName, mismatch)
+				} else if err != nil {
 					return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
+				} else {
+					r.noteWorkloadSelector(&fg, "Deployment", deployName, nil)
 				}
 			}
 		}
@@ -781,7 +792,7 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 			if selector == "" {
 				continue
 			}
-			if err := r.Tainter.SetTaint(ctx, selector, fg.Name, false); err != nil {
+			if err := r.Tainter.SetTaint(ctx, selector, fg.Namespace, fg.Name, false); err != nil {
 				logger.Error(err, "failed to remove taint during shutdown", "site", site.Name)
 				// Continue cleanup despite taint removal failure
 			}
@@ -1344,6 +1355,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 	pitrCanonical := pitr.inputs.Canonical()
 
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+		// The selector is immutable: a live Deployment with another one
+		// is refused, not updated (workload_selector.go).
+		if mismatch := deploymentSelectorMismatch(deploy, fg, site.Name); mismatch != nil {
+			return mismatch
+		}
 		// §4.6 row 4d (K3): while the group's Deployments carry no
 		// decodable pitr-render annotation and no check has authenticated
 		// the candidate, an existing Deployment is not updated at all; its
@@ -1376,13 +1392,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		deploy.Spec.Strategy = appsv1.DeploymentStrategy{
 			Type: appsv1.RecreateDeploymentStrategyType,
 		}
-		deploy.Spec.Selector = &metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				labelAppName:       "mysql",
-				labelInstance:      fg.Name,
-				v1alpha1.SiteLabel: site.Name,
-			},
-		}
+		deploy.Spec.Selector = mysqlDeploymentSelector(fg, site.Name)
 
 		podLabels := make(map[string]string)
 		for k, v := range fg.Spec.PodLabels {
@@ -1396,7 +1406,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		// These must NOT depend on fg.Status.ActiveSite or any mutable state,
 		// otherwise every status change triggers a Deployment rollout.
 		podLabels[v1alpha1.RoleLabel] = "replica"
-		podLabels[v1alpha1.HealthyLabel] = "no"
+		podLabels[v1alpha1.HealthyLabel] = v1alpha1.LabelValueFalse
 
 		configMapName := desiredSiteConfigMapName(fg, site, pitr.inputs)
 
@@ -1792,7 +1802,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				},
 				// MySQL pods must tolerate the db-readonly taint since they
 				// run on both primary and replica nodes.
-				Tolerations: groupReadOnlyTolerations(fg.Name),
+				Tolerations: groupReadOnlyTolerations(fg),
 				// Order: keyring-init first — the keyring must exist
 				// before mysqld starts, and it is cheaper to fail the
 				// pod there than to have InnoDB abort startup with
@@ -1882,7 +1892,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 		// has no endpoints while the seed is being loaded or holds a
 		// failed load. The restore Job uses the internal Service instead.
 		if site.IsReadOnlyReader() || restoreInFlight(fg) {
-			selector[v1alpha1.HealthyLabel] = "yes"
+			selector[v1alpha1.HealthyLabel] = v1alpha1.LabelValueTrue
 		}
 		serviceType := effectiveSiteServiceType(fg.Spec.ServiceTemplate, site.ServiceTemplate)
 		mutateServiceSpec(svc, serviceType, effectiveSiteExternalTrafficPolicy(fg.Spec.ServiceTemplate, site.ServiceTemplate), selector, []corev1.ServicePort{
@@ -1981,7 +1991,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Cont
 		mutateServiceSpec(svc, serviceType(fg.Spec.ServiceTemplate), serviceExternalTrafficPolicy(fg.Spec.ServiceTemplate), map[string]string{
 			labelInstance:         fg.Name,
 			v1alpha1.RoleLabel:    "replica",
-			v1alpha1.HealthyLabel: "yes",
+			v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
 		}, []corev1.ServicePort{
 			{
 				Name:       "mysql",
@@ -2298,31 +2308,31 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 			return fmt.Errorf("list pods for site %s: %w", si.spec.Name, err)
 		}
 
-		healthy := "no"
+		healthy := v1alpha1.LabelValueFalse
 		if si.spec.IsReadOnlyReader() {
 			if authorityValid && si.status.State == v1alpha1.SiteStateReadOnly && si.status.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
 				si.status.Replication.Running() && si.status.SecondsBehindSource != nil &&
 				canonicalSourceHost(si.status.SourceHost) == canonicalSourceHost(internalSiteServiceHost(fg.Name, fg.Status.ActiveSite, fg.Namespace)) &&
 				*si.status.SecondsBehindSource <= fg.Spec.EffectiveReadOnlyMaxLagSeconds() {
-				healthy = "yes"
+				healthy = v1alpha1.LabelValueTrue
 			}
 		} else if si.status.State == v1alpha1.SiteStateWritable || si.status.State == v1alpha1.SiteStateReadOnly {
-			healthy = "yes"
+			healthy = v1alpha1.LabelValueTrue
 		}
 		if restoreWithheld {
-			healthy = "no"
+			healthy = v1alpha1.LabelValueFalse
 		}
 		// A peer the in-place restore has not recloned yet still serves
 		// pre-restore data: keep it out of the reader Services.
 		if si.role != "primary" && restoreReclonePending(fg, si.spec.Name) {
-			healthy = "no"
+			healthy = v1alpha1.LabelValueFalse
 		}
 		// The cached view may predate the queue: before a pod that is not
 		// in the reader Services yet (labelled unhealthy, or a new pod not
 		// labelled at all) is put in, confirm uncached that the site is not
 		// queued.
-		if healthy == "yes" && si.role != "primary" && podsNotLabelled(pods.Items, v1alpha1.HealthyLabel, "yes") && confirmPending(si.spec.Name) {
-			healthy = "no"
+		if healthy == v1alpha1.LabelValueTrue && si.role != "primary" && podsNotLabelled(pods.Items, v1alpha1.HealthyLabel, v1alpha1.LabelValueTrue) && confirmPending(si.spec.Name) {
+			healthy = v1alpha1.LabelValueFalse
 		}
 
 		for i := range pods.Items {

@@ -231,7 +231,7 @@ Bloodraven moves labels, records and taints; the strategy is yours.
 
 | Strategy | How the pool gets refreshed | Choose it when |
 |---|---|---|
-| **Taint-based** | The `shipstream.io/db-readonly-<group>` `NoExecute` taint from the previous topic evicts the non-tolerating app pod at the demoted site; the restart guarantees a fresh pool | The app is co-located with MySQL and restarting it is cheap |
+| **Taint-based** | The `<namespace>.db-readonly.bloodraven.shipstream.io/<group>` `NoExecute` taint from the previous topic evicts the non-tolerating app pod at the demoted site; the restart guarantees a fresh pool | The app is co-located with MySQL and restarting it is cheap |
 | **Service-based** | The app stays up; bounded lifetime plus error-class retry carries it across | Restarts are expensive, or the app is not site-pinned |
 | **Site-local warm standby** | An instance runs at every site; only the one co-located with the current primary takes writes | Cross-site write latency is the binding constraint |
 

@@ -26,7 +26,7 @@ func DragonflySiteServiceName(fg, site string) string {
 }
 
 // DragonflyActiveServiceName is the cross-site write Service whose
-// selector tracks (role=master AND traffic=enabled). Application
+// selector tracks (role=master AND traffic=true). Application
 // clients connect through this.
 func DragonflyActiveServiceName(fg string) string {
 	return fmt.Sprintf("%s-dragonfly", fg)

@@ -55,8 +55,8 @@
 <p class="subtitle">Real-time MySQL failover group dashboard. WebSocket updates from the operator.</p>
 
 <div class="toolbar" id="toolbar">
-  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l shipstream.io/site=iad')">Kill IAD MySQL</button>
-  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l shipstream.io/site=pdx')">Kill PDX MySQL</button>
+  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l bloodraven.shipstream.io/site=iad')">Kill IAD MySQL</button>
+  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l bloodraven.shipstream.io/site=pdx')">Kill PDX MySQL</button>
   <button class="danger" onclick="copyCmd('kubectl cordon $(kubectl get nodes -l topology.kubernetes.io/zone=zone-iad -o name)')">Cordon IAD Node</button>
   <button class="danger" onclick="copyCmd('kubectl cordon $(kubectl get nodes -l topology.kubernetes.io/zone=zone-pdx -o name)')">Cordon PDX Node</button>
   <button onclick="copyCmd('kubectl uncordon $(kubectl get nodes -o name | tr \\'\\n\\' \\' \\')')">Uncordon All</button>

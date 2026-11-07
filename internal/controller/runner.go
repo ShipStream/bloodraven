@@ -160,6 +160,12 @@ type TopologyManagerRunner struct {
 	lastStartWarning map[types.NamespacedName]startWarning
 	// now is the clock for start-failure Events; nil means time.Now.
 	now func() time.Time
+
+	// refusalMu guards refusals: per group, what the operator refuses to
+	// act on (see SetGroupRefusal), which updateCRStatus reports as
+	// Degraded.
+	refusalMu sync.Mutex
+	refusals  map[types.NamespacedName]map[string]groupRefusal
 }
 
 // NewTopologyManagerRunner creates a new runner.
@@ -543,6 +549,11 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		fg := &groups.Items[i]
 		nn := FailoverGroupNamespacedName(fg)
 		seen[nn] = struct{}{}
+		if msg := terminalMarkerVersionProblem(fg); msg != "" {
+			r.SetGroupRefusal(fg, terminalMarkerRefusalKey, v1alpha1.ReasonMetadataVersionUnsupported, msg)
+		} else {
+			r.ClearGroupRefusal(nn, terminalMarkerRefusalKey)
+		}
 
 		cfg, cfgErr := CRConfigToTopologyConfig(fg)
 		if cfgErr != nil {
@@ -711,6 +722,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		clearManagedSiteGauges(mt.tm)
 	}
 	r.pruneStartFailures(seen)
+	r.pruneGroupRefusals(seen)
 
 	return nil
 }
@@ -929,6 +941,12 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 			deploy = &d
 		}
 		if action == pitrRenderDefer {
+			continue
+		}
+		// A Deployment whose immutable selector differs is refused, not
+		// updated (workload_selector.go): it is not drift the ordered
+		// updater could roll.
+		if deploymentSelectorMismatch(deploy, fg, site.Name) != nil {
 			continue
 		}
 		// The render annotation is repaired on its own (U08): with a
@@ -1833,7 +1851,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, v1alpha1.ReasonInitializing, initializingMessage(snap)
 		degradedStatus, degradedMessage = metav1.ConditionUnknown, readyMessage
 	case v1alpha1.ReasonBootstrapFailed:
-		degradedMessage = bootstrapFailedMessage(snap, nn.Name)
+		degradedMessage = bootstrapFailedMessage(snap, &freshFG)
 	}
 	// A group whose initFromBackup restore has not succeeded is not ready
 	// for applications whatever its topology: the operator keeps them off
@@ -1951,6 +1969,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		}
 	}
 
+	// Something the operator refuses to act on (a workload selector it
+	// cannot update, a payload it cannot read) outranks the per-site
+	// reasons above; the divergence block below and the topology alerts
+	// still win.
+	r.setRefusalDegraded(&freshFG.Status.Conditions, nn, reason, gen, now)
+
 	// A divergence block outranks the per-site replication reasons above,
 	// which are last-writer-wins: a lagging or broken replica must not hide
 	// that a site holds transactions the primary lacks. Topology alerts
@@ -2036,7 +2060,8 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			Message:            fmt.Sprintf("Old primary %s is being reconfigured as a replica", snap.RecoverySite),
 		})
 	} else if snap.RecoveryState == v1alpha1.RecoveryStateBlocked {
-		msg := fmt.Sprintf("Old primary %s has %d divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=%s to recover", snap.RecoverySite, snap.DivergentTxnCount, snap.RecoverySite)
+		msg := fmt.Sprintf("Old primary %s has %d divergent transactions — reclone it (kubectl bloodraven reclone %s %s, or annotate %s=%s) to recover",
+			snap.RecoverySite, snap.DivergentTxnCount, freshFG.Name, snap.RecoverySite, v1alpha1.RecloneAnnotation, recloneAnnotationValue(&freshFG, snap.RecoverySite))
 		if snap.DivergenceDetectedBy == divergenceDetectedByAudit {
 			msg = fmt.Sprintf("Replica %s has %d transactions the primary%s lacks — reclone it (kubectl bloodraven reclone %s %s) or make the primary contain them",
 				snap.RecoverySite, snap.DivergentTxnCount, comparedToSuffix(snap.DivergenceComparedTo), freshFG.Name, snap.RecoverySite)
@@ -2785,7 +2810,7 @@ func bootstrapFailureStands(snap TopologySnapshot) bool {
 }
 
 // bootstrapFailedMessage is the Degraded=True/BootstrapFailed message.
-func bootstrapFailedMessage(snap TopologySnapshot, group string) string {
+func bootstrapFailedMessage(snap TopologySnapshot, fg *v1alpha1.MysqlFailoverGroup) string {
 	label := bootstrapLabel(snap.BootstrapSource)
 	msg := label + " failed"
 	if snap.BootstrapTarget != "" {
@@ -2795,7 +2820,7 @@ func bootstrapFailedMessage(snap TopologySnapshot, group string) string {
 		msg += ": " + snap.BootstrapError
 	}
 	if snap.BootstrapTarget != "" {
-		msg += fmt.Sprintf(". It clears when %s replicates; to clone it again, annotate %s=%s:confirm=%s", snap.BootstrapTarget, v1alpha1.RecloneAnnotation, snap.BootstrapTarget, group)
+		msg += fmt.Sprintf(". It clears when %s replicates; to clone it again, annotate %s=%s", snap.BootstrapTarget, v1alpha1.RecloneAnnotation, recloneAnnotationValue(fg, snap.BootstrapTarget))
 	}
 	return msg
 }

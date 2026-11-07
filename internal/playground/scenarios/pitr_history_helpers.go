@@ -50,7 +50,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
+	"github.com/shipstream/bloodraven/internal/controller"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
@@ -1345,8 +1347,8 @@ func pitrWaitPromotionRecorded(ctx context.Context, env *runner.Env, site string
 // no divergence recorded, confirmed by the group name (a cold reclone).
 // Building the value before the divergence report settles would pick the
 // wrong confirmation, which the operator rejects (F067).
-func pitrRecloneRequest(sites []v1alpha1.SiteStatus, site, group string, expectDivergent bool) (ready bool, value, msg string) {
-	for _, s := range sites {
+func pitrRecloneRequest(mfg *v1alpha1.MysqlFailoverGroup, site string, expectDivergent bool) (ready bool, value, msg string) {
+	for _, s := range mfg.Status.Sites {
 		if s.Name != site {
 			continue
 		}
@@ -1359,12 +1361,12 @@ func pitrRecloneRequest(sites []v1alpha1.SiteStatus, site, group string, expectD
 			if s.RecoveryState != "RecoveryBlocked" || len(div) < 8 {
 				return false, "", msg + " (waiting for RecoveryBlocked with a divergent GTID)"
 			}
-			return true, site + ":" + div[:8], msg
+			return true, controller.RecloneAnnotationValueWithPrefix(mfg, site, div[:8]), msg
 		}
 		if div != "" || s.RecoveryState == "RecoveryBlocked" {
 			return false, "", msg + " (a cold reclone needs a site with no recorded divergence)"
 		}
-		return true, site + ":confirm=" + group, msg
+		return true, controller.RecloneAnnotationValue(mfg, site), msg
 	}
 	return false, "", "site absent"
 }
@@ -1459,7 +1461,7 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 	defer cancel()
 	var value string
 	mfg, err := env.Wait.UntilCR(readyCtx, env.Namespace, site+" ready for reclone", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		ready, v, msg := pitrRecloneRequest(m.Status.Sites, site, env.FG, expectDivergent)
+		ready, v, msg := pitrRecloneRequest(m, site, expectDivergent)
 		value = v
 		return ready, msg, nil
 	})
@@ -1540,7 +1542,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 		if !s.IsPromotable() {
 			continue
 		}
-		s.TaintNodeSelector = map[string]string{"shipstream.io/failover-group." + name: "true"}
+		s.TaintNodeSelector = map[string]string{"bloodraven.shipstream.io/failover-group." + name: "true"}
 		s.LBIP = fmt.Sprintf("192.0.2.%d", len(sites)+1)
 		s.ServiceTemplate = nil
 		if s.Name == src.Status.ActiveSite {
@@ -1579,7 +1581,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: src.Namespace,
-			Labels:    map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
+			Labels:    map[string]string{"playground.bloodraven.shipstream.io/created-by-e2e": "true"},
 		},
 		Spec: *spec,
 	}, nil
@@ -1989,10 +1991,11 @@ func pitrListKeySnapshots(ctx context.Context, env *runner.Env, groupUID, id str
 	return list.Items, nil
 }
 
-// pitrReleaseValue is the release annotation's value for one binding id
-// (`<id>:confirm=<group>`, one id per annotation).
-func pitrReleaseValue(id, group string) string {
-	return id + ":confirm=" + group
+// pitrReleaseValue is the release annotation's value for one binding id of
+// the group named name with uid (`<id>:confirm=<name>:uid=<uid>`, one id
+// per annotation).
+func pitrReleaseValue(id, name, uid string) string {
+	return actionvalue.Format(id, actionvalue.ConfirmPairs(name, uid)...)
 }
 
 // pitrReleaseBinding asks the operator to release one binding of the
@@ -2001,7 +2004,11 @@ func pitrReleaseValue(id, group string) string {
 // left. On a timeout (or the caller's deadline) it takes its own annotation
 // back (pitrWithdrawRelease), so a refused release does not fire later.
 func pitrReleaseBinding(ctx context.Context, env *runner.Env, id string) error {
-	value := pitrReleaseValue(id, env.FG)
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return fmt.Errorf("get MFG for the release of %s: %w", id, err)
+	}
+	value := pitrReleaseValue(id, mfg.Name, string(mfg.UID))
 	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, value); err != nil {
 		return fmt.Errorf("annotate the release of %s: %w", id, err)
 	}

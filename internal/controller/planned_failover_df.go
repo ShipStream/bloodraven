@@ -673,7 +673,7 @@ func (o reconcilerDragonflyOps) Abandon(ctx context.Context, fg *v1alpha1.MysqlF
 // Dragonfly gate:
 //
 //  1. Strip the dragonfly-traffic label from the source pod. The active
-//     Service selector requires (role=master AND traffic=enabled), so this
+//     Service selector requires (role=master AND traffic=true), so this
 //     sheds the source endpoint regardless of the pending role-label flip.
 //  2. Issue REPLTAKEOVER against the target Dragonfly (bounded by the run's
 //     maxSyncWait).
@@ -807,7 +807,7 @@ func (o reconcilerDragonflyOps) finishPromotion(ctx context.Context, fg *v1alpha
 		log.FromContext(ctx).Error(err, "post-promotion: stamp target role=master", "site", pf.TargetSite)
 	}
 	if err := r.setDragonflyTrafficOnSite(ctx, fg, pf.TargetSite, true); err != nil {
-		log.FromContext(ctx).Error(err, "post-promotion: stamp target traffic=enabled", "site", pf.TargetSite)
+		log.FromContext(ctx).Error(err, "post-promotion: stamp target traffic=true", "site", pf.TargetSite)
 	}
 	sourceDemoted := pf.SourceSite == ""
 	if pf.SourceSite != "" {
@@ -824,7 +824,7 @@ func (o reconcilerDragonflyOps) finishPromotion(ctx context.Context, fg *v1alpha
 		} else {
 			sourceDemoted = true
 			if err := r.setDragonflyTrafficOnSite(ctx, fg, pf.SourceSite, true); err != nil {
-				log.FromContext(ctx).Error(err, "post-promotion: restore source traffic=enabled", "site", pf.SourceSite)
+				log.FromContext(ctx).Error(err, "post-promotion: restore source traffic=true", "site", pf.SourceSite)
 			}
 		}
 	}

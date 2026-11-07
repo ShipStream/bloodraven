@@ -29,8 +29,8 @@ spec:
       role: PrimaryCandidate
       zone: zone-iad
       taintNodeSelector:
-        shipstream.io/failover-group.playground: "true"
-        shipstream.io/site.playground: iad
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: iad
       lbIP: "10.96.100.10"
       storage:
         storageClassName: playground-fast
@@ -43,8 +43,8 @@ spec:
       role: PrimaryCandidate
       zone: zone-pdx
       taintNodeSelector:
-        shipstream.io/failover-group.playground: "true"
-        shipstream.io/site.playground: pdx
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: pdx
       lbIP: "10.96.100.20"
       storage:
         storageClassName: playground-fast
@@ -57,8 +57,8 @@ spec:
       role: DisasterRecovery
       zone: zone-fra
       taintNodeSelector:
-        shipstream.io/failover-group.playground: "true"
-        shipstream.io/site.playground: fra
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: fra
       lbIP: "10.96.100.30"
       storage:
         storageClassName: playground-fast

@@ -18,13 +18,13 @@ A nightly reporting job against `playground` runs long analytical SELECTs and mu
 
 **Explanation:**
 
-`mysql-playground-replicas` is the group read endpoint — instance, `shipstream.io/role=replica` and `shipstream.io/healthy=yes` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: ReadOnly` site, its per-site Service *does* carry the same `healthy=yes` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)
+`mysql-playground-replicas` is the group read endpoint — instance, `bloodraven.shipstream.io/role=replica` and `bloodraven.shipstream.io/healthy=true` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: ReadOnly` site, its per-site Service *does* carry the same `healthy=true` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)
 
 ## Question 2
 
 **Type:** MULTIPLE_CHOICE
 
-During the draining phase of a planned failover, the operator stamps the `iad` pod `shipstream.io/role=fenced`. Which Service still resolves to that pod?
+During the draining phase of a planned failover, the operator stamps the `iad` pod `bloodraven.shipstream.io/role=fenced`. Which Service still resolves to that pod?
 
 - `mysql-playground-iad`, the per-site Service, which selects on site rather than role
 - `mysql-playground-primary` — the pod is still the active site in status, so the write endpoint still points at it
@@ -35,7 +35,7 @@ During the draining phase of a planned failover, the operator stamps the `iad` p
 
 **Explanation:**
 
-The per-site Services select on name, instance and `shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `PrimaryCandidate`; on a `role: ReadOnly` site the per-site Service adds a `healthy=yes` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)
+The per-site Services select on name, instance and `bloodraven.shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `PrimaryCandidate`; on a `role: ReadOnly` site the per-site Service adds a `healthy=true` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)
 
 ## Question 3
 

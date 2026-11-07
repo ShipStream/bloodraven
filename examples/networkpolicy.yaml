@@ -31,7 +31,7 @@ spec:
             matchLabels:
               app.kubernetes.io/name: mysql
               app.kubernetes.io/managed-by: bloodraven
-              shipstream.io/failover-group: orders
+              bloodraven.shipstream.io/failover-group: orders
       ports:
         - protocol: TCP
           port: 8082
@@ -48,7 +48,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: mysql
       app.kubernetes.io/managed-by: bloodraven
-      shipstream.io/failover-group: orders
+      bloodraven.shipstream.io/failover-group: orders
   policyTypes:
     - Ingress
   ingress:
@@ -66,7 +66,7 @@ spec:
             matchLabels:
               app.kubernetes.io/name: mysql
               app.kubernetes.io/managed-by: bloodraven
-              shipstream.io/failover-group: orders
+              bloodraven.shipstream.io/failover-group: orders
       ports:
         - protocol: TCP
           port: 8080

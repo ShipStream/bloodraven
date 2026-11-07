@@ -632,10 +632,10 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "dc1", ServerID: 101, Zone: "main-dc1", LBIP: "203.0.113.1",
-					TaintNodeSelector: map[string]string{"shipstream.io/site.main": "dc1"},
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.main": "dc1"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
 				{Name: "dc2", ServerID: 102, Zone: "main-dc2", LBIP: "203.0.113.2",
-					TaintNodeSelector: map[string]string{"shipstream.io/site.main": "dc2"},
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.main": "dc2"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
 			},
 			DNS: v1alpha1.DNSSpec{Hostname: "main.az.example.com", TTLSeconds: 60},

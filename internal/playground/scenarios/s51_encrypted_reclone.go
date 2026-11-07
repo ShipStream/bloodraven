@@ -163,7 +163,10 @@ func s51RequestReclone(state *s51RunState) runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "annotate the sealed replica for a cold reclone",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			value := fmt.Sprintf("%s:confirm=%s", state.replicaSite, env.FG)
+			value, err := recloneValueFor(ctx, env, state.replicaSite)
+			if err != nil {
+				return err
+			}
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
 				v1alpha1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("set reclone annotation: %w", err)

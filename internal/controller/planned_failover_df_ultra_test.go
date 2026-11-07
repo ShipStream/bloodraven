@@ -544,7 +544,7 @@ func (c *pfHookTakeoverConn) ReplTakeover(ctx context.Context, d time.Duration) 
 }
 
 // K065 (ported): during strip -> REPLTAKEOVER -> relabel, the active Service
-// selector (role=master AND traffic=enabled) never matches a pod that is
+// selector (role=master AND traffic=true) never matches a pod that is
 // not the real Dragonfly master at that instant.
 func TestPlannedFailoverDragonfly_NoReadOnlyMidFlight(t *testing.T) {
 	fg := pfDFIntended("Proceed", time.Now())

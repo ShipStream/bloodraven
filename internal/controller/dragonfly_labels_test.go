@@ -104,7 +104,7 @@ func TestSyncDragonflyPodLabels_RestoresAfterTakeoverSucceeded(t *testing.T) {
 	// PromotingDragonfly phase BUT the takeover is recorded Succeeded,
 	// meaning the strip→takeover→restore sequence has finished.
 	// effectiveDragonflyMasterSite returns target. syncDragonflyPodLabels
-	// should enforce target=master,traffic=enabled and source=replica,traffic=enabled.
+	// should enforce target=master,traffic=true and source=replica,traffic=true.
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{

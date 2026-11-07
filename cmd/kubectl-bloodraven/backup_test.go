@@ -64,10 +64,10 @@ func TestBuildBackupCR(t *testing.T) {
 			if !tc.wantOverride && b.Spec.SourceSite != "" {
 				t.Errorf("SourceSite = %q, want empty", b.Spec.SourceSite)
 			}
-			if got := b.Labels["shipstream.io/failover-group"]; got != tc.group {
+			if got := b.Labels["bloodraven.shipstream.io/failover-group"]; got != tc.group {
 				t.Errorf("failover-group label = %q, want %q", got, tc.group)
 			}
-			if got := b.Labels["shipstream.io/backup-profile"]; got != tc.profile {
+			if got := b.Labels["bloodraven.shipstream.io/backup-profile"]; got != tc.profile {
 				t.Errorf("backup-profile label = %q, want %q", got, tc.profile)
 			}
 			if got := b.Labels["app.kubernetes.io/managed-by"]; got != "bloodraven" {

@@ -46,14 +46,14 @@ usage() {
 }
 
 site_node() {
-  kubectl get nodes -l "shipstream.io/site.playground=$1" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+  kubectl get nodes -l "bloodraven.shipstream.io/site.playground=$1" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
 }
 
 cmd_kill_site() {
   local site="${1:?Usage: kill-site <site>}"
   info "Killing MySQL pod at site '$site'..."
-  kubectl -n "$NAMESPACE" delete pod -l "shipstream.io/site=$site" --grace-period=0 --force 2>/dev/null || \
-    kubectl -n "$NAMESPACE" delete pod -l "shipstream.io/site=$site"
+  kubectl -n "$NAMESPACE" delete pod -l "bloodraven.shipstream.io/site=$site" --grace-period=0 --force 2>/dev/null || \
+    kubectl -n "$NAMESPACE" delete pod -l "bloodraven.shipstream.io/site=$site"
   ok "MySQL pod at $site killed"
 }
 
@@ -86,7 +86,7 @@ cmd_cordon() {
 
 cmd_uncordon() {
   info "Uncordoning all playground nodes..."
-  for node in $(kubectl get nodes -l 'shipstream.io/site.playground' -o name 2>/dev/null); do
+  for node in $(kubectl get nodes -l 'bloodraven.shipstream.io/site.playground' -o name 2>/dev/null); do
     kubectl uncordon "$node" 2>/dev/null || true
   done
   ok "All playground nodes uncordoned"
@@ -110,7 +110,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      shipstream.io/site: ${site}
+      bloodraven.shipstream.io/site: ${site}
       app.kubernetes.io/name: mysql
   policyTypes:
   - Ingress
@@ -178,7 +178,7 @@ cmd_recover() {
 cmd_status() {
   echo ""
   info "Nodes:"
-  kubectl get nodes -o wide -L topology.kubernetes.io/zone,shipstream.io/site.playground
+  kubectl get nodes -o wide -L topology.kubernetes.io/zone,bloodraven.shipstream.io/site.playground
   echo ""
   info "MysqlFailoverGroup:"
   kubectl -n "$NAMESPACE" get mysqlfailovergroups -o wide 2>/dev/null || echo "  (none found)"
@@ -190,7 +190,7 @@ cmd_status() {
   kubectl -n "$NAMESPACE" get dnsendpoints -o yaml 2>/dev/null | grep -E "dnsName|targets|recordType" || echo "  (none found)"
   echo ""
   info "Node taints:"
-  for node in $(kubectl get nodes -l 'shipstream.io/site.playground' -o name 2>/dev/null); do
+  for node in $(kubectl get nodes -l 'bloodraven.shipstream.io/site.playground' -o name 2>/dev/null); do
     taints=$(kubectl get "$node" -o jsonpath='{.spec.taints[*].key}' 2>/dev/null)
     echo "  $node: ${taints:-<none>}"
   done

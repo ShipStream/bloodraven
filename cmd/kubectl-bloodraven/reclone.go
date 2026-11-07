@@ -11,40 +11,37 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
-// minRecloneGtidPrefix mirrors internal/controller/reclone.go's
-// constant. The operator rejects divergent-GTID prefixes shorter than
-// this; we mirror the value here so the plugin fails fast (with a
-// clearer error than the operator's "shorter than the required %d
-// characters" event) instead of round-tripping an invalid annotation.
-const minRecloneGtidPrefix = 8
-
-const recloneUsage = `Trigger a re-clone of a divergent site via annotation.
+const recloneUsage = `Trigger a re-clone of a site via annotation.
 
 Usage:
   kubectl bloodraven reclone <group> <site> [flags]
 
-The operator's safety interlock requires the annotation value to carry
-intent confirmation:
+CLONE INSTANCE wipes the site's datadir, so the operator's safety
+interlock requires the annotation value to name the group and its uid:
 
-  * Divergent-GTID case (status.sites[<site>].divergentGtid is set):
-    the value must include a prefix of the observed GTID. The plugin
-    auto-fills the first 12 chars from status; pass --gtid-prefix to
-    override.
+  <site>:confirm=<group>:uid=<group uid>
 
-  * Cold-reclone case (no divergent GTID): the operator requires the
-    annotation value to be exactly "<site>:confirm=<group>" because
-    CLONE INSTANCE wipes the target's datadir. Pass --cold to tell the
-    plugin you intend this and want the confirm token generated for
-    you; without --cold (or an explicit --gtid-prefix), the plugin
-    refuses.
+  * Divergent-GTID case (status.sites[<site>].divergentGtid is set): the
+    value also carries gtidPrefix=, a prefix of the source UUID of the
+    divergent GTID set's first entry. The plugin fills in the whole
+    source UUID from status; pass --gtid-prefix to give a shorter one
+    (at least 8 hex characters).
+
+  * Cold-reclone case (no divergent GTID): pass --cold to confirm that
+    you intend to wipe a site that has not diverged; without --cold the
+    plugin refuses.
+
+The plugin builds the value from the group it reads (name, uid and
+status) and checks it against the operator's interlock before writing it.
 
 Flags:
-  --gtid-prefix string   explicit prefix to embed (default: auto-pull from status)
-  --cold                 confirm a cold reclone — embeds confirm=<group>
-                         when the site has no divergent GTID. Mutually
-                         exclusive with --gtid-prefix.
+  --gtid-prefix string   source-UUID prefix to embed (default: the whole
+                         source UUID from status)
+  --cold                 confirm a cold reclone (no divergent GTID).
+                         Mutually exclusive with --gtid-prefix.
   --kubeconfig string    path to kubeconfig
   --context string       kubeconfig context
   --namespace, -n        namespace
@@ -59,8 +56,8 @@ func runReclone(args []string, stdout, stderr *os.File) error {
 		cold       bool
 	)
 	registerCommonFlags(fs, &cf)
-	fs.StringVar(&gtidPrefix, "gtid-prefix", "", "GTID prefix to embed; defaults to status.sites[site].divergentGtid")
-	fs.BoolVar(&cold, "cold", false, "confirm a cold reclone (no divergent GTID); embeds confirm=<group>")
+	fs.StringVar(&gtidPrefix, "gtid-prefix", "", "source-UUID prefix to embed; defaults to the source UUID of status.sites[site].divergentGtid")
+	fs.BoolVar(&cold, "cold", false, "confirm a cold reclone (no divergent GTID)")
 	fs.Usage = func() { fmt.Fprint(stderr, recloneUsage) }
 	positional, err := parseFlagsAndArgs(fs, args)
 	if err != nil {
@@ -75,7 +72,7 @@ func runReclone(args []string, stdout, stderr *os.File) error {
 		return fmt.Errorf("group and site must be non-empty")
 	}
 	if cold && gtidPrefix != "" {
-		return fmt.Errorf("--cold and --gtid-prefix are mutually exclusive; --cold automatically generates the confirm token")
+		return fmt.Errorf("--cold and --gtid-prefix are mutually exclusive: --gtid-prefix is for a site with a divergent GTID")
 	}
 
 	cl, ns, err := cf.newClient()
@@ -99,38 +96,30 @@ func runReclone(args []string, stdout, stderr *os.File) error {
 
 	observedGtid := siteDivergentGtid(&fg, site)
 
-	// Resolve the annotation suffix. The plugin mirrors the operator's
-	// safety interlock client-side so a missing --cold on a fresh site
-	// fails before round-tripping a doomed annotation.
-	suffix := gtidPrefix
+	// Build the value from the group as read, and run it through the
+	// operator's interlock, so a missing --cold or a wrong prefix fails
+	// before round-tripping a doomed annotation.
+	var value string
 	switch {
-	case suffix != "":
-		// User-provided prefix wins verbatim. If they passed
-		// confirm=<group> by hand for a cold reclone, that's their
-		// call — the operator validates it.
+	case gtidPrefix != "":
+		value = brcontroller.RecloneAnnotationValueWithPrefix(&fg, site, gtidPrefix)
 	case cold:
 		if observedGtid != "" {
-			return fmt.Errorf("--cold refused: site %q has a recorded divergent GTID (%q); rerun without --cold or pass --gtid-prefix=<prefix> so the operator can verify intent against the divergent set",
+			return fmt.Errorf("--cold refused: site %q has a recorded divergent GTID (%q); rerun without --cold so the operator can verify intent against the divergent set",
 				site, observedGtid)
 		}
-		suffix = "confirm=" + group
+		value = brcontroller.RecloneAnnotationValue(&fg, site)
 	case observedGtid != "":
-		suffix = autoPullDivergentGtidPrefix(&fg, site)
-		if suffix == "" {
-			return fmt.Errorf("site %q has a divergent GTID (%q) that is too short to forward safely (< %d chars); pass --gtid-prefix=<value> manually",
-				site, observedGtid, minRecloneGtidPrefix)
-		}
+		value = brcontroller.RecloneAnnotationValue(&fg, site)
 	default:
 		// No GTID, no --cold — cold reclone not confirmed. Reject
 		// with the exact remediation so a fat-finger can't wipe the
 		// datadir.
-		return fmt.Errorf("site %q has no divergent GTID — this is a cold reclone (CLONE INSTANCE will wipe the datadir). Re-run with --cold to confirm, or pass --gtid-prefix=confirm=%s explicitly",
-			site, group)
+		return fmt.Errorf("site %q has no divergent GTID — this is a cold reclone (CLONE INSTANCE will wipe the datadir). Re-run with --cold to confirm",
+			site)
 	}
-
-	value := site
-	if suffix != "" {
-		value = site + ":" + suffix
+	if err := brcontroller.ValidateRecloneAnnotation(&fg, value); err != nil {
+		return err
 	}
 
 	patched := fg.DeepCopy()
@@ -153,30 +142,6 @@ func siteDivergentGtid(fg *v1alpha1.MysqlFailoverGroup, site string) string {
 	for _, s := range fg.Status.Sites {
 		if s.Name == site {
 			return s.DivergentGtid
-		}
-	}
-	return ""
-}
-
-// autoPullDivergentGtidPrefix returns the first 12 chars of the
-// observed divergent GTID for the site — comfortably above the
-// operator's minimum of minRecloneGtidPrefix (8) so the value is
-// recognisable in logs and event messages without forwarding the
-// entire GTID set on the command line. If the recorded GTID is
-// shorter than minRecloneGtidPrefix (8), the helper returns "" so the
-// caller can refuse the operation rather than ship an annotation the
-// operator will reject.
-func autoPullDivergentGtidPrefix(fg *v1alpha1.MysqlFailoverGroup, site string) string {
-	for _, s := range fg.Status.Sites {
-		if s.Name == site && s.DivergentGtid != "" {
-			gtid := s.DivergentGtid
-			if len(gtid) < minRecloneGtidPrefix {
-				return ""
-			}
-			if len(gtid) > 12 {
-				return gtid[:12]
-			}
-			return gtid
 		}
 	}
 	return ""

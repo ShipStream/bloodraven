@@ -219,9 +219,9 @@ func s40ReplacementTestPod() *corev1.Pod {
 			Namespace: pgkube.PlaygroundNamespace,
 			UID:       types.UID("replacement-pod"),
 			Labels: map[string]string{
-				"app.kubernetes.io/name":     "mysql",
-				"app.kubernetes.io/instance": pgkube.FailoverGroupName,
-				"shipstream.io/site":         "reader",
+				"app.kubernetes.io/name":        "mysql",
+				"app.kubernetes.io/instance":    pgkube.FailoverGroupName,
+				"bloodraven.shipstream.io/site": "reader",
 			},
 		},
 	}

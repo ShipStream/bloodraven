@@ -296,7 +296,7 @@ func (a *Actions) LabelNode(ctx context.Context, name string, labels map[string]
 }
 
 // WipeSiteData scales the named site's MySQL deployment to 0, clears
-// the operator-applied `db-readonly-<fg>` taint from every node so the
+// the operator-applied `<namespace>.db-readonly.bloodraven.shipstream.io/<fg>` taint from every node so the
 // local-path-provisioner helper pod can run, deletes the site's data
 // PVC, and waits for the PVC to actually disappear. The reverter scales
 // the site back to 1 — at which point the operator's reconciler creates
@@ -351,7 +351,7 @@ func (a *Actions) WipeSiteData(ctx context.Context, site, fgGroup string) error 
 	}
 	// Clear the readonly taint from every node so the local-path-
 	// provisioner helper pod can run when the new PVC is created.
-	taintKey := v1alpha1.ReadOnlyTaintKey(fgGroup)
+	taintKey := v1alpha1.ReadOnlyTaintKey(a.Namespace, fgGroup)
 	nodes, err := a.K.ListNodes(ctx)
 	if err != nil {
 		return fmt.Errorf("list nodes: %w", err)

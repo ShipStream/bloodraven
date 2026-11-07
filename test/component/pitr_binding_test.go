@@ -477,7 +477,7 @@ func TestPITRBindingPre203Deployment(t *testing.T) {
 	old := e.startArchiver("a", srv, e.dest(a), v1alpha1.PITRArchiveBindingEncryption{Mode: "Passphrase", Algorithm: "AES-256-GCM"}, e.writeKey("k-orig"))
 	e.waitState(old, pitrarchive.StateVerified)
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "mysql-orders-a", Namespace: pbcNS,
-		Labels: map[string]string{"app.kubernetes.io/name": "mysql", "shipstream.io/failover-group": pbcGroupName, "shipstream.io/site": "a"}}}
+		Labels: map[string]string{"app.kubernetes.io/name": "mysql", "bloodraven.shipstream.io/failover-group": pbcGroupName, "bloodraven.shipstream.io/site": "a"}}}
 	if err := e.c.Create(context.Background(), dep); err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +609,7 @@ func TestPITRBindingRetainedArchiveRead(t *testing.T) {
 	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "c" })
 	// The running writer is held on a (its Deployment's render).
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "mysql-orders-a", Namespace: pbcNS,
-		Labels: map[string]string{"app.kubernetes.io/name": "mysql", "shipstream.io/failover-group": pbcGroupName, "shipstream.io/site": "a"}}}
+		Labels: map[string]string{"app.kubernetes.io/name": "mysql", "bloodraven.shipstream.io/failover-group": pbcGroupName, "bloodraven.shipstream.io/site": "a"}}}
 	if err := e.c.Create(context.Background(), dep); err != nil {
 		t.Fatal(err)
 	}
