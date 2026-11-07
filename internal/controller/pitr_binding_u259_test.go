@@ -175,7 +175,7 @@ func TestPITRBindingEstablishingBecomesRead(t *testing.T) {
 	e.deploy("iad", e.render(a, old.Encryption))
 	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b" })
 	mbv := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: pbtNS},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: pbtName}, ProfileName: "b",
+		Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: pbtName}, ProfileName: "b",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ArchiveProfileName: "b"}}}
 	if err := e.c.Create(context.Background(), mbv); err != nil {
 		t.Fatal(err)
@@ -867,9 +867,9 @@ func (panicReader) List(_ context.Context, list client.ObjectList, _ ...client.L
 func TestPITRVerificationsListedWithoutIndex(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
 		&v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "mine", Namespace: pbtNS},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: pbtName}}},
+			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: pbtName}}},
 		&v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "theirs", Namespace: pbtNS},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "other"}}},
+			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "other"}}},
 	).Build()
 	r := &MysqlFailoverGroupReconciler{Client: c}
 	got, err := r.listPITRVerifications(context.Background(), pbtGroup(pbtProfile("a", "p1", "")))

@@ -239,8 +239,8 @@ func s69AdmissionRefusals() runner.Step {
 				fn   func(*v1alpha1.BackupProfile)
 			}{
 				{"remove encryption", func(p *v1alpha1.BackupProfile) { p.Encryption = nil }},
-				{"rename passphraseSecret to a same-bytes copy", func(p *v1alpha1.BackupProfile) { p.Encryption.PassphraseSecret.Name = copyName }},
-				{"change passphraseSecret.key", func(p *v1alpha1.BackupProfile) { p.Encryption.PassphraseSecret.Key = "passphrase-copy" }},
+				{"rename passphraseSecretKeyRef to a same-bytes copy", func(p *v1alpha1.BackupProfile) { p.Encryption.PassphraseSecretKeyRef.Name = copyName }},
+				{"change passphraseSecretKeyRef.key", func(p *v1alpha1.BackupProfile) { p.Encryption.PassphraseSecretKeyRef.Key = "passphrase-copy" }},
 			}
 			for _, e := range edits {
 				err := s69EditBackupDryRun(ctx, env, func(b *v1alpha1.BackupSpec) error {
@@ -1180,10 +1180,10 @@ func s69AssertArchiveKeySnapshot(ctx context.Context, env *runner.Env, mfg *v1al
 // s69AssertDumpKeySnapshot checks a backup's recorded dump key (Δ1, Δ24):
 // its own immutable, ownerless snapshot of the profile's bytes at launch.
 func s69AssertDumpKeySnapshot(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlBackup, want []byte) error {
-	if !b.Status.Encrypted || b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecret == nil {
+	if !b.Status.Encrypted || b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecretKeyRef == nil {
 		return fmt.Errorf("MysqlBackup %s: encrypted=%v, no recorded dump key", b.Name, b.Status.Encrypted)
 	}
-	ref := b.Status.ArtifactStorage.PassphraseSecret
+	ref := b.Status.ArtifactStorage.PassphraseSecretKeyRef
 	if !strings.HasPrefix(ref.Name, "mysqlbackup-") || ref.Key != pitrSnapshotPassphraseKey {
 		return fmt.Errorf("MysqlBackup %s records %s/%s, want its own mysqlbackup-…-dump-key snapshot, key %s", b.Name, ref.Name, ref.Key, pitrSnapshotPassphraseKey)
 	}

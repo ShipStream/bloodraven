@@ -102,11 +102,11 @@ func TestInPlaceRestoreScope(t *testing.T) {
 }
 
 func TestValidateInPlaceRestoreSpec(t *testing.T) {
-	// Valid: full-instance from mysqlBackupRef.
+	// Valid: full-instance from backupRef.
 	good := &v1alpha1.RestoreInPlaceSpec{
 		Confirm: "2026-04-17T14:00:00Z",
-		Source: v1alpha1.InitFromBackupSource{
-			MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+		Source: v1alpha1.RestoreSource{
+			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	if err := validateInPlaceRestoreSpec(good); err != nil {
@@ -131,18 +131,18 @@ func TestValidateInPlaceRestoreSpec(t *testing.T) {
 
 	// Invalid: no source set.
 	bad3 := *good
-	bad3.Source = v1alpha1.InitFromBackupSource{}
+	bad3.Source = v1alpha1.RestoreSource{}
 	if err := validateInPlaceRestoreSpec(&bad3); err == nil {
 		t.Error("missing source should be rejected")
 	}
 
 	// Invalid: two sources set.
 	bad4 := *good
-	bad4.Source = v1alpha1.InitFromBackupSource{
-		MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+	bad4.Source = v1alpha1.RestoreSource{
+		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
 		S3: &v1alpha1.S3Storage{
-			Bucket:            "x",
-			CredentialsSecret: "y",
+			Bucket:                "x",
+			CredentialsSecretName: "y",
 		},
 	}
 	if err := validateInPlaceRestoreSpec(&bad4); err == nil {
@@ -257,8 +257,8 @@ func fgInPlaceRestore(schema string) *v1alpha1.MysqlFailoverGroup {
 	}
 	ripSpec := &v1alpha1.RestoreInPlaceSpec{
 		Confirm: "2026-04-17T14:00:00Z",
-		Source: v1alpha1.InitFromBackupSource{
-			MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+		Source: v1alpha1.RestoreSource{
+			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	if schema != "" {
@@ -1090,7 +1090,7 @@ func ptrTime(t time.Time) *metav1.Time {
 // are pruned; silences go vet in minimal builds.
 var _ = appsv1.Deployment{}
 
-// An in-place restore whose encrypted mysqlBackupRef profile has been
+// An in-place restore whose encrypted backupRef profile has been
 // deleted must end in a clean RestoreInPlaceBuildFailed terminal with no
 // Job, so the topology freeze and primary fence are released. Before the
 // fix the builder panicked on the missing profile's storage pointer,
@@ -1102,7 +1102,7 @@ func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testi
 	site := fg.Spec.Sites[0].Name
 	fg.Spec.Backup.Profiles = fg.Spec.Backup.Profiles[1:] // drop nightly-s3
 	fg.Spec.RestoreInPlace.Decryption = &v1alpha1.BackupDecryptionSpec{
-		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "restore-pass", Key: "passphrase"},
+		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "restore-pass", Key: "passphrase"},
 	}
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,

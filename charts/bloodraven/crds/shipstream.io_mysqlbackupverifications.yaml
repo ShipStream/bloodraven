@@ -80,20 +80,18 @@ spec:
               backupRef:
                 description: |-
                   BackupRef optionally pins the verification to a specific
-                  MysqlBackup in the same namespace. When empty, the reconciler
+                  MysqlBackup in the same namespace. When omitted, the reconciler
                   resolves the latest Succeeded MysqlBackup for (group, profile).
                 properties:
                   name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      This field is effectively required, but due to backwards compatibility is
-                      allowed to be empty. Instances of this type with an empty value here are
-                      almost certainly wrong.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    description: Name of the MysqlBackup.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
+                required:
+                - name
                 type: object
-                x-kubernetes-map-type: atomic
               failoverGroupRef:
                 description: |-
                   FailoverGroupRef identifies the MysqlFailoverGroup in the same
@@ -101,7 +99,9 @@ spec:
                 properties:
                   name:
                     description: Name of the MysqlFailoverGroup.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
                 required:
                 - name
@@ -170,7 +170,9 @@ spec:
                 description: |-
                   ProfileName is the name of a spec.backup.profiles[] entry on the
                   referenced failover group.
+                maxLength: 63
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               resources:
                 description: |-

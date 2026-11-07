@@ -122,7 +122,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		labels[v1alpha1.PITRKeySecretLabel] = pitrFrags.KeySecretName
 	}
 	// An encrypted backup is decrypted only with the key it recorded (its
-	// dump-key snapshot, status.artifactStorage.passphraseSecret), never
+	// dump-key snapshot, status.artifactStorage.passphraseSecretKeyRef), never
 	// the profile's live Secret (Δ17).
 	dumpKey, err := verificationDumpKey(backup)
 	if err != nil {
@@ -255,7 +255,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			return nil, fmt.Errorf("verification job: backup %q storageType=S3 but profile %q has no s3 config",
 				backup.Name, in.Profile.Name)
 		}
-		awsCredsSecret = in.Profile.Storage.S3.CredentialsSecret
+		awsCredsSecret = in.Profile.Storage.S3.CredentialsSecretName
 		env = append(env,
 			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: in.Profile.Storage.S3.Bucket},
 		)
@@ -327,9 +327,9 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// When the source backup is encrypted we run the same
 	// `bloodraven decrypt-download` init container the restore path
 	// uses, with the dump-key snapshot the backup recorded
-	// (status.artifactStorage.passphraseSecret, verificationDumpKey): the
+	// (status.artifactStorage.passphraseSecretKeyRef, verificationDumpKey): the
 	// immutable copy of the key its artifacts were encrypted with (Δ17).
-	// Never fall back to the profile's live encryption.passphraseSecret:
+	// Never fall back to the profile's live encryption.passphraseSecretKeyRef:
 	// it may hold other bytes since the backup ran, and an encrypted
 	// backup that recorded no key is refused (PITRBackupDumpKeyMissing).
 	if dumpKey != nil {
@@ -390,7 +390,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			if in.Profile.Storage.S3.Region != "" {
 				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: in.Profile.Storage.S3.Region})
 			}
-			if in.Profile.Storage.S3.CredentialsSecret != "" {
+			if in.Profile.Storage.S3.CredentialsSecretName != "" {
 				decMounts = append(decMounts, corev1.VolumeMount{
 					Name: "aws-creds", MountPath: backupAWSCredsMountPath, ReadOnly: true,
 				})
@@ -668,15 +668,15 @@ func marshalVerificationLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
 // backup's dump with: the one the backup recorded (Δ17). nil for a
 // plaintext backup; an encrypted backup that recorded none is refused with
 // PITRBackupDumpKeyMissing.
-func verificationDumpKey(backup *v1alpha1.MysqlBackup) (*v1alpha1.PassphraseSecretRef, error) {
+func verificationDumpKey(backup *v1alpha1.MysqlBackup) (*v1alpha1.PassphraseSecretKeyRef, error) {
 	if !backup.Status.Encrypted {
 		return nil, nil
 	}
-	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecret == nil ||
-		backup.Status.ArtifactStorage.PassphraseSecret.Name == "" {
-		return nil, fmt.Errorf("%s: verification job: backup %q is encrypted but recorded no dump key (status.artifactStorage.passphraseSecret)",
+	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecretKeyRef == nil ||
+		backup.Status.ArtifactStorage.PassphraseSecretKeyRef.Name == "" {
+		return nil, fmt.Errorf("%s: verification job: backup %q is encrypted but recorded no dump key (status.artifactStorage.passphraseSecretKeyRef)",
 			pitrarchive.TokenBackupDumpKeyMissing, backup.Name)
 	}
-	recorded := backup.Status.ArtifactStorage.PassphraseSecret
-	return &v1alpha1.PassphraseSecretRef{Name: recorded.Name, Key: recorded.Key}, nil
+	recorded := backup.Status.ArtifactStorage.PassphraseSecretKeyRef
+	return &v1alpha1.PassphraseSecretKeyRef{Name: recorded.Name, Key: recorded.Key}, nil
 }

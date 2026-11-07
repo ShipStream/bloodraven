@@ -17,11 +17,11 @@ import (
 func credentialsModeGroup() *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{}
 	fg.Spec.Credentials = v1alpha1.CredentialsSpec{
-		OperatorSecret: "op",
-		AppSecret:      "app",
-		ReadOnlySecret: "ro",
-		MonitorSecret:  "mon",
-		BackupSecret:   "bk",
+		OperatorSecretName: "op",
+		AppSecretName:      "app",
+		ReadOnlySecretName: "ro",
+		MonitorSecretName:  "mon",
+		BackupSecretName:   "bk",
 	}
 	return fg
 }
@@ -29,7 +29,7 @@ func credentialsModeGroup() *v1alpha1.MysqlFailoverGroup {
 func initScriptVariants() map[string]string {
 	return map[string]string{
 		"all roles":     generateInitUsersScript(credentialsModeGroup()),
-		"operator only": generateInitUsersScript(&v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "op"}}}),
+		"operator only": generateInitUsersScript(&v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "op"}}}),
 	}
 }
 

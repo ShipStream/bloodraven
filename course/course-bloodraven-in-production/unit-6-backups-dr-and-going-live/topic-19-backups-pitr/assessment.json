@@ -7,7 +7,7 @@
     },
     {
       "front": "Backup source reason string `\"override\"` — what does it tell you?",
-      "back": "The MysqlBackup carried a `sourceSiteOverride` that named a configured, observed, non-read-only site, so replica-first selection never ran.",
+      "back": "The MysqlBackup carried a `sourceSite` that named a configured, observed, non-read-only site, so replica-first selection never ran.",
       "orderIndex": 1
     },
     {
@@ -76,7 +76,7 @@
       "explanation": "Replica-first is conditional, not unconditional: a replica qualifies only while `secondsBehindSource` is at or below `maxLagSecondsForSource` (default 300). At 900 seconds `pdx` fails the gate, so option 1 is wrong. `reader` carries `role: read-only` and is excluded from the replica pool outright — the tempting 'spare site' is the one site that can never source a backup, so option 3 is wrong. Option 4 inverts the design: the fallback exists precisely so a stale replica does not block the backup, and `iad` is `writable` and promotable, so it takes the job and status records `\"primary-fallback\"` (objective 2)."
     },
     {
-      "question": "To keep dump load off both primary candidates, you set `sourceSiteOverride: reader` on a MysqlBackup for `playground`. What happens?",
+      "question": "To keep dump load off both primary candidates, you set `sourceSite: reader` on a MysqlBackup for `playground`. What happens?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 1,
       "options": [

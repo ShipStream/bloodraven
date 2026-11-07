@@ -853,7 +853,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePeerStopRejection(ctx context.Cont
 			return fmt.Sprintf("%s%v on %s. A full-instance restore stops the replication receiver of every peer so the restore's DROP statements "+
 				"do not reach them; grant it ON *.* to the operator account (%s). The restore is retried with the same confirm about once a minute",
 				restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), site,
-				fg.Spec.Credentials.OperatorSecret), nil
+				fg.Spec.Credentials.OperatorSecretName), nil
 		}
 		if errors.Is(err, errReplicaIOStopUnsupported) {
 			return fmt.Sprintf("restoreInPlace rejected: the operator cannot stop the replication receiver of peer %s (its MySQL checker does not "+

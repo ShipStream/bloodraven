@@ -21,7 +21,7 @@ func s3CredsTestFG() *v1alpha1.MysqlFailoverGroup {
 		Name: "nightly",
 		Storage: v1alpha1.BackupStorage{
 			Type: v1alpha1.BackupStorageS3,
-			S3:   &v1alpha1.S3Storage{Bucket: "b", CredentialsSecret: "s3-creds"},
+			S3:   &v1alpha1.S3Storage{Bucket: "b", CredentialsSecretName: "s3-creds"},
 		},
 	}}}
 	return fg
@@ -61,7 +61,7 @@ func TestReconcileS3CredentialsCondition(t *testing.T) {
 		{
 			name:       "missing secret",
 			wantStatus: metav1.ConditionFalse,
-			wantInMsg:  `spec.backup.profiles[nightly].storage.s3.credentialsSecret: Secret "s3-creds" not found`,
+			wantInMsg:  `spec.backup.profiles[nightly].storage.s3.credentialsSecretName: Secret "s3-creds" not found`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

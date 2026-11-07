@@ -160,8 +160,8 @@ func TestBuildCleanupJob_NilBackupSpec_UsesDefaultResources(t *testing.T) {
 		Storage: v1alpha1.BackupStorage{
 			Type: v1alpha1.BackupStorageS3,
 			S3: &v1alpha1.S3Storage{
-				Bucket:            "bucket",
-				CredentialsSecret: "s3-creds",
+				Bucket:                "bucket",
+				CredentialsSecretName: "s3-creds",
 			},
 		},
 	}
@@ -215,7 +215,7 @@ func TestBuildBackupJob_AutomountServiceAccountToken_False(t *testing.T) {
 	fg := fgWithBackup()
 	mb := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-nightly-abc", Namespace: "ns"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
 		DumpKeySecretName:    testDumpKeySecret,
@@ -243,7 +243,7 @@ func TestBuildVerificationJob_AutomountServiceAccountToken_False(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-amt", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -277,7 +277,7 @@ func TestBuildVerificationJob_EncryptedSource_InitContainerCarriesResources(t *t
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-enc", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -342,14 +342,14 @@ func TestBuildRestoreJob_MainContainerCarriesBackupResources(t *testing.T) {
 
 func TestBuildRestoreJob_NilBackupSpec_UsesDefaultResources(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
-	// Replace the InitFromBackupSource so the build path doesn't need
+	// Replace the RestoreSource so the build path doesn't need
 	// fg.Spec.Backup at all. S3-direct source is the cleanest.
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{
+		Source: v1alpha1.RestoreSource{
 			S3: &v1alpha1.S3Storage{
-				Bucket:            "external",
-				Prefix:            "dumps/x",
-				CredentialsSecret: "s3-creds",
+				Bucket:                "external",
+				Prefix:                "dumps/x",
+				CredentialsSecretName: "s3-creds",
 			},
 		},
 	}
@@ -375,14 +375,14 @@ func TestBuildRestoreJob_DecryptInitContainerCarriesResources(t *testing.T) {
 
 	fg := fgWithEncryptedBackup()
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{
-			MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+		Source: v1alpha1.RestoreSource{
+			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	seed := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "seed", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -392,7 +392,7 @@ func TestBuildRestoreJob_DecryptInitContainerCarriesResources(t *testing.T) {
 			Encrypted:           true,
 			EncryptionAlgorithm: "AES-256-GCM",
 			ArtifactStorage: &v1alpha1.BackupArtifactStorage{
-				PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "backup-passphrase", Key: "passphrase"},
+				PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"},
 			},
 		},
 	}
@@ -512,8 +512,8 @@ func TestReconcileDeployment_PITRSidecarDefaultsToMysqlDataUser(t *testing.T) {
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,
 				S3: &v1alpha1.S3Storage{
-					Bucket:            "backups",
-					CredentialsSecret: "aws-creds",
+					Bucket:                "backups",
+					CredentialsSecretName: "aws-creds",
 				},
 			},
 		}},

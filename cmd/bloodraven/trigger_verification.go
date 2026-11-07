@@ -93,7 +93,7 @@ func runTriggerVerification(args []string) {
 			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: "schedule"},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: *group},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: *group},
 			ProfileName:      *profile,
 		},
 	}

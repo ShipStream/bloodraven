@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,7 +20,7 @@ import (
 func pitrRestoreFG(ns string, pit *v1alpha1.PointInTimeSpec) *v1alpha1.MysqlFailoverGroup {
 	fg := newVerificationFG(ns)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source:      v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}},
+		Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
 		PointInTime: pit,
 	}
 	return fg
@@ -227,7 +226,7 @@ func TestPITRTargetPatternAndExclusions(t *testing.T) {
 		v := &v1alpha1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: ns},
 			Spec: v1alpha1.MysqlBackupVerificationSpec{
-				FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
+				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
 				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: tc.stop, ExcludeGtids: tc.exclude},
 			},
 		}
@@ -418,7 +417,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 	// MBV status.pointInTime.
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: ns},
-		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)

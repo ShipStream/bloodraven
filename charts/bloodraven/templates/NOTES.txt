@@ -26,14 +26,14 @@ dashboards, and observability namespaces that require it.
 
 WARNING: the auxiliary Service name is {{ include "bloodraven.auxiliaryServiceName" . }}, not the release fullname
 {{ include "bloodraven.fullname" . }}. If any existing MysqlFailoverGroup sets
-spec.sidecar.bloodravenAddress to the old Service FQDN, update it to:
+spec.sidecar.operatorEndpoint to the old Service FQDN, update it to:
   {{ include "bloodraven.auxiliaryServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.auxiliary.service.port }}
 {{- end }}
 {{- else }}
 
 WARNING: auxiliary.service.enabled=false. MySQL sidecars require a reachable
 operator auxiliary endpoint for /active-site self-fencing checks and PITR
-retention. Set spec.sidecar.bloodravenAddress on every MysqlFailoverGroup to a
+retention. Set spec.sidecar.operatorEndpoint on every MysqlFailoverGroup to a
 reachable endpoint before creating or restarting MySQL pods.
 {{- end }}
 
@@ -94,7 +94,7 @@ Next steps:
        namespace: {{ .Release.Namespace }}
      spec:
        credentials:
-         operatorSecret: orders-mysql-operator
+         operatorSecretName: orders-mysql-operator
        sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:{{ .Chart.AppVersion }}
        dns:
          hostname: orders.az.example.com

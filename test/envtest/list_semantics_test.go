@@ -215,7 +215,7 @@ func TestE4_NamedSpecListsAreMaps(t *testing.T) {
 // most one schema.
 func TestE4_SchemaListsAreSets(t *testing.T) {
 	ns := createNamespace(t, "e4-schemas")
-	backupRef := v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "b"}}
+	backupRef := v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "b"}}
 	for i, tc := range []struct {
 		name   string
 		mutate func(*v1alpha1.MysqlFailoverGroup)
@@ -500,7 +500,7 @@ func TestE4_TightenedSpecRulesOnStoredObjects(t *testing.T) {
 		{"two-schemas", "includeSchemas supports at most one schema",
 			func(fg *v1alpha1.MysqlFailoverGroup) {
 				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z",
-					Source:      v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "b"}},
+					Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "b"}},
 					LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"a", "b"}}}
 			},
 			func(fg *v1alpha1.MysqlFailoverGroup) {

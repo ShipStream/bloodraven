@@ -53,19 +53,21 @@ type MysqlBackupVerificationSpec struct {
 	// FailoverGroupRef identifies the MysqlFailoverGroup in the same
 	// namespace whose backup profile should drive this verification.
 	// +required
-	FailoverGroupRef LocalGroupRef `json:"failoverGroupRef"`
+	FailoverGroupRef LocalFailoverGroupRef `json:"failoverGroupRef"`
 
 	// ProfileName is the name of a spec.backup.profiles[] entry on the
 	// referenced failover group.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +required
 	ProfileName string `json:"profileName"`
 
 	// BackupRef optionally pins the verification to a specific
-	// MysqlBackup in the same namespace. When empty, the reconciler
+	// MysqlBackup in the same namespace. When omitted, the reconciler
 	// resolves the latest Succeeded MysqlBackup for (group, profile).
 	// +optional
-	BackupRef *corev1.LocalObjectReference `json:"backupRef,omitempty"`
+	BackupRef *LocalMysqlBackupRef `json:"backupRef,omitempty"`
 
 	// KeepOnFailure leaves the verification Job and its Pod in place when the
 	// verification terminates in Failed, so operators can kubectl exec

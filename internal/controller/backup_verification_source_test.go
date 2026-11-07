@@ -106,7 +106,7 @@ func TestVerificationSource_RejectsMissingOrReplacedPinBeforeLaunch(t *testing.T
 			a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
 			if mode == "replaced-explicit" {
-				v.Spec.BackupRef = &corev1.LocalObjectReference{Name: a.Name}
+				v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: a.Name}
 			}
 			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 			provisionVerificationSource(t, r, c, v)
@@ -155,7 +155,7 @@ func TestVerificationSource_BuildsFromPinnedDestination(t *testing.T) {
 	if err := c.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	v.Spec.BackupRef = &corev1.LocalObjectReference{Name: "new-explicit-ref"}
+	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "new-explicit-ref"}
 	if err := c.Update(ctx, v); err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestVerificationSource_ObservesJobAfterLaunchInputsDisappear(t *testing.T) 
 	fg := verifyFG()
 	a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("pinned", fg.Name, "nightly-s3")
-	v.Spec.BackupRef = &corev1.LocalObjectReference{Name: a.Name}
+	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: a.Name}
 	r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Delete(ctx, a); err != nil {

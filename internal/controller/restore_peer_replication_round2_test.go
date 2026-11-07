@@ -42,7 +42,7 @@ func TestReconcile_PlannedFailoverInFlightFinishesBeforeRestoreFences(t *testing
 	}
 	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{
 		Confirm: testRestoreConfirm,
-		Source:  v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}},
+		Source:  v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
 	}
 	nn := fgNN(fg)
 	iad := &mockMySQL{readOnly: false, gtidExecuted: restoreRoundTwoUUID + ":1-10"}

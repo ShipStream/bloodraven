@@ -128,12 +128,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 // surfaces them as BackupEncryptionInvalid events rather than blocking
 // reconciliation.
 func (r *MysqlFailoverGroupReconciler) validateEncryptionSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.BackupProfile) error {
-	ref := profile.Encryption.PassphraseSecret
+	ref := profile.Encryption.PassphraseSecretKeyRef
 	key := ref.PassphraseSecretKeyOrDefault()
 	var s corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: ref.Name}, &s); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("encryption.passphraseSecret Secret %q not found in namespace %q",
+			return fmt.Errorf("encryption.passphraseSecretKeyRef Secret %q not found in namespace %q",
 				ref.Name, fg.Namespace)
 		}
 		return fmt.Errorf("get encryption Secret: %w", err)
@@ -644,7 +644,7 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      sched.ProfileName,
 		},
 	}

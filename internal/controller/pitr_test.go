@@ -21,7 +21,7 @@ func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
 				fg := newTestFG()
 				storage := v1alpha1.BackupStorage{Type: storageType}
 				if storageType == v1alpha1.BackupStorageS3 {
-					storage.S3 = &v1alpha1.S3Storage{Bucket: "backups", CredentialsSecret: "aws-creds"}
+					storage.S3 = &v1alpha1.S3Storage{Bucket: "backups", CredentialsSecretName: "aws-creds"}
 				} else {
 					storage.PVC = &v1alpha1.PVCStorage{ClaimName: "backups"}
 				}
@@ -30,7 +30,7 @@ func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
 					Profiles: []v1alpha1.BackupProfile{{
 						Name: "encrypted", Storage: storage,
 						Encryption: &v1alpha1.BackupEncryptionSpec{
-							PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "archive-key", Key: "selected-key"},
+							PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "archive-key", Key: "selected-key"},
 						},
 					}},
 				}
@@ -140,11 +140,11 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,
 				S3: &v1alpha1.S3Storage{
-					Bucket:            "lion",
-					Prefix:            "dumps",
-					Region:            "us-east-1",
-					EndpointURL:       "https://s3.example.com",
-					CredentialsSecret: "aws-creds",
+					Bucket:                "lion",
+					Prefix:                "dumps",
+					Region:                "us-east-1",
+					EndpointURL:           "https://s3.example.com",
+					CredentialsSecretName: "aws-creds",
 				},
 			},
 		},
@@ -356,10 +356,10 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 		Storage: v1alpha1.BackupStorage{
 			Type: v1alpha1.BackupStorageS3,
 			S3: &v1alpha1.S3Storage{
-				Bucket:            "lion",
-				Prefix:            "dumps",
-				Region:            "us-east-1",
-				CredentialsSecret: "aws-creds",
+				Bucket:                "lion",
+				Prefix:                "dumps",
+				Region:                "us-east-1",
+				CredentialsSecretName: "aws-creds",
 			},
 		},
 	}}

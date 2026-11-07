@@ -137,7 +137,7 @@ func TestMysqlBackupReconciler_EncryptionFollowsLaunchedJob(t *testing.T) {
 				if err := c.Status().Update(ctx, &got); err != nil {
 					t.Fatal(err)
 				}
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: mb.Name}}}
+				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: mb.Name}}}
 				rr, _ := newReconciler(fg, &got)
 				restore, err := rr.buildRestoreJob(ctx, fg, "iad", "creds")
 				if err != nil {

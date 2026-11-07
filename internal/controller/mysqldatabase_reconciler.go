@@ -223,7 +223,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Resolve the group. A MysqlDatabase applied before its group is a
 	// normal ordering, not a fault, so this is Pending rather than Failed.
 	var fg v1alpha1.MysqlFailoverGroup
-	fgKey := types.NamespacedName{Namespace: mdb.Namespace, Name: mdb.Spec.GroupRef.Name}
+	fgKey := types.NamespacedName{Namespace: mdb.Namespace, Name: mdb.Spec.FailoverGroupRef.Name}
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			return r.pending(ctx, &mdb, v1alpha1.ReasonGroupNotFound,
@@ -408,7 +408,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if ownNameRecorded(prior, u.username) {
 				continue
 			}
-			if referrer, how, claimed := siblingPrincipalClaimIn(&siblings, mdb.Name, mdb.Spec.GroupRef.Name, u.username); claimed {
+			if referrer, how, claimed := siblingPrincipalClaimIn(&siblings, mdb.Name, mdb.Spec.FailoverGroupRef.Name, u.username); claimed {
 				return r.fail(ctx, &mdb, v1alpha1.ReasonUserClaimedBySibling, fmt.Sprintf(
 					"spec.users[] Secret %q names user %q, which MysqlDatabase %q already claims (%s); "+
 						"a users[] principal belongs to exactly one MysqlDatabase — share a group-level principal through spec.grants[] instead",
@@ -767,7 +767,7 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 	}
 
 	var fg v1alpha1.MysqlFailoverGroup
-	fgKey := types.NamespacedName{Namespace: mdb.Namespace, Name: mdb.Spec.GroupRef.Name}
+	fgKey := types.NamespacedName{Namespace: mdb.Namespace, Name: mdb.Spec.FailoverGroupRef.Name}
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Nothing to connect to. Mirrors the backup reconciler's
@@ -951,7 +951,7 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.Name == mdb.Name || !other.DeletionTimestamp.IsZero() ||
-			other.Spec.GroupRef.Name != mdb.Spec.GroupRef.Name {
+			other.Spec.FailoverGroupRef.Name != mdb.Spec.FailoverGroupRef.Name {
 			continue
 		}
 		if other.Spec.DatabaseName == mdb.Spec.DatabaseName {
@@ -993,20 +993,20 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 		c.hosts = hosts
 		if reserved[candidate] {
 			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventOwnerUserReservedSkipped,
-				"owner user %q is a group-level principal of %q; not dropping it", candidate, mdb.Spec.GroupRef.Name)
+				"owner user %q is a group-level principal of %q; not dropping it", candidate, mdb.Spec.FailoverGroupRef.Name)
 			continue
 		}
 		if r.claimedBySibling(ctx, mdb, &list, candidate) {
 			continue // claimedBySibling emitted the specific event.
 		}
-		if referrer, claimed := siblingGrantsClaimIn(&list, mdb.Name, mdb.Spec.GroupRef.Name, candidate); claimed {
+		if referrer, claimed := siblingGrantsClaimIn(&list, mdb.Name, mdb.Spec.FailoverGroupRef.Name, candidate); claimed {
 			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventOwnerUserDropSkipped,
 				"owner user %q is listed in MysqlDatabase %q's spec.grants[]; not dropping it", candidate, referrer)
 			continue
 		}
 		// The users[]-ledger direction (and a sibling's pending owner),
 		// which claimedBySibling and the grants check don't cover.
-		if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.GroupRef.Name, candidate); claimed {
+		if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.FailoverGroupRef.Name, candidate); claimed {
 			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventOwnerUserDropSkipped,
 				"owner user %q is still claimed by MysqlDatabase %q (%s); not dropping it", candidate, referrer, how)
 			continue
@@ -1040,10 +1040,10 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 			}
 			if reserved[name] {
 				r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventUserReservedSkipped,
-					"users[] principal %q is a group-level principal of %q; not dropping it", name, mdb.Spec.GroupRef.Name)
+					"users[] principal %q is a group-level principal of %q; not dropping it", name, mdb.Spec.FailoverGroupRef.Name)
 				continue
 			}
-			if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.GroupRef.Name, name); claimed {
+			if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.FailoverGroupRef.Name, name); claimed {
 				r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventUserDropSkipped,
 					"users[] principal %q is still claimed by MysqlDatabase %q (%s); not dropping it", name, referrer, how)
 				continue
@@ -1063,7 +1063,7 @@ func (r *MysqlDatabaseReconciler) claimedBySibling(ctx context.Context, mdb *v1a
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.Name == mdb.Name || !other.DeletionTimestamp.IsZero() ||
-			other.Spec.GroupRef.Name != mdb.Spec.GroupRef.Name {
+			other.Spec.FailoverGroupRef.Name != mdb.Spec.FailoverGroupRef.Name {
 			continue
 		}
 		if other.Spec.Owner.SecretName == mdb.Spec.Owner.SecretName || other.Status.OwnerUser == username {
@@ -1087,7 +1087,7 @@ func siblingGrantsClaimIn(list *v1alpha1.MysqlDatabaseList, selfName, groupName,
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.Name == selfName || !other.DeletionTimestamp.IsZero() ||
-			other.Spec.GroupRef.Name != groupName {
+			other.Spec.FailoverGroupRef.Name != groupName {
 			continue
 		}
 		for _, g := range other.Spec.Grants {
@@ -1145,7 +1145,7 @@ func (r *MysqlDatabaseReconciler) ownershipConflict(ctx context.Context, mdb *v1
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.Name == mdb.Name || !other.DeletionTimestamp.IsZero() ||
-			other.Spec.GroupRef.Name != mdb.Spec.GroupRef.Name {
+			other.Spec.FailoverGroupRef.Name != mdb.Spec.FailoverGroupRef.Name {
 			continue
 		}
 		if !mdbOutranks(other, mdb) {
@@ -1154,12 +1154,12 @@ func (r *MysqlDatabaseReconciler) ownershipConflict(ctx context.Context, mdb *v1
 		if other.Spec.DatabaseName == mdb.Spec.DatabaseName {
 			return conflictVerdictFail, v1alpha1.ReasonDatabaseNameConflict, fmt.Sprintf(
 				"MysqlDatabase %q already declares database %q on group %q; two CRs must not manage one database (deletionPolicy: Delete on either would drop the other's data)",
-				other.Name, mdb.Spec.DatabaseName, mdb.Spec.GroupRef.Name), nil
+				other.Name, mdb.Spec.DatabaseName, mdb.Spec.FailoverGroupRef.Name), nil
 		}
 		if other.Spec.Owner.SecretName == mdb.Spec.Owner.SecretName {
 			return conflictVerdictFail, v1alpha1.ReasonOwnerConflict, fmt.Sprintf(
 				"MysqlDatabase %q already shares owner Secret %q on group %q; each MysqlDatabase must own a distinct user (deleting one CR would drop the other's credential)",
-				other.Name, mdb.Spec.Owner.SecretName, mdb.Spec.GroupRef.Name), nil
+				other.Name, mdb.Spec.Owner.SecretName, mdb.Spec.FailoverGroupRef.Name), nil
 		}
 		peerUser := other.Status.OwnerUser
 		if peerUser == "" {
@@ -1176,7 +1176,7 @@ func (r *MysqlDatabaseReconciler) ownershipConflict(ctx context.Context, mdb *v1
 		if peerUser == ownerUser {
 			return conflictVerdictFail, v1alpha1.ReasonOwnerConflict, fmt.Sprintf(
 				"MysqlDatabase %q already owns MySQL user %q on group %q; each MysqlDatabase must own a distinct user (deleting one CR would drop the other's credential)",
-				other.Name, ownerUser, mdb.Spec.GroupRef.Name), nil
+				other.Name, ownerUser, mdb.Spec.FailoverGroupRef.Name), nil
 		}
 	}
 	return "", "", "", nil
@@ -1688,7 +1688,7 @@ func (r *MysqlDatabaseReconciler) retirePrincipal(ctx, sqlCtx context.Context, d
 	if err := r.List(ctx, &list, client.InNamespace(mdb.Namespace)); err != nil {
 		return end(ctrl.Result{}, fmt.Errorf("list mysqldatabases for drop guard: %w", err))
 	}
-	if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.GroupRef.Name, rt.username); claimed {
+	if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.FailoverGroupRef.Name, rt.username); claimed {
 		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, skipReason,
 			"%s %q is still claimed by MysqlDatabase %q (%s); not dropping it %s", noun, rt.username, referrer, how, rt.why)
 		return ctrl.Result{}, false, nil
@@ -1753,7 +1753,7 @@ func (r *MysqlDatabaseReconciler) dropUndeclaredHosts(ctx, sqlCtx context.Contex
 	if err := r.List(ctx, &list, client.InNamespace(mdb.Namespace)); err != nil {
 		return end(ctrl.Result{}, fmt.Errorf("list mysqldatabases for drop guard: %w", err))
 	}
-	if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.GroupRef.Name, username); claimed {
+	if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.FailoverGroupRef.Name, username); claimed {
 		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, skipReason,
 			"%s %q is still claimed by MysqlDatabase %q (%s); not dropping it %s", noun, username, referrer, how, why)
 		return ctrl.Result{}, false, nil
@@ -1785,7 +1785,7 @@ func siblingPrincipalClaimIn(list *v1alpha1.MysqlDatabaseList, selfName, groupNa
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.Name == selfName || !other.DeletionTimestamp.IsZero() ||
-			other.Spec.GroupRef.Name != groupName {
+			other.Spec.FailoverGroupRef.Name != groupName {
 			continue
 		}
 		if other.Status.OwnerUser == username || other.Status.PendingOwnerUser == username {
@@ -2630,11 +2630,11 @@ func (r *MysqlDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		mdbSecretNamesIndex, mdbSecretNames); err != nil {
 		return fmt.Errorf("index mysqldatabase secret names: %w", err)
 	}
-	// Index CRs by groupRef.name so the group watch and the peer watch map
+	// Index CRs by failoverGroupRef.name so the group watch and the peer watch map
 	// to exactly the matching tenants instead of scanning the namespace.
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.MysqlDatabase{},
-		mdbGroupRefIndex, func(o client.Object) []string {
-			return []string{o.(*v1alpha1.MysqlDatabase).Spec.GroupRef.Name}
+		mdbFailoverGroupRefIndex, func(o client.Object) []string {
+			return []string{o.(*v1alpha1.MysqlDatabase).Spec.FailoverGroupRef.Name}
 		}); err != nil {
 		return fmt.Errorf("index mysqldatabase group ref: %w", err)
 	}
@@ -2658,8 +2658,8 @@ func (r *MysqlDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // spec.users[].secretName.
 const mdbSecretNamesIndex = ".mysqldatabase.secretNames"
 
-// mdbGroupRefIndex is the cache index key for spec.groupRef.name.
-const mdbGroupRefIndex = ".spec.groupRef.name"
+// mdbFailoverGroupRefIndex is the cache index key for spec.failoverGroupRef.name.
+const mdbFailoverGroupRefIndex = ".spec.failoverGroupRef.name"
 
 // secretDataChangedPredicate drops Secret update events whose Data did not
 // change. ESO and friends re-apply Secrets on their refresh interval whether
@@ -2702,12 +2702,12 @@ func groupActiveSiteChangedPredicate() predicate.Predicate {
 	}
 }
 
-// mapGroupToDatabases resolves the group watch through the groupRef index:
+// mapGroupToDatabases resolves the group watch through the failoverGroupRef index:
 // a failover fans out to exactly the tenants on that group.
 func (r *MysqlDatabaseReconciler) mapGroupToDatabases(ctx context.Context, obj client.Object) []reconcile.Request {
 	var list v1alpha1.MysqlDatabaseList
 	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace()),
-		client.MatchingFields{mdbGroupRefIndex: obj.GetName()}); err != nil {
+		client.MatchingFields{mdbFailoverGroupRefIndex: obj.GetName()}); err != nil {
 		log.FromContext(ctx).Error(err, "list mysqldatabases for group watch mapping", "namespace", obj.GetNamespace())
 		return nil
 	}
@@ -2747,7 +2747,7 @@ func (r *MysqlDatabaseReconciler) mapDatabaseToPeers(ctx context.Context, obj cl
 	}
 	var list v1alpha1.MysqlDatabaseList
 	if err := r.List(ctx, &list, client.InNamespace(mdb.Namespace),
-		client.MatchingFields{mdbGroupRefIndex: mdb.Spec.GroupRef.Name}); err != nil {
+		client.MatchingFields{mdbFailoverGroupRefIndex: mdb.Spec.FailoverGroupRef.Name}); err != nil {
 		log.FromContext(ctx).Error(err, "list mysqldatabases for peer watch mapping", "namespace", mdb.Namespace)
 		return nil
 	}

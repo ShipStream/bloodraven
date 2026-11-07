@@ -28,7 +28,7 @@ Your platform team hands you three PVCs that already contain a working MySQL dat
 
 - Create the operator user with `ALL PRIVILEGES ON *.* WITH GRANT OPTION` (and any dedicated replication user with `REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN`), install the clone plugin, and create the role users by hand — the init script only runs on an empty datadir
 - Nothing: the init-users ConfigMap is applied on every pod start, so the users appear on the first restart
-- Set `spec.credentials.operatorSecret` and restart the pods; the operator reconciles MySQL users on every poll
+- Set `spec.credentials.operatorSecretName` and restart the pods; the operator reconciles MySQL users on every poll
 - Delete the PVCs and let the operator bootstrap, because adopting an existing datadir is not supported
 
 **Correct option index:** 0
@@ -41,7 +41,7 @@ The init-users ConfigMap is mounted at `/docker-entrypoint-initdb.d`, which the 
 
 **Type:** MULTIPLE_CHOICE
 
-A security review asks which MySQL user your application connects as, and what it could do if the credentials leaked. `appSecret` is set. What is the honest answer?
+A security review asks which MySQL user your application connects as, and what it could do if the credentials leaked. `appSecretName` is set. What is the honest answer?
 
 - It holds DML and DDL on `*.*` but no `GRANT OPTION`, `SUPER` or other admin privileges, so it can read and write everything and cannot create users, grant privileges or bypass `super_read_only`
 - It holds only the grants you listed in `spec.credentials`, so the answer depends on your manifest
@@ -52,7 +52,7 @@ A security review asks which MySQL user your application connects as, and what i
 
 **Explanation:**
 
-The grant sets are fixed by the operator, not configurable, and that is precisely what makes them answerable. The app user is deliberately full-privilege-minus-escalation: it cannot grant, and without `SUPER`/`CONNECTION_ADMIN` it cannot write through a `super_read_only` fence. Option 2 is the answer people expect and is wrong — there is no grant list in the CRD. Option 3 describes `readOnlySecret`. Option 4 describes `operatorSecret`, and conflating the two is the actual finding a review is looking for. (objective 2)
+The grant sets are fixed by the operator, not configurable, and that is precisely what makes them answerable. The app user is deliberately full-privilege-minus-escalation: it cannot grant, and without `SUPER`/`CONNECTION_ADMIN` it cannot write through a `super_read_only` fence. Option 2 is the answer people expect and is wrong — there is no grant list in the CRD. Option 3 describes `readOnlySecretName`. Option 4 describes `operatorSecretName`, and conflating the two is the actual finding a review is looking for. (objective 2)
 
 ## Question 4
 

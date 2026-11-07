@@ -43,7 +43,7 @@ type cleanupStore interface {
 //	BLOODRAVEN_S3_BUCKET             bucket from status.artifactStorage (S3)
 //	BLOODRAVEN_S3_ENDPOINT_OVERRIDE  endpoint from status.artifactStorage (S3, optional)
 //	AWS_REGION                       region from status.artifactStorage (S3, optional)
-//	BLOODRAVEN_AWS_CREDS_DIR         mounted credentialsSecret (S3)
+//	BLOODRAVEN_AWS_CREDS_DIR         the mounted s3.credentialsSecretName Secret (S3)
 //	BLOODRAVEN_PVC_MOUNT_PATH        mount of the claim from status.artifactStorage (PVC)
 //
 // A backup that never succeeded is cleaned up in abandoned mode

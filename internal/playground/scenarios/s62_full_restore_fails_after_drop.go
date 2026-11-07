@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -218,7 +217,7 @@ func s62StartRestoreAndCutStorage() runner.Step {
 			}
 			spec := v1alpha1.RestoreInPlaceSpec{
 				Confirm: confirm,
-				Source:  v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: ctxFetch(env, "backupName")}},
+				Source:  v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: ctxFetch(env, "backupName")}},
 			}
 			if _, err := patchRestoreInPlace(ctx, env, spec); err != nil {
 				return fmt.Errorf("patch full-instance restoreInPlace: %w", err)

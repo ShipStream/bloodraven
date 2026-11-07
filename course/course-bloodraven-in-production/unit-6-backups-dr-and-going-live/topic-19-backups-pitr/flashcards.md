@@ -11,7 +11,7 @@
 
 **Front:** Backup source reason string `"override"` — what does it tell you?
 
-**Back:** The MysqlBackup carried a `sourceSiteOverride` that named a configured, observed, non-read-only site, so replica-first selection never ran.
+**Back:** The MysqlBackup carried a `sourceSite` that named a configured, observed, non-read-only site, so replica-first selection never ran.
 
 ---
 

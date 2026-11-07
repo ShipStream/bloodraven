@@ -33,10 +33,10 @@ func pitrRolloutFG(credentials bool) *v1alpha1.MysqlFailoverGroup {
 			Name: "archive",
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,
-				S3:   &v1alpha1.S3Storage{Bucket: "backups", Region: "us-east-1", CredentialsSecret: "s3-creds"},
+				S3:   &v1alpha1.S3Storage{Bucket: "backups", Region: "us-east-1", CredentialsSecretName: "s3-creds"},
 			},
 			Encryption: &v1alpha1.BackupEncryptionSpec{
-				PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "archive-passphrase"},
+				PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "archive-passphrase"},
 			},
 		}},
 	}
@@ -59,24 +59,24 @@ func TestComputeSpecHashPITRRender(t *testing.T) {
 		}{
 			{"row 2: encryption removed", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Encryption = nil }, true},
 			{"row 5: secret renamed", func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret.Name = "rotated"
+				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "rotated"
 			}, true},
 			{"selector key", func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret.Key = "next"
+				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Key = "next"
 			}, true},
 			{"row 9/10: same-prefix alias made active", func(fg *v1alpha1.MysqlFailoverGroup) {
 				alias := *fg.Spec.Backup.Profiles[0].DeepCopy()
 				alias.Name = "alias"
-				alias.Encryption.PassphraseSecret.Name = "other-bytes"
+				alias.Encryption.PassphraseSecretKeyRef.Name = "other-bytes"
 				fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, alias)
 				fg.Spec.Backup.PITR.ProfileName = "alias"
 			}, true},
 			{"unused profile", func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, v1alpha1.BackupProfile{Name: "unused", Encryption: &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "unused"}}})
+				fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, v1alpha1.BackupProfile{Name: "unused", Encryption: &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "unused"}}})
 			}, true},
 			{"row 10a: region", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage.S3.Region = "eu-west-1" }, false},
 			{"row 10a: credentials Secret", func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecret = "s3-creds-2"
+				fg.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecretName = "s3-creds-2"
 			}, false},
 			{"row 10a: endpoint spelling", func(fg *v1alpha1.MysqlFailoverGroup) {
 				fg.Spec.Backup.Profiles[0].Storage.S3.EndpointURL = "https://s3.amazonaws.com:443"
@@ -131,7 +131,7 @@ func TestSpecSecretInputsConsumedKeysOnly(t *testing.T) {
 			fg := pitrRolloutFG(credentials)
 			fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
 			// Row 33a: the PITR passphrase lives in the TLS Secret.
-			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret = v1alpha1.PassphraseSecretRef{Name: "mysql-tls", Key: "pitr-passphrase"}
+			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef = v1alpha1.PassphraseSecretKeyRef{Name: "mysql-tls", Key: "pitr-passphrase"}
 			tls := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "mysql-tls", Namespace: fg.Namespace},
 				Data: map[string][]byte{"ca.crt": []byte("ca"), "tls.crt": []byte("crt"), "tls.key": []byte("key"), "pitr-passphrase": []byte("p1")}}
 			objs := []client.Object{tls}
@@ -213,7 +213,7 @@ func TestSpecSecretInputsNeverReadsPassphrase(t *testing.T) {
 func TestComputeCredentialHashConsumedKeysOnly(t *testing.T) {
 	ctx := context.Background()
 	fg := pitrRolloutFG(true)
-	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret = v1alpha1.PassphraseSecretRef{Name: "missing-passphrase"}
+	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef = v1alpha1.PassphraseSecretKeyRef{Name: "missing-passphrase"}
 	objs := []client.Object{fg}
 	for _, s := range newTestCredentialSecrets() {
 		objs = append(objs, s)
@@ -244,7 +244,7 @@ func TestComputeCredentialHashConsumedKeysOnly(t *testing.T) {
 
 	keys := credentialHashSecretKeys(newTestFG())
 	want := "username,password,MYSQL_ROOT_PASSWORD,MYSQL_REPLICATION_USER,MYSQL_REPLICATION_PASSWORD"
-	if got := keys[newTestFG().Spec.Credentials.OperatorSecret]; strings.Join(got, ",") != want {
+	if got := keys[newTestFG().Spec.Credentials.OperatorSecretName]; strings.Join(got, ",") != want {
 		t.Fatalf("credential hash reads %v of the operator Secret, want %s", got, want)
 	}
 }

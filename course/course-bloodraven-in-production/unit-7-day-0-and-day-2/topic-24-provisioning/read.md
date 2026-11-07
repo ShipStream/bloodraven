@@ -81,13 +81,13 @@ with a fixed grant set it will not let you widen:
 
 | Field | Purpose | Grants the operator issues |
 |---|---|---|
-| `operatorSecret` *(required)* | operator and sidecar connections | `ALL PRIVILEGES ON *.*` **WITH GRANT OPTION** |
-| `appSecret` | application read-write | DML and DDL on `*.*` — no `GRANT OPTION`, no `SUPER` or other admin privileges |
-| `readOnlySecret` | application read-only | `SELECT, SHOW VIEW, SHOW DATABASES, PROCESS` |
-| `monitorSecret` | Prometheus exporter | `PROCESS, REPLICATION CLIENT`, plus `SELECT` on `performance_schema` |
-| `backupSecret` | backup and restore jobs | `SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT` |
+| `operatorSecretName` *(required)* | operator and sidecar connections | `ALL PRIVILEGES ON *.*` **WITH GRANT OPTION** |
+| `appSecretName` | application read-write | DML and DDL on `*.*` — no `GRANT OPTION`, no `SUPER` or other admin privileges |
+| `readOnlySecretName` | application read-only | `SELECT, SHOW VIEW, SHOW DATABASES, PROCESS` |
+| `monitorSecretName` | Prometheus exporter | `PROCESS, REPLICATION CLIENT`, plus `SELECT` on `performance_schema` |
+| `backupSecretName` | backup and restore jobs | `SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT` |
 
-`operatorSecret` also carries `MYSQL_ROOT_PASSWORD`, and optionally
+The operator Secret also carries `MYSQL_ROOT_PASSWORD`, and optionally
 `MYSQL_REPLICATION_USER` / `MYSQL_REPLICATION_PASSWORD` — omit those and replication simply
 reuses the operator's username and password. Name a dedicated replication user and it is yours to
 create on every site: the operator does not (the playground's setup script does it for you).
@@ -161,11 +161,11 @@ spec:
   image: mysql:9.7                        # one supported baseline; pin it, never mysql:9
   sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:1.0.0   # match the operator's release
   credentials:                            # required — per-role users, fixed grants
-    operatorSecret: ledger-operator
-    appSecret: ledger-app
-    readOnlySecret: ledger-readonly
-    monitorSecret: ledger-monitor
-    backupSecret: ledger-backup
+    operatorSecretName: ledger-operator
+    appSecretName: ledger-app
+    readOnlySecretName: ledger-readonly
+    monitorSecretName: ledger-monitor
+    backupSecretName: ledger-backup
   dns:
     hostname: ledger-db.example.com
     ttl: 60                               # the shipped default; the playground's 10 is not

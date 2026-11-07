@@ -24,7 +24,7 @@ Replica-first is conditional, not unconditional: a replica qualifies only while 
 
 **Type:** MULTIPLE_CHOICE
 
-To keep dump load off both primary candidates, you set `sourceSiteOverride: reader` on a MysqlBackup for `playground`. What happens?
+To keep dump load off both primary candidates, you set `sourceSite: reader` on a MysqlBackup for `playground`. What happens?
 
 - The dump runs on `reader` and status records `"override"` — an explicit override outranks the role check
 - The dump runs on `reader` but status records `"replica-preferred"`, since the reader is a replica

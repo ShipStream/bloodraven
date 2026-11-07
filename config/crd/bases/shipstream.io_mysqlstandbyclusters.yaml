@@ -101,9 +101,9 @@ spec:
                       https://bloodraven.dev/docs/architecture/multi-cluster-dr for
                       distributing the passphrase across clusters.
                     properties:
-                      passphraseSecret:
+                      passphraseSecretKeyRef:
                         description: |-
-                          PassphraseSecret references the Secret holding the passphrase
+                          PassphraseSecretKeyRef selects the Secret key holding the passphrase
                           that was used when the source artifact was originally encrypted.
                           Bumping the Secret contents to a new value does not rotate the
                           ciphertext — it will simply fail to decrypt.
@@ -116,17 +116,19 @@ spec:
                               read.
                             maxLength: 253
                             minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
                             type: string
                           name:
                             description: Name of the Secret.
                             maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                             type: string
                         required:
                         - name
                         type: object
                     required:
-                    - passphraseSecret
+                    - passphraseSecretKeyRef
                     type: object
                   s3:
                     description: |-
@@ -141,13 +143,15 @@ spec:
                         x-kubernetes-validations:
                         - message: bucket must be at most 63 bytes (UTF-8)
                           rule: bytes(self).size() <= 63
-                      credentialsSecret:
+                      credentialsSecretName:
                         description: |-
-                          CredentialsSecret names a Secret in this namespace with read access
+                          CredentialsSecretName names a Secret in this namespace with read access
                           to the bucket. Expected keys: AWS_ACCESS_KEY_ID and
                           AWS_SECRET_ACCESS_KEY (required), AWS_SESSION_TOKEN and AWS_REGION
                           (optional; AWS_REGION overrides region).
+                        maxLength: 253
                         minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                         type: string
                       endpointURL:
                         description: |-
@@ -179,7 +183,7 @@ spec:
                         type: string
                     required:
                     - bucket
-                    - credentialsSecret
+                    - credentialsSecretName
                     - prefix
                     type: object
                 required:

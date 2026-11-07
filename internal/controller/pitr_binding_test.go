@@ -37,10 +37,10 @@ const (
 // (plaintext when secret is "").
 func pbtProfile(name, prefix, secret string) v1alpha1.BackupProfile {
 	p := v1alpha1.BackupProfile{Name: name, Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{
-		Bucket: "archive-bucket", Prefix: prefix, EndpointURL: "https://s3.example.test", Region: "us-east-1", CredentialsSecret: "s3-creds",
+		Bucket: "archive-bucket", Prefix: prefix, EndpointURL: "https://s3.example.test", Region: "us-east-1", CredentialsSecretName: "s3-creds",
 	}}}
 	if secret != "" {
-		p.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secret}}
+		p.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secret}}
 	}
 	return p
 }
@@ -423,7 +423,7 @@ func TestPITRBindingTargets(t *testing.T) {
 	mbv := func(name, mode, profile string, phase v1alpha1.VerificationPhase) v1alpha1.MysqlBackupVerification {
 		return v1alpha1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: pbtNS},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: pbtName},
+			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: pbtName},
 				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: mode, ArchiveProfileName: profile}},
 			Status: v1alpha1.MysqlBackupVerificationStatus{Phase: phase},
 		}
@@ -530,7 +530,7 @@ func TestPITRBindingFreshGroupConsumerProof(t *testing.T) {
 
 	// A succeeded backup stamped with the archive drops the baseline note.
 	b := &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: "b1", Namespace: pbtNS},
-		Spec:   v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: pbtName}, ProfileName: "a"},
+		Spec:   v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: pbtName}, ProfileName: "a"},
 		Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, PITRArchiveID: entry.ArchiveID}}
 	if err := e.c.Create(context.Background(), b); err != nil {
 		t.Fatal(err)
@@ -619,13 +619,13 @@ func TestPITRBindingDriftOnBound(t *testing.T) {
 		{name: "row 4 renamed Secret, same bytes", edit: func(e *pbtEnv) {
 			e.setSecret("pass-a2", "k1")
 			e.update(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret.Name = "pass-a2"
+				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "pass-a2"
 			})
 		}, status: metav1.ConditionTrue, reason: string(v1alpha1.PITRArchiveBindingReasonBound)},
 		{name: "row 5 renamed Secret, other bytes", edit: func(e *pbtEnv) {
 			e.setSecret("pass-a3", "k3")
 			e.update(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret.Name = "pass-a3"
+				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "pass-a3"
 			})
 		}, status: metav1.ConditionFalse, reason: v1alpha1.ReasonKeyChangeRefused, event: []string{v1alpha1.EventPITRArchiveKeyChangeRefused}},
 		{name: "row 2 encryption removed", edit: func(e *pbtEnv) {
@@ -634,7 +634,7 @@ func TestPITRBindingDriftOnBound(t *testing.T) {
 			inMsg: []string{"profile a configures None", "accepted as Passphrase/AES-256-GCM"}},
 		{name: "encryption restored", edit: func(e *pbtEnv) {
 			e.update(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pass-a2"}}
+				fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pass-a2"}}
 			})
 		}, status: metav1.ConditionTrue, reason: string(v1alpha1.PITRArchiveBindingReasonBound)},
 		{name: "row 9 alias with the same bytes made active", edit: func(e *pbtEnv) {
@@ -647,7 +647,7 @@ func TestPITRBindingDriftOnBound(t *testing.T) {
 		{name: "row 10 alias with other bytes made active", edit: func(e *pbtEnv) {
 			e.setSecret("pass-b", "kb")
 			e.update(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles[1].Encryption.PassphraseSecret.Name = "pass-b"
+				fg.Spec.Backup.Profiles[1].Encryption.PassphraseSecretKeyRef.Name = "pass-b"
 			})
 		}, status: metav1.ConditionFalse, reason: v1alpha1.ReasonKeyChangeRefused, event: []string{v1alpha1.EventPITRArchiveKeyChangeRefused},
 			inMsg: []string{"profile b's passphrase", "profiles resolving there: b, a"}},

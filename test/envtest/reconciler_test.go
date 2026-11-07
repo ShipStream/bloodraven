@@ -53,7 +53,7 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 					},
 				},
 			},
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			DNS: v1alpha1.DNSSpec{
 				Hostname: "lion.az.example.com",
 				TTL:      60,

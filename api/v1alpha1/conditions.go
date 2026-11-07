@@ -50,7 +50,7 @@ const (
 	// (ROW, FULL, no filter). Present only while PITR is enabled.
 	ConditionPITRMysqlConfAccepted = "PITRMysqlConfAccepted"
 	ConditionRecoveryPending       = "RecoveryPending"
-	// ConditionS3CredentialsReady reports whether every S3 credentialsSecret the
+	// ConditionS3CredentialsReady reports whether every S3 credentialsSecretName the
 	// group references holds the keys backup, restore and cleanup Jobs require.
 	// Those Jobs fail rather than fall back to ambient (IRSA, Workload Identity,
 	// instance-profile) credentials, so a Secret that relied on the fallback

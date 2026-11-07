@@ -108,7 +108,7 @@ func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
 					// reconciler reads the Secret before the SetNewStoreFunc
 					// injection returns the fake store, so the tests create
 					// it with ensureEnvtestS3CredsSecret.
-					CredentialsSecret: "envtest-s3-creds",
+					CredentialsSecretName: "envtest-s3-creds",
 				},
 			},
 		},
@@ -116,7 +116,7 @@ func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
 }
 
 // ensureEnvtestS3CredsSecret creates the dummy AWS-credentials Secret that
-// the standby fixture references in spec.source.s3.credentialsSecret.
+// the standby fixture references in spec.source.s3.credentialsSecretName.
 // The reconciler's resolveS3CredsToDir path always reads the Secret before
 // the SetNewStoreFunc-injected fake store is dispatched, so admission +
 // reconcile both require the Secret to exist. Idempotent across tests in
@@ -364,7 +364,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_PVCSourceUnrepresentable(t *testing.T
 
 	withS3 := newUnstructured("envtest-standby-pvc-pruned", map[string]any{
 		"storage": pvc,
-		"s3":      map[string]any{"bucket": "my-bucket", "prefix": "orders", "credentialsSecret": "envtest-s3-creds"},
+		"s3":      map[string]any{"bucket": "my-bucket", "prefix": "orders", "credentialsSecretName": "envtest-s3-creds"},
 	})
 	if err := k8sClient.Create(ctx, withS3); err != nil {
 		t.Fatalf("create with s3 and a leftover storage block: %v", err)

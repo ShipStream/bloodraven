@@ -533,21 +533,19 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 // error rather than swallowing the cause entirely.
 func (m *DragonflyManager) fetchPassword(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) string {
 	auth := fg.Spec.Dragonfly.Auth
-	if auth == nil || auth.SecretName == "" {
+	if auth == nil || auth.PasswordSecretKeyRef.Name == "" {
 		return ""
 	}
-	key := auth.PasswordKey
-	if key == "" {
-		key = "password"
-	}
+	ref := auth.PasswordSecretKeyRef
+	key := ref.KeyOrDefault()
 	var secret corev1.Secret
-	if err := m.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: auth.SecretName}, &secret); err != nil {
-		m.logger.Warn("dragonfly: read auth secret", "secret", auth.SecretName, "error", err)
+	if err := m.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &secret); err != nil {
+		m.logger.Warn("dragonfly: read auth secret", "secret", ref.Name, "error", err)
 		return ""
 	}
 	raw, ok := secret.Data[key]
 	if !ok {
-		m.logger.Warn("dragonfly: auth secret missing key", "secret", auth.SecretName, "key", key)
+		m.logger.Warn("dragonfly: auth secret missing key", "secret", ref.Name, "key", key)
 		return ""
 	}
 	return string(raw)

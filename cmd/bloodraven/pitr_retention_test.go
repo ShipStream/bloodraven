@@ -26,7 +26,7 @@ const retentionTestSID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 func retentionBoundaryBackup(name, gtids string, start time.Time) *v1alpha1.MysqlBackup {
 	s, c := metav1.NewTime(start), metav1.NewTime(start.Add(2*time.Hour))
-	return &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{"shipstream.io/failover-group": "fg", "shipstream.io/backup-profile": "p"}}, Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "fg"}, ProfileName: "p"}, Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, StartTime: &s, CompletionTime: &c, GtidExecuted: gtids}}
+	return &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{"shipstream.io/failover-group": "fg", "shipstream.io/backup-profile": "p"}}, Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "p"}, Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, StartTime: &s, CompletionTime: &c, GtidExecuted: gtids}}
 }
 
 func TestPITRCutoffRequiresEveryBackupGTIDBoundary(t *testing.T) {
@@ -141,7 +141,7 @@ func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
 	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
 	reading := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "ns", UID: "uid-v"},
-		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "fg"}, ProfileName: "p"},
+		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "p"},
 		Status: v1alpha1.MysqlBackupVerificationStatus{Phase: v1alpha1.VerificationPhaseRestoring,
 			BackupRef: &v1alpha1.VerificationBackupRef{Name: "deleting", UID: "uid-deleting", Location: "x/deleting", StorageType: v1alpha1.BackupStorageS3}},
 	}

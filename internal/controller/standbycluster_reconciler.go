@@ -453,8 +453,8 @@ func (r *MysqlStandbyClusterReconciler) buildStoreCfg(ctx context.Context, sc *v
 		StorageType: "S3",
 		S3:          s3Cfg,
 	}
-	if sc.Spec.Source.Decryption != nil && sc.Spec.Source.Decryption.PassphraseSecret.Name != "" {
-		passphraseFile, dir, err := r.resolvePassphraseToFile(ctx, sc.Namespace, sc.Spec.Source.Decryption.PassphraseSecret, credsDir)
+	if sc.Spec.Source.Decryption != nil && sc.Spec.Source.Decryption.PassphraseSecretKeyRef.Name != "" {
+		passphraseFile, dir, err := r.resolvePassphraseToFile(ctx, sc.Namespace, sc.Spec.Source.Decryption.PassphraseSecretKeyRef, credsDir)
 		if err != nil {
 			return nil, "", archive, dir, err
 		}
@@ -537,11 +537,11 @@ func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, name
 	}
 
 	var credsDir string
-	if s3.CredentialsSecret != "" {
+	if s3.CredentialsSecretName != "" {
 		var err error
-		credsDir, err = r.resolveS3CredsToDir(ctx, namespace, s3.CredentialsSecret)
+		credsDir, err = r.resolveS3CredsToDir(ctx, namespace, s3.CredentialsSecretName)
 		if err != nil {
-			return nil, credsDir, fmt.Errorf("resolve S3 credentials from secret %q: %w", s3.CredentialsSecret, err)
+			return nil, credsDir, fmt.Errorf("resolve S3 credentials from secret %q: %w", s3.CredentialsSecretName, err)
 		}
 		cfg.AWSCredsDir = credsDir
 	}
@@ -549,7 +549,7 @@ func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, name
 	return cfg, credsDir, nil
 }
 
-func (r *MysqlStandbyClusterReconciler) resolvePassphraseToFile(ctx context.Context, namespace string, ref v1alpha1.PassphraseSecretRef, dir string) (string, string, error) {
+func (r *MysqlStandbyClusterReconciler) resolvePassphraseToFile(ctx context.Context, namespace string, ref v1alpha1.PassphraseSecretKeyRef, dir string) (string, string, error) {
 	var secret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {

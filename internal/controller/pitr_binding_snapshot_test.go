@@ -409,7 +409,7 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 		},
 		"a live verification hold": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
 			mbv := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-1", Namespace: pbtNS, UID: "mbv-uid-1"},
-				Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "someone-else"}, ProfileName: "a"}}
+				Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "someone-else"}, ProfileName: "a"}}
 			if err := e.c.Create(context.Background(), mbv); err != nil {
 				e.t.Fatal(err)
 			}
@@ -475,7 +475,7 @@ func TestPITRBindingReleaseRacesHold(t *testing.T) {
 				return err
 			}
 			mbv := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-2", Namespace: pbtNS, UID: "mbv-uid-2"},
-				Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "x"}, ProfileName: "a"}}
+				Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "x"}, ProfileName: "a"}}
 			if err := c.Create(ctx, mbv); err != nil {
 				return err
 			}

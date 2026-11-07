@@ -128,22 +128,22 @@ EOSQL
 create_user_with_grants operator "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%' WITH GRANT OPTION;"
 `
 
-	if fg.Spec.Credentials.AppSecret != "" {
+	if fg.Spec.Credentials.AppSecretName != "" {
 		script += `create_user_with_grants app "GRANT ` + appGlobalPrivileges + ` ON *.* TO '__USER__'@'%';"
 `
 	}
 
-	if fg.Spec.Credentials.ReadOnlySecret != "" {
+	if fg.Spec.Credentials.ReadOnlySecretName != "" {
 		script += `create_user_with_grants readonly "GRANT SELECT, SHOW VIEW, SHOW DATABASES, PROCESS ON *.* TO '__USER__'@'%';"
 `
 	}
 
-	if fg.Spec.Credentials.MonitorSecret != "" {
+	if fg.Spec.Credentials.MonitorSecretName != "" {
 		script += `create_user_with_grants monitor "GRANT PROCESS, REPLICATION CLIENT ON *.* TO '__USER__'@'%'; GRANT SELECT ON performance_schema.* TO '__USER__'@'%';"
 `
 	}
 
-	if fg.Spec.Credentials.BackupSecret != "" {
+	if fg.Spec.Credentials.BackupSecretName != "" {
 		script += `create_user_with_grants backup "GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT ON *.* TO '__USER__'@'%';"
 `
 	}

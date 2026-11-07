@@ -45,7 +45,7 @@ spec:
             bucket: bloodraven
             prefix: playground
             endpointURL: http://rustfs.bloodraven-playground.svc.cluster.local:9000
-            credentialsSecret: dragonfly-s3-credentials
+            credentialsSecretName: dragonfly-s3-credentials
             region: us-east-1
         dump:
           threads: 2

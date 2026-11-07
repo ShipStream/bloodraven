@@ -87,9 +87,9 @@ requires the primary to be `writable` and promotable. Do not confuse the gate wi
 `ReplicationLagging` condition and never picks a backup source.
 
 Sites with `role: read-only` are excluded from the replica pool outright. An explicit
-`sourceSiteOverride` naming one is not silently ignored — it is **rejected**:
+`sourceSite` naming one is not silently ignored — it is **rejected**:
 
-> `sourceSiteOverride "reader" names a read-only site, which cannot be a backup source`
+> `sourceSite "reader" names a read-only site, which cannot be a backup source`
 
 The reader is the obvious place to put a dump, and it is the one site you cannot. This is the same
 logic you met in Unit 1 wearing different clothes: a site that is not a `primary-candidate` is not
@@ -111,7 +111,7 @@ spec:
             bucket: playground-backups
             prefix: playground
             endpointURL: http://minio.bloodraven-playground:9000
-            credentialsSecret: playground-backup-s3
+            credentialsSecretName: playground-backup-s3
         retention: 7                     # default
     pitr:
       enabled: true                      # NEW — turns the archiver on

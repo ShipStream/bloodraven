@@ -81,7 +81,7 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					},
 				},
 			},
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			DNS: v1alpha1.DNSSpec{
 				Hostname: "lion.az.example.com",
 				TTL:      60,
@@ -1331,11 +1331,11 @@ func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,
 				S3: &v1alpha1.S3Storage{
-					Bucket:            "backups",
-					Prefix:            "pitr/a",
-					Region:            "us-east-1",
-					EndpointURL:       "https://s3.example.com",
-					CredentialsSecret: "aws-creds",
+					Bucket:                "backups",
+					Prefix:                "pitr/a",
+					Region:                "us-east-1",
+					EndpointURL:           "https://s3.example.com",
+					CredentialsSecretName: "aws-creds",
 				},
 			},
 		}},
@@ -1351,7 +1351,7 @@ func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
 	}
 
 	fg3 := fg.DeepCopy()
-	fg3.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecret = "aws-creds-v2"
+	fg3.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecretName = "aws-creds-v2"
 	h3 := ComputeSpecHash(fg3, site, "", testPITRRender(fg3))
 	if h3 == h1 {
 		t.Error("hash should differ when the PITR profile credentials secret changes")
@@ -1361,9 +1361,9 @@ func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
 func newTestFGWithCredentials() *v1alpha1.MysqlFailoverGroup {
 	fg := newTestFG()
 	fg.Spec.Credentials = v1alpha1.CredentialsSpec{
-		OperatorSecret: "mysql-operator-creds",
-		AppSecret:      "mysql-app-creds",
-		BackupSecret:   "mysql-backup-creds",
+		OperatorSecretName: "mysql-operator-creds",
+		AppSecretName:      "mysql-app-creds",
+		BackupSecretName:   "mysql-backup-creds",
 	}
 	return fg
 }

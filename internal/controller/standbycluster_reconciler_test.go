@@ -737,7 +737,7 @@ func TestMysqlStandbyCluster_SlashBoundedPrefix(t *testing.T) {
 func TestMysqlStandbyCluster_DecryptionConfiguresPassphraseFile(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 	cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{
-		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "backup-passphrase", Key: "secret"},
+		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "backup-passphrase", Key: "secret"},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-passphrase", Namespace: "default"},

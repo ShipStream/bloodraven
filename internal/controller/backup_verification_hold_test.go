@@ -97,7 +97,7 @@ func TestArtifactReaders(t *testing.T) {
 		}()}, want: ""},
 		{name: "not yet pinned to another backup by name", objs: []client.Object{heldBackup(), func() client.Object {
 			v := holdVerification("pending", "", "")
-			v.Spec.BackupRef = &corev1.LocalObjectReference{Name: "another"}
+			v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "another"}
 			return v
 		}()}, want: ""},
 	}
@@ -198,7 +198,7 @@ func TestResolveBackup_SkipsTerminatingBackups(t *testing.T) {
 
 	latest := verifyCR("latest", fg.Name, "nightly-s3")
 	explicit := verifyCR("explicit", fg.Name, "nightly-s3")
-	explicit.Spec.BackupRef = &corev1.LocalObjectReference{Name: "newer"}
+	explicit.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "newer"}
 	r, _ := newVerificationReconciler(t, fg, older, newer)
 
 	got, err := r.resolveBackup(context.Background(), latest)
@@ -273,7 +273,7 @@ func TestVerificationHold_RefusesTerminatingBackupAtLaunch(t *testing.T) {
 	b.DeletionTimestamp = &now
 	b.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 	v := verifyCR("late", fg.Name, "nightly-s3")
-	v.Spec.BackupRef = &corev1.LocalObjectReference{Name: b.Name}
+	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: b.Name}
 	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {

@@ -57,7 +57,7 @@ func newTestReconcilerWithSecret(t *testing.T, objs []client.Object, storeFunc f
 // standbyCRWithCredsSecret returns a CR that references a credentials secret.
 func standbyCRWithCredsSecret(name, ns, secretName string) *v1alpha1.MysqlStandbyCluster {
 	cr := minimalStandbyCR(name, ns)
-	cr.Spec.Source.S3.CredentialsSecret = secretName
+	cr.Spec.Source.S3.CredentialsSecretName = secretName
 	return cr
 }
 
@@ -599,7 +599,7 @@ func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 				cr.Spec.Source.S3.Prefix = tt.prefix
 			}
 			if tt.decrypt {
-				cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pp"}}
+				cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pp"}}
 				objs = append(objs, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pp", Namespace: "default"}, Data: map[string][]byte{"passphrase": []byte("k")}})
 			}
 			store := &fakeStore{Objects: tt.objects}
@@ -651,7 +651,7 @@ func TestStandbyCluster_PassphraseUsesTrimPassphrase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pp", Namespace: "default"},
 		Data:       map[string][]byte{"passphrase": []byte("\vkey  \n")},
 	}}, &fakeStore{Objects: map[string][]byte{}})
-	file, dir, err := r.resolvePassphraseToFile(context.Background(), "default", v1alpha1.PassphraseSecretRef{Name: "pp"}, "")
+	file, dir, err := r.resolvePassphraseToFile(context.Background(), "default", v1alpha1.PassphraseSecretKeyRef{Name: "pp"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

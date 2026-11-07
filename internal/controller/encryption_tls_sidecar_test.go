@@ -154,7 +154,7 @@ func TestEncryption_SidecarMySQLDSNUsesTLS(t *testing.T) {
 	}{
 		{"dedicated operator secret", func() *v1alpha1.MysqlFailoverGroup {
 			fg := encTestFG()
-			fg.Spec.Credentials = v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator-creds"}
+			fg.Spec.Credentials = v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator-creds"}
 			return fg
 		}},
 		{"default fixture", encTestFG},

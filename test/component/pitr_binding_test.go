@@ -51,7 +51,7 @@ func pbcProfile(name, subPath, secret string) v1alpha1.BackupProfile {
 	p := v1alpha1.BackupProfile{Name: name, Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC,
 		PVC: &v1alpha1.PVCStorage{ClaimName: "archive", SubPath: subPath}}}
 	if secret != "" {
-		p.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secret}}
+		p.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secret}}
 	}
 	return p
 }

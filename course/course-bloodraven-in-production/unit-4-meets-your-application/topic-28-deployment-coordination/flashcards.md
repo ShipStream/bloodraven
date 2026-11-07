@@ -17,7 +17,7 @@
 
 **Front:** Where does authorization for the deployment API live, and what is the lease's `instance`?
 
-**Back:** On the `MysqlDatabase`: `spec.deploymentClients[]` lists one `namespace` + `serviceAccount` pair per namespace, and `spec.groupRef.name` names the group. `instance` is the `MysqlDatabase` resource name, not the SQL schema.
+**Back:** On the `MysqlDatabase`: `spec.deploymentClients[]` lists one `namespace` + `serviceAccount` pair per namespace, and `spec.failoverGroupRef.name` names the group. `instance` is the `MysqlDatabase` resource name, not the SQL schema.
 
 ---
 

@@ -124,13 +124,15 @@ type StandbyS3Source struct {
 	// +optional
 	EndpointURL string `json:"endpointURL,omitempty"`
 
-	// CredentialsSecret names a Secret in this namespace with read access
+	// CredentialsSecretName names a Secret in this namespace with read access
 	// to the bucket. Expected keys: AWS_ACCESS_KEY_ID and
 	// AWS_SECRET_ACCESS_KEY (required), AWS_SESSION_TOKEN and AWS_REGION
 	// (optional; AWS_REGION overrides region).
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
-	CredentialsSecret string `json:"credentialsSecret"`
+	CredentialsSecretName string `json:"credentialsSecretName"`
 }
 
 // StandbyFreshnessSpec configures the bucket-discovery cadence.

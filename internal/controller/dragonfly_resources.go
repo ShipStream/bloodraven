@@ -267,12 +267,7 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 	}
 	if spec.Snapshot != nil && spec.Snapshot.Dir != "" {
 		args = append(args, "--dir="+spec.Snapshot.Dir)
-		if spec.Snapshot.S3Endpoint != "" {
-			args = append(args, "--s3_endpoint="+spec.Snapshot.S3Endpoint)
-		}
-		if spec.Snapshot.S3UseHTTPS != nil {
-			args = append(args, "--s3_use_https="+strconv.FormatBool(*spec.Snapshot.S3UseHTTPS))
-		}
+		args = append(args, dragonflyS3EndpointArgs(spec.Snapshot.S3EndpointURL)...)
 		if spec.Snapshot.S3SignPayload != nil {
 			args = append(args, "--s3_sign_payload="+strconv.FormatBool(*spec.Snapshot.S3SignPayload))
 		}
@@ -281,6 +276,34 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 	// buildDragonflyEnv, not here, so the password stays off argv.
 	args = append(args, filterDragonflyUserArgs(spec.Args)...)
 	return args
+}
+
+// dragonflyS3EndpointArgs adapts spec.dragonfly.snapshot.s3EndpointURL to
+// Dragonfly's two flags: --s3_endpoint takes host[:port] without a scheme,
+// and --s3_use_https takes the scheme as a boolean. An empty URL means AWS
+// S3 with Dragonfly's defaults, so neither flag is emitted. Admission only
+// admits an http:// or https:// URL with a host and no path; anything else
+// (reachable only through a client that skips admission) also emits
+// nothing rather than a flag Dragonfly would misread.
+func dragonflyS3EndpointArgs(endpointURL string) []string {
+	var useHTTPS bool
+	var hostPort string
+	switch {
+	case strings.HasPrefix(endpointURL, "https://"):
+		useHTTPS, hostPort = true, strings.TrimPrefix(endpointURL, "https://")
+	case strings.HasPrefix(endpointURL, "http://"):
+		useHTTPS, hostPort = false, strings.TrimPrefix(endpointURL, "http://")
+	default:
+		return nil
+	}
+	hostPort = strings.TrimSuffix(hostPort, "/")
+	if hostPort == "" || strings.ContainsAny(hostPort, "/?#@ \t\r\n") {
+		return nil
+	}
+	return []string{
+		"--s3_endpoint=" + hostPort,
+		"--s3_use_https=" + strconv.FormatBool(useHTTPS),
+	}
 }
 
 func dragonflyServiceAccountName(spec *v1alpha1.DragonflySpec) string {
@@ -346,25 +369,23 @@ func filterDragonflyUserArgs(in []string) []string {
 
 // buildDragonflyEnv wires the auth password into the container's env from
 // the configured Secret, leaving env empty when auth is not set or when
-// the SecretName is empty (CRD validation typically catches the latter
-// but partial in-place patches can still produce it; emitting an
-// EnvVar with an empty SecretName makes the pod fail to start with a
-// secret-not-found event rather than a clean reconcile error).
+// the Secret name is empty (CRD validation catches the latter, but a
+// typed client that skips admission, such as a fake client, can still
+// produce it; emitting an EnvVar with an empty Secret name makes the pod
+// fail to start with a secret-not-found event rather than a clean
+// reconcile error).
 func buildDragonflyEnv(spec *v1alpha1.DragonflySpec) []corev1.EnvVar {
-	if spec.Auth == nil || spec.Auth.SecretName == "" {
+	if spec.Auth == nil || spec.Auth.PasswordSecretKeyRef.Name == "" {
 		return buildDragonflySnapshotEnv(spec)
 	}
-	key := spec.Auth.PasswordKey
-	if key == "" {
-		key = "password"
-	}
+	ref := spec.Auth.PasswordSecretKeyRef
 	secretRef := func(name string) corev1.EnvVar {
 		return corev1.EnvVar{
 			Name: name,
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: spec.Auth.SecretName},
-					Key:                  key,
+					LocalObjectReference: corev1.LocalObjectReference{Name: ref.Name},
+					Key:                  ref.KeyOrDefault(),
 				},
 			},
 		}
@@ -1000,18 +1021,16 @@ func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1
 		connector = realDragonflyConnector
 	}
 	password := ""
-	if auth := fg.Spec.Dragonfly.Auth; auth != nil && auth.SecretName != "" {
-		key := auth.PasswordKey
-		if key == "" {
-			key = "password"
-		}
+	if auth := fg.Spec.Dragonfly.Auth; auth != nil && auth.PasswordSecretKeyRef.Name != "" {
+		ref := auth.PasswordSecretKeyRef
+		key := ref.KeyOrDefault()
 		var s corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: auth.SecretName}, &s); err != nil {
-			return nil, fmt.Errorf("dragonfly: read auth secret %s: %w", auth.SecretName, err)
+		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &s); err != nil {
+			return nil, fmt.Errorf("dragonfly: read auth secret %s: %w", ref.Name, err)
 		}
 		raw, ok := s.Data[key]
 		if !ok {
-			return nil, fmt.Errorf("dragonfly: auth secret %s missing key %q", auth.SecretName, key)
+			return nil, fmt.Errorf("dragonfly: auth secret %s missing key %q", ref.Name, key)
 		}
 		password = string(raw)
 	}

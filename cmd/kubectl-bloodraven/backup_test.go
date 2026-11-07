@@ -58,11 +58,11 @@ func TestBuildBackupCR(t *testing.T) {
 			if b.Spec.ProfileName != tc.profile {
 				t.Errorf("ProfileName = %q, want %q", b.Spec.ProfileName, tc.profile)
 			}
-			if tc.wantOverride && b.Spec.SourceSiteOverride != tc.sourceSite {
-				t.Errorf("SourceSiteOverride = %q, want %q", b.Spec.SourceSiteOverride, tc.sourceSite)
+			if tc.wantOverride && b.Spec.SourceSite != tc.sourceSite {
+				t.Errorf("SourceSite = %q, want %q", b.Spec.SourceSite, tc.sourceSite)
 			}
-			if !tc.wantOverride && b.Spec.SourceSiteOverride != "" {
-				t.Errorf("SourceSiteOverride = %q, want empty", b.Spec.SourceSiteOverride)
+			if !tc.wantOverride && b.Spec.SourceSite != "" {
+				t.Errorf("SourceSite = %q, want empty", b.Spec.SourceSite)
 			}
 			if got := b.Labels["shipstream.io/failover-group"]; got != tc.group {
 				t.Errorf("failover-group label = %q, want %q", got, tc.group)

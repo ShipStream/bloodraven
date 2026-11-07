@@ -830,8 +830,7 @@ func (a *Actions) PatchDragonflySnapshot(ctx context.Context) error {
 	snapshot := map[string]any{
 		"dir":                   "s3://dragonfly/playground",
 		"credentialsSecretName": "dragonfly-s3-credentials",
-		"s3Endpoint":            "rustfs.bloodraven-playground.svc.cluster.local:9000",
-		"s3UseHTTPS":            false,
+		"s3EndpointURL":         "http://rustfs.bloodraven-playground.svc.cluster.local:9000",
 		"s3SignPayload":         false,
 	}
 	if err := a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{{

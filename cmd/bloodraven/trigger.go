@@ -80,7 +80,7 @@ func runTriggerBackup(args []string) {
 			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: trigger},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: *group},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: *group},
 			ProfileName:      *profile,
 		},
 	}

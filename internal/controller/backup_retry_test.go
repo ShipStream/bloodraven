@@ -21,7 +21,7 @@ func failedRetryRun(name, uid string, attempt int32, created time.Time) *v1alpha
 	return &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", UID: types.UID(uid), CreationTimestamp: metav1.NewTime(created),
 			Labels: map[string]string{v1alpha1.FailoverGroupLabel: "lion", v1alpha1.BackupProfileLabel: "nightly-s3", v1alpha1.BackupScheduleLabel: "nightly"}},
-		Spec:   v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:   v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 		Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed, Attempt: attempt, CompletionTime: &completed},
 	}
 }

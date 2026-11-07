@@ -223,7 +223,8 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 
 // §13, against the real upgrade path: blocks written by an older operator
 // under the pre-#235 CRD, then the CRD is upgraded to the final schema and
-// the objects get the spec fields the final schema requires (serverID).
+// the objects get the spec fields the final schema requires (serverID,
+// credentials.operatorSecretName).
 //   - The old fields are pruned on read. A legacy block whose values the
 //     final schema still accepts stays writable beside the runner's status
 //     writes. One in a removed phase (Validating) is outside the phase enum:
@@ -265,7 +266,10 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		t.Helper()
 		fg := newTestFG(ns.Name)
 		fg.Name = name
-		if err := c.Create(ctx, fg); err != nil {
+		// The pre-#235 CRD spells the operator Secret credentials.operatorSecret.
+		old := inertFieldsObject(t, fg, "MysqlFailoverGroup")
+		inertFieldsSet(t, old, map[string]any{"operatorSecret": fg.Spec.Credentials.OperatorSecretName}, "spec", "credentials")
+		if err := c.Create(ctx, old); err != nil {
 			t.Fatal(err)
 		}
 		u := &unstructured.Unstructured{}
@@ -338,9 +342,11 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// The pre-#235 CRD pruned spec.sites[].serverID on create; the final
-	// schema requires it (A-08), and every write evaluates the rule that
-	// keeps it unique, so the upgrade adds it first.
+	// The pre-#235 CRD pruned spec.sites[].serverID on create, and the
+	// final schema prunes credentials.operatorSecret; it requires both
+	// spec.sites[].serverID (A-08) and credentials.operatorSecretName
+	// (A-02), and every write evaluates the rule that keeps serverID
+	// unique, so the upgrade adds them first.
 	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
@@ -354,8 +360,11 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		if err := unstructured.SetNestedSlice(u.Object, sites, "spec", "sites"); err != nil {
 			t.Fatal(err)
 		}
+		if err := unstructured.SetNestedField(u.Object, "mysql-credentials", "spec", "credentials", "operatorSecretName"); err != nil {
+			t.Fatal(err)
+		}
 		if err := c.Update(ctx, u); err != nil {
-			t.Fatalf("%s: add spec.sites[].serverID after the upgrade: %v", nn.Name, err)
+			t.Fatalf("%s: add spec.sites[].serverID and credentials.operatorSecretName after the upgrade: %v", nn.Name, err)
 		}
 	}
 

@@ -13,7 +13,6 @@ import (
 //
 // +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.image) && self.image.size() > 0)",message="spec.dragonfly.image is required when spec.dragonfly.enabled is true"
 // +kubebuilder:validation:XValidation:rule="!self.enabled || !self.image.endsWith(':latest')",message="spec.dragonfly.image must be pinned (no :latest)"
-// +kubebuilder:validation:XValidation:rule="!has(self.auth) || (has(self.auth.secretName) && self.auth.secretName.size() > 0)",message="spec.dragonfly.auth.secretName is required when auth is set"
 type DragonflySpec struct {
 	// Enabled toggles Dragonfly co-management. When false (default), no
 	// Dragonfly resources are created and existing MySQL-only behavior
@@ -120,19 +119,24 @@ type DragonflySnapshotSpec struct {
 	// environment variables for S3-compatible snapshot access. Typical keys
 	// are AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION. Optional
 	// when ServiceAccountName provides credentials through cloud IAM.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +optional
 	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
 
-	// S3Endpoint is passed to Dragonfly as --s3_endpoint for S3-compatible
-	// services such as RustFS or MinIO. Leave empty for AWS S3.
+	// S3EndpointURL overrides the S3 endpoint for S3-compatible services
+	// such as RustFS or MinIO, in the URL form backup storage uses: an
+	// absolute http:// or https:// URL with a host and optional port, and
+	// no path, credentials, query or fragment. The operator passes the
+	// host and port to Dragonfly as --s3_endpoint and the scheme as
+	// --s3_use_https (false for http://, true for https://). Omit it, or
+	// leave it empty, for AWS S3 with Dragonfly's defaults.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="s3EndpointURL must be at most 512 bytes (UTF-8)"
+	// +kubebuilder:validation:Pattern=`^(https?://[^\s/?#@]+/?)?$`
 	// +optional
-	S3Endpoint string `json:"s3Endpoint,omitempty"`
-
-	// S3UseHTTPS controls Dragonfly's --s3_use_https flag. Leave nil for
-	// Dragonfly's default. Set false for in-cluster HTTP services like the
-	// playground RustFS deployment.
-	// +optional
-	S3UseHTTPS *bool `json:"s3UseHTTPS,omitempty"`
+	S3EndpointURL string `json:"s3EndpointURL,omitempty"`
 
 	// S3SignPayload controls Dragonfly's --s3_sign_payload flag. Leave nil
 	// for Dragonfly's default.
@@ -142,16 +146,29 @@ type DragonflySnapshotSpec struct {
 
 // DragonflyAuthSpec references a Secret containing the Dragonfly password.
 type DragonflyAuthSpec struct {
-	// SecretName is the name of the Secret containing the password.
-	// +kubebuilder:validation:MinLength=1
+	// PasswordSecretKeyRef selects the Secret key, in the group's
+	// namespace, that holds the Dragonfly password.
 	// +required
-	SecretName string `json:"secretName"`
+	PasswordSecretKeyRef DragonflyPasswordSecretKeyRef `json:"passwordSecretKeyRef"`
+}
 
-	// PasswordKey is the key inside the Secret that holds the password.
-	// Default: "password".
+// DragonflyPasswordSecretKeyRef selects the Secret key holding the
+// Dragonfly password.
+type DragonflyPasswordSecretKeyRef struct {
+	// Name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
+	Name string `json:"name"`
+
+	// Key within the Secret that holds the password. Default: "password".
 	// +kubebuilder:default="password"
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
 	// +optional
-	PasswordKey string `json:"passwordKey,omitempty"`
+	Key string `json:"key,omitempty"`
 }
 
 // DragonflyPlannedFailoverSpec configures planned-switchover semantics for

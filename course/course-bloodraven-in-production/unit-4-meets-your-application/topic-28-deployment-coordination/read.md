@@ -22,7 +22,7 @@ serves it. Only the leader answers; a follower returns `503 {"error":"not_leader
 A caller identifies itself with a projected ServiceAccount token whose audience is `bloodraven-deploy`,
 and the operator checks it with a TokenReview. That gets you authenticated, not authorized. Authorization
 lives on the `MysqlDatabase`: its `spec.deploymentClients[]` lists one `namespace` and `serviceAccount`
-pair per namespace, and the database's `spec.groupRef.name` decides which group that pair may
+pair per namespace, and the database's `spec.failoverGroupRef.name` decides which group that pair may
 coordinate. The lease's `instance` is the `MysqlDatabase` **resource name**, not the SQL schema name.
 
 Look at what the pipeline does *not* need. No permission to patch the `MysqlFailoverGroup`. No read on

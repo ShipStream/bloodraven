@@ -81,7 +81,7 @@ func s30EnsureBucket(v s30Variant) runner.Step {
 		Phase: runner.PhasePrecheck,
 		Name:  "ensure RustFS backup bucket exists",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			env.Capture.Note(fmt.Sprintf("RustFS endpoint=%s bucket=%s credentialsSecret=%s", backupE2EEndpoint, backupE2EBucket, backupE2ECredsSecret))
+			env.Capture.Note(fmt.Sprintf("RustFS endpoint=%s bucket=%s credentialsSecretName=%s", backupE2EEndpoint, backupE2EBucket, backupE2ECredsSecret))
 			if err := env.Chaos.EnsureRustFSBucket(ctx, backupE2EBucket); err != nil {
 				return err
 			}

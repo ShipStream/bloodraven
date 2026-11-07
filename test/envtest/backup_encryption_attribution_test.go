@@ -51,7 +51,7 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "new-passphrase"}}
+	fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "new-passphrase"}}
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}

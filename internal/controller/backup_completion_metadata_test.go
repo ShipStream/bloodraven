@@ -166,7 +166,7 @@ func TestMysqlBackupReconciler_RecoversCompletionAfterLogFailure(t *testing.T) {
 	if err != nil || envMap(cleanup.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_OUTPUT_URL"] != location {
 		t.Fatalf("cleanup did not use recovered artifact: err=%v", err)
 	}
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: mb.Name}}}
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: mb.Name}}}
 	rr, _ := newReconciler(fg, mb)
 	if _, err := rr.buildRestoreJob(context.Background(), fg, "iad", "creds"); err != nil {
 		t.Fatalf("recovered backup cannot build a restore: %v", err)

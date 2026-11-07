@@ -26,7 +26,7 @@ spec:
             bucket: orders-mysql-backups
             prefix: prod/orders
             region: us-east-1
-            credentialsSecret: orders-s3-backup
+            credentialsSecretName: orders-s3-backup
         dump:
           threads: 4
           compression: zstd

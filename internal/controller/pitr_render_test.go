@@ -56,7 +56,7 @@ func withTestPassphraseSecrets(objs []client.Object) []client.Object {
 			if !p.EncryptionEnabled() {
 				continue
 			}
-			ref := p.Encryption.PassphraseSecret
+			ref := p.Encryption.PassphraseSecretKeyRef
 			if have[fg.Namespace+"/"+ref.Name] {
 				continue
 			}
@@ -133,7 +133,7 @@ func recordTestDumpKey(b *v1alpha1.MysqlBackup) {
 	if b.Status.ArtifactStorage == nil {
 		b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{}
 	}
-	b.Status.ArtifactStorage.PassphraseSecret = &v1alpha1.BackupArtifactPassphrase{Name: "backup-passphrase", Key: "passphrase"}
+	b.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"}
 }
 
 // siteDeploy is fg's site Deployment carrying render (nil: no annotation;
@@ -156,10 +156,10 @@ func renderFG() *v1alpha1.MysqlFailoverGroup {
 	fg.UID = "uid-render"
 	s3 := func(prefix string) v1alpha1.BackupStorage {
 		return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{
-			Bucket: "archive", Prefix: prefix, Region: "us-east-1", EndpointURL: "https://s3.example.com", CredentialsSecret: "creds"}}
+			Bucket: "archive", Prefix: prefix, Region: "us-east-1", EndpointURL: "https://s3.example.com", CredentialsSecretName: "creds"}}
 	}
 	enc := func(secret string) *v1alpha1.BackupEncryptionSpec {
-		return &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secret}}
+		return &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secret}}
 	}
 	fg.Spec.Backup = &v1alpha1.BackupSpec{
 		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"},
@@ -227,14 +227,14 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "rows 2/5/6: Bound renders the binding under encryption, selector and alias drift", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
 			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, snapA)
-			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret.Name = "renamed"
+			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "renamed"
 			fg.Spec.Backup.PITR.ProfileName = "a2"
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", "garbage")}
 		}, enabled: true, dest: "a", key: snapA},
 		{name: "row 2: Bound plaintext binding under an encryption edit (EncryptionChangeRefused)", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
 			fg.Spec.Backup.Profiles[0].Encryption = nil
 			setBinding(t, fg, "a", v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "")
-			fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "key-a"}}
+			fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "key-a"}}
 			return nil
 		}, enabled: true, dest: "a", key: "", check: func(t *testing.T, _ *v1alpha1.MysqlFailoverGroup, in pitrRenderInputs) {
 			if in.EncryptionMode != "None" || in.keyRevision() != pitrKeyRevisionPlaintext {
@@ -315,7 +315,7 @@ func TestResolvePITRRenderMatrix(t *testing.T) {
 		{name: "row 44: hold keeps identity but takes the profile's new access fields", setup: func(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) []appsv1.Deployment {
 			fg.Spec.Backup.Profiles[0].Encryption = nil
 			held := bound(fg)
-			fg.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecret = "creds-fixed"
+			fg.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecretName = "creds-fixed"
 			fg.Spec.Backup.Profiles[0].Encryption = nil
 			return []appsv1.Deployment{siteDeploy(fg, "dc1", held), siteDeploy(fg, "dc2", held)}
 		}, enabled: true, dest: "a", key: "", check: func(t *testing.T, _ *v1alpha1.MysqlFailoverGroup, in pitrRenderInputs) {

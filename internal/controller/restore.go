@@ -215,12 +215,12 @@ func restoreMetadataFromBackupStatus(status v1alpha1.MysqlBackupStatus) restoreC
 	}
 }
 
-func (r *MysqlFailoverGroupReconciler) restoreSourceMetadata(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource) restoreCompletionMetadata {
-	if src.MysqlBackupRef == nil {
+func (r *MysqlFailoverGroupReconciler) restoreSourceMetadata(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource) restoreCompletionMetadata {
+	if src.BackupRef == nil {
 		return restoreCompletionMetadata{}
 	}
 	var ref v1alpha1.MysqlBackup
-	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.MysqlBackupRef.Name}, &ref); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.BackupRef.Name}, &ref); err != nil {
 		return restoreCompletionMetadata{}
 	}
 	return restoreMetadataFromBackupStatus(ref.Status)
@@ -775,7 +775,7 @@ func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg 
 // working under the offline_mode fence, none of which the backup role's
 // grants allow.
 func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, secretName string) error {
-	operatorSecretName := fg.Spec.Credentials.OperatorSecret
+	operatorSecretName := fg.Spec.Credentials.OperatorSecretName
 	var srcSecret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &srcSecret); err != nil {
 		return fmt.Errorf("get credential secret %s: %w", operatorSecretName, err)
@@ -823,13 +823,13 @@ type restoreJobInputs struct {
 	JobName     string
 	TargetSite  string
 	CredsName   string
-	Source      v1alpha1.InitFromBackupSource
+	Source      v1alpha1.RestoreSource
 	LoadOptions *v1alpha1.LoadOptions
 	PointInTime *v1alpha1.PointInTimeSpec
 	// Decryption, when set, provides the passphrase Secret the restore
 	// will use to decrypt the source artifact. When unset, the
 	// resolver falls back to the profile's own PassphraseSecret when
-	// the source is a MysqlBackupRef pointing at an encrypted backup.
+	// the source is a backupRef pointing at an encrypted backup.
 	Decryption *v1alpha1.BackupDecryptionSpec
 	// FieldPath is the root CR field name used in error messages
 	// ("initFromBackup" for bootstrap restore, "restoreInPlace" for
@@ -869,7 +869,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 	})
 }
 
-// backupRefProfileStorageError reports why a mysqlBackupRef's profile can
+// backupRefProfileStorageError reports why a backupRef's profile can
 // no longer locate the backup's artifact on the backend it was written to
 // (want), or returns nil when profile.Storage carries that backend's
 // configuration. A non-nil profile with a nil error guarantees the
@@ -882,18 +882,18 @@ func backupRefProfileStorageError(fp string, ref *v1alpha1.MysqlBackup, profile 
 	switch {
 	case profile == nil:
 		return fmt.Errorf(
-			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q is missing from spec.backup.profiles; "+
+			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q is missing from spec.backup.profiles; "+
 				"either restore the profile or set %s.source.%s explicitly",
 			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, fp, field)
 	case profile.Storage.Type != want:
 		return fmt.Errorf(
-			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q now stores to %s; "+
+			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q now stores to %s; "+
 				"either restore the profile's %s storage or set %s.source.%s explicitly",
 			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, profile.Storage.Type, want, fp, field)
 	case want == v1alpha1.BackupStorageS3 && profile.Storage.S3 == nil,
 		want == v1alpha1.BackupStoragePVC && profile.Storage.PVC == nil:
 		return fmt.Errorf(
-			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q has no storage.%s configuration; "+
+			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q has no storage.%s configuration; "+
 				"either restore the profile's %s storage or set %s.source.%s explicitly",
 			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, field, want, fp, field)
 	}
@@ -971,7 +971,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		decryptPVCPrefix          string
 		// Resolved passphrase Secret reference for the source (may
 		// come from in.Decryption or from the source profile itself).
-		passphraseRef *v1alpha1.PassphraseSecretRef
+		passphraseRef *v1alpha1.PassphraseSecretKeyRef
 		sourceMeta    restoreCompletionMetadata
 		// dumpSrc is where dump-meta reads the dump's identity; set only
 		// for a point-in-time restore.
@@ -991,9 +991,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	}
 
 	switch {
-	case src.MysqlBackupRef != nil:
+	case src.BackupRef != nil:
 		var ref v1alpha1.MysqlBackup
-		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.MysqlBackupRef.Name}, &ref); err != nil {
+		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.BackupRef.Name}, &ref); err != nil {
 			return nil, fmt.Errorf("get referenced mysqlbackup: %w", err)
 		}
 		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded || ref.Status.Location == "" {
@@ -1051,26 +1051,26 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			// never the profile's live Secret (Δ17, #203): that may hold
 			// other bytes since the backup ran.
 			switch {
-			case in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "":
-				ref := in.Decryption.PassphraseSecret
+			case in.Decryption != nil && in.Decryption.PassphraseSecretKeyRef.Name != "":
+				ref := in.Decryption.PassphraseSecretKeyRef
 				passphraseRef = &ref
-			case ref.Status.ArtifactStorage != nil && ref.Status.ArtifactStorage.PassphraseSecret != nil:
-				recorded := ref.Status.ArtifactStorage.PassphraseSecret
+			case ref.Status.ArtifactStorage != nil && ref.Status.ArtifactStorage.PassphraseSecretKeyRef != nil:
+				recorded := ref.Status.ArtifactStorage.PassphraseSecretKeyRef
 				var key corev1.Secret
 				if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: recorded.Name}, &key); err != nil {
 					if !apierrors.IsNotFound(err) {
 						return nil, fmt.Errorf("get recorded passphrase secret %s: %w", recorded.Name, err)
 					}
 					return nil, fmt.Errorf(
-						"%s: %s.source.mysqlBackupRef=%q is encrypted and the Secret %q it recorded as its dump key is gone; "+
-							"restore that Secret or set %s.decryption.passphraseSecret",
+						"%s: %s.source.backupRef=%q is encrypted and the Secret %q it recorded as its dump key is gone; "+
+							"restore that Secret or set %s.decryption.passphraseSecretKeyRef",
 						pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, recorded.Name, fp)
 				}
-				passphraseRef = &v1alpha1.PassphraseSecretRef{Name: recorded.Name, Key: recorded.Key}
+				passphraseRef = &v1alpha1.PassphraseSecretKeyRef{Name: recorded.Name, Key: recorded.Key}
 			default:
 				return nil, fmt.Errorf(
-					"%s: %s.source.mysqlBackupRef=%q is encrypted but recorded no dump key; "+
-						"set %s.decryption.passphraseSecret",
+					"%s: %s.source.backupRef=%q is encrypted but recorded no dump key; "+
+						"set %s.decryption.passphraseSecretKeyRef",
 					pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, fp)
 			}
 			if profileS3 != nil {
@@ -1083,7 +1083,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				if locBucket != "" {
 					decryptS3Bucket = locBucket
 				}
-				decryptAWSCredsSecret = profileS3.CredentialsSecret
+				decryptAWSCredsSecret = profileS3.CredentialsSecretName
 			} else if profilePVCClaim != "" {
 				decryptSourceKind = "PVC"
 				decryptPVCClaim = profilePVCClaim
@@ -1097,7 +1097,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if pitrReq != nil {
 			ds, err := pitrDumpSourceForBackup(fg, &ref, profile, passphraseRef)
 			if err != nil {
-				return nil, wrapTokenFirst(fp+".source.mysqlBackupRef", err)
+				return nil, wrapTokenFirst(fp+".source.backupRef", err)
 			}
 			dumpSrc = &ds
 		}
@@ -1113,7 +1113,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			if profileS3.Region != "" {
 				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: profileS3.Region})
 			}
-			awsCredsSecret = profileS3.CredentialsSecret
+			awsCredsSecret = profileS3.CredentialsSecretName
 		} else if profilePVCClaim != "" {
 			// MysqlBackup.status.location stores the in-pod dump path that the
 			// backup Job used. For PVC-backed backups that path lives under
@@ -1149,23 +1149,23 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if src.S3.Region != "" {
 			extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: src.S3.Region})
 		}
-		awsCredsSecret = src.S3.CredentialsSecret
+		awsCredsSecret = src.S3.CredentialsSecretName
 
-		if in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "" {
-			ref := in.Decryption.PassphraseSecret
+		if in.Decryption != nil && in.Decryption.PassphraseSecretKeyRef.Name != "" {
+			ref := in.Decryption.PassphraseSecretKeyRef
 			passphraseRef = &ref
 			decryptSourceKind = "S3"
 			decryptS3Bucket = src.S3.Bucket
 			decryptS3EndpointOverride = src.S3.EndpointURL
 			decryptS3Region = src.S3.Region
 			decryptS3Prefix = s3Prefix
-			decryptAWSCredsSecret = src.S3.CredentialsSecret
+			decryptAWSCredsSecret = src.S3.CredentialsSecretName
 		}
 		if pitrReq != nil {
 			dumpSrc = &pitrDumpSource{
 				StorageType: v1alpha1.BackupStorageS3, Prefix: s3Prefix,
 				S3Bucket: src.S3.Bucket, S3EndpointURL: src.S3.EndpointURL, S3Region: src.S3.Region,
-				AWSCredsSecret: src.S3.CredentialsSecret, Passphrase: passphraseRef,
+				AWSCredsSecret: src.S3.CredentialsSecretName, Passphrase: passphraseRef,
 			}
 		}
 
@@ -1198,8 +1198,8 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			Name: "restore-src", MountPath: mountPath, ReadOnly: true,
 		})
 
-		if in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "" {
-			ref := in.Decryption.PassphraseSecret
+		if in.Decryption != nil && in.Decryption.PassphraseSecretKeyRef.Name != "" {
+			ref := in.Decryption.PassphraseSecretKeyRef
 			passphraseRef = &ref
 			decryptSourceKind = "PVC"
 			decryptPVCClaim = claim
@@ -1210,7 +1210,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 
 	default:
-		return nil, fmt.Errorf("%s.source must set mysqlBackupRef, s3, or pvc", fp)
+		return nil, fmt.Errorf("%s.source must set backupRef, s3, or pvc", fp)
 	}
 
 	loadOptsJSON, err := restoreLoadOptionsJSON(fp, in)

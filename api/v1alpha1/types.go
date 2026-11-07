@@ -12,7 +12,7 @@ import (
 // +kubebuilder:printcolumn:name="Active",type=string,JSONPath=`.status.activeSite`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.backup) || !has(self.spec.backup) || !has(oldSelf.spec.backup.pitr) || !has(self.spec.backup.pitr) || !(has(oldSelf.spec.backup.pitr.enabled) && oldSelf.spec.backup.pitr.enabled) || !(has(self.spec.backup.pitr.enabled) && self.spec.backup.pitr.enabled) || !has(oldSelf.spec.backup.pitr.profileName) || !has(self.spec.backup.pitr.profileName) || oldSelf.spec.backup.pitr.profileName != self.spec.backup.pitr.profileName || !has(oldSelf.spec.backup.profiles) || !has(self.spec.backup.profiles) || self.spec.backup.profiles.all(p, p.name != self.spec.backup.pitr.profileName || oldSelf.spec.backup.profiles.all(o, o.name != p.name || !(o.storage.type == p.storage.type && has(o.storage.s3) == has(p.storage.s3) && (!has(o.storage.s3) || (o.storage.s3.bucket == p.storage.s3.bucket && (has(o.storage.s3.prefix) ? o.storage.s3.prefix : '') == (has(p.storage.s3.prefix) ? p.storage.s3.prefix : '') && (has(o.storage.s3.endpointURL) ? o.storage.s3.endpointURL : '') == (has(p.storage.s3.endpointURL) ? p.storage.s3.endpointURL : ''))) && has(o.storage.pvc) == has(p.storage.pvc) && (!has(o.storage.pvc) || ((has(o.storage.pvc.claimName) ? o.storage.pvc.claimName : '') == (has(p.storage.pvc.claimName) ? p.storage.pvc.claimName : '') && (has(o.storage.pvc.subPath) ? o.storage.pvc.subPath : '') == (has(p.storage.pvc.subPath) ? p.storage.pvc.subPath : '')))) || (has(o.encryption) == has(p.encryption) && (!has(o.encryption) || ((has(o.encryption.algorithm) ? o.encryption.algorithm : 'AES-256-GCM') == (has(p.encryption.algorithm) ? p.encryption.algorithm : 'AES-256-GCM') && o.encryption.passphraseSecret.name == p.encryption.passphraseSecret.name && (has(o.encryption.passphraseSecret.key) ? o.encryption.passphraseSecret.key : 'passphrase') == (has(p.encryption.passphraseSecret.key) ? p.encryption.passphraseSecret.key : 'passphrase'))))))",message="spec.backup.profiles[pitr.profileName].encryption (presence, algorithm, passphraseSecret) cannot change while that profile archives PITR binlogs to the same storage; create a new profile with a new storage prefix and its own passphrase, switch spec.backup.pitr.profileName to it, wait until its archive binding is Bound, then take a full backup (see Backup encryption > Rotation)"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.backup) || !has(self.spec.backup) || !has(oldSelf.spec.backup.pitr) || !has(self.spec.backup.pitr) || !(has(oldSelf.spec.backup.pitr.enabled) && oldSelf.spec.backup.pitr.enabled) || !(has(self.spec.backup.pitr.enabled) && self.spec.backup.pitr.enabled) || !has(oldSelf.spec.backup.pitr.profileName) || !has(self.spec.backup.pitr.profileName) || oldSelf.spec.backup.pitr.profileName != self.spec.backup.pitr.profileName || !has(oldSelf.spec.backup.profiles) || !has(self.spec.backup.profiles) || self.spec.backup.profiles.all(p, p.name != self.spec.backup.pitr.profileName || oldSelf.spec.backup.profiles.all(o, o.name != p.name || !(o.storage.type == p.storage.type && has(o.storage.s3) == has(p.storage.s3) && (!has(o.storage.s3) || (o.storage.s3.bucket == p.storage.s3.bucket && (has(o.storage.s3.prefix) ? o.storage.s3.prefix : '') == (has(p.storage.s3.prefix) ? p.storage.s3.prefix : '') && (has(o.storage.s3.endpointURL) ? o.storage.s3.endpointURL : '') == (has(p.storage.s3.endpointURL) ? p.storage.s3.endpointURL : ''))) && has(o.storage.pvc) == has(p.storage.pvc) && (!has(o.storage.pvc) || ((has(o.storage.pvc.claimName) ? o.storage.pvc.claimName : '') == (has(p.storage.pvc.claimName) ? p.storage.pvc.claimName : '') && (has(o.storage.pvc.subPath) ? o.storage.pvc.subPath : '') == (has(p.storage.pvc.subPath) ? p.storage.pvc.subPath : '')))) || (has(o.encryption) == has(p.encryption) && (!has(o.encryption) || ((has(o.encryption.algorithm) ? o.encryption.algorithm : 'AES-256-GCM') == (has(p.encryption.algorithm) ? p.encryption.algorithm : 'AES-256-GCM') && o.encryption.passphraseSecretKeyRef.name == p.encryption.passphraseSecretKeyRef.name && (has(o.encryption.passphraseSecretKeyRef.key) ? o.encryption.passphraseSecretKeyRef.key : 'passphrase') == (has(p.encryption.passphraseSecretKeyRef.key) ? p.encryption.passphraseSecretKeyRef.key : 'passphrase'))))))",message="spec.backup.profiles[pitr.profileName].encryption (presence, algorithm, passphraseSecretKeyRef) cannot change while that profile archives PITR binlogs to the same storage; create a new profile with a new storage prefix and its own passphrase, switch spec.backup.pitr.profileName to it, wait until its archive binding is Bound, then take a full backup (see Backup encryption > Rotation)"
 
 // MysqlFailoverGroup is the Schema for the mysqlfailovergroups API.
 type MysqlFailoverGroup struct {
@@ -463,6 +463,8 @@ type TLSSpec struct {
 	// operator does not issue certificates; create the Secret yourself or
 	// with a tool such as cert-manager.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
 	SecretName string `json:"secretName"`
 }
@@ -507,10 +509,14 @@ type SidecarSpec struct {
 	// +optional
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
 
-	// BloodravenAddress is the address of the Bloodraven operator auxiliary endpoint.
-	// When empty, the operator uses its configured default auxiliary Service address.
+	// OperatorEndpoint is the host:port of the Bloodraven operator's
+	// auxiliary endpoint, which the sidecar calls for its startup
+	// active-site check and the PITR retention cutoff. When empty, the
+	// operator uses its configured default auxiliary Service address.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9.-]+:[0-9]{1,5}$`
 	// +optional
-	BloodravenAddress string `json:"bloodravenAddress,omitempty"`
+	OperatorEndpoint string `json:"operatorEndpoint,omitempty"`
 }
 
 // ServiceTemplate customizes the Services created by the operator.
@@ -559,45 +565,59 @@ type SiteServiceTemplate struct {
 // The operator creates MySQL users with role-appropriate privileges
 // and rotates passwords when the referenced Secrets change.
 type CredentialsSpec struct {
-	// OperatorSecret references the Secret for operator and sidecar connections.
+	// OperatorSecretName names the Secret for operator and sidecar connections.
 	// Required keys: username, password, MYSQL_ROOT_PASSWORD.
 	// Optional keys: MYSQL_REPLICATION_USER, MYSQL_REPLICATION_PASSWORD
 	// (default to operator username/password if omitted).
 	// Grants: ALL PRIVILEGES WITH GRANT OPTION.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
-	OperatorSecret string `json:"operatorSecret"`
+	OperatorSecretName string `json:"operatorSecretName"`
 
-	// AppSecret references the Secret for application read-write connections.
+	// AppSecretName names the Secret for application read-write connections.
 	// Required keys: username, password.
 	// Grants on *.*: data and schema privileges (SELECT, INSERT, UPDATE,
 	// DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY
 	// TABLES, LOCK TABLES, EXECUTE, CREATE/SHOW VIEW, CREATE/ALTER ROUTINE,
 	// EVENT, TRIGGER, SHOW DATABASES). No GRANT OPTION, SUPER, CREATE USER,
 	// or other administrative privileges.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +optional
-	AppSecret string `json:"appSecret,omitempty"`
+	AppSecretName string `json:"appSecretName,omitempty"`
 
-	// ReadOnlySecret references the Secret for application read-only connections.
+	// ReadOnlySecretName names the Secret for application read-only connections.
 	// Required keys: username, password.
 	// Grants: SELECT, SHOW VIEW, SHOW DATABASES, PROCESS.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +optional
-	ReadOnlySecret string `json:"readOnlySecret,omitempty"`
+	ReadOnlySecretName string `json:"readOnlySecretName,omitempty"`
 
-	// MonitorSecret references the Secret for Prometheus exporter connections.
+	// MonitorSecretName names the Secret for Prometheus exporter connections.
 	// Required keys: username, password.
 	// Grants: PROCESS, REPLICATION CLIENT, SELECT on performance_schema.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +optional
-	MonitorSecret string `json:"monitorSecret,omitempty"`
+	MonitorSecretName string `json:"monitorSecretName,omitempty"`
 
-	// BackupSecret references the Secret for backup connections. Restore
+	// BackupSecretName names the Secret for backup connections. Restore
 	// Jobs run as the operator account instead: they need DDL, SET GLOBAL
 	// and CONNECTION_ADMIN, which this role does not have.
 	// Required keys: username, password.
 	// Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
 	// BACKUP_ADMIN, REPLICATION CLIENT.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +optional
-	BackupSecret string `json:"backupSecret,omitempty"`
+	BackupSecretName string `json:"backupSecretName,omitempty"`
 }
 
 // MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.

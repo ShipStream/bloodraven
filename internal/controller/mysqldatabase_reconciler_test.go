@@ -37,7 +37,7 @@ func mdbTestGroup() *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "dc1", ServerID: 101, Role: "primary-candidate"},
 				{Name: "dc2", ServerID: 102, Role: "primary-candidate"},
@@ -57,9 +57,9 @@ func mdbTestCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase 
 			Finalizers: []string{v1alpha1.MysqlDatabaseFinalizer},
 		},
 		Spec: v1alpha1.MysqlDatabaseSpec{
-			GroupRef:     v1alpha1.LocalGroupRef{Name: "main"},
-			DatabaseName: "acme_wms",
-			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+			DatabaseName:     "acme_wms",
+			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 		},
 	}
 	for _, m := range mutate {
@@ -99,8 +99,8 @@ func newMdbReconciler(t *testing.T, objs ...client.Object) (*MysqlDatabaseReconc
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
 		WithIndex(&v1alpha1.MysqlDatabase{}, mdbSecretNamesIndex, mdbSecretNames).
-		WithIndex(&v1alpha1.MysqlDatabase{}, mdbGroupRefIndex, func(o client.Object) []string {
-			return []string{o.(*v1alpha1.MysqlDatabase).Spec.GroupRef.Name}
+		WithIndex(&v1alpha1.MysqlDatabase{}, mdbFailoverGroupRefIndex, func(o client.Object) []string {
+			return []string{o.(*v1alpha1.MysqlDatabase).Spec.FailoverGroupRef.Name}
 		}).
 		WithObjects(objs...).
 		Build()
@@ -188,7 +188,7 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 			name: "group credential secret mid-rotation",
 			objects: func() []client.Object {
 				fg := mdbTestGroup()
-				fg.Spec.Credentials.AppSecret = "mysql-app" // named but absent
+				fg.Spec.Credentials.AppSecretName = "mysql-app" // named but absent
 				return []client.Object{mdbTestCR(), fg, mdbTestOwnerSecret(), mdbTestOperatorSecret()}
 			},
 			wantReason: "GroupSecretMissing",
@@ -603,7 +603,7 @@ func TestGroupActiveSiteChangedPredicate(t *testing.T) {
 func TestMysqlDatabaseWatchMapping(t *testing.T) {
 	other := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
 		m.Name = "tenant-other"
-		m.Spec.GroupRef.Name = "elsewhere"
+		m.Spec.FailoverGroupRef.Name = "elsewhere"
 		m.Spec.Owner.SecretName = "other-owner"
 	})
 	r, _, _ := newMdbReconciler(t, mdbTestCR(), other, mdbTestGroup(), mdbTestOwnerSecret())
@@ -667,7 +667,7 @@ func TestMysqlDatabaseRefusesReservedOwnerUsers(t *testing.T) {
 	for _, username := range []string{"root", "operator", "app", "replicator"} {
 		t.Run(username, func(t *testing.T) {
 			fg := mdbTestGroup()
-			fg.Spec.Credentials.AppSecret = "mysql-app"
+			fg.Spec.Credentials.AppSecretName = "mysql-app"
 
 			operator := mdbTestOperatorSecret()
 			operator.Data["MYSQL_REPLICATION_USER"] = []byte("replicator")
@@ -698,7 +698,7 @@ func TestMysqlDatabaseRefusesReservedOwnerUsers(t *testing.T) {
 
 func TestReservedGroupUsernames(t *testing.T) {
 	fg := mdbTestGroup()
-	fg.Spec.Credentials.AppSecret = "mysql-app"
+	fg.Spec.Credentials.AppSecretName = "mysql-app"
 
 	operator := mdbTestOperatorSecret()
 	operator.Data["MYSQL_REPLICATION_USER"] = []byte("replicator")
@@ -732,7 +732,7 @@ func TestReservedGroupUsernames(t *testing.T) {
 // rotated for exactly the window in which it could be hijacked.
 func TestReservedGroupUsernamesFailsClosedOnAbsentSecret(t *testing.T) {
 	fg := mdbTestGroup()
-	fg.Spec.Credentials.MonitorSecret = "mysql-monitor" // named, not created
+	fg.Spec.Credentials.MonitorSecretName = "mysql-monitor" // named, not created
 
 	_, c, _ := newMdbReconciler(t, fg, mdbTestOperatorSecret())
 
@@ -750,7 +750,7 @@ func TestReservedGroupUsernamesFailsClosedOnAbsentSecret(t *testing.T) {
 // Secret naming the operator user passes the OwnerUserReserved guard.
 func TestReservedGroupUsernamesFailsClosed(t *testing.T) {
 	fg := mdbTestGroup()
-	fg.Spec.Credentials.AppSecret = "mysql-app"
+	fg.Spec.Credentials.AppSecretName = "mysql-app"
 	operator := mdbTestOperatorSecret()
 	appSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "mysql-app", Namespace: mdbTestNamespace},

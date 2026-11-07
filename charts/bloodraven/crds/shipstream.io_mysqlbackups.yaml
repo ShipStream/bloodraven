@@ -76,7 +76,9 @@ spec:
                 properties:
                   name:
                     description: Name of the MysqlFailoverGroup.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
                 required:
                 - name
@@ -85,12 +87,18 @@ spec:
                 description: |-
                   ProfileName is the name of a spec.backup.profiles[] entry on the
                   referenced failover group.
+                maxLength: 63
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
-              sourceSiteOverride:
+              sourceSite:
                 description: |-
-                  SourceSiteOverride, if set, forces a specific site to be the dump
-                  source. Leave empty to let the reconciler choose (replica-first).
+                  SourceSite, if set, forces a specific site (a spec.sites[].name of
+                  the referenced group) to be the dump source. Leave empty to let the
+                  reconciler choose (replica-first).
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9-]+$
                 type: string
             required:
             - failoverGroupRef
@@ -115,7 +123,7 @@ spec:
                   cleanup cannot be redirected to another bucket, claim or prefix. Once
                   its location is recorded it is immutable. Credentials are
                   deliberately not recorded: cleanup reads them from the profile's
-                  current credentialsSecret.
+                  current credentialsSecretName.
                 properties:
                   bucket:
                     description: Bucket is the S3 bucket the artifact was written
@@ -136,9 +144,9 @@ spec:
                       form of MysqlBackupStatus.Location. Cleanup refuses to run unless the
                       two are identical.
                     type: string
-                  passphraseSecret:
+                  passphraseSecretKeyRef:
                     description: |-
-                      PassphraseSecret is the passphrase Secret and key the producing Job
+                      PassphraseSecretKeyRef is the passphrase Secret and key the producing Job
                       mounted, for an encrypted backup: the backup's own immutable dump-key
                       snapshot (mysqlbackup-<name>-dump-key-<uid8>, key passphrase), which
                       the operator made from the profile's passphrase before the Job and
@@ -149,11 +157,15 @@ spec:
                     properties:
                       key:
                         description: Key is the data key within the Secret.
+                        maxLength: 253
                         minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
                         type: string
                       name:
                         description: Name is the Secret name.
+                        maxLength: 253
                         minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                         type: string
                     required:
                     - key

@@ -260,9 +260,9 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	mdb := &v1alpha1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: "tenant-acme", Namespace: "bloodraven"},
 		Spec: v1alpha1.MysqlDatabaseSpec{
-			GroupRef:     v1alpha1.LocalGroupRef{Name: "main"},
-			DatabaseName: "acme_wms",
-			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+			DatabaseName:     "acme_wms",
+			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 			Grants: []v1alpha1.MysqlDatabaseGrant{
 				{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete}},
 			},

@@ -81,7 +81,7 @@ func pitrProfileRender(fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.Backup
 		if s3 := profile.Storage.S3; s3 != nil {
 			in.Region = s3.Region
 			in.EndpointURL = s3.EndpointURL
-			in.CredentialsSecret = s3.CredentialsSecret
+			in.CredentialsSecret = s3.CredentialsSecretName
 		}
 	case pitrarchive.DestinationPVC:
 		in.Claim = dest.Claim
@@ -493,8 +493,8 @@ func containsString(list []string, s string) bool {
 func credentialRoleSecretNames(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
 	out := consumedSecretKeys{}
 	c := fg.Spec.Credentials
-	out.add(c.OperatorSecret, "username", "password", "MYSQL_ROOT_PASSWORD")
-	for _, name := range []string{c.AppSecret, c.ReadOnlySecret, c.MonitorSecret, c.BackupSecret} {
+	out.add(c.OperatorSecretName, "username", "password", "MYSQL_ROOT_PASSWORD")
+	for _, name := range []string{c.AppSecretName, c.ReadOnlySecretName, c.MonitorSecretName, c.BackupSecretName} {
 		out.add(name, "username", "password")
 	}
 	return out
@@ -506,7 +506,7 @@ func credentialRoleSecretNames(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKe
 // Secret enters it.
 func credentialHashSecretKeys(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
 	out := credentialRoleSecretNames(fg)
-	out.add(fg.Spec.Credentials.OperatorSecret, "MYSQL_REPLICATION_USER", "MYSQL_REPLICATION_PASSWORD")
+	out.add(fg.Spec.Credentials.OperatorSecretName, "MYSQL_REPLICATION_USER", "MYSQL_REPLICATION_PASSWORD")
 	return out
 }
 

@@ -29,7 +29,7 @@ func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroup
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "default", UID: "deployment-coordination-uid"},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", Storage: v1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}},
 				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", Storage: v1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}},
@@ -45,7 +45,7 @@ func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroup
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: fg.Spec.Credentials.OperatorSecret, Namespace: fg.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: fg.Spec.Credentials.OperatorSecretName, Namespace: fg.Namespace},
 		Data: map[string][]byte{
 			"username":            []byte("bloodraven"),
 			"password":            []byte("password"),

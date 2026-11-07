@@ -14,8 +14,8 @@ func TestEffectiveBackupSecretName(t *testing.T) {
 			name: "dedicated backup secret",
 			spec: MysqlFailoverGroupSpec{
 				Credentials: CredentialsSpec{
-					OperatorSecret: "op",
-					BackupSecret:   "backup",
+					OperatorSecretName: "op",
+					BackupSecretName:   "backup",
 				},
 			},
 			want: "backup",
@@ -23,7 +23,7 @@ func TestEffectiveBackupSecretName(t *testing.T) {
 		{
 			name: "without backup secret falls back to operator",
 			spec: MysqlFailoverGroupSpec{
-				Credentials: CredentialsSpec{OperatorSecret: "op"},
+				Credentials: CredentialsSpec{OperatorSecretName: "op"},
 			},
 			want: "op",
 		},
@@ -41,11 +41,11 @@ func TestAllReferencedSecretNames(t *testing.T) {
 	t.Run("all set", func(t *testing.T) {
 		spec := MysqlFailoverGroupSpec{
 			Credentials: CredentialsSpec{
-				OperatorSecret: "op",
-				AppSecret:      "app",
-				ReadOnlySecret: "ro",
-				MonitorSecret:  "mon",
-				BackupSecret:   "bak",
+				OperatorSecretName: "op",
+				AppSecretName:      "app",
+				ReadOnlySecretName: "ro",
+				MonitorSecretName:  "mon",
+				BackupSecretName:   "bak",
 			},
 		}
 		names := spec.AllReferencedSecretNames()
@@ -57,8 +57,8 @@ func TestAllReferencedSecretNames(t *testing.T) {
 	t.Run("deduplication", func(t *testing.T) {
 		spec := MysqlFailoverGroupSpec{
 			Credentials: CredentialsSpec{
-				OperatorSecret: "shared",
-				BackupSecret:   "shared",
+				OperatorSecretName: "shared",
+				BackupSecretName:   "shared",
 			},
 		}
 		names := spec.AllReferencedSecretNames()
@@ -70,8 +70,8 @@ func TestAllReferencedSecretNames(t *testing.T) {
 	t.Run("partial", func(t *testing.T) {
 		spec := MysqlFailoverGroupSpec{
 			Credentials: CredentialsSpec{
-				OperatorSecret: "op",
-				AppSecret:      "app",
+				OperatorSecretName: "op",
+				AppSecretName:      "app",
 			},
 		}
 		names := spec.AllReferencedSecretNames()

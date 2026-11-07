@@ -354,7 +354,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		t.Cleanup(func() { SetOperatorImageDefaults("", "") })
 		fg := fgWithBackup()
 		profile := fg.Spec.Backup.Profiles[0]
-		profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "secret-a", Key: "pp"}}
+		profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "secret-a", Key: "pp"}}
 		mb := backupCR("art", "lion", profile.Name)
 		job, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: fg, Profile: profile, Backup: mb,
 			SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
@@ -367,7 +367,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		}
 		// The Job mounts the backup's dump-key snapshot, never the
 		// profile's Secret (#203), and records it.
-		if got := storage.PassphraseSecret; got == nil || got.Name != testDumpKeySecret || got.Key != pitrKeySnapshotDataKey {
+		if got := storage.PassphraseSecretKeyRef; got == nil || got.Name != testDumpKeySecret || got.Key != pitrKeySnapshotDataKey {
 			t.Fatalf("passphrase not recorded: %+v", got)
 		}
 		profile.Encryption = nil
@@ -376,7 +376,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if storage, err := artifactStorageFromJob(plain); err != nil || storage.PassphraseSecret != nil {
+		if storage, err := artifactStorageFromJob(plain); err != nil || storage.PassphraseSecretKeyRef != nil {
 			t.Fatalf("plaintext Job records a passphrase: %+v %v", storage, err)
 		}
 	})
@@ -384,7 +384,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 	t.Run("cleanup after the producer is gone mounts the recorded Secret", func(t *testing.T) {
 		f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
 		ctx := context.Background()
-		f.fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "secret-b"}}
+		f.fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "secret-b"}}
 		if err := f.c.Update(ctx, f.fg); err != nil {
 			t.Fatal(err)
 		}
@@ -392,7 +392,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.mb.Status.Encrypted = true
-		f.mb.Status.ArtifactStorage.PassphraseSecret = &v1alpha1.BackupArtifactPassphrase{Name: "secret-a", Key: "pp"}
+		f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "secret-a", Key: "pp"}
 		if err := f.c.Status().Update(ctx, f.mb); err != nil {
 			t.Fatal(err)
 		}

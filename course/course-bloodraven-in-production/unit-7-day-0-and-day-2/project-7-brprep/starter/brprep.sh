@@ -67,7 +67,7 @@ secs() {
 # the credentials one is a required field plus kubectl's strict field
 # validation. All are refusals at `kubectl apply`, which is all brprep claims.
 # The grader matches these tokens exactly, so do not reword them.
-RULE_CREDENTIALS="spec.credentials.operatorSecret is required and spec.secretName is not a field"
+RULE_CREDENTIALS="spec.credentials.operatorSecretName is required and spec.secretName is not a field"
 RULE_SITE_COUNT="spec.sites must contain between 2 and 16 entries"
 RULE_SITE_NAMES="spec.sites[].name must be unique"
 RULE_TWO_CANDIDATES="spec.sites must contain at least two sites with role primary-candidate"
@@ -93,7 +93,7 @@ WARN_RECREATE="updateStrategy Recreate patches every site Deployment in one pass
 #
 # The nine rules, and what each one actually checks:
 #
-#   RULE_CREDENTIALS    .spec.credentials.operatorSecret is present and
+#   RULE_CREDENTIALS    .spec.credentials.operatorSecretName is present and
 #                       non-empty, and .spec.secretName is absent. A missing
 #                       credentials block is a required-field error; the
 #                       single-Secret secretName mode was removed in v1.7.0,

@@ -66,7 +66,7 @@ func (r *MysqlFailoverGroupReconciler) readPITRLiveKey(ctx context.Context, fg *
 	if !p.EncryptionEnabled() {
 		return pitrLiveKey{}, nil
 	}
-	ref := p.Encryption.PassphraseSecret
+	ref := p.Encryption.PassphraseSecretKeyRef
 	out := pitrLiveKey{secret: ref.Name, key: ref.PassphraseSecretKeyOrDefault()}
 	var s corev1.Secret
 	err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &s)

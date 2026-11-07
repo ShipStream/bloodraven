@@ -277,9 +277,9 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 		if s3.Region != "" {
 			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(s3.Region)})
 		}
-		if s3.CredentialsSecret != "" {
+		if s3.CredentialsSecretName != "" {
 			volumes = append(volumes, corev1.Volume{Name: "pitr-aws-creds", VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: s3.CredentialsSecret, DefaultMode: ptr32(0o400)},
+				Secret: &corev1.SecretVolumeSource{SecretName: s3.CredentialsSecretName, DefaultMode: ptr32(0o400)},
 			}})
 			mounts = append(mounts, corev1.VolumeMount{Name: "pitr-aws-creds", MountPath: pitrAWSCredsMountDir, ReadOnly: true})
 			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_AWS_CREDS_DIR", Value: pitrAWSCredsMountDir})

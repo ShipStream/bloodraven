@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -200,7 +199,7 @@ func s36RejectInvalidConfirm() runner.Step {
 			backupName := ctxFetch(env, "backupName")
 			spec := v1alpha1.RestoreInPlaceSpec{
 				Confirm:     "not-a-timestamp",
-				Source:      v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: backupName}},
+				Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
 				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
 			}
 			if _, err := patchRestoreInPlace(ctx, env, spec); err != nil {
@@ -274,7 +273,7 @@ func s36StartRestoreThenOutage() runner.Step {
 			env.Capture.Note("applying fresh confirm=" + confirm)
 			spec := v1alpha1.RestoreInPlaceSpec{
 				Confirm:     confirm,
-				Source:      v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: backupName}},
+				Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
 				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
 			}
 			stale, err := patchRestoreInPlace(ctx, env, spec)

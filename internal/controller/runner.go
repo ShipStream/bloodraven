@@ -470,7 +470,7 @@ func connectionMaterialHash(ctx context.Context, c client.Client, fg *v1alpha1.M
 	h := sha256.New()
 	wrote := false
 
-	if name := fg.Spec.Credentials.OperatorSecret; name != "" {
+	if name := fg.Spec.Credentials.OperatorSecretName; name != "" {
 		var secret corev1.Secret
 		nn := types.NamespacedName{Namespace: fg.Namespace, Name: name}
 		if err := c.Get(ctx, nn, &secret); err != nil {
@@ -915,7 +915,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	nn := FailoverGroupNamespacedName(fg)
 
 	// Read the operator credentials secret.
-	operatorSecretName := fg.Spec.Credentials.OperatorSecret
+	operatorSecretName := fg.Spec.Credentials.OperatorSecretName
 	var secret corev1.Secret
 	secretNN := types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}
 	if err := r.client.Get(ctx, secretNN, &secret); err != nil {

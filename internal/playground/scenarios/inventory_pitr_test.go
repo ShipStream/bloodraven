@@ -172,7 +172,7 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 		t.Errorf("restored spec must drop dragonfly and PITR and use its own DNS name: %+v", got.Spec)
 	}
 	pit := got.Spec.InitFromBackup.PointInTime
-	if pit.ArchiveProfileName != backupE2EProfile || pit.StopDatetime != "2026-11-05T10:00:01Z" || got.Spec.InitFromBackup.Source.MysqlBackupRef.Name != "bk" {
+	if pit.ArchiveProfileName != backupE2EProfile || pit.StopDatetime != "2026-11-05T10:00:01Z" || got.Spec.InitFromBackup.Source.BackupRef.Name != "bk" {
 		t.Errorf("initFromBackup = %+v", got.Spec.InitFromBackup)
 	}
 	if src.Spec.Backup.PITR == nil || src.Spec.Sites[0].LBIP != "10.0.0.1" || src.Spec.Sites[0].Zone != "zone-iad" || src.Spec.Sites[0].TaintNodeSelector["a"] != "b" {

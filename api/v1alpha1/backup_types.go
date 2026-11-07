@@ -365,7 +365,7 @@ type BackupProfile struct {
 	//
 	// The operator snapshots the passphrase into immutable Secrets it
 	// manages: each MysqlBackup encrypts its dump with its own snapshot
-	// (recorded in its status.artifactStorage.passphraseSecret), and the
+	// (recorded in its status.artifactStorage.passphraseSecretKeyRef), and the
 	// PITR archive with the snapshot its binding accepted
 	// (status.pitrArchiveBindings). Changing the passphrase bytes or this
 	// field on a profile in PITR archive use is refused: archive with a
@@ -403,15 +403,15 @@ type BackupEncryptionSpec struct {
 	// +optional
 	Algorithm string `json:"algorithm,omitempty"`
 
-	// PassphraseSecret references the Secret in the same namespace
-	// as the MysqlFailoverGroup holding the passphrase. The
+	// PassphraseSecretKeyRef selects the Secret key, in the same namespace
+	// as the MysqlFailoverGroup, holding the passphrase. The
 	// passphrase must be non-empty; recommended length is >=32 bytes
 	// of random material (use `head -c 48 /dev/urandom | base64`).
 	// +required
-	PassphraseSecret PassphraseSecretRef `json:"passphraseSecret"`
+	PassphraseSecretKeyRef PassphraseSecretKeyRef `json:"passphraseSecretKeyRef"`
 }
 
-// PassphraseSecretRef points at a Secret key holding the passphrase
+// PassphraseSecretKeyRef points at a Secret key holding the passphrase
 // used as input to the per-file HKDF-SHA256 key derivation. The
 // same shape is reused by restore specs (spec.initFromBackup.decryption,
 // spec.restoreInPlace.decryption) and the standby cluster's
@@ -424,10 +424,11 @@ type BackupEncryptionSpec struct {
 // backup that never succeeded and recorded no dump key (made before dump
 // keys were recorded) runs its abandoned-artifact cleanup Job with this
 // Secret, to read that backup's stamp.
-type PassphraseSecretRef struct {
+type PassphraseSecretKeyRef struct {
 	// Name of the Secret.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
 	Name string `json:"name"`
 
@@ -437,6 +438,7 @@ type PassphraseSecretRef struct {
 	// +kubebuilder:default="passphrase"
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
 	// +optional
 	Key string `json:"key,omitempty"`
 }
@@ -449,12 +451,12 @@ type PassphraseSecretRef struct {
 // consumers never need to pick an Algorithm (the ciphertext header encodes
 // it), so the surface is just "where is the passphrase".
 type BackupDecryptionSpec struct {
-	// PassphraseSecret references the Secret holding the passphrase
+	// PassphraseSecretKeyRef selects the Secret key holding the passphrase
 	// that was used when the source artifact was originally encrypted.
 	// Bumping the Secret contents to a new value does not rotate the
 	// ciphertext — it will simply fail to decrypt.
 	// +required
-	PassphraseSecret PassphraseSecretRef `json:"passphraseSecret"`
+	PassphraseSecretKeyRef PassphraseSecretKeyRef `json:"passphraseSecretKeyRef"`
 }
 
 // RetentionPolicy is the structured retention configuration that replaces
@@ -561,15 +563,17 @@ type S3Storage struct {
 	// +optional
 	EndpointURL string `json:"endpointURL,omitempty"`
 
-	// CredentialsSecret references a Secret whose keys provide AWS
+	// CredentialsSecretName names a Secret whose keys provide AWS
 	// credentials to backup and restore Jobs. Expected keys:
 	//   AWS_ACCESS_KEY_ID (required)
 	//   AWS_SECRET_ACCESS_KEY (required)
 	//   AWS_SESSION_TOKEN (optional)
 	//   AWS_REGION (optional, overrides .region)
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
-	CredentialsSecret string `json:"credentialsSecret"`
+	CredentialsSecretName string `json:"credentialsSecretName"`
 }
 
 // PVCStorage configures a local persistent volume as the backup destination.
@@ -661,6 +665,8 @@ type BackupSchedule struct {
 
 	// ProfileName references a BackupProfile by name.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +required
 	ProfileName string `json:"profileName"`
 
@@ -720,9 +726,9 @@ type BackupSchedule struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.pointInTime) || has(self.pointInTime.archiveProfileName)",message="pointInTime.archiveProfileName is required: name the backup profile whose PITR archive the restore reads"
 type InitFromBackupSpec struct {
 	// Source is a tagged reference to the artifact to restore.
-	// +kubebuilder:validation:XValidation:rule="(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of mysqlBackupRef, s3, or pvc must be set"
+	// +kubebuilder:validation:XValidation:rule="(has(self.backupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of backupRef, s3, or pvc must be set"
 	// +required
-	Source InitFromBackupSource `json:"source"`
+	Source RestoreSource `json:"source"`
 
 	// LoadOptions are forwarded to util.loadDump(). Omit for sane defaults.
 	// +optional
@@ -738,8 +744,8 @@ type InitFromBackupSpec struct {
 
 	// Decryption, when set, provides the passphrase that decrypts the
 	// source dump. The dump key is resolved in this order: Decryption;
-	// else, for a MysqlBackupRef source, the dump-key snapshot that backup
-	// recorded (status.artifactStorage.passphraseSecret); else the restore
+	// else, for a backupRef source, the dump-key snapshot that backup
+	// recorded (status.artifactStorage.passphraseSecretKeyRef); else the restore
 	// is refused (PITRBackupDumpKeyMissing). The profile's live
 	// passphrase Secret is never used: it may hold other bytes since the
 	// backup ran. For direct S3/PVC sources of encrypted dumps Decryption
@@ -750,14 +756,14 @@ type InitFromBackupSpec struct {
 	Decryption *BackupDecryptionSpec `json:"decryption,omitempty"`
 }
 
-// InitFromBackupSource is the tagged-union selector for the restore source.
-type InitFromBackupSource struct {
-	// MysqlBackupRef restores from a previously-completed MysqlBackup in
+// RestoreSource is the tagged-union selector for the restore source.
+type RestoreSource struct {
+	// BackupRef restores from a previously-completed MysqlBackup in
 	// the same namespace. Its status.location is resolved automatically.
 	// +optional
-	MysqlBackupRef *corev1.LocalObjectReference `json:"mysqlBackupRef,omitempty"`
+	BackupRef *LocalMysqlBackupRef `json:"backupRef,omitempty"`
 
-	// S3 restores directly from an S3 URL. Requires credentialsSecret.
+	// S3 restores directly from an S3 URL. Requires credentialsSecretName.
 	// +optional
 	S3 *S3Storage `json:"s3,omitempty"`
 
@@ -924,9 +930,9 @@ type RestoreInPlaceSpec struct {
 	Confirm string `json:"confirm"`
 
 	// Source is a tagged reference to the artifact to restore.
-	// +kubebuilder:validation:XValidation:rule="(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of mysqlBackupRef, s3, or pvc must be set"
+	// +kubebuilder:validation:XValidation:rule="(has(self.backupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of backupRef, s3, or pvc must be set"
 	// +required
-	Source InitFromBackupSource `json:"source"`
+	Source RestoreSource `json:"source"`
 
 	// LoadOptions are forwarded to util.loadDump(). In-place restores
 	// require includeSchemas to be either empty (full instance) or
@@ -938,9 +944,9 @@ type RestoreInPlaceSpec struct {
 
 	// Decryption, when set, provides the passphrase that decrypts the
 	// source dump, resolved as InitFromBackupSpec.Decryption is:
-	// Decryption; else, for a MysqlBackupRef source, the dump-key
+	// Decryption; else, for a backupRef source, the dump-key
 	// snapshot that backup recorded
-	// (status.artifactStorage.passphraseSecret); else the restore is
+	// (status.artifactStorage.passphraseSecretKeyRef); else the restore is
 	// refused (PITRBackupDumpKeyMissing). The profile's live passphrase
 	// Secret is never used. For direct S3/PVC sources of encrypted dumps
 	// Decryption is required. Archived binlogs are decrypted with the key

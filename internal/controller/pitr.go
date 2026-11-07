@@ -669,7 +669,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 				Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(s3.Region),
 			})
 		}
-		if s3.CredentialsSecret != "" {
+		if s3.CredentialsSecretName != "" {
 			// Mount profile S3 creds at a dedicated path inside the
 			// init container. Kept distinct from the main
 			// backupAWSCredsMountPath so the dump source and PITR
@@ -679,7 +679,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 				Name: "pitr-aws-creds",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName:  s3.CredentialsSecret,
+						SecretName:  s3.CredentialsSecretName,
 						DefaultMode: ptr32(0o400),
 					},
 				},

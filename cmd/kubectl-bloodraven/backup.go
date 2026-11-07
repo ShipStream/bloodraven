@@ -123,9 +123,9 @@ func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1alpha1
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef:   v1alpha1.LocalGroupRef{Name: group},
-			ProfileName:        profile,
-			SourceSiteOverride: sourceSite,
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
+			ProfileName:      profile,
+			SourceSite:       sourceSite,
 		},
 	}
 }

@@ -1087,7 +1087,7 @@ func TestSetCloneTimeout_ForwardsToManager(t *testing.T) {
 func TestConnectionMaterialHash_TLSAdoptionAndRotationRestart(t *testing.T) {
 	fg := newTestFG()
 	opSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: fg.Spec.Credentials.OperatorSecret, Namespace: fg.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: fg.Spec.Credentials.OperatorSecretName, Namespace: fg.Namespace},
 		Data:       map[string][]byte{"username": []byte("op"), "password": []byte("p")},
 	}
 	tlsSecret := &corev1.Secret{

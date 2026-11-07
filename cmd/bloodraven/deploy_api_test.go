@@ -58,7 +58,7 @@ func newDeployAPIFixture(t *testing.T) *deployAPIFixture {
 	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}, {Name: "pdx", State: "read-only", Replicating: true}}
 	f.group.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.NewTime(f.now)}}
 	f.db = &v1alpha1.MysqlDatabase{ObjectMeta: metav1.ObjectMeta{Name: "tenant", Namespace: f.group.Namespace}, Spec: v1alpha1.MysqlDatabaseSpec{
-		GroupRef:          v1alpha1.LocalGroupRef{Name: f.group.Name},
+		FailoverGroupRef:  v1alpha1.LocalFailoverGroupRef{Name: f.group.Name},
 		DeploymentClients: []v1alpha1.DeploymentClient{{Namespace: "app-ns", ServiceAccount: "deployer"}},
 	}}
 	scheme := runtime.NewScheme()
@@ -239,7 +239,7 @@ func TestDeployAPIAuthorizationDoesNotLeakGroupExistence(t *testing.T) {
 			case "namespace":
 				f.db.Spec.DeploymentClients[0].Namespace = "other"
 			case "group ref":
-				f.db.Spec.GroupRef.Name = "other"
+				f.db.Spec.FailoverGroupRef.Name = "other"
 			case "deleting":
 				f.db.Finalizers = []string{"test/keep"}
 			}

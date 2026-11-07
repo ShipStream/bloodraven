@@ -221,9 +221,9 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if fg.Spec.Backup != nil && fg.Spec.Backup.MaxLagSecondsForSource > 0 {
 			maxLag = fg.Spec.Backup.MaxLagSecondsForSource
 		}
-		sourceSite, reason, err := selectSourceSite(&fg, backup.Spec.SourceSiteOverride, maxLag)
+		sourceSite, reason, err := selectSourceSite(&fg, backup.Spec.SourceSite, maxLag)
 		if err != nil {
-			if backup.Spec.SourceSiteOverride != "" {
+			if backup.Spec.SourceSite != "" {
 				return r.failBackup(ctx, &backup, v1alpha1.ReasonNoHealthySource, err.Error())
 			}
 			return r.pendBackup(ctx, &backup, v1alpha1.ReasonNoHealthySource, err.Error())
@@ -1086,9 +1086,9 @@ func stuckProducerPods(pods []corev1.Pod, backupDeleted *metav1.Time, now time.T
 // profile's Secret. nil for a plaintext backup.
 func (r *MysqlBackupReconciler) abandonedCleanupPassphrase(ctx context.Context, backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) (*corev1.SecretVolumeSource, string, error) {
 	encrypted := backup.Status.Encrypted
-	recorded := (*v1alpha1.BackupArtifactPassphrase)(nil)
+	recorded := (*v1alpha1.SecretKeyRef)(nil)
 	if storage != nil {
-		recorded = storage.PassphraseSecret
+		recorded = storage.PassphraseSecretKeyRef
 	}
 	if producer != nil {
 		if e, _ := backupJobEncryption(producer); e {
@@ -1114,11 +1114,11 @@ func (r *MysqlBackupReconciler) abandonedCleanupPassphrase(ctx context.Context, 
 	if !encrypted {
 		return nil, "", nil
 	}
-	if profile == nil || profile.Encryption == nil || profile.Encryption.PassphraseSecret.Name == "" {
+	if profile == nil || profile.Encryption == nil || profile.Encryption.PassphraseSecretKeyRef.Name == "" {
 		// buildCleanupJob refuses: the stamp cannot be read.
 		return &corev1.SecretVolumeSource{}, "", nil
 	}
-	return passphraseVolumeSource(profile.Encryption.PassphraseSecret.Name, profile.Encryption.PassphraseSecret.PassphraseSecretKeyOrDefault()), "", nil
+	return passphraseVolumeSource(profile.Encryption.PassphraseSecretKeyRef.Name, profile.Encryption.PassphraseSecretKeyRef.PassphraseSecretKeyOrDefault()), "", nil
 }
 
 func passphraseVolumeSource(name, key string) *corev1.SecretVolumeSource {
@@ -1841,17 +1841,17 @@ func selectSourceSite(fg *v1alpha1.MysqlFailoverGroup, override string, maxLagSe
 	if override != "" {
 		specSite := fg.Spec.SiteByName(override)
 		if specSite == nil {
-			return "", "", fmt.Errorf("sourceSiteOverride %q does not match any configured site", override)
+			return "", "", fmt.Errorf("sourceSite %q does not match any configured site", override)
 		}
 		if specSite.IsReadOnlyReader() {
-			return "", "", fmt.Errorf("sourceSiteOverride %q names a read-only site, which cannot be a backup source", override)
+			return "", "", fmt.Errorf("sourceSite %q names a read-only site, which cannot be a backup source", override)
 		}
 		for i := range status.Sites {
 			if status.Sites[i].Name == override {
 				return override, "override", nil
 			}
 		}
-		return "", "", fmt.Errorf("sourceSiteOverride %q does not match any observed site", override)
+		return "", "", fmt.Errorf("sourceSite %q does not match any observed site", override)
 	}
 
 	if status.ActiveSite == "" {
@@ -1935,20 +1935,20 @@ func (r *MysqlBackupReconciler) ensureDumpKeySnapshot(ctx context.Context, fg *v
 		return "", "", "", fmt.Errorf("get dump-key snapshot %s: %w", name, err)
 	}
 
-	ref := profile.Encryption.PassphraseSecret
+	ref := profile.Encryption.PassphraseSecretKeyRef
 	secretKey := ref.PassphraseSecretKeyOrDefault()
 	var live corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: ref.Name}, &live); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", v1alpha1.ReasonPassphraseSecretMissing,
-				fmt.Sprintf("profile %q encryption.passphraseSecret Secret %q not found", profile.Name, ref.Name), nil
+				fmt.Sprintf("profile %q encryption.passphraseSecretKeyRef Secret %q not found", profile.Name, ref.Name), nil
 		}
 		return "", "", "", fmt.Errorf("get passphrase secret %s: %w", ref.Name, err)
 	}
 	passphrase := backupcrypto.TrimPassphrase(live.Data[secretKey])
 	if len(passphrase) == 0 {
 		return "", v1alpha1.ReasonPassphraseSecretMissing,
-			fmt.Sprintf("profile %q encryption.passphraseSecret Secret %q key %q is missing or empty", profile.Name, ref.Name, secretKey), nil
+			fmt.Sprintf("profile %q encryption.passphraseSecretKeyRef Secret %q key %q is missing or empty", profile.Name, ref.Name, secretKey), nil
 	}
 	immutable := true
 	snap := &corev1.Secret{
@@ -2029,10 +2029,10 @@ func (r *MysqlBackupReconciler) dumpKeySnapshotKept(ctx context.Context, backup 
 // backup recorded a dump-key snapshot: the snapshot stays, because the
 // artifacts it decrypts may still exist.
 func dumpKeyKeptNote(backup *v1alpha1.MysqlBackup) string {
-	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecret == nil {
+	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecretKeyRef == nil {
 		return ""
 	}
-	name := backup.Status.ArtifactStorage.PassphraseSecret.Name
+	name := backup.Status.ArtifactStorage.PassphraseSecretKeyRef.Name
 	if name != dumpKeySnapshotName(backup) {
 		return ""
 	}

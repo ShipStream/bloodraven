@@ -330,7 +330,7 @@ func TestRestoreOfflineFenceSite_FromStatus(t *testing.T) {
 // CREATE or SET GLOBAL, and would be locked out by offline_mode.
 func TestEnsureRestoreCredsSecret_UsesOperatorAccount(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Spec.Credentials = v1alpha1.CredentialsSpec{OperatorSecret: "op-creds", BackupSecret: "backup-creds"}
+	fg.Spec.Credentials = v1alpha1.CredentialsSpec{OperatorSecretName: "op-creds", BackupSecretName: "backup-creds"}
 	op := &corev1.Secret{}
 	op.Name, op.Namespace = "op-creds", fg.Namespace
 	op.Data = map[string][]byte{"username": []byte("operator"), "password": []byte("op-pass")}

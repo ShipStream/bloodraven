@@ -104,7 +104,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 	// Check if credentials have changed since last reconciliation, and
 	// whether the app role's mysql schema restriction still has to land.
 	rolesCurrent := fg.Annotations[v1alpha1.CredentialHashAnnotation] == currentHash
-	restrictionCurrent := fg.Spec.Credentials.AppSecret == "" ||
+	restrictionCurrent := fg.Spec.Credentials.AppSecretName == "" ||
 		fg.Annotations[v1alpha1.SystemSchemaRestrictionAnnotation] == currentHash
 	if rolesCurrent && restrictionCurrent {
 		return nil
@@ -185,7 +185,7 @@ func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Contex
 	claimed := make(map[string]string)
 	for i := range list.Items {
 		mdb := &list.Items[i]
-		if mdb.Spec.GroupRef.Name != fg.Name {
+		if mdb.Spec.FailoverGroupRef.Name != fg.Name {
 			continue
 		}
 		if mdb.Status.OwnerUser != "" {
@@ -225,14 +225,14 @@ func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alp
 	// Operator: full admin.
 	roles = append(roles, credentialRole{
 		name:       "operator",
-		secretName: fg.Spec.Credentials.OperatorSecret,
+		secretName: fg.Spec.Credentials.OperatorSecretName,
 		grants:     []string{"GRANT ALL PRIVILEGES ON *.* TO '%s'@'%%' WITH GRANT OPTION"},
 	})
 
-	if fg.Spec.Credentials.AppSecret != "" {
+	if fg.Spec.Credentials.AppSecretName != "" {
 		roles = append(roles, credentialRole{
 			name:       "app",
-			secretName: fg.Spec.Credentials.AppSecret,
+			secretName: fg.Spec.Credentials.AppSecretName,
 			grants:     []string{"GRANT " + appGlobalPrivileges + " ON *.* TO '%s'@'%%'"},
 
 			resetAdminPrivileges: true,
@@ -240,20 +240,20 @@ func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alp
 		})
 	}
 
-	if fg.Spec.Credentials.ReadOnlySecret != "" {
+	if fg.Spec.Credentials.ReadOnlySecretName != "" {
 		roles = append(roles, credentialRole{
 			name:       "readonly",
-			secretName: fg.Spec.Credentials.ReadOnlySecret,
+			secretName: fg.Spec.Credentials.ReadOnlySecretName,
 			grants: []string{
 				"GRANT SELECT, SHOW VIEW, SHOW DATABASES, PROCESS ON *.* TO '%s'@'%%'",
 			},
 		})
 	}
 
-	if fg.Spec.Credentials.MonitorSecret != "" {
+	if fg.Spec.Credentials.MonitorSecretName != "" {
 		roles = append(roles, credentialRole{
 			name:       "monitor",
-			secretName: fg.Spec.Credentials.MonitorSecret,
+			secretName: fg.Spec.Credentials.MonitorSecretName,
 			grants: []string{
 				"GRANT PROCESS, REPLICATION CLIENT ON *.* TO '%s'@'%%'",
 				"GRANT SELECT ON performance_schema.* TO '%s'@'%%'",
@@ -261,10 +261,10 @@ func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alp
 		})
 	}
 
-	if fg.Spec.Credentials.BackupSecret != "" {
+	if fg.Spec.Credentials.BackupSecretName != "" {
 		roles = append(roles, credentialRole{
 			name:       "backup",
-			secretName: fg.Spec.Credentials.BackupSecret,
+			secretName: fg.Spec.Credentials.BackupSecretName,
 			grants: []string{
 				"GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT ON *.* TO '%s'@'%%'",
 			},
@@ -415,7 +415,7 @@ func (r *MysqlFailoverGroupReconciler) setCredentialAnnotation(ctx context.Conte
 // the initial-setup fallback, from the operator Secret's username, password
 // and MYSQL_ROOT_PASSWORD keys.
 func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) (user, password, rootPassword string, err error) {
-	secretName := fg.Spec.Credentials.OperatorSecret
+	secretName := fg.Spec.Credentials.OperatorSecretName
 	if secretName == "" {
 		return "", "", "", fmt.Errorf("group %q references no operator credential secret", fg.Name)
 	}
@@ -475,11 +475,11 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 	}
 
 	names := []string{
-		fg.Spec.Credentials.OperatorSecret,
-		fg.Spec.Credentials.AppSecret,
-		fg.Spec.Credentials.ReadOnlySecret,
-		fg.Spec.Credentials.MonitorSecret,
-		fg.Spec.Credentials.BackupSecret,
+		fg.Spec.Credentials.OperatorSecretName,
+		fg.Spec.Credentials.AppSecretName,
+		fg.Spec.Credentials.ReadOnlySecretName,
+		fg.Spec.Credentials.MonitorSecretName,
+		fg.Spec.Credentials.BackupSecretName,
 	}
 
 	for _, name := range names {

@@ -12,7 +12,7 @@
     },
     {
       "front": "What `spec.credentials` requires",
-      "back": "`spec.credentials` is required, and so is its `operatorSecret` (keys `username`, `password`, `MYSQL_ROOT_PASSWORD`). The other four role Secrets are optional; the operator creates a user per role with a fixed grant set. The single-Secret `spec.secretName` DSN mode was removed in v1.7.0.",
+      "back": "`spec.credentials` is required, and so is its `operatorSecretName` (keys `username`, `password`, `MYSQL_ROOT_PASSWORD`). The other four role Secrets are optional; the operator creates a user per role with a fixed grant set. The single-Secret `spec.secretName` DSN mode was removed in v1.7.0.",
       "orderIndex": 2
     },
     {
@@ -87,14 +87,14 @@
       "options": [
         "Create the operator user with `ALL PRIVILEGES ON *.* WITH GRANT OPTION` (and any dedicated replication user with `REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN`), install the clone plugin, and create the role users by hand — the init script only runs on an empty datadir",
         "Nothing: the init-users ConfigMap is applied on every pod start, so the users appear on the first restart",
-        "Set `spec.credentials.operatorSecret` and restart the pods; the operator reconciles MySQL users on every poll",
+        "Set `spec.credentials.operatorSecretName` and restart the pods; the operator reconciles MySQL users on every poll",
         "Delete the PVCs and let the operator bootstrap, because adopting an existing datadir is not supported"
       ],
       "correctOptionIndex": 0,
       "explanation": "The init-users ConfigMap is mounted at `/docker-entrypoint-initdb.d`, which the MySQL entrypoint runs only when it is initialising an empty datadir. Adopt a populated one and none of it runs. `CLONE_ADMIN` and `BACKUP_ADMIN` are the two grants people miss, and their absence surfaces much later as a reclone that will not start or a backup job that cannot take a consistent dump. Option 2 misremembers the entrypoint contract. Option 3 overstates the reconcile: the operator re-applies the role users only when their Secrets change, never on every poll, and only once it can log in as the operator user or as `root`. Option 4 is over-cautious: adoption works, it just moves the user setup onto you. (objectives 1, 2)"
     },
     {
-      "question": "A security review asks which MySQL user your application connects as, and what it could do if the credentials leaked. `appSecret` is set. What is the honest answer?",
+      "question": "A security review asks which MySQL user your application connects as, and what it could do if the credentials leaked. `appSecretName` is set. What is the honest answer?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -104,7 +104,7 @@
         "It is the same account the operator uses, so it holds `ALL PRIVILEGES` with `GRANT OPTION`"
       ],
       "correctOptionIndex": 0,
-      "explanation": "The grant sets are fixed by the operator, not configurable, and that is precisely what makes them answerable. The app user is deliberately full-privilege-minus-escalation: it cannot grant, and without `SUPER`/`CONNECTION_ADMIN` it cannot write through a `super_read_only` fence. Option 2 is the answer people expect and is wrong — there is no grant list in the CRD. Option 3 describes `readOnlySecret`. Option 4 describes `operatorSecret`, and conflating the two is the actual finding a review is looking for. (objective 2)"
+      "explanation": "The grant sets are fixed by the operator, not configurable, and that is precisely what makes them answerable. The app user is deliberately full-privilege-minus-escalation: it cannot grant, and without `SUPER`/`CONNECTION_ADMIN` it cannot write through a `super_read_only` fence. Option 2 is the answer people expect and is wrong — there is no grant list in the CRD. Option 3 describes `readOnlySecretName`. Option 4 describes `operatorSecretName`, and conflating the two is the actual finding a review is looking for. (objective 2)"
     },
     {
       "question": "Rotating the password in a role Secret changes the password MySQL will accept for that user.",

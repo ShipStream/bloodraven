@@ -79,7 +79,7 @@ type BackupJobInputs struct {
 	// (#203, I-17), required for an encrypted profile: the encrypt-upload
 	// container and the backup-stamp init container mount its "passphrase"
 	// key under the backup-passphrase volume, so
-	// status.artifactStorage.passphraseSecret records it (Δ1). The user's
+	// status.artifactStorage.passphraseSecretKeyRef records it (Δ1). The user's
 	// Secret is never mounted.
 	DumpKeySecretName string
 	// PITRArchiveID is the archive ID the group's rendered writers archive
@@ -139,13 +139,13 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	mysqlshImage := backupImage(fg)
 	encryption := in.Profile.Encryption
 	encrypted := in.Profile.EncryptionEnabled()
-	// Treat a non-nil Encryption with a missing passphraseSecret.name
+	// Treat a non-nil Encryption with a missing passphraseSecretKeyRef.name
 	// as a hard misconfiguration. Falling back silently to the
 	// unencrypted path would be an unsafe surprise — an operator who
 	// set encryption.algorithm but forgot the Secret name would end up
 	// with plaintext backups that their dashboard claims are encrypted.
-	if encryption != nil && encryption.PassphraseSecret.Name == "" {
-		return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecret.name", in.Profile.Name)
+	if encryption != nil && encryption.PassphraseSecretKeyRef.Name == "" {
+		return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecretKeyRef.name", in.Profile.Name)
 	}
 
 	// Job name derived from the backup CR name; capped at 63 chars.
@@ -223,7 +223,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 			Name: "aws-creds",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  in.Profile.Storage.S3.CredentialsSecret,
+					SecretName:  in.Profile.Storage.S3.CredentialsSecretName,
 					DefaultMode: ptr32(0o400),
 				},
 			},
@@ -409,8 +409,8 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		// uploader only; the mysqlsh dump container never sees it
 		// (defense-in-depth: a mysqlsh exploit that read files in its
 		// pod wouldn't surface the passphrase).
-		if encryption.PassphraseSecret.Name == "" {
-			return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecret.name", in.Profile.Name)
+		if encryption.PassphraseSecretKeyRef.Name == "" {
+			return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecretKeyRef.name", in.Profile.Name)
 		}
 		if in.DumpKeySecretName == "" {
 			return nil, fmt.Errorf("backup job: profile %q is encrypted but no dump-key snapshot was given", in.Profile.Name)

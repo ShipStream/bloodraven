@@ -724,7 +724,7 @@ func (r *MysqlFailoverGroupReconciler) settleArmedRestoreReclones(ctx context.Co
 			"the in-place restore (confirm=%s) ran on the primary and did not succeed, so the primary may hold dropped or half-loaded data. "+
 				"%s keep their replication receivers stopped and the data they had before the restore; they are not recloned from this primary "+
 				"and stay excluded from promotion and the reader Services.%s Restore the primary (for example from a backup taken from a held site "+
-				"with sourceSiteOverride) and let the new restore reclone them, set status.restoreReclones.phase to Draining once the primary's data is good, "+
+				"with sourceSite) and let the new restore reclone them, set status.restoreReclones.phase to Draining once the primary's data is good, "+
 				"or remove status.restoreReclones to resume their replication from the current primary",
 			q.ConfirmToken, strings.Join(pending, ", "), older)
 		return 0, nil

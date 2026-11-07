@@ -665,7 +665,7 @@ spec:
 
                             The operator snapshots the passphrase into immutable Secrets it
                             manages: each MysqlBackup encrypts its dump with its own snapshot
-                            (recorded in its status.artifactStorage.passphraseSecret), and the
+                            (recorded in its status.artifactStorage.passphraseSecretKeyRef), and the
                             PITR archive with the snapshot its binding accepted
                             (status.pitrArchiveBindings). Changing the passphrase bytes or this
                             field on a profile in PITR archive use is refused: archive with a
@@ -686,10 +686,10 @@ spec:
                               enum:
                               - AES-256-GCM
                               type: string
-                            passphraseSecret:
+                            passphraseSecretKeyRef:
                               description: |-
-                                PassphraseSecret references the Secret in the same namespace
-                                as the MysqlFailoverGroup holding the passphrase. The
+                                PassphraseSecretKeyRef selects the Secret key, in the same namespace
+                                as the MysqlFailoverGroup, holding the passphrase. The
                                 passphrase must be non-empty; recommended length is >=32 bytes
                                 of random material (use `head -c 48 /dev/urandom | base64`).
                               properties:
@@ -701,17 +701,19 @@ spec:
                                     read.
                                   maxLength: 253
                                   minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
                                   type: string
                                 name:
                                   description: Name of the Secret.
                                   maxLength: 253
                                   minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                                   type: string
                               required:
                               - name
                               type: object
                           required:
-                          - passphraseSecret
+                          - passphraseSecretKeyRef
                           type: object
                         name:
                           description: |-
@@ -820,15 +822,17 @@ spec:
                                   x-kubernetes-validations:
                                   - message: bucket must be at most 63 bytes (UTF-8)
                                     rule: bytes(self).size() <= 63
-                                credentialsSecret:
+                                credentialsSecretName:
                                   description: |-
-                                    CredentialsSecret references a Secret whose keys provide AWS
+                                    CredentialsSecretName names a Secret whose keys provide AWS
                                     credentials to backup and restore Jobs. Expected keys:
                                       AWS_ACCESS_KEY_ID (required)
                                       AWS_SECRET_ACCESS_KEY (required)
                                       AWS_SESSION_TOKEN (optional)
                                       AWS_REGION (optional, overrides .region)
+                                  maxLength: 253
                                   minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                                   type: string
                                 endpointURL:
                                   description: |-
@@ -863,7 +867,7 @@ spec:
                                   type: string
                               required:
                               - bucket
-                              - credentialsSecret
+                              - credentialsSecretName
                               type: object
                             type:
                               description: Type is the storage backend discriminator.
@@ -1203,7 +1207,9 @@ spec:
                           type: string
                         profileName:
                           description: ProfileName references a BackupProfile by name.
+                          maxLength: 63
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         schedule:
                           description: |-
@@ -1482,48 +1488,62 @@ spec:
                   Credentials configures per-role MySQL credential management. The
                   operator manages MySQL users and privileges for each configured role.
                 properties:
-                  appSecret:
+                  appSecretName:
                     description: |-
-                      AppSecret references the Secret for application read-write connections.
+                      AppSecretName names the Secret for application read-write connections.
                       Required keys: username, password.
                       Grants on *.*: data and schema privileges (SELECT, INSERT, UPDATE,
                       DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY
                       TABLES, LOCK TABLES, EXECUTE, CREATE/SHOW VIEW, CREATE/ALTER ROUTINE,
                       EVENT, TRIGGER, SHOW DATABASES). No GRANT OPTION, SUPER, CREATE USER,
                       or other administrative privileges.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
-                  backupSecret:
+                  backupSecretName:
                     description: |-
-                      BackupSecret references the Secret for backup connections. Restore
+                      BackupSecretName names the Secret for backup connections. Restore
                       Jobs run as the operator account instead: they need DDL, SET GLOBAL
                       and CONNECTION_ADMIN, which this role does not have.
                       Required keys: username, password.
                       Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
                       BACKUP_ADMIN, REPLICATION CLIENT.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
-                  monitorSecret:
+                  monitorSecretName:
                     description: |-
-                      MonitorSecret references the Secret for Prometheus exporter connections.
+                      MonitorSecretName names the Secret for Prometheus exporter connections.
                       Required keys: username, password.
                       Grants: PROCESS, REPLICATION CLIENT, SELECT on performance_schema.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
-                  operatorSecret:
+                  operatorSecretName:
                     description: |-
-                      OperatorSecret references the Secret for operator and sidecar connections.
+                      OperatorSecretName names the Secret for operator and sidecar connections.
                       Required keys: username, password, MYSQL_ROOT_PASSWORD.
                       Optional keys: MYSQL_REPLICATION_USER, MYSQL_REPLICATION_PASSWORD
                       (default to operator username/password if omitted).
                       Grants: ALL PRIVILEGES WITH GRANT OPTION.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
-                  readOnlySecret:
+                  readOnlySecretName:
                     description: |-
-                      ReadOnlySecret references the Secret for application read-only connections.
+                      ReadOnlySecretName names the Secret for application read-only connections.
                       Required keys: username, password.
                       Grants: SELECT, SHOW VIEW, SHOW DATABASES, PROCESS.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
                 required:
-                - operatorSecret
+                - operatorSecretName
                 type: object
               dns:
                 description: DNS configures the external DNS record managed via the
@@ -1576,19 +1596,30 @@ spec:
                       can authenticate to a password-protected master) and authenticates
                       its own connections.
                     properties:
-                      passwordKey:
-                        default: password
+                      passwordSecretKeyRef:
                         description: |-
-                          PasswordKey is the key inside the Secret that holds the password.
-                          Default: "password".
-                        type: string
-                      secretName:
-                        description: SecretName is the name of the Secret containing
-                          the password.
-                        minLength: 1
-                        type: string
+                          PasswordSecretKeyRef selects the Secret key, in the group's
+                          namespace, that holds the Dragonfly password.
+                        properties:
+                          key:
+                            default: password
+                            description: 'Key within the Secret that holds the password.
+                              Default: "password".'
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
                     required:
-                    - secretName
+                    - passwordSecretKeyRef
                     type: object
                   containerSecurityContext:
                     description: |-
@@ -2159,27 +2190,34 @@ spec:
                           environment variables for S3-compatible snapshot access. Typical keys
                           are AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION. Optional
                           when ServiceAccountName provides credentials through cloud IAM.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                         type: string
                       dir:
                         description: |-
                           Dir is passed to Dragonfly as --dir. Use s3://bucket[/prefix] for S3
                           snapshot/restore support. Empty leaves Dragonfly's default data dir.
                         type: string
-                      s3Endpoint:
+                      s3EndpointURL:
                         description: |-
-                          S3Endpoint is passed to Dragonfly as --s3_endpoint for S3-compatible
-                          services such as RustFS or MinIO. Leave empty for AWS S3.
+                          S3EndpointURL overrides the S3 endpoint for S3-compatible services
+                          such as RustFS or MinIO, in the URL form backup storage uses: an
+                          absolute http:// or https:// URL with a host and optional port, and
+                          no path, credentials, query or fragment. The operator passes the
+                          host and port to Dragonfly as --s3_endpoint and the scheme as
+                          --s3_use_https (false for http://, true for https://). Omit it, or
+                          leave it empty, for AWS S3 with Dragonfly's defaults.
+                        maxLength: 512
+                        pattern: ^(https?://[^\s/?#@]+/?)?$
                         type: string
+                        x-kubernetes-validations:
+                        - message: s3EndpointURL must be at most 512 bytes (UTF-8)
+                          rule: bytes(self).size() <= 512
                       s3SignPayload:
                         description: |-
                           S3SignPayload controls Dragonfly's --s3_sign_payload flag. Leave nil
                           for Dragonfly's default.
-                        type: boolean
-                      s3UseHTTPS:
-                        description: |-
-                          S3UseHTTPS controls Dragonfly's --s3_use_https flag. Leave nil for
-                          Dragonfly's default. Set false for in-cluster HTTP services like the
-                          playground RustFS deployment.
                         type: boolean
                       serviceAccountName:
                         description: |-
@@ -2196,10 +2234,6 @@ spec:
                     0)'
                 - message: spec.dragonfly.image must be pinned (no :latest)
                   rule: '!self.enabled || !self.image.endsWith('':latest'')'
-                - message: spec.dragonfly.auth.secretName is required when auth is
-                    set
-                  rule: '!has(self.auth) || (has(self.auth.secretName) && self.auth.secretName.size()
-                    > 0)'
               encryptionAtRest:
                 description: |-
                   EncryptionAtRest configures MySQL InnoDB data-at-rest encryption
@@ -5531,8 +5565,8 @@ spec:
                     description: |-
                       Decryption, when set, provides the passphrase that decrypts the
                       source dump. The dump key is resolved in this order: Decryption;
-                      else, for a MysqlBackupRef source, the dump-key snapshot that backup
-                      recorded (status.artifactStorage.passphraseSecret); else the restore
+                      else, for a backupRef source, the dump-key snapshot that backup
+                      recorded (status.artifactStorage.passphraseSecretKeyRef); else the restore
                       is refused (PITRBackupDumpKeyMissing). The profile's live
                       passphrase Secret is never used: it may hold other bytes since the
                       backup ran. For direct S3/PVC sources of encrypted dumps Decryption
@@ -5540,9 +5574,9 @@ spec:
                       decrypted with the key snapshot of the archive's read binding
                       (status.pitrArchiveBindings), never with Decryption.
                     properties:
-                      passphraseSecret:
+                      passphraseSecretKeyRef:
                         description: |-
-                          PassphraseSecret references the Secret holding the passphrase
+                          PassphraseSecretKeyRef selects the Secret key holding the passphrase
                           that was used when the source artifact was originally encrypted.
                           Bumping the Secret contents to a new value does not rotate the
                           ciphertext — it will simply fail to decrypt.
@@ -5555,17 +5589,19 @@ spec:
                               read.
                             maxLength: 253
                             minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
                             type: string
                           name:
                             description: Name of the Secret.
                             maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                             type: string
                         required:
                         - name
                         type: object
                     required:
-                    - passphraseSecret
+                    - passphraseSecretKeyRef
                     type: object
                   loadOptions:
                     description: LoadOptions are forwarded to util.loadDump(). Omit
@@ -5675,22 +5711,20 @@ spec:
                   source:
                     description: Source is a tagged reference to the artifact to restore.
                     properties:
-                      mysqlBackupRef:
+                      backupRef:
                         description: |-
-                          MysqlBackupRef restores from a previously-completed MysqlBackup in
+                          BackupRef restores from a previously-completed MysqlBackup in
                           the same namespace. Its status.location is resolved automatically.
                         properties:
                           name:
-                            default: ""
-                            description: |-
-                              Name of the referent.
-                              This field is effectively required, but due to backwards compatibility is
-                              allowed to be empty. Instances of this type with an empty value here are
-                              almost certainly wrong.
-                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            description: Name of the MysqlBackup.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                             type: string
+                        required:
+                        - name
                         type: object
-                        x-kubernetes-map-type: atomic
                       pvc:
                         description: |-
                           PVC restores from an existing PVC. Restore only supports referencing
@@ -5713,7 +5747,7 @@ spec:
                         type: object
                       s3:
                         description: S3 restores directly from an S3 URL. Requires
-                          credentialsSecret.
+                          credentialsSecretName.
                         properties:
                           bucket:
                             description: Bucket is the S3 bucket name.
@@ -5723,15 +5757,17 @@ spec:
                             x-kubernetes-validations:
                             - message: bucket must be at most 63 bytes (UTF-8)
                               rule: bytes(self).size() <= 63
-                          credentialsSecret:
+                          credentialsSecretName:
                             description: |-
-                              CredentialsSecret references a Secret whose keys provide AWS
+                              CredentialsSecretName names a Secret whose keys provide AWS
                               credentials to backup and restore Jobs. Expected keys:
                                 AWS_ACCESS_KEY_ID (required)
                                 AWS_SECRET_ACCESS_KEY (required)
                                 AWS_SESSION_TOKEN (optional)
                                 AWS_REGION (optional, overrides .region)
+                            maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                             type: string
                           endpointURL:
                             description: |-
@@ -5765,13 +5801,13 @@ spec:
                             type: string
                         required:
                         - bucket
-                        - credentialsSecret
+                        - credentialsSecretName
                         type: object
                     type: object
                     x-kubernetes-validations:
-                    - message: exactly one of mysqlBackupRef, s3, or pvc must be set
-                      rule: '(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ?
-                        1 : 0) + (has(self.pvc) ? 1 : 0) == 1'
+                    - message: exactly one of backupRef, s3, or pvc must be set
+                      rule: '(has(self.backupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0)
+                        + (has(self.pvc) ? 1 : 0) == 1'
                 required:
                 - source
                 type: object
@@ -6146,17 +6182,17 @@ spec:
                     description: |-
                       Decryption, when set, provides the passphrase that decrypts the
                       source dump, resolved as InitFromBackupSpec.Decryption is:
-                      Decryption; else, for a MysqlBackupRef source, the dump-key
+                      Decryption; else, for a backupRef source, the dump-key
                       snapshot that backup recorded
-                      (status.artifactStorage.passphraseSecret); else the restore is
+                      (status.artifactStorage.passphraseSecretKeyRef); else the restore is
                       refused (PITRBackupDumpKeyMissing). The profile's live passphrase
                       Secret is never used. For direct S3/PVC sources of encrypted dumps
                       Decryption is required. Archived binlogs are decrypted with the key
                       snapshot of the archive's read binding (status.pitrArchiveBindings).
                     properties:
-                      passphraseSecret:
+                      passphraseSecretKeyRef:
                         description: |-
-                          PassphraseSecret references the Secret holding the passphrase
+                          PassphraseSecretKeyRef selects the Secret key holding the passphrase
                           that was used when the source artifact was originally encrypted.
                           Bumping the Secret contents to a new value does not rotate the
                           ciphertext — it will simply fail to decrypt.
@@ -6169,17 +6205,19 @@ spec:
                               read.
                             maxLength: 253
                             minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
                             type: string
                           name:
                             description: Name of the Secret.
                             maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                             type: string
                         required:
                         - name
                         type: object
                     required:
-                    - passphraseSecret
+                    - passphraseSecretKeyRef
                     type: object
                   loadOptions:
                     description: |-
@@ -6235,22 +6273,20 @@ spec:
                   source:
                     description: Source is a tagged reference to the artifact to restore.
                     properties:
-                      mysqlBackupRef:
+                      backupRef:
                         description: |-
-                          MysqlBackupRef restores from a previously-completed MysqlBackup in
+                          BackupRef restores from a previously-completed MysqlBackup in
                           the same namespace. Its status.location is resolved automatically.
                         properties:
                           name:
-                            default: ""
-                            description: |-
-                              Name of the referent.
-                              This field is effectively required, but due to backwards compatibility is
-                              allowed to be empty. Instances of this type with an empty value here are
-                              almost certainly wrong.
-                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            description: Name of the MysqlBackup.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                             type: string
+                        required:
+                        - name
                         type: object
-                        x-kubernetes-map-type: atomic
                       pvc:
                         description: |-
                           PVC restores from an existing PVC. Restore only supports referencing
@@ -6273,7 +6309,7 @@ spec:
                         type: object
                       s3:
                         description: S3 restores directly from an S3 URL. Requires
-                          credentialsSecret.
+                          credentialsSecretName.
                         properties:
                           bucket:
                             description: Bucket is the S3 bucket name.
@@ -6283,15 +6319,17 @@ spec:
                             x-kubernetes-validations:
                             - message: bucket must be at most 63 bytes (UTF-8)
                               rule: bytes(self).size() <= 63
-                          credentialsSecret:
+                          credentialsSecretName:
                             description: |-
-                              CredentialsSecret references a Secret whose keys provide AWS
+                              CredentialsSecretName names a Secret whose keys provide AWS
                               credentials to backup and restore Jobs. Expected keys:
                                 AWS_ACCESS_KEY_ID (required)
                                 AWS_SECRET_ACCESS_KEY (required)
                                 AWS_SESSION_TOKEN (optional)
                                 AWS_REGION (optional, overrides .region)
+                            maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                             type: string
                           endpointURL:
                             description: |-
@@ -6325,13 +6363,13 @@ spec:
                             type: string
                         required:
                         - bucket
-                        - credentialsSecret
+                        - credentialsSecretName
                         type: object
                     type: object
                     x-kubernetes-validations:
-                    - message: exactly one of mysqlBackupRef, s3, or pvc must be set
-                      rule: '(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ?
-                        1 : 0) + (has(self.pvc) ? 1 : 0) == 1'
+                    - message: exactly one of backupRef, s3, or pvc must be set
+                      rule: '(has(self.backupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0)
+                        + (has(self.pvc) ? 1 : 0) == 1'
                 required:
                 - confirm
                 - source
@@ -6370,16 +6408,20 @@ spec:
               sidecar:
                 description: Sidecar configures sidecar behavior.
                 properties:
-                  bloodravenAddress:
-                    description: |-
-                      BloodravenAddress is the address of the Bloodraven operator auxiliary endpoint.
-                      When empty, the operator uses its configured default auxiliary Service address.
-                    type: string
                   leaseTimeout:
                     default: 20s
                     description: |-
                       LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
                       Must be at least 3s and at least 3x PeerCheckInterval.
+                    type: string
+                  operatorEndpoint:
+                    description: |-
+                      OperatorEndpoint is the host:port of the Bloodraven operator's
+                      auxiliary endpoint, which the sidecar calls for its startup
+                      active-site check and the PITR retention cutoff. When empty, the
+                      operator uses its configured default auxiliary Service address.
+                    maxLength: 253
+                    pattern: ^[A-Za-z0-9.-]+:[0-9]{1,5}$
                     type: string
                   peerCheckInterval:
                     default: 5s
@@ -6717,7 +6759,9 @@ spec:
                       (tls.crt), its private key (tls.key) and the CA bundle (ca.crt). The
                       operator does not issue certificates; create the Secret yourself or
                       with a tool such as cert-manager.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
                 required:
                 - secretName
@@ -8909,11 +8953,11 @@ spec:
         type: object
         x-kubernetes-validations:
         - message: spec.backup.profiles[pitr.profileName].encryption (presence, algorithm,
-            passphraseSecret) cannot change while that profile archives PITR binlogs
-            to the same storage; create a new profile with a new storage prefix and
-            its own passphrase, switch spec.backup.pitr.profileName to it, wait until
-            its archive binding is Bound, then take a full backup (see Backup encryption
-            > Rotation)
+            passphraseSecretKeyRef) cannot change while that profile archives PITR
+            binlogs to the same storage; create a new profile with a new storage prefix
+            and its own passphrase, switch spec.backup.pitr.profileName to it, wait
+            until its archive binding is Bound, then take a full backup (see Backup
+            encryption > Rotation)
           rule: '!has(oldSelf.spec.backup) || !has(self.spec.backup) || !has(oldSelf.spec.backup.pitr)
             || !has(self.spec.backup.pitr) || !(has(oldSelf.spec.backup.pitr.enabled)
             && oldSelf.spec.backup.pitr.enabled) || !(has(self.spec.backup.pitr.enabled)
@@ -8934,9 +8978,9 @@ spec:
             ? p.storage.pvc.subPath : '''')))) || (has(o.encryption) == has(p.encryption)
             && (!has(o.encryption) || ((has(o.encryption.algorithm) ? o.encryption.algorithm
             : ''AES-256-GCM'') == (has(p.encryption.algorithm) ? p.encryption.algorithm
-            : ''AES-256-GCM'') && o.encryption.passphraseSecret.name == p.encryption.passphraseSecret.name
-            && (has(o.encryption.passphraseSecret.key) ? o.encryption.passphraseSecret.key
-            : ''passphrase'') == (has(p.encryption.passphraseSecret.key) ? p.encryption.passphraseSecret.key
+            : ''AES-256-GCM'') && o.encryption.passphraseSecretKeyRef.name == p.encryption.passphraseSecretKeyRef.name
+            && (has(o.encryption.passphraseSecretKeyRef.key) ? o.encryption.passphraseSecretKeyRef.key
+            : ''passphrase'') == (has(p.encryption.passphraseSecretKeyRef.key) ? p.encryption.passphraseSecretKeyRef.key
             : ''passphrase''))))))'
     served: true
     storage: true

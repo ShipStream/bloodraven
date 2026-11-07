@@ -44,7 +44,7 @@ func getBackup(t *testing.T, c client.Client, mb *v1alpha1.MysqlBackup) *v1alpha
 
 // I-17, Δ1, Δ24: an encrypted backup's Job mounts its own immutable,
 // ownerless dump-key snapshot holding the trimmed live bytes, created
-// before the Job and recorded in status.artifactStorage.passphraseSecret.
+// before the Job and recorded in status.artifactStorage.passphraseSecretKeyRef.
 func TestDumpKeySnapshotCreatedBeforeJob(t *testing.T) {
 	ctx := context.Background()
 	r, c, fg, mb := encryptedBackupFixture(t)
@@ -77,7 +77,7 @@ func TestDumpKeySnapshotCreatedBeforeJob(t *testing.T) {
 	if got := backupJobPassphrase(&job); got == nil || got.Name != name || got.Key != pitrKeySnapshotDataKey {
 		t.Fatalf("Job mounts %+v, want the snapshot", got)
 	}
-	if got := getBackup(t, c, mb).Status.ArtifactStorage; got == nil || got.PassphraseSecret == nil || got.PassphraseSecret.Name != name {
+	if got := getBackup(t, c, mb).Status.ArtifactStorage; got == nil || got.PassphraseSecretKeyRef == nil || got.PassphraseSecretKeyRef.Name != name {
 		t.Fatalf("recorded dump key %+v, want %s", got, name)
 	}
 }
@@ -256,7 +256,7 @@ func TestDumpKeySnapshotDeletedOnlyAfterCleanup(t *testing.T) {
 	t.Run("group gone: skipped, kept and named", func(t *testing.T) {
 		f := newCleanupFixture(t)
 		recordTestDumpKey(f.mb)
-		f.mb.Status.ArtifactStorage.PassphraseSecret.Name = dumpKeySnapshotName(f.mb)
+		f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef.Name = dumpKeySnapshotName(f.mb)
 		if err := f.c.Status().Update(ctx, f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -300,7 +300,7 @@ func TestDumpKeySnapshotDeletedOnlyAfterCleanup(t *testing.T) {
 func TestAbandonedCleanupRecordedKeyMissing(t *testing.T) {
 	r, _ := newBackupReconciler(t)
 	mb := backupCR("ab", "lion", "nightly-s3")
-	storage := &v1alpha1.BackupArtifactStorage{PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "gone", Key: "passphrase"}}
+	storage := &v1alpha1.BackupArtifactStorage{PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "gone", Key: "passphrase"}}
 	profile := fgWithEncryptedBackup().Spec.Backup.Profiles[0]
 	vol, missing, err := r.abandonedCleanupPassphrase(context.Background(), mb, &profile, storage, nil)
 	if err != nil || vol != nil || !strings.Contains(missing, `"gone"`) {
@@ -309,7 +309,7 @@ func TestAbandonedCleanupRecordedKeyMissing(t *testing.T) {
 	// No attribution at all: the profile's Secret is the only fallback.
 	mb.Status.Encrypted = true
 	vol, missing, err = r.abandonedCleanupPassphrase(context.Background(), mb, &profile, nil, nil)
-	if err != nil || missing != "" || vol == nil || vol.SecretName != profile.Encryption.PassphraseSecret.Name {
+	if err != nil || missing != "" || vol == nil || vol.SecretName != profile.Encryption.PassphraseSecretKeyRef.Name {
 		t.Fatalf("no-attribution fallback: %v %q %v", vol, missing, err)
 	}
 }

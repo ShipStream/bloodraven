@@ -1289,7 +1289,7 @@ func (p *pitrBindingPass) refusalMessage(t *pitrBindingTarget, reason v1alpha1.P
 	switch reason {
 	case v1alpha1.PITRArchiveBindingReasonKeyMismatch:
 		if t.profile.EncryptionEnabled() {
-			ref := t.profile.Encryption.PassphraseSecret
+			ref := t.profile.Encryption.PassphraseSecretKeyRef
 			msg += fmt.Sprintf("; no candidate key opens the archive: recover the archive's original passphrase into Secret %s key %s (profile %s), or point the profile at a new prefix",
 				ref.Name, ref.PassphraseSecretKeyOrDefault(), t.profile.Name)
 		}

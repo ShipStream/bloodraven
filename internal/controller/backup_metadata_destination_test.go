@@ -98,7 +98,7 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					if mb.Status.Location != wantLocation || mb.Status.Phase != v1alpha1.BackupPhaseSucceeded {
 						t.Fatalf("recovery changed actual artifact identity: %+v want %q", mb.Status, wantLocation)
 					}
-					fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: mb.Name}}}
+					fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: mb.Name}}}
 					objs := []client.Object{fg, mb}
 					if encrypted {
 						// The restore decrypts with the backup's dump-key
@@ -107,7 +107,7 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 						if err := c.Get(ctx, client.ObjectKey{Namespace: mb.Namespace, Name: dumpKeySnapshotName(mb)}, &snap); err != nil {
 							t.Fatal(err)
 						}
-						if got := mb.Status.ArtifactStorage.PassphraseSecret; got == nil || got.Name != snap.Name || got.Key != pitrKeySnapshotDataKey {
+						if got := mb.Status.ArtifactStorage.PassphraseSecretKeyRef; got == nil || got.Name != snap.Name || got.Key != pitrKeySnapshotDataKey {
 							t.Fatalf("recorded dump key %+v, want snapshot %s", got, snap.Name)
 						}
 						snap.ResourceVersion = ""

@@ -103,9 +103,9 @@ spec:
         bucket: shipstream-backups
         prefix: playground/west/playground-nightly-20260520
         region: us-west-2
-        credentialsSecret: s3-dr-readonly-creds
+        credentialsSecretName: s3-dr-readonly-creds
     decryption:
-      passphraseSecret:
+      passphraseSecretKeyRef:
         name: playground-backup-passphrase      # mirrored into the DR namespace in advance
     pointInTime:
       stopDatetime: "2026-05-20T14:32:00Z"  # omit to recover to the dump's GTID

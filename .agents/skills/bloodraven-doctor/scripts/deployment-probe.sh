@@ -53,7 +53,7 @@ echo "A non-terminal plannedFailover phase, a planned-failover claim, or a hold 
 
 echo "--- Declared deployment callers ---"
 kubectl get mysqldatabases.shipstream.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" '
-    [.items[] | select(.spec.groupRef.name == $group) |
+    [.items[] | select(.spec.failoverGroupRef.name == $group) |
     {instance: .metadata.name, deploymentClients: (.spec.deploymentClients // [])}]'
 
 echo "--- Durable deployment Lease records (not leader election) ---"

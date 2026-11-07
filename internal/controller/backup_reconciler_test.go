@@ -158,7 +158,7 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "ns"},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image:       "mysql:9.7",
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "iad", ServerID: 101, Zone: "az-iad", LBIP: "10.0.0.1",
 					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
@@ -177,11 +177,11 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 						Storage: v1alpha1.BackupStorage{
 							Type: v1alpha1.BackupStorageS3,
 							S3: &v1alpha1.S3Storage{
-								Bucket:            "bloodraven-backups",
-								Prefix:            "lion",
-								Region:            "us-east-1",
-								EndpointURL:       "https://minio.local",
-								CredentialsSecret: "s3-creds",
+								Bucket:                "bloodraven-backups",
+								Prefix:                "lion",
+								Region:                "us-east-1",
+								EndpointURL:           "https://minio.local",
+								CredentialsSecretName: "s3-creds",
 							},
 						},
 						Dump: &v1alpha1.DumpOptions{
@@ -215,7 +215,7 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 	fg := fgWithBackup()
 	mb := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-nightly-abc", Namespace: "ns"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
 		DumpKeySecretName:    testDumpKeySecret,
@@ -309,7 +309,7 @@ func TestBuildBackupJob_PVC_MountsClaim(t *testing.T) {
 	fg := fgWithBackup()
 	mb := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-daily-xyz", Namespace: "ns"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "daily-local"},
+		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "daily-local"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
 		DumpKeySecretName:    testDumpKeySecret,
@@ -533,7 +533,7 @@ func backupCR(name, fgName, profile string) *v1alpha1.MysqlBackup {
 			CreationTimestamp: metav1.Now(),
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fgName},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 	}

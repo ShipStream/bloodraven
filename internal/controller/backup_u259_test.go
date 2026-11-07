@@ -30,7 +30,7 @@ func encryptedAbandonedFixture(t *testing.T, withKey bool) *cleanupFixture {
 	f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
 	ctx := context.Background()
 	f.mb.Status.Encrypted = true
-	f.mb.Status.ArtifactStorage.PassphraseSecret = &v1alpha1.BackupArtifactPassphrase{Name: dumpKeySnapshotName(f.mb), Key: pitrKeySnapshotDataKey}
+	f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: dumpKeySnapshotName(f.mb), Key: pitrKeySnapshotDataKey}
 	if err := f.c.Status().Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestVerificationRecordedDumpKeyGone(t *testing.T) {
 	backup.Status.Location = "s3://bloodraven-backups/lion/seed/"
 	backup.Status.StorageType = v1alpha1.BackupStorageS3
 	backup.Status.Encrypted = true
-	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}}
+	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}}
 	v := verifyCR("verify-gone", "lion", "nightly-s3")
 	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
@@ -158,13 +158,13 @@ func TestCRDDecryptionHelpIsCurrent(t *testing.T) {
 	if !strings.Contains(flat, "else the restore is refused (PITRBackupDumpKeyMissing)") {
 		t.Error("CRD help lacks the dump-key resolution order")
 	}
-	// The PassphraseSecretRef type doc (Go API reference) names the one
+	// The PassphraseSecretKeyRef type doc (Go API reference) names the one
 	// Job that still mounts a profile's Secret.
 	src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", "backup_types.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(strings.Join(strings.Fields(strings.ReplaceAll(string(src), "//", "")), " "), "runs its abandoned-artifact cleanup Job with this Secret") {
-		t.Error("PassphraseSecretRef doc does not qualify the legacy abandoned cleanup")
+		t.Error("PassphraseSecretKeyRef doc does not qualify the legacy abandoned cleanup")
 	}
 }

@@ -62,7 +62,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	for _, p := range []v1alpha1.BackupProfile{encProfile, plainProfile} {
 		mb := &v1alpha1.MysqlBackup{
 			ObjectMeta: metav1.ObjectMeta{Name: "b-" + p.Name, Namespace: fg.Namespace},
-			Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: p.Name},
+			Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: p.Name},
 		}
 		job, err := BuildBackupJob(BackupJobInputs{
 			DumpKeySecretName: testDumpKeySecret,
@@ -75,7 +75,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: fg.Namespace},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      encProfile.Name,
 		},
 	}
@@ -117,7 +117,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 		addJob(tc.name, job, err)
 	}
 
-	src := v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: seed.Name}}
+	src := v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: seed.Name}}
 	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, PointInTime: pit}
 	// In-place restores refuse pointInTime, so that variant has no PITR init container.

@@ -74,11 +74,11 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,
 				S3: &v1alpha1.S3Storage{
-					Bucket:            backupE2EBucket,
-					Prefix:            prefix,
-					EndpointURL:       backupE2EEndpoint,
-					CredentialsSecret: backupE2ECredsSecret,
-					Region:            "us-east-1",
+					Bucket:                backupE2EBucket,
+					Prefix:                prefix,
+					EndpointURL:           backupE2EEndpoint,
+					CredentialsSecretName: backupE2ECredsSecret,
+					Region:                "us-east-1",
 				},
 			},
 			Dump: &v1alpha1.DumpOptions{
@@ -102,8 +102,8 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 
 func backupE2EEncryption(secretName string) *v1alpha1.BackupEncryptionSpec {
 	return &v1alpha1.BackupEncryptionSpec{
-		Algorithm:        "AES-256-GCM",
-		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secretName},
+		Algorithm:              "AES-256-GCM",
+		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secretName},
 	}
 }
 
@@ -124,7 +124,7 @@ func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string,
 			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
 		},
 		StringData: map[string]string{
-			backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault(): text,
+			backupE2EEncryption(name).PassphraseSecretKeyRef.PassphraseSecretKeyOrDefault(): text,
 		},
 	}
 	created, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Create(ctx, sec, metav1.CreateOptions{})
@@ -298,7 +298,7 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: env.FG},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG},
 			ProfileName:      profile,
 		},
 	}
@@ -324,9 +324,9 @@ func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, b
 			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef:        v1alpha1.LocalGroupRef{Name: env.FG},
+			FailoverGroupRef:        v1alpha1.LocalFailoverGroupRef{Name: env.FG},
 			ProfileName:             backupE2EProfile,
-			BackupRef:               &corev1.LocalObjectReference{Name: backupName},
+			BackupRef:               &v1alpha1.LocalMysqlBackupRef{Name: backupName},
 			KeepOnFailure:           &keep,
 			TTLSecondsAfterFinished: 0,
 			PointInTime:             pit,

@@ -27,7 +27,7 @@ const (
 
 var (
 	errOperatorImageUnset          = errors.New("operator image is not configured (SetOperatorImageDefaults); artifact cleanup runs it")
-	errCleanupCredentialsMissing   = errors.New("profile has no S3 credentialsSecret for the artifact's storage")
+	errCleanupCredentialsMissing   = errors.New("profile has no S3 credentialsSecretName for the artifact's storage")
 	errCleanupDestinationNotStored = errors.New("artifact has no recorded storage destination")
 )
 
@@ -137,7 +137,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 		if storage.Bucket == "" {
 			return nil, fmt.Errorf("cleanup job: %w: no bucket", errCleanupDestinationNotStored)
 		}
-		if profile == nil || profile.Storage.S3 == nil || profile.Storage.S3.CredentialsSecret == "" {
+		if profile == nil || profile.Storage.S3 == nil || profile.Storage.S3.CredentialsSecretName == "" {
 			return nil, fmt.Errorf("cleanup job: %w", errCleanupCredentialsMissing)
 		}
 		envVars = append(envVars, corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: literalArtifactEnvValue(storage.Bucket)})
@@ -152,7 +152,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 			Name: "aws-creds",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  profile.Storage.S3.CredentialsSecret,
+					SecretName:  profile.Storage.S3.CredentialsSecretName,
 					DefaultMode: ptr32(0o400),
 				},
 			},
@@ -338,20 +338,20 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 	default:
 		return nil, fmt.Errorf("backup Job has unknown storage type %q", env["BLOODRAVEN_STORAGE_TYPE"].value)
 	}
-	storage.PassphraseSecret = backupJobPassphrase(job)
+	storage.PassphraseSecretKeyRef = backupJobPassphrase(job)
 	return storage, nil
 }
 
 // backupJobPassphrase returns the passphrase Secret key a backup Job
 // mounts, or nil for a plaintext Job.
-func backupJobPassphrase(job *batchv1.Job) *v1alpha1.BackupArtifactPassphrase {
+func backupJobPassphrase(job *batchv1.Job) *v1alpha1.SecretKeyRef {
 	for _, vol := range job.Spec.Template.Spec.Volumes {
 		if vol.Name != "backup-passphrase" || vol.Secret == nil || vol.Secret.SecretName == "" {
 			continue
 		}
 		for _, item := range vol.Secret.Items {
 			if item.Path == backupPassphraseFileName && item.Key != "" {
-				return &v1alpha1.BackupArtifactPassphrase{Name: vol.Secret.SecretName, Key: item.Key}
+				return &v1alpha1.SecretKeyRef{Name: vol.Secret.SecretName, Key: item.Key}
 			}
 		}
 	}

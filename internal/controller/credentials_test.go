@@ -58,7 +58,7 @@ func TestOpenAdminConnectionRootFallback(t *testing.T) {
 		fg := &v1alpha1.MysqlFailoverGroup{
 			ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 			Spec: v1alpha1.MysqlFailoverGroupSpec{
-				Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+				Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 				Sites:       []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: "primary-candidate"}},
 			},
 		}
@@ -187,8 +187,8 @@ func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1a
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Credentials: v1alpha1.CredentialsSpec{
-				OperatorSecret: "mysql-operator",
-				AppSecret:      "mysql-app",
+				OperatorSecretName: "mysql-operator",
+				AppSecretName:      "mysql-app",
 			},
 			Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: "primary-candidate"}},
 		},
@@ -206,9 +206,9 @@ func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1a
 	mdb := &v1alpha1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: "tenant-acme", Namespace: mdbTestNamespace},
 		Spec: v1alpha1.MysqlDatabaseSpec{
-			GroupRef:     v1alpha1.LocalGroupRef{Name: "main"},
-			DatabaseName: "acme_wms",
-			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+			DatabaseName:     "acme_wms",
+			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 		},
 	}
 	claim(&mdb.Status)
@@ -248,7 +248,7 @@ func TestReconcileCredentialsDefersDuringInitFromBackup(t *testing.T) {
 			fg := &v1alpha1.MysqlFailoverGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Credentials:    v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+					Credentials:    v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 					Sites:          []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: "primary-candidate"}},
 					InitFromBackup: &v1alpha1.InitFromBackupSpec{},
 				},
@@ -287,7 +287,7 @@ func TestComputeCredentialHashIsKeyedOnContent(t *testing.T) {
 	getSecret := func() *corev1.Secret {
 		t.Helper()
 		var s corev1.Secret
-		if err := c.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: fg.Spec.Credentials.OperatorSecret}, &s); err != nil {
+		if err := c.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: fg.Spec.Credentials.OperatorSecretName}, &s); err != nil {
 			t.Fatalf("get secret: %v", err)
 		}
 		return &s
@@ -300,7 +300,7 @@ func TestComputeCredentialHashIsKeyedOnContent(t *testing.T) {
 	unkeyed := sha256.New()
 	fmt.Fprintf(unkeyed, "grants=%s\n", credentialGrantsVersion)
 	fmt.Fprintf(unkeyed, "secrets=%s\n", secretContentDigest(make([]byte, digestKeyBytes),
-		map[string]map[string][]byte{fg.Spec.Credentials.OperatorSecret: getSecret().Data}))
+		map[string]map[string][]byte{fg.Spec.Credentials.OperatorSecretName: getSecret().Data}))
 	if hex.EncodeToString(unkeyed.Sum(nil))[:16] == base {
 		t.Fatal("credential hash is reproducible without the group's digest key")
 	}

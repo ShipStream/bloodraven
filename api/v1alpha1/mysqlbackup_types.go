@@ -45,24 +45,42 @@ type MysqlBackupSpec struct {
 	// FailoverGroupRef identifies the MysqlFailoverGroup in the same
 	// namespace whose profile should drive this backup.
 	// +required
-	FailoverGroupRef LocalGroupRef `json:"failoverGroupRef"`
+	FailoverGroupRef LocalFailoverGroupRef `json:"failoverGroupRef"`
 
 	// ProfileName is the name of a spec.backup.profiles[] entry on the
 	// referenced failover group.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +required
 	ProfileName string `json:"profileName"`
 
-	// SourceSiteOverride, if set, forces a specific site to be the dump
-	// source. Leave empty to let the reconciler choose (replica-first).
+	// SourceSite, if set, forces a specific site (a spec.sites[].name of
+	// the referenced group) to be the dump source. Leave empty to let the
+	// reconciler choose (replica-first).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
 	// +optional
-	SourceSiteOverride string `json:"sourceSiteOverride,omitempty"`
+	SourceSite string `json:"sourceSite,omitempty"`
 }
 
-// LocalGroupRef is a same-namespace reference to a MysqlFailoverGroup.
-type LocalGroupRef struct {
+// LocalFailoverGroupRef is a same-namespace reference to a MysqlFailoverGroup.
+type LocalFailoverGroupRef struct {
 	// Name of the MysqlFailoverGroup.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
+	Name string `json:"name"`
+}
+
+// LocalMysqlBackupRef is a same-namespace reference to a MysqlBackup.
+type LocalMysqlBackupRef struct {
+	// Name of the MysqlBackup.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
 	Name string `json:"name"`
 }
@@ -124,7 +142,7 @@ type MysqlBackupStatus struct {
 	// cleanup cannot be redirected to another bucket, claim or prefix. Once
 	// its location is recorded it is immutable. Credentials are
 	// deliberately not recorded: cleanup reads them from the profile's
-	// current credentialsSecret.
+	// current credentialsSecretName.
 	// +optional
 	ArtifactStorage *BackupArtifactStorage `json:"artifactStorage,omitempty"`
 
@@ -246,7 +264,7 @@ type BackupArtifactStorage struct {
 	// ClaimName is the PersistentVolumeClaim the artifact was written to.
 	// +optional
 	ClaimName string `json:"claimName,omitempty"`
-	// PassphraseSecret is the passphrase Secret and key the producing Job
+	// PassphraseSecretKeyRef is the passphrase Secret and key the producing Job
 	// mounted, for an encrypted backup: the backup's own immutable dump-key
 	// snapshot (mysqlbackup-<name>-dump-key-<uid8>, key passphrase), which
 	// the operator made from the profile's passphrase before the Job and
@@ -255,18 +273,24 @@ type BackupArtifactStorage struct {
 	// with it, so a profile edited since the launch does not decide which
 	// passphrase is used.
 	// +optional
-	PassphraseSecret *BackupArtifactPassphrase `json:"passphraseSecret,omitempty"`
+	PassphraseSecretKeyRef *SecretKeyRef `json:"passphraseSecretKeyRef,omitempty"`
 }
 
-// BackupArtifactPassphrase names the Secret key a producing backup Job
-// encrypted its artifact with.
-type BackupArtifactPassphrase struct {
+// SecretKeyRef selects one data key of a Secret in the same namespace.
+// Both fields are required; it is the shape a reference takes when there
+// is no default key, such as the key a producing backup Job encrypted its
+// artifact with.
+type SecretKeyRef struct {
 	// Name is the Secret name.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
 	Name string `json:"name"`
 	// Key is the data key within the Secret.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
 	// +required
 	Key string `json:"key"`
 }

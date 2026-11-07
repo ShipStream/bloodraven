@@ -9,7 +9,7 @@
   "spec": {
     "image": "mysql:9.7",
     "credentials": {
-      "operatorSecret": "mysql-credentials"
+      "operatorSecretName": "mysql-credentials"
     },
     "pollInterval": "2s",
     "failureThreshold": 3,

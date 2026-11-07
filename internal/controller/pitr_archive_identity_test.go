@@ -35,7 +35,7 @@ func identityFG() *v1alpha1.MysqlFailoverGroup {
 func identityBackup() *v1alpha1.MysqlBackup {
 	return &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-nightly-1", Namespace: "ns", UID: "backup-uid"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 }
 
@@ -75,7 +75,7 @@ func TestBuildBackupJob_BackupStamp(t *testing.T) {
 			profile := fg.Spec.Backup.Profiles[0]
 			profile.Dump.IncludeSchemas = []string{"orders"}
 			if encrypted {
-				profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pp"}}
+				profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pp"}}
 			}
 			job, err := BuildBackupJob(BackupJobInputs{
 				DumpKeySecretName: testDumpKeySecret,

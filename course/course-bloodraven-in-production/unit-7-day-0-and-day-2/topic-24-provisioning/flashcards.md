@@ -17,7 +17,7 @@
 
 **Front:** What `spec.credentials` requires
 
-**Back:** `spec.credentials` is required, and so is its `operatorSecret` (keys `username`, `password`, `MYSQL_ROOT_PASSWORD`). The other four role Secrets are optional; the operator creates a user per role with a fixed grant set. The single-Secret `spec.secretName` DSN mode was removed in v1.7.0.
+**Back:** `spec.credentials` is required, and so is its `operatorSecretName` (keys `username`, `password`, `MYSQL_ROOT_PASSWORD`). The other four role Secrets are optional; the operator creates a user per role with a fixed grant set. The single-Secret `spec.secretName` DSN mode was removed in v1.7.0.
 
 ---
 

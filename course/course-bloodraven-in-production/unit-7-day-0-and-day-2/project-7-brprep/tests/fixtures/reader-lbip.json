@@ -9,11 +9,11 @@
     "image": "mysql:9.7",
     "sidecarImage": "ghcr.io/shipstream/bloodraven-sidecar:1.0.0",
     "credentials": {
-      "operatorSecret": "ledger-operator",
-      "appSecret": "ledger-app",
-      "readOnlySecret": "ledger-readonly",
-      "monitorSecret": "ledger-monitor",
-      "backupSecret": "ledger-backup"
+      "operatorSecretName": "ledger-operator",
+      "appSecretName": "ledger-app",
+      "readOnlySecretName": "ledger-readonly",
+      "monitorSecretName": "ledger-monitor",
+      "backupSecretName": "ledger-backup"
     },
     "dns": {
       "hostname": "ledger-db.example.com",

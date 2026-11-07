@@ -215,7 +215,7 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var namespaces []string
 	instancesByNamespace := map[string][]string{}
 	for _, db := range databases.Items {
-		if !db.DeletionTimestamp.IsZero() || db.Spec.GroupRef.Name != group || (instance != "" && db.Name != instance) {
+		if !db.DeletionTimestamp.IsZero() || db.Spec.FailoverGroupRef.Name != group || (instance != "" && db.Name != instance) {
 			continue
 		}
 		for _, caller := range db.Spec.DeploymentClients {

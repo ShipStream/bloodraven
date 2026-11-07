@@ -83,11 +83,11 @@ const (
 	sidecarPort = 8080
 )
 
-func defaultBloodravenAddress(fg *v1alpha1.MysqlFailoverGroup) string {
-	if fg.Spec.Sidecar.BloodravenAddress != "" {
-		return fg.Spec.Sidecar.BloodravenAddress
+func defaultOperatorEndpoint(fg *v1alpha1.MysqlFailoverGroup) string {
+	if fg.Spec.Sidecar.OperatorEndpoint != "" {
+		return fg.Spec.Sidecar.OperatorEndpoint
 	}
-	if addr := strings.TrimSpace(os.Getenv("BLOODRAVEN_DEFAULT_AUXILIARY_ADDRESS")); addr != "" {
+	if addr := strings.TrimSpace(os.Getenv("BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT")); addr != "" {
 		return addr
 	}
 	return fmt.Sprintf("bloodraven.%s.svc.cluster.local:8082", fg.Namespace)
@@ -788,7 +788,7 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 // validateCredentialSecrets validates that the referenced credential
 // secrets exist and contain the expected keys.
 func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (ctrl.Result, error) {
-	operatorSecretName := fg.Spec.Credentials.OperatorSecret
+	operatorSecretName := fg.Spec.Credentials.OperatorSecretName
 	var secret corev1.Secret
 	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}
 	if err := r.Get(ctx, secretKey, &secret); err != nil {
@@ -813,10 +813,10 @@ func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Con
 		role string
 	}
 	for _, opt := range []optionalSecret{
-		{fg.Spec.Credentials.AppSecret, "app"},
-		{fg.Spec.Credentials.ReadOnlySecret, "read-only"},
-		{fg.Spec.Credentials.MonitorSecret, "monitor"},
-		{fg.Spec.Credentials.BackupSecret, "backup"},
+		{fg.Spec.Credentials.AppSecretName, "app"},
+		{fg.Spec.Credentials.ReadOnlySecretName, "read-only"},
+		{fg.Spec.Credentials.MonitorSecretName, "monitor"},
+		{fg.Spec.Credentials.BackupSecretName, "backup"},
 	} {
 		if opt.name == "" {
 			continue
@@ -1392,7 +1392,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		// quorum, so every non-self site needs to be listed here.
 		peerAddresses := strings.Join(sitePeerAddresses(fg, site.Name), ",")
 
-		bloodravenAddress := defaultBloodravenAddress(fg)
+		operatorEndpoint := defaultOperatorEndpoint(fg)
 
 		leaseTimeout := "20s"
 		if fg.Spec.Sidecar.LeaseTimeout != nil {
@@ -1515,7 +1515,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			mysqlContainer.Args = args
 		}
 
-		operatorSecretName := fg.Spec.Credentials.OperatorSecret
+		operatorSecretName := fg.Spec.Credentials.OperatorSecretName
 
 		sidecarEnv := []corev1.EnvVar{
 			{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
@@ -1523,7 +1523,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			}},
 			{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
 			{Name: "PEER_ADDRESSES", Value: peerAddresses},
-			{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
+			{Name: "BLOODRAVEN_ADDRESS", Value: operatorEndpoint},
 			{Name: "MY_SITE", Value: site.Name},
 			{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
@@ -1564,16 +1564,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
 				corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
 		}
-		if fg.Spec.Credentials.AppSecret != "" {
+		if fg.Spec.Credentials.AppSecretName != "" {
 			appendCredVolume("app")
 		}
-		if fg.Spec.Credentials.ReadOnlySecret != "" {
+		if fg.Spec.Credentials.ReadOnlySecretName != "" {
 			appendCredVolume("readonly")
 		}
-		if fg.Spec.Credentials.MonitorSecret != "" {
+		if fg.Spec.Credentials.MonitorSecretName != "" {
 			appendCredVolume("monitor")
 		}
-		if fg.Spec.Credentials.BackupSecret != "" {
+		if fg.Spec.Credentials.BackupSecretName != "" {
 			appendCredVolume("backup")
 		}
 
@@ -1740,18 +1740,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			}
 		}
 		volumes = append(volumes,
-			credSecretVolume("creds-operator", fg.Spec.Credentials.OperatorSecret),
+			credSecretVolume("creds-operator", fg.Spec.Credentials.OperatorSecretName),
 		)
-		if s := fg.Spec.Credentials.AppSecret; s != "" {
+		if s := fg.Spec.Credentials.AppSecretName; s != "" {
 			volumes = append(volumes, credSecretVolume("creds-app", s))
 		}
-		if s := fg.Spec.Credentials.ReadOnlySecret; s != "" {
+		if s := fg.Spec.Credentials.ReadOnlySecretName; s != "" {
 			volumes = append(volumes, credSecretVolume("creds-readonly", s))
 		}
-		if s := fg.Spec.Credentials.MonitorSecret; s != "" {
+		if s := fg.Spec.Credentials.MonitorSecretName; s != "" {
 			volumes = append(volumes, credSecretVolume("creds-monitor", s))
 		}
-		if s := fg.Spec.Credentials.BackupSecret; s != "" {
+		if s := fg.Spec.Credentials.BackupSecretName; s != "" {
 			volumes = append(volumes, credSecretVolume("creds-backup", s))
 		}
 

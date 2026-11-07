@@ -28,7 +28,7 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: namespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image:       "mysql:9.7",
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", LBIP: "203.0.113.1", TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
@@ -44,9 +44,9 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 						Storage: v1alpha1.BackupStorage{
 							Type: v1alpha1.BackupStorageS3,
 							S3: &v1alpha1.S3Storage{
-								Bucket:            "bloodraven",
-								Prefix:            "lion",
-								CredentialsSecret: "s3-creds",
+								Bucket:                "bloodraven",
+								Prefix:                "lion",
+								CredentialsSecretName: "s3-creds",
 							},
 						},
 					},
@@ -71,7 +71,7 @@ func newSucceededBackup(namespace, fgName, profile string) *v1alpha1.MysqlBackup
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fgName},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 	}
@@ -103,7 +103,7 @@ func TestEnvtest_Verification_CreationAndSchemaAcceptance(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-a", Namespace: ns},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
 				Mode: "timestamp",
@@ -180,7 +180,7 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-provision", Namespace: ns},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -321,7 +321,7 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-ok", Namespace: ns},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -415,7 +415,7 @@ func TestEnvtest_Verification_BackupNotFound_FailsWithReason(t *testing.T) {
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-no-backup", Namespace: ns},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}

@@ -177,7 +177,7 @@ func TestReconcileInPlaceRestore_SpecRemovedMidJobHoldsUntilJobFinishes(t *testi
 		t.Fatalf("terminal status must survive a spec-less reconcile, got %+v", st)
 	}
 	reapplied := getFG(t, c, fg)
-	reapplied.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: testRestoreConfirm, Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}}}
+	reapplied.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: testRestoreConfirm, Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}}
 	if _, err := r.reconcileInPlaceRestore(context.Background(), reapplied); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestReconcileInPlaceRestore_SpecRemovedBeforeJobCancels(t *testing.T) {
 
 			// Re-applying the earlier, already executed confirm does nothing.
 			old := getFG(t, c, fg)
-			old.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: previousRestoreConfirm, Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}}}
+			old.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: previousRestoreConfirm, Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}}
 			if _, err := r.reconcileInPlaceRestore(context.Background(), old); err != nil {
 				t.Fatal(err)
 			}

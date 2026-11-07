@@ -4,10 +4,10 @@ package v1alpha1
 // backup verification) Jobs; restore Jobs use the operator secret. It
 // prefers the dedicated backup secret, falling back to the operator secret.
 func (s *MysqlFailoverGroupSpec) EffectiveBackupSecretName() string {
-	if s.Credentials.BackupSecret != "" {
-		return s.Credentials.BackupSecret
+	if s.Credentials.BackupSecretName != "" {
+		return s.Credentials.BackupSecretName
 	}
-	return s.Credentials.OperatorSecret
+	return s.Credentials.OperatorSecretName
 }
 
 // AllReferencedSecretNames returns every distinct secret name referenced
@@ -27,23 +27,23 @@ func (s *MysqlFailoverGroupSpec) AllReferencedSecretNames() []string {
 		names = append(names, name)
 	}
 
-	add(s.Credentials.OperatorSecret)
-	add(s.Credentials.AppSecret)
-	add(s.Credentials.ReadOnlySecret)
-	add(s.Credentials.MonitorSecret)
-	add(s.Credentials.BackupSecret)
+	add(s.Credentials.OperatorSecretName)
+	add(s.Credentials.AppSecretName)
+	add(s.Credentials.ReadOnlySecretName)
+	add(s.Credentials.MonitorSecretName)
+	add(s.Credentials.BackupSecretName)
 	if s.Backup != nil {
 		for i := range s.Backup.Profiles {
 			if enc := s.Backup.Profiles[i].Encryption; enc != nil {
-				add(enc.PassphraseSecret.Name)
+				add(enc.PassphraseSecretKeyRef.Name)
 			}
 		}
 	}
 	if s.InitFromBackup != nil && s.InitFromBackup.Decryption != nil {
-		add(s.InitFromBackup.Decryption.PassphraseSecret.Name)
+		add(s.InitFromBackup.Decryption.PassphraseSecretKeyRef.Name)
 	}
 	if s.RestoreInPlace != nil && s.RestoreInPlace.Decryption != nil {
-		add(s.RestoreInPlace.Decryption.PassphraseSecret.Name)
+		add(s.RestoreInPlace.Decryption.PassphraseSecretKeyRef.Name)
 	}
 	return names
 }
@@ -51,12 +51,12 @@ func (s *MysqlFailoverGroupSpec) AllReferencedSecretNames() []string {
 // EncryptionEnabled returns true when the profile has backup encryption
 // configured.
 func (p *BackupProfile) EncryptionEnabled() bool {
-	return p != nil && p.Encryption != nil && p.Encryption.PassphraseSecret.Name != ""
+	return p != nil && p.Encryption != nil && p.Encryption.PassphraseSecretKeyRef.Name != ""
 }
 
 // PassphraseSecretKeyOrDefault returns the Secret key holding the
 // passphrase, defaulting to "passphrase" when unset.
-func (r PassphraseSecretRef) PassphraseSecretKeyOrDefault() string {
+func (r PassphraseSecretKeyRef) PassphraseSecretKeyOrDefault() string {
 	if r.Key == "" {
 		return "passphrase"
 	}
@@ -71,4 +71,13 @@ func (s *BackupEncryptionSpec) AlgorithmOrDefault() string {
 		return "AES-256-GCM"
 	}
 	return s.Algorithm
+}
+
+// KeyOrDefault returns the Secret key holding the Dragonfly password,
+// defaulting to "password" when unset.
+func (r DragonflyPasswordSecretKeyRef) KeyOrDefault() string {
+	if r.Key == "" {
+		return "password"
+	}
+	return r.Key
 }

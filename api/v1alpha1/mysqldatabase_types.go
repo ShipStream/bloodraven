@@ -7,7 +7,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=mydb;mydbs,categories=bloodraven;mysql
-// +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.groupRef.name`
+// +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.failoverGroupRef.name`
 // +kubebuilder:printcolumn:name="Database",type=string,JSONPath=`.spec.databaseName`
 // +kubebuilder:printcolumn:name="Owner",type=string,JSONPath=`.status.ownerUser`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -183,7 +183,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(self.users) || self.users.all(u, !('ALL PRIVILEGES' in u.privileges))",message="spec.users[].privileges must not include 'ALL PRIVILEGES'; an all-privileges principal is the owner's shape, declare it via spec.owner"
 // +kubebuilder:validation:XValidation:rule="!has(self.users) || self.users.all(u, u.secretName != self.owner.secretName)",message="spec.users[].secretName must not reuse spec.owner.secretName; the owner already manages that principal"
 type MysqlDatabaseSpec struct {
-	// GroupRef identifies the MysqlFailoverGroup in the same namespace
+	// FailoverGroupRef identifies the MysqlFailoverGroup in the same namespace
 	// that owns the MySQL instance this database lives on. Cross-namespace
 	// and cross-group references are deliberately not expressible.
 	//
@@ -192,9 +192,9 @@ type MysqlDatabaseSpec struct {
 	// would apply the database and owner to the new group, orphan them on
 	// the old one, and aim any later deletionPolicy: Delete cleanup at the
 	// wrong MySQL. Changing groups is a migration, not a spec edit.
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.groupRef is immutable; moving a database between groups is a migration, not a spec edit"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.failoverGroupRef is immutable; moving a database between groups is a migration, not a spec edit"
 	// +required
-	GroupRef LocalGroupRef `json:"groupRef"`
+	FailoverGroupRef LocalFailoverGroupRef `json:"failoverGroupRef"`
 
 	// DeploymentClients authorizes ServiceAccounts to use the deployment
 	// companion API for this database, keyed by (namespace,
@@ -295,7 +295,7 @@ type MysqlDatabaseSpec struct {
 type MysqlDatabaseOwner struct {
 	// SecretName references a Secret in the same namespace with keys
 	// `username` and `password` — the same contract as
-	// spec.credentials.*Secret on MysqlFailoverGroup. The Secret is
+	// spec.credentials.*SecretName on MysqlFailoverGroup. The Secret is
 	// desired state for the MySQL user, not a credential to a user that
 	// already exists: Bloodraven runs CREATE USER IF NOT EXISTS followed
 	// by ALTER USER, so rotating the password is a Secret write and
@@ -304,6 +304,7 @@ type MysqlDatabaseOwner struct {
 	// Bloodraven never generates, returns, or stores a password.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
 	SecretName string `json:"secretName"`
 
@@ -357,6 +358,7 @@ type MysqlDatabaseUser struct {
 	// USER, so rotating the password is a Secret write and nothing else.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +required
 	SecretName string `json:"secretName"`
 

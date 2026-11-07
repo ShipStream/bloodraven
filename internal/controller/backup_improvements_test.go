@@ -74,7 +74,7 @@ func succeededBackup(name string, ns string, fgName, profile string, completed m
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fgName},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -178,7 +178,7 @@ func TestEnsureBackupLabels_StampsMissing(t *testing.T) {
 	b := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "bare"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly",
 		},
 	}
@@ -291,7 +291,7 @@ func TestPruneRetention_WorksForUnlabelledAdHocBackups(t *testing.T) {
 		return &v1alpha1.MysqlBackup{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
 			Spec: v1alpha1.MysqlBackupSpec{
-				FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 				ProfileName:      "nightly-s3",
 			},
 			Status: v1alpha1.MysqlBackupStatus{
@@ -574,7 +574,7 @@ func TestMaybeScheduleRetry_CreatesRetryCRWhenBackoffElapsed(t *testing.T) {
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      sched.ProfileName,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -608,7 +608,7 @@ func TestMaybeScheduleRetry_NoRetryWhenMaxAttemptsReached(t *testing.T) {
 			Labels: map[string]string{v1alpha1.BackupScheduleLabel: sched.Name, v1alpha1.FailoverGroupLabel: "lion"},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      sched.ProfileName,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -642,7 +642,7 @@ func TestMaybeScheduleRetry_ReturnsWaitWhenBackoffPending(t *testing.T) {
 			Labels: map[string]string{v1alpha1.BackupScheduleLabel: sched.Name, v1alpha1.FailoverGroupLabel: "lion"},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      sched.ProfileName,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -678,7 +678,7 @@ func TestMysqlBackupReconciler_StampsLabels(t *testing.T) {
 	mb := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "bare-adhoc", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -701,7 +701,7 @@ func TestEmitTerminalMetrics_SuccessUpdatesGauges(t *testing.T) {
 	end := metav1.NewTime(time.Now())
 	b := &v1alpha1.MysqlBackup{
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -722,7 +722,7 @@ func TestEmitTerminalMetrics_FailureDoesNotSetSuccessGauge(t *testing.T) {
 	end := metav1.NewTime(time.Now())
 	b := &v1alpha1.MysqlBackup{
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -742,7 +742,7 @@ func TestBuildCleanupJob_S3_SetsStorageTypeEnvAndMountsAWSCreds(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-done", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -791,7 +791,7 @@ func TestBuildCleanupJob_PVC_AttachesVolumeAndSetsMountPath(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-local", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "daily-local",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -828,7 +828,7 @@ func TestBuildCleanupJob_NoLocation_Errors(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-none", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}

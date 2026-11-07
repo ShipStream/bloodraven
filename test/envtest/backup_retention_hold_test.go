@@ -101,8 +101,8 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 	}
 	backup := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-read", time.Now())
 	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
-		FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
-		BackupRef: &corev1.LocalObjectReference{Name: backup.Name},
+		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backup.Name},
 	}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
@@ -220,8 +220,8 @@ func TestEnvtest_RetentionHoldsUnstampedRun(t *testing.T) {
 	}
 	older := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-older", time.Now().Add(-2*time.Hour))
 	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
-		FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
-		BackupRef: &corev1.LocalObjectReference{Name: older.Name},
+		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: older.Name},
 	}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
@@ -283,8 +283,8 @@ func TestEnvtest_VerificationDeletionWaitsForForegroundJobDeletion(t *testing.T)
 	}
 	backup := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-fg", time.Now())
 	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "deleting", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
-		FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
-		BackupRef: &corev1.LocalObjectReference{Name: backup.Name},
+		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backup.Name},
 	}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)

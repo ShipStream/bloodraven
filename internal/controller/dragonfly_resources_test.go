@@ -121,8 +121,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 func TestReconcileDragonflyStatefulSet_AuthEnvWiredFromSecret(t *testing.T) {
 	fg := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
 		fg.Spec.Dragonfly.Auth = &v1alpha1.DragonflyAuthSpec{
-			SecretName:  "lion-dragonfly-auth",
-			PasswordKey: "password",
+			PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "lion-dragonfly-auth", Key: "password"},
 		}
 	})
 	r, c := newReconciler(fg)
@@ -170,14 +169,12 @@ func TestReconcileDragonflyStatefulSet_AuthEnvWiredFromSecret(t *testing.T) {
 
 func TestReconcileDragonflyStatefulSet_SnapshotS3WiresDirAndServiceAccount(t *testing.T) {
 	fg := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
-		useHTTPS := false
 		signPayload := false
 		fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{
 			Dir:                   "s3://tenant-dragonfly/orders/prod",
 			ServiceAccountName:    "dragonfly-backup",
 			CredentialsSecretName: "dragonfly-s3",
-			S3Endpoint:            "rustfs.bloodraven-playground.svc.cluster.local:9000",
-			S3UseHTTPS:            &useHTTPS,
+			S3EndpointURL:         "http://rustfs.bloodraven-playground.svc.cluster.local:9000",
 			S3SignPayload:         &signPayload,
 		}
 		fg.Spec.Dragonfly.Args = []string{"--dir=/tmp/ignored", "--s3_endpoint=ignored"}
@@ -659,14 +656,14 @@ func TestBuildDragonflyArgs_FiltersOperatorOwnedFlags(t *testing.T) {
 }
 
 // TestBuildDragonflyEnv_EmptySecretNameOmitsEnv regression-tests B8:
-// when auth.SecretName is empty (unset by partial in-place patch or
-// admission-webhook bypass), the env var must not be emitted with an
+// when auth.passwordSecretKeyRef.name is empty (a client that skips
+// admission), the env var must not be emitted with an
 // empty SecretKeyRef name — that produces a pod that fails to start
 // with a secret-not-found event rather than a clean reconcile error.
 // The corresponding --requirepass / --masterauth args must also be omitted.
 func TestBuildDragonflyEnv_EmptySecretNameOmitsEnv(t *testing.T) {
 	spec := &v1alpha1.DragonflySpec{
-		Auth: &v1alpha1.DragonflyAuthSpec{SecretName: ""},
+		Auth: &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: ""}},
 	}
 	if env := buildDragonflyEnv(spec); env != nil {
 		t.Errorf("expected nil env when SecretName empty; got %+v", env)
@@ -678,6 +675,54 @@ func TestBuildDragonflyEnv_EmptySecretNameOmitsEnv(t *testing.T) {
 	}
 	if contains(joined, "--masterauth") {
 		t.Errorf("--masterauth emitted with empty SecretName; args = %q", joined)
+	}
+}
+
+// TestDragonflyS3EndpointArgs pins the adapter from the API's
+// s3EndpointURL to Dragonfly's --s3_endpoint (host[:port], no scheme) and
+// --s3_use_https (the scheme as a boolean).
+func TestDragonflyS3EndpointArgs(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want []string
+	}{
+		{"http://rustfs.default.svc.cluster.local:9000", []string{"--s3_endpoint=rustfs.default.svc.cluster.local:9000", "--s3_use_https=false"}},
+		{"http://rustfs.default.svc.cluster.local", []string{"--s3_endpoint=rustfs.default.svc.cluster.local", "--s3_use_https=false"}},
+		{"https://minio.example.com:9443", []string{"--s3_endpoint=minio.example.com:9443", "--s3_use_https=true"}},
+		{"https://minio.example.com", []string{"--s3_endpoint=minio.example.com", "--s3_use_https=true"}},
+		{"https://minio.example.com/", []string{"--s3_endpoint=minio.example.com", "--s3_use_https=true"}},
+		{"http://[fd00::1]:9000", []string{"--s3_endpoint=[fd00::1]:9000", "--s3_use_https=false"}},
+		// Empty means AWS S3 with Dragonfly's defaults: no flag at all.
+		{"", nil},
+		// Not admissible; never rendered into a flag Dragonfly would misread.
+		{"rustfs:9000", nil},
+		{"https://", nil},
+		{"https://minio.example.com/bucket", nil},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			got := dragonflyS3EndpointArgs(tc.url)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("dragonflyS3EndpointArgs(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+
+	// Through the args builder: the flags render only with a snapshot dir,
+	// and an https URL flips --s3_use_https.
+	spec := &v1alpha1.DragonflySpec{Snapshot: &v1alpha1.DragonflySnapshotSpec{
+		Dir:           "s3://bucket/prefix",
+		S3EndpointURL: "https://s3.example.com:8443",
+	}}
+	joined := joinArgs(buildDragonflyArgs(spec, 6379, 9999))
+	for _, want := range []string{"--s3_endpoint=s3.example.com:8443", "--s3_use_https=true"} {
+		if !contains(joined, want) {
+			t.Errorf("args missing %q: %s", want, joined)
+		}
+	}
+	spec.Snapshot.S3EndpointURL = ""
+	joined = joinArgs(buildDragonflyArgs(spec, 6379, 9999))
+	if contains(joined, "--s3_endpoint") || contains(joined, "--s3_use_https") {
+		t.Errorf("empty s3EndpointURL must emit neither flag: %s", joined)
 	}
 }
 

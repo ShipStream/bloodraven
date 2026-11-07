@@ -11,7 +11,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-The `nightly` profile on `playground` fires at 02:00 with no `sourceSiteOverride` and `maxLagSecondsForSource` left at its default. At that moment: `iad` (`primary-candidate`) is the active site, `writable`; `pdx` (`primary-candidate`) is `read-only`, both replication threads running, `secondsBehindSource: 412`; `reader` (`role: read-only`) is `read-only`, replicating, `secondsBehindSource: 3`. Which site runs the dump, and what reason string lands in status?
+The `nightly` profile on `playground` fires at 02:00 with no `sourceSite` and `maxLagSecondsForSource` left at its default. At that moment: `iad` (`primary-candidate`) is the active site, `writable`; `pdx` (`primary-candidate`) is `read-only`, both replication threads running, `secondsBehindSource: 412`; `reader` (`role: read-only`) is `read-only`, replicating, `secondsBehindSource: 3`. Which site runs the dump, and what reason string lands in status?
 
 - `reader`, `"replica-preferred"` — it is the freshest replica and the one site carrying no promotion duty
 - `pdx`, `"replica-preferred"` — replica-first is the rule, and the lag figure only drives the `ReplicationLagging` condition
@@ -22,7 +22,7 @@ The `nightly` profile on `playground` fires at 02:00 with no `sourceSiteOverride
 
 **Explanation:**
 
-`selectSourceSite` prefers a replica and falls back to the primary. A replica qualifies only if it is `read-only`, actually replicating, and at or below `maxLagSecondsForSource` — default **300**. `pdx` at 412 s fails that gate, so the job goes to the active site as `"primary-fallback"`, which itself requires the primary to be `writable` and promotable. `reader` looks like the obvious host — freshest, least loaded — but `role: read-only` sites are excluded from the replica pool outright; had you named it in `sourceSiteOverride` you would have got a hard rejection, not a silent fallback: `sourceSiteOverride "reader" names a read-only site, which cannot be a backup source`. Option two confuses two settings that both default to 300: `maxLagSecondsForSource` picks the backup source, `spec.replication.maxLagSeconds` drives only the `ReplicationLagging` condition and never selects anything. Option four invents a failure mode — the primary fallback exists precisely so an ineligible replica does not cost you the night's backup. (objective 2)
+`selectSourceSite` prefers a replica and falls back to the primary. A replica qualifies only if it is `read-only`, actually replicating, and at or below `maxLagSecondsForSource` — default **300**. `pdx` at 412 s fails that gate, so the job goes to the active site as `"primary-fallback"`, which itself requires the primary to be `writable` and promotable. `reader` looks like the obvious host — freshest, least loaded — but `role: read-only` sites are excluded from the replica pool outright; had you named it in `sourceSite` you would have got a hard rejection, not a silent fallback: `sourceSite "reader" names a read-only site, which cannot be a backup source`. Option two confuses two settings that both default to 300: `maxLagSecondsForSource` picks the backup source, `spec.replication.maxLagSeconds` drives only the `ReplicationLagging` condition and never selects anything. Option four invents a failure mode — the primary fallback exists precisely so an ineligible replica does not cost you the night's backup. (objective 2)
 
 ## Question 2
 

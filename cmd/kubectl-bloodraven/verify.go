@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -145,12 +144,12 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 			},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: group},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
 			ProfileName:      profile,
 		},
 	}
 	if backupName != "" {
-		cr.Spec.BackupRef = &corev1.LocalObjectReference{Name: backupName}
+		cr.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: backupName}
 	}
 	if vs := profileVerificationSpec(fg, profile); vs != nil {
 		cr.Spec.KeepOnFailure = vs.KeepOnFailure

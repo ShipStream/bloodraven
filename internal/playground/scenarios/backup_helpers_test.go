@@ -37,7 +37,7 @@ func TestBackupProfileSpec(t *testing.T) {
 			if profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil {
 				t.Fatalf("storage=%+v, want S3 config", profile.Storage)
 			}
-			if profile.Storage.S3.Bucket != backupE2EBucket || profile.Storage.S3.Prefix != "e2e/test/run" || profile.Storage.S3.EndpointURL != backupE2EEndpoint || profile.Storage.S3.CredentialsSecret != backupE2ECredsSecret {
+			if profile.Storage.S3.Bucket != backupE2EBucket || profile.Storage.S3.Prefix != "e2e/test/run" || profile.Storage.S3.EndpointURL != backupE2EEndpoint || profile.Storage.S3.CredentialsSecretName != backupE2ECredsSecret {
 				t.Fatalf("unexpected S3 config: %+v", profile.Storage.S3)
 			}
 			if (spec.PITR != nil) != tc.pitr {

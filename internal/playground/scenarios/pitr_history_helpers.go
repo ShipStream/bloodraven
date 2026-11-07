@@ -862,14 +862,14 @@ func pitrArchivePassphrases(env *runner.Env) [][]byte {
 }
 
 // pitrBackupDumpPassphrase is the passphrase a backup's dump is encrypted
-// with: the dump-key snapshot its status.artifactStorage.passphraseSecret
+// with: the dump-key snapshot its status.artifactStorage.passphraseSecretKeyRef
 // records (#203: an immutable per-backup copy, so a later edit of the
 // profile's Secret does not change it).
 func pitrBackupDumpPassphrase(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlBackup) ([]byte, error) {
-	if b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecret == nil || b.Status.ArtifactStorage.PassphraseSecret.Name == "" {
-		return nil, fmt.Errorf("encrypted MysqlBackup %s records no status.artifactStorage.passphraseSecret", b.Name)
+	if b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecretKeyRef == nil || b.Status.ArtifactStorage.PassphraseSecretKeyRef.Name == "" {
+		return nil, fmt.Errorf("encrypted MysqlBackup %s records no status.artifactStorage.passphraseSecretKeyRef", b.Name)
 	}
-	ref := b.Status.ArtifactStorage.PassphraseSecret
+	ref := b.Status.ArtifactStorage.PassphraseSecretKeyRef
 	sec, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("get dump key %s of MysqlBackup %s: %w", ref.Name, b.Name, err)
@@ -1543,7 +1543,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 	spec.Backup.PITR = nil
 	spec.Backup.Schedules = nil
 	spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: backupName}},
+		Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
 		PointInTime: &v1alpha1.PointInTimeSpec{
 			StopDatetime:       stop,
 			ArchiveProfileName: backupE2EProfile,

@@ -177,7 +177,7 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 		return fmt.Errorf("playground TLS Secret has no ca.crt")
 	}
 	mdb := &v1alpha1.MysqlDatabase{ObjectMeta: meta, Spec: v1alpha1.MysqlDatabaseSpec{
-		GroupRef: v1alpha1.LocalGroupRef{Name: env.FG}, DatabaseName: strings.ReplaceAll(s.name, "-", "_"),
+		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG}, DatabaseName: strings.ReplaceAll(s.name, "-", "_"),
 		Owner: v1alpha1.MysqlDatabaseOwner{SecretName: s.name}, DeletionPolicy: v1alpha1.MysqlDatabaseDelete,
 		DeploymentClients: []v1alpha1.DeploymentClient{{Namespace: env.Namespace, ServiceAccount: s.name}},
 	}}

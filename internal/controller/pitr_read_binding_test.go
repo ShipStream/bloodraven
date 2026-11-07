@@ -220,7 +220,7 @@ func TestVerificationArchiveProfileName(t *testing.T) {
 	retained := *fg.Spec.Backup.Profiles[0].DeepCopy()
 	retained.Name = "retained"
 	retained.Storage.S3.Prefix = "old-prefix"
-	retained.Encryption.PassphraseSecret.Name = "deleted-secret"
+	retained.Encryption.PassphraseSecretKeyRef.Name = "deleted-secret"
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, retained)
 	e := bindTestPITRArchive(t, fg, "retained")
 	e.Encryption.KeySecretName = "mysql-lion-pitr-key-retained00"
@@ -247,12 +247,12 @@ func TestVerificationDumpKeyIsRecorded(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 	fg := fgWithEncryptedBackup()
-	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret.Name = "edited-since"
+	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "edited-since"
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	backup.Status.Location = "s3://bloodraven-backups/lion/seed/"
 	backup.Status.StorageType = v1alpha1.BackupStorageS3
 	backup.Status.Encrypted = true
-	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "mysqlbackup-seed-dump-key-uid-seed", Key: pitrKeySnapshotDataKey}}
+	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-uid-seed", Key: pitrKeySnapshotDataKey}}
 	v := verifyCR("verify-dump", "lion", "nightly-s3")
 	job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
 	if err != nil {
@@ -294,7 +294,7 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
 			name := addSourceArchiveProfile(fg)
 			src := findProfile(fg, name)
-			src.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "source-key"}}
+			src.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "source-key"}}
 			fg.Status.PITRArchiveBindings = nil
 			e := bindTestPITRArchive(t, fg, name)
 			e.State, e.Reason = tc.state, tc.reason
@@ -337,7 +337,7 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 	}
 }
 
-// Δ17: an encrypted mysqlBackupRef restore decrypts with the explicit
+// Δ17: an encrypted backupRef restore decrypts with the explicit
 // decryption Secret, else the recorded key (which must exist), and never
 // with the profile's live Secret.
 func TestRestoreDumpKeyOrder(t *testing.T) {
@@ -345,9 +345,9 @@ func TestRestoreDumpKeyOrder(t *testing.T) {
 	defer SetOperatorImageDefaults("", "")
 	ctx := context.Background()
 	fg := fgWithEncryptedBackup()
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}}}
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}}
 	seed := encryptedRefSeed("nightly-s3", v1alpha1.BackupStorageS3)
-	seed.Status.ArtifactStorage.PassphraseSecret = &v1alpha1.BackupArtifactPassphrase{Name: "seed-dump-key", Key: pitrKeySnapshotDataKey}
+	seed.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "seed-dump-key", Key: pitrKeySnapshotDataKey}
 	dumpKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "seed-dump-key"}, Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("k")}}
 
 	decryptSecret := func(job *batchv1.Job) string {
@@ -371,7 +371,7 @@ func TestRestoreDumpKeyOrder(t *testing.T) {
 	}
 
 	explicit := fg.DeepCopy()
-	explicit.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "restore-pass", Key: "passphrase"}}
+	explicit.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "restore-pass", Key: "passphrase"}}
 	r, _ = newReconciler(explicit, seed)
 	job, err = r.buildRestoreJob(ctx, explicit, explicit.Spec.Sites[0].Name, "creds")
 	if err != nil {

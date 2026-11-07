@@ -283,12 +283,12 @@ func validateInPlaceRestoreSpec(spec *v1alpha1.RestoreInPlaceSpec) error {
 			len(spec.LoadOptions.IncludeSchemas))
 	}
 	// Source must be set to exactly one of the three alternatives. The
-	// CEL rule on InitFromBackupSource already enforces this but we
+	// CEL rule on RestoreSource already enforces this but we
 	// re-check so we emit a clean preflight error instead of crashing
 	// inside buildRestoreJob.
 	src := spec.Source
 	setCount := 0
-	if src.MysqlBackupRef != nil {
+	if src.BackupRef != nil {
 		setCount++
 	}
 	if src.S3 != nil {
@@ -298,7 +298,7 @@ func validateInPlaceRestoreSpec(spec *v1alpha1.RestoreInPlaceSpec) error {
 		setCount++
 	}
 	if setCount != 1 {
-		return fmt.Errorf("restoreInPlace.source must set exactly one of mysqlBackupRef, s3, pvc (got %d)", setCount)
+		return fmt.Errorf("restoreInPlace.source must set exactly one of backupRef, s3, pvc (got %d)", setCount)
 	}
 	return nil
 }
@@ -1197,7 +1197,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencePrivilegeRejection(ctx contex
 			"that remain, and the operator account must keep working under it; grant these ON *.* to the operator account (%s). "+
 			"The restore is retried with the same confirm about once a minute",
 			restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), target,
-			fg.Spec.Credentials.OperatorSecret), nil
+			fg.Spec.Credentials.OperatorSecretName), nil
 	}
 	if err != nil {
 		return "", err

@@ -51,7 +51,7 @@ func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg},
 			ProfileName:      profile,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -73,7 +73,7 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-happy", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -157,7 +157,7 @@ func TestBuildVerificationJob_NoStorageDiskBoundedByResources(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-bounded", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			Resources:        corev1.ResourceRequirements{Limits: limits},
 		},
@@ -198,7 +198,7 @@ func TestBuildVerificationJob_PVCBackedBackup_MountsBackupPVC(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-pvc", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      profile.Name,
 		},
 	}
@@ -231,7 +231,7 @@ func TestBuildVerificationJob_MissingLocation_Errors(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -270,7 +270,7 @@ func verifyCR(name, fgName, profile string) *v1alpha1.MysqlBackupVerification {
 	return &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fgName},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 	}
@@ -573,7 +573,7 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
 				Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
@@ -633,7 +633,7 @@ func TestBuildVerificationJob_PITRRequiresPITREnabled(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-bad-pitr", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
 				Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
@@ -659,7 +659,7 @@ func TestBuildVerificationJob_SanityCheck_SetsEnvVars(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-sanity", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			SanityCheck: &v1alpha1.SanityCheckSpec{
 				Query: "SELECT COUNT(*) FROM orders.orders",
@@ -739,7 +739,7 @@ func TestBuildVerificationJob_SanityCheck_RejectsMultiStatement(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-bad-sanity", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			SanityCheck: &v1alpha1.SanityCheckSpec{
 				Query: "SELECT 1; DROP TABLE orders",
@@ -810,7 +810,7 @@ func TestBuildVerificationJob_PITRRefusesBackupWithoutIdentity(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"},
 		},

@@ -39,10 +39,10 @@ func bindingFG(ns string) *v1alpha1.MysqlFailoverGroup {
 	// render change is visible without the ordered updater.
 	fg.Spec.UpdateStrategy = "Recreate"
 	s3 := func(prefix string) v1alpha1.BackupStorage {
-		return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "archive", Prefix: prefix, EndpointURL: "http://rustfs:9000", CredentialsSecret: "s3-creds"}}
+		return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "archive", Prefix: prefix, EndpointURL: "http://rustfs:9000", CredentialsSecretName: "s3-creds"}}
 	}
 	enc := func(secret string) *v1alpha1.BackupEncryptionSpec {
-		return &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secret}}
+		return &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secret}}
 	}
 	fg.Spec.Backup = &v1alpha1.BackupSpec{
 		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"},
@@ -483,7 +483,7 @@ func TestEnvtest_MysqlBackupDumpKeySnapshot(t *testing.T) {
 	}
 	mb := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "nightly-1"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "a"},
+		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "a"},
 	}
 	if err := k8sClient.Create(ctx, mb); err != nil {
 		t.Fatal(err)
@@ -521,7 +521,7 @@ func TestEnvtest_MysqlBackupDumpKeySnapshot(t *testing.T) {
 	if mounted != snap.Name || snap.CreationTimestamp.After(job.CreationTimestamp.Time) {
 		t.Fatalf("Job mounts %q, want %q created first", mounted, snap.Name)
 	}
-	if ps := mb.Status.ArtifactStorage; ps == nil || ps.PassphraseSecret == nil || ps.PassphraseSecret.Name != snap.Name {
+	if ps := mb.Status.ArtifactStorage; ps == nil || ps.PassphraseSecretKeyRef == nil || ps.PassphraseSecretKeyRef.Name != snap.Name {
 		t.Fatalf("recorded dump key %+v", mb.Status.ArtifactStorage)
 	}
 }

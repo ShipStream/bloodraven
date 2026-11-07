@@ -28,12 +28,12 @@ spec:
       prefix: orders/west
       region: us-west-2
       # Secret with AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (read-only).
-      credentialsSecret: s3-dr-readonly-creds
+      credentialsSecretName: s3-dr-readonly-creds
     # Required when the source profile has encryption enabled.
     # The Secret must be copied to this namespace from the source cluster.
     # See site/content/docs/5.architecture/3.multi-cluster-dr.md — Passphrase distribution.
     decryption:
-      passphraseSecret:
+      passphraseSecretKeyRef:
         name: orders-backup-passphrase
   freshness:
     discoveryInterval: 5m          # how often to re-scan the bucket (default 5m, minimum 30s)

@@ -253,9 +253,9 @@ func TestEffectiveDefaults(t *testing.T) {
 func TestSpecValidate(t *testing.T) {
 	valid := func() MysqlDatabaseSpec {
 		return MysqlDatabaseSpec{
-			GroupRef:     LocalGroupRef{Name: "main"},
-			DatabaseName: "acme_wms",
-			Owner:        MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			FailoverGroupRef: LocalFailoverGroupRef{Name: "main"},
+			DatabaseName:     "acme_wms",
+			Owner:            MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 			Grants: []MysqlDatabaseGrant{
 				{Username: "maester", Privileges: []MysqlPrivilege{PrivilegeSelect, PrivilegeDelete}},
 			},

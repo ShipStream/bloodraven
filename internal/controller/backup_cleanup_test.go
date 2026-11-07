@@ -76,7 +76,7 @@ func TestArtifactStorageFromJob(t *testing.T) {
 			want: v1alpha1.BackupArtifactStorage{Location: "lion/snap", Bucket: "bloodraven-backups", EndpointURL: "https://minio.example:9000", Region: "us-west-2"}},
 		{name: "encrypted S3 reads the uploader", job: func(t *testing.T) *batchv1.Job { return build(t, fgWithEncryptedBackup(), 0) },
 			want: v1alpha1.BackupArtifactStorage{Location: "s3://bloodraven-backups/lion/snap/", Bucket: "bloodraven-backups", EndpointURL: "https://minio.local", Region: "us-east-1",
-				PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: testDumpKeySecret, Key: pitrKeySnapshotDataKey}}},
+				PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: testDumpKeySecret, Key: pitrKeySnapshotDataKey}}},
 		{name: "PVC claim", job: func(t *testing.T) *batchv1.Job { return build(t, fgWithBackup(), 1) },
 			want: v1alpha1.BackupArtifactStorage{Location: "/backups/snap", ClaimName: ownedBackupPVCName("lion", "daily-local")}},
 		{name: "bucket from a runtime-only source", job: func(t *testing.T) *batchv1.Job {
@@ -551,7 +551,7 @@ func TestFinalize_BlockedCleanup(t *testing.T) {
 		{
 			name: "profile lost its S3 credentials",
 			setup: func(t *testing.T, f *cleanupFixture) {
-				f.fg.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecret = ""
+				f.fg.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecretName = ""
 				if err := f.c.Update(context.Background(), f.fg); err != nil {
 					t.Fatal(err)
 				}

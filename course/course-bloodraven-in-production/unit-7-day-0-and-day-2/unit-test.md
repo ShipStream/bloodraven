@@ -28,7 +28,7 @@ The line between yours and the operator's is the first thing to get right on day
 
 **Type:** MULTIPLE_CHOICE
 
-You rotate the password in the Secret named by `spec.credentials.appSecret` and apply. What happens?
+You rotate the password in the Secret named by `spec.credentials.appSecretName` and apply. What happens?
 
 - The pods roll, because credential Secret data is folded into the spec hash — but MySQL still expects the old password, because the `ALTER USER` only runs on a fresh datadir
 - Nothing until the next pod restart, at which point the init script re-runs and applies the new password

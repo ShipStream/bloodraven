@@ -418,7 +418,7 @@ func TestPITRBindingSpellingOnlyStorageEditRefused(t *testing.T) {
 	}{
 		{name: "prefix slash, other Secret", edit: func(p *v1alpha1.BackupProfile) {
 			p.Storage.S3.Prefix = "/" + p.Storage.S3.Prefix + "/"
-			p.Encryption.PassphraseSecret.Name = "pass-x"
+			p.Encryption.PassphraseSecretKeyRef.Name = "pass-x"
 		}, reason: v1alpha1.ReasonKeyChangeRefused},
 		{name: "endpoint case and port, encryption removed", edit: func(p *v1alpha1.BackupProfile) {
 			p.Storage.S3.EndpointURL = "https://S3.Example.Test:443/"

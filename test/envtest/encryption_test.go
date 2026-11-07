@@ -25,7 +25,7 @@ func newEncryptionFG(namespace, name string) *v1alpha1.MysqlFailoverGroup {
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image:        "mysql:9.7",
 			SidecarImage: "ghcr.io/shipstream/bloodraven-sidecar:1.3.2",
-			Credentials:  v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
+			Credentials:  v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
 				{
 					Name: "dc1", ServerID: 101, Zone: "lion-dc1", LBIP: "203.0.113.1",

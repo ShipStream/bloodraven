@@ -25,24 +25,24 @@ type s3CredentialRef struct {
 	secret string
 }
 
-// s3CredentialRefs lists the S3 credentialsSecret references on fg's spec.
+// s3CredentialRefs lists the S3 credentialsSecretName references on fg's spec.
 func s3CredentialRefs(fg *v1alpha1.MysqlFailoverGroup) []s3CredentialRef {
 	var refs []s3CredentialRef
 	if fg.Spec.Backup != nil {
 		for _, p := range fg.Spec.Backup.Profiles {
 			if s3 := p.Storage.S3; s3 != nil {
 				refs = append(refs, s3CredentialRef{
-					field:  fmt.Sprintf("spec.backup.profiles[%s].storage.s3.credentialsSecret", p.Name),
-					secret: s3.CredentialsSecret,
+					field:  fmt.Sprintf("spec.backup.profiles[%s].storage.s3.credentialsSecretName", p.Name),
+					secret: s3.CredentialsSecretName,
 				})
 			}
 		}
 	}
 	if in := fg.Spec.InitFromBackup; in != nil && in.Source.S3 != nil {
-		refs = append(refs, s3CredentialRef{field: "spec.initFromBackup.source.s3.credentialsSecret", secret: in.Source.S3.CredentialsSecret})
+		refs = append(refs, s3CredentialRef{field: "spec.initFromBackup.source.s3.credentialsSecretName", secret: in.Source.S3.CredentialsSecretName})
 	}
 	if in := fg.Spec.RestoreInPlace; in != nil && in.Source.S3 != nil {
-		refs = append(refs, s3CredentialRef{field: "spec.restoreInPlace.source.s3.credentialsSecret", secret: in.Source.S3.CredentialsSecret})
+		refs = append(refs, s3CredentialRef{field: "spec.restoreInPlace.source.s3.credentialsSecretName", secret: in.Source.S3.CredentialsSecretName})
 	}
 	return refs
 }
@@ -93,7 +93,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileS3CredentialsCondition(ctx conte
 			Type:               v1alpha1.ConditionS3CredentialsReady,
 			Status:             metav1.ConditionTrue,
 			Reason:             v1alpha1.ReasonCredentialsComplete,
-			Message:            "every S3 credentialsSecret has AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
+			Message:            "every S3 credentialsSecretName has AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
 			ObservedGeneration: fg.Generation,
 			LastTransitionTime: metav1.Now(),
 		}

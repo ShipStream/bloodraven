@@ -159,7 +159,7 @@ func mdbGroup(activeSite string) *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: mdbGroupName, Namespace: mdbNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "dc1", ServerID: 101, Role: "primary-candidate"},
 				{Name: "dc2", ServerID: 102, Role: "primary-candidate"},
@@ -200,11 +200,11 @@ func mdbCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
 			Finalizers: []string{v1alpha1.MysqlDatabaseFinalizer},
 		},
 		Spec: v1alpha1.MysqlDatabaseSpec{
-			GroupRef:     v1alpha1.LocalGroupRef{Name: mdbGroupName},
-			DatabaseName: mdbDatabase,
-			CharacterSet: "utf8mb4",
-			Collation:    "utf8mb4_unicode_ci",
-			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: mdbOwnerSecretName},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: mdbGroupName},
+			DatabaseName:     mdbDatabase,
+			CharacterSet:     "utf8mb4",
+			Collation:        "utf8mb4_unicode_ci",
+			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: mdbOwnerSecretName},
 		},
 	}
 	for _, m := range mutate {
