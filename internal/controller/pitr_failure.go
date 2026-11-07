@@ -38,9 +38,11 @@ func pitrFailureReason(message string) v1alpha1.PITRToken {
 	return ""
 }
 
-// tokenFirstMessage moves tok, found in message (pitrFailureReason), to the
-// front: "verification job: PITRX: detail" becomes "PITRX: verification
-// job: detail" (§7.1).
+// tokenFirstMessage puts tok (pitrFailureReason) at the front of message
+// (§7.1). When message contains tok it is moved: "verification job: PITRX:
+// detail" becomes "PITRX: verification job: detail". When it does not (tok
+// is the served translation of a different token in message), tok is
+// prepended: "PITRY: verification job: PITRX: detail".
 func tokenFirstMessage(tok, message string) string {
 	message = strings.TrimSpace(message)
 	if strings.HasPrefix(message, tok) {

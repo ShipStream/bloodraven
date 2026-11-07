@@ -24,7 +24,7 @@ Usage:
 Flags:
   --profile string       profile name from spec.backup.profiles (required)
   --source-site string   force a specific site as the dump source
-  --triggered-by string  free-form label recorded on the CR (default: "manual")
+  --triggered-by string  free-form value of the CR's triggered-by annotation (default: "manual")
   --wait                 block until the backup reaches Succeeded or Failed
   --timeout DURATION     timeout for --wait (default: 2h)
   --kubeconfig string    path to kubeconfig
@@ -46,7 +46,7 @@ func runBackup(args []string, stdout, stderr *os.File) error {
 	registerCommonFlags(fs, &cf)
 	fs.StringVar(&profile, "profile", "", "backup profile name (required)")
 	fs.StringVar(&sourceSite, "source-site", "", "force a specific site as the dump source")
-	fs.StringVar(&triggeredBy, "triggered-by", "manual", "free-form label recorded on the CR")
+	fs.StringVar(&triggeredBy, "triggered-by", "manual", "free-form value of the CR's triggered-by annotation")
 	fs.BoolVar(&wait, "wait", false, "block until the backup reaches Succeeded or Failed")
 	fs.DurationVar(&timeout, "timeout", 2*time.Hour, "timeout for --wait")
 	fs.Usage = func() { fmt.Fprint(stderr, backupUsage) }

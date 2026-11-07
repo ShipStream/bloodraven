@@ -96,7 +96,7 @@ func s21InjectCanaries() runner.Step {
 				return err
 			}
 			tolerantPod := s21CanaryPod(env.Namespace, s21TolerateCanary, selector, []corev1.Toleration{{
-				Key:      s20PlaygroundReadOnly,
+				Key:      s20PlaygroundReadOnly(env),
 				Operator: corev1.TolerationOpExists,
 				Effect:   corev1.TaintEffectNoExecute,
 			}})
@@ -161,7 +161,7 @@ func s21ObserveTaintApplied() runner.Step {
 				n, err := env.Kube.GetNode(ctx, node)
 				if err == nil {
 					last = fmt.Sprintf("taintCount=%d", len(n.Spec.Taints))
-					if pgkube.NodeHasTaint(n, s20PlaygroundReadOnly) {
+					if pgkube.NodeHasTaint(n, s20PlaygroundReadOnly(env)) {
 						env.Capture.Note(fmt.Sprintf("playground taint applied on %s", node))
 						return nil
 					}

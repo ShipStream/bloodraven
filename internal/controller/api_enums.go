@@ -64,8 +64,9 @@ func apiSiteState(s state.SiteState) v1alpha1.SiteState {
 	return v1alpha1.SiteStateUnknown
 }
 
-// apiDragonflyRole maps the Dragonfly classifier's role (also the
-// dragonfly-role pod label value) to status.dragonfly.sites[].role.
+// apiDragonflyRole maps the Dragonfly classifier's internal role token to
+// status.dragonfly.sites[].role. The dragonfly-role pod label is not
+// derived from it.
 func apiDragonflyRole(r dragonfly.SiteRole) v1alpha1.DragonflyRole {
 	switch r {
 	case dragonfly.RoleMaster:

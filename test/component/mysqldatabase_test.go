@@ -953,8 +953,8 @@ func TestMysqlDatabaseRotationSurvivesFailedReadyStamp(t *testing.T) {
 
 	// Simulate the state after that rotation ran its MySQL work but crashed
 	// before the Ready stamp persisted: the new account exists, the old one
-	// is gone, and status still shows Creating with the old owner plus the
-	// write-ahead pending record from the Creating stamp.
+	// is gone, and status still shows Applying with the old owner plus the
+	// write-ahead pending record from the Applying stamp.
 	h.server.removeUser(mdbOwnerUser)
 	h.server.addUser("acme_app_v2", "owner-pw-2")
 	mdb := h.get()

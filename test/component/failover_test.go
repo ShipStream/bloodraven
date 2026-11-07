@@ -230,7 +230,7 @@ func TestFailover_PromotionGtidInStatus(t *testing.T) {
 	h.pollN(3) // failover
 
 	s := h.tm.Status()
-	if s.PromotionGtidExecuted == "" {
-		t.Error("expected PromotionGtidExecuted to be populated after failover")
+	if s.LastFailover == nil || s.LastFailover.PromotionGtidExecuted == "" {
+		t.Error("expected lastFailover.promotionGtidExecuted to be populated after failover")
 	}
 }

@@ -111,9 +111,9 @@ of this for you):
 ```bash
 NS=bloodraven-playground; FG=playground; SITE=iad
 DG=$(kubectl -n $NS get mfg $FG -o jsonpath="{.status.sites[?(@.name==\"$SITE\")].divergentGtid}")
-UID=$(kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.uid}')
+GROUP_UID=$(kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.uid}')
 kubectl -n $NS annotate mfg $FG \
-  bloodraven.shipstream.io/reclone-site="$SITE:confirm=$FG:uid=$UID:gtidPrefix=${DG:0:8}" --overwrite
+  bloodraven.shipstream.io/reclone-site="$SITE:confirm=$FG:uid=$GROUP_UID:gtidPrefix=${DG:0:8}" --overwrite
 ```
 
 ```widget

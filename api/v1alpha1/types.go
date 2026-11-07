@@ -594,20 +594,15 @@ const (
 )
 
 // SidecarSpec configures the sidecar container behavior.
-// The XValidation messages below deliberately use the context-neutral
-// "sidecar.*" field prefix rather than "spec.sidecar.*": SidecarSpec is
-// embedded at spec.sidecar in MysqlFailoverGroup but at
-// spec.template.spec.sidecar in MysqlStandbyCluster, and a struct-level
-// marker emits the same message in both, so a fully-qualified path would
-// be wrong in one of them.
 // +kubebuilder:validation:XValidation:rule="duration(has(self.leaseTimeout) ? self.leaseTimeout : '20s') >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s')",message="sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval"
 type SidecarSpec struct {
-	// Image is the sidecar image, also used by the init container. Empty
+	// Image is the sidecar image, also used by the init container. Unset
 	// means the sidecar image the running operator release ships with
 	// (the chart's sidecar.image.repository and sidecar.image.tag), so an
-	// operator upgrade moves the sidecar with it. A non-empty value pins
-	// the image; the operator warns (SidecarVersionSkew) when a pin is
-	// tagged with a different release than the operator.
+	// operator upgrade moves the sidecar with it; an empty string is
+	// refused. A value pins the image; the operator warns
+	// (SidecarVersionSkew) when a pin is tagged with a different release
+	// than the operator.
 	// +kubebuilder:validation:MinLength=1
 	// +optional
 	Image string `json:"image,omitempty"`
@@ -1019,7 +1014,9 @@ const (
 	SiteReplicationHealthy SiteReplicationState = "Healthy"
 	// SiteReplicationLagging: as Healthy, but secondsBehindSource exceeds
 	// spec.replication.maxLagSeconds (the Degraded ReplicationLagging
-	// threshold).
+	// threshold). A Lagging site reads Healthy again once its lag is a
+	// fifth of the threshold (at least a second) below it, so lag that
+	// hovers around the threshold does not flip the state every poll.
 	SiteReplicationLagging SiteReplicationState = "Lagging"
 	// SiteReplicationBroken: replica status was read, and the IO or SQL
 	// thread is stopped or no source is set.

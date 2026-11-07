@@ -226,8 +226,8 @@ func FailoverRecordAnnotations(rec FailoverRecord) (map[string]string, error) {
 }
 
 // ClearFailoverState deletes the out-of-band anti-flap annotations. Callers
-// that intentionally clear status.lastFailover and status.lastFailoverTarget
-// must call this while the operator is stopped, otherwise the running manager
+// that intentionally clear status.lastFailover (its time and target) must
+// call this while the operator is stopped, otherwise the running manager
 // can immediately repopulate either durable copy.
 func ClearFailoverState(ctx context.Context, c client.Client, nn types.NamespacedName) error {
 	return NewAnnotationFailoverStateRecorder(c, c, nn).RecordFailoverState(ctx, FailoverRecord{})

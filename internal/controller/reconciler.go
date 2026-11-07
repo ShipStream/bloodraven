@@ -265,6 +265,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if errors.IsNotFound(err) {
 			r.forgetLicense(req.NamespacedName)
 			r.forgetGroupMemos(req.NamespacedName)
+			r.clearDragonflyUpgradeDeferral(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -274,6 +275,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if !fg.DeletionTimestamp.IsZero() {
 		r.forgetLicense(req.NamespacedName)
 		r.forgetGroupMemos(req.NamespacedName)
+		r.clearDragonflyUpgradeDeferral(req.NamespacedName)
 		if controllerutil.ContainsFinalizer(&fg, v1alpha1.FailoverGroupFinalizer) {
 			logger.Info("CR being deleted, running finalizer cleanup", "name", fg.Name)
 
@@ -285,8 +287,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 			if err := r.handleDeletion(ctx, &fg); err != nil {
 				return ctrl.Result{}, fmt.Errorf("handle deletion: %w", err)
 			}
+			base := fg.DeepCopy()
 			controllerutil.RemoveFinalizer(&fg, v1alpha1.FailoverGroupFinalizer)
-			if err := r.Update(ctx, &fg); err != nil {
+			if err := r.Patch(ctx, &fg, metadataPatch(base)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 			}
 		}
@@ -323,8 +326,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Ensure finalizer is present.
 	if !controllerutil.ContainsFinalizer(&fg, v1alpha1.FailoverGroupFinalizer) {
+		base := fg.DeepCopy()
 		controllerutil.AddFinalizer(&fg, v1alpha1.FailoverGroupFinalizer)
-		if err := r.Update(ctx, &fg); err != nil {
+		if err := r.Patch(ctx, &fg, metadataPatch(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 	}
@@ -430,6 +434,10 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if r.APIReader != nil {
 		deploymentReader = r.APIReader
 	}
+
+	// A refusal of a workload whose site left spec.sites is not re-checked
+	// by the per-site loops below, so it is dropped here.
+	r.pruneRemovedSiteSelectorRefusals(&fg)
 
 	// Reconcile per-site resources
 	for _, site := range fg.Spec.Sites {
@@ -2458,9 +2466,15 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, se
 	h := sha256.New()
 	fmt.Fprintf(h, "deploymentPodRenderVersion=%s\n", deploymentPodRenderVersion)
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
+	// The server ID is rendered into --server-id and server-id.cnf. It
+	// cannot change in place, but a site removed and re-added under its
+	// name with another serverID finds its retained Deployment, which must
+	// then roll.
+	fmt.Fprintf(h, "serverID=%d\n", site.ServerID)
 	// The effective sidecar image: a pin, or the operator's default, so a
 	// new default rolls the groups that do not pin one. An unset default
-	// hashes as empty; the render refuses it (effectiveSidecarImage).
+	// hashes as empty; the render refuses it (effectiveSidecarImage), and
+	// drift is not evaluated meanwhile (specDriftView).
 	sidecarImage, _ := effectiveSidecarImage(fg)
 	fmt.Fprintf(h, "sidecar=%s\n", sidecarImage)
 	fmt.Fprintf(h, "resources=%v\n", site.Resources)

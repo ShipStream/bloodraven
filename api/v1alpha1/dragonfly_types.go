@@ -40,12 +40,17 @@ type DragonflySpec struct {
 	//     from that snapshot, then moves the other sites and re-attaches
 	//     them as replicas. Cache and session traffic is shed while it
 	//     runs; status.dragonfly.upgrade records the run. The ordinary
-	//     render never moves an image under this strategy. A run that
-	//     fails is not restarted for the same spec.dragonfly: change it
-	//     (or set Image back to the running image and then forward again)
-	//     to retry. Requires snapshot.dir.
-	// Switching to Rolling while a change is pending rolls it the ordinary
-	// way.
+	//     render never moves an image under this strategy; it rolls out
+	//     every other change first, and a run starts only once the sites
+	//     run it. A run that fails is not restarted for the same
+	//     spec.dragonfly: change spec.dragonfly to retry. When every site
+	//     still runs one image, setting Image back to it removes the
+	//     failed record, and setting it forward again retries; when the
+	//     sites run different images, that would start a run back to the
+	//     old image instead. A run ends when spec.dragonfly changes under
+	//     it, and after an hour. Requires snapshot.dir.
+	// Switching to Rolling, during a run or while a change is pending,
+	// rolls it the ordinary way.
 	// +kubebuilder:default=Rolling
 	// +optional
 	UpgradeStrategy DragonflyUpgradeStrategy `json:"upgradeStrategy,omitempty"`
@@ -487,6 +492,20 @@ const (
 	// restored, so the data the upgrade moves was lost; the operator
 	// re-creates the StatefulSet.
 	DragonflyUpgradeReasonActiveWorkloadDeleted DragonflyUpgradeReason = "ActiveWorkloadDeleted"
+	// DragonflyUpgradeReasonSpecChanged: spec.dragonfly changed while the
+	// upgrade ran (the image, upgradeStrategy, the snapshot block or any
+	// other field), so the upgrade stopped; the operator then decides
+	// again for the new spec.dragonfly.
+	DragonflyUpgradeReasonSpecChanged DragonflyUpgradeReason = "SpecChanged"
+	// DragonflyUpgradeReasonDragonflyDisabled: spec.dragonfly was disabled
+	// or removed while the upgrade ran; the operator removes the Dragonfly
+	// workloads.
+	DragonflyUpgradeReasonDragonflyDisabled DragonflyUpgradeReason = "DragonflyDisabled"
+	// DragonflyUpgradeReasonTimedOut: the upgrade had not finished an hour
+	// after it started (an active site that never restored, or a replica
+	// that never synced), so it stopped and gave the group's reconcile
+	// back.
+	DragonflyUpgradeReasonTimedOut DragonflyUpgradeReason = "TimedOut"
 )
 
 // DragonflySiteStatus describes the observed state of one site's Dragonfly

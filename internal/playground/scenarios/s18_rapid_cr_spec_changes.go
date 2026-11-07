@@ -196,7 +196,7 @@ func s18ObserveConvergence() runner.Step {
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}

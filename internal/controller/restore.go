@@ -903,16 +903,12 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 	})
 }
 
-// backupRefProfileStorageError reports why a backupRef's profile can no
-// longer supply the credentials for the backend the backup was written to
-// (want), or returns nil when profile.Storage carries that backend's
-// configuration. A non-nil profile with a nil error guarantees the
-// matching profile.Storage.S3 / profile.Storage.PVC pointer is non-nil.
-func backupRefProfileStorageError(fp string, ref *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, want v1alpha1.BackupStorageType) error {
-	kind, field := "an S3", "s3"
-	if want == v1alpha1.BackupStoragePVC {
-		kind, field = "a PVC", "pvc"
-	}
+// backupRefS3CredentialsError reports why an S3 backupRef's profile can no
+// longer supply the S3 credentials its recorded destination is read with,
+// or returns nil. The destination itself comes from the backup's
+// status.artifactStorage; a PVC backup needs no profile. A nil error
+// guarantees profile.Storage.S3 is non-nil.
+func backupRefS3CredentialsError(fp string, ref *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile) error {
 	location := ""
 	if ref.Status.ArtifactStorage != nil {
 		location = ref.Status.ArtifactStorage.Location
@@ -920,20 +916,19 @@ func backupRefProfileStorageError(fp string, ref *v1alpha1.MysqlBackup, profile 
 	switch {
 	case profile == nil:
 		return fmt.Errorf(
-			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q is missing from spec.backup.profiles; "+
+			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles (it supplies the S3 credentials); "+
 				"either restore the profile or %s explicitly",
-			fp, ref.Name, kind, location, ref.Spec.ProfileName, restoreSpecFix(fp, "source."+field))
-	case profile.Storage.Type != want:
+			fp, ref.Name, location, ref.Spec.ProfileName, restoreSpecFix(fp, "source.s3"))
+	case profile.Storage.Type != v1alpha1.BackupStorageS3:
 		return fmt.Errorf(
-			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q now stores to %s; "+
-				"either restore the profile's %s storage or %s explicitly",
-			fp, ref.Name, kind, location, ref.Spec.ProfileName, profile.Storage.Type, want, restoreSpecFix(fp, "source."+field))
-	case want == v1alpha1.BackupStorageS3 && profile.Storage.S3 == nil,
-		want == v1alpha1.BackupStoragePVC && profile.Storage.PVC == nil:
+			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q now stores to %s (it supplies the S3 credentials); "+
+				"either restore the profile's S3 storage or %s explicitly",
+			fp, ref.Name, location, ref.Spec.ProfileName, profile.Storage.Type, restoreSpecFix(fp, "source.s3"))
+	case profile.Storage.S3 == nil:
 		return fmt.Errorf(
-			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q has no storage.%s configuration; "+
-				"either restore the profile's %s storage or %s explicitly",
-			fp, ref.Name, kind, location, ref.Spec.ProfileName, field, want, restoreSpecFix(fp, "source."+field))
+			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q has no storage.s3 configuration to supply its credentials; "+
+				"either restore the profile's S3 storage or %s explicitly",
+			fp, ref.Name, location, ref.Spec.ProfileName, restoreSpecFix(fp, "source.s3"))
 	}
 	return nil
 }
@@ -1063,7 +1058,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		)
 		switch storage.Type {
 		case v1alpha1.BackupStorageS3:
-			if err := backupRefProfileStorageError(fp, &ref, profile, v1alpha1.BackupStorageS3); err != nil {
+			if err := backupRefS3CredentialsError(fp, &ref, profile); err != nil {
 				return nil, err
 			}
 			s3Storage, s3Creds = storage, profile.Storage.S3.CredentialsSecretName
@@ -1101,9 +1096,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			}
 			if s3Storage != nil {
 				decryptSourceKind = "S3"
-				decryptS3Bucket = s3Storage.Bucket
-				decryptS3EndpointOverride = s3Storage.EndpointURL
-				decryptS3Region = s3Storage.Region
+				// Recorded values are already resolved: render them
+				// literally (as BLOODRAVEN_SOURCE_PREFIX always is).
+				decryptS3Bucket = literalArtifactEnvValue(s3Storage.Bucket)
+				decryptS3EndpointOverride = literalArtifactEnvValue(s3Storage.EndpointURL)
+				decryptS3Region = literalArtifactEnvValue(s3Storage.Region)
 				_, decryptS3Prefix = splitS3Location(s3Storage.Location)
 				decryptAWSCredsSecret = s3Creds
 			} else if pvcClaim != "" {
@@ -1124,16 +1121,19 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			dumpSrc = &ds
 		}
 		if s3Storage != nil {
+			// The recorded destination is already expanded; escape it so
+			// kubelet's $(VAR) expansion cannot change it again. A direct
+			// source below keeps its one expansion.
 			extraEnv = append(extraEnv,
-				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: s3Storage.Bucket},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: literalArtifactEnvValue(s3Storage.Bucket)},
 			)
 			if s3Storage.EndpointURL != "" {
 				extraEnv = append(extraEnv, corev1.EnvVar{
-					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: s3Storage.EndpointURL,
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: literalArtifactEnvValue(s3Storage.EndpointURL),
 				})
 			}
 			if s3Storage.Region != "" {
-				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: s3Storage.Region})
+				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: literalArtifactEnvValue(s3Storage.Region)})
 			}
 			awsCredsSecret = s3Creds
 		} else if pvcClaim != "" {

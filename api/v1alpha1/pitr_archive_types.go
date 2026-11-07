@@ -177,9 +177,10 @@ type ReplayedBinlogRef struct {
 }
 
 // PointInTimeResult is the certified outcome of a point-in-time replay,
-// read from the replay's verdict. Restores (status.restore.pointInTime and
-// status.restoreInPlace.pointInTime) and verifications
-// (status.pointInTime) share it.
+// read from the replay's verdict. Restores
+// (status.restore.provenance.pointInTime; it stays unset in
+// status.restoreInPlace.provenance) and verifications (status.pointInTime)
+// share it.
 type PointInTimeResult struct {
 	// Mode is the replay mode.
 	// +required

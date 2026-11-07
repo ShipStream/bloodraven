@@ -19,12 +19,13 @@ func init() {
 // annotation safety interlock end-to-end. It first produces a
 // divergent-GTID condition through an actual failover and old-primary
 // rogue write (this scenario is self-contained — it does not depend on
-// scenario 8 having been run), then submits three
+// scenario 8 having been run), then submits four
 // annotation values and asserts the operator reaction:
 //
-//	A) bare site name      — REJECTED (RecloneRejected event), annotation cleared
-//	B) site:wrongprefix    — REJECTED (RecloneRejected event), annotation cleared
-//	C) site:correctprefix  — ACCEPTED (RecloneRequested event), Bootstrapping condition cycles back to False/NotBootstrapping
+//	A) <site> (bare, unconfirmed)                    — REJECTED (RecloneRejected event), annotation cleared
+//	A) <site>:confirm=<fg>:uid=<uid> (cold form)     — REJECTED (RecloneRejected event), annotation cleared
+//	B) cold form + gtidPrefix=<wrong prefix>         — REJECTED (RecloneRejected event), annotation cleared
+//	C) cold form + gtidPrefix=<correct prefix>       — ACCEPTED (RecloneRequested event), Bootstrapping condition cycles back to False/NotBootstrapping
 //
 // The cold-reclone "must include :confirm=<fg-name>" interlock branch
 // is intentionally NOT exercised here — sub-case C drives the divergent
@@ -41,17 +42,18 @@ func scenario19RecloneInterlock() runner.Scenario {
 		ID:    "19-reclone-interlock",
 		Title: "Reclone safety interlock rejects fat-finger annotations",
 		Hypothesis: "Against a site with status.divergentGtid populated, the reclone-site annotation: " +
-			"(A) bare site name is REJECTED with RecloneRejected event; " +
+			"(A) a bare site name, and the confirmed cold form without gtidPrefix, are each REJECTED with a RecloneRejected event; " +
 			"(B) wrong GTID prefix is REJECTED with RecloneRejected event; " +
 			"(C) correct 8-char prefix is ACCEPTED with RecloneRequested event and clone runs to completion.",
 		Risk:     "medium",
 		DocLink:  "playground/chaos-scenarios.md#19-reclone-safety-interlock",
-		Timeout:  8 * time.Minute,
+		Timeout:  9 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectDivergenceViaFailover(),
 			observeDivergenceRecorded(),
 			verifyRecloneRejectedBare(),
+			verifyRecloneRejectedColdForm(),
 			verifyRecloneRejectedMismatch(),
 			verifyRecloneAcceptedMatching(),
 		},
@@ -285,17 +287,32 @@ func observeDivergenceRecorded() runner.Step {
 	}
 }
 
-// verifyRecloneRejectedBare submits the bare site name as the
-// annotation value, which must be rejected with RecloneRejected and
-// the annotation cleared by the operator.
+// verifyRecloneRejectedBare submits the bare site name, with no confirm=
+// or uid=, which must be rejected with RecloneRejected (a reclone wipes
+// the datadir and must be confirmed) and the annotation cleared.
 func verifyRecloneRejectedBare() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "sub-case A: bare site name is rejected against divergent site",
+		Name:  "sub-case A (bare): unconfirmed bare site name is rejected against divergent site",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			site := ctxFetch(env, "divergentSite")
-			// The cold form, confirmed: the divergence still needs its
-			// gtidPrefix interlock.
+			return submitAndExpectRejection(ctx, env, site, "must be confirmed")
+		},
+	}
+}
+
+// verifyRecloneRejectedColdForm submits the confirmed cold form
+// (<site>:confirm=<fg>:uid=<uid>, no gtidPrefix=), which must be rejected
+// with RecloneRejected because the site has a recorded divergence, and
+// the annotation cleared.
+func verifyRecloneRejectedColdForm() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseVerify,
+		Name:  "sub-case A (cold form): confirmed value without gtidPrefix is rejected against divergent site",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			site := ctxFetch(env, "divergentSite")
+			// Confirmed, but the divergence still needs its gtidPrefix
+			// interlock.
 			value, err := recloneValueForCold(ctx, env, site)
 			if err != nil {
 				return err
@@ -377,7 +394,7 @@ func verifyRecloneAcceptedMatching() runner.Step {
 						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 						if s.DivergentGtid != "" {

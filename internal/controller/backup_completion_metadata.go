@@ -22,7 +22,13 @@ const (
 	maxCompletionMetadataWait = 10 * time.Minute
 )
 
-var errBackupDestinationUnavailable = errors.New("backup completed without a recoverable destination")
+var (
+	errBackupDestinationUnavailable = errors.New("backup completed without a recoverable destination")
+	// errBackupDestinationMismatch: the producing Job wrote somewhere other
+	// than the destination recorded at launch, so its artifact is not the
+	// one status.artifactStorage names and success is never certified.
+	errBackupDestinationMismatch = errors.New("the producing Job did not write to the recorded artifact destination")
+)
 
 // backupJobMainContainer excludes the encrypted Job's staging init container.
 func backupJobMainContainer(job *batchv1.Job) *corev1.Container {
@@ -52,15 +58,25 @@ func completionMetadataRetryable(status *v1alpha1.MysqlBackupStatus) bool {
 func (r *MysqlBackupReconciler) collectBackupCompletion(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job, next *v1alpha1.MysqlBackupStatus) (ctrl.Result, error) {
 	// The destination is the one recorded when the Job was created, or,
 	// when that status write was lost, the one the Job names. The Job's
-	// completion log never supplies it: it is cross-checked below.
+	// completion log never supplies it: it is cross-checked below. A
+	// recorded destination is certified only if this Job wrote to it: a
+	// replacement Job built after a profile edit writes elsewhere.
+	recovered := false
 	if next.ArtifactStorage == nil || next.ArtifactStorage.Location == "" {
 		storage, err := artifactStorageFromJob(job)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("%w: %v", errBackupDestinationUnavailable, err)
 		}
 		next.ArtifactStorage = storage
+		recovered = true
+	} else if problem := producerStorageProblem(next.ArtifactStorage, job); problem != "" {
+		return ctrl.Result{}, fmt.Errorf("%w: %s", errBackupDestinationMismatch, problem)
 	}
 	location := next.ArtifactStorage.Location
+	source := "recorded at launch"
+	if recovered {
+		source = "recovered from the producing Job"
+	}
 	meta, found, logErr := r.tailJobCompletion(ctx, backup, job)
 	if found {
 		if meta.Size != "" {
@@ -88,15 +104,15 @@ func (r *MysqlBackupReconciler) collectBackupCompletion(ctx context.Context, bac
 	case logErr != nil:
 		condition.Status = metav1.ConditionFalse
 		condition.Reason = v1alpha1.ReasonSentinelUnavailable
-		condition.Message = "completion logs unavailable; artifact destination recovered from Job inputs"
+		condition.Message = "completion logs unavailable; using the artifact destination " + source
 	case !found || meta.Location == "":
 		condition.Status = metav1.ConditionFalse
 		condition.Reason = v1alpha1.ReasonSentinelMissing
-		condition.Message = "completion sentinel missing or incomplete; artifact destination recovered from Job inputs"
+		condition.Message = "completion sentinel missing or incomplete; using the artifact destination " + source
 	case meta.Location != location:
 		condition.Status = metav1.ConditionFalse
 		condition.Reason = v1alpha1.ReasonLocationMismatch
-		condition.Message = "completion location differs from producing Job; using the Job destination"
+		condition.Message = "completion location differs from the producing Job's destination; using the artifact destination " + source
 	}
 	setCondition(&next.Conditions, condition)
 	if r.Clientset != nil && completionMetadataRetryable(next) {

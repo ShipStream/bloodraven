@@ -114,6 +114,12 @@ type UpdateTarget struct {
 	// the pod-readiness gate off for this site; production always sets
 	// it together with ApplyUpdate.
 	PodReady func(context.Context) (PodReadiness, error)
+	// SelectorRefused is true when the site's Deployment is refused for
+	// its selector (workload_selector.go): the operator cannot update it,
+	// so it is never drift, but what template it runs is unknown. It is
+	// never taken as running the current template and never chosen as the
+	// handoff target.
+	SelectorRefused bool
 	// HandoffBlocked, when set, reports the site's handoff eligibility
 	// (keyring rotation, pending reclone, divergence) at the moment the
 	// handoff target is chosen. The flags above are a snapshot taken when
@@ -358,9 +364,13 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		processedFollowers[name] = struct{}{}
 	}
 	var handoff *UpdateTarget
-	var rotatingStandby, pendingStandby, divergentStandby, liveBlocked []string
+	var rotatingStandby, pendingStandby, divergentStandby, liveBlocked, refusedStandby []string
 	for i := range followers {
 		if !followers[i].Promotable {
+			continue
+		}
+		if followers[i].SelectorRefused {
+			refusedStandby = append(refusedStandby, followers[i].Name)
 			continue
 		}
 		if followers[i].RotationBlocked {
@@ -403,6 +413,9 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		}
 		if len(liveBlocked) > 0 {
 			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s", strings.Join(liveBlocked, "; "))
+		}
+		if len(refusedStandby) > 0 {
+			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: the Deployment of %s is refused for its selector (WorkloadSelectorMismatch); delete it and the operator re-creates it", strings.Join(refusedStandby, ", "))
 		}
 		return processed, fmt.Errorf("no healthy promotable standby available for active-site update")
 	}
@@ -721,14 +734,16 @@ func (u *UpdateController) probePod(ctx context.Context, target UpdateTarget) (P
 }
 
 // sitesOnTemplate returns the sites that already run the new pod template
-// when an update starts: those without spec drift.
+// when an update starts: those without spec drift whose Deployment is not
+// refused for its selector (a refused one has no drift only because it
+// cannot be updated).
 func sitesOnTemplate(active UpdateTarget, followers []UpdateTarget) []UpdateTarget {
 	var sites []UpdateTarget
-	if !active.Drifted {
+	if !active.Drifted && !active.SelectorRefused {
 		sites = append(sites, active)
 	}
 	for _, f := range followers {
-		if !f.Drifted {
+		if !f.Drifted && !f.SelectorRefused {
 			sites = append(sites, f)
 		}
 	}

@@ -116,7 +116,7 @@ func TestOrderedUpdate_HandoffPromotesOnlyAfterStandbyHasFencedSourceGTIDs(t *te
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if got := tm.Status().PromotionGtidExecuted; got != handoffFenced {
+	if got := tm.Status().PromotionGtidExecuted(); got != handoffFenced {
 		t.Fatalf("PromotionGtidExecuted = %q, want %q: the standby was promoted without the source's 91-100", got, handoffFenced)
 	}
 	if iad.isReadOnly() {

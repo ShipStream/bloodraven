@@ -445,11 +445,12 @@ func (r *MysqlFailoverGroupReconciler) setCredentialAnnotation(ctx context.Conte
 		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &fresh); err != nil {
 			return err
 		}
+		base := fresh.DeepCopy()
 		if fresh.Annotations == nil {
 			fresh.Annotations = make(map[string]string)
 		}
 		fresh.Annotations[key] = hash
-		return r.Update(ctx, &fresh)
+		return r.Patch(ctx, &fresh, metadataPatch(base))
 	})
 }
 

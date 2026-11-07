@@ -361,3 +361,75 @@ func backtickList(vs []string) string {
 	}
 	return strings.Join(out, ", ")
 }
+
+// TestDeployAPIDoc423Reasons pins the "423 refusal reasons" table of
+// 11.deployment-api.md: it lists exactly the constant reasons of the 423
+// lease refusals sent with retryAfterSeconds that the group response
+// never serves as unstableReason. A 423 without retryAfterSeconds must
+// carry a Degraded reason (the unstableReason of a True Degraded
+// condition), which the Token values table already lists.
+func TestDeployAPIDoc423Reasons(t *testing.T) {
+	a, _ := analysed(t)
+	reg := newRegistry(t, a)
+	unstable := deployTokenSets(t, a, reg)["unstableReason"].values
+	degraded := conditionReasonsOf(t, a, "Degraded", metav1.ConditionTrue)
+	transient := map[string]bool{}
+	found := false
+	for _, p := range a.pkgs {
+		if p.PkgPath != modulePath+"/internal/controller" {
+			continue
+		}
+		for _, f := range p.Syntax {
+			ast.Inspect(f, func(n ast.Node) bool {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok || namedPath(p.TypesInfo.Types[lit].Type) != modulePath+"/internal/controller.DeploymentLeaseError" {
+					return true
+				}
+				fields := map[string]ast.Expr{}
+				for _, elt := range lit.Elts {
+					if kv, ok := elt.(*ast.KeyValueExpr); ok {
+						if id, ok := kv.Key.(*ast.Ident); ok {
+							fields[id.Name] = kv.Value
+						}
+					}
+				}
+				st := fields["Status"]
+				if st == nil {
+					return true
+				}
+				if tv := p.TypesInfo.Types[st]; tv.Value == nil || tv.Value.ExactString() != "423" {
+					return true
+				}
+				found = true
+				reason := fields["Reason"]
+				if reason == nil {
+					t.Errorf("%s: a 423 refusal without a reason", a.pos(lit.Pos()))
+					return true
+				}
+				tv := p.TypesInfo.Types[reason]
+				if tv.Value == nil || tv.Value.Kind() != constant.String {
+					return true // an unstableReason passed through (UnstableReason, the planned-operation slot)
+				}
+				v := constant.StringVal(tv.Value)
+				if fields["RetryAfterSeconds"] == nil {
+					if !degraded[v] && !unstable[v] {
+						t.Errorf("%s: 423 reason %q has no retryAfterSeconds and is not a Degraded or unstableReason value", a.pos(lit.Pos()), v)
+					}
+					return true
+				}
+				if !unstable[v] {
+					transient[v] = true
+				}
+				return true
+			})
+		}
+	}
+	if !found {
+		t.Fatal("no 423 DeploymentLeaseError literal found in internal/controller; update this test")
+	}
+	want := sortedKeys(transient)
+	got := sortedKeys(docTable(t, "423 refusal reasons"))
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("423 refusal reasons: documented %v, want %s", got, backtickList(want))
+	}
+}

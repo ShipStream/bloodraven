@@ -842,9 +842,10 @@ func (r *TopologyManagerRunner) removeRecloneAnnotationForSite(ctx context.Conte
 		if expectedSite != "" && parseRecloneAnnotation(annotations[v1alpha1.RecloneAnnotation]).Site != expectedSite {
 			return fmt.Errorf("reclone annotation changed before start")
 		}
+		base := fresh.DeepCopy()
 		delete(annotations, v1alpha1.RecloneAnnotation)
 		fresh.SetAnnotations(annotations)
-		return r.client.Update(ctx, &fresh)
+		return r.client.Patch(ctx, &fresh, metadataPatch(base))
 	})
 }
 
@@ -873,7 +874,7 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 		return
 	}
 
-	driftSites, ok := r.specDriftSites(ctx, r.client, fg)
+	driftSites, refused, ok := r.specDriftView(ctx, r.client, fg)
 	if !ok {
 		return
 	}
@@ -883,13 +884,14 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 			r.logger.Warn("failed to confirm spec drift with an uncached read; preserving current drift set", "error", err)
 			return
 		}
-		confirmed, ok := r.specDriftSites(ctx, r.apiReader, &fresh)
+		confirmed, confirmedRefused, ok := r.specDriftView(ctx, r.apiReader, &fresh)
 		if !ok {
 			return
 		}
-		driftSites = confirmed
+		driftSites, refused = confirmed, confirmedRefused
 	}
 
+	tm.SetSpecRefusedSites(refused)
 	tm.SetSpecDriftSites(driftSites)
 }
 
@@ -897,6 +899,22 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 // reader) carries a spec hash other than the desired one, or ok=false when
 // an input could not be read (the caller keeps the current set).
 func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) ([]string, bool) {
+	drift, _, ok := r.specDriftView(ctx, reader, fg)
+	return drift, ok
+}
+
+// specDriftView is specDriftSites plus the sites whose Deployment is
+// refused for its selector: those are never drift, and never evidence
+// that a site runs the current template either.
+func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (drift, refused []string, ok bool) {
+	// With no sidecar image to render (no pin and no operator default)
+	// every site would hash as drift the render then refuses to apply,
+	// and the ordered updater would retry it for ever. Keep the current
+	// set; the reconcile reports the refusal.
+	if _, err := effectiveSidecarImage(fg); err != nil {
+		r.logger.Warn("cannot render the group's Deployments; preserving current drift set", "fg", client.ObjectKeyFromObject(fg), "error", err)
+		return nil, nil, false
+	}
 	// The reconciler creates the digest key before the first Deployment;
 	// until it exists no live hash can match, so keep the current set.
 	digestKey, err := readDigestKey(ctx, reader, fg)
@@ -904,18 +922,18 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 		if err != errDigestKeyMissing {
 			r.logger.Warn("failed to read secret digest key; preserving current drift set", "error", err)
 		}
-		return nil, false
+		return nil, nil, false
 	}
 	secretInputs, err := specSecretInputs(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to read spec secrets; preserving current drift set", "error", err)
-		return nil, false
+		return nil, nil, false
 	}
 	secretDigest := secretContentDigest(digestKey, secretInputs)
 	deploys, err := listPITRSiteDeployments(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to list site deployments; preserving current drift set", "error", err)
-		return nil, false
+		return nil, nil, false
 	}
 	pitr, action := resolvePITRRender(fg, deploys)
 	byName := make(map[string]*appsv1.Deployment, len(deploys))
@@ -923,7 +941,6 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 		byName[deploys[i].Name] = &deploys[i]
 	}
 
-	var driftSites []string
 	for _, site := range fg.Spec.Sites {
 		deploy, found := byName[resourceName(fg.Name, site.Name)]
 		if !found {
@@ -936,7 +953,7 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 					continue // Deployment doesn't exist yet — reconciler will create it
 				}
 				r.logger.Warn("failed to inspect deployment spec drift; preserving current drift set", "site", site.Name, "error", err)
-				return nil, false
+				return nil, nil, false
 			}
 			deploy = &d
 		}
@@ -947,6 +964,7 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 		// updated (workload_selector.go): it is not drift the ordered
 		// updater could roll.
 		if deploymentSelectorMismatch(deploy, fg, site.Name) != nil {
+			refused = append(refused, site.Name)
 			continue
 		}
 		// The render annotation is repaired on its own (U08): with a
@@ -955,10 +973,10 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 		// hash matches.
 		if deploy.Annotations[v1alpha1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
 			deploy.Annotations[v1alpha1.PITRRenderAnnotation] != pitr.Canonical() {
-			driftSites = append(driftSites, site.Name)
+			drift = append(drift, site.Name)
 		}
 	}
-	return driftSites, true
+	return drift, refused, true
 }
 
 // startManager creates and starts a TopologyManager for a single
@@ -978,12 +996,8 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// unreachable; fail the start instead, so the group gets a
 	// TopologyManagerStartFailed Warning naming the Secret.
 	for _, key := range []string{"username", "password"} {
-		v, ok := secret.Data[key]
-		if !ok {
-			return fmt.Errorf("operator secret %s missing %q key", secretNN, key)
-		}
-		if len(v) == 0 {
-			return fmt.Errorf("operator secret %s has an empty value for key %q", secretNN, key)
+		if problem := credentialKeyProblem(secret.Data, key, true); problem != "" {
+			return fmt.Errorf("operator secret %s %s %q", secretNN, problem, key)
 		}
 	}
 
@@ -1669,6 +1683,12 @@ func (r *TopologyManagerRunner) SetManagerForTest(nn types.NamespacedName, tm *T
 	r.managers[nn] = &managedTopology{tm: tm}
 }
 
+// RemoveRecloneAnnotationForTest removes the group's reclone annotation
+// the way a started reclone does. Not for production use.
+func (r *TopologyManagerRunner) RemoveRecloneAnnotationForTest(ctx context.Context, nn types.NamespacedName, expectedSite string) error {
+	return r.removeRecloneAnnotationForSite(ctx, nn, expectedSite)
+}
+
 // WriteStatusForTest writes snap to the CR status the way a running
 // manager's status callback does. Not for production use.
 func (r *TopologyManagerRunner) WriteStatusForTest(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) error {
@@ -1975,6 +1995,8 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			})
 		}
 	}
+	// A refusal the reasons above outrank still shows, with its remedy.
+	r.appendRefusalDetail(&freshFG.Status.Conditions, nn)
 
 	// A promotion of a divergent site is recorded once and kept until an
 	// administrator removes the condition after reviewing the transactions.
@@ -2110,6 +2132,16 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			r.hydrateDeploymentGeneration(&fresh)
 			return nil
 		}
+		// A write at the same topology generation that already published
+		// a newer applied generation (a later callback that won the race
+		// to the API server) is newer than this one: its conditions are
+		// stamped with that generation, and replacing them with this
+		// write's would move observedGeneration back with nothing left to
+		// rewrite it (K017).
+		if fresh.Status.TopologyGeneration == snap.TopologyGeneration && fresh.Status.ObservedGeneration > freshFG.Status.ObservedGeneration {
+			superseded = true
+			return nil
+		}
 		// Apply status changes to the freshly-fetched object.
 		//
 		// freshFG.Status is a snapshot taken before this function started
@@ -2163,6 +2195,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// not be replaced by freshFG's pre-merged copy.
 		live := fresh.Status
 		fresh.Status = *freshFG.Status.DeepCopy()
+		fresh.Status.ObservedGeneration = max(live.ObservedGeneration, fresh.Status.ObservedGeneration)
 		fresh.Status.LastFailover = live.LastFailover
 		mergeFailoverTriple(&fresh.Status, snap)
 		if !newDivergentPromotion {
@@ -2236,7 +2269,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 // MergeTopologySnapshotStatus merges the topology manager's snapshot into
 // st: observedGeneration (never backwards), the active site,
 // topologyGeneration, the per-site observations and
-// recovery fields, the failover record {lastFailover, lastFailoverTarget,
+// recovery fields, the failover record status.lastFailover {time, target,
 // promotionGtidExecuted} and updatePhase. It returns false, leaving st
 // untouched, when the snapshot is older than the stored topologyGeneration.
 // Conditions and the subtrees other writers own are not touched.
@@ -2518,7 +2551,7 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		// or the periodic re-verification found the divergent set has CHANGED
 		// while the site stayed blocked (it respawned writable, took writes,
 		// and was re-fenced). Re-emitting on a changed count keeps the Event
-		// stream in step with status.divergentTransactionCount — an admin who
+		// stream in step with status.sites[].divergentTransactionCount — an admin who
 		// extracts only the first-reported set would lose the rest. An
 		// unchanged count is not re-emitted, and a status that never recorded
 		// a count is treated as unchanged rather than as a new report.

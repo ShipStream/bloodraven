@@ -150,7 +150,7 @@ cmd_dragonfly_status() {
   # after the first restart, which silently shifts every column to the
   # right and makes positional parsing print things like "site=ago)".
   kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=dragonfly \
-    -o "custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,SITE:.metadata.labels['shipstream\.io/site'],ROLE:.metadata.labels['shipstream\.io/dragonfly-role'],TRAFFIC:.metadata.labels['shipstream\.io/dragonfly-traffic']" \
+    -o "custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,SITE:.metadata.labels['bloodraven\.shipstream\.io/site'],ROLE:.metadata.labels['bloodraven\.shipstream\.io/dragonfly-role'],TRAFFIC:.metadata.labels['bloodraven\.shipstream\.io/dragonfly-traffic']" \
     --no-headers 2>/dev/null \
     | awk '{printf "  %-32s ready=%-5s site=%-4s role=%-8s traffic=%s\n", $1, $2, $3, $4, $5}'
 

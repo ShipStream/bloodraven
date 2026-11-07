@@ -432,7 +432,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 		applyRestoreMetadataToInPlaceStatus(next, r.restoreSourceMetadata(ctx, fg, spec.Source))
 		r.setInPlaceRestoreStatus(ctx, fg, next)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceStarted,
-			"starting in-place restore (scope=%s, confirm=%s)", scope, spec.Confirm)
+			"starting in-place restore (scope=%s, confirm=%s)", restoreScopeString(scope), spec.Confirm)
 		return 5 * time.Second, nil
 	}
 
@@ -905,7 +905,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		r.setInPlaceRestoreStatus(ctx, fg, next)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceJobCreated,
 			"created in-place restore Job %s targeting site %s (scope=%s)",
-			built.Name, target, cur.Scope)
+			built.Name, target, restoreScopeString(cur.Scope))
 		return 15 * time.Second, nil
 	}
 
@@ -1096,7 +1096,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *
 	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 	r.setInPlaceRestoreStatus(ctx, fg, next)
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceSucceeded,
-		"in-place restore complete (scope=%s, site=%s)", cur.Scope, target)
+		"in-place restore complete (scope=%s, site=%s)", restoreScopeString(cur.Scope), target)
 	return 0, nil
 }
 

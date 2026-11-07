@@ -1243,6 +1243,13 @@ func mergeEncryptionStatus(desired, latest *v1alpha1.EncryptionAtRestStatus) *v1
 	return out
 }
 
+// ClearRotateAnnotationForTest removes the group's rotate-keyring
+// annotation the way a handled rotation request does. Not for production
+// use.
+func (r *MysqlFailoverGroupReconciler) ClearRotateAnnotationForTest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	return r.clearRotateAnnotation(ctx, fg)
+}
+
 func (r *MysqlFailoverGroupReconciler) clearRotateAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var latest v1alpha1.MysqlFailoverGroup
@@ -1254,7 +1261,8 @@ func (r *MysqlFailoverGroupReconciler) clearRotateAnnotation(ctx context.Context
 		if _, ok := latest.Annotations[v1alpha1.RotateKeyringAnnotation]; !ok {
 			return nil
 		}
+		base := latest.DeepCopy()
 		delete(latest.Annotations, v1alpha1.RotateKeyringAnnotation)
-		return r.Update(ctx, &latest)
+		return r.Patch(ctx, &latest, metadataPatch(base))
 	})
 }

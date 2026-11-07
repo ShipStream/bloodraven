@@ -30,7 +30,7 @@ func TestFailover_CompactTaggedGTIDCandidateIsPromoted(t *testing.T) {
 	if got := h.dns.getLastIP(); got != "2.2.2.2" {
 		t.Errorf("DNS = %q, want 2.2.2.2 after promotion", got)
 	}
-	if got := h.tm.Status().PromotionGtidExecuted; got != gtid {
+	if got := h.tm.Status().PromotionGtidExecuted(); got != gtid {
 		t.Errorf("PromotionGtidExecuted = %q, want %q", got, gtid)
 	}
 }

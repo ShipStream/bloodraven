@@ -42,3 +42,16 @@ func TestScheduledVerificationKeepsTTLPresence(t *testing.T) {
 		})
 	}
 }
+
+// TestScheduledVerificationCarriesScheduleLabel: a scheduled verification
+// carries the verification-schedule label with the value its CronJob has
+// (the profile name), so the documented selector finds scheduled runs.
+func TestScheduledVerificationCarriesScheduleLabel(t *testing.T) {
+	fg := &v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Backup: &v1alpha1.BackupSpec{
+		Profiles: []v1alpha1.BackupProfile{{Name: "nightly", Verification: &v1alpha1.VerificationSpec{Enabled: true}}},
+	}}}
+	cr := buildScheduledVerification(fg, "orders", "nightly", "ns")
+	if got := cr.Labels[v1alpha1.VerificationScheduleLabel]; got != "nightly" {
+		t.Fatalf("%s = %q, want the profile name %q", v1alpha1.VerificationScheduleLabel, got, "nightly")
+	}
+}

@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -492,21 +490,12 @@ func s31Cleanup(ctx context.Context, env *runner.Env) error {
 		errs = append(errs, err)
 	}
 	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s31 cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		ready := false
-		for _, c := range mfg.Status.Conditions {
-			if c.Type == v1alpha1.ConditionReady {
-				ready = c.Status == metav1.ConditionTrue
-			}
-		}
 		wantPITR, wantProfile, err := originalPITRExpected(env)
 		if err != nil {
 			return false, "", err
 		}
-		pitrRestored := !wantPITR && pitrSpecProfile(mfg) == ""
-		if wantPITR {
-			pitrRestored = pitrSpecProfile(mfg) == wantProfile && mfg.Status.PITR != nil
-		}
-		return ready && mfg.Status.ActiveSite != "" && mfg.Status.UpdatePhase == "" && pitrRestored, fmt.Sprintf("ready=%v active=%q updatePhase=%q pitrRestored=%v wantPITR=%v wantProfile=%q pitr=%v", ready, mfg.Status.ActiveSite, mfg.Status.UpdatePhase, pitrRestored, wantPITR, wantProfile, mfg.Status.PITR), nil
+		done, msg := pitrBaselineRestored(mfg, wantPITR, wantProfile)
+		return done, msg, nil
 	}); err != nil {
 		errs = append(errs, err)
 	} else if prefix := ctxFetch(env, "backupPrefix"); prefix != "" {

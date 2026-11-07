@@ -596,7 +596,7 @@ func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 // TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed keeps the no-credential
 // -in-status rule honest at the API boundary. The group exists and names an
 // active site that does not resolve to a promotable site, so the reconciler
-// reads the owner Secret, validates it, stamps Creating and then fails the
+// reads the owner Secret, validates it, stamps Applying and then fails the
 // admin connection *before* dialing — every status-writing path that could
 // echo Secret bytes executes, while the no-dial invariant still holds.
 // Without the group, reconciliation would stop at Pending(GroupNotYetCreated)

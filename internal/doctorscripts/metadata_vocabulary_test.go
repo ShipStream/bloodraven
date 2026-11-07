@@ -17,8 +17,11 @@ import (
 
 // oldPrefixJSONPath matches a kubectl JSONPath that reads a label or
 // annotation under the bare shipstream.io/ prefix, which no key the
-// operator writes uses any more (every key is under bloodraven.shipstream.io/).
-var oldPrefixJSONPath = regexp.MustCompile(`\.(annotations|labels)\.shipstream\\\.io/`)
+// operator writes uses any more (every key is under bloodraven.shipstream.io/):
+// the dotted form (.labels.shipstream\.io/<key>, with the dot escaped once
+// or, inside a double-quoted shell string, twice) and the bracket form
+// (.labels['shipstream\.io/<key>']).
+var oldPrefixJSONPath = regexp.MustCompile(`(\.(annotations|labels)\.|\[['"])shipstream\\+\.io/`)
 
 // jsonPathKey is how the doctor scripts spell a metadata key inside a
 // kubectl custom-columns JSONPath: dots escaped.
@@ -70,6 +73,52 @@ func TestDoctorScriptsReadKeysAtBloodravenPrefix(t *testing.T) {
 			if !strings.Contains(body, p) {
 				t.Errorf("%s does not read %s", name, p)
 			}
+		}
+	}
+}
+
+// TestPlaygroundScriptsReadKeysAtBloodravenPrefix applies the same check to
+// the playground's shell scripts, whose status reports read pod and Secret
+// labels through custom-columns the same way.
+func TestPlaygroundScriptsReadKeysAtBloodravenPrefix(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	scripts, err := filepath.Glob(filepath.Join(filepath.Dir(file), "..", "..", "playground", "*.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scripts) == 0 {
+		t.Fatal("no playground scripts found")
+	}
+	for _, path := range scripts {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if m := oldPrefixJSONPath.FindString(line); m != "" {
+				t.Errorf("playground/%s:%d reads a key at the old shipstream.io/ prefix (%q); the operator writes it under bloodraven.shipstream.io/", filepath.Base(path), i+1, m)
+			}
+		}
+	}
+}
+
+// TestOldPrefixJSONPathForms pins the forms oldPrefixJSONPath catches and
+// that the new prefix is not mistaken for the old one.
+func TestOldPrefixJSONPathForms(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{`SITE:.metadata.labels.shipstream\.io/site`, true},
+		{`SITE:.metadata.labels.shipstream\\.io/site`, true},
+		{`SITE:.metadata.labels['shipstream\.io/site']`, true},
+		{`.metadata.annotations["shipstream\.io/x"]`, true},
+		{`SITE:.metadata.labels.bloodraven\.shipstream\.io/site`, false},
+		{`SITE:.metadata.labels.bloodraven\\.shipstream\\.io/site`, false},
+		{`SITE:.metadata.labels['bloodraven\.shipstream\.io/site']`, false},
+	} {
+		if got := oldPrefixJSONPath.MatchString(tc.line); got != tc.want {
+			t.Errorf("oldPrefixJSONPath.MatchString(%q) = %v, want %v", tc.line, got, tc.want)
 		}
 	}
 }

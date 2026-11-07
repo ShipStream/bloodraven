@@ -133,7 +133,7 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		return fmt.Errorf("baseline unhealthy: no active site (run ./playground/setup.sh)")
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.RecoveryState == "RecoveryBlocked" {
+		if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 			return fmt.Errorf("baseline unhealthy: site %s has RecoveryBlocked — run ./playground/reset-mysql.sh and retry", s.Name)
 		}
 		if s.State == "" || s.State == v1alpha1.SiteStateUnknown || s.State == v1alpha1.SiteStateUnreachable {
@@ -378,8 +378,6 @@ func emptyAsNone(s string) string {
 	return s
 }
 
-// lastIOString renders status.dragonfly.sites[].lastIOSecondsAgo; "unset"
-// when Dragonfly did not report it.
 // pitrSpecProfile is spec.backup.pitr.profileName while PITR is enabled,
 // else "". Status no longer echoes either.
 func pitrSpecProfile(mfg *v1alpha1.MysqlFailoverGroup) string {
@@ -419,6 +417,8 @@ func optionalBoolString(v *bool) string {
 	return fmt.Sprint(*v)
 }
 
+// lastIOString renders status.dragonfly.sites[].lastIOSecondsAgo; "unset"
+// when Dragonfly did not report it.
 func lastIOString(v *int64) string {
 	if v == nil {
 		return "unset"

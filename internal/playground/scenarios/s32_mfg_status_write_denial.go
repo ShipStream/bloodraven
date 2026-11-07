@@ -153,7 +153,7 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 							msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q promotionGtid=%q ready=%s",
 								mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), truncGtid(mfg.Status.PromotionGtidExecuted()), readyOf(mfg))
 							for _, s := range mfg.Status.Sites {
-								if s.RecoveryState == "RecoveryBlocked" {
+								if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 									return false, msg, fmt.Errorf("site %s RecoveryBlocked during status heal", s.Name)
 								}
 							}
@@ -193,11 +193,11 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 							}
 							msg := fmt.Sprintf("old=%s state=%s replication=%s recovery=%q ready=%s",
 								old.Name, old.State, old.Replication, old.RecoveryState, readyOf(mfg))
-							if old.RecoveryState == "RecoveryBlocked" {
+							if old.RecoveryState == v1alpha1.RecoveryStateBlocked {
 								return false, msg, fmt.Errorf("old primary %s RecoveryBlocked", activeSite)
 							}
 							healthyReplica := old.State == v1alpha1.SiteStateReadOnly && old.Replication.Running() && readyOf(mfg) == "True"
-							recovering := old.RecoveryState == "RecoveryInProgress"
+							recovering := old.RecoveryState == v1alpha1.RecoveryStateInProgress
 							return healthyReplica || recovering, msg, nil
 						})
 					return err

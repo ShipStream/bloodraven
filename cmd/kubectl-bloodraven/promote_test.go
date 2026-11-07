@@ -11,10 +11,11 @@ import (
 )
 
 func TestBuildPlannedFailoverValue(t *testing.T) {
+	dur := func(d time.Duration) *time.Duration { return &d }
 	tests := []struct {
 		name        string
 		site        string
-		maxLag      time.Duration
+		maxLag      *time.Duration
 		want        string
 		wantErr     bool
 		wantErrText string
@@ -27,14 +28,54 @@ func TestBuildPlannedFailoverValue(t *testing.T) {
 		{
 			name:   "maxLagWait override only",
 			site:   "pdx",
-			maxLag: 30 * time.Second,
+			maxLag: dur(30 * time.Second),
 			want:   "pdx:maxLagWait=30s",
 		},
 		{
-			name:   "sub-millisecond override stays in the annotation charset",
+			name:   "lower bound is accepted",
 			site:   "pdx",
-			maxLag: 1500 * time.Nanosecond,
-			want:   "pdx:maxLagWait=1500ns",
+			maxLag: dur(v1alpha1.PlannedFailoverMaxLagWaitMin),
+			want:   "pdx:maxLagWait=1s",
+		},
+		{
+			name:   "upper bound is accepted and parses back",
+			site:   "pdx",
+			maxLag: dur(v1alpha1.PlannedFailoverMaxLagWaitMax),
+			want:   "pdx:maxLagWait=1h0m0s",
+		},
+		{
+			name:   "fractional seconds stay in the annotation charset",
+			site:   "pdx",
+			maxLag: dur(1500 * time.Millisecond),
+			want:   "pdx:maxLagWait=1.5s",
+		},
+		{
+			name:        "below the lower bound is refused",
+			site:        "pdx",
+			maxLag:      dur(500 * time.Millisecond),
+			wantErr:     true,
+			wantErrText: "--max-lag-wait must be between",
+		},
+		{
+			name:        "above the upper bound is refused",
+			site:        "pdx",
+			maxLag:      dur(2 * time.Hour),
+			wantErr:     true,
+			wantErrText: "--max-lag-wait must be between",
+		},
+		{
+			name:        "an explicit zero is refused, not dropped",
+			site:        "pdx",
+			maxLag:      dur(0),
+			wantErr:     true,
+			wantErrText: "--max-lag-wait must be between",
+		},
+		{
+			name:        "a negative override is refused, not dropped",
+			site:        "pdx",
+			maxLag:      dur(-time.Second),
+			wantErr:     true,
+			wantErrText: "--max-lag-wait must be between",
 		},
 		{
 			name:        "empty site is rejected",
@@ -60,6 +101,12 @@ func TestBuildPlannedFailoverValue(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("value = %q, want %q", got, tc.want)
+			}
+			// The written value parses back to the requested duration.
+			if _, raw, ok := strings.Cut(got, ":maxLagWait="); ok {
+				if d, err := time.ParseDuration(raw); err != nil || d != *tc.maxLag {
+					t.Fatalf("maxLagWait=%q parses to %v, %v; want %v", raw, d, err, *tc.maxLag)
+				}
 			}
 		})
 	}

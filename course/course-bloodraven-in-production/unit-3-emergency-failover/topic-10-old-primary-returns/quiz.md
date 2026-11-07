@@ -24,7 +24,7 @@ The test is one-directional: does the NEW primary's set contain the OLD primary'
 
 **Type:** MULTIPLE_CHOICE
 
-`iad` is `RecoveryBlocked` and its `divergentGtid` begins `589f4b67`. You run `kubectl annotate mfg playground bloodraven.shipstream.io/reclone-site=iad:confirm=playground:uid=$UID:gtidPrefix=589f4b`, with `$UID` the group's `metadata.uid`. What happens?
+`iad` is `RecoveryBlocked` and its `divergentGtid` begins `589f4b67`. You run `kubectl annotate mfg playground bloodraven.shipstream.io/reclone-site=iad:confirm=playground:uid=$GROUP_UID:gtidPrefix=589f4b`, with `$GROUP_UID` the group's `metadata.uid`. What happens?
 
 - The reclone starts — `589f4b` is a correct prefix of the observed set, and the 8-character figure is only a hint printed in the error message.
 - Nothing happens until the next 30 s re-verification, which re-reads the annotation and accepts it.

@@ -1060,7 +1060,7 @@ func (p *runnerPlannedTopology) ApplyDNS(ctx context.Context, ref PlannedRunRef)
 // could not be confirmed as lastFailoverTarget in the manager's memory only
 // (OPEN-1): no lastFailover and no promotedSite, so emergency failover to
 // the fenced source is not cooldown-blocked. The name reaches
-// status.lastFailoverTarget through the next snapshot write.
+// status.lastFailover.target through the next snapshot write.
 func (p *runnerPlannedTopology) NameUnconfirmedTarget(ref PlannedRunRef) error {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
@@ -1081,7 +1081,7 @@ func (tm *TopologyManager) namePlannedTargetUnconfirmed(target string) {
 	// The retry replays statusRetrySnapshot, which refreshes the failover
 	// record only after a topology-generation bump; a name-only target (no
 	// generation bump when read_only=OFF was never sent) must reach
-	// status.lastFailoverTarget all the same.
+	// status.lastFailover.target all the same.
 	if tm.statusRetrySnapshot != nil {
 		snap := *tm.statusRetrySnapshot
 		snap.LastFailoverTarget = target

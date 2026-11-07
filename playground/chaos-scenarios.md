@@ -511,23 +511,26 @@ FG=playground
 # Identify the divergent site from scenario 8's aftermath.
 SITE=$(kubectl -n $NS get mfg $FG -o jsonpath='{range .status.sites[?(@.recoveryState=="RecoveryBlocked")]}{.name}{end}')
 DG=$(kubectl -n $NS get mfg $FG -o jsonpath="{.status.sites[?(@.name==\"$SITE\")].divergentGtid}")
-UID=$(kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.uid}')
-echo "divergent site=$SITE gtid=$DG uid=$UID"
+GROUP_UID=$(kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.uid}')
+echo "divergent site=$SITE gtid=$DG uid=$GROUP_UID"
 
-# --- A) Rejected: the confirmed cold form against a divergent site ---
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$UID
+# --- A) Rejected: a bare site, then the confirmed cold form against a divergent site ---
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE
+sleep 5
+kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -3
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$GROUP_UID
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -5
 kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/reclone-site}'; echo
 
 # --- B) Rejected: mismatched GTID prefix ---
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$UID:gtidPrefix=deadbeef
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$GROUP_UID:gtidPrefix=deadbeef
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -5
 
 # --- C) Accepted: matching 8-char prefix of divergentGtid's source UUID ---
 PREFIX=$(echo -n "$DG" | cut -c1-8)
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$UID:gtidPrefix=$PREFIX
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$GROUP_UID:gtidPrefix=$PREFIX
 # Watch for RecloneRequested and the Bootstrapping condition entering Cloning.
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp -w &
 EVENT_WATCH_PID=$!
@@ -537,7 +540,7 @@ kill $EVENT_WATCH_PID 2>/dev/null
 # --- D) Cold reclone still works (no divergence) ---
 # After sub-case C completes the site has rejoined as replica and no longer
 # has divergentGtid in status. The cold form (no gtidPrefix) is accepted.
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$UID
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$GROUP_UID
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -3
 ```
@@ -546,7 +549,7 @@ kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.la
 
 | Sub-case | Expected outcome |
 |---|---|
-| A. cold form, divergent | `RecloneRejected` Warning event saying the value must include `gtidPrefix=` and printing the full form (`…:confirm=<group>:uid=<uid>:gtidPrefix=<prefix>`); annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
+| A. bare site, then cold form, divergent | The bare `<site>`: a `RecloneRejected` Warning event saying the value must be confirmed; annotation removed. The cold form: a `RecloneRejected` Warning event saying the value must include `gtidPrefix=` and printing the full form (`…:confirm=<group>:uid=<uid>:gtidPrefix=<prefix>`); annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
 | B. mismatched prefix | `RecloneRejected` Warning event with "does not match the observed divergentGtid" text; annotation removed; site still fenced; no clone executed. |
 | C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` (`True`) and returns to `False`/`NotBootstrapping`, with the recloned site replicating; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
 | D. cold form | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms the non-divergent case needs no `gtidPrefix`. |

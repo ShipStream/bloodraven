@@ -27,7 +27,7 @@ whether the dump loads cleanly.
 Flags:
   --profile string       backup profile name (required)
   --backup string        pin to a specific MysqlBackup (default: latest Succeeded)
-  --triggered-by string  label recorded on the CR (default: "manual")
+  --triggered-by string  free-form value of the CR's triggered-by annotation (default: "manual")
   --wait                 block until the verification reaches Succeeded or Failed
   --timeout DURATION     timeout for --wait (default: 30m)
   --kubeconfig string    path to kubeconfig
@@ -49,7 +49,7 @@ func runVerifyBackup(args []string, stdout, stderr *os.File) error {
 	registerCommonFlags(fs, &cf)
 	fs.StringVar(&profile, "profile", "", "backup profile name (required)")
 	fs.StringVar(&backupName, "backup", "", "pin to a specific MysqlBackup (default: latest Succeeded)")
-	fs.StringVar(&triggeredBy, "triggered-by", "manual", "label recorded on the CR")
+	fs.StringVar(&triggeredBy, "triggered-by", "manual", "free-form value of the CR's triggered-by annotation")
 	fs.BoolVar(&wait, "wait", false, "block until the verification reaches Succeeded or Failed")
 	fs.DurationVar(&timeout, "timeout", 30*time.Minute, "timeout for --wait")
 	fs.Usage = func() { fmt.Fprint(stderr, verifyUsage) }

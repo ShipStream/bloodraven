@@ -122,7 +122,7 @@ func TestStartFailureEvent_NeverStartedWarnsAfterOneResync(t *testing.T) {
 	if startFailureWarnings(ev) != 1 || len(ev) != 1 {
 		t.Fatalf("second failure: want one %s Warning, got %v", v1alpha1.EventTopologyManagerStartFailed, ev)
 	}
-	if !strings.Contains(ev[0], "no topology manager is running") || !strings.Contains(ev[0], `missing "username" key`) {
+	if !strings.Contains(ev[0], "no topology manager is running") || !strings.Contains(ev[0], `missing required key "username"`) {
 		t.Fatalf("Warning message lacks the impact or the cause: %q", ev[0])
 	}
 	for i := 3; i <= 10; i++ {

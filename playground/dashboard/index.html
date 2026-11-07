@@ -84,7 +84,9 @@ const $ = id => document.getElementById(id);
 let ws = null;
 let lastState = {};
 // The last failover record from /ws/status. Only /ws/status messages (they
-// carry group) set or clear it: the REST /status fallback has no record.
+// carry group) set or clear it. The REST /status fallback carries the same
+// record, but it runs only while the WebSocket is down, so the record from
+// the last WS frame is kept rather than logged again.
 let lastFailover = null;
 let wsStatusSeen = false;
 const logEntries = [];
@@ -129,9 +131,10 @@ function handleMessage(msg) {
   //   NotApplicable on the writable primary. lastFailover is omitted when
   //   there is no failover record.
   // The operator's /ws/status broadcasts this shape on every poll cycle.
-  // The REST /status fallback carries no replication or lastFailover
-  // record; a site without replication shows no replication line and never
-  // counts as not replicating.
+  // The REST /status fallback carries lastFailover but no replication. It
+  // is used only while the WebSocket is down (pollStatus), and a replica it
+  // reports has unknown replication: the banner says so instead of
+  // reporting the group healthy.
   if (msg.sites) {
     if ('group' in msg) {
       const prev = lastFailover && lastFailover.time;
@@ -180,10 +183,17 @@ function renderSites(msg) {
     // lagging replica stays acceptable). Broken and Unknown are not.
     const notReplicating = sites.filter(s => s.name !== msg.activeSite &&
       s.replication && !replicationRunning(s.replication));
+    const unreported = sites.filter(s => s.name !== msg.activeSite && !s.replication);
     if (notReplicating.length > 0) {
       healthClass = 'warning';
       healthText = 'DEGRADED \u2014 replica not replicating: ' +
         notReplicating.map(s => s.name + ' (' + s.replication + ')').join(', ');
+    } else if (unreported.length > 0) {
+      // Only the REST fallback omits replication: say what is not known
+      // rather than call the group healthy.
+      healthClass = 'warning';
+      healthText = 'REPLICATION UNKNOWN \u2014 WebSocket down, REST status has no replication for: ' +
+        unreported.map(s => s.name).join(', ');
     }
   }
 
@@ -355,8 +365,11 @@ function copyCmd(cmd) {
 
 // Poll the REST status endpoint as a fallback when the WebSocket isn't
 // connected. The WS broadcast (/ws/status) is the primary source of live
-// topology and fires on every operator poll cycle.
+// topology and fires on every operator poll cycle. While it is open the REST
+// frame is skipped: it carries no replication, and rendering it would
+// overwrite the last WS frame's Broken or Unknown replica every 3s.
 async function pollStatus() {
+  if (ws && ws.readyState === WebSocket.OPEN && wsStatusSeen) return;
   try {
     const r = await fetch('/api/operator/status');
     if (!r.ok) return;

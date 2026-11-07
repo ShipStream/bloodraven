@@ -114,7 +114,7 @@ func nextBlockedSite(mfg *v1alpha1.MysqlFailoverGroup, requested map[string]bool
 		if s.Name == mfg.Status.ActiveSite || requested[s.Name] {
 			continue
 		}
-		blocked := s.RecoveryState == "RecoveryBlocked" ||
+		blocked := s.RecoveryState == v1alpha1.RecoveryStateBlocked ||
 			s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked
 		if !blocked {
 			continue

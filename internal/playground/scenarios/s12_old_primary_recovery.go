@@ -142,7 +142,7 @@ func observeClusterReconvergence() runner.Step {
 						if s.DivergentTransactionCount != nil {
 							divergent += *s.DivergentTransactionCount
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}

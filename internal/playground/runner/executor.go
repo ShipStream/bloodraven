@@ -353,7 +353,7 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 				if s.State != v1alpha1.SiteStateWritable && s.State != v1alpha1.SiteStateReadOnly {
 					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))
 				}
-				if s.RecoveryState == "RecoveryBlocked" {
+				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
 				}
 				if s.Name != mfg.Status.ActiveSite && isPromotableStatusSite(mfg, s.Name) && !s.Replication.Running() {

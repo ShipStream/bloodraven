@@ -24,6 +24,12 @@ type pitrDumpSource struct {
 	S3Bucket, S3EndpointURL, S3Region, AWSCredsSecret string
 	PVCClaim                                          string
 
+	// Recorded marks S3Bucket, S3EndpointURL and S3Region as the resolved
+	// values a MysqlBackup recorded: they are rendered literally, so
+	// kubelet's $(VAR) expansion cannot change them a second time. A
+	// direct source's values keep their one expansion.
+	Recorded bool
+
 	// Passphrase is the dump key; nil for a plaintext dump.
 	Passphrase *v1alpha1.PassphraseSecretKeyRef
 
@@ -53,6 +59,7 @@ func pitrDumpSourceForBackup(backup *v1alpha1.MysqlBackup, profile *v1alpha1.Bac
 	}
 	src := pitrDumpSource{
 		StorageType:          storage.Type,
+		Recorded:             true,
 		Passphrase:           passphrase,
 		ExpectedBackupUID:    backup.UID,
 		ExpectedSourceUID:    backup.Status.FailoverGroupUID,
@@ -113,12 +120,18 @@ func buildDumpMetaInitContainer(fg *v1alpha1.MysqlFailoverGroup, src pitrDumpSou
 		if src.S3Bucket == "" {
 			return corev1.Container{}, nil, fmt.Errorf("point-in-time replay: the dump's S3 bucket is unknown")
 		}
-		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: src.S3Bucket})
+		value := func(v string) string {
+			if src.Recorded {
+				return literalArtifactEnvValue(v)
+			}
+			return v
+		}
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: value(src.S3Bucket)})
 		if src.S3EndpointURL != "" {
-			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: src.S3EndpointURL})
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: value(src.S3EndpointURL)})
 		}
 		if src.S3Region != "" {
-			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: src.S3Region})
+			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: value(src.S3Region)})
 		}
 		if src.AWSCredsSecret != "" {
 			volumes = append(volumes, corev1.Volume{
