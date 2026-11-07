@@ -727,7 +727,7 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 	// Retain is the default, and the default is the whole point: a CR
 	// garbage-collected by a GitOps prune, a namespace delete or a bad
 	// selector must not take a live tenant database with it.
-	if mdb.Spec.EffectiveDeletionPolicy() == v1alpha1.MysqlDatabaseRetain {
+	if mdb.Spec.EffectiveDeletionPolicy() == v1alpha1.DeletionPolicyRetain {
 		r.Recorder.Eventf(mdb, corev1.EventTypeNormal, v1alpha1.EventDatabaseRetained,
 			"deletionPolicy=Retain: database %q and user %q left untouched in MySQL",
 			mdb.Spec.DatabaseName, mdb.Status.OwnerUser)
@@ -1971,11 +1971,11 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	spec := &mdb.Spec
 	progress := applyProgress{users: make(map[string]bool, len(users))}
 
-	createDB, err := renderCreateDatabase(spec.DatabaseName, spec.EffectiveCharacterSet(), spec.EffectiveCollation())
+	createDB, err := renderCreateDatabase(spec.DatabaseName, spec.EffectiveCharacterSet(), spec.Collation)
 	if err != nil {
 		return nil, progress, err
 	}
-	alterDB, err := renderAlterDatabase(spec.DatabaseName, spec.EffectiveCharacterSet(), spec.EffectiveCollation())
+	alterDB, err := renderAlterDatabase(spec.DatabaseName, spec.EffectiveCharacterSet(), spec.Collation)
 	if err != nil {
 		return nil, progress, err
 	}

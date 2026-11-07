@@ -208,7 +208,7 @@ func (r *resetter) syncMySQLDeploymentSpecs(ctx context.Context, _ []v1alpha1.Si
 			case "mysql":
 				dep.Spec.Template.Spec.Containers[i].Resources = site.Resources
 			case "sidecar":
-				dep.Spec.Template.Spec.Containers[i].Resources = mfg.Spec.SidecarResources
+				dep.Spec.Template.Spec.Containers[i].Resources = mfg.Spec.Sidecar.Resources
 			}
 		}
 		if _, err := r.k.Kubernetes.AppsV1().Deployments(r.namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {

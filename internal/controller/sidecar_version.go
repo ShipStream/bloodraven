@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -10,12 +11,43 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
+// sidecarImageFromEnv is the sidecar image this operator release ships
+// with (BLOODRAVEN_SIDECAR_IMAGE, rendered by the chart from
+// sidecar.image.repository and sidecar.image.tag). A group that leaves
+// spec.sidecar.image empty runs it.
+var sidecarImageFromEnv = ""
+
+// SetSidecarImageDefault is called from cmd/bloodraven/main.go with the
+// operator's default sidecar image.
+func SetSidecarImageDefault(image string) {
+	sidecarImageFromEnv = strings.TrimSpace(image)
+}
+
+// errSidecarImageUnset refuses to render a group that pins no sidecar
+// image when the operator was not told its default.
+var errSidecarImageUnset = errors.New("spec.sidecar.image is empty and the operator has no default sidecar image " +
+	"(BLOODRAVEN_SIDECAR_IMAGE, set by the chart from sidecar.image.repository and sidecar.image.tag); " +
+	"set one of them")
+
+// effectiveSidecarImage returns the group's pinned spec.sidecar.image, or
+// the operator's default when the group pins none.
+func effectiveSidecarImage(fg *v1alpha1.MysqlFailoverGroup) (string, error) {
+	if img := strings.TrimSpace(fg.Spec.Sidecar.Image); img != "" {
+		return img, nil
+	}
+	if sidecarImageFromEnv == "" {
+		return "", errSidecarImageUnset
+	}
+	return sidecarImageFromEnv, nil
+}
+
 // The operator and the sidecar are two halves of one contract: the
 // operator renders environment variables and volume mounts that the
-// sidecar binary has to know how to read. A group that pins
-// spec.sidecarImage to a different release than the running operator
-// gets whichever half of a newer contract the older binary happens to
-// understand, and the failure is silent at the point of drift.
+// sidecar binary has to know how to read. A group whose sidecar image
+// (a spec.sidecar.image pin, or a mis-set operator default) is from a
+// different release than the running operator gets whichever half of a
+// newer contract the older binary happens to understand, and the failure
+// is silent at the point of drift.
 //
 // The sharpest instance is TLS. spec.tls makes the operator set
 // require_secure_transport=ON and configure the sidecar's MySQL client
@@ -36,10 +68,18 @@ import (
 // untagged reference, or an operator that was not told its own image are
 // all legitimate, and guessing would make the event untrustworthy.
 func (r *MysqlFailoverGroupReconciler) warnOnSidecarVersionSkew(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) {
+	sidecarImage, err := effectiveSidecarImage(fg)
+	if err != nil {
+		return
+	}
 	operatorTag := imageTag(operatorImageFromEnv)
-	sidecarTag := imageTag(fg.Spec.SidecarImage)
+	sidecarTag := imageTag(sidecarImage)
 	if operatorTag == "" || sidecarTag == "" || operatorTag == sidecarTag {
 		return
+	}
+	source := "spec.sidecar.image"
+	if fg.Spec.Sidecar.Image == "" {
+		source = "the operator's default sidecar image (BLOODRAVEN_SIDECAR_IMAGE)"
 	}
 
 	detail := ""
@@ -52,7 +92,7 @@ func (r *MysqlFailoverGroupReconciler) warnOnSidecarVersionSkew(ctx context.Cont
 
 	log.FromContext(ctx).Info("sidecar image version differs from the operator",
 		"operatorImage", operatorImageFromEnv,
-		"sidecarImage", fg.Spec.SidecarImage,
+		"sidecarImage", sidecarImage,
 		"operatorTag", operatorTag,
 		"sidecarTag", sidecarTag)
 
@@ -60,10 +100,10 @@ func (r *MysqlFailoverGroupReconciler) warnOnSidecarVersionSkew(ctx context.Cont
 		return
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSidecarVersionSkew,
-		"spec.sidecarImage is tagged %q but the operator is running %q. "+
+		"%s is tagged %q but the operator is running %q. "+
 			"The operator and sidecar share a rendering contract and are only "+
 			"supported at matching releases.%s",
-		sidecarTag, operatorTag, detail)
+		source, sidecarTag, operatorTag, detail)
 }
 
 // imageTag returns the tag portion of a container image reference, or ""

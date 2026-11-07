@@ -63,9 +63,9 @@
 
 ---
 
-**Front:** `spec.sidecarImage`
+**Front:** `spec.sidecar.image`
 
-**Back:** Ships as its own image and is referenced by the group, not the chart. Moving it restarts every site's pod, so it goes through the same ordered update — with the same failover. Bloodraven tolerates one minor of operator/sidecar skew in either direction while pods roll.
+**Back:** Optional, with no stored default. Unset, the group runs the sidecar its operator release ships with (the chart's `sidecar.image.repository` and `sidecar.image.tag`), so a `helm upgrade` that ships a new sidecar changes the group's pod spec and runs an ordered update — with the same failover. Set it only to pin a build: a pin stays put, and a pin from another release gets a `SidecarVersionSkew` Warning. Bloodraven tolerates one minor of operator/sidecar skew in either direction while pods roll.
 
 ---
 

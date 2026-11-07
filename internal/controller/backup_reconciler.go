@@ -691,6 +691,9 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	if _, err := r.repairTerminalAttribution(ctx, backup); err != nil && !errors.Is(err, errBackupDestinationUnavailable) {
 		return false, 0, err
 	}
+	if backup.Spec.DeletionPolicy == v1alpha1.DeletionPolicyRetain {
+		return r.retainArtifact(ctx, backup)
+	}
 	// A hold whose verification can no longer read (its finalizer was
 	// removed by hand, say) would keep the PITR cutoff pinned for as long
 	// as cleanup stays blocked. Drop it first.
@@ -1014,6 +1017,47 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		}
 		return false, 15 * time.Second, nil
 	}
+}
+
+// retainArtifact releases a backup whose spec.deletionPolicy is Retain
+// without touching storage (A-98). The artifact stays where it is, and so
+// does the dump-key snapshot Secret that decrypts it: without it a
+// retained encrypted artifact could not be read. The snapshot carries no
+// owner reference, so nothing deletes it once the backup is gone.
+//
+// A backup that never succeeded may still have a producing Job writing to
+// the destination. It is stopped, and its pods waited out, before the
+// release, as the abandoned cleanup does: until the finalizer is gone no
+// backup of the same name can be created, and a successor must not start
+// while the old uploader may still write. A successor of the same name
+// then finds the retained backup stamp, and its stamp step refuses the
+// destination while dump objects remain there.
+func (r *MysqlBackupReconciler) retainArtifact(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, time.Duration, error) {
+	if !backupArtifactCompleted(&backup.Status) && backup.UID != "" {
+		producer, err := r.ownedBackupJob(ctx, backup)
+		if err != nil {
+			return false, 0, err
+		}
+		if wait, err := r.stopAbandonedProducer(ctx, backup, producer); err != nil || wait > 0 {
+			return false, wait, err
+		}
+	}
+	location := "no recorded destination"
+	if storage := backup.Status.ArtifactStorage; storage != nil && storage.Location != "" {
+		location = fmt.Sprintf("%q", storage.Location)
+	}
+	kept, err := r.dumpKeySnapshotKept(ctx, backup)
+	if err != nil {
+		return false, 0, err
+	}
+	key, what := "", "it"
+	if kept != "" {
+		key, what = fmt.Sprintf("; the dump-key snapshot Secret %q that decrypts it is kept", kept), "them"
+	}
+	r.Recorder.Eventf(backup, corev1.EventTypeNormal, v1alpha1.EventArtifactRetained,
+		"deletionPolicy is Retain: the artifact (%s) is left in storage%s; delete %s by hand once no longer needed",
+		location, key, what)
+	return true, 0, nil
 }
 
 // skipAbandonedCleanup gives up on an unfinished backup's leftovers and

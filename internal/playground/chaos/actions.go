@@ -691,6 +691,45 @@ func (a *Actions) PatchDragonflyImage(ctx context.Context, image string) error {
 	return nil
 }
 
+// PatchDragonflySnapshotUpgrade requests a snapshot-restore upgrade the way
+// a user does: one patch sets spec.dragonfly.upgradeStrategy to
+// SnapshotRestore and spec.dragonfly.image to image, so the Rolling render
+// never sees the new image. The reverter restores both in one patch; with
+// the original strategy back, the original image rolls the ordinary way.
+func (a *Actions) PatchDragonflySnapshotUpgrade(ctx context.Context, image string) error {
+	if image == "" {
+		return fmt.Errorf("dragonfly image must not be empty")
+	}
+	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	if err != nil {
+		return fmt.Errorf("read MFG for dragonfly snapshot upgrade: %w", err)
+	}
+	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
+		return fmt.Errorf("spec.dragonfly.enabled must be true")
+	}
+	originalImage := mfg.Spec.Dragonfly.Image
+	if originalImage == image {
+		return fmt.Errorf("dragonfly snapshot upgrade target equals current image %q", image)
+	}
+	originalStrategy := mfg.Spec.Dragonfly.UpgradeStrategy
+	if originalStrategy == "" {
+		originalStrategy = v1alpha1.DragonflyUpgradeStrategyRolling
+	}
+	if err := a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{
+		{Op: "add", Path: "/spec/dragonfly/upgradeStrategy", Value: string(v1alpha1.DragonflyUpgradeStrategySnapshotRestore)},
+		{Op: "replace", Path: "/spec/dragonfly/image", Value: image},
+	}); err != nil {
+		return fmt.Errorf("patch dragonfly snapshot upgrade: %w", err)
+	}
+	a.push("restore dragonfly image and upgrade strategy", func(ctx context.Context) error {
+		return a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{
+			{Op: "add", Path: "/spec/dragonfly/upgradeStrategy", Value: string(originalStrategy)},
+			{Op: "replace", Path: "/spec/dragonfly/image", Value: originalImage},
+		})
+	})
+	return nil
+}
+
 // EnsureRustFSDragonflyBucket creates the playground Dragonfly snapshot bucket
 // using a signed S3 request through a port-forward to the RustFS pod. This
 // replaces the old aws-cli bucket-init Job so scenario 29 does not depend on

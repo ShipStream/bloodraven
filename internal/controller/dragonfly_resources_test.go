@@ -219,7 +219,7 @@ func TestReconcileDragonflyStatefulSet_SnapshotS3WiresDirAndServiceAccount(t *te
 func TestDesiredDragonflyStatefulSet_ProbeDefaultsAreExplicit(t *testing.T) {
 	fg := fgWithDragonfly()
 	r, _ := newReconciler(fg)
-	sts, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0])
+	sts, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0], nil)
 	if err != nil {
 		t.Fatalf("desiredDragonflyStatefulSet: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestDesiredDragonflyStatefulSet_ProbeDefaultsAreExplicit(t *testing.T) {
 func TestDragonflyStatefulSetTemplateEqual_TreatsDefaultedPodSecurityContextAsEmpty(t *testing.T) {
 	fg := fgWithDragonfly()
 	r, _ := newReconciler(fg)
-	desired, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0])
+	desired, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0], nil)
 	if err != nil {
 		t.Fatalf("desiredDragonflyStatefulSet: %v", err)
 	}

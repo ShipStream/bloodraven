@@ -178,7 +178,7 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 	}
 	mdb := &v1alpha1.MysqlDatabase{ObjectMeta: meta, Spec: v1alpha1.MysqlDatabaseSpec{
 		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG}, DatabaseName: strings.ReplaceAll(s.name, "-", "_"),
-		Owner: v1alpha1.MysqlDatabaseOwner{SecretName: s.name}, DeletionPolicy: v1alpha1.MysqlDatabaseDelete,
+		Owner: v1alpha1.MysqlDatabaseOwner{SecretName: s.name}, DeletionPolicy: v1alpha1.DeletionPolicyDelete,
 		DeploymentClients: []v1alpha1.DeploymentClient{{Namespace: env.Namespace, ServiceAccount: s.name}},
 	}}
 	for _, obj := range []client.Object{

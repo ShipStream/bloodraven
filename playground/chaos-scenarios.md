@@ -808,14 +808,18 @@ The scenario temporarily scales the target Dragonfly StatefulSet to 0 and patche
 
 **Injection**:
 
+Set the strategy and the new image in one patch, so the Rolling render never sees the new image:
+
 ```bash
-kubectl -n bloodraven-playground annotate --overwrite mysqlfailovergroup playground \
-  bloodraven.shipstream.io/dragonfly-snapshot-upgrade=docker.dragonflydb.io/dragonflydb/dragonfly:<target>
+kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type=json -p '[
+  {"op": "add", "path": "/spec/dragonfly/upgradeStrategy", "value": "SnapshotRestore"},
+  {"op": "replace", "path": "/spec/dragonfly/image", "value": "docker.dragonflydb.io/dragonflydb/dragonfly:<target>"}
+]'
 ```
 
-**Verify**: `status.dragonfly.upgrade.phase` walks `Pending → SavingSnapshot → UpdatingActive → WaitingForActiveRestore → ReattachingReplicas → Succeeded`; the active Service has no endpoints while restore is in progress; `SAVE` completes before the active pod is deleted; final Dragonfly pods run the target image; `status.dragonfly.phase` returns to `Ready`; the seeded key is present after restore.
+**Verify**: `status.dragonfly.upgrade.phase` walks `Pending → SavingSnapshot → UpdatingActive → WaitingForActiveRestore → ReattachingReplicas → Succeeded`; the active Service has no endpoints while restore is in progress; `SAVE` completes before the active pod is deleted; final Dragonfly pods run the target image; `spec.dragonfly.image` still reads the requested target (the operator never writes spec); `status.dragonfly.phase` returns to `Ready`; the seeded key is present after restore.
 
-**Automation status**: Registered as `29-dragonfly-snapshot-upgrade`. The playground deploys RustFS during setup; the scenario creates the `dragonfly` bucket on demand, temporarily patches `spec.dragonfly.snapshot`, waits for Dragonfly pods to run with `--dir=s3://dragonfly/playground`, and then runs the upgrade.
+**Automation status**: Registered as `29-dragonfly-snapshot-upgrade`. The playground deploys RustFS during setup; the scenario creates the `dragonfly` bucket on demand, temporarily patches `spec.dragonfly.snapshot`, waits for Dragonfly pods to run with `--dir=s3://dragonfly/playground`, and then sets `upgradeStrategy: SnapshotRestore` and moves `spec.dragonfly.image` to the image the pods already run, by digest (no new pull). The reverter restores the strategy and the original image in one patch, which rolls back the ordinary way.
 
 ---
 

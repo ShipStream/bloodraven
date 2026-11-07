@@ -120,10 +120,11 @@ spec:
                 pattern: ^[A-Za-z0-9_]{1,64}$
                 type: string
               collation:
-                default: utf8mb4_unicode_ci
                 description: |-
-                  Collation is the database default collation. Defaults to
-                  utf8mb4_unicode_ci when empty.
+                  Collation is the database default collation. Unset means the
+                  character set's default collation (utf8mb4_0900_ai_ci for utf8mb4 on
+                  MySQL 8.0 and later): the operator renders no COLLATE clause. Set
+                  utf8mb4_unicode_ci explicitly to keep the older UCA 4.0 ordering.
                 maxLength: 64
                 pattern: ^[A-Za-z0-9_]{1,64}$
                 type: string
@@ -159,7 +160,16 @@ spec:
                 default: Retain
                 description: |-
                   DeletionPolicy controls what happens in MySQL when this CR is
-                  deleted. Defaults to Retain.
+                  deleted:
+                    - Retain (default) leaves MySQL untouched. The alternative failure
+                      mode, dropping a live tenant database because a CR was
+                      garbage-collected by a GitOps prune or a namespace delete, is
+                      unrecoverable.
+                    - Delete drops the database, the owner user and the spec.users[]
+                      principals this CR created (per the status.appliedUsers ledger),
+                      and revokes the spec.grants[] entries on that database. It never
+                      drops a spec.grants[] user; those are shared principals this CRD
+                      did not create.
                 enum:
                 - Retain
                 - Delete

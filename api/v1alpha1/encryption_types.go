@@ -41,11 +41,26 @@ type EncryptionAtRestSpec struct {
 	// Encryption can only be enabled on a group that has not yet
 	// bootstrapped, or adopted by an existing group via the replica-first
 	// reclone procedure documented in https://bloodraven.dev/docs/configuration/encryption-at-rest.
-	// The operator rejects flipping this flag on a group whose sites
-	// already hold unencrypted data.
+	// On a group whose sites already hold unencrypted data, ExistingData
+	// decides.
 	// +kubebuilder:default=false
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
+
+	// ExistingData decides what happens when encryption is enabled on a
+	// group that is already serving, whose existing tablespaces MySQL
+	// does not rewrite:
+	//   - Refuse (default): encryption is not started, and
+	//     EncryptionAtRestReady is False with reason AdoptionRefused. Move
+	//     onto an encrypted replica with a planned failover instead.
+	//   - LeavePlaintext: encryption starts and covers data written from
+	//     then on; the existing tablespaces stay plaintext until they are
+	//     rebuilt (status.encryptionAtRest.sites[].coverage reports how
+	//     much is still exposed).
+	// It is read only when encryption is first turned on.
+	// +kubebuilder:default=Refuse
+	// +optional
+	ExistingData EncryptionExistingDataPolicy `json:"existingData,omitempty"`
 
 	// Coverage selects which MySQL encryption settings the operator
 	// enforces in the generated my.cnf. Every field defaults to true;
@@ -59,6 +74,19 @@ type EncryptionAtRestSpec struct {
 	// +optional
 	Keyring *KeyringSpec `json:"keyring,omitempty"`
 }
+
+// EncryptionExistingDataPolicy is spec.encryptionAtRest.existingData.
+// +kubebuilder:validation:Enum=Refuse;LeavePlaintext
+type EncryptionExistingDataPolicy string
+
+const (
+	// EncryptionExistingDataRefuse refuses to enable encryption on a
+	// group that already holds data.
+	EncryptionExistingDataRefuse EncryptionExistingDataPolicy = "Refuse"
+	// EncryptionExistingDataLeavePlaintext enables encryption and leaves
+	// the existing tablespaces plaintext.
+	EncryptionExistingDataLeavePlaintext EncryptionExistingDataPolicy = "LeavePlaintext"
+)
 
 // EncryptionCoverageSpec selects the MySQL encryption settings the
 // operator writes into the generated my.cnf. These are operator-owned

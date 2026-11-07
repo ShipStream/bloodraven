@@ -122,16 +122,16 @@ It is a fail-fast abort, not a timeout — the outer deadline is five minutes an
 
 Which upgrade order is correct, and why?
 
-- CRDs by `kubectl apply --server-side` first, then `helm upgrade` the operator, then bump `spec.sidecarImage` — because Helm never upgrades CRDs from `crds/`, and a new operator against an old schema has its new fields silently pruned
+- CRDs by `kubectl apply --server-side` first, then `helm upgrade` the operator, whose sidecar image then rolls every group without a `spec.sidecar.image` pin — because Helm never upgrades CRDs from `crds/`, and a new operator against an old schema has its new fields silently pruned
 - `helm upgrade` first, then CRDs — the chart's post-upgrade hook applies them once the new operator is running
 - `helm upgrade` alone; the chart's `crds/` directory is applied on every upgrade, which is why it exists as a separate directory
-- Bump `spec.sidecarImage` first so the sidecars are ready for the new operator, then CRDs, then the chart
+- Pin `spec.sidecar.image` to the new release first so the sidecars are ready for the new operator, then CRDs, then the chart
 
 **Correct option index:** 0
 
 **Explanation:**
 
-Helm installs CRDs from `crds/` on first install and never upgrades them — on upgrade or on rollback. Skip the explicit apply and you get the silent-pruning failure from Unit 5 by a different route: the object is admitted, the unknown field is dropped, and nothing errors at apply, in an event, or in the log. Option 3 is the belief that causes it. Option 2 invents a hook. Option 4 gets the sidecar in the wrong place: it is a group-level field whose bump triggers an ordered update, so it belongs last, after the control plane is on the new release. (objective 9)
+Helm installs CRDs from `crds/` on first install and never upgrades them — on upgrade or on rollback. Skip the explicit apply and you get the silent-pruning failure from Unit 5 by a different route: the object is admitted, the unknown field is dropped, and nothing errors at apply, in an event, or in the log. Option 3 is the belief that causes it. Option 2 invents a hook. Option 4 gets the sidecar in the wrong place: a sidecar move triggers an ordered update, so it belongs last, after the control plane is on the new release, which is what leaving `spec.sidecar.image` unset gives you. (objective 9)
 
 ## Question 9
 

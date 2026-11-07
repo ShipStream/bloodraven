@@ -104,8 +104,9 @@ const (
 	// (its reclone queue is `Armed` or `Held`, or the topology is frozen).
 	// The site keeps its data and its stopped replication.
 	EventBootstrapRefusedRestoreHold = "BootstrapRefusedRestoreHold"
-	// `spec.sidecarImage` is tagged with a different release than the
-	// running operator. The two share a rendering contract and are
+	// The group's sidecar image (a `spec.sidecar.image` pin, or the
+	// operator's default `BLOODRAVEN_SIDECAR_IMAGE` when it pins none) is
+	// tagged with a different release than the running operator. The two share a rendering contract and are
 	// supported only at matching releases; on a group with `spec.tls`, an
 	// older sidecar cannot reach MySQL at all. Advisory only: the operator
 	// never blocks on it, and it is not emitted for digest-pinned or
@@ -295,10 +296,11 @@ const (
 	// session continuity. Emitted when the capability probe changes to
 	// unsupported; use a Dragonfly image that supports the command.
 	EventDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
-	// A `dragonfly-snapshot-upgrade` request was accepted and
-	// `status.dragonfly.upgrade` records it; the message gives the current
-	// and target images. Dragonfly promotions and replication changes
-	// pause until the upgrade ends.
+	// A snapshot-restore upgrade run started: `spec.dragonfly.upgradeStrategy`
+	// is `SnapshotRestore` and a site's live StatefulSet runs an image other
+	// than `spec.dragonfly.image`. `status.dragonfly.upgrade` records it;
+	// the message gives the source and target images. Dragonfly promotions
+	// and replication changes pause until the run ends.
 	EventDragonflyUpgradeStarted = "DragonflyUpgradeStarted"
 	// The active Dragonfly site was removed from the active Service and
 	// the operator is saving a snapshot. Cache and session traffic is
@@ -308,37 +310,35 @@ const (
 	// `spec.dragonfly.snapshot.dir`. The active pod is restarted on the
 	// target image next and restores from the snapshot.
 	EventDragonflyUpgradeSnapshotCompleted = "DragonflyUpgradeSnapshotCompleted"
-	// Every Dragonfly site runs the target image, the active site serves
-	// traffic again with its replicas attached, and `spec.dragonfly.image`
-	// was set to the target image.
+	// Every Dragonfly site runs the target image and the active site
+	// serves traffic again with its replicas attached.
 	EventDragonflyUpgradeSucceeded = "DragonflyUpgradeSucceeded"
-	// A Dragonfly snapshot-restore upgrade failed; the message gives the
-	// reason. On `DragonflySnapshotDialFailed`,
+	// A Dragonfly snapshot-restore upgrade failed, once per run; the
+	// message gives the reason. On `DragonflySnapshotDialFailed`,
 	// `DragonflySnapshotSaveFailed` or `UnknownPhase` the operator
 	// restores the active site's traffic label. On `ActiveSiteChanged` the
 	// upgrade was abandoned because MySQL failed over or a promotion moved
-	// the Dragonfly master; retry it against the new active site.
+	// the Dragonfly master. The run is not restarted while
+	// `spec.dragonfly` is unchanged: change it, or set
+	// `spec.dragonfly.image` back to the running image and then forward
+	// again, to retry.
 	EventDragonflyUpgradeFailed = "DragonflyUpgradeFailed"
-	// A `dragonfly-snapshot-upgrade` request was refused and the
-	// annotation removed: the target image is empty, Dragonfly is not
-	// enabled or `spec.dragonfly.snapshot.dir` is not set,
-	// `status.activeSite` is empty, a planned failover or automation hold
-	// owns the sites, or an earlier upgrade is still running.
-	EventDragonflyUpgradeRejected = "DragonflyUpgradeRejected"
-	// A `dragonfly-snapshot-upgrade` request waits because the Dragonfly
-	// master is not on the MySQL active site. The annotation is kept and
-	// the request is retried every 10 seconds until they match.
+	// A snapshot-restore upgrade run is needed but waits: `status.activeSite`
+	// is empty, a planned failover run or automation hold owns the sites,
+	// or the Dragonfly master is not on the MySQL active site. Emitted when
+	// the cause changes; the run is retried every 10 seconds and starts
+	// once the cause clears. No site moves meanwhile.
 	EventDragonflyUpgradeDeferred = "DragonflyUpgradeDeferred"
 )
 
 // Events: Encryption at rest. On: MysqlFailoverGroup.
 const (
 	// `spec.encryptionAtRest.enabled` was turned on for a group that is
-	// already serving. Existing tablespaces would stay plaintext, so
+	// already serving, with `spec.encryptionAtRest.existingData: Refuse`
+	// (the default). Existing tablespaces would stay plaintext, so
 	// `EncryptionAtRestReady` is `False` with `AdoptionRefused`. Move onto
 	// an encrypted replica with a planned failover, or set
-	// `bloodraven.shipstream.io/encryption-adopt=confirm` to accept
-	// partial coverage.
+	// `existingData: LeavePlaintext` to accept partial coverage.
 	EventEncryptionAdoptionRefused = "EncryptionAdoptionRefused"
 	// A site's keyring moved to another phase (`Pending`, `Unsealed`,
 	// `Escrowed`, `Sealed` or `Failed`); the message gives the old and new
@@ -942,6 +942,13 @@ const (
 	// encrypted artifacts may exist; delete it once you have confirmed
 	// none remain`).
 	EventArtifactCleanupSkipped = "ArtifactCleanupSkipped"
+	// The backup was deleted with `spec.deletionPolicy: Retain`: no
+	// cleanup ran, and the artifact and its dump-key snapshot Secret (an
+	// encrypted backup's key) are left in place; the message names both.
+	// The finalizer is released at once, or for a backup that never
+	// succeeded, once its producing Job's pods have stopped. Delete them
+	// by hand once they are no longer needed.
+	EventArtifactRetained = "ArtifactRetained"
 )
 
 // Events: Backup verification. On: MysqlBackupVerification.

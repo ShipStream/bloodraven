@@ -23,6 +23,26 @@ func TestRenderCreateDatabase(t *testing.T) {
 	}
 }
 
+// TestRenderDatabaseWithoutCollation pins A-53: an unset spec.collation
+// renders no COLLATE clause on CREATE and ALTER, so MySQL applies the
+// character set's own default collation.
+func TestRenderDatabaseWithoutCollation(t *testing.T) {
+	create, err := renderCreateDatabase("acme_wms", "utf8mb4", "")
+	if err != nil {
+		t.Fatalf("renderCreateDatabase() error = %v", err)
+	}
+	if want := "CREATE DATABASE IF NOT EXISTS `acme_wms` CHARACTER SET utf8mb4"; create != want {
+		t.Fatalf("renderCreateDatabase() = %q, want %q", create, want)
+	}
+	alter, err := renderAlterDatabase("acme_wms", "utf8mb4", "")
+	if err != nil {
+		t.Fatalf("renderAlterDatabase() error = %v", err)
+	}
+	if want := "ALTER DATABASE `acme_wms` CHARACTER SET utf8mb4"; alter != want {
+		t.Fatalf("renderAlterDatabase() = %q, want %q", alter, want)
+	}
+}
+
 func TestRenderCreateDatabaseRejectsBeforeFormatting(t *testing.T) {
 	// Each case would be a SQL injection if the value were merely escaped
 	// and interpolated. The contract is rejection, so the statement is

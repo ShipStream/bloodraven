@@ -428,8 +428,8 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 }
 
 // K089: with no hydrated slot, a durable hold owns the group's Dragonfly:
-// a snapshot upgrade requested during the hold is rejected.
-func TestDragonflySnapshotUpgrade_RejectedDuringUnhydratedHold(t *testing.T) {
+// a snapshot upgrade that spec drift wants during the hold waits.
+func TestDragonflySnapshotUpgrade_WaitsDuringUnhydratedHold(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
 	setPlannedHold(&fg.Status, v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged,
 		SourceSite: "dc1", TargetSite: "dc2", HoldTime: metav1.Now()}, fg.Generation)
@@ -437,12 +437,14 @@ func TestDragonflySnapshotUpgrade_RejectedDuringUnhydratedHold(t *testing.T) {
 		t.Fatal("a durable hold does not own the group's Dragonfly")
 	}
 	r, c := newReconciler(fg)
-	if _, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg); err != nil {
-		t.Fatal(err)
+	seedDragonflyStatefulSets(t, r, c, fg, bothSites(dfSourceImage))
+	step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg)
+	if err != nil || step.wait != dragonflyUpgradeDeferRetry || step.hold != 0 {
+		t.Fatalf("= (%+v, %v), want a wait", step, err)
 	}
 	got := getFGByKey(t, c, fgNN(fg))
 	if got.Status.Dragonfly.Upgrade != nil {
-		t.Fatalf("upgrade accepted during a hold: %+v", got.Status.Dragonfly.Upgrade)
+		t.Fatalf("upgrade started during a hold: %+v", got.Status.Dragonfly.Upgrade)
 	}
 }
 
@@ -451,7 +453,6 @@ func TestDragonflySnapshotUpgrade_RejectedDuringUnhydratedHold(t *testing.T) {
 // upgrade ended nor leaves a stale pause in place.
 func TestDragonflySnapshotUpgrade_PauseFollowsUncachedState(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
-	fg.Annotations = nil
 	start := metav1.Now()
 	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseFailed, Reason: "ActiveSiteChanged",
 		ActiveSite: "dc1", StartTime: &start, CompletionTime: &start}
@@ -477,22 +478,30 @@ func TestDragonflySnapshotUpgrade_PauseFollowsUncachedState(t *testing.T) {
 // K122: a snapshot upgrade is not admitted while the Dragonfly master
 // differs from the MySQL active site (a planned takeover failed after MySQL
 // moved, before drift repair): it would save and restart a replica. The
-// request is kept.
+// run waits, and starts once they match.
 func TestDragonflySnapshotUpgrade_DeferredWhileDragonflyMasterDiffers(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
 	fg.Status.ActiveSite = "dc2"
 	fg.Status.Dragonfly.ActiveSite = "dc1"
 	r, c := newReconciler(fg)
-	requeue, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg)
-	if err != nil || requeue != dragonflyUpgradeDeferRetry {
-		t.Fatalf("= (%s, %v), want a %s deferral", requeue, err, dragonflyUpgradeDeferRetry)
+	seedDragonflyStatefulSets(t, r, c, fg, bothSites(dfSourceImage))
+	step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg)
+	if err != nil || step.wait != dragonflyUpgradeDeferRetry || step.hold != 0 {
+		t.Fatalf("= (%+v, %v), want a %s wait", step, err, dragonflyUpgradeDeferRetry)
 	}
 	got := getFGByKey(t, c, fgNN(fg))
 	if got.Status.Dragonfly.Upgrade != nil {
 		t.Fatalf("upgrade admitted against the wrong site: %+v", got.Status.Dragonfly.Upgrade)
 	}
-	if _, ok := got.Annotations[v1alpha1.DragonflySnapshotUpgradeAnnotation]; !ok {
-		t.Fatal("the deferred request was dropped")
+	got.Status.Dragonfly.ActiveSite = "dc2"
+	if err := c.Status().Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	if step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, fgNN(fg))); err != nil || step.hold == 0 {
+		t.Fatalf("once they match = (%+v, %v), want a started run", step, err)
+	}
+	if up := getFGByKey(t, c, fgNN(fg)).Status.Dragonfly.Upgrade; up == nil || up.ActiveSite != "dc2" {
+		t.Fatalf("upgrade = %+v, want a run retaining dc2", up)
 	}
 }
 

@@ -109,9 +109,9 @@ Bloodraven releases are built from a semantic-version tag. Before creating the t
 For a future release, replace `<VERSION>` with a bare version such as `0.9.2`, then copy and paste this prompt:
 
 ```text
-Prepare and publish Bloodraven <VERSION> from main. Update the SidecarImage
-kubebuilder default in api/v1alpha1/types.go, the version and appVersion in
-charts/bloodraven/Chart.yaml, and current-release pins in user-facing docs,
+Prepare and publish Bloodraven <VERSION> from main. Update the version and
+appVersion in charts/bloodraven/Chart.yaml (the default sidecar image tag
+follows appVersion), and current-release pins in user-facing docs,
 examples, and fixtures. Do not blindly replace historical references or
 version-parsing test data.
 

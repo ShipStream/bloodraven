@@ -21,9 +21,10 @@ func scenario29DragonflySnapshotUpgrade() runner.Scenario {
 	return runner.Scenario{
 		ID:    "29-dragonfly-snapshot-upgrade",
 		Title: "Dragonfly snapshot-restore upgrade via RustFS",
-		Hypothesis: "With the playground RustFS bucket configured as spec.dragonfly.snapshot.dir, annotating " +
-			"bloodraven.shipstream.io/dragonfly-snapshot-upgrade snapshots the active Dragonfly, restarts it, " +
-			"restores the seeded key, reattaches replicas, and leaves status.dragonfly.upgrade=Succeeded.",
+		Hypothesis: "With the playground RustFS bucket configured as spec.dragonfly.snapshot.dir, setting " +
+			"spec.dragonfly.upgradeStrategy=SnapshotRestore and a new spec.dragonfly.image (the cached image by " +
+			"digest) snapshots the active Dragonfly, restarts it, restores the seeded key, reattaches replicas, " +
+			"and leaves status.dragonfly.upgrade=Succeeded without writing spec.",
 		Risk:     "medium",
 		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D6a)",
 		Timeout:  8 * time.Minute,
@@ -33,7 +34,7 @@ func scenario29DragonflySnapshotUpgrade() runner.Scenario {
 			enableDragonflySnapshotForUpgrade(),
 			waitDragonflyReadyAfterSnapshotConfig(),
 			seedDragonflyCounterForSnapshotUpgrade(),
-			annotateDragonflySnapshotUpgrade(),
+			requestDragonflySnapshotUpgrade(),
 			observeDragonflySnapshotUpgradeSucceeded(),
 			verifyDragonflySnapshotUpgradeKeyRestored(),
 			verifyDragonflySnapshotUpgradeImages(),
@@ -147,7 +148,23 @@ func seedDragonflyCounterForSnapshotUpgrade() runner.Step {
 			if err := ctxStash(ctx, env, "s29Active", active); err != nil {
 				return err
 			}
-			if err := ctxStash(ctx, env, "s29TargetImage", mfg.Spec.Dragonfly.Image); err != nil {
+			// The target is the image the pods already run, by digest: a
+			// different spec.dragonfly.image that needs no new pull.
+			target := ""
+			for _, site := range mfg.Spec.Sites {
+				pod, err := env.Kube.GetSiteDragonflyPod(ctx, env.Namespace, env.FG, site.Name)
+				if err != nil {
+					return err
+				}
+				if img, err := dragonflyDigestImageFromPod(mfg.Spec.Dragonfly.Image, pod); err == nil && img != mfg.Spec.Dragonfly.Image {
+					target = img
+					break
+				}
+			}
+			if target == "" {
+				return fmt.Errorf("no Dragonfly pod reported a digest image different from spec image %q", mfg.Spec.Dragonfly.Image)
+			}
+			if err := ctxStash(ctx, env, "s29TargetImage", target); err != nil {
 				return err
 			}
 			cli, err := env.Dragonfly(active)
@@ -163,14 +180,14 @@ func seedDragonflyCounterForSnapshotUpgrade() runner.Step {
 	}
 }
 
-func annotateDragonflySnapshotUpgrade() runner.Step {
+func requestDragonflySnapshotUpgrade() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "annotate dragonfly snapshot upgrade",
+		Name:  "set upgradeStrategy SnapshotRestore and the new spec.dragonfly.image",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			image := ctxFetch(env, "s29TargetImage")
 			env.Capture.Note(fmt.Sprintf("request Dragonfly snapshot upgrade to %s", image))
-			return env.Kube.AnnotateMFG(ctx, env.Namespace, v1alpha1.DragonflySnapshotUpgradeAnnotation, image)
+			return env.Chaos.PatchDragonflySnapshotUpgrade(ctx, image)
 		},
 	}
 }
@@ -239,6 +256,9 @@ func verifyDragonflySnapshotUpgradeImages() runner.Step {
 				return err
 			}
 			want := ctxFetch(env, "s29TargetImage")
+			if mfg.Spec.Dragonfly.Image != want {
+				return fmt.Errorf("spec.dragonfly.image=%q, want the requested %q (the operator must not write spec)", mfg.Spec.Dragonfly.Image, want)
+			}
 			for _, site := range mfg.Spec.Sites {
 				sts, err := env.Kube.Kubernetes.AppsV1().StatefulSets(env.Namespace).Get(ctx, pgkube.DragonflyStatefulSetName(env.FG, site.Name), metav1.GetOptions{})
 				if err != nil {

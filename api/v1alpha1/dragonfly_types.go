@@ -14,6 +14,7 @@ import (
 //
 // +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.image) && self.image.size() > 0)",message="spec.dragonfly.image is required when spec.dragonfly.enabled is true"
 // +kubebuilder:validation:XValidation:rule="!self.enabled || !self.image.endsWith(':latest')",message="spec.dragonfly.image must be pinned (no :latest)"
+// +kubebuilder:validation:XValidation:rule="!has(self.upgradeStrategy) || self.upgradeStrategy != 'SnapshotRestore' || (has(self.snapshot) && has(self.snapshot.dir) && self.snapshot.dir.size() > 0)",message="spec.dragonfly.snapshot.dir is required when spec.dragonfly.upgradeStrategy is SnapshotRestore"
 type DragonflySpec struct {
 	// Enabled toggles Dragonfly co-management. When false (default), no
 	// Dragonfly resources are created and existing MySQL-only behavior
@@ -23,9 +24,30 @@ type DragonflySpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Image is the pinned Dragonfly container image. Required when
-	// Enabled is true. Tag ":latest" is rejected.
+	// Enabled is true. Tag ":latest" is rejected. How a change reaches the
+	// running sites is UpgradeStrategy's choice.
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// UpgradeStrategy decides how a change of Image reaches the running
+	// Dragonfly sites:
+	//   - Rolling (default): the StatefulSets roll like any other template
+	//     change, replicas first, then the active site after a promotion.
+	//     Cache contents survive only through replication.
+	//   - SnapshotRestore: the operator saves a snapshot of the active
+	//     site into snapshot.dir, restarts it on the new image restoring
+	//     from that snapshot, then moves the other sites and re-attaches
+	//     them as replicas. Cache and session traffic is shed while it
+	//     runs; status.dragonfly.upgrade records the run. The ordinary
+	//     render never moves an image under this strategy. A run that
+	//     fails is not restarted for the same spec.dragonfly: change it
+	//     (or set Image back to the running image and then forward again)
+	//     to retry. Requires snapshot.dir.
+	// Switching to Rolling while a change is pending rolls it the ordinary
+	// way.
+	// +kubebuilder:default=Rolling
+	// +optional
+	UpgradeStrategy DragonflyUpgradeStrategy `json:"upgradeStrategy,omitempty"`
 
 	// Port is the client (Redis-compatible) port. Default: 6379.
 	// +kubebuilder:default=6379
@@ -103,6 +125,19 @@ type DragonflySpec struct {
 	// +optional
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }
+
+// DragonflyUpgradeStrategy is spec.dragonfly.upgradeStrategy.
+// +kubebuilder:validation:Enum=Rolling;SnapshotRestore
+type DragonflyUpgradeStrategy string
+
+const (
+	// DragonflyUpgradeStrategyRolling rolls an image change like any other
+	// StatefulSet template change.
+	DragonflyUpgradeStrategyRolling DragonflyUpgradeStrategy = "Rolling"
+	// DragonflyUpgradeStrategySnapshotRestore moves an image change
+	// through the snapshot-restore upgrade.
+	DragonflyUpgradeStrategySnapshotRestore DragonflyUpgradeStrategy = "SnapshotRestore"
+)
 
 // DragonflySnapshotSpec configures Dragonfly's native snapshot location.
 type DragonflySnapshotSpec struct {
@@ -302,10 +337,21 @@ type DragonflyStatus struct {
 	// +listMapKey=name
 	Sites []DragonflySiteStatus `json:"sites,omitempty"`
 
-	// Upgrade tracks an explicit Dragonfly snapshot-restore upgrade
-	// requested by annotation. It is separate from normal spec reconciliation
-	// because this workflow intentionally creates a short cache outage while
-	// preserving sessions through a pre-upgrade snapshot.
+	// Image is the Dragonfly container image of the active Dragonfly
+	// site's StatefulSet, as the operator last observed it. It is an
+	// observation only: the snapshot-restore upgrade compares
+	// spec.dragonfly.image with each site's live StatefulSet, never with
+	// this field, and sites can run different images while an upgrade
+	// runs or after one stopped part way (status.dragonfly.upgrade).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Upgrade records the latest snapshot-restore upgrade run
+	// (spec.dragonfly.upgradeStrategy SnapshotRestore). The run
+	// intentionally creates a short cache outage while preserving sessions
+	// through a pre-upgrade snapshot. A Failed record stays until
+	// spec.dragonfly changes, or until no site runs an image other than
+	// spec.dragonfly.image, when it is removed.
 	// +optional
 	Upgrade *DragonflyUpgradeStatus `json:"upgrade,omitempty"`
 
@@ -345,22 +391,33 @@ const (
 	DragonflyUpgradePhaseFailed                  DragonflyUpgradePhase = "Failed"
 )
 
-// DragonflyUpgradeStatus is the observable audit trail for a one-shot
-// snapshot-restore Dragonfly upgrade.
+// DragonflyUpgradeStatus is the run record of one snapshot-restore
+// Dragonfly upgrade.
 type DragonflyUpgradeStatus struct {
 	// Phase is the current upgrade phase.
 	// +optional
 	Phase DragonflyUpgradePhase `json:"phase,omitempty"`
 
-	// SourceImage is the image in use when the request was accepted.
+	// SourceImage is the image the run moves from: the live image of the
+	// active site's StatefulSet when the run started, or, for a run that
+	// started after the active site had already moved, the live image of
+	// the first site that had not.
 	// +optional
 	SourceImage string `json:"sourceImage,omitempty"`
 
-	// TargetImage is the requested replacement image.
+	// TargetImage is the image the run moves to: spec.dragonfly.image when
+	// the run started.
 	// +optional
 	TargetImage string `json:"targetImage,omitempty"`
 
-	// ActiveSite is the site that was active when the request was accepted.
+	// SpecDigest is "sha256:<hex>" over spec.dragonfly as the run saw it
+	// when it started. A Failed run is not restarted while spec.dragonfly
+	// still matches it.
+	// +optional
+	SpecDigest string `json:"specDigest,omitempty"`
+
+	// ActiveSite is the MySQL active site when the run started: the site
+	// whose snapshot it saves and restores.
 	// +optional
 	ActiveSite string `json:"activeSite,omitempty"`
 
@@ -368,7 +425,7 @@ type DragonflyUpgradeStatus struct {
 	// +optional
 	SnapshotDir string `json:"snapshotDir,omitempty"`
 
-	// StartTime is when the upgrade request was accepted.
+	// StartTime is when the run started.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 

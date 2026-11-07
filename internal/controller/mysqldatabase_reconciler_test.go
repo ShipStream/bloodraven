@@ -443,7 +443,7 @@ func (e *dialRefusedError) Error() string { return "connection refused" }
 // default policy must release the finalizer without so much as opening a
 // connection.
 func TestMysqlDatabaseDeleteRetainNeverTouchesMySQL(t *testing.T) {
-	for _, policy := range []v1alpha1.MysqlDatabaseDeletionPolicy{"", v1alpha1.MysqlDatabaseRetain} {
+	for _, policy := range []v1alpha1.DeletionPolicy{"", v1alpha1.DeletionPolicyRetain} {
 		t.Run(string("policy="+policy), func(t *testing.T) {
 			now := metav1.Now()
 			mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
@@ -476,7 +476,7 @@ func TestMysqlDatabaseDeleteRetainNeverTouchesMySQL(t *testing.T) {
 func TestMysqlDatabaseDeleteWithoutGroupReleases(t *testing.T) {
 	now := metav1.Now()
 	mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.DeletionTimestamp = &now
 		m.Status.DatabaseCreated = true // DDL was applied; there is something to drop
 	})
@@ -503,7 +503,7 @@ func TestMysqlDatabaseDeleteWithoutGroupReleases(t *testing.T) {
 func TestMysqlDatabaseDeleteWithoutAppliedDDLReleases(t *testing.T) {
 	now := metav1.Now()
 	mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.DeletionTimestamp = &now
 		// status.DatabaseCreated deliberately unset.
 	})
@@ -531,7 +531,7 @@ func TestMysqlDatabaseDeleteWithoutAppliedDDLReleases(t *testing.T) {
 func TestMysqlDatabaseDeleteDefersWithoutActiveSite(t *testing.T) {
 	now := metav1.Now()
 	mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.DeletionTimestamp = &now
 		m.Status.DatabaseCreated = true
 	})
@@ -854,7 +854,7 @@ func TestMysqlDatabaseOwnershipConflicts(t *testing.T) {
 func TestMysqlDatabaseConflictLoserDeleteDropsNothing(t *testing.T) {
 	now := metav1.Now()
 	loser := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.DeletionTimestamp = &now
 		m.Status.Phase = v1alpha1.MysqlDatabasePhaseFailed // lost the conflict; no DatabaseCreated
 	})
@@ -1073,7 +1073,7 @@ func TestMysqlDatabaseConnectFailureKeepsWriteAheadClean(t *testing.T) {
 	}
 
 	// Deleting now must release without dropping anything.
-	mdb.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+	mdb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 	if err := c.Update(context.Background(), mdb); err != nil {
 		t.Fatalf("set deletionPolicy: %v", err)
 	}
@@ -1105,7 +1105,7 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 		now := metav1.Now()
 		return mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
 			m.DeletionTimestamp = &now
-			m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+			m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 			m.Status.DatabaseCreated = true
 			m.Status.OwnerUser = "acme_app"
 			for _, f := range mutate {

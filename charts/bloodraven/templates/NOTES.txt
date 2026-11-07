@@ -95,7 +95,6 @@ Next steps:
      spec:
        credentials:
          operatorSecretName: orders-mysql-operator
-       sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:{{ .Chart.AppVersion }}
        dns:
          hostname: orders.az.example.com
          ttlSeconds: 60
@@ -115,6 +114,9 @@ Next steps:
              size: 50Gi
              storageClassName: fast-ssd
      EOF
+
+     Groups that leave spec.sidecar.image empty run the sidecar this release
+     ships with: {{ include "bloodraven.sidecarImage" . }}
 
   3. Monitor the operator:
      kubectl logs -f deploy/{{ include "bloodraven.fullname" . }} -n {{ .Release.Namespace }}

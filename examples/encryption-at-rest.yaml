@@ -44,7 +44,6 @@ metadata:
   namespace: orders
 spec:
   image: mysql:9.7
-  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:1.3.2
 
   credentials:
     operatorSecretName: orders-mysql-operator

@@ -85,18 +85,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	// encrypts what is created after the fact, it does not rewrite what
 	// is already on disk. Silently accepting the flag would hand the
 	// admin a cluster that reports "encrypted" while most of the data on
-	// the PVC is not, so the default is to refuse and point at the
-	// supported procedure.
+	// the PVC is not, so spec.encryptionAtRest.existingData defaults to
+	// Refuse and points at the supported procedure.
 	if fg.Status.EncryptionAtRest == nil && fg.Status.ActiveSite != "" &&
-		fg.Annotations[v1alpha1.AdoptEncryptionAnnotation] != "confirm" {
+		fg.Spec.EncryptionAtRest.ExistingData != v1alpha1.EncryptionExistingDataLeavePlaintext {
 		logger.Info("refusing to enable encryption at rest on a live failover group",
 			"activeSite", fg.Status.ActiveSite)
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventEncryptionAdoptionRefused,
 			"spec.encryptionAtRest.enabled was turned on for a group that is already serving from site %q. "+
 				"Existing tablespaces stay plaintext — MySQL only encrypts data written after the fact. "+
 				"Supported path: bring up a replica on an encrypted group and planned-failover onto it, or "+
-				"acknowledge partial coverage with the annotation %s=confirm.",
-			fg.Status.ActiveSite, v1alpha1.AdoptEncryptionAnnotation)
+				"accept partial coverage with spec.encryptionAtRest.existingData: LeavePlaintext.",
+			fg.Status.ActiveSite)
 		setEncryptionRefusedCondition(fg)
 		if _, err := r.patchEncryptionStatus(ctx, fg, nil, false); err != nil {
 			if errors.Is(err, errEncryptionStatusMoved) {
@@ -1039,8 +1039,8 @@ func publishKeyringMetrics(namespace, group string, site *v1alpha1.SiteEncryptio
 }
 
 // setEncryptionRefusedCondition reports a refused adoption. The
-// condition stays False until the admin either reverts the flag or
-// acknowledges partial coverage.
+// condition stays False until the admin either reverts the flag or sets
+// spec.encryptionAtRest.existingData: LeavePlaintext.
 func setEncryptionRefusedCondition(fg *v1alpha1.MysqlFailoverGroup) {
 	setCondition(&fg.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionEncryptionAtRestReady,
@@ -1048,10 +1048,9 @@ func setEncryptionRefusedCondition(fg *v1alpha1.MysqlFailoverGroup) {
 		Reason:             v1alpha1.ReasonAdoptionRefused,
 		ObservedGeneration: fg.Generation,
 		LastTransitionTime: metav1.Now(),
-		Message: fmt.Sprintf(
-			"encryption at rest cannot be enabled on a group that is already serving; "+
-				"existing tablespaces would stay plaintext. Set %s=confirm to accept partial coverage.",
-			v1alpha1.AdoptEncryptionAnnotation),
+		Message: "encryption at rest cannot be enabled on a group that is already serving; " +
+			"existing tablespaces would stay plaintext. Set spec.encryptionAtRest.existingData: " +
+			"LeavePlaintext to accept partial coverage.",
 	})
 }
 

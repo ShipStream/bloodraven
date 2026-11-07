@@ -439,7 +439,6 @@ func (c *upgradeRoleConn) ReplicaOf(context.Context, string, int32) error {
 // abandoned without re-attaching dc2 to dc1.
 func TestDragonflySnapshotUpgrade_WaitsForAndYieldsToEmergencyPromotion(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
-	fg.Annotations = nil
 	const image = "dragonfly:new"
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(dragonflyPodForTest(fg, "dc1", image, true), dragonflyPodForTest(fg, "dc2", image, true)).Build()
@@ -500,9 +499,9 @@ func TestDragonflySnapshotUpgrade_WaitsForAndYieldsToEmergencyPromotion(t *testi
 	// The in-flight upgrade paused the manager when it was accepted (the
 	// pause follows only the upgrade state read under the gate).
 	mgr.SetUpgradePaused(true)
-	requeue, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), live)
-	if err != nil || requeue != dragonflyGateRetry {
-		t.Fatalf("upgrade while the emergency held the gate = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
+	step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), live)
+	if err != nil || step.hold != dragonflyGateRetry {
+		t.Fatalf("upgrade while the emergency held the gate = (%+v, %v), want a %s hold", step, err, dragonflyGateRetry)
 	}
 	if !mgr.paused() {
 		t.Error("the in-flight upgrade's pause was lifted while it waited for the gate")

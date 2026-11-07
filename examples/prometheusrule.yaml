@@ -71,8 +71,9 @@ spec:
             runbook_url: https://bloodraven.dev/docs/licensing
         - alert: BloodravenUnencryptedTablespaces
           # Non-zero means part of the data on the PVC is in the clear.
-          # Expected on a group adopted with encryption-adopt=confirm until
-          # the pre-existing tables are rebuilt.
+          # Expected on a group adopted with
+          # spec.encryptionAtRest.existingData: LeavePlaintext until the
+          # pre-existing tables are rebuilt.
           expr: bloodraven_encryption_unencrypted_tablespaces > 0
           for: 1h
           labels:

@@ -78,6 +78,15 @@ Operator image reference.
 {{- end }}
 
 {{/*
+Default MySQL sidecar image (BLOODRAVEN_SIDECAR_IMAGE): the image a failover
+group runs when spec.sidecar.image is empty.
+*/}}
+{{- define "bloodraven.sidecarImage" -}}
+{{- $tag := .Values.sidecar.image.tag | default .Chart.AppVersion }}
+{{- printf "%s:%s" .Values.sidecar.image.repository $tag }}
+{{- end }}
+
+{{/*
 BLOODRAVEN_WS_MAX_CLIENTS value. Missing, null or blank keeps the default
 100 and 0 disables the cap. Anything that is not a whole number from 0 to
 2147483647 fails the render: the operator would otherwise fall back to 100

@@ -275,6 +275,15 @@ func main() {
 	}
 	controller.SetOperatorImageDefaults(operatorImage, "")
 
+	// The sidecar image a group runs when spec.sidecar.image is empty. The
+	// chart renders it from sidecar.image.repository and sidecar.image.tag.
+	// Without it, only groups that pin spec.sidecar.image can render.
+	sidecarImage := os.Getenv("BLOODRAVEN_SIDECAR_IMAGE")
+	if sidecarImage == "" {
+		logger.Warn("BLOODRAVEN_SIDECAR_IMAGE is not set; groups without spec.sidecar.image cannot render their Deployments")
+	}
+	controller.SetSidecarImageDefault(sidecarImage)
+
 	if err := mgr.Add(runner); err != nil {
 		logger.Error("unable to add topology manager runner", "error", err)
 		os.Exit(1)

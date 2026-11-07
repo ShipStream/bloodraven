@@ -60,7 +60,7 @@ const (
 	pitrArchiveAwaitingRolloutText    = "ordered update pending; the pod does not run the PITR configuration yet"
 	pitrArchiveRolloutStalledText     = "ordered update still pending after 30m; the pod does not run the PITR configuration (check status.updatePhase and \"ordered update: deferring\" operator logs)"
 	pitrArchiveUnreachableDetailTempl = "archiver status unreachable since %s: %s"
-	pitrArchiveSidecarOutdatedText    = "sidecar archives without an archive identity (it predates archive identity), so its manifests are unusable for restores; set spec.sidecarImage to this operator's release (or clear it) before archiving to a new prefix"
+	pitrArchiveSidecarOutdatedText    = "sidecar archives without an archive identity (it predates archive identity), so its manifests are unusable for restores; set spec.sidecar.image to this operator's release (or clear it) before archiving to a new prefix"
 )
 
 // pitrArchiveFalseReasons is the reason precedence when sites disagree:
@@ -505,7 +505,7 @@ func (h *pitrSiteHistory) classify(now time.Time, r archiverPollResult, errorStu
 		h.health, h.reason, h.detail = pitrSiteBad, v1alpha1.ReasonArchiveStoreInitFailed, s.LastError
 	case s.Archive == nil:
 		// F003: an enabled archiver that reports no archive identity
-		// block predates archive identity (an older spec.sidecarImage).
+		// block predates archive identity (an older spec.sidecar.image pin).
 		// It writes manifests without an archive ID that no restore of
 		// this release accepts, so it is not archiving for PITR however
 		// healthy it looks. Handled like a disabled archiver: Unknown

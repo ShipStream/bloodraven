@@ -124,6 +124,22 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSet(ctx context
 	return err
 }
 
+// dragonflyRenderImage is the image the ordinary render gives a site's
+// Dragonfly container. Under upgradeStrategy Rolling it is
+// spec.dragonfly.image. Under SnapshotRestore the render never moves an
+// image: an existing StatefulSet (sts as read back) keeps its live image,
+// including while a run waits for admission and after a run failed, and
+// only the snapshot upgrade's own phases change it. A StatefulSet being
+// created starts on spec.dragonfly.image.
+func dragonflyRenderImage(spec *v1alpha1.DragonflySpec, sts *appsv1.StatefulSet) string {
+	if dragonflyUpgradeStrategy(spec) == v1alpha1.DragonflyUpgradeStrategySnapshotRestore {
+		if live := dragonflyTemplateImage(sts); live != "" {
+			return live
+		}
+	}
+	return spec.Image
+}
+
 func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, sts *appsv1.StatefulSet) error {
 	spec := fg.Spec.Dragonfly
 	if err := controllerutil.SetControllerReference(fg, sts, r.Scheme); err != nil {
@@ -142,7 +158,7 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 
 	container := corev1.Container{
 		Name:  dragonflyContainerName,
-		Image: spec.Image,
+		Image: dragonflyRenderImage(spec, sts),
 		Args:  args,
 		Env:   env,
 		Ports: []corev1.ContainerPort{
@@ -577,6 +593,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.C
 	if err != nil {
 		return 0, err
 	}
+	if err := r.observeDragonflyImage(ctx, fg); err != nil {
+		return 0, fmt.Errorf("record dragonfly image: %w", err)
+	}
 	if err := r.reconcileDragonflyActiveService(ctx, fg); err != nil {
 		return 0, fmt.Errorf("reconcile dragonfly active service: %w", err)
 	}
@@ -589,6 +608,31 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.C
 		}
 	}
 	return requeue, nil
+}
+
+// observeDragonflyImage records status.dragonfly.image: the Dragonfly
+// container image of the active Dragonfly site's StatefulSet. It is an
+// observation only; nothing compares spec.dragonfly.image with it.
+func (r *MysqlFailoverGroupReconciler) observeDragonflyImage(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	master := effectiveDragonflyMasterSite(fg)
+	if master == "" {
+		return nil
+	}
+	var sts appsv1.StatefulSet
+	key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, master)}
+	if err := r.Get(ctx, key, &sts); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	image := dragonflyTemplateImage(&sts)
+	if image == "" || (fg.Status.Dragonfly != nil && fg.Status.Dragonfly.Image == image) {
+		return nil
+	}
+	patch := client.MergeFrom(fg.DeepCopy())
+	if fg.Status.Dragonfly == nil {
+		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{}
+	}
+	fg.Status.Dragonfly.Image = image
+	return client.IgnoreNotFound(r.Status().Patch(ctx, fg, patch))
 }
 
 func (r *MysqlFailoverGroupReconciler) deleteLegacyDragonflyGroupPDB(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
@@ -626,7 +670,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 			return 0, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
 		}
 
-		desired, err := r.desiredDragonflyStatefulSet(fg, site)
+		desired, err := r.desiredDragonflyStatefulSet(fg, site, &current)
 		if err != nil {
 			return 0, fmt.Errorf("build desired dragonfly statefulset %s: %w", site.Name, err)
 		}
@@ -856,12 +900,18 @@ func minInt(a, b int) int {
 	return b
 }
 
-func (r *MysqlFailoverGroupReconciler) desiredDragonflyStatefulSet(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) (*appsv1.StatefulSet, error) {
+// desiredDragonflyStatefulSet renders site's StatefulSet as the ordinary
+// render would update current (nil when it does not exist yet): the same
+// mutation CreateOrUpdate applies to the object it reads back.
+func (r *MysqlFailoverGroupReconciler) desiredDragonflyStatefulSet(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, current *appsv1.StatefulSet) (*appsv1.StatefulSet, error) {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dragonflyStatefulSetName(fg.Name, site.Name),
 			Namespace: fg.Namespace,
 		},
+	}
+	if current != nil {
+		sts = current.DeepCopy()
 	}
 	if err := r.applyDragonflyStatefulSetSpec(fg, site, sts); err != nil {
 		return nil, err

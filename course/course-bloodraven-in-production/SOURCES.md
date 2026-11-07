@@ -379,7 +379,7 @@ This course is separately licensed; see the notice in the page footer.
 | # | Claim | Value / verbatim quote | Source | Angle |
 |---|---|---|---|---|
 | 190 | Release under study: **v1.0.0**; chart `version: 1.0.0`, `appVersion: "1.0.0"`, `kubeVersion: ">=1.26.0"` | `charts/bloodraven/Chart.yaml:5-6, 25`; `git tag` | | A2 |
-| 191 | MySQL image default `mysql:9.7`; sidecar image `ghcr.io/shipstream/bloodraven-sidecar:1.0.0` | `api/v1alpha1/types.go:46, 50` | | A2 |
+| 191 | MySQL image default `mysql:9.7`; no stored sidecar image default: an unset `spec.sidecar.image` runs the operator's `BLOODRAVEN_SIDECAR_IMAGE`, which the chart renders from `sidecar.image.repository` and `sidecar.image.tag` (default the chart's `appVersion`) | `api/v1alpha1/types.go` (`Image`, `SidecarSpec.Image`); `internal/controller/sidecar_version.go` (`effectiveSidecarImage`); `charts/bloodraven/values.yaml`, `templates/deployment.yaml` | | A2 |
 | 192 | `spec.sites` MinItems 2 / MaxItems 16 | `api/v1alpha1/types.go:63-64` | | A2 |
 | 193 | **51 registered chaos scenarios**. Profiles: smoke = 4, release = 17; full is every registered scenario whose `Quarantine` string is empty (encrypted 48/50/51 are quarantined from batch profiles) | `internal/playground/scenarios/*.go`; `internal/playground/runner/profile.go:34-38, 48-67, 93-96` | | A2 |
 | 194 | The playground overrides shipped defaults: `failoverCooldown: 30s` (vs 5 m), `replication.maxLagSeconds: 30` (vs 300), `dns.ttlSeconds: 10` (vs 60). It matches defaults for `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`, `peerCheckInterval`, `maxSyncWait` | `playground/manifests/failovergroup.yaml:10-13, 18, 76-79, 92-94` | | A2 |

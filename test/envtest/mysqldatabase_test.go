@@ -93,13 +93,15 @@ func TestMysqlDatabase_EnvtestDefaults(t *testing.T) {
 	if got.Spec.CharacterSet != "utf8mb4" {
 		t.Errorf("spec.characterSet = %q, want utf8mb4", got.Spec.CharacterSet)
 	}
-	if got.Spec.Collation != "utf8mb4_unicode_ci" {
-		t.Errorf("spec.collation = %q, want utf8mb4_unicode_ci", got.Spec.Collation)
+	// No persisted collation default (A-53): unset means the character
+	// set's default collation, resolved by MySQL.
+	if got.Spec.Collation != "" {
+		t.Errorf("spec.collation = %q, want unset", got.Spec.Collation)
 	}
 	// The default that matters. Dropping a tenant database because a CR was
 	// garbage-collected is an unrecoverable data-loss incident, so the API
 	// server must default this to Retain without the caller saying so.
-	if got.Spec.DeletionPolicy != v1alpha1.MysqlDatabaseRetain {
+	if got.Spec.DeletionPolicy != v1alpha1.DeletionPolicyRetain {
 		t.Errorf("spec.deletionPolicy = %q, want Retain", got.Spec.DeletionPolicy)
 	}
 	if len(got.Spec.Owner.Privileges) != 1 || got.Spec.Owner.Privileges[0] != v1alpha1.PrivilegeAllPrivileges {
@@ -569,7 +571,7 @@ func TestMysqlDatabase_EnvtestRetainDeletionReleasesFinalizer(t *testing.T) {
 func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 	ns := createNamespace(t, "mydb-delete-optin")
 	cr := newMysqlDatabaseCR(ns, "tenant-acme")
-	cr.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+	cr.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 	if err := k8sClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create with deletionPolicy=Delete: %v", err)
 	}
@@ -579,7 +581,7 @@ func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "tenant-acme"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Spec.DeletionPolicy != v1alpha1.MysqlDatabaseDelete {
+	if got.Spec.DeletionPolicy != v1alpha1.DeletionPolicyDelete {
 		t.Fatalf("spec.deletionPolicy = %q, want Delete", got.Spec.DeletionPolicy)
 	}
 

@@ -249,8 +249,7 @@ func TestEncryptionChaos_PartialAdoptionKeepsBothSitesRestartable(t *testing.T) 
 	live.Spec.TLS = &v1alpha1.TLSSpec{
 		SecretName: "mysql-tls",
 	}
-	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
-	live.Annotations = map[string]string{v1alpha1.AdoptEncryptionAnnotation: "confirm"}
+	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, ExistingData: v1alpha1.EncryptionExistingDataLeavePlaintext}
 	if err := c.Update(ctx, &live); err != nil {
 		t.Fatalf("enable encryption: %v", err)
 	}
@@ -924,11 +923,12 @@ func TestEncryptionChaos_DisableRetainsEscrowAndReEnableResumes(t *testing.T) {
 		}
 	}
 
-	// Re-enable. The group is serving, so adoption needs the annotation;
-	// with it, the lifecycle restarts from the retained versions.
+	// Re-enable. The group is serving, so adoption needs existingData:
+	// LeavePlaintext; with it, the lifecycle restarts from the retained
+	// versions.
 	fg.Spec.EncryptionAtRest.Enabled = true
+	fg.Spec.EncryptionAtRest.ExistingData = v1alpha1.EncryptionExistingDataLeavePlaintext
 	fg.Status.ActiveSite = "dc1"
-	fg.Annotations = map[string]string{v1alpha1.AdoptEncryptionAnnotation: "confirm"}
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}

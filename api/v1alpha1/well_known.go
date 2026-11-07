@@ -44,18 +44,6 @@ const (
 	// Public.
 	RotateKeyringAnnotation = "bloodraven.shipstream.io/rotate-keyring"
 
-	// AdoptEncryptionAnnotation, set to "confirm", acknowledges that
-	// encryption is being turned on for a group that already holds data,
-	// and that the existing tablespaces stay plaintext until they are
-	// rebuilt (status.encryptionAtRest.sites[].coverage reports how much).
-	// Public.
-	AdoptEncryptionAnnotation = "bloodraven.shipstream.io/encryption-adopt"
-
-	// DragonflySnapshotUpgradeAnnotation starts the Dragonfly
-	// snapshot-restore upgrade to the target image; it requires
-	// spec.dragonfly.snapshot. Public.
-	DragonflySnapshotUpgradeAnnotation = "bloodraven.shipstream.io/dragonfly-snapshot-upgrade"
-
 	// ReleasePITRArchiveBindingAnnotation releases one PITR archive
 	// binding: "<binding id>:confirm=<metadata.name>". Never commit it in
 	// GitOps. Public.

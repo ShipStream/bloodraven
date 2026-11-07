@@ -590,8 +590,8 @@ func (r *fakeSQLValueRows) Next(dest []driver.Value) error {
 // ---------------------------------------------------------------------------
 
 var (
-	reCreateDatabase = regexp.MustCompile("^CREATE DATABASE IF NOT EXISTS `([^`]+)` CHARACTER SET (\\S+) COLLATE (\\S+)$")
-	reAlterDatabase  = regexp.MustCompile("^ALTER DATABASE `([^`]+)` CHARACTER SET (\\S+) COLLATE (\\S+)$")
+	reCreateDatabase = regexp.MustCompile("^CREATE DATABASE IF NOT EXISTS `([^`]+)` CHARACTER SET (\\S+)(?: COLLATE (\\S+))?$")
+	reAlterDatabase  = regexp.MustCompile("^ALTER DATABASE `([^`]+)` CHARACTER SET (\\S+)(?: COLLATE (\\S+))?$")
 	reCreateUser     = regexp.MustCompile(`^CREATE USER IF NOT EXISTS (.+)$`)
 	reAlterUserWith  = regexp.MustCompile(`^ALTER USER (.+?) WITH MAX_USER_CONNECTIONS (\d+) MAX_QUERIES_PER_HOUR (\d+)$`)
 	reAlterUser      = regexp.MustCompile(`^ALTER USER (.+)$`)
@@ -607,6 +607,19 @@ var (
 	reAccountAuth = regexp.MustCompile(`'([^']*)'@'([^']*)' IDENTIFIED BY '((?:[^'\\]|\\.|'')*)'`)
 	reAccount     = regexp.MustCompile(`'([^']*)'@'([^']*)'`)
 )
+
+// fakeCollation is the collation a CREATE or ALTER DATABASE leaves: the
+// named one, or, with no COLLATE clause, the character set's default, as
+// MySQL 8.0 and later resolve it.
+func fakeCollation(charset, collation string) string {
+	if collation != "" {
+		return collation
+	}
+	if charset == "utf8mb4" {
+		return "utf8mb4_0900_ai_ci"
+	}
+	return charset + "_general_ci"
+}
 
 type fakeAccount struct{ user, host, password string }
 
@@ -706,7 +719,7 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 	case reCreateDatabase.MatchString(stmt):
 		m := reCreateDatabase.FindStringSubmatch(stmt)
 		if _, exists := s.databases[m[1]]; !exists {
-			s.databases[m[1]] = m[2] + "/" + m[3]
+			s.databases[m[1]] = m[2] + "/" + fakeCollation(m[2], m[3])
 		}
 		return nil
 
@@ -715,7 +728,7 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 		if _, exists := s.databases[m[1]]; !exists {
 			return fmt.Errorf("fake mysql: ALTER DATABASE on nonexistent database %q", m[1])
 		}
-		s.databases[m[1]] = m[2] + "/" + m[3]
+		s.databases[m[1]] = m[2] + "/" + fakeCollation(m[2], m[3])
 		return nil
 
 	case reCreateUser.MatchString(stmt):

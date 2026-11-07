@@ -72,6 +72,23 @@ spec:
           spec:
             description: MysqlBackupSpec defines the desired state of a MysqlBackup.
             properties:
+              deletionPolicy:
+                default: Delete
+                description: |-
+                  DeletionPolicy controls what happens to the backup's artifact when
+                  this CR is deleted, by hand or by retention:
+                    - Delete (default) removes the artifact from storage, and then the
+                      backup's dump-key snapshot Secret, so retention frees storage.
+                    - Retain leaves the artifact in storage and keeps the dump-key
+                      snapshot Secret that decrypts it; an ArtifactRetained Event names
+                      both. Nothing tracks them afterwards: delete them by hand when
+                      they are no longer needed.
+                  It is read when the deletion is processed, so it can be changed up to
+                  then.
+                enum:
+                - Retain
+                - Delete
+                type: string
               failoverGroupRef:
                 description: |-
                   FailoverGroupRef identifies the MysqlFailoverGroup in the same

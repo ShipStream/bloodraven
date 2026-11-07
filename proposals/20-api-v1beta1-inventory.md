@@ -21,7 +21,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)`
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))`
 
-### MysqlFailoverGroup `spec` (241 fields)
+### MysqlFailoverGroup `spec` (243 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -122,7 +122,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.dns` | object | yes |  |  |
 | `spec.dns.hostname` | string | yes |  | minLength=1 |
 | `spec.dns.ttlSeconds` | integer (int64) |  | `60` | minimum=1 |
-| `spec.dragonfly` | object |  |  | CEL: `!self.enabled \|\| (has(self.image) && self.image.size() > 0)`; CEL: `!self.enabled \|\| !self.image.endsWith(':latest')` |
+| `spec.dragonfly` | object |  |  | CEL: `!self.enabled \|\| (has(self.image) && self.image.size() > 0)`; CEL: `!self.enabled \|\| !self.image.endsWith(':latest')`; CEL: `!has(self.upgradeStrategy) \|\| self.upgradeStrategy != 'SnapshotRestore' \|\| (has(self.snapshot) && has(self.snapshot.dir) && self.snapshot.dir.size() > 0)` |
 | `spec.dragonfly.adminPort` | integer (int32) |  | `9999` | minimum=1; maximum=65535 |
 | `spec.dragonfly.args` | []string |  |  | listType=atomic |
 | `spec.dragonfly.auth` | object |  |  |  |
@@ -146,6 +146,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.dragonfly.snapshot.s3EndpointURL` | string |  |  | maxLength=512; pattern=`^(https?://[^\s/?#@]+/?)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.dragonfly.snapshot.s3SignPayload` | boolean |  |  |  |
 | `spec.dragonfly.snapshot.serviceAccountName` | string |  |  |  |
+| `spec.dragonfly.upgradeStrategy` | string |  | `"Rolling"` | enum: `Rolling`, `SnapshotRestore` |
 | `spec.encryptionAtRest` | object |  |  |  |
 | `spec.encryptionAtRest.coverage` | object |  |  |  |
 | `spec.encryptionAtRest.coverage.binaryLog` | boolean |  | `true` |  |
@@ -155,6 +156,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.encryptionAtRest.coverage.tables` | boolean |  | `true` |  |
 | `spec.encryptionAtRest.coverage.undoLog` | boolean |  | `true` |  |
 | `spec.encryptionAtRest.enabled` | boolean |  | `false` |  |
+| `spec.encryptionAtRest.existingData` | string |  | `"Refuse"` | enum: `Refuse`, `LeavePlaintext` |
 | `spec.encryptionAtRest.keyring` | object |  |  |  |
 | `spec.encryptionAtRest.keyring.dataFileDir` | string |  | `"/run/mysql-keyring"` | pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$` |
 | `spec.encryptionAtRest.keyring.escrowTimeout` | string |  | `"10m0s"` | CEL: `duration(self) >= duration('30s') && duration(self) <= duration('1h')` |
@@ -236,12 +238,12 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.serviceTemplate.annotations` | map[string]string |  |  |  |
 | `spec.serviceTemplate.externalTrafficPolicy` | string |  |  | enum: `Cluster`, `Local` |
 | `spec.serviceTemplate.type` | string |  |  | enum: `ClusterIP`, `LoadBalancer`, `NodePort` |
-| `spec.sidecar` | object |  |  | CEL: `duration(has(self.leaseTimeout) ? self.leaseTimeout : '20s') >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s')` |
+| `spec.sidecar` | object |  | `{}` | CEL: `duration(has(self.leaseTimeout) ? self.leaseTimeout : '20s') >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s')` |
+| `spec.sidecar.image` | string |  |  | minLength=1 |
 | `spec.sidecar.leaseTimeout` | string |  | `"20s"` | CEL: `duration(self) >= duration('3s') && duration(self) <= duration('10m')` |
 | `spec.sidecar.operatorEndpoint` | string |  |  | maxLength=253; pattern=`^[A-Za-z0-9.-]+:[0-9]{1,5}$` |
 | `spec.sidecar.peerCheckInterval` | string |  | `"5s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1m')` |
-| `spec.sidecarImage` | string |  | `"ghcr.io/shipstream/bloodraven-sidecar:1.3.2"` | minLength=1 |
-| `spec.sidecarResources` | corev1.ResourceRequirements |  |  |  |
+| `spec.sidecar.resources` | corev1.ResourceRequirements |  |  |  |
 | `spec.sites` | []object | yes |  | minItems=2; maxItems=16; listType=map keys=name; items CEL: `self.role == 'ReadOnly' \|\| (has(self.taintNodeSelector) && has(self.lbIP))` |
 | `spec.sites[].lbIP` | string |  |  | minLength=1 |
 | `spec.sites[].mysqlConf` | map[string]string |  |  |  |
@@ -268,7 +270,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.updateStrategy.type` | string |  | `"OrderedUpdate"` | enum: `OrderedUpdate`, `Recreate` |
 
 
-### MysqlFailoverGroup `status` (320 fields)
+### MysqlFailoverGroup `status` (322 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -287,6 +289,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.conditions` | []metav1.Condition |  |  | listType=map keys=type |
 | `status.dragonfly` | object |  |  |  |
 | `status.dragonfly.activeSite` | string |  |  |  |
+| `status.dragonfly.image` | string |  |  |  |
 | `status.dragonfly.lastPromotionTarget` | string |  |  |  |
 | `status.dragonfly.lastPromotionTime` | string (date-time) |  |  |  |
 | `status.dragonfly.message` | string |  |  |  |
@@ -315,6 +318,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.dragonfly.upgrade.snapshotDir` | string |  |  |  |
 | `status.dragonfly.upgrade.snapshotTime` | string (date-time) |  |  |  |
 | `status.dragonfly.upgrade.sourceImage` | string |  |  |  |
+| `status.dragonfly.upgrade.specDigest` | string |  |  |  |
 | `status.dragonfly.upgrade.startTime` | string (date-time) |  |  |  |
 | `status.dragonfly.upgrade.targetImage` | string |  |  |  |
 | `status.encryptionAtRest` | object |  |  |  |
@@ -602,10 +606,11 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - Root CEL: `!self.metadata.name.endsWith('.bloodraven-backup.json')`
 - Root CEL: `!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location) || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage == oldSelf.status.artifactStorage)`
 
-### MysqlBackup `spec` (4 fields)
+### MysqlBackup `spec` (5 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
+| `spec.deletionPolicy` | string |  | `"Delete"` | enum: `Retain`, `Delete` |
 | `spec.failoverGroupRef` | object | yes |  |  |
 | `spec.failoverGroupRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.profileName` | string | yes |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
@@ -753,7 +758,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
 | `spec.characterSet` | string |  | `"utf8mb4"` | maxLength=64; pattern=`^[A-Za-z0-9_]{1,64}$` |
-| `spec.collation` | string |  | `"utf8mb4_unicode_ci"` | maxLength=64; pattern=`^[A-Za-z0-9_]{1,64}$` |
+| `spec.collation` | string |  |  | maxLength=64; pattern=`^[A-Za-z0-9_]{1,64}$` |
 | `spec.databaseName` | string | yes |  | maxLength=64; pattern=`^[A-Za-z0-9_]{1,64}$`; CEL(transition): `self == oldSelf`; CEL: `!(self.lowerAscii() in ['mysql', 'sys', 'information_schema', 'performance_schema'])` |
 | `spec.deletionPolicy` | string |  | `"Retain"` | enum: `Retain`, `Delete` |
 | `spec.deploymentClients` | []object |  |  | maxItems=16; listType=map keys=namespace,serviceAccount |

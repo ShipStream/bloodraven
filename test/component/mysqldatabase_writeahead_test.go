@@ -96,7 +96,7 @@ func (h *mdbHarness) requireNoStatementNaming(n int, prefix, username string) {
 // entry was removed — adopted the second through its surviving record.
 func TestMysqlDatabaseRefusedUsersThenRemovedNeverAdopts(t *testing.T) {
 	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("a-mysql"), selectUserEntry("b-mysql")}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(),
@@ -167,7 +167,7 @@ func TestMysqlDatabasePreflightQueryFailureStampsNothing(t *testing.T) {
 // statement created and are withdrawn — so a foreign account created with
 // that name afterwards is refused, not adopted, and never dropped.
 func TestMysqlDatabaseOwnerStatementRefusedWithdrawsUnexecutedRecords(t *testing.T) {
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
 		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)
@@ -231,7 +231,7 @@ func TestMysqlDatabaseAmbiguousOwnerFailureKeepsRecord(t *testing.T) {
 // status.pendingOwnerUser, or a foreign account created under that name later
 // would be adopted by the retry and dropped by Delete.
 func TestMysqlDatabaseRefusedRotationStatementWithdrawsPendingOwner(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 	h.reconcile()
 	h.requireReady()
@@ -268,7 +268,7 @@ func TestMysqlDatabaseRefusedRotationStatementWithdrawsPendingOwner(t *testing.T
 // does not make a foreign X@H2 this CR's — for the owner or a users[] entry.
 func TestMysqlDatabaseHostAdditionOverForeignAccountRefused(t *testing.T) {
 	t.Run("owner", func(t *testing.T) {
-		cr := mdbCR(withOwnerHosts(hostA), func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+		cr := mdbCR(withOwnerHosts(hostA), func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 		h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 		h.reconcile()
 		h.requireReady()
@@ -292,7 +292,7 @@ func TestMysqlDatabaseHostAdditionOverForeignAccountRefused(t *testing.T) {
 	})
 
 	t.Run("users", func(t *testing.T) {
-		cr := mdbCR(withSupportUser, withSupportHosts(hostA), func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+		cr := mdbCR(withSupportUser, withSupportHosts(hostA), func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 		h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 		h.reconcile()
 		h.requireReady()
@@ -793,7 +793,7 @@ func TestMysqlDatabaseWithdrawalPatchFailureDoesNotAdopt(t *testing.T) {
 			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 	}
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h := newMdbHarnessWithInterceptor(t, funcs, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
 		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)
@@ -958,7 +958,7 @@ func TestMysqlDatabaseFailedApplyWithdrawsInThePhasePatch(t *testing.T) {
 // path's retirePrincipal applies. The pre-fix delete path only checked
 // sibling CRs' grants[] and dropped its own.
 func TestMysqlDatabaseDeleteKeepsPrincipalMovedToOwnGrants(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 	h.reconcile()
 	h.requireReady()
@@ -1008,7 +1008,7 @@ func TestMysqlDatabaseRemovedEntryWithdrawsStaleLedgerRecord(t *testing.T) {
 			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 	}
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h := newMdbHarnessWithInterceptor(t, funcs, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
 		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)

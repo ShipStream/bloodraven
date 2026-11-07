@@ -67,11 +67,11 @@ const (
 	//
 	// /peer/ping answers unconditionally from the HTTP server and is served
 	// by every sidecar release. The sidecar's /livez also covers a wedged
-	// fencing loop, but an older sidecar answers 404 to it, and
-	// spec.sidecarImage is routinely older than the operator (CRs persist
-	// the CRD default they were created with, and the upgrade policy
-	// allows a one-minor skew). A /livez probe would crash-loop every such
-	// sidecar. Switch to /livez once every supported sidecar serves it.
+	// fencing loop, but an older sidecar answers 404 to it, and a pinned
+	// spec.sidecar.image may be older than the operator (the upgrade
+	// policy allows a one-minor skew). A /livez probe would crash-loop
+	// every such sidecar. Switch to /livez once every supported sidecar
+	// serves it.
 	sidecarLivenessPath = "/peer/ping"
 
 	// sidecarReadinessPath reports local MySQL connectivity. Readiness is
@@ -150,6 +150,13 @@ type MysqlFailoverGroupReconciler struct {
 	// restoreRecloneStalled).
 	restoreRecloneMu   sync.Mutex
 	restoreRecloneIdle map[types.NamespacedName]restoreRecloneWait
+
+	// dragonflyUpgradeDeferNote is the last cause each group's waiting
+	// snapshot-restore upgrade reported (noteDragonflyUpgradeDeferral), so
+	// DragonflyUpgradeDeferred is emitted when the cause changes, not on
+	// every retry.
+	dragonflyUpgradeDeferMu   sync.Mutex
+	dragonflyUpgradeDeferNote map[types.NamespacedName]string
 
 	// Logger is the operational slog stream. Nil is treated as discard
 	// so existing tests that construct the reconciler without a logger
@@ -479,17 +486,22 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile pdb: %w", err)
 	}
 
-	if dfUpgradeRequeue, err := r.reconcileDragonflySnapshotUpgrade(ctx, &fg); err != nil {
+	// A snapshot-restore upgrade run in flight owns the Dragonfly sites and
+	// holds the reconcile here; a run that waits for admission only
+	// contributes a requeue, so the planned failover it may wait for is
+	// still driven below.
+	dfUpgrade, err := r.reconcileDragonflySnapshotUpgrade(ctx, &fg)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly snapshot upgrade: %w", err)
-	} else if dfUpgradeRequeue > 0 {
-		return ctrl.Result{RequeueAfter: dfUpgradeRequeue}, nil
+	} else if dfUpgrade.hold > 0 {
+		return ctrl.Result{RequeueAfter: dfUpgrade.hold}, nil
 	}
 
 	// Reconcile per-site Dragonfly resources when spec.dragonfly is enabled.
 	// When Dragonfly is disabled, reconcileDragonflyResources actively removes
 	// any previously managed Dragonfly resources so MySQL-only deployments are
 	// unaffected.
-	deferredRequeue := bindingRequeue
+	deferredRequeue := minPositiveDuration(bindingRequeue, dfUpgrade.wait)
 	if dragonflyRequeue, err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
 	} else if dragonflyRequeue > 0 {
@@ -1301,6 +1313,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			Namespace: fg.Namespace,
 		},
 	}
+	sidecarImage, err := effectiveSidecarImage(fg)
+	if err != nil {
+		return err
+	}
 
 	// Secret contents enter the spec hash as a keyed digest so password
 	// and certificate changes roll the pods (see secret_digest.go).
@@ -1381,8 +1397,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		// otherwise every status change triggers a Deployment rollout.
 		podLabels[v1alpha1.RoleLabel] = "replica"
 		podLabels[v1alpha1.HealthyLabel] = "no"
-
-		sidecarImage := fg.Spec.SidecarImage
 
 		configMapName := desiredSiteConfigMapName(fg, site, pitr.inputs)
 
@@ -1638,7 +1652,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			},
 			Env:          sidecarEnv,
 			VolumeMounts: sidecarVolumeMounts,
-			Resources:    fg.Spec.SidecarResources,
+			Resources:    fg.Spec.Sidecar.Resources,
 			LivenessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
@@ -2364,9 +2378,13 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, se
 	h := sha256.New()
 	fmt.Fprintf(h, "deploymentPodRenderVersion=%s\n", deploymentPodRenderVersion)
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
-	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)
+	// The effective sidecar image: a pin, or the operator's default, so a
+	// new default rolls the groups that do not pin one. An unset default
+	// hashes as empty; the render refuses it (effectiveSidecarImage).
+	sidecarImage, _ := effectiveSidecarImage(fg)
+	fmt.Fprintf(h, "sidecar=%s\n", sidecarImage)
 	fmt.Fprintf(h, "resources=%v\n", site.Resources)
-	fmt.Fprintf(h, "sidecarResources=%v\n", fg.Spec.SidecarResources)
+	fmt.Fprintf(h, "sidecarResources=%v\n", fg.Spec.Sidecar.Resources)
 	// Opt-in security contexts must be part of the rolling-hash so that
 	// toggling spec.{pod,container}SecurityContext actually rolls the
 	// pods. The %v rendering of these corev1 structs is deterministic

@@ -317,6 +317,8 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set image.repository="${IMG_PREFIX}bloodraven" \
   --set image.tag=playground \
   --set image.pullPolicy=Never \
+  --set sidecar.image.repository="${IMG_PREFIX}bloodraven-sidecar" \
+  --set sidecar.image.tag=playground \
   --set auxiliary.service.enabled=true \
   --set 'nodeSelector=null' \
   --set 'tolerations[0].key=node.kubernetes.io/disk-pressure' \
@@ -345,12 +347,10 @@ if [[ "$SETUP_TLS" == "true" ]]; then
       if [[ "$line" == "    operatorSecretName: mysql-credentials" ]]; then
         printf '  tls:\n    secretName: mysql-playground-tls\n'
       fi
-    done < <(sed "s|sidecarImage: bloodraven-sidecar|sidecarImage: ${IMG_PREFIX}bloodraven-sidecar|" \
-      "$SCRIPT_DIR/manifests/failovergroup.yaml")
+    done <"$SCRIPT_DIR/manifests/failovergroup.yaml"
   } | kubectl apply -f -
 else
-  sed "s|sidecarImage: bloodraven-sidecar|sidecarImage: ${IMG_PREFIX}bloodraven-sidecar|" \
-    "$SCRIPT_DIR/manifests/failovergroup.yaml" | kubectl apply -f -
+  kubectl apply -f "$SCRIPT_DIR/manifests/failovergroup.yaml"
 fi
 
 info "Seeding DNSEndpoint CR (so external-dns chain works immediately)..."

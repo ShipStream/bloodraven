@@ -50,12 +50,6 @@ type MysqlFailoverGroupSpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
-	// SidecarImage is the image used for the sidecar/init container.
-	// +kubebuilder:default="ghcr.io/shipstream/bloodraven-sidecar:1.3.2"
-	// +kubebuilder:validation:MinLength=1
-	// +optional
-	SidecarImage string `json:"sidecarImage,omitempty"`
-
 	// Sites defines the sites that form this failover group. The slice must
 	// contain at least two sites with role PrimaryCandidate; additional
 	// sites with role DisasterRecovery may be appended for cross-region DR.
@@ -126,7 +120,10 @@ type MysqlFailoverGroupSpec struct {
 	// +optional
 	ConnectionDrainTimeout *metav1.Duration `json:"connectionDrainTimeout,omitempty"`
 
-	// Sidecar configures sidecar behavior.
+	// Sidecar configures the sidecar container: its image, resources,
+	// lease and peer-check timing. Default: {} (the block's own defaults
+	// apply when it is omitted).
+	// +kubebuilder:default={}
 	// +optional
 	Sidecar SidecarSpec `json:"sidecar,omitempty"`
 
@@ -153,10 +150,6 @@ type MysqlFailoverGroupSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	UpdateStrategy UpdateStrategy `json:"updateStrategy,omitempty"`
-
-	// SidecarResources defines the compute resources for the sidecar container.
-	// +optional
-	SidecarResources corev1.ResourceRequirements `json:"sidecarResources,omitempty"`
 
 	// TerminationGracePeriodSeconds is the grace period for MySQL container shutdown. Default: 60
 	// +kubebuilder:default=60
@@ -526,6 +519,20 @@ type DNSSpec struct {
 	TTLSeconds int64 `json:"ttlSeconds,omitempty"`
 }
 
+// DeletionPolicy is what happens to the state a resource manages outside
+// Kubernetes when the resource is deleted. Each kind's deletionPolicy field
+// says what that state is and which value is its default.
+// +kubebuilder:validation:Enum=Retain;Delete
+type DeletionPolicy string
+
+const (
+	// DeletionPolicyRetain leaves the managed state in place.
+	DeletionPolicyRetain DeletionPolicy = "Retain"
+	// DeletionPolicyDelete deletes the managed state before the resource
+	// is released.
+	DeletionPolicyDelete DeletionPolicy = "Delete"
+)
+
 // SidecarSpec configures the sidecar container behavior.
 // The XValidation messages below deliberately use the context-neutral
 // "sidecar.*" field prefix rather than "spec.sidecar.*": SidecarSpec is
@@ -535,6 +542,20 @@ type DNSSpec struct {
 // be wrong in one of them.
 // +kubebuilder:validation:XValidation:rule="duration(has(self.leaseTimeout) ? self.leaseTimeout : '20s') >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s')",message="sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval"
 type SidecarSpec struct {
+	// Image is the sidecar image, also used by the init container. Empty
+	// means the sidecar image the running operator release ships with
+	// (the chart's sidecar.image.repository and sidecar.image.tag), so an
+	// operator upgrade moves the sidecar with it. A non-empty value pins
+	// the image; the operator warns (SidecarVersionSkew) when a pin is
+	// tagged with a different release than the operator.
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Resources defines the compute resources for the sidecar container.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
 	// LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
 	// Bounds: 3s to 10m, and at least 3x PeerCheckInterval.
 	// +kubebuilder:default="20s"

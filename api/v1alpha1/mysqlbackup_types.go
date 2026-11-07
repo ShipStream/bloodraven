@@ -64,6 +64,20 @@ type MysqlBackupSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
 	// +optional
 	SourceSite string `json:"sourceSite,omitempty"`
+
+	// DeletionPolicy controls what happens to the backup's artifact when
+	// this CR is deleted, by hand or by retention:
+	//   - Delete (default) removes the artifact from storage, and then the
+	//     backup's dump-key snapshot Secret, so retention frees storage.
+	//   - Retain leaves the artifact in storage and keeps the dump-key
+	//     snapshot Secret that decrypts it; an ArtifactRetained Event names
+	//     both. Nothing tracks them afterwards: delete them by hand when
+	//     they are no longer needed.
+	// It is read when the deletion is processed, so it can be changed up to
+	// then.
+	// +kubebuilder:default=Delete
+	// +optional
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 }
 
 // LocalFailoverGroupRef is a same-namespace reference to a MysqlFailoverGroup.

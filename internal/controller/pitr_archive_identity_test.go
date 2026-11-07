@@ -457,7 +457,7 @@ func TestPITRArchiveTrackerOutdatedSidecar(t *testing.T) {
 	}
 	tr.observe(now.Add(30*time.Second), pitrRound{iad: outdated, pdx: pitrClean()}.results())
 	if v := tr.current(); v.Status != metav1.ConditionFalse || v.Reason != v1alpha1.ReasonSidecarOutdated || !strings.Contains(v.Message, "iad: ") ||
-		!strings.Contains(v.Message, "spec.sidecarImage") {
+		!strings.Contains(v.Message, "spec.sidecar.image") {
 		t.Fatalf("verdict %+v, want False/SidecarOutdated", v)
 	}
 

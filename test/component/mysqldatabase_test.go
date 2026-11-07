@@ -213,6 +213,27 @@ func mdbCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
 	return mdb
 }
 
+// TestMysqlDatabaseUnsetCollation pins A-53 end to end: with no
+// spec.collation the statements carry no COLLATE clause and the schema gets
+// the character set's default collation, not the legacy utf8mb4_unicode_ci.
+func TestMysqlDatabaseUnsetCollation(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.Collation = "" })
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	before := h.server.statementCount()
+
+	h.reconcile()
+
+	h.requireReady()
+	if spec, ok := h.server.database(mdbDatabase); !ok || spec != "utf8mb4/utf8mb4_0900_ai_ci" {
+		t.Fatalf("database %q = %q (present=%v), want utf8mb4/utf8mb4_0900_ai_ci", mdbDatabase, spec, ok)
+	}
+	for _, stmt := range h.server.statementsSince(before) {
+		if strings.Contains(stmt, "DATABASE") && strings.Contains(stmt, "COLLATE") {
+			t.Fatalf("statement %q names a collation; an unset spec.collation must render none", stmt)
+		}
+	}
+}
+
 // TestMysqlDatabaseCreateAndGrant is the happy path the ShipStream
 // provisioner exercises: one database, one owner, one grant onto an existing
 // shared principal.
@@ -431,7 +452,7 @@ func TestMysqlDatabaseDeleteRetainLeavesMySQLIntact(t *testing.T) {
 // opt-in destructive path, including the rule that shared principals survive.
 func TestMysqlDatabaseDeletePolicyDropsDatabaseButNotSharedUsers(t *testing.T) {
 	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
 			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
 		}
@@ -546,7 +567,7 @@ func TestMysqlDatabasePendingDuringPlannedFailover(t *testing.T) {
 //     SQL runs.
 func TestMysqlDatabaseDeleteAfterPartialApplyCleansUp(t *testing.T) {
 	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
 			{Username: "ghost", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
 		}
@@ -743,7 +764,7 @@ func TestMysqlDatabaseRemovingGrantRevokesIt(t *testing.T) {
 // schema name is ever recreated.
 func TestMysqlDatabaseDeleteRevokesRemovedGrants(t *testing.T) {
 	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
 			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
 		}
@@ -798,7 +819,7 @@ func TestMysqlDatabaseRefusesPreExistingSchema(t *testing.T) {
 
 	// Deletion under Delete must release without touching the foreign
 	// schema.
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h.delete()
 	h.reconcile()
 	if _, ok := h.server.database(mdbDatabase); !ok {
@@ -836,7 +857,7 @@ func TestMysqlDatabaseRefusesPreExistingOwnerUser(t *testing.T) {
 	}
 
 	// Deletion under Delete never drops the foreign account.
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h.delete()
 	h.reconcile()
 	if !h.server.hasUser(mdbOwnerUser) {

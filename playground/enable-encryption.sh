@@ -9,11 +9,11 @@
 #   1. Verifies the playground started with the expected MySQL TLS
 #      Secret and waits for a healthy baseline.
 #   2. Enables the operator's keyring escrow TLS listener.
-#   3. Patches the MFG with spec.encryptionAtRest.
-#   4. Stamps the encryption-adopt annotation, because the playground is
-#      already serving and the operator otherwise refuses (existing
-#      tablespaces stay plaintext — see the warning below).
-#   5. Waits for every site to reach phase=Sealed and for the ordered
+#   3. Patches the MFG with spec.encryptionAtRest, including
+#      existingData: LeavePlaintext, because the playground is already
+#      serving and the default (Refuse) refuses (existing tablespaces stay
+#      plaintext — see the warning below).
+#   4. Waits for every site to reach phase=Sealed and for the ordered
 #      rollout's anti-flap cooldown to expire.
 #
 # Usage:
@@ -315,25 +315,25 @@ if [[ "${BLOODRAVEN_PLAYGROUND_MYSQL_UNCONFINED:-0}" == "1" ]]; then
      "seccompProfile": {"type": "Unconfined"}
   }}'
 fi
-kubectl -n "$NAMESPACE" patch mysqlfailovergroup "$FG" --type=json -p '[
-  {"op": "add", "path": "/spec/encryptionAtRest", "value": {
-     "enabled": true
-  }}'"$UNCONFINED_PATCH"'
-]'
-
 # The operator refuses encryption on any group with an ActiveSite unless
-# this annotation is present — including after --fresh, because reset-mysql
-# re-establishes a healthy primary before we get here. --fresh still matters
-# for data coverage (new tablespaces are encrypted from birth); the
-# annotation only acknowledges the timing of the flag flip.
+# existingData is LeavePlaintext — including after --fresh, because
+# reset-mysql re-establishes a healthy primary before we get here. --fresh
+# still matters for data coverage (new tablespaces are encrypted from
+# birth); the policy only accepts the timing of the flag flip. It is set in
+# the same patch as enabled, so the operator never sees one without the
+# other.
 if [[ "$FRESH" == "1" ]]; then
-	ok "acknowledging encryption enable after --fresh wipe (annotation required while ActiveSite is set)"
+	ok "enabling encryption after the --fresh wipe (existingData: LeavePlaintext is still required while ActiveSite is set)"
 else
 	warn "the playground is already serving, so pre-existing tables stay plaintext"
-	warn "acknowledging with the encryption-adopt annotation (use --fresh for full coverage)"
+	warn "accepting that with spec.encryptionAtRest.existingData: LeavePlaintext (use --fresh for full coverage)"
 fi
-kubectl -n "$NAMESPACE" annotate mysqlfailovergroup "$FG" \
-	bloodraven.shipstream.io/encryption-adopt=confirm --overwrite
+kubectl -n "$NAMESPACE" patch mysqlfailovergroup "$FG" --type=json -p '[
+  {"op": "add", "path": "/spec/encryptionAtRest", "value": {
+     "enabled": true,
+     "existingData": "LeavePlaintext"
+  }}'"$UNCONFINED_PATCH"'
+]'
 
 # ---------------------------------------------------------------------
 # 5. Wait for every site to seal

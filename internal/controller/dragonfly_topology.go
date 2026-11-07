@@ -667,6 +667,8 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 		st.LastPromotionTime = fg.Status.Dragonfly.LastPromotionTime
 		st.LastPromotionTarget = fg.Status.Dragonfly.LastPromotionTarget
 		st.Upgrade = fg.Status.Dragonfly.Upgrade
+		// The reconciler observes the image from the StatefulSets.
+		st.Image = fg.Status.Dragonfly.Image
 	}
 	applyReplTakeoverStatus(&st, fg, snaps)
 	return st
@@ -1769,7 +1771,7 @@ func dragonflyStatusEqual(a, b *v1alpha1.DragonflyStatus) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	if a.ActiveSite != b.ActiveSite || a.Phase != b.Phase || a.Message != b.Message {
+	if a.ActiveSite != b.ActiveSite || a.Phase != b.Phase || a.Message != b.Message || a.Image != b.Image {
 		return false
 	}
 	if (a.LastPromotionTime == nil) != (b.LastPromotionTime == nil) {

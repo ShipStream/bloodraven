@@ -90,6 +90,11 @@ spec:
             # same binary.
             - name: BLOODRAVEN_OPERATOR_IMAGE
               value: {{ include "bloodraven.image" . | quote }}
+            # Sidecar image for failover groups that leave
+            # spec.sidecar.image empty (sidecar.image.repository and
+            # sidecar.image.tag).
+            - name: BLOODRAVEN_SIDECAR_IMAGE
+              value: {{ include "bloodraven.sidecarImage" . | quote }}
             # Default operator auxiliary endpoint injected into MySQL sidecars
             # when spec.sidecar.operatorEndpoint is not set.
             - name: BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT

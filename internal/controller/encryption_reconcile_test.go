@@ -1115,10 +1115,32 @@ func TestReconcileEncryption_RefusesAdoptionOnLiveGroup(t *testing.T) {
 	}
 }
 
-func TestReconcileEncryption_AdoptionProceedsWithConfirmation(t *testing.T) {
+// TestReconcileEncryption_RefuseIgnoresRetiredAnnotation: the policy is
+// spec.encryptionAtRest.existingData only (A-51); the retired
+// encryption-adopt annotation is not read.
+func TestReconcileEncryption_RefuseIgnoresRetiredAnnotation(t *testing.T) {
 	fg := encTestFG()
 	fg.Status.ActiveSite = "dc1"
-	fg.Annotations = map[string]string{v1alpha1.AdoptEncryptionAnnotation: "confirm"}
+	fg.Spec.EncryptionAtRest.ExistingData = v1alpha1.EncryptionExistingDataRefuse
+	fg.Annotations = map[string]string{"bloodraven.shipstream.io/encryption-adopt": "confirm"}
+	r, _ := encReconciler(t, scriptedKeyring(nil), fg)
+
+	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if fg.Status.EncryptionAtRest != nil {
+		t.Fatal("the retired annotation must not adopt encryption")
+	}
+	cond := findCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
+	if cond == nil || cond.Reason != v1alpha1.ReasonAdoptionRefused || !strings.Contains(cond.Message, "existingData") {
+		t.Fatalf("condition = %+v, want AdoptionRefused naming existingData", cond)
+	}
+}
+
+func TestReconcileEncryption_AdoptionProceedsWithLeavePlaintext(t *testing.T) {
+	fg := encTestFG()
+	fg.Status.ActiveSite = "dc1"
+	fg.Spec.EncryptionAtRest.ExistingData = v1alpha1.EncryptionExistingDataLeavePlaintext
 	r, _ := encReconciler(t, scriptedKeyring(nil), fg)
 
 	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {

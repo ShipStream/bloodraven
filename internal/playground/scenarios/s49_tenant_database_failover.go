@@ -159,7 +159,7 @@ func s49CreateTenantDatabase() runner.Step {
 					}},
 					// Explicit, even though it is the default: this scenario
 					// creates a real database and must clean it up.
-					DeletionPolicy: v1alpha1.MysqlDatabaseDelete,
+					DeletionPolicy: v1alpha1.DeletionPolicyDelete,
 				},
 			}
 			if err := env.Kube.Controller.Create(ctx, mdb); err != nil && !apierrors.IsAlreadyExists(err) {

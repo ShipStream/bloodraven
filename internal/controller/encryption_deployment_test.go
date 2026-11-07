@@ -243,11 +243,7 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 	live.Spec.TLS = &v1alpha1.TLSSpec{
 		SecretName: "mysql-tls",
 	}
-	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
-	if live.Annotations == nil {
-		live.Annotations = map[string]string{}
-	}
-	live.Annotations[v1alpha1.AdoptEncryptionAnnotation] = "confirm"
+	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, ExistingData: v1alpha1.EncryptionExistingDataLeavePlaintext}
 	if err := c.Update(context.Background(), &live); err != nil {
 		t.Fatalf("enable encryption: %v", err)
 	}

@@ -146,25 +146,6 @@ type DeploymentClient struct {
 	ServiceAccount string `json:"serviceAccount"`
 }
 
-// MysqlDatabaseDeletionPolicy controls what happens in MySQL when the CR is
-// deleted.
-// +kubebuilder:validation:Enum=Retain;Delete
-type MysqlDatabaseDeletionPolicy string
-
-const (
-	// MysqlDatabaseRetain leaves MySQL untouched when the CR is deleted.
-	// This is the default, because the alternative failure mode —
-	// dropping a live tenant database because a CR was garbage-collected
-	// by a GitOps prune or a namespace delete — is unrecoverable.
-	MysqlDatabaseRetain MysqlDatabaseDeletionPolicy = "Retain"
-	// MysqlDatabaseDelete drops the database, the owner user and the
-	// spec.users[] principals this CR created (per the status.appliedUsers
-	// ledger), and revokes the spec.grants[] entries on that database. It
-	// never drops a spec.grants[] user; those are shared principals this
-	// CRD did not create.
-	MysqlDatabaseDelete MysqlDatabaseDeletionPolicy = "Delete"
-)
-
 // MysqlDatabaseSpec is the desired state of one tenant database.
 //
 // Membership in the privilege allowlist is enforced by the MysqlPrivilege
@@ -237,11 +218,12 @@ type MysqlDatabaseSpec struct {
 	// +optional
 	CharacterSet string `json:"characterSet,omitempty"`
 
-	// Collation is the database default collation. Defaults to
-	// utf8mb4_unicode_ci when empty.
+	// Collation is the database default collation. Unset means the
+	// character set's default collation (utf8mb4_0900_ai_ci for utf8mb4 on
+	// MySQL 8.0 and later): the operator renders no COLLATE clause. Set
+	// utf8mb4_unicode_ci explicitly to keep the older UCA 4.0 ordering.
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_]{1,64}$`
 	// +kubebuilder:validation:MaxLength=64
-	// +kubebuilder:default=utf8mb4_unicode_ci
 	// +optional
 	Collation string `json:"collation,omitempty"`
 
@@ -285,10 +267,19 @@ type MysqlDatabaseSpec struct {
 	Users []MysqlDatabaseUser `json:"users,omitempty"`
 
 	// DeletionPolicy controls what happens in MySQL when this CR is
-	// deleted. Defaults to Retain.
+	// deleted:
+	//   - Retain (default) leaves MySQL untouched. The alternative failure
+	//     mode, dropping a live tenant database because a CR was
+	//     garbage-collected by a GitOps prune or a namespace delete, is
+	//     unrecoverable.
+	//   - Delete drops the database, the owner user and the spec.users[]
+	//     principals this CR created (per the status.appliedUsers ledger),
+	//     and revokes the spec.grants[] entries on that database. It never
+	//     drops a spec.grants[] user; those are shared principals this CRD
+	//     did not create.
 	// +kubebuilder:default=Retain
 	// +optional
-	DeletionPolicy MysqlDatabaseDeletionPolicy `json:"deletionPolicy,omitempty"`
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 }
 
 // MysqlDatabaseOwner declares the owning user of a tenant database.

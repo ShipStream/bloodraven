@@ -14,6 +14,15 @@ image:
   # -- Image pull policy
   pullPolicy: IfNotPresent
 
+sidecar:
+  image:
+    # -- MySQL sidecar image repository. Failover groups that leave
+    # spec.sidecar.image empty run this image, so an operator upgrade moves
+    # their sidecars too. Point it at a mirror for air-gapped registries.
+    repository: ghcr.io/shipstream/bloodraven-sidecar
+    # -- Sidecar image tag (defaults to .Chart.AppVersion)
+    tag: ""
+
 # -- Image pull secrets for private registries
 imagePullSecrets: []
 
