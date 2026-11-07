@@ -331,6 +331,7 @@ spec:
                           ArchivePollInterval is how often the archiver reconciles the list
                           of binlog files against storage as a belt-and-suspenders safety
                           net alongside inotify. Default: 60s. Bounds: 5s to 1h.
+                        maxLength: 64
                         type: string
                         x-kubernetes-validations:
                         - message: archivePollInterval must be between 5s and 1h
@@ -349,8 +350,11 @@ spec:
                           controlling how frequently binlogs rotate. Smaller values reduce
                           the RPO gap (the tail of transactions on a crashed primary that
                           may not yet have been archived) at the cost of more objects in
-                          storage. Accepts any value MySQL accepts (e.g. "100M", "256M",
-                          "1073741824"). Defaults to "100M" when PITR is enabled.
+                          storage. A byte count with an optional k, m or g suffix in either
+                          case, as mysqld reads it (e.g. "100M", "512m", "1073741824").
+                          Defaults to "100M" when PITR is enabled.
+                        maxLength: 20
+                        pattern: ^[0-9]+[kKmMgG]?$
                         type: string
                       profileName:
                         description: |-
@@ -610,8 +614,12 @@ spec:
                           properties:
                             bytesPerChunk:
                               default: 64M
-                              description: BytesPerChunk is the approximate chunk
-                                size (e.g. "64M").
+                              description: |-
+                                BytesPerChunk is the approximate chunk size: a byte count with an
+                                optional k, K, M or G suffix, as mysqlsh reads it (e.g. "64M",
+                                "512k"). mysqlsh refuses a lowercase m or g.
+                              maxLength: 20
+                              pattern: ^[0-9]+[kKMG]?$
                               type: string
                             compression:
                               default: zstd
@@ -687,10 +695,8 @@ spec:
                             algorithm:
                               default: AES-256-GCM
                               description: |-
-                                Algorithm selects the encryption mechanism. Only
-                                "AES-256-GCM" is currently supported; the field is present so
-                                future releases can add envelope-over-KMS / XChaCha20-Poly1305
-                                / external key-manager modes without a breaking CRD bump.
+                                Algorithm selects the encryption mechanism. Only "AES-256-GCM" is
+                                supported.
                               enum:
                               - AES-256-GCM
                               type: string
@@ -1068,6 +1074,7 @@ spec:
                               description: |-
                                 Schedule is a standard cron expression (5 fields). Evaluated in
                                 the TimeZone below. Required when Enabled=true.
+                              maxLength: 256
                               type: string
                             startingDeadlineSeconds:
                               description: StartingDeadlineSeconds is forwarded to
@@ -1103,6 +1110,11 @@ spec:
                               minimum: 0
                               type: integer
                           type: object
+                          x-kubernetes-validations:
+                          - message: verification.schedule is required when verification.enabled
+                              is true
+                            rule: '!has(self.enabled) || !self.enabled || (has(self.schedule)
+                              && size(self.schedule) > 0)'
                       required:
                       - name
                       - storage
@@ -1185,6 +1197,7 @@ spec:
                           InitialBackoff is the delay between the first failure and the first
                           retry. Subsequent retries double the backoff until MaxBackoff.
                           Default: 1m. Bounds: 1s to 1h.
+                        maxLength: 64
                         type: string
                         x-kubernetes-validations:
                         - message: retry.initialBackoff must be between 1s and 1h
@@ -1204,6 +1217,7 @@ spec:
                         description: |-
                           MaxBackoff caps the exponential backoff. Default: 30m. Bounds: 1s to
                           24h, and at least InitialBackoff.
+                        maxLength: 64
                         type: string
                         x-kubernetes-validations:
                         - message: retry.maxBackoff must be between 1s and 24h
@@ -1314,12 +1328,27 @@ spec:
                       the full dump spills past this limit the kubelet evicts the Job
                       pod; without the cap, a multi-GB dump can fill the node's
                       `/var/lib/kubelet` partition and trigger DiskPressure eviction of
-                      unrelated pods (AUDIT H6). Empty value falls through to the
+                      unrelated pods. Empty value falls through to the
                       node's ephemeral-storage limit (preserving previous behavior).
                       The reconciler does not enforce this — it's a hint to the kubelet.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                 type: object
+                x-kubernetes-validations:
+                - message: spec.backup.pitr.profileName must name an entry of spec.backup.profiles
+                    when pitr.enabled is true
+                  rule: '!has(self.pitr) || !has(self.pitr.enabled) || !self.pitr.enabled
+                    || (has(self.pitr.profileName) && has(self.profiles) && self.profiles.exists(p,
+                    p.name == self.pitr.profileName))'
+                - message: each spec.backup.schedules[].profileName must name an entry
+                    of spec.backup.profiles
+                  rule: '!has(self.schedules) || self.schedules.all(s, has(self.profiles)
+                    && self.profiles.exists(p, p.name == s.profileName))'
+                - message: each spec.backup.profiles[].verification.pointInTime.archiveProfileName
+                    must name an entry of spec.backup.profiles
+                  rule: '!has(self.profiles) || self.profiles.all(p, !has(p.verification)
+                    || !has(p.verification.pointInTime) || !has(p.verification.pointInTime.archiveProfileName)
+                    || self.profiles.exists(q, q.name == p.verification.pointInTime.archiveProfileName))'
               cloneTimeout:
                 default: 1h0m0s
                 description: |-
@@ -1328,6 +1357,7 @@ spec:
                   cloning) and the global variable clone_ddl_timeout (GLOBAL-only; set
                   via SET GLOBAL before cloning), all in whole seconds, rounded up.
                   Default: 1h. Bounds: 1m to 24h.
+                maxLength: 64
                 type: string
                 x-kubernetes-validations:
                 - message: cloneTimeout must be between 1m and 24h
@@ -1340,6 +1370,7 @@ spec:
                   emergency failover or autonomous self-fence. This drain runs only
                   after promotion has completed, so it cannot kill the operator's
                   promotion session. Default: 30s. Bounds: 1s to 10m.
+                maxLength: 64
                 type: string
                 x-kubernetes-validations:
                 - message: connectionDrainTimeout must be between 1s and 10m
@@ -1638,14 +1669,27 @@ spec:
                   args:
                     description: |-
                       Args are additional command-line arguments appended to the
-                      Dragonfly container command. Operator-managed flags (for example
-                      --port, --admin_port, --maxmemory, --proactor_threads,
-                      --requirepass, --masterauth, and --replicaof) are reserved for the
-                      operator and cannot be overridden via spec.dragonfly.args.
+                      Dragonfly container command. The flags the operator owns are refused,
+                      in any spelling Dragonfly reads (-flag, --flag, --flag=value, and
+                      --noflag): --port, --admin_port, --bind, --dir, --maxmemory,
+                      --proactor_threads, --replicaof, --requirepass, --masterauth,
+                      --break_replication_on_master_restart, --s3_endpoint, --s3_use_https
+                      and --s3_sign_payload, and --flagfile, --fromenv and --tryfromenv,
+                      which read flags from elsewhere. Use the typed fields for the values
+                      the operator renders.
                     items:
+                      maxLength: 256
                       type: string
+                    maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: spec.dragonfly.args must not set a flag the operator
+                        owns (port, admin_port, bind, dir, maxmemory, proactor_threads,
+                        replicaof, requirepass, masterauth, break_replication_on_master_restart,
+                        s3_endpoint, s3_use_https, s3_sign_payload) or read flags
+                        from elsewhere (flagfile, fromenv, tryfromenv)
+                      rule: self.all(a, !a.matches('^--?(no)?(port|admin_port|bind|dir|maxmemory|proactor_threads|replicaof|requirepass|masterauth|break_replication_on_master_restart|s3_endpoint|s3_use_https|s3_sign_payload|flagfile|fromenv|tryfromenv)(=|$)'))
                   auth:
                     description: |-
                       Auth references a Secret containing the Dragonfly password. When
@@ -1884,6 +1928,7 @@ spec:
                       Image is the pinned Dragonfly container image. Required when
                       Enabled is true. Tag ":latest" is rejected. How a change reaches the
                       running sites is UpgradeStrategy's choice.
+                    maxLength: 1024
                     type: string
                   maxMemory:
                     anyOf:
@@ -1911,6 +1956,7 @@ spec:
                           Dragonfly takes that argument in whole seconds, so it is rounded up
                           to the next second.
                           Default: 30s. Bounds: 1s to 10m.
+                        maxLength: 64
                         type: string
                         x-kubernetes-validations:
                         - message: dragonfly.plannedFailover.maxSyncWait must be between
@@ -2267,6 +2313,7 @@ spec:
                         description: |-
                           Dir is passed to Dragonfly as --dir. Use s3://bucket[/prefix] for S3
                           snapshot/restore support. Empty leaves Dragonfly's default data dir.
+                        maxLength: 1024
                         type: string
                       s3EndpointURL:
                         description: |-
@@ -2451,6 +2498,7 @@ spec:
                           status. The site is not sealed and not admitted to service until
                           escrow succeeds; the timeout only controls when the condition flips
                           to a loud failure. Default: 10m. Bounds: 30s to 1h.
+                        maxLength: 64
                         type: string
                         x-kubernetes-validations:
                         - message: keyring.escrowTimeout must be between 30s and 1h
@@ -5667,6 +5715,7 @@ spec:
                   FailoverCooldown is the minimum time between failovers, the
                   anti-flap guard; it cannot be disabled. Default: 5m. Bounds: 30s to
                   24h.
+                maxLength: 64
                 type: string
                 x-kubernetes-validations:
                 - message: failoverCooldown must be between 30s and 24h
@@ -5954,13 +6003,28 @@ spec:
                   it offline (no network) and exposes organization, edition, and
                   update-period end as logs and metrics. It never gates functionality
                   or changes failover behavior. When empty, the operator-level license
-                  is used if set; otherwise the group is observed as Community.
+                  is used if set; otherwise the group is observed as Community. The
+                  value is a compact JWS (three base64url segments joined by '.').
+                maxLength: 4096
+                pattern: ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$
                 type: string
               mysqlConf:
                 additionalProperties:
+                  description: |-
+                    MysqlConfValue is one my.cnf option value: a single line of at most 1024
+                    characters, written after "key=" as it is.
+                  maxLength: 1024
+                  pattern: ^[^\r\n\x00]*$
                   type: string
-                description: MysqlConf allows overriding default my.cnf settings.
+                description: |-
+                  MysqlConf overrides default my.cnf settings. Keys are option names
+                  (letters, digits, '_', '.', '-'); values are single lines.
+                maxProperties: 128
                 type: object
+                x-kubernetes-validations:
+                - message: 'mysqlConf keys must be option names: letters, digits,
+                    ''_'', ''.'' or ''-'''
+                  rule: self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))
               plannedFailover:
                 description: |-
                   PlannedFailover configures cluster-wide defaults for the graceful
@@ -5978,6 +6042,7 @@ spec:
                       KillAppConnections; if any connections remain after the timeout
                       the state machine proceeds anyway so a stuck client cannot block
                       a planned switchover indefinitely. Default: 30s. Bounds: 1s to 10m.
+                    maxLength: 64
                     type: string
                     x-kubernetes-validations:
                     - message: plannedFailover.drainTimeout must be between 1s and
@@ -5993,6 +6058,7 @@ spec:
                       while the run waits, so this also bounds the write outage.
                       Default: 5m. Bounds: 1s to 1h, the same bounds as the
                       planned-failover annotation's maxLagWait= override.
+                    maxLength: 64
                     type: string
                     x-kubernetes-validations:
                     - message: plannedFailover.maxLagWait must be between 1s and 1h
@@ -6271,6 +6337,7 @@ spec:
                   reaches FailureThreshold and continues failing, that site's probes back
                   off exponentially to a 30s cap; other sites keep this interval.
                   Default: 2s. Bounds: 1s to 5m.
+                maxLength: 64
                 type: string
                 x-kubernetes-validations:
                 - message: pollInterval must be between 1s and 5m
@@ -6586,6 +6653,7 @@ spec:
                     description: |-
                       LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
                       Bounds: 3s to 10m, and at least 3x PeerCheckInterval.
+                    maxLength: 64
                     type: string
                     x-kubernetes-validations:
                     - message: sidecar.leaseTimeout must be between 3s and 10m
@@ -6605,6 +6673,7 @@ spec:
                     description: |-
                       PeerCheckInterval is how often the sidecar checks its peer. Default: 5s.
                       Bounds: 1s to 1m.
+                    maxLength: 64
                     type: string
                     x-kubernetes-validations:
                     - message: sidecar.peerCheckInterval must be between 1s and 1m
@@ -6704,10 +6773,21 @@ spec:
                       type: string
                     mysqlConf:
                       additionalProperties:
+                        description: |-
+                          MysqlConfValue is one my.cnf option value: a single line of at most 1024
+                          characters, written after "key=" as it is.
+                        maxLength: 1024
+                        pattern: ^[^\r\n\x00]*$
                         type: string
-                      description: MysqlConf overrides group-level MySQL settings
-                        for this site.
+                      description: |-
+                        MysqlConf overrides group-level MySQL settings for this site, with
+                        the same key and value rules as spec.mysqlConf.
+                      maxProperties: 128
                       type: object
+                      x-kubernetes-validations:
+                      - message: 'mysqlConf keys must be option names: letters, digits,
+                          ''_'', ''.'' or ''-'''
+                        rule: self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))
                     name:
                       description: |-
                         Name is the site identifier (e.g. "iad", "pdx", "lhr"), the key of
@@ -7023,6 +7103,13 @@ spec:
                 || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir)
                 || (self.encryptionAtRest.keyring.dataFileDir != ''/var/lib/mysql''
                 && !self.encryptionAtRest.keyring.dataFileDir.startsWith(''/var/lib/mysql/''))'
+            - message: spec.initFromBackup.pointInTime.archiveProfileName must name
+                an entry of spec.backup.profiles
+              optionalOldSelf: true
+              rule: oldSelf.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime)
+                || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup)
+                && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name
+                == self.initFromBackup.pointInTime.archiveProfileName))
           status:
             description: MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
             properties:
@@ -7585,7 +7672,7 @@ spec:
                         type: string
                       keyRevision:
                         description: |-
-                          KeyRevision is the snapshot name every counted sidecar echoed (#203);
+                          KeyRevision is the snapshot name every counted sidecar echoed;
                           empty for None.
                         maxLength: 253
                         type: string
@@ -7665,7 +7752,7 @@ spec:
               pitrArchiveBindings:
                 description: |-
                   PITRArchiveBindings are the encryption identities accepted for the
-                  PITR archive destinations this group writes or reads (#203). Written
+                  PITR archive destinations this group writes or reads. Written
                   by the group reconciler.
                   Durable: a binding pins the key snapshot every writer and reader of
                   its archive mounts. A lost encrypted entry is rebuilt from the
@@ -7675,7 +7762,7 @@ spec:
                 items:
                   description: |-
                     PITRArchiveBinding is the encryption identity the group accepted for one
-                    PITR archive destination it writes or reads (#203). Accepted encrypted
+                    PITR archive destination it writes or reads. Accepted encrypted
                     bindings are reconstructible from their key snapshot's acceptance
                     annotation; plaintext bindings are re-proven (the descriptor records the
                     mode).
@@ -8543,7 +8630,7 @@ spec:
                             type: integer
                           onHistoryExclusions:
                             description: |-
-                              OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
+                              OnHistoryExclusions are excluded transactions on the target history that precede a replayed one.
                               Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
                               Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
                             maxLength: 2048
@@ -8857,7 +8944,7 @@ spec:
                             type: integer
                           onHistoryExclusions:
                             description: |-
-                              OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
+                              OnHistoryExclusions are excluded transactions on the target history that precede a replayed one.
                               Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
                               Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
                             maxLength: 2048

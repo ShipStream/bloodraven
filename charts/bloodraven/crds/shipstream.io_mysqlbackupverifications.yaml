@@ -8,9 +8,16 @@ metadata:
 spec:
   group: shipstream.io
   names:
+    categories:
+    - bloodraven
+    - mysql
+    - backup
     kind: MysqlBackupVerification
     listKind: MysqlBackupVerificationList
     plural: mysqlbackupverifications
+    shortNames:
+    - mbv
+    - mbvs
     singular: mysqlbackupverification
   scope: Namespaced
   versions:
@@ -595,7 +602,7 @@ spec:
                     type: integer
                   onHistoryExclusions:
                     description: |-
-                      OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
+                      OnHistoryExclusions are excluded transactions on the target history that precede a replayed one.
                       Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
                       Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
                     maxLength: 2048

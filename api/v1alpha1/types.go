@@ -50,6 +50,7 @@ type MysqlFailoverGroupList struct {
 // +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="inherited externalTrafficPolicy requires each effective site service type to be NodePort or LoadBalancer"
 // +kubebuilder:validation:XValidation:rule="!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)",message="spec.encryptionAtRest.enabled requires spec.tls: MySQL requires a secure connection to clone encrypted data"
 // +kubebuilder:validation:XValidation:rule="!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))",message="spec.encryptionAtRest.keyring.dataFileDir must not be inside the MySQL data directory"
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime) || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup) && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name == self.initFromBackup.pointInTime.archiveProfileName))",message="spec.initFromBackup.pointInTime.archiveProfileName must name an entry of spec.backup.profiles",optionalOldSelf=true
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.7
 	// +kubebuilder:default="mysql:9.7"
@@ -92,6 +93,8 @@ type MysqlFailoverGroupSpec struct {
 	// off exponentially to a 30s cap; other sites keep this interval.
 	// Default: 2s. Bounds: 1s to 5m.
 	// +kubebuilder:default="2s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('5m')",message="pollInterval must be between 1s and 5m"
 	// +optional
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
@@ -112,6 +115,8 @@ type MysqlFailoverGroupSpec struct {
 	// anti-flap guard; it cannot be disabled. Default: 5m. Bounds: 30s to
 	// 24h.
 	// +kubebuilder:default="5m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('24h')",message="failoverCooldown must be between 30s and 24h"
 	// +optional
 	FailoverCooldown *metav1.Duration `json:"failoverCooldown,omitempty"`
@@ -122,6 +127,8 @@ type MysqlFailoverGroupSpec struct {
 	// after promotion has completed, so it cannot kill the operator's
 	// promotion session. Default: 30s. Bounds: 1s to 10m.
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('10m')",message="connectionDrainTimeout must be between 1s and 10m"
 	// +optional
 	ConnectionDrainTimeout *metav1.Duration `json:"connectionDrainTimeout,omitempty"`
@@ -139,13 +146,18 @@ type MysqlFailoverGroupSpec struct {
 	// via SET GLOBAL before cloning), all in whole seconds, rounded up.
 	// Default: 1h. Bounds: 1m to 24h.
 	// +kubebuilder:default="1h0m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1m') && duration(self) <= duration('24h')",message="cloneTimeout must be between 1m and 24h"
 	// +optional
 	CloneTimeout *metav1.Duration `json:"cloneTimeout,omitempty"`
 
-	// MysqlConf allows overriding default my.cnf settings.
+	// MysqlConf overrides default my.cnf settings. Keys are option names
+	// (letters, digits, '_', '.', '-'); values are single lines.
 	// +optional
-	MysqlConf map[string]string `json:"mysqlConf,omitempty"`
+	// +kubebuilder:validation:MaxProperties=128
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))",message="mysqlConf keys must be option names: letters, digits, '_', '.' or '-'"
+	MysqlConf map[string]MysqlConfValue `json:"mysqlConf,omitempty"`
 
 	// Replication configures replication health monitoring.
 	// +optional
@@ -273,10 +285,19 @@ type MysqlFailoverGroupSpec struct {
 	// it offline (no network) and exposes organization, edition, and
 	// update-period end as logs and metrics. It never gates functionality
 	// or changes failover behavior. When empty, the operator-level license
-	// is used if set; otherwise the group is observed as Community.
+	// is used if set; otherwise the group is observed as Community. The
+	// value is a compact JWS (three base64url segments joined by '.').
 	// +optional
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`
 	License string `json:"license,omitempty"`
 }
+
+// MysqlConfValue is one my.cnf option value: a single line of at most 1024
+// characters, written after "key=" as it is.
+// +kubebuilder:validation:MaxLength=1024
+// +kubebuilder:validation:Pattern=`^[^\r\n\x00]*$`
+type MysqlConfValue string
 
 // SplitBrainPolicySpec configures automated split-brain resolution.
 //
@@ -463,9 +484,12 @@ type SiteSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// MysqlConf overrides group-level MySQL settings for this site.
+	// MysqlConf overrides group-level MySQL settings for this site, with
+	// the same key and value rules as spec.mysqlConf.
 	// +optional
-	MysqlConf map[string]string `json:"mysqlConf,omitempty"`
+	// +kubebuilder:validation:MaxProperties=128
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))",message="mysqlConf keys must be option names: letters, digits, '_', '.' or '-'"
+	MysqlConf map[string]MysqlConfValue `json:"mysqlConf,omitempty"`
 
 	// ServiceTemplate overrides the group Service template for this site's
 	// client-facing MySQL Service.
@@ -595,6 +619,8 @@ type SidecarSpec struct {
 	// LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
 	// Bounds: 3s to 10m, and at least 3x PeerCheckInterval.
 	// +kubebuilder:default="20s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('3s') && duration(self) <= duration('10m')",message="sidecar.leaseTimeout must be between 3s and 10m"
 	// +optional
 	LeaseTimeout *metav1.Duration `json:"leaseTimeout,omitempty"`
@@ -602,6 +628,8 @@ type SidecarSpec struct {
 	// PeerCheckInterval is how often the sidecar checks its peer. Default: 5s.
 	// Bounds: 1s to 1m.
 	// +kubebuilder:default="5s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1m')",message="sidecar.peerCheckInterval must be between 1s and 1m"
 	// +optional
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
@@ -867,7 +895,7 @@ type MysqlFailoverGroupStatus struct {
 	EncryptionAtRest *EncryptionAtRestStatus `json:"encryptionAtRest,omitempty"`
 
 	// PITRArchiveBindings are the encryption identities accepted for the
-	// PITR archive destinations this group writes or reads (#203). Written
+	// PITR archive destinations this group writes or reads. Written
 	// by the group reconciler.
 	// Durable: a binding pins the key snapshot every writer and reader of
 	// its archive mounts. A lost encrypted entry is rebuilt from the

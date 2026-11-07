@@ -610,7 +610,8 @@ func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
 	ensureSecret(t, nsNone)
 
 	invalid := newTestFG(nsInvalid)
-	invalid.Spec.License = "this-is-not-a-valid-token"
+	// A compact JWS (admission requires the shape) that no key verifies.
+	invalid.Spec.License = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ4In0.bm90LWEtc2lnbmF0dXJl"
 	if err := k8sClient.Create(ctx, invalid); err != nil {
 		t.Fatalf("spec.license must be admitted: %v", err)
 	}

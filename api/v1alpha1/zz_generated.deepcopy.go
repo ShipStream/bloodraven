@@ -1512,7 +1512,7 @@ func (in *MysqlFailoverGroupSpec) DeepCopyInto(out *MysqlFailoverGroupSpec) {
 	}
 	if in.MysqlConf != nil {
 		in, out := &in.MysqlConf, &out.MysqlConf
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]MysqlConfValue, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}
@@ -3057,7 +3057,7 @@ func (in *SiteSpec) DeepCopyInto(out *SiteSpec) {
 	in.Resources.DeepCopyInto(&out.Resources)
 	if in.MysqlConf != nil {
 		in, out := &in.MysqlConf, &out.MysqlConf
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]MysqlConfValue, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}

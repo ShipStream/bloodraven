@@ -25,7 +25,7 @@ When an operator or developer encounters issues with a cluster, replication, fai
    - State the **Data Loss Risk (RPO / RTO)**.
    - Present the exact command and seek user confirmation.
 4. **Dynamic Container Resolution**: Never assume fixed container names (e.g. `sidecar` vs `bloodraven-sidecar`). Always discover container names dynamically from `.spec.containers[*].name`. Helper scripts in `scripts/` handle this automatically.
-5. **Resource name**: the `mfg` short name exists only once the v1.6.0 CRD is applied. If `kubectl get mfg` reports "the server doesn't have a resource type", use `mysqlfailovergroup` (or `mysqlfailovergroups.shipstream.io`); the helper scripts already do.
+5. **Resource name**: the `mfg` short name exists only once the v1.6.0 CRD is applied. If `kubectl get mfg` reports "the server doesn't have a resource type", use `mysqlfailovergroup` (or `mysqlfailovergroups.shipstream.io`); the helper scripts already do. Likewise `mbk` (MysqlBackup) and `mbv` (MysqlBackupVerification), and the `backup` category, exist only from v1.7.0 on; spell out `mysqlbackups` and `mysqlbackupverifications` against an older CRD.
 
 ---
 

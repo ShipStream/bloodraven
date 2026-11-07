@@ -381,7 +381,7 @@ func TestReconcile_TLSConfig(t *testing.T) {
 
 func TestReconcile_MysqlConfOverrides(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.MysqlConf = map[string]string{
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{
 		"max-connections": "1000",
 		"custom-setting":  "value",
 	}
@@ -736,7 +736,7 @@ func TestGenerateMyCnf_StripsLogBinDisableAliases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.MysqlConf = map[string]string{tt.key: ""}
+			fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{tt.key: ""}
 
 			cnf := generateMyCnf(fg, pitrEnabled(fg))
 			if strings.Contains(cnf, "skip-log-bin") || strings.Contains(cnf, "disable-log-bin") {
@@ -769,7 +769,7 @@ func TestGenerateMyCnf_OwnsReplicaPreserveCommitOrder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
 			if tt.key != "" {
-				conf := map[string]string{tt.key: tt.val}
+				conf := map[string]v1alpha1.MysqlConfValue{tt.key: v1alpha1.MysqlConfValue(tt.val)}
 				if tt.site {
 					fg.Spec.Sites[0].MysqlConf = conf
 				} else {
@@ -801,7 +801,7 @@ func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.MysqlConf = map[string]string{tt.key: "0"}
+			fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{tt.key: "0"}
 
 			cnf := generateMyCnf(fg, pitrEnabled(fg))
 			if !strings.Contains(cnf, "log-bin-trust-function-creators=0") {
@@ -1070,9 +1070,9 @@ func TestMutateServiceSpecLifecycle(t *testing.T) {
 
 func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.MysqlConf = map[string]string{"max_connections": "600", "sync-binlog": "0", "gtid_mode": "OFF"}
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max_connections": "600", "sync-binlog": "0", "gtid_mode": "OFF"}
 	site := fg.Spec.Sites[0]
-	site.MysqlConf = map[string]string{"max-connections": "700", "log_bin": "/unsafe"}
+	site.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max-connections": "700", "log_bin": "/unsafe"}
 	cnf := generateMyCnf(fg, pitrEnabled(fg), site)
 	for _, want := range []string{"max-connections=700", "sync-binlog=0", "gtid-mode=ON", "log-bin=/var/lib/mysql/mysql-bin"} {
 		if !strings.Contains(cnf, want) {
@@ -1080,7 +1080,7 @@ func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 		}
 	}
 	fg2 := fg.DeepCopy()
-	fg2.Spec.MysqlConf = map[string]string{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
+	fg2.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
 	if ComputeSpecHash(fg, site, "", testPITRRender(fg)) != ComputeSpecHash(fg2, site, "", testPITRRender(fg2)) {
 		t.Fatal("normalized equivalent MySQL settings must hash identically")
 	}

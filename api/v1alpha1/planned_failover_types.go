@@ -26,6 +26,8 @@ type PlannedFailoverSpec struct {
 	// Default: 5m. Bounds: 1s to 1h, the same bounds as the
 	// planned-failover annotation's maxLagWait= override.
 	// +kubebuilder:default="5m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="plannedFailover.maxLagWait must be between 1s and 1h"
 	// +optional
 	MaxLagWait *metav1.Duration `json:"maxLagWait,omitempty"`
@@ -37,6 +39,8 @@ type PlannedFailoverSpec struct {
 	// the state machine proceeds anyway so a stuck client cannot block
 	// a planned switchover indefinitely. Default: 30s. Bounds: 1s to 10m.
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('10m')",message="plannedFailover.drainTimeout must be between 1s and 10m"
 	// +optional
 	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`

@@ -51,9 +51,9 @@ func SetOperatorImageDefaults(image, _ string) {
 // owned PVCs are only provisioned when spec.backup declares PVC-backed
 // profiles.
 //
-// This function also emits the PITR reserved-not-implemented warning
-// event when spec.backup.pitr is explicitly enabled — PITR is a future
-// feature and the operator does not yet act on it.
+// It also warns (BackupPITRInvalid) when PITR is enabled without a
+// profile that exists. Admission refuses that combination; the warning
+// covers an object stored before the rule.
 func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	if fg.Spec.Backup == nil && fg.Spec.InitFromBackup == nil {
 		return nil

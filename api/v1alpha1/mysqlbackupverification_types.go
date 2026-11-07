@@ -8,6 +8,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=mbv;mbvs,categories=bloodraven;mysql;backup
 // +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.failoverGroupRef.name`
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profileName`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -349,6 +350,7 @@ type VerificationBackupRef struct {
 // MysqlFailoverGroupReconciler renders a CronJob that creates
 // MysqlBackupVerification CRs on schedule. See
 // internal/controller/backup_verification_schedule.go.
+// +kubebuilder:validation:XValidation:rule="!has(self.enabled) || !self.enabled || (has(self.schedule) && size(self.schedule) > 0)",message="verification.schedule is required when verification.enabled is true"
 type VerificationSpec struct {
 	// Enabled turns the scheduled verification CronJob on or off.
 	// Omitting spec.backup.profiles[].verification entirely is
@@ -359,6 +361,7 @@ type VerificationSpec struct {
 
 	// Schedule is a standard cron expression (5 fields). Evaluated in
 	// the TimeZone below. Required when Enabled=true.
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	Schedule string `json:"schedule,omitempty"`
 

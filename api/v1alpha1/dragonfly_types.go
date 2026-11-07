@@ -26,6 +26,7 @@ type DragonflySpec struct {
 	// Image is the pinned Dragonfly container image. Required when
 	// Enabled is true. Tag ":latest" is rejected. How a change reaches the
 	// running sites is UpgradeStrategy's choice.
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	Image string `json:"image,omitempty"`
 
@@ -77,12 +78,19 @@ type DragonflySpec struct {
 	ProactorThreads *int32 `json:"proactorThreads,omitempty"`
 
 	// Args are additional command-line arguments appended to the
-	// Dragonfly container command. Operator-managed flags (for example
-	// --port, --admin_port, --maxmemory, --proactor_threads,
-	// --requirepass, --masterauth, and --replicaof) are reserved for the
-	// operator and cannot be overridden via spec.dragonfly.args.
+	// Dragonfly container command. The flags the operator owns are refused,
+	// in any spelling Dragonfly reads (-flag, --flag, --flag=value, and
+	// --noflag): --port, --admin_port, --bind, --dir, --maxmemory,
+	// --proactor_threads, --replicaof, --requirepass, --masterauth,
+	// --break_replication_on_master_restart, --s3_endpoint, --s3_use_https
+	// and --s3_sign_payload, and --flagfile, --fromenv and --tryfromenv,
+	// which read flags from elsewhere. Use the typed fields for the values
+	// the operator renders.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.matches('^--?(no)?(port|admin_port|bind|dir|maxmemory|proactor_threads|replicaof|requirepass|masterauth|break_replication_on_master_restart|s3_endpoint|s3_use_https|s3_sign_payload|flagfile|fromenv|tryfromenv)(=|$)'))",message="spec.dragonfly.args must not set a flag the operator owns (port, admin_port, bind, dir, maxmemory, proactor_threads, replicaof, requirepass, masterauth, break_replication_on_master_restart, s3_endpoint, s3_use_https, s3_sign_payload) or read flags from elsewhere (flagfile, fromenv, tryfromenv)"
 	Args []string `json:"args,omitempty"`
 
 	// Auth references a Secret containing the Dragonfly password. When
@@ -143,6 +151,7 @@ const (
 type DragonflySnapshotSpec struct {
 	// Dir is passed to Dragonfly as --dir. Use s3://bucket[/prefix] for S3
 	// snapshot/restore support. Empty leaves Dragonfly's default data dir.
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	Dir string `json:"dir,omitempty"`
 
@@ -220,6 +229,8 @@ type DragonflyPlannedFailoverSpec struct {
 	// to the next second.
 	// Default: 30s. Bounds: 1s to 10m.
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('10m')",message="dragonfly.plannedFailover.maxSyncWait must be between 1s and 10m"
 	// +optional
 	MaxSyncWait *metav1.Duration `json:"maxSyncWait,omitempty"`
@@ -377,8 +388,8 @@ type DragonflyStatus struct {
 	ReplTakeoverProbeMessage string `json:"replTakeoverProbeMessage,omitempty"`
 }
 
-// DragonflyUpgradePhase describes the D6a snapshot-restore planned upgrade
-// state machine.
+// DragonflyUpgradePhase describes the snapshot-restore upgrade state
+// machine.
 // +kubebuilder:validation:Enum=Pending;SavingSnapshot;UpdatingActive;WaitingForActiveRestore;ReattachingReplicas;Succeeded;Failed
 type DragonflyUpgradePhase string
 

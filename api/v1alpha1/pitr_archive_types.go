@@ -122,7 +122,7 @@ type PITRArchiveObservation struct {
 	// sites verified conflicting archive IDs.
 	// +optional
 	Reason PITRArchiveRefusalReason `json:"reason,omitempty"`
-	// KeyRevision is the snapshot name every counted sidecar echoed (#203);
+	// KeyRevision is the snapshot name every counted sidecar echoed;
 	// empty for None.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
@@ -230,7 +230,7 @@ type PointInTimeResult struct {
 	// the target, outside the target history, excluded by excludeGtids.
 	// +optional
 	ExcludedDivergentTransactionCount int64 `json:"excludedDivergentTransactionCount,omitempty"`
-	// OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
+	// OnHistoryExclusions are excluded transactions on the target history that precede a replayed one.
 	// Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
 	// Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
 	// +optional
@@ -278,7 +278,7 @@ const (
 type PITRArchiveBindingReason string
 
 // PITRArchiveBinding is the encryption identity the group accepted for one
-// PITR archive destination it writes or reads (#203). Accepted encrypted
+// PITR archive destination it writes or reads. Accepted encrypted
 // bindings are reconstructible from their key snapshot's acceptance
 // annotation; plaintext bindings are re-proven (the descriptor records the
 // mode).

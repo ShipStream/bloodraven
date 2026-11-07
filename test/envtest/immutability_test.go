@@ -136,6 +136,12 @@ func e6Run(t *testing.T, ns string, cases []e6Case) {
 // e6WithInit gives the group an initFromBackup block with every field
 // the rule compares.
 func e6WithInit(fg *v1alpha1.MysqlFailoverGroup) {
+	// The archive profile the restore reads must exist when the group is
+	// created (E16).
+	if fg.Spec.Backup == nil {
+		fg.Spec.Backup = &v1alpha1.BackupSpec{}
+	}
+	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, pitrS3Profile("nightly-s3", "orders", ""))
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
 		Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "orders-nightly"}},
 		LoadOptions: &v1alpha1.LoadOptions{Threads: 4, ExcludeSchemas: []string{"scratch"}},

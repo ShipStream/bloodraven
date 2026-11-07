@@ -24,6 +24,9 @@ const DefaultBackupImage = "container-registry.oracle.com/mysql/community-server
 // BackupSpec is the top-level backup configuration embedded in
 // MysqlFailoverGroupSpec as spec.backup. All fields are optional; omitting
 // spec.backup entirely disables backups for this failover group.
+// +kubebuilder:validation:XValidation:rule="!has(self.pitr) || !has(self.pitr.enabled) || !self.pitr.enabled || (has(self.pitr.profileName) && has(self.profiles) && self.profiles.exists(p, p.name == self.pitr.profileName))",message="spec.backup.pitr.profileName must name an entry of spec.backup.profiles when pitr.enabled is true"
+// +kubebuilder:validation:XValidation:rule="!has(self.schedules) || self.schedules.all(s, has(self.profiles) && self.profiles.exists(p, p.name == s.profileName))",message="each spec.backup.schedules[].profileName must name an entry of spec.backup.profiles"
+// +kubebuilder:validation:XValidation:rule="!has(self.profiles) || self.profiles.all(p, !has(p.verification) || !has(p.verification.pointInTime) || !has(p.verification.pointInTime.archiveProfileName) || self.profiles.exists(q, q.name == p.verification.pointInTime.archiveProfileName))",message="each spec.backup.profiles[].verification.pointInTime.archiveProfileName must name an entry of spec.backup.profiles"
 type BackupSpec struct {
 	// Image is the container image containing mysqlsh. It must include
 	// util.dumpInstance() and util.loadDump() with native S3 support
@@ -125,7 +128,7 @@ type BackupSpec struct {
 	// the full dump spills past this limit the kubelet evicts the Job
 	// pod; without the cap, a multi-GB dump can fill the node's
 	// `/var/lib/kubelet` partition and trigger DiskPressure eviction of
-	// unrelated pods (AUDIT H6). Empty value falls through to the
+	// unrelated pods. Empty value falls through to the
 	// node's ephemeral-storage limit (preserving previous behavior).
 	// The reconciler does not enforce this — it's a hint to the kubelet.
 	// +optional
@@ -160,9 +163,12 @@ type PITRSpec struct {
 	// controlling how frequently binlogs rotate. Smaller values reduce
 	// the RPO gap (the tail of transactions on a crashed primary that
 	// may not yet have been archived) at the cost of more objects in
-	// storage. Accepts any value MySQL accepts (e.g. "100M", "256M",
-	// "1073741824"). Defaults to "100M" when PITR is enabled.
+	// storage. A byte count with an optional k, m or g suffix in either
+	// case, as mysqld reads it (e.g. "100M", "512m", "1073741824").
+	// Defaults to "100M" when PITR is enabled.
 	// +kubebuilder:default="100M"
+	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=`^[0-9]+[kKmMgG]?$`
 	// +optional
 	MaxBinlogSize string `json:"maxBinlogSize,omitempty"`
 
@@ -170,6 +176,8 @@ type PITRSpec struct {
 	// of binlog files against storage as a belt-and-suspenders safety
 	// net alongside inotify. Default: 60s. Bounds: 5s to 1h.
 	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5s') && duration(self) <= duration('1h')",message="archivePollInterval must be between 5s and 1h"
 	// +optional
 	ArchivePollInterval *metav1.Duration `json:"archivePollInterval,omitempty"`
@@ -293,6 +301,8 @@ type BackupRetrySpec struct {
 	// retry. Subsequent retries double the backoff until MaxBackoff.
 	// Default: 1m. Bounds: 1s to 1h.
 	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="retry.initialBackoff must be between 1s and 1h"
 	// +optional
 	InitialBackoff *metav1.Duration `json:"initialBackoff,omitempty"`
@@ -300,6 +310,8 @@ type BackupRetrySpec struct {
 	// MaxBackoff caps the exponential backoff. Default: 30m. Bounds: 1s to
 	// 24h, and at least InitialBackoff.
 	// +kubebuilder:default="30m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('24h')",message="retry.maxBackoff must be between 1s and 24h"
 	// +optional
 	MaxBackoff *metav1.Duration `json:"maxBackoff,omitempty"`
@@ -380,10 +392,8 @@ type BackupProfile struct {
 // the restore Job fail fast with a clear "decryption failed" event
 // rather than silently reloading garbage into MySQL.
 type BackupEncryptionSpec struct {
-	// Algorithm selects the encryption mechanism. Only
-	// "AES-256-GCM" is currently supported; the field is present so
-	// future releases can add envelope-over-KMS / XChaCha20-Poly1305
-	// / external key-manager modes without a breaking CRD bump.
+	// Algorithm selects the encryption mechanism. Only "AES-256-GCM" is
+	// supported.
 	// +kubebuilder:default="AES-256-GCM"
 	// +optional
 	Algorithm EncryptionAlgorithm `json:"algorithm,omitempty"`
@@ -610,8 +620,12 @@ type DumpOptions struct {
 	// +optional
 	Threads int32 `json:"threads,omitempty"`
 
-	// BytesPerChunk is the approximate chunk size (e.g. "64M").
+	// BytesPerChunk is the approximate chunk size: a byte count with an
+	// optional k, K, M or G suffix, as mysqlsh reads it (e.g. "64M",
+	// "512k"). mysqlsh refuses a lowercase m or g.
 	// +kubebuilder:default="64M"
+	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=`^[0-9]+[kKMG]?$`
 	// +optional
 	BytesPerChunk string `json:"bytesPerChunk,omitempty"`
 

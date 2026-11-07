@@ -198,6 +198,8 @@ type KeyringSpec struct {
 	// escrow succeeds; the timeout only controls when the condition flips
 	// to a loud failure. Default: 10m. Bounds: 30s to 1h.
 	// +kubebuilder:default="10m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('1h')",message="keyring.escrowTimeout must be between 30s and 1h"
 	// +optional
 	EscrowTimeout *metav1.Duration `json:"escrowTimeout,omitempty"`

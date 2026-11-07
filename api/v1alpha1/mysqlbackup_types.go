@@ -7,6 +7,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=mbk;mbks,categories=bloodraven;mysql;backup
 // +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.failoverGroupRef.name`
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profileName`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -180,11 +181,9 @@ type MysqlBackupStatus struct {
 	// MysqlImage is the resolved MySQL server image (spec.image, or the
 	// controller default) that was in use on the source failover group
 	// when this backup was taken. Captured when the backup Job is
-	// created and backfilled from the live spec on next reconcile if
-	// empty on older CRs. Retained so future verifications can pin the
-	// ephemeral mysqld to a version-compatible tag; the Phase-2
-	// verification Job currently runs on the backup/restore image
-	// (spec.backup.image) and does not yet consume this field.
+	// created, and filled from the live spec on a later reconcile when
+	// empty. Verification Jobs run on the backup image (spec.backup.image)
+	// and do not read this field.
 	// +optional
 	MysqlImage string `json:"mysqlImage,omitempty"`
 

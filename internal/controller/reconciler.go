@@ -991,6 +991,11 @@ func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.Sit
 // a restarted pod of the untouched Deployment must start with the
 // configuration it was rendered with (U09).
 func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr groupPITRRender) error {
+	if _, refused := effectivePITRMaxBinlogSize(fg); refused != "" && pitr.inputs.Enabled && r.Recorder != nil {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventMysqlConfIgnored,
+			"ignoring spec.backup.pitr.maxBinlogSize %q: it must be a byte count with an optional k, m or g suffix; max-binlog-size is %s",
+			refused, defaultPITRMaxBinlogSize)
+	}
 	for _, site := range fg.Spec.Sites {
 		if keys := unsafeMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventMysqlConfIgnored,
@@ -1048,15 +1053,37 @@ var mysqlOptionKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 // unsafeMySQLSetting reports a spec.mysqlConf entry that cannot be written
 // as one my.cnf line: a line break in the key or value would inject further
 // directives or [section] headers, overriding operator-owned settings.
-func unsafeMySQLSetting(key, value string) bool {
-	return !mysqlOptionKeyPattern.MatchString(key) || strings.ContainsAny(value, "\r\n\x00")
+// Admission refuses both (the key rule and MysqlConfValue's pattern); this
+// check keeps a value that bypassed it out of the file.
+func unsafeMySQLSetting(key string, value v1alpha1.MysqlConfValue) bool {
+	return !mysqlOptionKeyPattern.MatchString(key) || strings.ContainsAny(string(value), "\r\n\x00")
+}
+
+// mysqlSizePattern mirrors the admission pattern of
+// spec.backup.pitr.maxBinlogSize: a byte count with an optional k, m or g
+// suffix in either case, as mysqld reads it.
+var mysqlSizePattern = regexp.MustCompile(`^[0-9]+[kKmMgG]?$`)
+
+// effectivePITRMaxBinlogSize is the max-binlog-size generateMyCnf writes
+// while PITR renders: spec.backup.pitr.maxBinlogSize, or the default when it
+// is unset or not a size. refused is the spec value when it was not a size
+// (only reachable past admission); it would otherwise be written into my.cnf
+// as it is, and a line break in it would inject further directives.
+func effectivePITRMaxBinlogSize(fg *v1alpha1.MysqlFailoverGroup) (value, refused string) {
+	if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || fg.Spec.Backup.PITR.MaxBinlogSize == "" {
+		return defaultPITRMaxBinlogSize, ""
+	}
+	if v := fg.Spec.Backup.PITR.MaxBinlogSize; !mysqlSizePattern.MatchString(v) {
+		return defaultPITRMaxBinlogSize, v
+	}
+	return fg.Spec.Backup.PITR.MaxBinlogSize, ""
 }
 
 // unsafeMySQLConfKeys lists the spec.mysqlConf keys, group-level then the
 // site's, that generateMyCnf drops as unsafe.
 func unsafeMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []string {
 	var out []string
-	for _, raw := range []map[string]string{fg.Spec.MysqlConf, site.MysqlConf} {
+	for _, raw := range []map[string]v1alpha1.MysqlConfValue{fg.Spec.MysqlConf, site.MysqlConf} {
 		for k, v := range raw {
 			if unsafeMySQLSetting(k, v) {
 				out = append(out, strconv.Quote(k))
@@ -1067,7 +1094,7 @@ func unsafeMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec
 	return out
 }
 
-func normalizedMySQLSettings(raw map[string]string) map[string]string {
+func normalizedMySQLSettings(raw map[string]v1alpha1.MysqlConfValue) map[string]string {
 	keys := make([]string, 0, len(raw))
 	for key := range raw {
 		keys = append(keys, key)
@@ -1078,7 +1105,7 @@ func normalizedMySQLSettings(raw map[string]string) map[string]string {
 		if unsafeMySQLSetting(key, raw[key]) {
 			continue
 		}
-		out[canonicalMySQLOptionName(strings.ReplaceAll(key, "_", "-"))] = raw[key]
+		out[canonicalMySQLOptionName(strings.ReplaceAll(key, "_", "-"))] = string(raw[key])
 	}
 	return out
 }
@@ -1191,7 +1218,7 @@ func ownedMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
 func shadowedMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []string {
 	owned := ownedMySQLSettings(fg)
 	var out []string
-	for _, raw := range []map[string]string{fg.Spec.MysqlConf, site.MysqlConf} {
+	for _, raw := range []map[string]v1alpha1.MysqlConfValue{fg.Spec.MysqlConf, site.MysqlConf} {
 		for k := range normalizedMySQLSettings(raw) {
 			if shadowsOwnedSetting(k, owned) {
 				out = append(out, strconv.Quote(k))
@@ -1246,11 +1273,7 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, pitrOn bool, sites ...v1alph
 	// overrides so operators can still override via spec.mysqlConf if
 	// they want something different from what spec.backup.pitr configures.
 	if pitrOn && fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil {
-		maxSize := fg.Spec.Backup.PITR.MaxBinlogSize
-		if maxSize == "" {
-			maxSize = defaultPITRMaxBinlogSize
-		}
-		settings["max-binlog-size"] = maxSize
+		settings["max-binlog-size"], _ = effectivePITRMaxBinlogSize(fg)
 	}
 
 	for k, v := range normalizedMySQLSettings(fg.Spec.MysqlConf) {
@@ -2463,10 +2486,7 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, se
 	// release that changes the default rolls the pods.
 	fmt.Fprintf(h, "pitr.render=%s\n", pitr.Canonical())
 	if pitr.Enabled {
-		effMaxBinlogSize := defaultPITRMaxBinlogSize
-		if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.MaxBinlogSize != "" {
-			effMaxBinlogSize = fg.Spec.Backup.PITR.MaxBinlogSize
-		}
+		effMaxBinlogSize, _ := effectivePITRMaxBinlogSize(fg)
 		fmt.Fprintf(h, "pitr.podRenderVersion=%s\n", pitrPodRenderVersion)
 		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", effMaxBinlogSize)
 	}

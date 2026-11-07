@@ -117,7 +117,12 @@ const (
 	// line break, or a key that would override an operator-owned setting,
 	// including through a `loose-`, `skip-`, `disable-`, `enable-` or
 	// `maximum-` spelling. The message names the site and the keys; remove
-	// them from `spec.mysqlConf`.
+	// them from `spec.mysqlConf`. Admission refuses the malformed keys and
+	// values, so only an object stored before that rule reaches the first
+	// case. Also emitted, without a site, when
+	// `spec.backup.pitr.maxBinlogSize` is not a byte count with an optional
+	// `k`, `m` or `g` suffix (likewise refused at admission): my.cnf gets
+	// the `100M` default instead.
 	EventMysqlConfIgnored = "MysqlConfIgnored"
 )
 
@@ -753,7 +758,9 @@ const (
 
 // Events: Backup and verification scheduling. On: MysqlFailoverGroup.
 const (
-	// Schedule references an unknown backup profile.
+	// Schedule references an unknown backup profile. Admission refuses
+	// such a schedule, so only an object stored before that rule reaches
+	// it.
 	EventBackupScheduleInvalid = "BackupScheduleInvalid"
 	// The schedule's profile is
 	// [read-only](/docs/backup-and-restore/backup-encryption#read-only-profiles)
@@ -781,11 +788,13 @@ const (
 	// `spec.backup.pitr.profileName` is empty or names no entry in
 	// `spec.backup.profiles`. Binlog archiving stays disabled and
 	// `PITRArchiveReady` reports `ArchiverDisabled`; set `profileName` to
-	// an existing profile.
+	// an existing profile. Admission refuses both, so only an object
+	// stored before that rule reaches it.
 	EventBackupPITRInvalid = "BackupPITRInvalid"
 	// A backup profile sets `verification.enabled: true` but leaves
 	// `verification.schedule` empty, so no verification CronJob is created
-	// for it. Set a schedule or disable verification.
+	// for it. Set a schedule or disable verification. Admission refuses
+	// it, so only an object stored before that rule reaches it.
 	EventVerificationScheduleInvalid = "VerificationScheduleInvalid"
 )
 

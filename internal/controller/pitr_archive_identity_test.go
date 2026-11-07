@@ -320,24 +320,24 @@ func TestPITRArchiveTrackerArchiveRefusals(t *testing.T) {
 func TestPITRRefusedMySQLConf(t *testing.T) {
 	tests := []struct {
 		name       string
-		conf, site map[string]string
+		conf, site map[string]v1alpha1.MysqlConfValue
 		pitr       bool
 		want       []string // "site: substring", sorted
 	}{
-		{name: "clean", conf: map[string]string{"max_connections": "100", "binlog_format": "ROW", "binlog-row-image": "full"}, pitr: true},
-		{name: "replicate filter on the group hits every site", conf: map[string]string{"replicate_do_db": "orders"}, pitr: true,
+		{name: "clean", conf: map[string]v1alpha1.MysqlConfValue{"max_connections": "100", "binlog_format": "ROW", "binlog-row-image": "full"}, pitr: true},
+		{name: "replicate filter on the group hits every site", conf: map[string]v1alpha1.MysqlConfValue{"replicate_do_db": "orders"}, pitr: true,
 			want: []string{"iad: spec.mysqlConf sets replicate-do-db", "pdx: spec.mysqlConf sets replicate-do-db"}},
-		{name: "wild filter, loose prefix", conf: map[string]string{"loose-replicate-wild-ignore-table": "a.%"}, pitr: true,
+		{name: "wild filter, loose prefix", conf: map[string]v1alpha1.MysqlConfValue{"loose-replicate-wild-ignore-table": "a.%"}, pitr: true,
 			want: []string{"iad: spec.mysqlConf sets loose-replicate-wild-ignore-table", "pdx: spec.mysqlConf sets loose-replicate-wild-ignore-table"}},
-		{name: "binlog filter on one site is that site's", site: map[string]string{"binlog-ignore-db": "tmp"}, pitr: true,
+		{name: "binlog filter on one site is that site's", site: map[string]v1alpha1.MysqlConfValue{"binlog-ignore-db": "tmp"}, pitr: true,
 			want: []string{"pdx: spec.sites[pdx].mysqlConf sets binlog-ignore-db"}},
-		{name: "statement format", conf: map[string]string{"binlog_format": "MIXED"}, pitr: true,
+		{name: "statement format", conf: map[string]v1alpha1.MysqlConfValue{"binlog_format": "MIXED"}, pitr: true,
 			want: []string{"iad: spec.mysqlConf sets binlog-format=MIXED", "pdx: spec.mysqlConf sets binlog-format=MIXED"}},
-		{name: "site override makes the effective value safe", conf: map[string]string{"binlog_format": "MIXED"}, site: map[string]string{"binlog-format": "row"}, pitr: true,
+		{name: "site override makes the effective value safe", conf: map[string]v1alpha1.MysqlConfValue{"binlog_format": "MIXED"}, site: map[string]v1alpha1.MysqlConfValue{"binlog-format": "row"}, pitr: true,
 			want: []string{"iad: spec.mysqlConf sets binlog-format=MIXED"}},
-		{name: "site sets the unsafe value", site: map[string]string{"binlog_row_image": "MINIMAL"}, pitr: true,
+		{name: "site sets the unsafe value", site: map[string]v1alpha1.MysqlConfValue{"binlog_row_image": "MINIMAL"}, pitr: true,
 			want: []string{"pdx: spec.sites[pdx].mysqlConf sets binlog-row-image=MINIMAL"}},
-		{name: "PITR disabled", conf: map[string]string{"replicate_do_db": "orders"}, pitr: false},
+		{name: "PITR disabled", conf: map[string]v1alpha1.MysqlConfValue{"replicate_do_db": "orders"}, pitr: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -375,7 +375,7 @@ func TestPITRRefusedMySQLConf(t *testing.T) {
 	// Without PITR the same option is rendered as configured.
 	fg := identityFG()
 	fg.Spec.Backup.PITR.Enabled = false
-	fg.Spec.MysqlConf = map[string]string{"binlog_format": "MIXED"}
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"binlog_format": "MIXED"}
 	if cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0]); !strings.Contains(cnf, "\nbinlog-format=MIXED\n") {
 		t.Fatalf("PITR disabled, but binlog-format dropped:\n%s", cnf)
 	}
@@ -391,7 +391,7 @@ func TestPITRRefusedMySQLConf(t *testing.T) {
 func TestReconcilePITRMySQLConfCondition(t *testing.T) {
 	ctx := context.Background()
 	fg := identityFG()
-	fg.Spec.MysqlConf = map[string]string{"binlog_format": "STATEMENT"}
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"binlog_format": "STATEMENT"}
 	r, c := newReconciler(fg)
 	rec := r.Recorder.(*record.FakeRecorder)
 	get := func() *metav1.Condition {

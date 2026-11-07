@@ -79,7 +79,7 @@ func TestEncryptionMySQLSettings_Coverage(t *testing.T) {
 // so a spec.mysqlConf entry naming the same key must not win.
 func TestEncryptionSettingsOverrideUserConf(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.MysqlConf = map[string]string{
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{
 		"innodb_redo_log_encrypt":  "OFF",
 		"binlog-encryption":        "OFF",
 		"default_table_encryption": "OFF",
@@ -102,14 +102,14 @@ func TestEncryptionSettingsOverrideUserConf(t *testing.T) {
 // break in a value, which would write a directive of its own.
 func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.MysqlConf = map[string]string{
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{
 		"loose_innodb_redo_log_encrypt":        "OFF",
 		"skip-binlog-encryption":               "",
 		"disable-default-table-encryption":     "",
 		"max_connections":                      "777\ninnodb-undo-log-encrypt=OFF",
 		"x\n[mysqld]\ninnodb-undo-log-encrypt": "OFF",
 	}
-	fg.Spec.Sites[0].MysqlConf = map[string]string{"loose-skip-binlog-encryption": ""}
+	fg.Spec.Sites[0].MysqlConf = map[string]v1alpha1.MysqlConfValue{"loose-skip-binlog-encryption": ""}
 	cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0])
 	for _, forbidden := range []string{
 		"loose-innodb-redo-log-encrypt", "skip-binlog-encryption", "disable-default-table-encryption",
@@ -138,7 +138,7 @@ func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
 // group uses to load extra plugins must survive next to mysql_clone.so.
 func TestGenerateMyCnf_KeepsLoosePluginLoadAdd(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.MysqlConf = map[string]string{"loose_plugin_load_add": "auth_socket.so"}
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"loose_plugin_load_add": "auth_socket.so"}
 	cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0])
 	for _, want := range []string{"loose-plugin-load-add=auth_socket.so\n", "plugin-load-add=mysql_clone.so\n"} {
 		if !strings.Contains(cnf, want) {

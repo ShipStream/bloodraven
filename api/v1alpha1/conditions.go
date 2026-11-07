@@ -376,7 +376,7 @@ const (
 	ReasonFailed                 = "Failed"                 // MysqlBackup, MysqlBackupVerification
 	ReasonGroupNotFound          = "GroupNotFound"          // MysqlBackup, MysqlBackupVerification
 	// ReasonMetadataVersionUnsupported: an internal annotation payload
-	// (A-80) carries a schemaVersion this operator does not know. On a
+	// carries a schemaVersion this operator does not know. On a
 	// MysqlFailoverGroup it is a Degraded reason; on a
 	// MysqlBackupVerification the Verified reason of the failed run.
 	ReasonMetadataVersionUnsupported = "MetadataVersionUnsupported" // MysqlFailoverGroup, MysqlBackupVerification

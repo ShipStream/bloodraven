@@ -142,6 +142,8 @@ type StandbyFreshnessSpec struct {
 	// scheduled poll; the reconciler also enforces the floor as
 	// defense-in-depth).
 	// +kubebuilder:default="5m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('24h')",message="discoveryInterval must be between 30s and 24h"
 	// +optional
 	DiscoveryInterval *metav1.Duration `json:"discoveryInterval,omitempty"`
