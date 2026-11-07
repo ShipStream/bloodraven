@@ -183,9 +183,9 @@ func findPITRBinding(fg *v1alpha1.MysqlFailoverGroup, dest pitrarchive.Destinati
 // matches a report.
 func pitrKeyRevision(enc v1alpha1.PITRArchiveBindingEncryption) string {
 	switch enc.Mode {
-	case v1alpha1.PITRArchiveEncryptionNone:
+	case v1alpha1.EncryptionModeNone:
 		return pitrKeyRevisionPlaintext
-	case v1alpha1.PITRArchiveEncryptionPassphrase:
+	case v1alpha1.EncryptionModePassphrase:
 		return enc.KeySecretName
 	default:
 		return ""
@@ -361,7 +361,7 @@ func (p pitrRenderInputs) keyRevision() string {
 		return ""
 	}
 	return pitrKeyRevision(v1alpha1.PITRArchiveBindingEncryption{
-		Mode:          v1alpha1.PITRArchiveEncryptionMode(p.EncryptionMode),
+		Mode:          v1alpha1.EncryptionMode(p.EncryptionMode),
 		KeySecretName: p.KeySecretName,
 	})
 }
@@ -635,14 +635,14 @@ func groupPITRHold(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deployment)
 // the proof verified the descriptor with exactly these bytes and fields.
 // It is a passphrase verifier and lives only on the Secret.
 type pitrAcceptance struct {
-	SchemaVersion int                                `json:"schemaVersion"`
-	Destination   string                             `json:"destination"`
-	ArchiveID     string                             `json:"archiveID"`
-	Source        v1alpha1.PITRArchiveSource         `json:"source"`
-	Mode          v1alpha1.PITRArchiveEncryptionMode `json:"mode"`
-	Algorithm     v1alpha1.EncryptionAlgorithm       `json:"algorithm"`
-	KeyCheck      string                             `json:"keyCheck"`
-	AcceptedAt    time.Time                          `json:"acceptedAt"`
+	SchemaVersion int                          `json:"schemaVersion"`
+	Destination   string                       `json:"destination"`
+	ArchiveID     string                       `json:"archiveID"`
+	Source        v1alpha1.PITRArchiveSource   `json:"source"`
+	Mode          v1alpha1.EncryptionMode      `json:"mode"`
+	Algorithm     v1alpha1.EncryptionAlgorithm `json:"algorithm"`
+	KeyCheck      string                       `json:"keyCheck"`
+	AcceptedAt    time.Time                    `json:"acceptedAt"`
 }
 
 // Acceptance verification errors. verifyPITRAcceptance wraps exactly one.

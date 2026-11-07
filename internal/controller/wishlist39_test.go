@@ -129,8 +129,7 @@ func TestBuildCleanupJob_AppliesBackupResourcesAndDropsSAToken(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-cleanup", Namespace: "ns"},
 		Status: v1alpha1.MysqlBackupStatus{
-			Location:    "lion/lion-cleanup/",
-			StorageType: v1alpha1.BackupStorageS3,
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/lion-cleanup/"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -168,8 +167,7 @@ func TestBuildCleanupJob_NilBackupSpec_UsesDefaultResources(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-cleanup", Namespace: "ns"},
 		Status: v1alpha1.MysqlBackupStatus{
-			Location:    "bucket/key/",
-			StorageType: v1alpha1.BackupStorageS3,
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "bucket/key/"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -191,8 +189,7 @@ func TestBuildCleanupJob_HardenedSecurityContextStillApplied(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-cleanup", Namespace: "ns"},
 		Status: v1alpha1.MysqlBackupStatus{
-			Location:    "lion/lion-cleanup/",
-			StorageType: v1alpha1.BackupStorageS3,
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/lion-cleanup/"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -270,9 +267,8 @@ func TestBuildVerificationJob_EncryptedSource_InitContainerCarriesResources(t *t
 
 	fg := fgWithEncryptedBackup()
 	backup := successfulBackup("verify-enc", "lion", "nightly-s3")
-	backup.Status.Encrypted = true
+	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	recordTestDumpKey(backup)
-	backup.Status.EncryptionAlgorithm = "AES-256-GCM"
 
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-enc", Namespace: "ns"},
@@ -386,14 +382,10 @@ func TestBuildRestoreJob_DecryptInitContainerCarriesResources(t *testing.T) {
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Phase:               v1alpha1.BackupPhaseSucceeded,
-			Location:            "lion/seed/",
-			StorageType:         v1alpha1.BackupStorageS3,
-			Encrypted:           true,
-			EncryptionAlgorithm: "AES-256-GCM",
-			ArtifactStorage: &v1alpha1.BackupArtifactStorage{
-				PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"},
-			},
+			Phase: v1alpha1.BackupPhaseSucceeded,
+			ArtifactStorage: testArtifactStorageWithKey(v1alpha1.BackupStorageS3, "lion/seed/",
+				&v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"}),
+			Encryption: &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM},
 		},
 	}
 	r, _ := newReconciler(fg, seed)

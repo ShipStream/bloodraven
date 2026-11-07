@@ -23,7 +23,7 @@
 
 **Front:** The single observable change on the CR during an operator outage.
 
-**Back:** `status.*` stops updating — `status.sites[].lastSeen` freezes at the last poll.
+**Back:** `status.*` stops updating — `status.sites[].lastSeenTime` freezes at the last poll.
 
 ---
 

@@ -426,9 +426,8 @@ func TestE5_ArtifactPassphraseSecretKeyRefImmutable(t *testing.T) {
 	done := metav1.NewTime(time.Now())
 	b.Status = v1alpha1.MysqlBackupStatus{
 		Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &done, StartTime: &done,
-		StorageType: v1alpha1.BackupStorageS3, Location: "lion/encrypted",
 		ArtifactStorage: &v1alpha1.BackupArtifactStorage{
-			Location: "lion/encrypted", Bucket: "bloodraven",
+			Type: v1alpha1.BackupStorageS3, Location: "lion/encrypted", Bucket: "bloodraven",
 			PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "mysqlbackup-encrypted-dump-key-0a1b2c3d", Key: "passphrase"},
 		},
 	}

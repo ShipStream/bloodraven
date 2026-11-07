@@ -36,7 +36,7 @@ func TestSelectSourceSite_ReplicaHealthy_PicksReplica(t *testing.T) {
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true, SecondsBehindSource: &lag},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag},
 		},
 	}
 	site, reason, err := selectSourceSite(backupTestGroup(status), "", 300)
@@ -57,7 +57,7 @@ func TestSelectSourceSite_ReplicaLagging_FallsBackToPrimary(t *testing.T) {
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true, SecondsBehindSource: &lag},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag},
 		},
 	}
 	site, reason, err := selectSourceSite(backupTestGroup(status), "", 300)
@@ -137,8 +137,8 @@ func TestSelectSourceSite_ExcludesReadOnlyRole(t *testing.T) {
 		}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad", Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replicating: true, SecondsBehindSource: &lag},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true, SecondsBehindSource: &lag},
+			{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag},
 		}},
 	}
 	site, _, err := selectSourceSite(fg, "", 300)
@@ -582,7 +582,7 @@ func TestMysqlBackupReconciler_ProfileNotFound_TransitionsToFailed(t *testing.T)
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("bad-profile", "lion", "does-not-exist")
@@ -602,7 +602,7 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("happy-path", "lion", "nightly-s3")
@@ -653,7 +653,7 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateReadOnly},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("wait-for-source", "lion", "nightly-s3")
@@ -720,7 +720,7 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	liveFG.Status.ActiveSite = "iad"
 	liveFG.Status.Sites = []v1alpha1.SiteStatus{
 		{Name: "iad", State: v1alpha1.SiteStateWritable},
-		{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+		{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 	}
 	if err := c.Status().Update(context.Background(), &liveFG); err != nil {
 		t.Fatalf("make source healthy: %v", err)
@@ -745,7 +745,7 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateReadOnly},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("pending-too-long", "lion", "nightly-s3")
@@ -794,7 +794,7 @@ func TestMysqlBackupReconciler_RunningJobSurvivesTransientNoActiveSite(t *testin
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("in-flight-failover", "lion", "nightly-s3")
@@ -870,7 +870,7 @@ func TestMysqlBackupReconciler_JobSucceeded_MarksSucceeded(t *testing.T) {
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("done", "lion", "nightly-s3")
@@ -915,7 +915,7 @@ func TestMysqlBackupReconciler_JobFailed_MarksFailed(t *testing.T) {
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("boom", "lion", "nightly-s3")

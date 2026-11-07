@@ -403,17 +403,6 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 			message = "PITRCoverageInvalid: " + err.Error()
 		} else {
 			next.PointInTime = result
-			// replayedThroughBinlog keeps feeding the replay-lag gauge:
-			// the last segment's file and the newest replayed commit.
-			mark := &v1alpha1.BinlogReplayMark{}
-			if result.LastReplayedBinlog != nil {
-				mark.File = result.LastReplayedBinlog.Name
-			}
-			if result.NewestReplayedCommitTime != nil {
-				stamp := metav1.NewTime(result.NewestReplayedCommitTime.Time)
-				mark.Timestamp = &stamp
-			}
-			next.ReplayedThroughBinlog = mark
 		}
 	}
 	if pitr && jobFailed {
@@ -876,10 +865,10 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 	// Replay lag measures archive freshness, so only a latest drill sets
 	// it; a timestamp drill's newest event is its historical target.
 	if pitrMode == "latest" && v.Status.Phase == v1alpha1.VerificationPhaseSucceeded &&
-		v.Status.ReplayedThroughBinlog != nil &&
-		v.Status.ReplayedThroughBinlog.Timestamp != nil &&
+		v.Status.PointInTime != nil &&
+		v.Status.PointInTime.NewestReplayedCommitTime != nil &&
 		!end.IsZero() {
-		lag := end.Sub(v.Status.ReplayedThroughBinlog.Timestamp.Time).Seconds()
+		lag := end.Sub(v.Status.PointInTime.NewestReplayedCommitTime.Time).Seconds()
 		if lag < 0 {
 			lag = 0
 		}

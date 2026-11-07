@@ -193,11 +193,11 @@ func settleDragonflyOldMasterRejoinsAsReplica() runner.Step {
 					}
 					for _, s := range mfg.Status.Dragonfly.Sites {
 						if s.Name == oldMaster {
-							msg := fmt.Sprintf("site %s role=%q linkStatus=%q reachable=%v sync=%v",
-								s.Name, s.Role, s.LinkStatus, s.Reachable, s.SyncInProgress)
+							msg := fmt.Sprintf("site %s role=%q linkStatus=%q reachable=%v sync=%s",
+								s.Name, s.Role, s.LinkStatus, s.Reachable, optionalBoolString(s.SyncInProgress))
 							done := s.Role == v1alpha1.DragonflyRoleReplica &&
 								s.LinkStatus == "up" &&
-								!s.SyncInProgress &&
+								!dragonflySyncing(s.SyncInProgress) &&
 								s.Reachable
 							return done, msg, nil
 						}

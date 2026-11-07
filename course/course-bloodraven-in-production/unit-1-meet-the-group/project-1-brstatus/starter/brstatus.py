@@ -144,7 +144,8 @@ def is_serving(site_spec, site_status, group):
       * For a site whose role is "ReadOnly", healthy=yes needs all five of
         these to hold at once:
           1. sourceConvergenceState is "Converged"
-          2. replicating is true
+          2. replication is "Healthy" or "Lagging" (Lagging only means past
+             maxLagSeconds; the reader threshold is conjunct 5)
           3. secondsBehindSource is present (not null)
           4. canonical_host(sourceHost) equals expected_source_host(...) for
              the active site - a chained replica does not count
@@ -215,7 +216,7 @@ def build_rows(group):
                 name,
                 site_role(site_spec),
                 site_status.get("state") or "Unknown",
-                "yes" if site_status.get("replicating") else "no",
+                site_status.get("replication") or "Unknown",
                 format_lag(site_status),
                 "yes" if is_serving(site_spec, site_status, group) else "no",
             )

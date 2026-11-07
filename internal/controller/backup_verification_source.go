@@ -14,19 +14,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// verificationBackupSnapshot pins the backup a verification reads: its
+// identity and its recorded artifact destination.
 func verificationBackupSnapshot(backup *v1alpha1.MysqlBackup) *v1alpha1.VerificationBackupRef {
 	return &v1alpha1.VerificationBackupRef{
 		Name: backup.Name, UID: string(backup.UID),
-		Location: backup.Status.Location, StorageType: backup.Status.StorageType,
+		ArtifactStorage: backup.Status.ArtifactStorage.DeepCopy(),
 	}
 }
 
 func validateVerificationBackupRef(ref *v1alpha1.VerificationBackupRef) error {
-	if ref == nil || ref.Name == "" || ref.UID == "" || ref.Location == "" {
-		return fmt.Errorf("verification source requires a pinned name, UID and location")
+	if ref == nil || ref.Name == "" || ref.UID == "" || ref.ArtifactStorage == nil || ref.ArtifactStorage.Location == "" {
+		return fmt.Errorf("verification source requires a pinned name, UID and artifact location")
 	}
-	if ref.StorageType != v1alpha1.BackupStorageS3 && ref.StorageType != v1alpha1.BackupStoragePVC {
-		return fmt.Errorf("verification source has unknown storage type %q", ref.StorageType)
+	if t := ref.ArtifactStorage.Type; t != v1alpha1.BackupStorageS3 && t != v1alpha1.BackupStoragePVC {
+		return fmt.Errorf("verification source has unknown storage type %q", t)
 	}
 	return nil
 }
@@ -62,8 +64,7 @@ func (r *MysqlBackupVerificationReconciler) resolvePinnedVerificationBackup(ctx 
 	if !backup.DeletionTimestamp.IsZero() {
 		return nil, fmt.Errorf("pinned backup %q is being deleted", ref.Name)
 	}
-	backup.Status.Location = ref.Location
-	backup.Status.StorageType = ref.StorageType
+	backup.Status.ArtifactStorage = ref.ArtifactStorage.DeepCopy()
 	return &backup, nil
 }
 
@@ -88,20 +89,21 @@ func verificationContainerEnv(container corev1.Container) map[string]string {
 // verificationJobReadsBackup checks the original source, not a decrypt staging
 // path. This also permits safe observation of older Jobs without a snapshot.
 func verificationJobReadsBackup(job *batchv1.Job, ref *v1alpha1.VerificationBackupRef) bool {
+	storage := ref.ArtifactStorage
 	for _, container := range job.Spec.Template.Spec.InitContainers {
 		if container.Name != "decrypt-download" {
 			continue
 		}
 		env := verificationContainerEnv(container)
-		if env["BLOODRAVEN_STORAGE_TYPE"] != string(ref.StorageType) {
+		if env["BLOODRAVEN_STORAGE_TYPE"] != string(storage.Type) {
 			return false
 		}
-		switch ref.StorageType {
+		switch storage.Type {
 		case v1alpha1.BackupStorageS3:
-			bucket, prefix := splitS3Location(ref.Location)
-			return env["BLOODRAVEN_SOURCE_PREFIX"] == prefix && (bucket == "" || env["BLOODRAVEN_S3_BUCKET"] == bucket)
+			_, prefix := splitS3Location(storage.Location)
+			return env["BLOODRAVEN_SOURCE_PREFIX"] == prefix && env["BLOODRAVEN_S3_BUCKET"] == storage.Bucket
 		case v1alpha1.BackupStoragePVC:
-			prefix := strings.TrimSuffix(strings.TrimPrefix(ref.Location, backupPVCMountPath+"/"), "/")
+			prefix := strings.TrimSuffix(strings.TrimPrefix(storage.Location, backupPVCMountPath+"/"), "/")
 			return env["BLOODRAVEN_SOURCE_PREFIX"] == prefix
 		}
 	}
@@ -110,8 +112,8 @@ func verificationJobReadsBackup(job *batchv1.Job, ref *v1alpha1.VerificationBack
 			continue
 		}
 		env := verificationContainerEnv(container)
-		return env["BLOODRAVEN_INPUT_URL"] == mysqlShellDumpInput(ref.Location, ref.StorageType) &&
-			(ref.StorageType != v1alpha1.BackupStorageS3 || env["BLOODRAVEN_S3_BUCKET"] != "")
+		return env["BLOODRAVEN_INPUT_URL"] == mysqlShellDumpInput(storage.Location, storage.Type) &&
+			(storage.Type != v1alpha1.BackupStorageS3 || env["BLOODRAVEN_S3_BUCKET"] == storage.Bucket)
 	}
 	return false
 }

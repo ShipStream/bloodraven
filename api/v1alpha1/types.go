@@ -663,11 +663,16 @@ type CredentialsSpec struct {
 // MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
 type MysqlFailoverGroupStatus struct {
 	// ActiveSite is the name of the site currently acting as primary (writable).
+	// Durable: the topology manager restores it after a restart, before it
+	// has observed the sites. Lost beside a failover record, it makes the
+	// manager refuse automatic promotion until it observes a writable
+	// primary.
 	// +optional
 	ActiveSite string `json:"activeSite,omitempty"`
 
 	// TopologyGeneration increments whenever the authoritative active site changes
 	// and persists across operator restarts to fence deployment leases.
+	// Durable: it is restored after a restart and never moves backwards.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	TopologyGeneration int64 `json:"topologyGeneration,omitempty"`
@@ -684,19 +689,14 @@ type MysqlFailoverGroupStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// LastFailover is the timestamp of the last failover event.
+	// LastFailover is the record of the most recent failover: when it was
+	// recorded, the site it promoted and that site's GTID set at promotion.
+	// Durable: the topology manager restores the failover cooldown and the
+	// promotion watermark from it, or from its annotation copies
+	// (bloodraven.shipstream.io/last-failover, last-failover-target and
+	// promotion-gtid-executed) when those are newer, after a restart.
 	// +optional
-	LastFailover *metav1.Time `json:"lastFailover,omitempty"`
-
-	// LastFailoverTarget is the site that was last promoted during failover.
-	// +optional
-	LastFailoverTarget string `json:"lastFailoverTarget,omitempty"`
-
-	// PromotionGtidExecuted is the GTID executed set recorded on the
-	// candidate at the moment of the most recent promotion, before it
-	// began accepting writes. Used for data-loss accounting.
-	// +optional
-	PromotionGtidExecuted string `json:"promotionGtidExecuted,omitempty"`
+	LastFailover *FailoverRecord `json:"lastFailover,omitempty"`
 
 	// UpdatePhase is the current phase of an ordered update. Absent when
 	// no ordered update is running.
@@ -704,6 +704,8 @@ type MysqlFailoverGroupStatus struct {
 	UpdatePhase UpdatePhase `json:"updatePhase,omitempty"`
 
 	// Restore tracks an in-flight or completed initFromBackup operation.
+	// Durable: until it records Succeeded the group is treated as still
+	// restoring (no DNS, no application endpoints, no fresh-deploy clone).
 	// +optional
 	Restore *RestoreStatus `json:"restore,omitempty"`
 
@@ -713,6 +715,8 @@ type MysqlFailoverGroupStatus struct {
 	// already done" from "new restore requested". Once a run is accepted
 	// this status, not the spec, drives it: removing spec.restoreInPlace
 	// while its Job runs keeps the fence until the Job finishes.
+	// Durable: confirmTokenUsed is the only record that a confirm was
+	// consumed, and the run record is what a restarted operator resumes.
 	// +optional
 	RestoreInPlace *RestoreInPlaceStatus `json:"restoreInPlace,omitempty"`
 
@@ -721,12 +725,17 @@ type MysqlFailoverGroupStatus struct {
 	// outside restoreInPlace because it outlives that restore: it drains
 	// after the restore has succeeded, across later restores and spec
 	// edits. Empty when nothing is queued.
+	// Durable: pending sites are never promoted and do not replicate until
+	// recloned; fencedGtidExecuted decides whether a failed restore's queue
+	// is discarded or held.
 	// +optional
 	RestoreReclones *RestoreReclonesStatus `json:"restoreReclones,omitempty"`
 
 	// RestoreOfflineFence is the offline_mode fence a full-instance
 	// in-place restore holds on its target primary. It is cleared once the
 	// restore has finished and the prior offline_mode is back.
+	// Durable: it is written before offline_mode changes, and a restarted
+	// operator re-applies the fence and restores the prior value from it.
 	// +optional
 	RestoreOfflineFence *RestoreOfflineFenceStatus `json:"restoreOfflineFence,omitempty"`
 
@@ -756,6 +765,8 @@ type MysqlFailoverGroupStatus struct {
 	// failover attempt. Terminal status is retained until a newer
 	// annotation replaces the block; the field is how kubectl describe
 	// tells the story of a switchover after the fact.
+	// Durable: its write-ahead fence and promotion records are what a
+	// restarted operator resumes, rolls back or ends from.
 	// +optional
 	PlannedFailover *PlannedFailoverStatus `json:"plannedFailover,omitempty"`
 
@@ -766,6 +777,10 @@ type MysqlFailoverGroupStatus struct {
 	// administrator acknowledges it with
 	// bloodraven.shipstream.io/acknowledge-planned-failover-hold=<runID>.
 	// The AutomaticFailoverHeld condition summarises it.
+	// Durable: losing it would re-enable automatic failover beside a
+	// possible split brain; the condition and the planned-failover-terminal
+	// annotation are second copies that keep the hold until it is
+	// acknowledged.
 	// +optional
 	PlannedFailoverHold *PlannedFailoverHold `json:"plannedFailoverHold,omitempty"`
 
@@ -782,6 +797,11 @@ type MysqlFailoverGroupStatus struct {
 	// PITRArchiveBindings are the encryption identities accepted for the
 	// PITR archive destinations this group writes or reads (#203). Written
 	// by the group reconciler.
+	// Durable: a binding pins the key snapshot every writer and reader of
+	// its archive mounts. A lost encrypted entry is rebuilt from the
+	// acceptance its key snapshot records (snapshots outlive the group); a
+	// lost plaintext entry stays Pending until a writer or a check Job
+	// proves the archive again.
 	// +optional
 	// +listType=map
 	// +listMapKey=id
@@ -802,17 +822,23 @@ type SiteStatus struct {
 	// +optional
 	State SiteState `json:"state,omitempty"`
 
-	// LastSeen is the last time this site was successfully polled.
+	// LastSeenTime is the last time this site was successfully polled.
 	// +optional
-	LastSeen *metav1.Time `json:"lastSeen,omitempty"`
+	LastSeenTime *metav1.Time `json:"lastSeenTime,omitempty"`
 
 	// GtidExecuted is the GTID executed set (populated when replication status is enriched).
 	// +optional
 	GtidExecuted string `json:"gtidExecuted,omitempty"`
 
-	// Replicating indicates whether replication is running (populated when replication status is enriched).
+	// Replication is the site's replication state: NotApplicable on the
+	// writable primary; Healthy or Lagging once both replication threads
+	// have run with a source set for consecutive polls (Lagging when
+	// secondsBehindSource exceeds spec.replication.maxLagSeconds); Broken
+	// when replica status was read and a thread is stopped or no source is
+	// set; Unknown when replica status could not be read, the site has not
+	// been probed, or the healthy streak is still building.
 	// +optional
-	Replicating bool `json:"replicating,omitempty"`
+	Replication SiteReplicationState `json:"replication,omitempty"`
 
 	// SecondsBehindSource is the replication lag in seconds (populated when replication status is enriched).
 	// +optional
@@ -882,6 +908,48 @@ const (
 	// operator started.
 	SiteStateUnknown SiteState = "Unknown"
 )
+
+// SiteReplicationState is status.sites[].replication.
+// +kubebuilder:validation:Enum=Healthy;Lagging;Broken;Unknown;NotApplicable
+type SiteReplicationState string
+
+const (
+	// SiteReplicationHealthy: both replication threads run with a source
+	// set, over consecutive polls, within spec.replication.maxLagSeconds.
+	SiteReplicationHealthy SiteReplicationState = "Healthy"
+	// SiteReplicationLagging: as Healthy, but secondsBehindSource exceeds
+	// spec.replication.maxLagSeconds (the Degraded ReplicationLagging
+	// threshold).
+	SiteReplicationLagging SiteReplicationState = "Lagging"
+	// SiteReplicationBroken: replica status was read, and the IO or SQL
+	// thread is stopped or no source is set.
+	SiteReplicationBroken SiteReplicationState = "Broken"
+	// SiteReplicationUnknown: replica status could not be read, the site
+	// has not been probed, or the healthy streak is still building.
+	SiteReplicationUnknown SiteReplicationState = "Unknown"
+	// SiteReplicationNotApplicable: the site is the writable primary.
+	SiteReplicationNotApplicable SiteReplicationState = "NotApplicable"
+)
+
+// Running reports whether replication runs: Healthy or Lagging. It is the
+// predicate every reader that needs a replicating follower uses; a reader
+// that also bounds lag applies its own threshold to secondsBehindSource.
+func (s SiteReplicationState) Running() bool {
+	return s == SiteReplicationHealthy || s == SiteReplicationLagging
+}
+
+// FailoverRecord is the durable record of the most recent failover. It
+// embeds the {time, target} reference a planned run's claimBaseline
+// records, and adds the promotion watermark.
+type FailoverRecord struct {
+	FailoverRecordRef `json:",inline"`
+
+	// PromotionGtidExecuted is the GTID executed set recorded on the
+	// target at the moment of its promotion, before it began accepting
+	// writes. Used for data-loss accounting.
+	// +optional
+	PromotionGtidExecuted string `json:"promotionGtidExecuted,omitempty"`
+}
 
 // UpdatePhase is the phase of an in-flight ordered update. While the
 // update runs it is also the reason of the Updating condition.

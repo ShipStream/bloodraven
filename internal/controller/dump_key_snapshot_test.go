@@ -308,7 +308,7 @@ func TestAbandonedCleanupRecordedKeyMissing(t *testing.T) {
 		t.Fatalf("got %v %q %v, want a missing report naming the recorded Secret", vol, missing, err)
 	}
 	// No attribution at all: the profile's Secret is the only fallback.
-	mb.Status.Encrypted = true
+	mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	vol, missing, err = r.abandonedCleanupPassphrase(context.Background(), mb, &profile, nil, nil)
 	if err != nil || missing != "" || vol == nil || vol.SecretName != profile.Encryption.PassphraseSecretKeyRef.Name {
 		t.Fatalf("no-attribution fallback: %v %q %v", vol, missing, err)

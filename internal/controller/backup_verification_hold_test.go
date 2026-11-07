@@ -44,7 +44,7 @@ func holdVerification(name string, phase v1alpha1.VerificationPhase, refUID stri
 	v.UID = types.UID("uid-" + name)
 	v.Status.Phase = phase
 	if refUID != "" {
-		v.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: "held", UID: refUID, Location: "lion/nightly/held/", StorageType: v1alpha1.BackupStorageS3}
+		v.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: "held", UID: refUID, ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/nightly/held/")}
 	}
 	return v
 }
@@ -333,7 +333,7 @@ func TestFinalize_DefersWhileVerificationReads(t *testing.T) {
 	f := newCleanupFixture(t)
 	reader := verifyCR("reader", "lion", "nightly-s3")
 	reader.Status.Phase = v1alpha1.VerificationPhaseRestoring
-	reader.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), Location: f.mb.Status.Location, StorageType: v1alpha1.BackupStorageS3}
+	reader.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, testArtifactLocation(f.mb))}
 	if err := f.c.Create(context.Background(), reader); err != nil {
 		t.Fatal(err)
 	}

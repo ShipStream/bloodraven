@@ -285,9 +285,9 @@ func failoverWatermarkBinding(at time.Time, target string) string {
 // FailoverRecordFromStatus reads the status-subresource copy of the durable
 // anti-flap record.
 func FailoverRecordFromStatus(fg *v1alpha1.MysqlFailoverGroup) FailoverRecord {
-	rec := FailoverRecord{LastFailoverTarget: fg.Status.LastFailoverTarget, PromotionGtidExecuted: fg.Status.PromotionGtidExecuted}
-	if fg.Status.LastFailover != nil && !fg.Status.LastFailover.IsZero() {
-		rec.LastFailover = fg.Status.LastFailover.Time.UTC().Truncate(time.Second)
+	rec := FailoverRecord{LastFailoverTarget: fg.Status.LastFailoverTarget(), PromotionGtidExecuted: fg.Status.PromotionGtidExecuted()}
+	if fg.Status.LastFailoverTime() != nil && !fg.Status.LastFailoverTime().IsZero() {
+		rec.LastFailover = fg.Status.LastFailoverTime().Time.UTC().Truncate(time.Second)
 	}
 	return rec
 }

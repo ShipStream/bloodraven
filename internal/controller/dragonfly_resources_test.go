@@ -403,7 +403,7 @@ func TestReconcileDragonflyResources_DisabledTearsDownPriorResources(t *testing.
 func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 10}})
@@ -470,7 +470,7 @@ func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t
 func TestReconcileDragonflyResources_SerializesImageRolloutWhenActiveSiteIsSecond(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc2"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 2}})
@@ -525,7 +525,7 @@ func TestReconcileDragonflyResources_SerializesImageRolloutWhenActiveSiteIsSecon
 func TestReconcileDragonflyResources_UsesUncachedStatefulSetForActiveDrift(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc2"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 2}})
@@ -581,7 +581,7 @@ func TestReconcileDragonflyResources_UsesUncachedStatefulSetForActiveDrift(t *te
 func TestReconcileDragonflyResources_HoldsActiveImageUntilReplicaReady(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	ctx := context.Background()
 	if _, err := r.reconcileDragonflyResources(ctx, fg); err != nil {

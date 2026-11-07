@@ -313,7 +313,7 @@ func TestInvariant_CooldownSurvivesOperatorRestart(t *testing.T) {
 			v1alpha1.LastFailoverAnnotation:       start.Add(-30 * time.Minute).Format(time.RFC3339),
 			v1alpha1.LastFailoverTargetAnnotation: "dc2",
 		}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{LastFailover: &statusStamp, LastFailoverTarget: "dc1"},
+		Status: v1alpha1.MysqlFailoverGroupStatus{LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &statusStamp, Target: "dc1"}}},
 	}
 	record, fromAnnotations, err := EffectiveFailoverRecord(fg, start)
 	if err != nil {

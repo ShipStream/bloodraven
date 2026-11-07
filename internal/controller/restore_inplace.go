@@ -1028,7 +1028,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		}
 		applyRestoreMetadataToInPlaceStatus(next, meta)
 		if r.setInPlaceRestoreStatus(ctx, fg, next) {
-			emitRestoreSuccessMetrics(fg, "in_place", target, next.SourceSizeBytes, jobStart, now)
+			emitRestoreSuccessMetrics(fg, "in_place", target, meta.SourceSizeBytes, jobStart, now)
 		}
 		return 2 * time.Second, nil
 	}

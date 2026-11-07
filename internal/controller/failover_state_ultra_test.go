@@ -31,19 +31,19 @@ func TestUltraK023_FutureDatedRecordDoesNotBlockWriters(t *testing.T) {
 	} {
 		t.Run(tc.name+"/status merge", func(t *testing.T) {
 			stored := metav1.NewTime(tc.storedAt)
-			st := v1alpha1.MysqlFailoverGroupStatus{LastFailover: &stored, LastFailoverTarget: "dc1", PromotionGtidExecuted: "old"}
+			st := v1alpha1.MysqlFailoverGroupStatus{LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &stored, Target: "dc1"}, PromotionGtidExecuted: "old"}}
 			snap := TopologySnapshot{LastFailover: now, LastFailoverTarget: "dc2", PromotionGtidExecuted: "new", ObservedAt: now}
 			MergeTopologySnapshotStatus(&st, snap)
-			if got := st.LastFailoverTarget == "dc2" && st.PromotionGtidExecuted == "new"; got != tc.overwrite {
-				t.Fatalf("merged triple = %v %q %q; overwrite=%v", st.LastFailover, st.LastFailoverTarget, st.PromotionGtidExecuted, tc.overwrite)
+			if got := st.LastFailoverTarget() == "dc2" && st.PromotionGtidExecuted() == "new"; got != tc.overwrite {
+				t.Fatalf("merged triple = %v %q %q; overwrite=%v", st.LastFailover, st.LastFailoverTarget(), st.PromotionGtidExecuted(), tc.overwrite)
 			}
 		})
 		t.Run(tc.name+"/planned record", func(t *testing.T) {
 			stored := metav1.NewTime(tc.storedAt)
-			st := v1alpha1.MysqlFailoverGroupStatus{LastFailover: &stored, LastFailoverTarget: "dc1", PromotionGtidExecuted: "old"}
+			st := v1alpha1.MysqlFailoverGroupStatus{LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &stored, Target: "dc1"}, PromotionGtidExecuted: "old"}}
 			applyPlannedFailoverRecord(&st, now, "dc2", "new", now)
-			if got := st.LastFailoverTarget == "dc2" && st.PromotionGtidExecuted == "new"; got != tc.overwrite {
-				t.Fatalf("applied triple = %v %q %q; overwrite=%v", st.LastFailover, st.LastFailoverTarget, st.PromotionGtidExecuted, tc.overwrite)
+			if got := st.LastFailoverTarget() == "dc2" && st.PromotionGtidExecuted() == "new"; got != tc.overwrite {
+				t.Fatalf("applied triple = %v %q %q; overwrite=%v", st.LastFailover, st.LastFailoverTarget(), st.PromotionGtidExecuted(), tc.overwrite)
 			}
 		})
 		t.Run(tc.name+"/annotation recorder", func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestUltraK058_StatusRetryKeepsNewerFailoverTriple(t *testing.T) {
 	newer := old.Add(time.Hour)
 	fg := newTestFG()
 	oldT := metav1.NewTime(old)
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted = &oldT, "dc1", "old"
+	fg.Status.SetLastFailover(&oldT, "dc1", "old")
 	fg.Status.TopologyGeneration = 4
 	injected := false
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
@@ -132,7 +132,7 @@ func TestUltraK058_StatusRetryKeepsNewerFailoverTriple(t *testing.T) {
 						return err
 					}
 					nt := metav1.NewTime(newer)
-					cur.Status.LastFailover, cur.Status.LastFailoverTarget, cur.Status.PromotionGtidExecuted = &nt, "dc2", "planned"
+					cur.Status.SetLastFailover(&nt, "dc2", "planned")
 					if err := underlying.Status().Update(ctx, &cur); err != nil {
 						return err
 					}
@@ -156,9 +156,9 @@ func TestUltraK058_StatusRetryKeepsNewerFailoverTriple(t *testing.T) {
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.LastFailoverTarget != "dc2" || got.Status.PromotionGtidExecuted != "planned" || !got.Status.LastFailover.Time.Equal(newer) {
+	if got.Status.LastFailoverTarget() != "dc2" || got.Status.PromotionGtidExecuted() != "planned" || !got.Status.LastFailoverTime().Time.Equal(newer) {
 		t.Fatalf("triple after the retried write = %v %q %q; want the planned engine's newer record",
-			got.Status.LastFailover, got.Status.LastFailoverTarget, got.Status.PromotionGtidExecuted)
+			got.Status.LastFailoverTime(), got.Status.LastFailoverTarget(), got.Status.PromotionGtidExecuted())
 	}
 }
 

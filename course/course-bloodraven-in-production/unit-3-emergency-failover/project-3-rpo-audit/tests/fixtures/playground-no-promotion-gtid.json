@@ -29,30 +29,32 @@
   },
   "status": {
     "activeSite": "pdx",
-    "lastFailover": "2026-05-02T05:17:03Z",
-    "lastFailoverTarget": "pdx",
+    "lastFailover": {
+      "time": "2026-05-02T05:17:03Z",
+      "target": "pdx"
+    },
     "sites": [
       {
         "name": "iad",
         "state": "Unreachable",
-        "lastSeen": "2026-05-02T05:16:57Z",
+        "lastSeenTime": "2026-05-02T05:16:57Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-23,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7",
-        "replicating": false
+        "replication": "Unknown"
       },
       {
         "name": "pdx",
         "state": "Writable",
-        "lastSeen": "2026-05-02T05:19:52Z",
+        "lastSeenTime": "2026-05-02T05:19:52Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-9",
-        "replicating": false,
+        "replication": "NotApplicable",
         "sourceConvergenceState": "Converged"
       },
       {
         "name": "reader",
         "state": "ReadOnly",
-        "lastSeen": "2026-05-02T05:19:52Z",
+        "lastSeenTime": "2026-05-02T05:19:52Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-9",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0,
         "sourceHost": "mysql-playground-pdx-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Converged"

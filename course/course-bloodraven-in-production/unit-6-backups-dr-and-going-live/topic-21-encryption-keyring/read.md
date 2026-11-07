@@ -121,7 +121,7 @@ kubectl get mysqlfailovergroup playground \
   -o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name}{"\t"}{.phase}{"\t"}{.message}{"\n"}{end}'
 ```
 
-Three sites at `Sealed`, each `sealed against mysql-playground-<site>-keyring-v1`, with `status.encryptionAtRest.sealed: true` — that is the finished state. During step 1 above, `pdx` reads `Unsealed` with `unsealReason: Rotation`, and comes back as `v2`. The phase string is identical to the one it showed at bootstrap; only the reason and the version distinguish them.
+Three sites at `Sealed`, each `sealed against mysql-playground-<site>-keyring-v1`, and the `EncryptionAtRestReady` condition `True` with reason `AllSitesSealed` — that is the finished state. During step 1 above, `pdx` reads `Unsealed` with `unsealReason: Rotation`, and comes back as `v2`. The phase string is identical to the one it showed at bootstrap; only the reason and the version distinguish them.
 
 One last currency check, because keyring advice ages badly. The current component is `component_keyring_file`, verified against the default `mysql:9.7` image. The `keyring_file` **plugin** was removed in MySQL 8.4.0 along with the `keyring_file_data` system variable — any runbook or blog post naming the plugin is describing something that no longer exists. And Oracle's own caveat belongs in the conversation if someone is enabling this for an auditor: `component_keyring_file` and `component_keyring_encrypted_file` "are not intended as a regulatory compliance solution".
 

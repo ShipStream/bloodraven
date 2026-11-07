@@ -91,9 +91,9 @@ runs exactly as it did on day one of this course.</p>
   DNS: playground-east.example.com (TTL 60s)
 
 Sites:
-  NAME    ROLE              ZONE        STATE     REPL  LAG  RECOVERY  LAST-SEEN
-  east-1  PrimaryCandidate  us-east-1a  Writable  no    -    -         2s
-  east-2  PrimaryCandidate  us-east-1b  ReadOnly  yes   0s   -         2s
+  NAME    ROLE              ZONE        STATE     REPL           LAG  RECOVERY  LAST-SEEN
+  east-1  PrimaryCandidate  us-east-1a  Writable  NotApplicable  -    -         2s
+  east-2  PrimaryCandidate  us-east-1b  ReadOnly  Healthy        0s   -         2s
 
 Initial restore (initFromBackup):
   Phase: Succeeded

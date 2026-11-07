@@ -61,10 +61,9 @@ func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
 			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
 			FailoverGroupUID: "lion-uid",
 			// Completed before the fixed PITR targets the tests request.
-			CompletionTime: &metav1.Time{Time: time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC)},
-			Location:       "lion/nightly/name/",
-			StorageType:    v1alpha1.BackupStorageS3,
-			SizeBytes:      1 * 1024 * 1024 * 1024,
+			CompletionTime:  &metav1.Time{Time: time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC)},
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/nightly/name/"),
+			SizeBytes:       1 * 1024 * 1024 * 1024,
 		},
 	}
 }
@@ -194,8 +193,8 @@ func TestBuildVerificationJob_PVCBackedBackup_MountsBackupPVC(t *testing.T) {
 	// The fg has two profiles; the second is PVC-backed ("daily-local").
 	profile := fg.Spec.Backup.Profiles[1]
 	backup := successfulBackup("pvc-happy", "lion", profile.Name)
-	backup.Status.StorageType = v1alpha1.BackupStoragePVC
-	backup.Status.Location = "/backups/pvc-happy"
+	setTestArtifactType(backup, v1alpha1.BackupStoragePVC)
+	setTestArtifactLocation(backup, "/backups/pvc-happy")
 
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-pvc", Namespace: "ns"},
@@ -229,7 +228,7 @@ func TestBuildVerificationJob_PVCBackedBackup_MountsBackupPVC(t *testing.T) {
 func TestBuildVerificationJob_MissingLocation_Errors(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("missing-loc", "lion", "nightly-s3")
-	backup.Status.Location = ""
+	setTestArtifactLocation(backup, "")
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{

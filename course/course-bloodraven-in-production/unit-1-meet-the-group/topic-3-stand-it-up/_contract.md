@@ -8,7 +8,7 @@
 
 ## Topic generation prompt
 
-This is now the first topic. Open on the running example, not the vocabulary. Give the prerequisites, the k3d creation command, and `./playground/setup.sh`. Then spend most of the reading on status literacy: `status.activeSite`, `status.sites[].state`, `.replicating`, `.secondsBehindSource`, `.gtidExecuted`, and the five condition reasons. Show port-forwarding the counter app, incrementing it, and finding the row on the replica. Include the playground-overrides warning. Close with a first-hour glossary of eleven words. Use one `terminal` widget on the status output and one topology `figure`. Do NOT interpret what the operator will *do* with any of these states; that is Unit 2.
+This is now the first topic. Open on the running example, not the vocabulary. Give the prerequisites, the k3d creation command, and `./playground/setup.sh`. Then spend most of the reading on status literacy: `status.activeSite`, `status.sites[].state`, `.replication`, `.secondsBehindSource`, `.gtidExecuted`, and the five condition reasons. Show port-forwarding the counter app, incrementing it, and finding the row on the replica. Include the playground-overrides warning. Close with a first-hour glossary of eleven words. Use one `terminal` widget on the status output and one topology `figure`. Do NOT interpret what the operator will *do* with any of these states; that is Unit 2.
 
 ## Requested activities
 

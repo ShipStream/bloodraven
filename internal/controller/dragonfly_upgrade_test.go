@@ -21,7 +21,7 @@ func fgWithDragonflySnapshotUpgrade() *v1alpha1.MysqlFailoverGroup {
 		}
 	})
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
 	fg.Annotations = map[string]string{v1alpha1.DragonflySnapshotUpgradeAnnotation: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"}
 	return fg
 }

@@ -42,8 +42,7 @@ func createHeldTestBackup(t *testing.T, ns, fgName, name string, completed time.
 	done := metav1.NewTime(completed)
 	b.Status = v1alpha1.MysqlBackupStatus{
 		Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &done, StartTime: &done,
-		StorageType: v1alpha1.BackupStorageS3, Location: "lion/" + name,
-		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Location: "lion/" + name, Bucket: "bloodraven"},
+		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "lion/" + name, Bucket: "bloodraven"},
 	}
 	if err := k8sClient.Status().Update(ctx, b); err != nil {
 		t.Fatal(err)
@@ -352,7 +351,6 @@ func TestEnvtest_ArtifactStorageImmutable(t *testing.T) {
 
 	moved := b.DeepCopy()
 	moved.Status.ArtifactStorage.Location = "elsewhere/" + b.Name
-	moved.Status.Location = "elsewhere/" + b.Name
 	if err := k8sClient.Status().Update(ctx, moved); err == nil {
 		t.Fatal("API server allowed the recorded artifact location to change")
 	}

@@ -137,16 +137,16 @@ func injectDivergenceViaFailover() runner.Step {
 						}
 					}
 					cooldownRemaining := time.Duration(0)
-					if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailover != nil {
-						cooldownRemaining = mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailover.Time)
+					if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailoverTime() != nil {
+						cooldownRemaining = mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailoverTime().Time)
 						if cooldownRemaining < 0 {
 							cooldownRemaining = 0
 						}
 					}
 					msg := fmt.Sprintf("activeSite=%q peerState=%s oldState=%s lastFailoverTarget=%q cooldownRemaining=%s",
-						mfg.Status.ActiveSite, peerState, activeState, mfg.Status.LastFailoverTarget, cooldownRemaining.Round(time.Second))
+						mfg.Status.ActiveSite, peerState, activeState, mfg.Status.LastFailoverTarget(), cooldownRemaining.Round(time.Second))
 					done := mfg.Status.ActiveSite == peer &&
-						mfg.Status.LastFailoverTarget == peer &&
+						mfg.Status.LastFailoverTarget() == peer &&
 						peerState == v1alpha1.SiteStateWritable &&
 						activeState != v1alpha1.SiteStateWritable &&
 						cooldownRemaining == 0

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -602,7 +603,6 @@ func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySit
 func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) v1alpha1.DragonflyStatus {
 	expectedActive := activeDragonflySiteFromObservation(fg, snaps)
 	st := v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: expectedActive,
 	}
 	mastersOnExpected := 0
@@ -635,7 +635,7 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 			ServiceName:      dragonflySiteServiceName(fg.Name, s.Name),
 			ReplicationState: s.Info.Role,
 			LinkStatus:       linkStatus,
-			SyncInProgress:   s.Info.MasterSyncInProgress,
+			SyncInProgress:   dragonflySyncInProgress(s.Info),
 			LastIOSecondsAgo: dragonflyLastIOSecondsAgo(s.Info),
 			Ready:            ready,
 			Message:          dragonflySiteMessage(s, role),
@@ -1244,7 +1244,7 @@ func supersededPromotionRequest(fg *v1alpha1.MysqlFailoverGroup, req *dragonflyP
 			return fmt.Sprintf("planned failover to %q claimed the group after the request", pf.TargetSite)
 		}
 	}
-	if t := fg.Status.LastFailoverTarget; t != "" && t != req.target && fg.Status.LastFailover != nil && !fg.Status.LastFailover.Time.Before(issued) {
+	if t := fg.Status.LastFailoverTarget(); t != "" && t != req.target && fg.Status.LastFailoverTime() != nil && !fg.Status.LastFailoverTime().Time.Before(issued) {
 		return fmt.Sprintf("MySQL failed over to %q after the request", t)
 	}
 	if df := fg.Status.Dragonfly; df != nil && df.LastPromotionTime != nil && df.LastPromotionTarget != "" &&
@@ -1687,7 +1687,7 @@ func stampDragonflyPromotionStatus(ctx context.Context, reader client.Reader, c 
 		}
 		base := fg.DeepCopy()
 		if fg.Status.Dragonfly == nil {
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true}
+			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{}
 		}
 		if success {
 			if fg.Status.Dragonfly.ActiveSite != target {
@@ -1771,7 +1771,7 @@ func dragonflyStatusEqual(a, b *v1alpha1.DragonflyStatus) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	if a.Enabled != b.Enabled || a.ActiveSite != b.ActiveSite || a.Phase != b.Phase || a.Message != b.Message {
+	if a.ActiveSite != b.ActiveSite || a.Phase != b.Phase || a.Message != b.Message {
 		return false
 	}
 	if (a.LastPromotionTime == nil) != (b.LastPromotionTime == nil) {
@@ -1799,11 +1799,22 @@ func dragonflyStatusEqual(a, b *v1alpha1.DragonflyStatus) bool {
 		return false
 	}
 	for i := range a.Sites {
-		if a.Sites[i] != b.Sites[i] {
+		// The optional observations are pointers: compare their values.
+		if !equality.Semantic.DeepEqual(a.Sites[i], b.Sites[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// dragonflySyncInProgress is status.dragonfly.sites[].syncInProgress: nil
+// when Dragonfly did not report master_sync_in_progress.
+func dragonflySyncInProgress(info dragonfly.ReplicationInfo) *bool {
+	if !info.MasterSyncInProgressReported {
+		return nil
+	}
+	v := info.MasterSyncInProgress
+	return &v
 }
 
 // dragonflyLastIOSecondsAgo is status.dragonfly.sites[].lastIOSecondsAgo:

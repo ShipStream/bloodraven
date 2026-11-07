@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailoverTarget` empty. Dump B has `status.lastFailoverTarget: pdx`, with `pdx` writable and still `PrimaryCandidate`. Which site ends up writable in each?
+`playground` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailover.target` empty. Dump B has `status.lastFailover.target: pdx`, with `pdx` writable and still `PrimaryCandidate`. Which site ends up writable in each?
 
 - `iad` in both — `sitePriorities` is your standing decision and the operator honours it either way
 - `iad` in A, `pdx` in B — usable history is tier 1 and pre-empts the policy list entirely
@@ -58,13 +58,13 @@ You copy the `splitBrainPolicy: preferSite: iad` block from the published failov
 - Nothing — the field is not in the CRD schema, so it was pruned and the group stays on tier 3
 - The group now resolves split brains in favour of `iad`, since `preferSite` is the legacy alias for `sitePriorities`
 - Nothing, and admission rejected the apply with a CEL error naming the unknown field
-- The group is now on tier 1, because `preferSite` seeds `status.lastFailoverTarget` with `iad`
+- The group is now on tier 1, because `preferSite` seeds `status.lastFailover.target` with `iad`
 
 **Correct option index:** 0
 
 **Explanation:**
 
-`preferSite` does not exist in the CRD. The API server prunes unknown fields, so the apply succeeds and changes nothing — the group keeps whatever tier it had, which with no `sitePriorities` is tier 3, alert only. Option 2 is the belief the documentation invites; there is no alias, and no code outside the docs reads that name. Option 3 gets the outcome half right but the mechanism wrong, and the difference matters operationally: an admission rejection would have told you at apply time, whereas silent pruning is what costs you an hour at 3am. Option 4 confuses policy with history — nothing writes `lastFailoverTarget` except a recorded failover. Verify with `kubectl explain` or by grepping the shipped CRD. (objective 5)
+`preferSite` does not exist in the CRD. The API server prunes unknown fields, so the apply succeeds and changes nothing — the group keeps whatever tier it had, which with no `sitePriorities` is tier 3, alert only. Option 2 is the belief the documentation invites; there is no alias, and no code outside the docs reads that name. Option 3 gets the outcome half right but the mechanism wrong, and the difference matters operationally: an admission rejection would have told you at apply time, whereas silent pruning is what costs you an hour at 3am. Option 4 confuses policy with history — nothing writes `status.lastFailover` except a recorded failover. Verify with `kubectl explain` or by grepping the shipped CRD. (objective 5)
 
 ## Question 5
 

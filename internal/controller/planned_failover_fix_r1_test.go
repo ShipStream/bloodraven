@@ -156,9 +156,9 @@ func TestFixR1_ConfirmedStallMarksOnlyDurableRecord(t *testing.T) {
 	if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded || pf.Promotion == nil || pf.Promotion.ConfirmationTime == nil {
 		t.Fatalf("terminal block = %+v", pf)
 	}
-	if fg.Status.LastFailoverTarget != "pdx" || fg.Status.PromotionGtidExecuted != "uuid-iad:1-10" || fg.Status.LastFailover == nil {
+	if fg.Status.LastFailoverTarget() != "pdx" || fg.Status.PromotionGtidExecuted() != "uuid-iad:1-10" || fg.Status.LastFailoverTime() == nil {
 		t.Fatalf("status record = %v %q %q; the marker-ended Succeeded record must apply the failover record",
-			fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted)
+			fg.Status.LastFailoverTime(), fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
 	}
 }
 
@@ -228,7 +228,7 @@ func TestFixR1_ConfirmedTailRechecksDurableRecord(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
 	fg := h.fg()
 	at := metav1.NewTime(h.clk.Now().Add(-time.Second))
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &at, "iad"
+	fg.Status.SetLastFailover(&at, "iad", "")
 	if err := h.c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -831,7 +831,7 @@ func TestFixR1_OwnRecordUsesSelectedWatermark(t *testing.T) {
 	t0m := metav1.NewTime(t0)
 	pf.ClaimBaseline = &v1alpha1.FailoverRecordRef{Time: &t0m, Target: "dc1"}
 	fg := opsReproveGroup(f, pf, pf.Promotion.IntentTime.Add(2*time.Second), "dc2")
-	fg.Status.PromotionGtidExecuted = opsF
+	fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), fg.Status.LastFailoverTarget(), opsF)
 	fg.Annotations = map[string]string{
 		v1alpha1.LastFailoverAnnotation:             failoverStampFormat(t0),
 		v1alpha1.LastFailoverTargetAnnotation:       "dc1",

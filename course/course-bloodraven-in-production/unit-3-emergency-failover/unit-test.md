@@ -142,7 +142,7 @@ The 36 s is the tell: 6 s of detection plus a drain that spent its whole 30 s bu
 
 **Explanation:**
 
-The direction is the other way: the test is whether the **new** primary's set contains the **old** primary's — new contains old. The stated test is the inverted one, and it fails in both directions of usefulness. It goes false the moment `pdx` accepts its first write after promotion, so it would block every rejoin that ought to be automatic; and it passes precisely when the old primary is *ahead*, the one case that must never proceed. Get this backwards and you predict every outcome backwards. Note too what the gate is not: recovery is deliberately not gated on `lastFailoverTarget`, because a primary can change hands with no failover recorded at all — safety comes from a unique, directly confirmed, promotable writable primary observed right now. (objective 7)
+The direction is the other way: the test is whether the **new** primary's set contains the **old** primary's — new contains old. The stated test is the inverted one, and it fails in both directions of usefulness. It goes false the moment `pdx` accepts its first write after promotion, so it would block every rejoin that ought to be automatic; and it passes precisely when the old primary is *ahead*, the one case that must never proceed. Get this backwards and you predict every outcome backwards. Note too what the gate is not: recovery is deliberately not gated on the recorded failover target (`lastFailover.target`), because a primary can change hands with no failover recorded at all — safety comes from a unique, directly confirmed, promotable writable primary observed right now. (objective 7)
 
 ## Question 9
 

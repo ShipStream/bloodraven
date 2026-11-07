@@ -6880,8 +6880,12 @@ spec:
             description: MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
             properties:
               activeSite:
-                description: ActiveSite is the name of the site currently acting as
-                  primary (writable).
+                description: |-
+                  ActiveSite is the name of the site currently acting as primary (writable).
+                  Durable: the topology manager restores it after a restart, before it
+                  has observed the sites. Lost beside a failover record, it makes the
+                  manager refuse automatic promotion until it observes a writable
+                  primary.
                 type: string
               backupSchedules:
                 description: |-
@@ -7028,11 +7032,6 @@ spec:
                       Normally equal to status.activeSite (MySQL active); during a
                       planned-failover Dragonfly promotion the two may briefly diverge.
                     type: string
-                  enabled:
-                    description: |-
-                      Enabled mirrors spec.dragonfly.enabled at the time of the last
-                      observation.
-                    type: boolean
                   lastPromotionTarget:
                     description: |-
                       LastPromotionTarget is the site promoted in the most recent
@@ -7146,7 +7145,8 @@ spec:
                         syncInProgress:
                           description: |-
                             SyncInProgress is the parsed master_sync_in_progress field from
-                            INFO replication on a replica.
+                            INFO replication on a replica. Unset when Dragonfly did not report
+                            it.
                           type: boolean
                       required:
                       - name
@@ -7221,13 +7221,6 @@ spec:
                       last reconciled.
                     format: int64
                     type: integer
-                  sealed:
-                    description: |-
-                      Sealed is true when encryption is enabled and every site in the
-                      group is in the Sealed phase. It is the single field to alert on:
-                      false means at least one site is running with a writable keyring
-                      or has failed to escrow.
-                    type: boolean
                   sites:
                     description: Sites is the per-site keyring lifecycle state.
                     items:
@@ -7326,9 +7319,9 @@ spec:
                           - Clone
                           - Rotation
                           type: string
-                        unsealedSince:
+                        unsealTime:
                           description: |-
-                            UnsealedSince is when the site entered the Unsealed phase. Used to
+                            UnsealTime is when the site entered the Unsealed phase. Used to
                             evaluate keyring.escrowTimeout.
                           format: date-time
                           type: string
@@ -7348,13 +7341,28 @@ spec:
                 format: date-time
                 type: string
               lastFailover:
-                description: LastFailover is the timestamp of the last failover event.
-                format: date-time
-                type: string
-              lastFailoverTarget:
-                description: LastFailoverTarget is the site that was last promoted
-                  during failover.
-                type: string
+                description: |-
+                  LastFailover is the record of the most recent failover: when it was
+                  recorded, the site it promoted and that site's GTID set at promotion.
+                  Durable: the topology manager restores the failover cooldown and the
+                  promotion watermark from it, or from its annotation copies
+                  (bloodraven.shipstream.io/last-failover, last-failover-target and
+                  promotion-gtid-executed) when those are newer, after a restart.
+                properties:
+                  promotionGtidExecuted:
+                    description: |-
+                      PromotionGtidExecuted is the GTID executed set recorded on the
+                      target at the moment of its promotion, before it began accepting
+                      writes. Used for data-loss accounting.
+                    type: string
+                  target:
+                    description: Target is the site the failover promoted.
+                    type: string
+                  time:
+                    description: Time is when the failover was recorded.
+                    format: date-time
+                    type: string
+                type: object
               pitr:
                 description: |-
                   PITR summarizes the continuous binary-log archive (oldest/newest
@@ -7441,12 +7449,6 @@ spec:
                       storage across all sites.
                     format: int32
                     type: integer
-                  enabled:
-                    description: |-
-                      Enabled mirrors spec.backup.pitr.enabled so consumers (status
-                      widgets, `kubectl get -o wide`) can see at a glance whether
-                      archival is running.
-                    type: boolean
                   lastArchivedTime:
                     description: |-
                       LastArchivedTime is the wall clock at which the most recent
@@ -7475,15 +7477,17 @@ spec:
                       retention; it does not prove that a target can be restored.
                     format: date-time
                     type: string
-                  profileName:
-                    description: ProfileName mirrors spec.backup.pitr.profileName.
-                    type: string
                 type: object
               pitrArchiveBindings:
                 description: |-
                   PITRArchiveBindings are the encryption identities accepted for the
                   PITR archive destinations this group writes or reads (#203). Written
                   by the group reconciler.
+                  Durable: a binding pins the key snapshot every writer and reader of
+                  its archive mounts. A lost encrypted entry is rebuilt from the
+                  acceptance its key snapshot records (snapshots outlive the group); a
+                  lost plaintext entry stays Pending until a writer or a check Job
+                  proves the archive again.
                 items:
                   description: |-
                     PITRArchiveBinding is the encryption identity the group accepted for one
@@ -7625,6 +7629,8 @@ spec:
                   failover attempt. Terminal status is retained until a newer
                   annotation replaces the block; the field is how kubectl describe
                   tells the story of a switchover after the fact.
+                  Durable: its write-ahead fence and promotion records are what a
+                  restarted operator resumes, rolls back or ends from.
                 properties:
                   admission:
                     description: |-
@@ -8129,6 +8135,10 @@ spec:
                   administrator acknowledges it with
                   bloodraven.shipstream.io/acknowledge-planned-failover-hold=<runID>.
                   The AutomaticFailoverHeld condition summarises it.
+                  Durable: losing it would re-enable automatic failover beside a
+                  possible split brain; the condition and the planned-failover-terminal
+                  annotation are second copies that keep the hold until it is
+                  acknowledged.
                 properties:
                   ambiguousSites:
                     description: |-
@@ -8196,15 +8206,11 @@ spec:
                 - holdTime
                 - runID
                 type: object
-              promotionGtidExecuted:
-                description: |-
-                  PromotionGtidExecuted is the GTID executed set recorded on the
-                  candidate at the moment of the most recent promotion, before it
-                  began accepting writes. Used for data-loss accounting.
-                type: string
               restore:
-                description: Restore tracks an in-flight or completed initFromBackup
-                  operation.
+                description: |-
+                  Restore tracks an in-flight or completed initFromBackup operation.
+                  Durable: until it records Succeeded the group is treated as still
+                  restoring (no DNS, no application endpoints, no fresh-deploy clone).
                 properties:
                   completionTime:
                     description: CompletionTime is when the restore Job reached a
@@ -8230,176 +8236,248 @@ spec:
                     - Succeeded
                     - Failed
                     type: string
-                  pointInTime:
+                  provenance:
                     description: |-
-                      PointInTime is the certified outcome of the point-in-time replay,
-                      read from the replay's verdict. Unset without pointInTime.
+                      Provenance records what the restore loaded, what the target held
+                      afterwards and, with spec.initFromBackup.pointInTime, the certified
+                      outcome of the point-in-time replay.
                     properties:
-                      archive:
-                        description: Archive identifies the archive the replay read.
+                      pointInTime:
+                        description: |-
+                          PointInTime is the certified outcome of the point-in-time replay,
+                          read from the replay's verdict. Unset when no replay ran.
                         properties:
-                          algorithm:
-                            description: Algorithm is the encryption algorithm; empty
-                              for None.
-                            enum:
-                            - AES-256-GCM
-                            type: string
-                          archiveID:
+                          archive:
+                            description: Archive identifies the archive the replay
+                              read.
+                            properties:
+                              algorithm:
+                                description: Algorithm is the encryption algorithm;
+                                  empty for None.
+                                enum:
+                                - AES-256-GCM
+                                type: string
+                              archiveID:
+                                description: |-
+                                  ArchiveID is the descriptor's archive ID, derived from the source
+                                  group's UID and the normalized destination.
+                                pattern: ^ar1-[a-z2-7]{26}$
+                                type: string
+                              destination:
+                                description: |-
+                                  Destination is the normalized archive destination the descriptor
+                                  was read from (s3://… or pvc://…).
+                                maxLength: 4096
+                                type: string
+                              encryptionMode:
+                                description: EncryptionMode is the archive's encryption
+                                  mode.
+                                enum:
+                                - None
+                                - Passphrase
+                                type: string
+                              source:
+                                description: Source is the group that created the
+                                  archive.
+                                properties:
+                                  name:
+                                    description: Name is the source group's name.
+                                    maxLength: 253
+                                    type: string
+                                  namespace:
+                                    description: Namespace is the source group's namespace.
+                                    maxLength: 63
+                                    type: string
+                                  uid:
+                                    description: UID is the source group's metadata.uid.
+                                    type: string
+                                required:
+                                - name
+                                - namespace
+                                - uid
+                                type: object
+                            required:
+                            - archiveID
+                            - encryptionMode
+                            - source
+                            type: object
+                          excludedDivergentTransactionCount:
                             description: |-
-                              ArchiveID is the descriptor's archive ID, derived from the source
-                              group's UID and the normalized destination.
-                            pattern: ^ar1-[a-z2-7]{26}$
-                            type: string
-                          destination:
+                              ExcludedDivergentTransactionCount is |D|: transactions committed between the backup's newest transaction and
+                              the target, outside the target history, excluded by excludeGtids.
+                            format: int64
+                            type: integer
+                          gtidExecuted:
                             description: |-
-                              Destination is the normalized archive destination the descriptor
-                              was read from (s3://… or pvc://…).
-                            maxLength: 4096
+                              GtidExecuted is the target's @@global.gtid_executed after replay,
+                              which the replay proved equal to the target history minus
+                              excludeGtids. Empty when longer than 2048 characters; see
+                              GtidExecutedSHA256.
+                            maxLength: 2048
                             type: string
-                          encryptionMode:
-                            description: EncryptionMode is the archive's encryption
-                              mode.
-                            enum:
-                            - None
-                            - Passphrase
+                          gtidExecutedSHA256:
+                            description: |-
+                              GtidExecutedSHA256 is the hex SHA-256 of GtidExecuted as the server
+                              printed it (newlines removed).
+                            pattern: ^([0-9a-f]{64})?$
                             type: string
-                          source:
-                            description: Source is the group that created the archive.
+                          lastReplayedBinlog:
+                            description: LastReplayedBinlog is the file of the last
+                              segment.
                             properties:
                               name:
-                                description: Name is the source group's name.
-                                maxLength: 253
+                                description: Name is the binlog file name, for example
+                                  mysql-bin.000042.
+                                maxLength: 255
                                 type: string
-                              namespace:
-                                description: Namespace is the source group's namespace.
+                              site:
+                                description: Site is the site whose archive holds
+                                  the file.
                                 maxLength: 63
-                                type: string
-                              uid:
-                                description: UID is the source group's metadata.uid.
+                                pattern: ^[a-z0-9-]+$
                                 type: string
                             required:
                             - name
-                            - namespace
-                            - uid
+                            - site
                             type: object
+                          mode:
+                            description: Mode is the replay mode.
+                            enum:
+                            - Timestamp
+                            - Latest
+                            type: string
+                          newestReplayedCommitTime:
+                            description: |-
+                              NewestReplayedCommitTime is the newest original commit time among
+                              the replayed transactions.
+                            format: date-time
+                            type: string
+                          onHistoryExclusionCount:
+                            description: OnHistoryExclusionCount is the number of
+                              GTIDs in OnHistoryExclusions.
+                            format: int64
+                            type: integer
+                          onHistoryExclusions:
+                            description: |-
+                              OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
+                              Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
+                              Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
+                            maxLength: 2048
+                            type: string
+                          outcome:
+                            description: Outcome is how the end point was reached.
+                            enum:
+                            - TargetCovered
+                            - Partial
+                            - ArchiveHead
+                            type: string
+                          replaySites:
+                            description: |-
+                              ReplaySites are the sites whose archived binlogs were staged, sorted;
+                              see ReplaySitesOmitted for the ones the verdict left out.
+                            items:
+                              maxLength: 63
+                              pattern: ^[a-z0-9-]+$
+                              type: string
+                            maxItems: 16
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          replaySitesOmitted:
+                            description: |-
+                              ReplaySitesOmitted counts further staged sites the verdict did not
+                              name: its site list is bounded, so ReplaySites is complete only when
+                              this is zero.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          replayedBinlogCount:
+                            description: |-
+                              ReplayedBinlogCount is the number of distinct archived binlogs the
+                              segments read.
+                            format: int32
+                            type: integer
+                          replayedTransactionCount:
+                            description: |-
+                              ReplayedTransactionCount is the number of transactions replayed on
+                              top of the backup.
+                            format: int64
+                            type: integer
+                          segmentCount:
+                            description: SegmentCount is the number of replay segments.
+                            format: int32
+                            type: integer
+                          stopTime:
+                            description: |-
+                              StopTime is the requested target (a whole second; commit times are
+                              compared against it to the microsecond). Unset in Latest mode.
+                            format: date-time
+                            type: string
                         required:
-                        - archiveID
-                        - encryptionMode
-                        - source
+                        - mode
+                        - outcome
                         type: object
-                      excludedDivergentTransactionCount:
+                      source:
                         description: |-
-                          ExcludedDivergentTransactionCount is |D|: transactions committed between the backup's newest transaction and
-                          the target, outside the target history, excluded by excludeGtids.
-                        format: int64
-                        type: integer
-                      gtidExecuted:
-                        description: |-
-                          GtidExecuted is the target's @@global.gtid_executed after replay,
-                          which the replay proved equal to the target history minus
-                          excludeGtids. Empty when longer than 2048 characters; see
-                          GtidExecutedSHA256.
-                        maxLength: 2048
-                        type: string
-                      gtidExecutedSHA256:
-                        description: |-
-                          GtidExecutedSHA256 is the hex SHA-256 of GtidExecuted as the server
-                          printed it (newlines removed).
-                        pattern: ^([0-9a-f]{64})?$
-                        type: string
-                      lastReplayedBinlog:
-                        description: LastReplayedBinlog is the file of the last segment.
+                          Source is what the referenced MysqlBackup recorded about its
+                          artifact. Absent when the source was not a MysqlBackup.
                         properties:
-                          name:
-                            description: Name is the binlog file name, for example
-                              mysql-bin.000042.
-                            maxLength: 255
+                          binlogPosition:
+                            description: BinlogPosition is the binary-log position
+                              the backup recorded.
+                            properties:
+                              file:
+                                description: File is the binary-log file name, e.g.
+                                  "mysql-bin.000412".
+                                maxLength: 512
+                                minLength: 1
+                                type: string
+                              position:
+                                description: Position is the byte offset within File.
+                                format: int64
+                                minimum: 0
+                                type: integer
+                            required:
+                            - file
+                            - position
+                            type: object
+                          gtidExecuted:
+                            description: GtidExecuted is the GTID set the backup recorded.
                             type: string
-                          site:
-                            description: Site is the site whose archive holds the
-                              file.
-                            maxLength: 63
-                            pattern: ^[a-z0-9-]+$
-                            type: string
-                        required:
-                        - name
-                        - site
+                          sizeBytes:
+                            description: SizeBytes is the artifact size in bytes.
+                              Unset when unknown.
+                            format: int64
+                            minimum: 0
+                            type: integer
                         type: object
-                      mode:
-                        description: Mode is the replay mode.
-                        enum:
-                        - Timestamp
-                        - Latest
-                        type: string
-                      newestReplayedCommitTime:
-                        description: |-
-                          NewestReplayedCommitTime is the newest original commit time among
-                          the replayed transactions.
-                        format: date-time
-                        type: string
-                      onHistoryExclusionCount:
-                        description: OnHistoryExclusionCount is the number of GTIDs
-                          in OnHistoryExclusions.
-                        format: int64
-                        type: integer
-                      onHistoryExclusions:
-                        description: |-
-                          OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
-                          Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
-                          Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
-                        maxLength: 2048
-                        type: string
-                      outcome:
-                        description: Outcome is how the end point was reached.
-                        enum:
-                        - TargetCovered
-                        - Partial
-                        - ArchiveHead
-                        type: string
-                      replaySites:
-                        description: |-
-                          ReplaySites are the sites whose archived binlogs were staged, sorted;
-                          see ReplaySitesOmitted for the ones the verdict left out.
-                        items:
-                          maxLength: 63
-                          pattern: ^[a-z0-9-]+$
-                          type: string
-                        maxItems: 16
-                        type: array
-                        x-kubernetes-list-type: atomic
-                      replaySitesOmitted:
-                        description: |-
-                          ReplaySitesOmitted counts further staged sites the verdict did not
-                          name: its site list is bounded, so ReplaySites is complete only when
-                          this is zero.
-                        format: int32
-                        minimum: 0
-                        type: integer
-                      replayedBinlogCount:
-                        description: |-
-                          ReplayedBinlogCount is the number of distinct archived binlogs the
-                          segments read.
-                        format: int32
-                        type: integer
-                      replayedTransactionCount:
-                        description: |-
-                          ReplayedTransactionCount is the number of transactions replayed on
-                          top of the backup.
-                        format: int64
-                        type: integer
-                      segmentCount:
-                        description: SegmentCount is the number of replay segments.
-                        format: int32
-                        type: integer
-                      stopTime:
-                        description: |-
-                          StopTime is the requested target (a whole second; commit times are
-                          compared against it to the microsecond). Unset in Latest mode.
-                        format: date-time
-                        type: string
-                    required:
-                    - mode
-                    - outcome
+                      target:
+                        description: Target is the target's state after the load and
+                          any replay.
+                        properties:
+                          binlogPosition:
+                            description: BinlogPosition is the target's binary-log
+                              position.
+                            properties:
+                              file:
+                                description: File is the binary-log file name, e.g.
+                                  "mysql-bin.000412".
+                                maxLength: 512
+                                minLength: 1
+                                type: string
+                              position:
+                                description: Position is the byte offset within File.
+                                format: int64
+                                minimum: 0
+                                type: integer
+                            required:
+                            - file
+                            - position
+                            type: object
+                          gtidExecuted:
+                            description: GtidExecuted is @@global.gtid_executed on
+                              the target.
+                            type: string
+                        type: object
                     type: object
                   reason:
                     description: |-
@@ -8410,41 +8488,9 @@ spec:
                     maxLength: 1024
                     pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                     type: string
-                  sourceBinlogFile:
-                    description: SourceBinlogFile is the referenced MysqlBackup binary
-                      log file when known.
-                    type: string
-                  sourceBinlogPos:
-                    description: SourceBinlogPos is the referenced MysqlBackup binary
-                      log position when known.
-                    format: int64
-                    type: integer
-                  sourceGtidExecuted:
-                    description: SourceGtidExecuted is the referenced MysqlBackup
-                      GTID set when known.
-                    type: string
-                  sourceSizeBytes:
-                    description: |-
-                      SourceSizeBytes is the source backup artifact size in bytes when
-                      known from a referenced MysqlBackup. 0 means unknown.
-                    format: int64
-                    type: integer
                   startTime:
                     description: StartTime is when the restore Job was created.
                     format: date-time
-                    type: string
-                  targetBinlogFile:
-                    description: TargetBinlogFile is the target binary log file after
-                      load and optional PITR.
-                    type: string
-                  targetBinlogPos:
-                    description: TargetBinlogPos is the target binary log position
-                      after load and optional PITR.
-                    format: int64
-                    type: integer
-                  targetGtidExecuted:
-                    description: TargetGtidExecuted is @@global.gtid_executed on the
-                      target after load and optional PITR.
                     type: string
                   targetSite:
                     description: TargetSite is the site name whose MySQL instance
@@ -8459,6 +8505,8 @@ spec:
                   already done" from "new restore requested". Once a run is accepted
                   this status, not the spec, drives it: removing spec.restoreInPlace
                   while its Job runs keeps the fence until the Job finishes.
+                  Durable: confirmTokenUsed is the only record that a confirm was
+                  consumed, and the run record is what a restarted operator resumes.
                 properties:
                   completionTime:
                     description: CompletionTime is when the restore reached a terminal
@@ -8502,176 +8550,248 @@ spec:
                     - Succeeded
                     - Failed
                     type: string
-                  pointInTime:
+                  provenance:
                     description: |-
-                      PointInTime is the certified outcome of the point-in-time replay,
-                      read from the replay's verdict. Unset without pointInTime.
+                      Provenance records what the restore loaded and what the target held
+                      afterwards. An in-place restore never replays binary logs, so its
+                      provenance.pointInTime stays unset.
                     properties:
-                      archive:
-                        description: Archive identifies the archive the replay read.
+                      pointInTime:
+                        description: |-
+                          PointInTime is the certified outcome of the point-in-time replay,
+                          read from the replay's verdict. Unset when no replay ran.
                         properties:
-                          algorithm:
-                            description: Algorithm is the encryption algorithm; empty
-                              for None.
-                            enum:
-                            - AES-256-GCM
-                            type: string
-                          archiveID:
+                          archive:
+                            description: Archive identifies the archive the replay
+                              read.
+                            properties:
+                              algorithm:
+                                description: Algorithm is the encryption algorithm;
+                                  empty for None.
+                                enum:
+                                - AES-256-GCM
+                                type: string
+                              archiveID:
+                                description: |-
+                                  ArchiveID is the descriptor's archive ID, derived from the source
+                                  group's UID and the normalized destination.
+                                pattern: ^ar1-[a-z2-7]{26}$
+                                type: string
+                              destination:
+                                description: |-
+                                  Destination is the normalized archive destination the descriptor
+                                  was read from (s3://… or pvc://…).
+                                maxLength: 4096
+                                type: string
+                              encryptionMode:
+                                description: EncryptionMode is the archive's encryption
+                                  mode.
+                                enum:
+                                - None
+                                - Passphrase
+                                type: string
+                              source:
+                                description: Source is the group that created the
+                                  archive.
+                                properties:
+                                  name:
+                                    description: Name is the source group's name.
+                                    maxLength: 253
+                                    type: string
+                                  namespace:
+                                    description: Namespace is the source group's namespace.
+                                    maxLength: 63
+                                    type: string
+                                  uid:
+                                    description: UID is the source group's metadata.uid.
+                                    type: string
+                                required:
+                                - name
+                                - namespace
+                                - uid
+                                type: object
+                            required:
+                            - archiveID
+                            - encryptionMode
+                            - source
+                            type: object
+                          excludedDivergentTransactionCount:
                             description: |-
-                              ArchiveID is the descriptor's archive ID, derived from the source
-                              group's UID and the normalized destination.
-                            pattern: ^ar1-[a-z2-7]{26}$
-                            type: string
-                          destination:
+                              ExcludedDivergentTransactionCount is |D|: transactions committed between the backup's newest transaction and
+                              the target, outside the target history, excluded by excludeGtids.
+                            format: int64
+                            type: integer
+                          gtidExecuted:
                             description: |-
-                              Destination is the normalized archive destination the descriptor
-                              was read from (s3://… or pvc://…).
-                            maxLength: 4096
+                              GtidExecuted is the target's @@global.gtid_executed after replay,
+                              which the replay proved equal to the target history minus
+                              excludeGtids. Empty when longer than 2048 characters; see
+                              GtidExecutedSHA256.
+                            maxLength: 2048
                             type: string
-                          encryptionMode:
-                            description: EncryptionMode is the archive's encryption
-                              mode.
-                            enum:
-                            - None
-                            - Passphrase
+                          gtidExecutedSHA256:
+                            description: |-
+                              GtidExecutedSHA256 is the hex SHA-256 of GtidExecuted as the server
+                              printed it (newlines removed).
+                            pattern: ^([0-9a-f]{64})?$
                             type: string
-                          source:
-                            description: Source is the group that created the archive.
+                          lastReplayedBinlog:
+                            description: LastReplayedBinlog is the file of the last
+                              segment.
                             properties:
                               name:
-                                description: Name is the source group's name.
-                                maxLength: 253
+                                description: Name is the binlog file name, for example
+                                  mysql-bin.000042.
+                                maxLength: 255
                                 type: string
-                              namespace:
-                                description: Namespace is the source group's namespace.
+                              site:
+                                description: Site is the site whose archive holds
+                                  the file.
                                 maxLength: 63
-                                type: string
-                              uid:
-                                description: UID is the source group's metadata.uid.
+                                pattern: ^[a-z0-9-]+$
                                 type: string
                             required:
                             - name
-                            - namespace
-                            - uid
+                            - site
                             type: object
+                          mode:
+                            description: Mode is the replay mode.
+                            enum:
+                            - Timestamp
+                            - Latest
+                            type: string
+                          newestReplayedCommitTime:
+                            description: |-
+                              NewestReplayedCommitTime is the newest original commit time among
+                              the replayed transactions.
+                            format: date-time
+                            type: string
+                          onHistoryExclusionCount:
+                            description: OnHistoryExclusionCount is the number of
+                              GTIDs in OnHistoryExclusions.
+                            format: int64
+                            type: integer
+                          onHistoryExclusions:
+                            description: |-
+                              OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
+                              Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
+                              Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
+                            maxLength: 2048
+                            type: string
+                          outcome:
+                            description: Outcome is how the end point was reached.
+                            enum:
+                            - TargetCovered
+                            - Partial
+                            - ArchiveHead
+                            type: string
+                          replaySites:
+                            description: |-
+                              ReplaySites are the sites whose archived binlogs were staged, sorted;
+                              see ReplaySitesOmitted for the ones the verdict left out.
+                            items:
+                              maxLength: 63
+                              pattern: ^[a-z0-9-]+$
+                              type: string
+                            maxItems: 16
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          replaySitesOmitted:
+                            description: |-
+                              ReplaySitesOmitted counts further staged sites the verdict did not
+                              name: its site list is bounded, so ReplaySites is complete only when
+                              this is zero.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          replayedBinlogCount:
+                            description: |-
+                              ReplayedBinlogCount is the number of distinct archived binlogs the
+                              segments read.
+                            format: int32
+                            type: integer
+                          replayedTransactionCount:
+                            description: |-
+                              ReplayedTransactionCount is the number of transactions replayed on
+                              top of the backup.
+                            format: int64
+                            type: integer
+                          segmentCount:
+                            description: SegmentCount is the number of replay segments.
+                            format: int32
+                            type: integer
+                          stopTime:
+                            description: |-
+                              StopTime is the requested target (a whole second; commit times are
+                              compared against it to the microsecond). Unset in Latest mode.
+                            format: date-time
+                            type: string
                         required:
-                        - archiveID
-                        - encryptionMode
-                        - source
+                        - mode
+                        - outcome
                         type: object
-                      excludedDivergentTransactionCount:
+                      source:
                         description: |-
-                          ExcludedDivergentTransactionCount is |D|: transactions committed between the backup's newest transaction and
-                          the target, outside the target history, excluded by excludeGtids.
-                        format: int64
-                        type: integer
-                      gtidExecuted:
-                        description: |-
-                          GtidExecuted is the target's @@global.gtid_executed after replay,
-                          which the replay proved equal to the target history minus
-                          excludeGtids. Empty when longer than 2048 characters; see
-                          GtidExecutedSHA256.
-                        maxLength: 2048
-                        type: string
-                      gtidExecutedSHA256:
-                        description: |-
-                          GtidExecutedSHA256 is the hex SHA-256 of GtidExecuted as the server
-                          printed it (newlines removed).
-                        pattern: ^([0-9a-f]{64})?$
-                        type: string
-                      lastReplayedBinlog:
-                        description: LastReplayedBinlog is the file of the last segment.
+                          Source is what the referenced MysqlBackup recorded about its
+                          artifact. Absent when the source was not a MysqlBackup.
                         properties:
-                          name:
-                            description: Name is the binlog file name, for example
-                              mysql-bin.000042.
-                            maxLength: 255
+                          binlogPosition:
+                            description: BinlogPosition is the binary-log position
+                              the backup recorded.
+                            properties:
+                              file:
+                                description: File is the binary-log file name, e.g.
+                                  "mysql-bin.000412".
+                                maxLength: 512
+                                minLength: 1
+                                type: string
+                              position:
+                                description: Position is the byte offset within File.
+                                format: int64
+                                minimum: 0
+                                type: integer
+                            required:
+                            - file
+                            - position
+                            type: object
+                          gtidExecuted:
+                            description: GtidExecuted is the GTID set the backup recorded.
                             type: string
-                          site:
-                            description: Site is the site whose archive holds the
-                              file.
-                            maxLength: 63
-                            pattern: ^[a-z0-9-]+$
-                            type: string
-                        required:
-                        - name
-                        - site
+                          sizeBytes:
+                            description: SizeBytes is the artifact size in bytes.
+                              Unset when unknown.
+                            format: int64
+                            minimum: 0
+                            type: integer
                         type: object
-                      mode:
-                        description: Mode is the replay mode.
-                        enum:
-                        - Timestamp
-                        - Latest
-                        type: string
-                      newestReplayedCommitTime:
-                        description: |-
-                          NewestReplayedCommitTime is the newest original commit time among
-                          the replayed transactions.
-                        format: date-time
-                        type: string
-                      onHistoryExclusionCount:
-                        description: OnHistoryExclusionCount is the number of GTIDs
-                          in OnHistoryExclusions.
-                        format: int64
-                        type: integer
-                      onHistoryExclusions:
-                        description: |-
-                          OnHistoryExclusions are excluded transactions on the target history that precede a replayed one (D-48).
-                          Their GTIDs were skipped, but later row images may carry their effects; the result is not certified for them.
-                          Empty when the set is too long to record; OnHistoryExclusionCount still counts it.
-                        maxLength: 2048
-                        type: string
-                      outcome:
-                        description: Outcome is how the end point was reached.
-                        enum:
-                        - TargetCovered
-                        - Partial
-                        - ArchiveHead
-                        type: string
-                      replaySites:
-                        description: |-
-                          ReplaySites are the sites whose archived binlogs were staged, sorted;
-                          see ReplaySitesOmitted for the ones the verdict left out.
-                        items:
-                          maxLength: 63
-                          pattern: ^[a-z0-9-]+$
-                          type: string
-                        maxItems: 16
-                        type: array
-                        x-kubernetes-list-type: atomic
-                      replaySitesOmitted:
-                        description: |-
-                          ReplaySitesOmitted counts further staged sites the verdict did not
-                          name: its site list is bounded, so ReplaySites is complete only when
-                          this is zero.
-                        format: int32
-                        minimum: 0
-                        type: integer
-                      replayedBinlogCount:
-                        description: |-
-                          ReplayedBinlogCount is the number of distinct archived binlogs the
-                          segments read.
-                        format: int32
-                        type: integer
-                      replayedTransactionCount:
-                        description: |-
-                          ReplayedTransactionCount is the number of transactions replayed on
-                          top of the backup.
-                        format: int64
-                        type: integer
-                      segmentCount:
-                        description: SegmentCount is the number of replay segments.
-                        format: int32
-                        type: integer
-                      stopTime:
-                        description: |-
-                          StopTime is the requested target (a whole second; commit times are
-                          compared against it to the microsecond). Unset in Latest mode.
-                        format: date-time
-                        type: string
-                    required:
-                    - mode
-                    - outcome
+                      target:
+                        description: Target is the target's state after the load and
+                          any replay.
+                        properties:
+                          binlogPosition:
+                            description: BinlogPosition is the target's binary-log
+                              position.
+                            properties:
+                              file:
+                                description: File is the binary-log file name, e.g.
+                                  "mysql-bin.000412".
+                                maxLength: 512
+                                minLength: 1
+                                type: string
+                              position:
+                                description: Position is the byte offset within File.
+                                format: int64
+                                minimum: 0
+                                type: integer
+                            required:
+                            - file
+                            - position
+                            type: object
+                          gtidExecuted:
+                            description: GtidExecuted is @@global.gtid_executed on
+                              the target.
+                            type: string
+                        type: object
                     type: object
                   runConfirm:
                     description: |-
@@ -8712,41 +8832,9 @@ spec:
                     - message: schema is required when type is Schema, and forbidden
                         otherwise
                       rule: 'self.type == ''Schema'' ? has(self.schema) : !has(self.schema)'
-                  sourceBinlogFile:
-                    description: SourceBinlogFile is the referenced MysqlBackup binary
-                      log file when known.
-                    type: string
-                  sourceBinlogPos:
-                    description: SourceBinlogPos is the referenced MysqlBackup binary
-                      log position when known.
-                    format: int64
-                    type: integer
-                  sourceGtidExecuted:
-                    description: SourceGtidExecuted is the referenced MysqlBackup
-                      GTID set when known.
-                    type: string
-                  sourceSizeBytes:
-                    description: |-
-                      SourceSizeBytes is the source backup artifact size in bytes when
-                      known from a referenced MysqlBackup. 0 means unknown.
-                    format: int64
-                    type: integer
                   startTime:
                     description: StartTime is when the restore entered Preflight.
                     format: date-time
-                    type: string
-                  targetBinlogFile:
-                    description: TargetBinlogFile is the target binary log file after
-                      load and optional PITR.
-                    type: string
-                  targetBinlogPos:
-                    description: TargetBinlogPos is the target binary log position
-                      after load and optional PITR.
-                    format: int64
-                    type: integer
-                  targetGtidExecuted:
-                    description: TargetGtidExecuted is @@global.gtid_executed on the
-                      target after load and optional PITR.
                     type: string
                   targetSite:
                     description: |-
@@ -8759,6 +8847,8 @@ spec:
                   RestoreOfflineFence is the offline_mode fence a full-instance
                   in-place restore holds on its target primary. It is cleared once the
                   restore has finished and the prior offline_mode is back.
+                  Durable: it is written before offline_mode changes, and a restarted
+                  operator re-applies the fence and restores the prior value from it.
                 properties:
                   confirmToken:
                     description: |-
@@ -8797,6 +8887,9 @@ spec:
                   outside restoreInPlace because it outlives that restore: it drains
                   after the restore has succeeded, across later restores and spec
                   edits. Empty when nothing is queued.
+                  Durable: pending sites are never promoted and do not replicate until
+                  recloned; fencedGtidExecuted decides whether a failed restore's queue
+                  is discarded or held.
                 properties:
                   confirmToken:
                     description: |-
@@ -8863,17 +8956,17 @@ spec:
                     - Draining
                     - Held
                     type: string
+                  requestTime:
+                    description: |-
+                      RequestTime is when Requested was set. A request whose clone has
+                      not started within a few minutes counts as a failed attempt, so one
+                      site that cannot be cloned does not hold up the others.
+                    format: date-time
+                    type: string
                   requested:
                     description: |-
                       Requested is the pending site whose reclone the operator has
                       requested through the reclone annotation and not yet seen finish.
-                    type: string
-                  requestedAt:
-                    description: |-
-                      RequestedAt is when Requested was set. A request whose clone has
-                      not started within a few minutes counts as a failed attempt, so one
-                      site that cannot be cloned does not hold up the others.
-                    format: date-time
                     type: string
                   superseded:
                     description: |-
@@ -8944,8 +9037,8 @@ spec:
                       description: GtidExecuted is the GTID executed set (populated
                         when replication status is enriched).
                       type: string
-                    lastSeen:
-                      description: LastSeen is the last time this site was successfully
+                    lastSeenTime:
+                      description: LastSeenTime is the last time this site was successfully
                         polled.
                       format: date-time
                       type: string
@@ -8968,10 +9061,22 @@ spec:
                       - RecoveryInProgress
                       - RecoveryBlocked
                       type: string
-                    replicating:
-                      description: Replicating indicates whether replication is running
-                        (populated when replication status is enriched).
-                      type: boolean
+                    replication:
+                      description: |-
+                        Replication is the site's replication state: NotApplicable on the
+                        writable primary; Healthy or Lagging once both replication threads
+                        have run with a source set for consecutive polls (Lagging when
+                        secondsBehindSource exceeds spec.replication.maxLagSeconds); Broken
+                        when replica status was read and a thread is stopped or no source is
+                        set; Unknown when replica status could not be read, the site has not
+                        been probed, or the healthy streak is still building.
+                      enum:
+                      - Healthy
+                      - Lagging
+                      - Broken
+                      - Unknown
+                      - NotApplicable
+                      type: string
                     secondsBehindSource:
                       description: SecondsBehindSource is the replication lag in seconds
                         (populated when replication status is enriched).
@@ -9023,6 +9128,7 @@ spec:
                 description: |-
                   TopologyGeneration increments whenever the authoritative active site changes
                   and persists across operator restarts to fence deployment leases.
+                  Durable: it is restored after a restart and never moves backwards.
                 format: int64
                 minimum: 0
                 type: integer

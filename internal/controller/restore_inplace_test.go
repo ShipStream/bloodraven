@@ -1111,8 +1111,8 @@ func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testi
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
-	seed.Status.StorageType = v1alpha1.BackupStorageS3
-	seed.Status.Encrypted = true
+	setTestArtifactType(seed, v1alpha1.BackupStorageS3)
+	seed.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	recordTestDumpKey(seed)
 	r, c := newReconciler(fg, seed, operatorCredsSecret())
 

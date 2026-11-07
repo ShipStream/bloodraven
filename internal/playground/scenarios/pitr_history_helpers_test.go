@@ -360,7 +360,7 @@ func TestPITRRecloneRequest(t *testing.T) {
 		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, true, false, ""},
 		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, true, "iad:3e11fa47"},
 		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateUnreachable, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, false, ""},
-		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, Replicating: true}, false, true, "iad:confirm=mfg"},
+		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}, false, true, "iad:confirm=mfg"},
 		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, false, false, ""},
 		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked"}, false, false, ""},
 	}
@@ -687,7 +687,7 @@ func TestPITRSiteReplicating(t *testing.T) {
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
 		t.Fatal("a read-only site that is not replicating counted as replicating")
 	}
-	mfg.Status.Sites[1].Replicating = true
+	mfg.Status.Sites[1].Replication = v1alpha1.SiteReplicationHealthy
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
 		t.Fatal("a replicating read-only site was not accepted")
 	}
@@ -740,7 +740,7 @@ func TestPITRObservedArchiveIDMatchesPrefix(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			mfg := &v1alpha1.MysqlFailoverGroup{}
 			if c.obs != nil {
-				mfg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, Archive: c.obs}
+				mfg.Status.PITR = &v1alpha1.PITRStatus{Archive: c.obs}
 			}
 			if got := pitrObservedArchiveID(mfg, c.prefix); got != c.want {
 				t.Errorf("pitrObservedArchiveID=%q, want %q", got, c.want)
@@ -777,7 +777,7 @@ func TestPITRArchiveBoundReady(t *testing.T) {
 			Status: v1alpha1.MysqlFailoverGroupStatus{
 				ActiveSite: "iad",
 				Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 10}},
-				PITR: &v1alpha1.PITRStatus{Enabled: true, Archive: &v1alpha1.PITRArchiveObservation{
+				PITR: &v1alpha1.PITRStatus{Archive: &v1alpha1.PITRArchiveObservation{
 					Destination: newDest, ArchiveID: newID, State: v1alpha1.PITRArchiveVerified,
 				}},
 				PITRArchiveBindings: []v1alpha1.PITRArchiveBinding{

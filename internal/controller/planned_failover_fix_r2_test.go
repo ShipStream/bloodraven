@@ -29,10 +29,10 @@ func midEmergencyFailover(at time.Time) func(*v1alpha1.MysqlFailoverGroupStatus)
 	return func(st *v1alpha1.MysqlFailoverGroupStatus) {
 		rec := metav1.NewTime(at)
 		st.ActiveSite = ""
-		st.LastFailover, st.LastFailoverTarget = &rec, "pdx"
+		st.SetLastFailover(&rec, "pdx", st.PromotionGtidExecuted())
 		st.Sites = []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateUnreachable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: false},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationBroken},
 		}
 	}
 }
@@ -162,7 +162,7 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 		h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseAdmitting)
 		h.setStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
 			rec := metav1.NewTime(h.clk.Now().Add(-time.Hour))
-			st.LastFailover, st.LastFailoverTarget = &rec, "pdx"
+			st.SetLastFailover(&rec, "pdx", st.PromotionGtidExecuted())
 		})
 		h.step()
 		if pf := h.pf(); pf.Admission != nil && pf.Admission.WaitReason == v1alpha1.PlannedFailoverWaitAuthorityUnsettled {

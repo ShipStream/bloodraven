@@ -1308,8 +1308,8 @@ func (tm *TopologyManager) restoreFailoverRecordFrom(fg *v1alpha1.MysqlFailoverG
 	// The promotion GTID gates which candidates are safe to promote and how
 	// a returning old primary is judged, so it must survive a restart. It
 	// is taken from the newer record below; this is the status copy.
-	tm.promotionGtidExecuted = fg.Status.PromotionGtidExecuted
-	tm.groupHasData = strings.TrimSpace(fg.Status.PromotionGtidExecuted) != ""
+	tm.promotionGtidExecuted = fg.Status.PromotionGtidExecuted()
+	tm.groupHasData = strings.TrimSpace(fg.Status.PromotionGtidExecuted()) != ""
 	for _, site := range fg.Status.Sites {
 		if strings.TrimSpace(site.GtidExecuted) != "" {
 			tm.groupHasData = true
@@ -1377,6 +1377,17 @@ func (tm *TopologyManager) restoreFailoverRecordFrom(fg *v1alpha1.MysqlFailoverG
 		// /status. Invalidate old leases even if authority returned to the same site.
 		tm.topologyGeneration++
 		tm.deploymentActiveSite = failoverRecord.LastFailoverTarget
+	}
+	// A status that names no authority (no active site, generation 0)
+	// beside a failover record of the group's history was lost, not
+	// fresh: until this process has observed a unique writable primary
+	// it knows of no primary to fail away from, so it promotes nothing.
+	if fg.Status.ActiveSite == "" && fg.Status.TopologyGeneration == 0 && !failoverRecord.IsZero() {
+		tm.mu.Lock()
+		tm.awaitingObservedPrimary = true
+		tm.mu.Unlock()
+		logger.Warn("status names no active site but the group has failover history; automatic promotion waits until a writable primary is observed",
+			"fg", nn.String(), "lastFailoverTarget", failoverRecord.LastFailoverTarget)
 	}
 }
 
@@ -1760,6 +1771,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	// Save existing status before modification for comparison.
 	existingStatus := freshFG.Status.DeepCopy()
+	// Lagging uses the same threshold as Degraded=ReplicationLagging
+	// below: the spec this status is written against.
+	snap.MaxLagSeconds = freshFG.Spec.EffectiveMaxLagSeconds()
 	if !MergeTopologySnapshotStatus(&freshFG.Status, snap) {
 		r.hydrateDeploymentGeneration(&freshFG)
 		return nil
@@ -2114,8 +2128,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// not be replaced by freshFG's pre-merged copy.
 		live := fresh.Status
 		fresh.Status = *freshFG.Status.DeepCopy()
-		fresh.Status.LastFailover, fresh.Status.LastFailoverTarget, fresh.Status.PromotionGtidExecuted =
-			live.LastFailover, live.LastFailoverTarget, live.PromotionGtidExecuted
+		fresh.Status.LastFailover = live.LastFailover
 		mergeFailoverTriple(&fresh.Status, snap)
 		if !newDivergentPromotion {
 			if liveDivergentPromotion != nil {
@@ -2206,7 +2219,7 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 		st.Sites = make([]v1alpha1.SiteStatus, len(snap.Sites))
 	}
 	for i, s := range snap.Sites {
-		st.Sites[i] = siteStatusFromSnapshot(s)
+		st.Sites[i] = siteStatusFromSnapshot(s, snap.MaxLagSeconds)
 	}
 
 	mergeFailoverTriple(st, snap)
@@ -2235,18 +2248,18 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 	return true
 }
 
-// mergeFailoverTriple moves the failover record {lastFailover,
-// lastFailoverTarget, promotionGtidExecuted} of st forward to snap's: a
-// snapshot whose lastFailover is strictly older (second precision) than
-// the stored one leaves the triple alone, and an equal one may change only
+// mergeFailoverTriple moves the failover record status.lastFailover{time,
+// target, promotionGtidExecuted} of st forward to snap's: a snapshot whose
+// failover time is strictly older (second precision) than the stored one
+// leaves the record alone, and an equal one may change only
 // the target (a planned failover naming an unconfirmed target). The status
 // write's conflict retry applies it again over the live triple, so a newer
 // record committed in between (the planned engine's) is not overwritten.
 func mergeFailoverTriple(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
 	snapAt := snap.LastFailover.UTC().Truncate(time.Second)
 	var storedAt time.Time
-	if st.LastFailover != nil {
-		storedAt = st.LastFailover.UTC().Truncate(time.Second)
+	if t := st.LastFailoverTime(); t != nil {
+		storedAt = t.UTC().Truncate(time.Second)
 	}
 	if !snapAt.IsZero() && failoverStampFutureDated(storedAt, snap.ObservedAt) {
 		// A stored record implausibly ahead of the writer's clock is no
@@ -2256,11 +2269,9 @@ func mergeFailoverTriple(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySna
 	switch {
 	case snapAt.After(storedAt):
 		t := metav1.NewTime(snap.LastFailover)
-		st.LastFailover = &t
-		st.LastFailoverTarget = snap.LastFailoverTarget
-		st.PromotionGtidExecuted = snap.PromotionGtidExecuted
+		st.SetLastFailover(&t, snap.LastFailoverTarget, snap.PromotionGtidExecuted)
 	case snapAt.Equal(storedAt):
-		st.LastFailoverTarget = snap.LastFailoverTarget
+		st.SetLastFailover(st.LastFailoverTime(), snap.LastFailoverTarget, st.PromotionGtidExecuted())
 	}
 }
 
@@ -2338,10 +2349,7 @@ func (r *TopologyManagerRunner) populatePITRStatusFor(nn types.NamespacedName, f
 		return
 	}
 
-	out := &v1alpha1.PITRStatus{
-		Enabled:     true,
-		ProfileName: fg.Spec.Backup.PITR.ProfileName,
-	}
+	out := &v1alpha1.PITRStatus{}
 	// Iterate in site-name order so the derived Message (and any future
 	// order-sensitive field) is reproducible across reconciles — map
 	// iteration in Go is randomized, which would otherwise flap the
@@ -2406,7 +2414,6 @@ func (r *TopologyManagerRunner) populatePITRStatusFor(nn types.NamespacedName, f
 		// times are maxima: the answering sites can only move them
 		// forward, and a stale value would read as a stopped archive.
 		kept := fg.Status.PITR.DeepCopy()
-		kept.Enabled, kept.ProfileName = true, fg.Spec.Backup.PITR.ProfileName
 		if out.NewestArchivedTime != nil && (kept.NewestArchivedTime == nil || out.NewestArchivedTime.After(kept.NewestArchivedTime.Time)) {
 			kept.NewestArchivedTime = out.NewestArchivedTime
 		}
@@ -2443,7 +2450,7 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	}
 
 	// Failover executed: new failover target differs from previously persisted target.
-	if snap.LastFailoverTarget != "" && snap.LastFailoverTarget != existingStatus.LastFailoverTarget {
+	if snap.LastFailoverTarget != "" && snap.LastFailoverTarget != existingStatus.LastFailoverTarget() {
 		r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventFailoverExecuted,
 			"Failover completed: %s promoted as new primary", snap.LastFailoverTarget)
 	}
@@ -2543,7 +2550,7 @@ func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFai
 	if r == nil || r.recorder == nil || !pitrEnabled(fg) || promoted == "" || promoted == from {
 		return
 	}
-	if from == "" && fg.Status.LastFailover == nil && fg.Status.LastFailoverTarget == "" {
+	if from == "" && fg.Status.LastFailoverTime() == nil && fg.Status.LastFailoverTarget() == "" {
 		return
 	}
 	rows, ok := r.pitrArchiveSuspectRows(FailoverGroupNamespacedName(fg), promoted)
@@ -2926,7 +2933,9 @@ func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context
 	}
 }
 
-func siteStatusFromSnapshot(s SiteSnapshot) v1alpha1.SiteStatus {
+// siteStatusFromSnapshot is the status.sites[] entry of one site snapshot.
+// maxLagSeconds is spec.replication.maxLagSeconds, the Lagging threshold.
+func siteStatusFromSnapshot(s SiteSnapshot, maxLagSeconds int64) v1alpha1.SiteStatus {
 	status := v1alpha1.SiteStatus{
 		Name:                    s.Name,
 		State:                   apiSiteState(s.State),
@@ -2936,10 +2945,10 @@ func siteStatusFromSnapshot(s SiteSnapshot) v1alpha1.SiteStatus {
 	}
 	if !s.LastSeen.IsZero() {
 		t := metav1.NewTime(s.LastSeen)
-		status.LastSeen = &t
+		status.LastSeenTime = &t
 	}
+	status.Replication = siteReplicationState(s.State, s.Replication, s.ReplicaStatusRead, s.ReplicationHealthy, maxLagSeconds)
 	if s.Replication != nil {
-		status.Replicating = s.ReplicationHealthy
 		status.SecondsBehindSource = s.Replication.SecondsBehindSource
 		status.GtidExecuted = s.Replication.ExecutedGtidSet
 	}

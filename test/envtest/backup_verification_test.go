@@ -150,9 +150,10 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 	backup.Status = v1alpha1.MysqlBackupStatus{
 		Phase:          v1alpha1.BackupPhaseSucceeded,
 		CompletionTime: &metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
-		Location:       "s3://bloodraven/lion/lion-nightly-ok/",
-		StorageType:    v1alpha1.BackupStorageS3,
-		SizeBytes:      512 * 1024 * 1024,
+		ArtifactStorage: &v1alpha1.BackupArtifactStorage{
+			Type: v1alpha1.BackupStorageS3, Location: "s3://bloodraven/lion/lion-nightly-ok/", Bucket: "bloodraven",
+		},
+		SizeBytes: 512 * 1024 * 1024,
 	}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatalf("update backup status: %v", err)
@@ -298,9 +299,10 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	backup.Status = v1alpha1.MysqlBackupStatus{
 		Phase:          v1alpha1.BackupPhaseSucceeded,
 		CompletionTime: &metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
-		Location:       "s3://bloodraven/lion/lion-nightly-ok/",
-		StorageType:    v1alpha1.BackupStorageS3,
-		SizeBytes:      512 * 1024 * 1024,
+		ArtifactStorage: &v1alpha1.BackupArtifactStorage{
+			Type: v1alpha1.BackupStorageS3, Location: "s3://bloodraven/lion/lion-nightly-ok/", Bucket: "bloodraven",
+		},
+		SizeBytes: 512 * 1024 * 1024,
 	}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatalf("update backup status: %v", err)

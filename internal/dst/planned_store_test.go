@@ -72,10 +72,10 @@ func TestSimStore_ConditionedWrite(t *testing.T) {
 
 	// mutate applies to the same write.
 	out, err = s.Write(ctx, cur, block("r1", 2, v1alpha1.PlannedFailoverPhaseSucceeded), func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.LastFailoverTarget = "beta"
+		st.SetLastFailover(st.LastFailoverTime(), "beta", st.PromotionGtidExecuted())
 	})
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if got := mustLoad(t, s); got.Status.LastFailoverTarget != "beta" || got.Status.PlannedFailover.Revision != 2 {
+	if got := mustLoad(t, s); got.Status.LastFailoverTarget() != "beta" || got.Status.PlannedFailover.Revision != 2 {
 		t.Fatalf("mutate not applied: %+v", got.Status)
 	}
 }
@@ -469,7 +469,7 @@ func TestMergeSnapshot_TwoStepWrite(t *testing.T) {
 		t.Fatal("the snapshot write did not yield between its read and its commit")
 	}
 	st := s.Object().Status
-	if st.ActiveSite != "alpha" || st.LastFailoverTarget != "alpha" {
+	if st.ActiveSite != "alpha" || st.LastFailoverTarget() != "alpha" {
 		t.Fatalf("computed fields not written: %+v", st)
 	}
 	if st.PlannedFailover == nil || st.PlannedFailover.RunID != "r1" || st.PlannedFailoverHold == nil ||

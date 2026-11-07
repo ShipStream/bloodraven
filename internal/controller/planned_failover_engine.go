@@ -2608,16 +2608,14 @@ func (e *PlannedFailoverEngine) terminalMutate(base *v1alpha1.MysqlFailoverGroup
 // (second precision) only the target and watermark may change.
 func applyPlannedFailoverRecord(st *v1alpha1.MysqlFailoverGroupStatus, confirmedAt time.Time, target, watermark string, now time.Time) {
 	rec := newFailoverRecordRef(confirmedAt, target)
-	if st.LastFailover != nil {
-		stored := st.LastFailover.UTC().Truncate(time.Second)
+	if lf := st.LastFailoverTime(); lf != nil {
+		stored := lf.UTC().Truncate(time.Second)
 		if stored.After(rec.LastFailover) && !failoverStampFutureDated(stored, now) {
 			return
 		}
 	}
 	t := metav1.NewTime(rec.LastFailover)
-	st.LastFailover = &t
-	st.LastFailoverTarget = target
-	st.PromotionGtidExecuted = watermark
+	st.SetLastFailover(&t, target, watermark)
 }
 
 // finish writes the terminal record and, once it has committed, releases

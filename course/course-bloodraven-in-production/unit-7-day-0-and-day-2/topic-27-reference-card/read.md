@@ -68,7 +68,7 @@ carries on.
 | 3 | Relay-log drain on the candidate, 30 s budget | warns, promotes anyway |
 | 4 | `STOP REPLICA` on the candidate | **fatal** |
 | 5 | `RESET REPLICA ALL` on the candidate | **fatal** |
-| 6 | `SELECT @@global.gtid_executed` → `promotionGtidExecuted` | warns only |
+| 6 | `SELECT @@global.gtid_executed` → `lastFailover.promotionGtidExecuted` | warns only |
 | 7 | `SET GLOBAL super_read_only = OFF` | **fatal** |
 | 8 | `SET GLOBAL read_only = OFF` | **fatal** |
 | 9 | Writable confirmation, synchronously | logs, skips the DNS flip, returns |
@@ -88,7 +88,7 @@ Node taints and source convergence are poll neighbours, not steps.
 | `mysql-<group>-<site>-internal` | name + instance + site, no health gate, `publishNotReadyAddresses: true` | never yours — sidecar and peer traffic |
 
 `role="fenced"` matches neither shared Service. A `ReadOnly` site earns `healthy=yes` only when
-**all five** hold: converged source, replicating, non-nil lag, canonical *direct* source host, and lag
+**all five** hold: converged source, replication `Healthy` or `Lagging`, non-nil lag, canonical *direct* source host, and lag
 within `readOnlyMaxLagSeconds`.
 
 ## Metrics, and their label sets

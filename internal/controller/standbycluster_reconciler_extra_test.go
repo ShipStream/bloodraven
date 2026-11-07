@@ -627,7 +627,7 @@ func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 				ArchiveID:      standbyTestArchiveID,
 				Destination:    "s3://my-bucket/orders/binlogs?endpoint=aws",
 				Source:         v1alpha1.PITRArchiveSource{Namespace: "prod", Name: "orders", UID: "source-uid"},
-				EncryptionMode: v1alpha1.PITRArchiveEncryptionNone,
+				EncryptionMode: v1alpha1.EncryptionModeNone,
 			}
 			if d.BinlogArchive == nil || d.BinlogArchive.Identity != *want {
 				t.Fatalf("discovered.binlogArchive = %+v, want identity %+v", d.BinlogArchive, want)

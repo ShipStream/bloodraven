@@ -34,14 +34,17 @@ func plannedFG(sites, drOnly []string, active string, statusStates map[string]v1
 		} else {
 			st.State = v1alpha1.SiteStateReadOnly
 		}
-		if r, ok := replicating[name]; ok {
-			st.Replicating = r
-		} else {
-			st.Replicating = st.State == v1alpha1.SiteStateReadOnly
+		running, ok := replicating[name]
+		if !ok {
+			running = st.State == v1alpha1.SiteStateReadOnly
+		}
+		st.Replication = v1alpha1.SiteReplicationBroken
+		if running {
+			st.Replication = v1alpha1.SiteReplicationHealthy
 		}
 		if name == active {
 			st.State = v1alpha1.SiteStateWritable
-			st.Replicating = false
+			st.Replication = v1alpha1.SiteReplicationNotApplicable
 		}
 		fg.Status.Sites = append(fg.Status.Sites, st)
 	}
@@ -255,8 +258,8 @@ func TestValidatePlannedFailover_Cooldown(t *testing.T) {
 			fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 			fg.Spec.FailoverCooldown = &metav1.Duration{Duration: cooldown}
 			last := metav1.NewTime(now.Add(-tc.statusAgo))
-			fg.Status.LastFailover = &last
-			fg.Status.LastFailoverTarget = "iad"
+			fg.Status.SetLastFailover(&last, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
+			fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), "iad", fg.Status.PromotionGtidExecuted())
 			if tc.annotation != nil {
 				fg.Annotations = map[string]string{
 					v1alpha1.LastFailoverAnnotation:       tc.annotation.LastFailover.Format(time.RFC3339),
@@ -311,8 +314,8 @@ func TestValidatePlannedFailover_DurableStateErrors(t *testing.T) {
 			}
 			if tc.withStatus {
 				last := metav1.NewTime(now.Add(-time.Minute))
-				fg.Status.LastFailover = &last
-				fg.Status.LastFailoverTarget = "iad"
+				fg.Status.SetLastFailover(&last, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
+				fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), "iad", fg.Status.PromotionGtidExecuted())
 			}
 
 			result, reason, err := validatePlannedFailoverRequest(

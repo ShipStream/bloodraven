@@ -230,7 +230,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 		t.Fatal("discovered.binlogArchive is nil")
 	}
 	if a.Identity.ArchiveID != "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa" ||
-		a.Identity.Source.UID != "orders-uid" || a.Identity.EncryptionMode != v1alpha1.PITRArchiveEncryptionNone {
+		a.Identity.Source.UID != "orders-uid" || a.Identity.EncryptionMode != v1alpha1.EncryptionModeNone {
 		t.Errorf("discovered.binlogArchive.identity: %+v", a.Identity)
 	}
 	if a.ManifestCount != 1 || a.FileCount != 1 || a.SizeBytes != 1024 ||

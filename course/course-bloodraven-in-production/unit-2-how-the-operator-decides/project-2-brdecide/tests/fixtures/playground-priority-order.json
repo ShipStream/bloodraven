@@ -39,28 +39,28 @@
         "name": "iad",
         "state": "Unreachable",
         "role": "PrimaryCandidate",
-        "replicating": false,
+        "replication": "Unknown",
         "secondsBehindSource": null
       },
       {
         "name": "pdx",
         "state": "ReadOnly",
         "role": "PrimaryCandidate",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0
       },
       {
         "name": "sfo",
         "state": "ReadOnly",
         "role": "PrimaryCandidate",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0
       },
       {
         "name": "reader",
         "state": "ReadOnly",
         "role": "ReadOnly",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 3
       }
     ]

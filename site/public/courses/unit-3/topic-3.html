@@ -26,7 +26,7 @@ why: <em>“Re-read after the fence: this is the authoritative set the divergenc
 <p>A returning mysqld is not quiet. Compare two GTID sets while one is still advancing and your answer
 describes a moment already gone. The fence turns a moving target into a fact.</p>
 <h2 id="what-the-gate-is-not">What the gate is not</h2>
-<p>Recovery is deliberately <strong>not</strong> gated on <code>lastFailoverTarget</code>, because a primary can change hands with
+<p>Recovery is deliberately <strong>not</strong> gated on the recorded failover target (<code>lastFailover.target</code>), because a primary can change hands with
 no failover recorded at all: a replica may be made writable by hand (or respawn writable on a pod that
 predates the <code>--read-only=ON</code> boot flag) and be adopted as the de-facto primary while
 the old primary comes back fenced, or the record may be lost to a status-write outage plus an operator

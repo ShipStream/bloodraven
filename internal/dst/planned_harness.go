@@ -237,8 +237,7 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	obj.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{MaxLagWait: &simMaxLagWait, DrainTimeout: &simDrainTimeout}
 	if p := r.persisted; p != nil && !p.LastFailover.IsZero() {
 		lf := metav1.NewTime(p.LastFailover.UTC().Truncate(time.Second))
-		obj.Status.LastFailover = &lf
-		obj.Status.LastFailoverTarget = p.LastFailoverTarget
+		obj.Status.SetLastFailover(&lf, p.LastFailoverTarget, "")
 	}
 	if f := r.persistedFailover; f != nil {
 		if a, err := controller.FailoverRecordAnnotations(*f); err == nil {

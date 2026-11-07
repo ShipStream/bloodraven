@@ -50,7 +50,7 @@ func TestDragonflyManager_QueuedRequestObsoleteAfterCompletedPlannedFailover(t *
 			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	now := metav1.Now()
-	latest.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: &now}
+	latest.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: &now}
 	if err := c.Status().Update(context.Background(), latest); err != nil {
 		t.Fatal(err)
 	}
@@ -127,13 +127,14 @@ func TestSupersededPromotionRequest(t *testing.T) {
 		{"nothing newer", func(*v1alpha1.MysqlFailoverGroup) {}, false},
 		{"MySQL has not published yet", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.ActiveSite = "dc1" }, false},
 		{"MySQL published this decision", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.ActiveSite, fg.Status.LastFailoverTarget, fg.Status.LastFailover = "dc2", "dc2", at(0)
+			fg.Status.ActiveSite = "dc2"
+			fg.Status.SetLastFailover(at(0), "dc2", "")
 		}, false},
 		{"older failover to dc1", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.LastFailoverTarget, fg.Status.LastFailover = "dc1", at(-time.Hour)
+			fg.Status.SetLastFailover(at(-time.Hour), "dc1", "")
 		}, false},
 		{"newer MySQL failover to dc1", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.LastFailoverTarget, fg.Status.LastFailover = "dc1", at(2*time.Second)
+			fg.Status.SetLastFailover(at(2*time.Second), "dc1", "")
 		}, true},
 		{"planned failover claimed after", func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, TargetSite: "dc1",
@@ -165,7 +166,8 @@ func TestSupersededPromotionRequest(t *testing.T) {
 			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: at(0)}
 		}, true},
 		{"later promotion elsewhere, MySQL published target", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.ActiveSite, fg.Status.LastFailoverTarget, fg.Status.LastFailover = "dc2", "dc2", at(0)
+			fg.Status.ActiveSite = "dc2"
+			fg.Status.SetLastFailover(at(0), "dc2", "")
 			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTarget: "dc1", LastPromotionTime: at(time.Second)}
 		}, false},
 		{"same-second promotion, MySQL on target", func(fg *v1alpha1.MysqlFailoverGroup) {
@@ -355,7 +357,7 @@ func TestDragonflyManager_TickAfterPromotionReadsAuthorityUncached(t *testing.T)
 		t.Run(lag.String(), func(t *testing.T) {
 			fg := fgWithDragonflyEnabledAndActive()
 			fg.Status.ActiveSite = "dc2" // MySQL already failed over to dc2
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 			cb, key := newDragonflyFakeClient(fg)
 			base := cb.WithObjects(
 				makeDragonflyPod(fg.Name, "dc1", "master", true),
@@ -640,7 +642,7 @@ func TestTopologyManagerRunner_NewDragonflyManagerWiring(t *testing.T) {
 func TestReconcileDragonflyResources_HoldsReplicaRestartOfNewMaster(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	r.Runner = &TopologyManagerRunner{}
 	ctx := context.Background()

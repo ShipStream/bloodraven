@@ -720,7 +720,7 @@ func opsReproveGroup(f *opsFixture, pf *v1alpha1.PlannedFailoverStatus, last tim
 	fg := opsGroup(pf)
 	if !last.IsZero() {
 		t := metav1.NewTime(last)
-		fg.Status.LastFailover, fg.Status.LastFailoverTarget = &t, target
+		fg.Status.SetLastFailover(&t, target, "")
 	}
 	return fg
 }

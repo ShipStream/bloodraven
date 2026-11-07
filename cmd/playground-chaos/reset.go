@@ -374,7 +374,7 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec
 // TestMFGStatusFieldsToClear classifies every status field, so a new one
 // must be added here or to its kept list.
 func mfgStatusFieldsToClear(keepEncryption bool) []string {
-	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"}
+	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"}
 	if !keepEncryption {
 		fields = append(fields, "encryptionAtRest", "pitrArchiveBindings")
 	}

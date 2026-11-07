@@ -243,7 +243,7 @@ func (e *bindingEnv) startArchiver(site string, srv *simServer, dest pitrarchive
 		Encryption:  pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionMode(enc.Mode), Algorithm: string(enc.Algorithm)},
 		KeyRevision: enc.KeySecretName,
 	}
-	if enc.Mode == v1alpha1.PITRArchiveEncryptionNone {
+	if enc.Mode == v1alpha1.EncryptionModeNone {
 		ident.KeyRevision = "plaintext"
 	}
 	ctx, cancel := context.WithCancel(e.w.ctx)
@@ -274,7 +274,7 @@ func (e *bindingEnv) report(st *pitrarchive.ArchiveStatus) {
 			s.PITR = &v1alpha1.PITRStatus{}
 		}
 		obs := &v1alpha1.PITRArchiveObservation{Destination: st.Destination, ArchiveID: st.ArchiveID,
-			EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(st.EncryptionMode), KeyRevision: st.KeyRevision,
+			EncryptionMode: v1alpha1.EncryptionMode(st.EncryptionMode), KeyRevision: st.KeyRevision,
 			State: v1alpha1.PITRArchiveObservedState(st.State), Reason: v1alpha1.PITRArchiveRefusalReason(st.Reason)}
 		s.PITR.Archive = obs
 	})

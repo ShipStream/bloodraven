@@ -106,6 +106,9 @@ report_status() {
 	kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" \
 		-o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name}{"\t"}{.phase}{"\t"}{.keyringSecret}{"\t"}{.message}{"\n"}{end}' \
 		2>/dev/null || warn "no encryption status yet"
+	kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" \
+		-o jsonpath='{range .status.conditions[?(@.type=="EncryptionAtRestReady")]}EncryptionAtRestReady={.status}/{.reason}: {.message}{"\n"}{end}' \
+		2>/dev/null || true
 	echo
 	info "escrow secrets"
 	kubectl -n "$NAMESPACE" get secrets -l app.kubernetes.io/name=mysql-keyring \
@@ -338,12 +341,16 @@ kubectl -n "$NAMESPACE" annotate mysqlfailovergroup "$FG" \
 # Three-site ordered update + keyring escrow regularly needs more than
 # 10 minutes on kind (CI runners are especially slow around the primary
 # handoff). 15 minutes still fails fast when the keyring never loads.
-info "waiting for every site to reach phase=Sealed (up to 15 minutes)"
+# EncryptionAtRestReady=True with reason AllSitesSealed means every site is
+# sealed. The condition must also be current: observedGeneration is the
+# generation that enabled encryption, not an earlier one.
+info "waiting for every site to reach phase=Sealed (EncryptionAtRestReady=True/AllSitesSealed, up to 15 minutes)"
 deadline=$(( $(date +%s) + 900 ))
 while [[ $(date +%s) -lt $deadline ]]; do
 	sealed=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" \
-		-o jsonpath='{.status.encryptionAtRest.sealed}' 2>/dev/null || echo "")
-	if [[ "$sealed" == "true" ]]; then
+		-o jsonpath='{.metadata.generation}{" "}{range .status.conditions[?(@.type=="EncryptionAtRestReady")]}{.observedGeneration}{" "}{.status}{" "}{.reason}{end}' 2>/dev/null || echo "")
+	read -r gen observed status reason <<<"$sealed" || true
+	if [[ "${status:-}" == "True" && "${reason:-}" == "AllSitesSealed" && -n "${gen:-}" && "${observed:-}" == "$gen" ]]; then
 		ok "every site is sealed against an escrowed keyring"
 		wait_for_stable_baseline "after the encryption rollout"
 		report_status

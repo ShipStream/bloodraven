@@ -55,7 +55,7 @@ func newDeployAPIFixture(t *testing.T) *deployAPIFixture {
 	f.group.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	f.group.Status.ActiveSite = "iad"
 	f.group.Status.TopologyGeneration = 7
-	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true}}
+	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
 	f.group.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.NewTime(f.now)}}
 	f.db = &v1alpha1.MysqlDatabase{ObjectMeta: metav1.ObjectMeta{Name: "tenant", Namespace: f.group.Namespace}, Spec: v1alpha1.MysqlDatabaseSpec{
 		FailoverGroupRef:  v1alpha1.LocalFailoverGroupRef{Name: f.group.Name},
@@ -784,5 +784,52 @@ func TestDeployAPIConcurrentAuthenticationCache(t *testing.T) {
 	wg.Wait()
 	if len(f.api.tokens) != 1 {
 		t.Fatalf("cache entries = %d", len(f.api.tokens))
+	}
+}
+
+// TestDeployGroupResponseReplicationRunning pins health.replicationRunning
+// over status.sites[].replication: true exactly when every non-active spec
+// site has a status entry that is Healthy or Lagging (a lagging replica
+// still replicates; its lag is replicationLagSeconds).
+func TestDeployGroupResponseReplicationRunning(t *testing.T) {
+	base := func(repl v1alpha1.SiteReplicationState) *v1alpha1.MysqlFailoverGroup {
+		lag := int64(45)
+		fg := &v1alpha1.MysqlFailoverGroup{}
+		fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
+		fg.Status.ActiveSite = "iad"
+		fg.Status.Sites = []v1alpha1.SiteStatus{
+			{Name: "iad", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: repl, SecondsBehindSource: &lag},
+		}
+		return fg
+	}
+	running := func(fg *v1alpha1.MysqlFailoverGroup) (bool, int64) {
+		t.Helper()
+		health := deployGroupResponse(fg, nil, "")["health"].(map[string]any)
+		return health["replicationRunning"].(bool), health["replicationLagSeconds"].(int64)
+	}
+	for _, tc := range []struct {
+		repl v1alpha1.SiteReplicationState
+		want bool
+	}{
+		{v1alpha1.SiteReplicationHealthy, true},
+		{v1alpha1.SiteReplicationLagging, true},
+		{v1alpha1.SiteReplicationBroken, false},
+		{v1alpha1.SiteReplicationUnknown, false},
+		{v1alpha1.SiteReplicationNotApplicable, false},
+		{"", false},
+	} {
+		got, lag := running(base(tc.repl))
+		if got != tc.want || lag != 45 {
+			t.Errorf("replication %q: replicationRunning=%t lag=%d, want %t and 45", tc.repl, got, lag, tc.want)
+		}
+	}
+	// A non-active spec site with no status entry is not replicating, and a
+	// status entry for a site no longer in spec is not one that counts.
+	missing := base(v1alpha1.SiteReplicationHealthy)
+	missing.Spec.Sites = append(missing.Spec.Sites, v1alpha1.SiteSpec{Name: "dfw", ServerID: 103})
+	missing.Status.Sites = append(missing.Status.Sites, v1alpha1.SiteStatus{Name: "old", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy})
+	if got, _ := running(missing); got {
+		t.Error("replicationRunning with a spec site that has no status entry")
 	}
 }

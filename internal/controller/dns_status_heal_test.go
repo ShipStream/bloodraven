@@ -100,8 +100,8 @@ func TestUpdateCRStatus_DeniedWriteReturnsErrorThenHeals(t *testing.T) {
 	if healed.Status.ActiveSite != "dc1" {
 		t.Errorf("status did not heal: ActiveSite=%q want dc1", healed.Status.ActiveSite)
 	}
-	if healed.Status.LastFailoverTarget != "dc1" {
-		t.Errorf("lastFailoverTarget did not heal: got %q want dc1", healed.Status.LastFailoverTarget)
+	if healed.Status.LastFailoverTarget() != "dc1" {
+		t.Errorf("lastFailoverTarget did not heal: got %q want dc1", healed.Status.LastFailoverTarget())
 	}
 }
 

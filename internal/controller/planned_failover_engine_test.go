@@ -376,8 +376,8 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, events: []string{"PlannedFailoverSucceeded"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					st := h.fg().Status
-					if st.LastFailover == nil || st.LastFailoverTarget != "pdx" || st.PromotionGtidExecuted != "uuid-iad:1-10" {
-						t.Errorf("failover record = %v %q %q", st.LastFailover, st.LastFailoverTarget, st.PromotionGtidExecuted)
+					if st.LastFailoverTime() == nil || st.LastFailoverTarget() != "pdx" || st.PromotionGtidExecuted() != "uuid-iad:1-10" {
+						t.Errorf("failover record = %v %q %q", st.LastFailover, st.LastFailoverTarget(), st.PromotionGtidExecuted())
 					}
 					if len(h.sink.terminals) != 1 || labels.PlannedFailoverResult(h.sink.terminals[0].Outcome) != "succeeded" {
 						t.Errorf("terminals = %+v", h.sink.terminals)
@@ -390,15 +390,15 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 				// plausible later record (K023 lets only an implausibly
 				// future-dated one be written over).
 				later := metav1.NewTime(h.clk.Now().Add(2 * time.Minute))
-				fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted = &later, "iad", "newer"
+				fg.Status.SetLastFailover(&later, "iad", "newer")
 				if err := h.c.Status().Update(t.Context(), fg); err != nil {
 					t.Fatal(err)
 				}
 			},
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded,
 				check: func(t *testing.T, h *pfEngineHarness) {
-					if st := h.fg().Status; st.LastFailoverTarget != "iad" || st.PromotionGtidExecuted != "newer" {
-						t.Errorf("an older run record replaced a newer one: %q %q", st.LastFailoverTarget, st.PromotionGtidExecuted)
+					if st := h.fg().Status; st.LastFailoverTarget() != "iad" || st.PromotionGtidExecuted() != "newer" {
+						t.Errorf("an older run record replaced a newer one: %q %q", st.LastFailoverTarget(), st.PromotionGtidExecuted())
 					}
 				}}},
 	}
@@ -457,7 +457,7 @@ func TestPlannedFailoverEngine_DeferredCooldown(t *testing.T) {
 	fg := plannedFailoverFG("pdx")
 	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: v1alpha1.PlannedFailoverCooldownDefer}
 	recent := metav1.NewTime(time.Date(2026, 11, 4, 11, 58, 0, 0, time.UTC))
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &recent, "iad"
+	fg.Status.SetLastFailover(&recent, "iad", "")
 	h := newPFEngineHarness(t, fg)
 	h.step()
 	pf := h.pf()

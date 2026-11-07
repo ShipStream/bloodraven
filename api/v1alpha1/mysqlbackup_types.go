@@ -12,7 +12,7 @@ import (
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Started",type=date,JSONPath=`.status.startTime`
 // +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=`.status.completionTime`
-// +kubebuilder:printcolumn:name="Location",type=string,JSONPath=`.status.location`,priority=1
+// +kubebuilder:printcolumn:name="Location",type=string,JSONPath=`.status.artifactStorage.location`,priority=1
 // +kubebuilder:printcolumn:name="Size",type=string,JSONPath=`.status.size`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!self.metadata.name.endsWith('.bloodraven-backup.json')",message="metadata.name must not end in .bloodraven-backup.json: that is the backup stamp's key suffix, and the dump location ends in the backup's name"
@@ -123,26 +123,16 @@ type MysqlBackupStatus struct {
 	// +optional
 	SourceSite string `json:"sourceSite,omitempty"`
 
-	// Location is the resolved URL/path of the backup artifact, e.g.
-	// "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
-	// +optional
-	Location string `json:"location,omitempty"`
-
-	// StorageType is the storage backend kind (S3 or PVC) that was used
-	// for this backup. Populated at Job creation time so cleanup logic
-	// can dispatch on it without resorting to a brittle location
-	// heuristic after the referenced profile is gone.
-	// +optional
-	StorageType BackupStorageType `json:"storageType,omitempty"`
-
 	// ArtifactStorage records the storage destination the producing Job
-	// wrote to: the exact artifact location, plus bucket, endpoint and
-	// region for S3 or the claim for PVC. It is captured from the Job when
-	// the Job is created and never follows later profile edits, so artifact
-	// cleanup cannot be redirected to another bucket, claim or prefix. Once
-	// its location is recorded it is immutable. Credentials are
-	// deliberately not recorded: cleanup reads them from the profile's
-	// current credentialsSecretName.
+	// wrote to: the storage type and the exact artifact location, plus
+	// bucket, endpoint and region for S3 or the claim for PVC. It is
+	// captured from the Job when the Job is created and never follows later
+	// profile edits, so restores, verifications and artifact cleanup cannot
+	// be redirected to another bucket, claim or prefix. Once its location is
+	// recorded it is immutable. Credentials are deliberately not recorded:
+	// consumers read them from the profile's current credentialsSecretName.
+	// Durable: after the producing Job is gone it is the only record of
+	// where the artifact is and which key encrypted it.
 	// +optional
 	ArtifactStorage *BackupArtifactStorage `json:"artifactStorage,omitempty"`
 
@@ -162,14 +152,11 @@ type MysqlBackupStatus struct {
 	// +optional
 	GtidExecuted string `json:"gtidExecuted,omitempty"`
 
-	// BinlogFile is the binary log file name at dump time. Populated
-	// alongside BinlogPos for pre-GTID point-in-time tooling.
+	// BinlogPosition is the binary-log position at dump time, for
+	// pre-GTID point-in-time tooling. Unset when the dump did not report
+	// one.
 	// +optional
-	BinlogFile string `json:"binlogFile,omitempty"`
-
-	// BinlogPos is the binary log position at dump time.
-	// +optional
-	BinlogPos int64 `json:"binlogPos,omitempty"`
+	BinlogPosition *BinlogCoordinate `json:"binlogPosition,omitempty"`
 
 	// MysqlImage is the resolved MySQL server image (spec.image, or the
 	// controller default) that was in use on the source failover group
@@ -195,32 +182,27 @@ type MysqlBackupStatus struct {
 	// +optional
 	Attempt int32 `json:"attempt,omitempty"`
 
-	// Encrypted records whether the artifact at Location was encrypted
-	// at rest by the operator. True when the driving profile had
-	// spec.backup.profiles[].encryption set at the time the backup was
-	// taken. The restore side uses this flag to decide whether to run
-	// the decrypt init container; it is also useful as a compliance-
-	// audit trail for "prove every production backup was encrypted".
+	// Encryption attributes the artifact's encryption: Passphrase when the
+	// producing Job encrypted it (artifactStorage.passphraseSecretKeyRef
+	// names the key), None when it wrote plaintext. It is written from the
+	// owned producing Job when the Job is created, and derived again from
+	// that Job at completion. Absent when no owned producing Job attributes
+	// it. Restores and verifications use it to decide whether to decrypt.
 	// +optional
-	Encrypted bool `json:"encrypted,omitempty"`
-
-	// EncryptionAlgorithm is the algorithm identifier stamped onto the
-	// artifact header (e.g. "AES-256-GCM"). Empty on unencrypted
-	// artifacts. Forward-compat field — a future release that adds a
-	// second algorithm can dispatch on this rather than re-reading the
-	// header from storage.
-	// +optional
-	EncryptionAlgorithm string `json:"encryptionAlgorithm,omitempty"`
+	Encryption *BackupEncryptionStatus `json:"encryption,omitempty"`
 
 	// FailoverGroupUID is the metadata.uid of the source failover group,
 	// pinned in the backup Job's template when the Job is created and
 	// recovered from the Job. The backup's stamp records the same UID.
+	// Durable: after the producing Job is gone it is the only record of
+	// which group incarnation produced the artifact.
 	// +optional
 	FailoverGroupUID types.UID `json:"failoverGroupUID,omitempty"`
 
 	// PITRArchiveID is the archive ID of the source group's active PITR
 	// archive when the Job was created, pinned in the Job's template and
 	// recovered from it. Empty when PITR was disabled.
+	// Durable: PITR replay and binlog retention select the archive by it.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^(ar1-[a-z2-7]{26})?$`
 	PITRArchiveID string `json:"pitrArchiveID,omitempty"`
@@ -242,13 +224,28 @@ type MysqlBackupStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// BackupEncryptionStatus attributes a backup artifact's encryption.
+type BackupEncryptionStatus struct {
+	// Mode is Passphrase for an encrypted artifact and None for plaintext.
+	// +required
+	Mode EncryptionMode `json:"mode"`
+
+	// Algorithm is the algorithm stamped onto the artifact header; empty
+	// for None.
+	// +optional
+	Algorithm EncryptionAlgorithm `json:"algorithm,omitempty"`
+}
+
 // BackupArtifactStorage is the immutable storage destination of a backup
 // artifact. Immutability is enforced from the MysqlBackup root, so removing
 // the whole status does not bypass it.
 type BackupArtifactStorage struct {
-	// Location is the artifact location the producing Job wrote, in the
-	// form of MysqlBackupStatus.Location. Cleanup refuses to run unless the
-	// two are identical.
+	// Type is the storage backend the producing Job wrote to.
+	// +required
+	Type BackupStorageType `json:"type"`
+
+	// Location is the artifact location the producing Job wrote, e.g.
+	// "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
 	// +optional
 	Location string `json:"location,omitempty"`
 	// Bucket is the S3 bucket the artifact was written to.

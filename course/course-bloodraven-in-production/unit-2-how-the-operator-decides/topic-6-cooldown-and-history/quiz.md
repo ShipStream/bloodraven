@@ -36,7 +36,7 @@ The ordered-update handoff is a separate promotion path with no cooldown check a
 
 **Type:** MULTIPLE_CHOICE
 
-The operator restarts. `status.lastFailover` reads `10:04:00Z`, the `bloodraven.shipstream.io/last-failover` annotation reads `10:06:00Z`, and the local clock is `10:07:00Z`. Which record does the restarted operator install as its cooldown baseline?
+The operator restarts. `status.lastFailover.time` reads `10:04:00Z`, the `bloodraven.shipstream.io/last-failover` annotation reads `10:06:00Z`, and the local clock is `10:07:00Z`. Which record does the restarted operator install as its cooldown baseline?
 
 - The status copy, because status is the authoritative subresource and the annotations are only a fallback
 - The annotation copy at `10:06:00Z`, because rehydration takes whichever copy is stamped later
@@ -53,7 +53,7 @@ Rehydration takes the later of the two, because the two paths fail independently
 
 **Type:** SHORT_ANSWER
 
-Every site in `playground` is read-only, no site is unreachable, and `lastFailoverTarget` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?
+Every site in `playground` is read-only, no site is unreachable, and `status.lastFailover.target` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?
 
 **Sample answer:**
 

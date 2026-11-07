@@ -314,8 +314,8 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 	if !pitrarchive.ValidArchiveID(fields["archive"]) {
 		return nil, fmt.Errorf("PITR verdict archive %q is malformed", fields["archive"])
 	}
-	mode := v1alpha1.PITRArchiveEncryptionMode(fields["encryptionMode"])
-	if mode != v1alpha1.PITRArchiveEncryptionNone && mode != v1alpha1.PITRArchiveEncryptionPassphrase {
+	mode := v1alpha1.EncryptionMode(fields["encryptionMode"])
+	if mode != v1alpha1.EncryptionModeNone && mode != v1alpha1.EncryptionModePassphrase {
 		return nil, fmt.Errorf("PITR verdict encryption mode %q is invalid", mode)
 	}
 	if req.EncryptionMode != "" && string(mode) != req.EncryptionMode {
@@ -338,7 +338,7 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		Source:         v1alpha1.PITRArchiveSource{Namespace: fields["sourceNamespace"], Name: fields["sourceName"], UID: types.UID(fields["sourceUID"])},
 		EncryptionMode: mode,
 	}
-	if mode == v1alpha1.PITRArchiveEncryptionPassphrase {
+	if mode == v1alpha1.EncryptionModePassphrase {
 		archive.Algorithm = v1alpha1.EncryptionAlgorithmAES256GCM
 	}
 	res.Archive = archive

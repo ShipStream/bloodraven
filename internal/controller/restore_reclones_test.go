@@ -338,7 +338,7 @@ func TestRestoreReclone_StalledRequestMovesOn(t *testing.T) {
 	// has not watched it sit unstarted yet (as after an operator restart,
 	// while the new topology manager picks the annotation up again).
 	old := metav1.NewTime(time.Now().Add(-2 * restoreRecloneStartTimeout))
-	fg.Status.RestoreReclones.RequestedAt = &old
+	fg.Status.RestoreReclones.RequestTime = &old
 	if err := c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestRestoreReclone_CompletedCloneAwaitingCallbackIsNotStalled(t *testing.T)
 
 	reconcileRestoreStep(t, r, fg)
 	old := metav1.NewTime(time.Now().Add(-2 * restoreRecloneStartTimeout))
-	fg.Status.RestoreReclones.RequestedAt = &old
+	fg.Status.RestoreReclones.RequestTime = &old
 	if err := c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +793,7 @@ func TestSyncPodLabels_QueuedRecloneSiteServesNoReads(t *testing.T) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Sites = []v1alpha1.SiteStatus{
 				{Name: "dc1", State: v1alpha1.SiteStateWritable},
-				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true, SecondsBehindSource: &lag0},
+				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag0},
 			}
 			if tc.queued {
 				fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{

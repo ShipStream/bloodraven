@@ -17,26 +17,34 @@ import (
 // current state of a single failover group. It is sent to all connected
 // /ws/status clients on every poll cycle.
 type TopologyMessage struct {
-	Namespace             string         `json:"namespace"`
-	Group                 string         `json:"group"`
-	ActiveSite            string         `json:"activeSite"`
-	Sites                 []TopologySite `json:"sites"`
-	LastFailover          string         `json:"lastFailover,omitempty"`
-	LastFailoverTarget    string         `json:"lastFailoverTarget,omitempty"`
-	Alert                 string         `json:"alert,omitempty"`
-	UpdatePhase           string         `json:"updatePhase,omitempty"`
-	PollTime              string         `json:"pollTime"`
-	PromotionGtidExecuted string         `json:"promotionGtidExecuted,omitempty"`
+	Namespace    string          `json:"namespace"`
+	Group        string          `json:"group"`
+	ActiveSite   string          `json:"activeSite"`
+	Sites        []TopologySite  `json:"sites"`
+	LastFailover *FailoverRecord `json:"lastFailover,omitempty"`
+	Alert        string          `json:"alert,omitempty"`
+	UpdatePhase  string          `json:"updatePhase,omitempty"`
+	PollTime     string          `json:"pollTime"`
 }
 
-// TopologySite is a single site entry inside a TopologyMessage. Role and
-// State carry the CR values (spec.sites[].role, status.sites[].state).
+// FailoverRecord is the most recent failover, in the shape of the CR's
+// status.lastFailover: when it was recorded (RFC 3339), the site it
+// promoted, and that site's GTID set at promotion.
+type FailoverRecord struct {
+	Time                  string `json:"time,omitempty"`
+	Target                string `json:"target,omitempty"`
+	PromotionGtidExecuted string `json:"promotionGtidExecuted,omitempty"`
+}
+
+// TopologySite is a single site entry inside a TopologyMessage. Role,
+// State and Replication carry the CR values (spec.sites[].role,
+// status.sites[].state, status.sites[].replication).
 type TopologySite struct {
 	Name                      string `json:"name"`
 	Role                      string `json:"role,omitempty"`
 	State                     string `json:"state"`
-	LastSeen                  string `json:"lastSeen,omitempty"`
-	Replicating               bool   `json:"replicating"`
+	LastSeenTime              string `json:"lastSeenTime,omitempty"`
+	Replication               string `json:"replication"`
 	SecondsBehindSource       *int64 `json:"secondsBehindSource,omitempty"`
 	GtidExecuted              string `json:"gtidExecuted,omitempty"`
 	RecoveryState             string `json:"recoveryState,omitempty"`

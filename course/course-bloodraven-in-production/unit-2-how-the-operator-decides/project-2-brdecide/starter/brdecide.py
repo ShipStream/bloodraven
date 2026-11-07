@@ -268,11 +268,11 @@ def observations_from(group: dict) -> list[Observation]:
 
 def read_history(group: dict):
     """Return the two durable copies as ((ts, target), (ts, target))."""
-    status = group.get("status", {})
+    record = group.get("status", {}).get("lastFailover") or {}
     annotations = group.get("metadata", {}).get("annotations", {}) or {}
     status_record = (
-        parse_rfc3339(status.get("lastFailover")),
-        status.get("lastFailoverTarget") or None,
+        parse_rfc3339(record.get("time")),
+        record.get("target") or None,
     )
     annotation_record = (
         parse_rfc3339(annotations.get(LAST_FAILOVER_ANNOTATION)),

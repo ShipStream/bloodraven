@@ -26,7 +26,7 @@ func init() {
 //
 // This regression matters operationally because
 // internal/controller/planned_failover.go reads
-// `targetStatus.Replicating` directly as a safety check, so any
+// `targetStatus.Replication.Running()` directly as a safety check, so any
 // planned switchover after the first chaos event in the same operator
 // lifecycle is rejected as TargetUnhealthy even though replication is
 // fine on the wire.
@@ -179,9 +179,9 @@ func s22VerifyCRReplicatingTrue() runner.Step {
 					if replica == nil {
 						return false, "no read-only site present", nil
 					}
-					msg := fmt.Sprintf("site=%s state=%s replicating=%v gtidExecuted=%q",
-						replica.Name, replica.State, replica.Replicating, replica.GtidExecuted)
-					return replica.Replicating, msg, nil
+					msg := fmt.Sprintf("site=%s state=%s replication=%s gtidExecuted=%q",
+						replica.Name, replica.State, replica.Replication, replica.GtidExecuted)
+					return replica.Replication.Running(), msg, nil
 				},
 			)
 			return err

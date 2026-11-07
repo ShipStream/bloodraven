@@ -401,7 +401,7 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 		if reason, ok := sourceConvergenceUnstableReasons[s.SourceConvergenceState]; ok {
 			return reason
 		}
-		if s.Name != fg.Status.ActiveSite && !s.Replicating {
+		if s.Name != fg.Status.ActiveSite && !s.Replication.Running() {
 			return v1alpha1.UnstableReasonReplicationNotRunning
 		}
 	}

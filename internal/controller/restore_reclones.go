@@ -190,7 +190,7 @@ func (r *MysqlFailoverGroupReconciler) restoreReclonesReadyForNewRestore(ctx con
 		if fq == nil || fq.Requested != requested {
 			return false
 		}
-		fq.Requested, fq.RequestedAt = "", nil
+		fq.Requested, fq.RequestTime = "", nil
 		return true
 	}); err != nil {
 		return "", err
@@ -400,7 +400,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 			fq.Pending = slices.DeleteFunc(fq.Pending, func(site string) bool { return !specDeclaresSite(fresh, site) })
 			fq.Failures = slices.DeleteFunc(fq.Failures, func(f v1alpha1.RestoreRecloneFailure) bool { return !slices.Contains(fq.Pending, f.Site) })
 			if fq.Requested != "" && !slices.Contains(fq.Pending, fq.Requested) {
-				fq.Requested, fq.RequestedAt = "", nil
+				fq.Requested, fq.RequestTime = "", nil
 			}
 			return len(fq.Pending) != before
 		}); err != nil {
@@ -498,7 +498,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 			return false
 		}
 		now := metav1.Now()
-		fq.Requested, fq.RequestedAt = head, &now
+		fq.Requested, fq.RequestTime = head, &now
 		return true
 	})
 	if err != nil || !claimed {
@@ -521,7 +521,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 			if fq == nil || fq.Requested != head {
 				return false
 			}
-			fq.Requested, fq.RequestedAt = "", nil
+			fq.Requested, fq.RequestTime = "", nil
 			return true
 		}); err != nil {
 			return 0, err
@@ -546,12 +546,12 @@ const restoreRecloneStartTimeout = 10 * time.Minute
 // manager starting it. With no manager to ask it is never stalled.
 //
 // The wait is measured from when this process first saw the request not
-// running, not from the durable requestedAt: after an operator restart a
+// running, not from the durable requestTime: after an operator restart a
 // clone that ran for an hour looks unstarted until the new topology
 // manager picks the annotation up again, and must get the full timeout.
 // Seeing the clone running resets the wait.
 func (r *MysqlFailoverGroupReconciler) restoreRecloneStalled(fg *v1alpha1.MysqlFailoverGroup, q *v1alpha1.RestoreReclonesStatus) bool {
-	if q.RequestedAt == nil || time.Since(q.RequestedAt.Time) < restoreRecloneStartTimeout || r.Runner == nil {
+	if q.RequestTime == nil || time.Since(q.RequestTime.Time) < restoreRecloneStartTimeout || r.Runner == nil {
 		return false
 	}
 	nn := client.ObjectKeyFromObject(fg)
@@ -559,7 +559,7 @@ func (r *MysqlFailoverGroupReconciler) restoreRecloneStalled(fg *v1alpha1.MysqlF
 	if !known {
 		return false
 	}
-	key := restoreRecloneWait{site: q.Requested, requestedAt: q.RequestedAt.Time}
+	key := restoreRecloneWait{site: q.Requested, requestedAt: q.RequestTime.Time}
 	r.restoreRecloneMu.Lock()
 	defer r.restoreRecloneMu.Unlock()
 	if inProgress {
@@ -594,7 +594,7 @@ func (r *MysqlFailoverGroupReconciler) failRestoreRecloneRequest(ctx context.Con
 		if fq == nil || fq.Requested != site {
 			return false
 		}
-		fq.Requested, fq.RequestedAt = "", nil
+		fq.Requested, fq.RequestTime = "", nil
 		setRecloneFailure(fq, site, msg, metav1.Now())
 		return true
 	})
@@ -1018,7 +1018,7 @@ func (r *TopologyManagerRunner) recordRestoreRecloneOutcome(ctx context.Context,
 		if q == nil || q.Requested != site {
 			return nil
 		}
-		q.Requested, q.RequestedAt = "", nil
+		q.Requested, q.RequestTime = "", nil
 		switch {
 		case outcome.Owner != q.ConfirmToken:
 			// A clone this queue did not start used up its request (an

@@ -25,8 +25,8 @@ func plannedFailoverFG(annotationValue string) *v1alpha1.MysqlFailoverGroup {
 	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: 5 * time.Minute}
 	fg.Status.ActiveSite = "iad"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: v1alpha1.SiteStateWritable, Replicating: false},
-		{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+		{Name: "iad", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
+		{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 	}
 	if annotationValue != "" {
 		fg.SetAnnotations(map[string]string{
@@ -165,7 +165,7 @@ func TestReconcilePlannedFailover_RejectUnknownSite(t *testing.T) {
 func TestReconcilePlannedFailover_CooldownRejectDefault(t *testing.T) {
 	fg := plannedFailoverFG("pdx")
 	last := metav1.NewTime(time.Now().Add(-time.Minute))
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &last, "iad"
+	fg.Status.SetLastFailover(&last, "iad", "")
 	r, _ := pfReconciler(t, fg)
 	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -300,7 +300,7 @@ func TestCooldownRetryAfter(t *testing.T) {
 		t.Error("no lastFailover: want zero time")
 	}
 	last := metav1.NewTime(time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC))
-	fg.Status.LastFailover = &last
+	fg.Status.SetLastFailover(&last, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
 	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: 10 * time.Minute}
 	want := last.Time.Add(10 * time.Minute)
 	if got := cooldownRetryAfter(fg, last.Time); !got.Equal(want) {

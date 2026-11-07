@@ -31,7 +31,7 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 	if err := k8sClient.Create(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, Location: "prod_backups/a", StorageType: v1alpha1.BackupStorageS3, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
+	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "prod_backups/a", Bucket: "bloodraven"}, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
 	if err := k8sClient.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +47,14 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 		}
 		return v.Status.Phase == v1alpha1.VerificationPhaseProvisioning
 	})
-	want := &v1alpha1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), Location: a.Status.Location, StorageType: a.Status.StorageType}
+	want := &v1alpha1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), ArtifactStorage: a.Status.ArtifactStorage.DeepCopy()}
 	b := newSucceededBackup(ns, fg.Name, "nightly-s3")
 	b.Name = "backup-b"
 	if err := k8sClient.Create(ctx, b); err != nil {
 		t.Fatal(err)
 	}
-	b.Status = a.Status
-	b.Status.Location = "prod_backups/b"
+	b.Status = *a.Status.DeepCopy()
+	b.Status.ArtifactStorage.Location = "prod_backups/b"
 	b.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 	if err := k8sClient.Status().Update(ctx, b); err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestEnvtest_VerificationRejectsRecreatedSourceBeforeLaunch(t *testing.T) {
 	if err := k8sClient.Create(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, Location: "prod_backups/a", StorageType: v1alpha1.BackupStorageS3, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
+	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "prod_backups/a", Bucket: "bloodraven"}, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
 	if err := k8sClient.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}

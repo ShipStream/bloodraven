@@ -216,7 +216,6 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 
 	now := metav1.Now()
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{{
 			Name:           "dc1",
 			Phase:          v1alpha1.KeyringPhaseSealed,
@@ -226,12 +225,12 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 			LastEscrowTime: &now,
 			Coverage: &v1alpha1.SiteEncryptionCoverage{
 				KeyringComponent:          "component_keyring_file",
-				KeyringReadOnly:           true,
-				SystemTablespaceEncrypted: true,
+				KeyringReadOnly:           new(true),
+				SystemTablespaceEncrypted: new(true),
 				UnencryptedTablespaces:    7,
-				RedoLogEncrypted:          true,
-				UndoLogEncrypted:          true,
-				BinlogEncrypted:           true,
+				RedoLogEncrypted:          new(true),
+				UndoLogEncrypted:          new(true),
+				BinlogEncrypted:           nil, // not reported: stays unset, never false
 				LastCheckTime:             &now,
 			},
 		}},
@@ -245,14 +244,14 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	st := got.Status.EncryptionAtRest
-	if st == nil || !st.Sealed || len(st.Sites) != 1 {
+	if st == nil || len(st.Sites) != 1 {
 		t.Fatalf("status did not round-trip: %+v", st)
 	}
 	s := st.Sites[0]
 	if s.Phase != v1alpha1.KeyringPhaseSealed || s.KeyringVersion != 3 || s.KeyringDigest != "sha256:abc123" {
 		t.Errorf("site status = %+v", s)
 	}
-	if s.Coverage == nil || s.Coverage.UnencryptedTablespaces != 7 || !s.Coverage.KeyringReadOnly {
+	if c := s.Coverage; c == nil || c.UnencryptedTablespaces != 7 || c.KeyringReadOnly == nil || !*c.KeyringReadOnly || c.BinlogEncrypted != nil {
 		t.Errorf("coverage = %+v", s.Coverage)
 	}
 	if !got.SiteKeyringSealed("dc1") {
@@ -307,7 +306,6 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 			t.Fatalf("create: %v", err)
 		}
 		fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-			Sealed: true,
 			Sites: []v1alpha1.SiteEncryptionStatus{
 				{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed, Message: "rotation deferred: an ordered update is in flight"},
 				{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed},
@@ -321,7 +319,6 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 		stale = fg.DeepCopy()
 		stale.Status.EncryptionAtRest.Sites[1].Phase = v1alpha1.KeyringPhaseUnsealed
 		stale.Status.EncryptionAtRest.Sites[1].UnsealReason = v1alpha1.UnsealReasonRotation
-		stale.Status.EncryptionAtRest.Sealed = false
 
 		// A later pass reproduces the persisted status: success, same
 		// resourceVersion.

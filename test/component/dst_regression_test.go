@@ -729,7 +729,7 @@ func TestDSTPF_RetiredManagerHandoffReachesReplacement(t *testing.T) {
 		t.Fatalf("the replacement made dc1 writable %s after the handoff, inside the 10m cooldown; dc1 statements %v",
 			15*time.Second, h.src.statements())
 	}
-	if got := h.store.Object().Status.LastFailoverTarget; got != "dc2" {
+	if got := h.store.Object().Status.LastFailoverTarget(); got != "dc2" {
 		t.Fatalf("status.lastFailoverTarget = %q, want the carried handoff target dc2", got)
 	}
 }

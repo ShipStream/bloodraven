@@ -130,10 +130,7 @@ func (nopTB) Fatalf(f string, args ...any) { panic(f) }
 // dump key an encrypted backup was written with: the "backup-passphrase"
 // Secret's "passphrase" key, which the encrypted fixtures' profile names.
 func recordTestDumpKey(b *v1alpha1.MysqlBackup) {
-	if b.Status.ArtifactStorage == nil {
-		b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{}
-	}
-	b.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"}
+	ensureTestArtifact(b).PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"}
 }
 
 // siteDeploy is fg's site Deployment carrying render (nil: no annotation;

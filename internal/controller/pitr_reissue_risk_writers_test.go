@@ -133,7 +133,7 @@ func TestPITRArchiveReissueRiskAfterPersistedNoPrimary(t *testing.T) {
 			fg.Status.TopologyGeneration = 5
 			if tc.failedOver {
 				at := metav1.Now()
-				fg.Status.LastFailover, fg.Status.LastFailoverTarget = &at, "iad"
+				fg.Status.SetLastFailover(&at, "iad", "")
 			}
 			nn := client.ObjectKeyFromObject(fg)
 			c := fake.NewClientBuilder().WithScheme(testScheme()).

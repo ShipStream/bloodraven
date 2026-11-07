@@ -578,6 +578,7 @@ spec:
                   next apply, and deletion revokes the union of the current list and
                   this record. spec.users[] principals are tracked separately in
                   AppliedUsers, which pairs each username with its Secret.
+                  Durable: a grant missing from it is never revoked.
                 items:
                   type: string
                 type: array
@@ -594,6 +595,7 @@ spec:
                   created. Entries whose secretName has left the spec are dropped from
                   MySQL and then removed here. Usernames only; never any credential
                   material.
+                  Durable: it is what authorizes DROP USER for spec.users[] accounts.
                 items:
                   description: |-
                     MysqlDatabaseUserState is one spec.users[] ledger entry — the users[]
@@ -727,6 +729,7 @@ spec:
                   CR that failed before any SQL (invalid spec, reserved owner,
                   ownership conflict, unreachable primary) must not drop a database
                   something else created under the same name.
+                  Durable: a lost record makes deletion leave the database behind.
                 type: boolean
               lastAppliedHash:
                 description: |-
@@ -762,6 +765,8 @@ spec:
                   its hosts) — and settled to the current list by the Ready stamp. Host
                   removal and deletion drop OwnerUser off exactly these hosts. Empty
                   means the pre-hosts default, ["%"].
+                  Durable: host removal and deletion drop the owner only on these
+                  hosts.
                 items:
                   type: string
                 type: array
@@ -773,6 +778,8 @@ spec:
                   applies. During a username rotation it keeps the previous name until
                   the old account has actually been dropped. The password is never
                   echoed anywhere.
+                  Durable: it is the only attribution of the owner account; a lost
+                  record leaves the account behind at deletion.
                 type: string
               pendingOwnerHosts:
                 description: |-
@@ -783,6 +790,7 @@ spec:
                   drop an unrelated same-named account. Non-empty only while
                   PendingOwnerUser is set; empty with PendingOwnerUser set is the
                   shape an older operator wrote, and falls back to OwnerHosts.
+                  Durable: see OwnerHosts.
                 items:
                   type: string
                 type: array
@@ -799,6 +807,7 @@ spec:
                   gate would see an account it cannot attribute and wedge the CR on
                   PreExistingOwnerUser for a user it created itself. Deletion treats
                   it as an owner candidate for the same reason.
+                  Durable: see OwnerUser.
                 type: string
               phase:
                 description: Phase is the lifecycle phase of this database.

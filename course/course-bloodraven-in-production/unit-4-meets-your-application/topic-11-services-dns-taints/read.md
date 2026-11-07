@@ -33,7 +33,7 @@ and `shipstream.io/healthy=yes`. The operator stamps `role` and `healthy` onto t
 reconcile; the Services never change, only the labels underneath them.
 
 For a `role: ReadOnly` reader site, that `healthy=yes` stamp is expensive. Five conjuncts must **all**
-hold: source convergence is `converged`; `replicating` is true; `secondsBehindSource` is non-nil; the
+hold: source convergence is `converged`; `replication` is `Healthy` or `Lagging`; `secondsBehindSource` is non-nil; the
 reported source host canonically matches the active site's internal per-site Service — a *direct*
 source, so a replication chain does not count; and the lag is within
 `EffectiveReadOnlyMaxLagSeconds()`. That last one has no default: nil inherits `maxLagSeconds`

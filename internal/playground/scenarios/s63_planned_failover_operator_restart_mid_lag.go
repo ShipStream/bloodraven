@@ -150,7 +150,7 @@ func s63PrepareBacklogAndAnnotate() runner.Step {
 				s63KeySource:        source,
 				s63KeyTarget:        target,
 				s63KeyBaselineRunID: baselineRunID,
-				s63KeyBaselineLFT:   mfg.Status.LastFailoverTarget,
+				s63KeyBaselineLFT:   mfg.Status.LastFailoverTarget(),
 			} {
 				if err := ctxStash(ctx, env, k, v); err != nil {
 					return err
@@ -435,7 +435,7 @@ func s63HoldViolation(mfg *v1alpha1.MysqlFailoverGroup, runID, target, baselineL
 	if mfg.Status.ActiveSite == target {
 		return fmt.Errorf("status.activeSite=%q while run %s was held: the target was promoted outside the run", target, runID)
 	}
-	if lft := mfg.Status.LastFailoverTarget; lft != baselineLastFailoverTarget {
+	if lft := mfg.Status.LastFailoverTarget(); lft != baselineLastFailoverTarget {
 		return fmt.Errorf("status.lastFailoverTarget changed %q -> %q while run %s was held", baselineLastFailoverTarget, lft, runID)
 	}
 	return nil

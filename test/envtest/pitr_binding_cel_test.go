@@ -854,7 +854,7 @@ func pitrBindingFixture(i int, destination string) v1alpha1.PITRArchiveBinding {
 		ArchiveID:   "ar1-" + strings.Repeat("a", 26),
 		Source:      &v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "lion", UID: "0a1b2c3d-0000-4000-8000-000000000001"},
 		Encryption: v1alpha1.PITRArchiveBindingEncryption{
-			Mode:          v1alpha1.PITRArchiveEncryptionPassphrase,
+			Mode:          v1alpha1.EncryptionModePassphrase,
 			Algorithm:     v1alpha1.EncryptionAlgorithmAES256GCM,
 			KeySecretName: fmt.Sprintf("mysql-lion-pitr-key-%010x", i),
 		},

@@ -39,7 +39,7 @@ func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroup
 			ActiveSite: "dc1", TopologyGeneration: 7,
 			Sites: []v1alpha1.SiteStatus{
 				{Name: "dc1", State: v1alpha1.SiteStateWritable},
-				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 			},
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.NewTime(clk.Now())}},
 		},
@@ -151,7 +151,7 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 			clk.Advance(time.Nanosecond)
 			assertHeld(later)
 			if unhealthy {
-				fg.Status.Sites[1].Replicating = false
+				fg.Status.Sites[1].Replication = v1alpha1.SiteReplicationBroken
 				if err := r.Status().Update(ctx, fg); err != nil {
 					t.Fatal(err)
 				}

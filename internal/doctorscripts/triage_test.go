@@ -154,3 +154,31 @@ func TestTriageReportsHolds(t *testing.T) {
 		}
 	}
 }
+
+// triage.sh reads the current status shape: the lastFailover record, the
+// sites[].replication enum, the EncryptionAtRestReady condition and the
+// backups' status.artifactStorage. Each rule matches only the new path, so
+// a script still reading an old field prints nothing for it.
+func TestTriageReadsCurrentStatusShape(t *testing.T) {
+	e := newRuleEnv(t)
+	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o json", "{}", false)
+	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath={.status.lastFailover.time}{\" target=\"}{.status.lastFailover.target}", "2026-11-05T10:00:00Z target=dc2", false)
+	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath=*Replication: {.replication}*", "Site: dc1\n  Replication: Lagging\n", false)
+	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath=*EncryptionAtRestReady*", "True AllSitesSealed: all sites sealed", false)
+	e.rule(t, "get mysqlbackups -n orders -l shipstream.io/failover-group=lion -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,LOCATION:.status.artifactStorage.location,BUCKET:*",
+		"NAME   DELETING   LOCATION\nb1     <none>     s3://bucket/lion/b1\n", false)
+	out, err := e.run(t, scriptPath("triage.sh"), "-n", "orders", "lion")
+	if err != nil {
+		t.Fatalf("triage.sh failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"Last Failover:       2026-11-05T10:00:00Z target=dc2",
+		"Replication: Lagging",
+		"EncryptionAtRestReady: True AllSitesSealed",
+		"s3://bucket/lion/b1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("triage output lacks %q:\n%s", want, out)
+		}
+	}
+}

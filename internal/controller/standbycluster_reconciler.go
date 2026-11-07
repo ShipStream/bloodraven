@@ -1064,7 +1064,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 			Name:      desc.Source.Name,
 			UID:       desc.Source.UID,
 		},
-		EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(desc.Encryption.Mode),
+		EncryptionMode: v1alpha1.EncryptionMode(desc.Encryption.Mode),
 		Algorithm:      v1alpha1.EncryptionAlgorithm(desc.Encryption.Algorithm),
 	}
 	result.BinlogArchive = &window

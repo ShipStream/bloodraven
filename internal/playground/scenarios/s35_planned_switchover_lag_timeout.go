@@ -71,7 +71,7 @@ func s35InjectDelayMarkerAndAnnotate() runner.Step {
 			if err := ctxStash(ctx, env, "target", target); err != nil {
 				return err
 			}
-			if err := ctxStash(ctx, env, "lastFailoverTargetBefore", mfg.Status.LastFailoverTarget); err != nil {
+			if err := ctxStash(ctx, env, "lastFailoverTargetBefore", mfg.Status.LastFailoverTarget()); err != nil {
 				return err
 			}
 			if err := stashMetricCounter(ctx, env, "plannedFailedTimeoutBefore", "bloodraven_planned_failovers_total",
@@ -198,7 +198,7 @@ func s35VerifySourceStaysActive() runner.Step {
 			if _, err := env.Wait.UntilCR(activeCtx, env.Namespace,
 				fmt.Sprintf("status.activeSite==%s restored as sole writer/active after rollback", source),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					return s35RollbackConverged(mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, source, target)
+					return s35RollbackConverged(mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), source, target)
 				}); err != nil {
 				return fmt.Errorf("source %s not restored as active after rollback: %w", source, err)
 			}

@@ -215,7 +215,7 @@ func TestPlannedFailoverDragonfly_RerunNeverRepeatsTakeover(t *testing.T) {
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
 	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: now}
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "pdx", LastPromotionTarget: "pdx", LastPromotionTime: &now}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "pdx", LastPromotionTarget: "pdx", LastPromotionTime: &now}
 	r, _, _ := pfDFReconciler(t, fg)
 	target := &pfTakeoverConn{fakeDragonflyConn: &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}}
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: &fakeDragonflyConn{}})

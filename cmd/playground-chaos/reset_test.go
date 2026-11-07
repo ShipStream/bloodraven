@@ -176,8 +176,7 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 	// engines write must be cleared by both passes: a leftover
 	// plannedFailoverHold is hydrated as an automation hold on the fresh
 	// cluster (O-m2).
-	for _, f := range []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget",
-		"promotionGtidExecuted", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"} {
+	for _, f := range []string{"activeSite", "sites", "conditions", "lastFailover", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"} {
 		if !slices.Contains(wipe, f) || !slices.Contains(normalize, f) {
 			t.Errorf("status field %q must be cleared by both passes (wipe %v, normalize %v)", f, wipe, normalize)
 		}
@@ -256,8 +255,8 @@ func TestClearMFGFailoverStatusKeepsEncryptionAtRest(t *testing.T) {
 	if !reflect.DeepEqual(got.Status.EncryptionAtRest, mfg.Status.EncryptionAtRest) {
 		t.Fatalf("encryptionAtRest = %+v, want it preserved exactly as %+v", got.Status.EncryptionAtRest, mfg.Status.EncryptionAtRest)
 	}
-	if got.Status.ActiveSite != "" || got.Status.LastFailover != nil || got.Status.LastFailoverTarget != "" ||
-		got.Status.PromotionGtidExecuted != "" || got.Status.PlannedFailover != nil {
+	if got.Status.ActiveSite != "" || got.Status.LastFailoverTime() != nil || got.Status.LastFailoverTarget() != "" ||
+		got.Status.PromotionGtidExecuted() != "" || got.Status.PlannedFailover != nil {
 		t.Fatalf("failover history survived normalization: %+v", got.Status)
 	}
 	for _, a := range []string{v1alpha1.PlannedFailoverAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation} {
@@ -297,13 +296,13 @@ func newStatusResetter(t *testing.T) (*resetter, *v1alpha1.MysqlFailoverGroup) {
 			"unrelated": "kept",
 		}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
-			ActiveSite:            "iad",
-			LastFailover:          &failedOver,
-			LastFailoverTarget:    "iad",
-			PromotionGtidExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5",
-			PlannedFailover:       &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded},
+			ActiveSite: "iad",
+			LastFailover: &v1alpha1.FailoverRecord{
+				FailoverRecordRef:     v1alpha1.FailoverRecordRef{Time: &failedOver, Target: "iad"},
+				PromotionGtidExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5",
+			},
+			PlannedFailover: &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded},
 			EncryptionAtRest: &v1alpha1.EncryptionAtRestStatus{
-				Sealed:             true,
 				ObservedGeneration: 3,
 				Sites: []v1alpha1.SiteEncryptionStatus{
 					{Name: "iad", Phase: v1alpha1.KeyringPhaseSealed, KeyringSecret: "mysql-orders-iad-keyring-v2", KeyringVersion: 2, KeyringDigest: "sha256:aa"},

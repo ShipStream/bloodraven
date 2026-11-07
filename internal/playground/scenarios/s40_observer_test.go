@@ -140,7 +140,7 @@ func TestS40ObserveOnceIgnoresTerminatingServingEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statusSiteByName(mfg, "reader").Replicating = false
+	statusSiteByName(mfg, "reader").Replication = v1alpha1.SiteReplicationBroken
 	if err := env.Kube.Controller.Update(context.Background(), mfg); err != nil {
 		t.Fatal(err)
 	}
@@ -189,11 +189,11 @@ func s40ObserverTestEnv(t *testing.T, clientset *k8sfake.Clientset) (*runner.Env
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
 			Sites: []v1alpha1.SiteStatus{
 				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 				{
 					Name:                   "reader",
 					State:                  v1alpha1.SiteStateReadOnly,
-					Replicating:            true,
+					Replication:            v1alpha1.SiteReplicationHealthy,
 					SecondsBehindSource:    &lag,
 					SourceHost:             playgroundInternalSiteHost(pgkube.FailoverGroupName, "iad", pgkube.PlaygroundNamespace),
 					SourceConvergenceState: v1alpha1.SourceConvergenceConverged,

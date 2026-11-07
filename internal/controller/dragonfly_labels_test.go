@@ -148,7 +148,6 @@ func TestSyncDragonflyPodLabels_HonorsDragonflyOnlyActiveSite(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: "dc2",
 	}
 	dc1Pod := makeDragonflyPod(fg.Name, "dc1", "master", true)

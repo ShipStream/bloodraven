@@ -140,7 +140,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	}
 
 	requeue := time.Duration(0)
-	allSealed := true
 	// rotation records what this pass did with the rotate-keyring request.
 	// The annotation is removed only when the request was consumed: the
 	// rotation completed, or it was refused for good. Anything else, a
@@ -175,9 +174,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		if wantRequeue {
 			requeue = encryptionRequeue
 		}
-		if site.Phase != v1alpha1.KeyringPhaseSealed {
-			allSealed = false
-		}
 		if before.Phase != site.Phase {
 			logger.Info("keyring phase transition",
 				"site", site.Name, "from", before.Phase, "to", site.Phase,
@@ -187,8 +183,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		}
 		publishKeyringMetrics(fg.Namespace, fg.Name, site)
 	}
-
-	st.Sealed = allSealed
 
 	setEncryptionCondition(fg)
 	written, err := r.patchEncryptionStatus(ctx, fg, baseline, false)
@@ -320,7 +314,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 	if site.Phase == "" {
 		site.Phase = v1alpha1.KeyringPhasePending
 		site.UnsealReason = v1alpha1.UnsealReasonBootstrap
-		site.UnsealedSince = &now
+		site.UnsealTime = &now
 		site.Message = "awaiting initial keyring creation"
 	}
 
@@ -380,7 +374,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 		}
 		site.Phase = v1alpha1.KeyringPhaseUnsealed
 		site.UnsealReason = v1alpha1.UnsealReasonRotation
-		site.UnsealedSince = &now
+		site.UnsealTime = &now
 		site.Message = "unsealing for admin-triggered master key rotation"
 		return true, nil
 	}
@@ -431,8 +425,8 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 	now := metav1.Now()
 	if site.Phase != v1alpha1.KeyringPhaseUnsealed && site.Phase != v1alpha1.KeyringPhaseFailed {
 		site.Phase = v1alpha1.KeyringPhaseUnsealed
-		if site.UnsealedSince == nil {
-			site.UnsealedSince = &now
+		if site.UnsealTime == nil {
+			site.UnsealTime = &now
 		}
 	}
 	ready, err := r.deploymentReadyWithUnsealedKeyring(ctx, fg, site.Name)
@@ -595,7 +589,7 @@ func (r *MysqlFailoverGroupReconciler) advanceEscrowedSite(
 
 	site.Phase = v1alpha1.KeyringPhaseSealed
 	site.UnsealReason = ""
-	site.UnsealedSince = nil
+	site.UnsealTime = nil
 	site.Message = fmt.Sprintf("sealed against %s", site.KeyringSecret)
 	applyCoverage(site, live, r.encryptionNow())
 	return false, nil
@@ -681,7 +675,7 @@ func (r *MysqlFailoverGroupReconciler) verifySealedSite(
 		}
 		site.Phase = v1alpha1.KeyringPhaseSealed
 		site.UnsealReason = ""
-		site.UnsealedSince = nil
+		site.UnsealTime = nil
 		site.Message = fmt.Sprintf("sealed against %s", site.KeyringSecret)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventKeyringRecovered,
 			"site %s recovered to Sealed against escrow %s", site.Name, site.KeyringSecret)
@@ -707,12 +701,12 @@ func checkEscrowDeadline(fg *v1alpha1.MysqlFailoverGroup, site *v1alpha1.SiteEnc
 	if site.UnsealReason == v1alpha1.UnsealReasonClone {
 		return true
 	}
-	if site.UnsealedSince == nil {
+	if site.UnsealTime == nil {
 		now := metav1.Now()
-		site.UnsealedSince = &now
+		site.UnsealTime = &now
 		return true
 	}
-	if time.Since(site.UnsealedSince.Time) > fg.Spec.EscrowTimeout() {
+	if time.Since(site.UnsealTime.Time) > fg.Spec.EscrowTimeout() {
 		site.Phase = v1alpha1.KeyringPhaseFailed
 		site.Message = fmt.Sprintf(
 			"keyring not escrowed within %s: %s", fg.Spec.EscrowTimeout(), site.Message)
@@ -816,7 +810,7 @@ func (r *MysqlFailoverGroupReconciler) NotifyCloneComplete(
 		now := metav1.Now()
 		s.Phase = v1alpha1.KeyringPhaseUnsealed
 		s.UnsealReason = ""
-		s.UnsealedSince = &now
+		s.UnsealTime = &now
 		s.Message = "clone bootstrap finished; resealing"
 		return true, nil
 	})
@@ -832,7 +826,7 @@ func (r *MysqlFailoverGroupReconciler) stampCloneUnseal(ctx context.Context, nn 
 		}
 		now := metav1.Now()
 		s.UnsealReason = v1alpha1.UnsealReasonClone
-		s.UnsealedSince = &now
+		s.UnsealTime = &now
 		s.Message = "unsealed so CLONE INSTANCE can rewrap tablespace keys under a new master key"
 		return true, nil
 	})
@@ -866,7 +860,7 @@ func (r *MysqlFailoverGroupReconciler) unsealSiteForClone(ctx context.Context, n
 		now := metav1.Now()
 		s.Phase = v1alpha1.KeyringPhaseUnsealed
 		s.UnsealReason = v1alpha1.UnsealReasonClone
-		s.UnsealedSince = &now
+		s.UnsealTime = &now
 		s.Message = "unsealed so CLONE INSTANCE can rewrap tablespace keys under a new master key"
 		return true, nil
 	})
@@ -896,15 +890,7 @@ func (r *MysqlFailoverGroupReconciler) mutateSiteEncryption(
 		if err != nil || !write {
 			return err
 		}
-		if st := latest.Status.EncryptionAtRest; st != nil {
-			allSealed := true
-			for i := range st.Sites {
-				if st.Sites[i].Phase != v1alpha1.KeyringPhaseSealed {
-					allSealed = false
-					break
-				}
-			}
-			st.Sealed = allSealed
+		if latest.Status.EncryptionAtRest != nil {
 			setEncryptionCondition(&latest)
 		}
 		return r.Status().Update(ctx, &latest)
@@ -976,18 +962,31 @@ func applyCoverage(site *v1alpha1.SiteEncryptionStatus, live *mysql.KeyringStatu
 		cov = &v1alpha1.SiteEncryptionCoverage{}
 	}
 	if live.Component != nil {
+		readOnly := live.Component.ReadOnly
 		cov.KeyringComponent = live.Component.Name
-		cov.KeyringReadOnly = live.Component.ReadOnly
+		cov.KeyringReadOnly = &readOnly
 	}
 	if live.Coverage != nil {
-		cov.SystemTablespaceEncrypted = live.Coverage.SystemTablespaceEncrypted
+		// A flag the sidecar did not report stays unset: an unknown
+		// value is never recorded as false.
+		cov.SystemTablespaceEncrypted = copyBool(live.Coverage.SystemTablespaceEncrypted)
 		cov.UnencryptedTablespaces = live.Coverage.UnencryptedTablespaces
-		cov.RedoLogEncrypted = live.Coverage.RedoLogEncrypted
-		cov.UndoLogEncrypted = live.Coverage.UndoLogEncrypted
-		cov.BinlogEncrypted = live.Coverage.BinlogEncrypted
+		cov.RedoLogEncrypted = copyBool(live.Coverage.RedoLogEncrypted)
+		cov.UndoLogEncrypted = copyBool(live.Coverage.UndoLogEncrypted)
+		cov.BinlogEncrypted = copyBool(live.Coverage.BinlogEncrypted)
 		cov.LastCheckTime = &now
 	}
 	site.Coverage = cov
+}
+
+// copyBool copies an optional observation, so status never aliases the
+// probe's value.
+func copyBool(b *bool) *bool {
+	if b == nil {
+		return nil
+	}
+	v := *b
+	return &v
 }
 
 func eventTypeForKeyringPhase(p v1alpha1.SiteKeyringPhase) string {
@@ -1012,15 +1011,20 @@ func publishKeyringMetrics(namespace, group string, site *v1alpha1.SiteEncryptio
 	metrics.KeyringEscrowVersion.WithLabelValues(namespace, group, site.Name).Set(float64(site.KeyringVersion))
 	if c := site.Coverage; c != nil {
 		metrics.EncryptionCoverageGaps.WithLabelValues(namespace, group, site.Name).Set(float64(c.UnencryptedTablespaces))
-		for aspect, on := range map[string]bool{
+		for aspect, on := range map[string]*bool{
 			"system_tablespace": c.SystemTablespaceEncrypted,
 			"redo_log":          c.RedoLogEncrypted,
 			"undo_log":          c.UndoLogEncrypted,
 			"binlog":            c.BinlogEncrypted,
 			"keyring_read_only": c.KeyringReadOnly,
 		} {
+			if on == nil {
+				// Not reported: no series rather than a false 0.
+				metrics.EncryptionCoverageFlag.DeleteLabelValues(namespace, group, site.Name, aspect)
+				continue
+			}
 			v := 0.0
-			if on {
+			if *on {
 				v = 1
 			}
 			metrics.EncryptionCoverageFlag.WithLabelValues(namespace, group, site.Name, aspect).Set(v)
@@ -1231,14 +1235,6 @@ func mergeEncryptionStatus(desired, latest *v1alpha1.EncryptionAtRestStatus) *v1
 			continue
 		}
 	}
-	allSealed := true
-	for i := range out.Sites {
-		if out.Sites[i].Phase != v1alpha1.KeyringPhaseSealed {
-			allSealed = false
-			break
-		}
-	}
-	out.Sealed = allSealed
 	return out
 }
 

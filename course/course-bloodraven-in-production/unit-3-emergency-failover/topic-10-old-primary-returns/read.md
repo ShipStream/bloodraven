@@ -39,7 +39,7 @@ describes a moment already gone. The fence turns a moving target into a fact.
 
 ## What the gate is not
 
-Recovery is deliberately **not** gated on `lastFailoverTarget`, because a primary can change hands with
+Recovery is deliberately **not** gated on the recorded failover target (`lastFailover.target`), because a primary can change hands with
 no failover recorded at all: a replica may be made writable by hand (or respawn writable on a pod that
 predates the `--read-only=ON` boot flag) and be adopted as the de-facto primary while
 the old primary comes back fenced, or the record may be lost to a status-write outage plus an operator

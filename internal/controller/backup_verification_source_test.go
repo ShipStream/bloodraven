@@ -24,7 +24,7 @@ func TestVerificationSource_RemainsPinnedWhenNewBackupCompletes(t *testing.T) {
 			ctx := context.Background()
 			fg := verifyFG()
 			a := successfulBackup("backup-a", fg.Name, "nightly-s3")
-			a.Status.Location = "prod_backups/backup-a"
+			setTestArtifactLocation(a, "prod_backups/backup-a")
 			a.Status.CompletionTime = &metav1.Time{Time: time.Now().Add(-time.Hour)}
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
 			v.UID = "pinned-verification-uid"
@@ -46,9 +46,9 @@ func TestVerificationSource_RemainsPinnedWhenNewBackupCompletes(t *testing.T) {
 			} else {
 				reconcileVerifUntilStable(t, r, v.Name)
 			}
-			want := &v1alpha1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), Location: a.Status.Location, StorageType: a.Status.StorageType}
+			want := &v1alpha1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), ArtifactStorage: a.Status.ArtifactStorage.DeepCopy()}
 			b := successfulBackup("backup-b", fg.Name, "nightly-s3")
-			b.Status.Location = "prod_backups/backup-b"
+			setTestArtifactLocation(b, "prod_backups/backup-b")
 			if err := c.Create(ctx, b); err != nil {
 				t.Fatal(err)
 			}
@@ -64,7 +64,7 @@ func TestVerificationSource_RemainsPinnedWhenNewBackupCompletes(t *testing.T) {
 			if err := c.Get(ctx, client.ObjectKey{Name: verificationJobName(v.Name), Namespace: v.Namespace}, &job); err != nil {
 				t.Fatal(err)
 			}
-			if envMap(job.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_INPUT_URL"] != a.Status.Location {
+			if envMap(job.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_INPUT_URL"] != testArtifactLocation(a) {
 				t.Fatal("Job loaded a different backup than the pinned reference")
 			}
 			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()}}
@@ -117,7 +117,7 @@ func TestVerificationSource_RejectsMissingOrReplacedPinBeforeLaunch(t *testing.T
 				b := a.DeepCopy()
 				b.ResourceVersion = ""
 				b.UID = "replacement-uid"
-				b.Status.Location = "other/artifact"
+				setTestArtifactLocation(b, "other/artifact")
 				if err := c.Create(ctx, b); err != nil {
 					t.Fatal(err)
 				}
@@ -142,7 +142,7 @@ func TestVerificationSource_BuildsFromPinnedDestination(t *testing.T) {
 	ctx := context.Background()
 	fg := verifyFG()
 	a := successfulBackup("backup-a", fg.Name, "nightly-s3")
-	a.Status.Location = "original/artifact"
+	setTestArtifactLocation(a, "original/artifact")
 	v := verifyCR("pinned", fg.Name, "nightly-s3")
 	r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 	provisionVerificationSource(t, r, c, v)
@@ -150,8 +150,8 @@ func TestVerificationSource_BuildsFromPinnedDestination(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKeyFromObject(a), a); err != nil {
 		t.Fatal(err)
 	}
-	a.Status.Location = "changed/artifact"
-	a.Status.StorageType = v1alpha1.BackupStoragePVC
+	setTestArtifactLocation(a, "changed/artifact")
+	setTestArtifactType(a, v1alpha1.BackupStoragePVC)
 	if err := c.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 			ctx := context.Background()
 			fg := verifyFG()
 			a := successfulBackup("backup-a", fg.Name, "nightly-s3")
-			a.Status.Location = "backup-a/artifact"
+			setTestArtifactLocation(a, "backup-a/artifact")
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
 			v.Spec.TTLSecondsAfterFinished = new(int32(3600))
 			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
@@ -203,7 +203,7 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 			if mode == "missing-status" {
 				v.Status.BackupRef = nil
 			} else if mode == "drifted-status" || mode == "mismatched-legacy" {
-				v.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: "backup-b", UID: "uid-b", Location: "backup-b/artifact", StorageType: v1alpha1.BackupStorageS3}
+				v.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: "backup-b", UID: "uid-b", ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "backup-b/artifact")}
 			}
 			if err := c.Status().Update(ctx, v); err != nil {
 				t.Fatal(err)
@@ -238,16 +238,16 @@ func TestVerificationSource_StorageInputMatchesSnapshot(t *testing.T) {
 					fg = fgWithEncryptedBackup()
 				}
 				a := successfulBackup("backup-a", fg.Name, "nightly-s3")
-				a.Status.StorageType = storage
-				a.Status.Encrypted = encrypted
+				setTestArtifactType(a, storage)
 				if encrypted {
+					a.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 					recordTestDumpKey(a)
 				}
 				if storage == v1alpha1.BackupStoragePVC {
 					fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: storage, PVC: &v1alpha1.PVCStorage{ClaimName: "backups"}}
-					a.Status.Location = "/backups/prod_backups/db dumps/a/"
+					setTestArtifactLocation(a, "/backups/prod_backups/db dumps/a/")
 				} else {
-					a.Status.Location = "s3://bloodraven-backups/prod_backups/a/"
+					setTestArtifactLocation(a, "s3://bloodraven-backups/prod_backups/a/")
 				}
 				job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Backup: a, Verification: verifyCR("verify", fg.Name, "nightly-s3"), CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 				if err != nil {
@@ -257,7 +257,7 @@ func TestVerificationSource_StorageInputMatchesSnapshot(t *testing.T) {
 				if !verificationJobReadsBackup(job, ref) {
 					t.Fatalf("source did not match original storage inputs: %+v", ref)
 				}
-				ref.Location = "wrong/destination"
+				ref.ArtifactStorage.Location = "wrong/destination"
 				if verificationJobReadsBackup(job, ref) {
 					t.Fatal("accepted a different source location")
 				}

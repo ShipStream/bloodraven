@@ -75,7 +75,7 @@
       "difficulty": "hard"
     },
     {
-      "question": "The operator restarts. `status.lastFailover` reads `10:04:00Z`, the `bloodraven.shipstream.io/last-failover` annotation reads `10:06:00Z`, and the local clock is `10:07:00Z`. Which record does the restarted operator install as its cooldown baseline?",
+      "question": "The operator restarts. `status.lastFailover.time` reads `10:04:00Z`, the `bloodraven.shipstream.io/last-failover` annotation reads `10:06:00Z`, and the local clock is `10:07:00Z`. Which record does the restarted operator install as its cooldown baseline?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -89,7 +89,7 @@
       "difficulty": "medium"
     },
     {
-      "question": "Every site in `playground` is read-only, no site is unreachable, and `lastFailoverTarget` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?",
+      "question": "Every site in `playground` is read-only, no site is unreachable, and `status.lastFailover.target` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?",
       "type": "SHORT_ANSWER",
       "orderIndex": 3,
       "sampleAnswer": "It refuses the re-assert. It logs `primary re-assert refused: recorded promotion GTID set failed to parse — status corrupted or manually edited?` at WARN and returns without touching MySQL, leaving the group on its NoPrimary alert for a human. It does not treat the unparseable value as absent and skip the GTID gate. The whole safety argument for re-asserting a fenced primary is that the target's GTID_EXECUTED provably contains the recorded promotion GTID set and every peer's set; if the recorded invariant cannot be read, it cannot have been verified, so proceeding would restore writability on a site that might be missing transactions.",

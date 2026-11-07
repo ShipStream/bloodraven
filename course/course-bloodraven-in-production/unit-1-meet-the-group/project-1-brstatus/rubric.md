@@ -17,7 +17,7 @@ the bottom for reference.
 `verdict` reads the `Degraded` condition out of `status.conditions` and combines it with
 `status.activeSite` to return exactly `("OK", 0)`, `("DEGRADED", 1)` or `("CRITICAL", 2)`.
 
-Full marks require that no per-site field — lag, `replicating`, `state` — is consulted inside
+Full marks require that no per-site field — lag, `replication`, `state` — is consulted inside
 `verdict`. The operator evaluates its cross-site table on every poll and writes the answer into the
 condition; re-deriving it from the site rows is a second, disagreeing implementation of the same
 decision, and it will disagree first on exactly the fixture that matters.
@@ -33,7 +33,7 @@ decision, and it will disagree first on exactly the fixture that matters.
 `is_serving` branches on `site_role(...)`.
 
 The `ReadOnly` branch tests all five conjuncts together: `sourceConvergenceState` is `Converged`,
-`replicating` is true, `secondsBehindSource` is present, `canonical_host(sourceHost)` equals
+`replication` is `Healthy` or `Lagging`, `secondsBehindSource` is present, `canonical_host(sourceHost)` equals
 `expected_source_host(...)` for the active site, and the lag is at or under
 `effective_readonly_max_lag(spec)`.
 
@@ -59,7 +59,7 @@ Every other role is served on `state` alone — `Writable` or `ReadOnly` — wit
 
 `artefacts/playground-live.json` is present, is a single `MysqlFailoverGroup` captured from the running
 playground rather than a copied fixture — its `metadata.creationTimestamp`, `metadata.uid` and
-`status.sites[].lastSeen` are populated — and the submission shows `brstatus` output for it.
+`status.sites[].lastSeenTime` are populated — and the submission shows `brstatus` output for it.
 
 - **10** — captured, distinguishable from the fixtures, and its output shown.
 - **5** — captured but no output shown, or the capture is a trimmed excerpt rather than the whole

@@ -62,7 +62,7 @@ This is the trade, made visible: Bloodraven buys write availability with consist
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` reports `activeSite: iad`; `iad` state `Writable`; `pdx` state `ReadOnly`, `replicating: true`; and `reader` — declared `role: ReadOnly` in the spec — state `Writable`. What `reason` does the `Degraded` condition carry, and what happens to `reader`?
+`playground` reports `activeSite: iad`; `iad` state `Writable`; `pdx` state `ReadOnly`, `replication: Healthy`; and `reader` — declared `role: ReadOnly` in the spec — state `Writable`. What `reason` does the `Degraded` condition carry, and what happens to `reader`?
 
 - `SplitBrain`, and the operator resolves it by picking a winner between `iad` and `reader`
 - `Healthy`, and nothing happens to `reader` — a `ReadOnly` site is excluded from the tallies, so the operator ignores it entirely
@@ -95,11 +95,11 @@ You have just run `./playground/setup.sh` against a fresh three-agent k3d cluste
 
 **Sample answer:**
 
-First the pods: `kubectl -n bloodraven-playground get pods -l app.kubernetes.io/name=mysql` should list three, one per site, and each should read 2/2 Ready — `mysql` plus its `sidecar` container. Then the status. `status.activeSite` names exactly one site, say `iad`. In `status.sites[]`, `iad` reads state `Writable` with no `replicating`, `secondsBehindSource` or `gtidExecuted` keys at all, because the operator only probes replication on read-only sites; `pdx` and `reader` read state `ReadOnly` with `replicating: true` and `secondsBehindSource: 0`. The `Ready` condition is True and the `Degraded` condition's `reason` is `Healthy`. The values I would not carry to production are the playground's deliberate overrides: `failoverCooldown: 30s` against a shipped default of 5m, `replication.maxLagSeconds: 30` against 300, and `dns.ttlSeconds: 10` against 60. Everything else — `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`, `peerCheckInterval`, `maxSyncWait` — is at its shipped default here.
+First the pods: `kubectl -n bloodraven-playground get pods -l app.kubernetes.io/name=mysql` should list three, one per site, and each should read 2/2 Ready — `mysql` plus its `sidecar` container. Then the status. `status.activeSite` names exactly one site, say `iad`. In `status.sites[]`, `iad` reads state `Writable` with `replication: NotApplicable` and no `secondsBehindSource` or `gtidExecuted` keys at all, because the operator only probes replication on read-only sites; `pdx` and `reader` read state `ReadOnly` with `replication: Healthy` and `secondsBehindSource: 0`. The `Ready` condition is True and the `Degraded` condition's `reason` is `Healthy`. The values I would not carry to production are the playground's deliberate overrides: `failoverCooldown: 30s` against a shipped default of 5m, `replication.maxLagSeconds: 30` against 300, and `dns.ttlSeconds: 10` against 60. Everything else — `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`, `peerCheckInterval`, `maxSyncWait` — is at its shipped default here.
 
 **A full-credit answer shows:**
 
-A strong answer covers: (1) three MySQL pods, each 2/2 because every MySQL pod runs a sidecar container beside mysqld; (2) reading the status — one named `activeSite`, that site `Writable`, the other two `ReadOnly` with `replicating: true` and lag 0, `Degraded` reason `Healthy`; (3) at least two of the three playground overrides with their shipped defaults: `failoverCooldown` 30s vs 5m, `maxLagSeconds` 30 vs 300, `dns.ttlSeconds` 10 vs 60. Credit for noting that the primary's entry has replication fields absent rather than zero or false, and for noting that timings observed in the playground are not shipped timings. Do not credit an answer that reads a 1/1 pod as healthy, or that presents the overridden values as defaults.
+A strong answer covers: (1) three MySQL pods, each 2/2 because every MySQL pod runs a sidecar container beside mysqld; (2) reading the status — one named `activeSite`, that site `Writable`, the other two `ReadOnly` with `replication: Healthy` and lag 0, `Degraded` reason `Healthy`; (3) at least two of the three playground overrides with their shipped defaults: `failoverCooldown` 30s vs 5m, `maxLagSeconds` 30 vs 300, `dns.ttlSeconds` 10 vs 60. Credit for noting that the primary's entry reads `replication: NotApplicable` with its lag and GTID fields absent rather than zero, and for noting that timings observed in the playground are not shipped timings. Do not credit an answer that reads a 1/1 pod as healthy, or that presents the overridden values as defaults.
 
 **Explanation:**
 
@@ -114,13 +114,13 @@ You press **+ Increment** five times in the counter app, which writes through `m
 - `kubectl exec deploy/mysql-playground-pdx -c mysql -- mysql -h127.0.0.1 -Nse "SELECT value, updated_at FROM counter_db.counters WHERE id = 1"`, and compare the value with the counter
 - Read `status.sites[]` and confirm `pdx` shows `secondsBehindSource: 0`, which means it has applied everything the primary has committed
 - Query `SELECT value FROM counter_db.counters WHERE id = 1` through the `mysql-playground-replicas` Service and compare the value with the counter
-- Read `status.sites[]` and confirm `pdx` shows `replicating: true`, the operator's verdict that replication on that follower is healthy
+- Read `status.sites[]` and confirm `pdx` shows `replication: Healthy`, the operator's verdict that replication on that follower is healthy
 
 **Correct option index:** 0
 
 **Explanation:**
 
-Only reading the row out of `pdx` by name proves the row is on `pdx`. `secondsBehindSource: 0` does not: it compares the last transaction executed against the last event *downloaded*, so it reads zero when the receiver thread has stalled or the replica is idle — a replica that stopped fetching an hour ago still reports 0. `replicating: true` is a verdict on replication health, not a statement that any particular transaction has landed. And `mysql-playground-replicas` is the wrong endpoint for this experiment: it selects every replica currently carrying `shipstream.io/healthy=yes`, so the answer might have come from `reader` rather than `pdx` and you would have proved nothing about the site you asked about. Write through the group endpoint, read back by site name. (objective 9)
+Only reading the row out of `pdx` by name proves the row is on `pdx`. `secondsBehindSource: 0` does not: it compares the last transaction executed against the last event *downloaded*, so it reads zero when the receiver thread has stalled or the replica is idle — a replica that stopped fetching an hour ago still reports 0. `replication: Healthy` is a verdict on replication health, not a statement that any particular transaction has landed. And `mysql-playground-replicas` is the wrong endpoint for this experiment: it selects every replica currently carrying `shipstream.io/healthy=yes`, so the answer might have come from `reader` rather than `pdx` and you would have proved nothing about the site you asked about. Write through the group endpoint, read back by site name. (objective 9)
 
 ## Question 8
 

@@ -126,7 +126,7 @@ func scenario60OperatorOnlyPartition() runner.Scenario {
 						return err
 					}
 					env.Capture.Note(fmt.Sprintf("during partition: activeSite=%q lastFailoverTarget=%q; %s",
-						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, st.writer.summary()))
+						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), st.writer.summary()))
 					return nil
 				},
 			},

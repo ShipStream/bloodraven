@@ -37,13 +37,6 @@ func emptyDash(s string) string {
 	return s
 }
 
-func boolYesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
-}
-
 // age formats a duration since t in a kubectl-style short form
 // ("5s", "12m", "3h45m", "2d6h", "30d"). t.IsZero() prints "-".
 func age(t time.Time) string {

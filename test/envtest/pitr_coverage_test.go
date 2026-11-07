@@ -170,7 +170,7 @@ func TestPITRStatusArchiveObservation(t *testing.T) {
 			t.Fatal(err)
 		}
 		obs := tc.obs
-		cur.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ProfileName: "nightly-s3", Archive: &obs}
+		cur.Status.PITR = &v1alpha1.PITRStatus{Archive: &obs}
 		err := k8sClient.Status().Update(ctx, cur)
 		if (err == nil) != tc.ok {
 			t.Fatalf("observation %+v: %v", tc.obs.State, err)
@@ -298,7 +298,7 @@ func pointInTimeFixture() *v1alpha1.PointInTimeResult {
 	return &v1alpha1.PointInTimeResult{
 		Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop, Outcome: v1alpha1.PointInTimeTargetCovered,
 		Archive: &v1alpha1.PITRArchiveIdentity{ArchiveID: "ar1-abcdefghijklmnopqrstuvwxyz", Destination: "s3://b/p/binlogs?endpoint=aws",
-			Source: v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "src", UID: "src-uid"}, EncryptionMode: v1alpha1.PITRArchiveEncryptionPassphrase,
+			Source: v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "src", UID: "src-uid"}, EncryptionMode: v1alpha1.EncryptionModePassphrase,
 			Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM},
 		ReplaySites: []string{"a", "b"}, SegmentCount: 3, ReplayedBinlogCount: 2,
 		LastReplayedBinlog: &v1alpha1.ReplayedBinlogRef{Site: "a", Name: "mysql-bin.000010"}, ReplayedTransactionCount: 1234,
@@ -352,7 +352,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 		}
 		res := pointInTimeFixture()
 		tc.mutate(res)
-		cur.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded, PointInTime: res}
+		cur.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded, Provenance: &v1alpha1.RestoreProvenance{PointInTime: res}}
 		err := k8sClient.Status().Update(ctx, cur)
 		if (err == nil) != tc.ok {
 			t.Fatalf("%s: %v", tc.name, err)
@@ -362,7 +362,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: fg.Name}, got); err != nil {
 		t.Fatal(err)
 	}
-	assertPointInTimeRoundTrip(t, "status.restore", got.Status.Restore.PointInTime)
+	assertPointInTimeRoundTrip(t, "status.restore.provenance", got.Status.Restore.Provenance.PointInTime)
 
 	// The flat pitr* restore fields are gone from the schema.
 	u := &unstructured.Unstructured{}

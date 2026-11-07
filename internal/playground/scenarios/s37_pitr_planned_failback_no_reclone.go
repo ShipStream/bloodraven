@@ -312,7 +312,7 @@ func s37RestoreInsideBEra() runner.Step {
 			if err != nil {
 				return err
 			}
-			if err := assertPITRResult(env, "restore "+s37Restored, rs.PointInTime, pitrExpectation{
+			if err := assertPITRResult(env, "restore "+s37Restored, restorePointInTime(rs), pitrExpectation{
 				Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2, Outcome: v1alpha1.PointInTimeTargetCovered, TargetLocal: true,
 			}); err != nil {
 				return err
@@ -516,13 +516,13 @@ func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...stri
 		if err != nil {
 			return false, "", err
 		}
-		pitrRestored := mfg.Status.PITR == nil || (!mfg.Status.PITR.Enabled && !wantPITR)
+		pitrRestored := !wantPITR && pitrSpecProfile(mfg) == ""
 		if wantPITR {
-			pitrRestored = mfg.Status.PITR != nil && mfg.Status.PITR.Enabled && mfg.Status.PITR.ProfileName == wantProfile
+			pitrRestored = pitrSpecProfile(mfg) == wantProfile && mfg.Status.PITR != nil
 		}
 		var cooldown string
-		if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailover != nil {
-			if rem := mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailover.Time); rem > 0 {
+		if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailoverTime() != nil {
+			if rem := mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailoverTime().Time); rem > 0 {
 				cooldown = rem.Round(time.Second).String()
 			}
 		}

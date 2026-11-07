@@ -24,7 +24,7 @@ The response is tiered, evaluated in this order every time the operator sees `Sp
 
 | Tier | Trigger | What the operator does |
 | --- | --- | --- |
-| 1 — history | `lastFailoverTarget` names a site that is **live, writable and promotable** | Fences every other site immediately, regardless of policy |
+| 1 — history | `lastFailover.target` names a site that is **live, writable and promotable** | Fences every other site immediately, regardless of policy |
 | 2 — policy | No usable history **and** `sitePriorities` is non-empty | `ResolveSplitBrain` picks the winner, losers are fenced, winner is re-promoted through the standard path |
 | 3 — neither | No usable history **and** no priorities | Alert only. Manual resolution, by design |
 

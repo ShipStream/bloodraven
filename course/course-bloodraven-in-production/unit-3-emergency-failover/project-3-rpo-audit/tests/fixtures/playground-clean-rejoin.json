@@ -29,16 +29,18 @@
   },
   "status": {
     "activeSite": "pdx",
-    "lastFailover": "2026-05-02T05:17:03Z",
-    "lastFailoverTarget": "pdx",
-    "promotionGtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7",
+    "lastFailover": {
+      "time": "2026-05-02T05:17:03Z",
+      "target": "pdx",
+      "promotionGtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7"
+    },
     "sites": [
       {
         "name": "iad",
         "state": "ReadOnly",
-        "lastSeen": "2026-05-02T05:24:41Z",
+        "lastSeenTime": "2026-05-02T05:24:41Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-11",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0,
         "recoveryState": "",
         "sourceHost": "mysql-playground-pdx-internal.bloodraven-playground.svc.cluster.local",
@@ -47,17 +49,17 @@
       {
         "name": "pdx",
         "state": "Writable",
-        "lastSeen": "2026-05-02T05:24:41Z",
+        "lastSeenTime": "2026-05-02T05:24:41Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-11",
-        "replicating": false,
+        "replication": "NotApplicable",
         "sourceConvergenceState": "Converged"
       },
       {
         "name": "reader",
         "state": "ReadOnly",
-        "lastSeen": "2026-05-02T05:24:41Z",
+        "lastSeenTime": "2026-05-02T05:24:41Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-10",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 1,
         "sourceHost": "mysql-playground-pdx-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Converged"

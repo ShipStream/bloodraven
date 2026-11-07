@@ -228,7 +228,7 @@ func TestDragonflyManager_PublishedMySQLFollowSurvivesInFlightTickPromotion(t *t
 	mgr.pollInterval = time.Hour
 	fg := get()
 	fg.Status.ActiveSite = "dc2" // MySQL on dc2; Dragonfly still on dc1 (diverged)
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,8 @@ func TestDragonflyManager_PublishedMySQLFollowSurvivesInFlightTickPromotion(t *t
 	// MySQL's dc2 primary dies; MySQL fails back to dc1 and publishes it.
 	live := get()
 	now := metav1.Now()
-	live.Status.ActiveSite, live.Status.LastFailoverTarget, live.Status.LastFailover = "dc1", "dc1", &now
+	live.Status.ActiveSite = "dc1"
+	live.Status.SetLastFailover(&now, "dc1", "")
 	if err := mgr.client.Status().Update(context.Background(), live); err != nil {
 		t.Fatal(err)
 	}

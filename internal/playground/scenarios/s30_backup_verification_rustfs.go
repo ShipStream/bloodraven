@@ -198,17 +198,25 @@ func s30WaitBackupSucceeded(v s30Variant) runner.Step {
 				// full s3:// URL (cmd/bloodraven storageConfigFromEnv).
 				wantLocation = "s3://" + backupE2EBucket + "/" + prefix + "/" + name + "/"
 			}
-			if b.Status.Location != wantLocation {
-				return fmt.Errorf("backup location %q, want %q", b.Status.Location, wantLocation)
+			storage := b.Status.ArtifactStorage
+			if storage == nil {
+				return fmt.Errorf("backup status.artifactStorage is unset")
 			}
-			if b.Status.StorageType != v1alpha1.BackupStorageS3 {
-				return fmt.Errorf("backup storageType=%q, want S3", b.Status.StorageType)
+			if storage.Location != wantLocation {
+				return fmt.Errorf("backup artifactStorage.location %q, want %q", storage.Location, wantLocation)
+			}
+			if storage.Type != v1alpha1.BackupStorageS3 {
+				return fmt.Errorf("backup artifactStorage.type=%q, want S3", storage.Type)
 			}
 			if b.Status.JobName == "" {
 				return fmt.Errorf("backup status.jobName is empty")
 			}
-			if b.Status.Encrypted != v.encrypted {
-				return fmt.Errorf("backup status.encrypted=%v, want %v", b.Status.Encrypted, v.encrypted)
+			wantMode := v1alpha1.EncryptionModeNone
+			if v.encrypted {
+				wantMode = v1alpha1.EncryptionModePassphrase
+			}
+			if b.Status.Encryption == nil || b.Status.Encryption.Mode != wantMode {
+				return fmt.Errorf("backup status.encryption=%+v, want mode %s", b.Status.Encryption, wantMode)
 			}
 			if err := ctxStash(ctx, env, "backupUID", string(b.UID)); err != nil {
 				return err

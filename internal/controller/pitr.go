@@ -743,7 +743,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	// verified this pass). The path is the conventional one backup and
 	// restore Jobs use, so env var names stay consistent.
 	keySecret := ""
-	if binding.Encryption.Mode == v1alpha1.PITRArchiveEncryptionPassphrase {
+	if binding.Encryption.Mode == v1alpha1.EncryptionModePassphrase {
 		keySecret = binding.Encryption.KeySecretName
 		if keySecret == "" {
 			return out, fmt.Errorf("internal error: Bound passphrase binding %s has no key snapshot", binding.ID)

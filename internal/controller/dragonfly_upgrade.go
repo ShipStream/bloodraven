@@ -434,7 +434,7 @@ func (r *MysqlFailoverGroupReconciler) failDragonflyUpgrade(ctx context.Context,
 func (r *MysqlFailoverGroupReconciler) setDragonflyUpgradeStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.DragonflyUpgradeStatus) error {
 	patch := client.MergeFrom(fg.DeepCopy())
 	if fg.Status.Dragonfly == nil {
-		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: dragonflyEnabled(fg)}
+		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{}
 	}
 	fg.Status.Dragonfly.Upgrade = s
 	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {

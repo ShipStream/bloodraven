@@ -231,8 +231,8 @@ func TestPrintGroupStatus(t *testing.T) {
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable, LastSeen: &now},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, LastSeen: &now, Replicating: true},
+				{Name: "iad", State: v1alpha1.SiteStateWritable, LastSeenTime: &now, Replication: v1alpha1.SiteReplicationNotApplicable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, LastSeenTime: &now, Replication: v1alpha1.SiteReplicationHealthy},
 			},
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
 		},

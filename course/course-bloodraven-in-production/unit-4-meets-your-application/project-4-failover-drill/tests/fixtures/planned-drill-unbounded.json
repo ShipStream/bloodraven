@@ -25,9 +25,11 @@
   },
   "status": {
     "activeSite": "iad",
-    "lastFailover": "2026-08-12T10:00:38Z",
-    "lastFailoverTarget": "iad",
-    "promotionGtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-191447",
+    "lastFailover": {
+      "time": "2026-08-12T10:00:38Z",
+      "target": "iad",
+      "promotionGtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-191447"
+    },
     "plannedFailover": {
       "runID": "8d4a1f6e-2c9b-4e07-a3f5-1b7c0d9e6a24",
       "phase": "Succeeded",

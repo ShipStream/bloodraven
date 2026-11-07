@@ -2287,7 +2287,7 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 		healthy := "no"
 		if si.spec.IsReadOnlyReader() {
 			if authorityValid && si.status.State == v1alpha1.SiteStateReadOnly && si.status.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
-				si.status.Replicating && si.status.SecondsBehindSource != nil &&
+				si.status.Replication.Running() && si.status.SecondsBehindSource != nil &&
 				canonicalSourceHost(si.status.SourceHost) == canonicalSourceHost(internalSiteServiceHost(fg.Name, fg.Status.ActiveSite, fg.Namespace)) &&
 				*si.status.SecondsBehindSource <= fg.Spec.EffectiveReadOnlyMaxLagSeconds() {
 				healthy = "yes"

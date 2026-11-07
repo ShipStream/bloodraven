@@ -82,10 +82,10 @@ func TestBackupStampKeyAgreesForSlashedS3Prefix(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				mb.Status.Location = storage.Location
-				mb.Status.StorageType = v1alpha1.BackupStorageS3
+				setTestArtifactLocation(mb, storage.Location)
+				setTestArtifactType(mb, v1alpha1.BackupStorageS3)
 				mb.Status.FailoverGroupUID = fg.UID
-				src, err := pitrDumpSourceForBackup(fg, mb, &profile, nil)
+				src, err := pitrDumpSourceForBackup(mb, &profile, nil)
 				if err != nil {
 					t.Fatal(err)
 				}

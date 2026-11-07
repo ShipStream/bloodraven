@@ -21,7 +21,7 @@
 
 ---
 
-**Front:** Tier 1's guard — the three conditions the recorded `lastFailoverTarget` must satisfy
+**Front:** Tier 1's guard — the three conditions the recorded `lastFailover.target` must satisfy
 
 **Back:** The site must exist (`keepSite != nil`), be currently `StateWritable`, and be `isPromotable()`. All three, as a conjunction.
 

@@ -220,8 +220,7 @@ func TestEffectiveFailoverRecord(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "alpha", ServerID: 101}, {Name: "beta", ServerID: 102}}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
-			LastFailover:       &statusStamp,
-			LastFailoverTarget: "alpha",
+			LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &statusStamp, Target: "alpha"}},
 		},
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 			v1alpha1.LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
@@ -259,8 +258,8 @@ func TestEffectiveFailoverRecord(t *testing.T) {
 	}
 
 	futureStatus := metav1.NewTime(now.Add(48 * time.Hour))
-	fg.Status.LastFailover = &futureStatus
-	fg.Status.LastFailoverTarget = "alpha"
+	fg.Status.SetLastFailover(&futureStatus, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
+	fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), "alpha", fg.Status.PromotionGtidExecuted())
 	rec, _, err = EffectiveFailoverRecord(fg, now)
 	if err == nil || !rec.IsZero() {
 		t.Fatalf("two future copies: rec=%+v err=%v", rec, err)

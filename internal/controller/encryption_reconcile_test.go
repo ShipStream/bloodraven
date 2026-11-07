@@ -13,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -44,10 +45,10 @@ func liveKeyring(digest string, readOnly bool) *internalmysql.KeyringStatus {
 			Name: "component_keyring_file", Status: "Active", ReadOnly: readOnly,
 		},
 		Coverage: &internalmysql.KeyringCoverage{
-			SystemTablespaceEncrypted: true,
-			RedoLogEncrypted:          true,
-			UndoLogEncrypted:          true,
-			BinlogEncrypted:           true,
+			SystemTablespaceEncrypted: new(true),
+			RedoLogEncrypted:          new(true),
+			UndoLogEncrypted:          new(true),
+			BinlogEncrypted:           new(true),
 		},
 	}
 }
@@ -83,7 +84,7 @@ func TestReconcileEncryption_DisabledIsNoop(t *testing.T) {
 
 func TestReconcileEncryption_DisablingClearsStatus(t *testing.T) {
 	fg := newTestFG()
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{Sealed: true}
+	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{}
 	r, _ := encReconciler(t, nil, fg)
 	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -119,7 +120,7 @@ func TestReconcileEncryption_FreshSitesStartPending(t *testing.T) {
 			t.Errorf("%s must not render sealed before anything is escrowed", name)
 		}
 	}
-	if fg.Status.EncryptionAtRest.Sealed {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady); c != nil && c.Reason == v1alpha1.ReasonAllSitesSealed {
 		t.Error("group must not report sealed while sites are bootstrapping")
 	}
 }
@@ -293,12 +294,12 @@ func TestReconcileEncryption_SealsOnceDeploymentRolled(t *testing.T) {
 		if s.Phase != v1alpha1.KeyringPhaseSealed {
 			t.Errorf("%s phase = %q (%s), want Sealed", name, s.Phase, s.Message)
 		}
-		if s.Coverage == nil || !s.Coverage.KeyringReadOnly {
+		if s.Coverage == nil || s.Coverage.KeyringReadOnly == nil || !*s.Coverage.KeyringReadOnly {
 			t.Errorf("%s coverage should record a read-only keyring: %+v", name, s.Coverage)
 		}
 	}
-	if !fg.Status.EncryptionAtRest.Sealed {
-		t.Error("group should report sealed once every site is sealed")
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady); c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonAllSitesSealed {
+		t.Errorf("group should report EncryptionAtRestReady=True/AllSitesSealed once every site is sealed: %+v", c)
 	}
 }
 
@@ -431,7 +432,6 @@ func sealedGroupWithActive(active string) *v1alpha1.MysqlFailoverGroup {
 	fg.Status.ActiveSite = active
 	digest := keyringDigest([]byte("k"))
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringDigest: digest},
@@ -931,7 +931,7 @@ func TestReconcileEncryption_CloneHoldIgnoresEscrowDeadline(t *testing.T) {
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed},
 			{Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
-				UnsealReason: v1alpha1.UnsealReasonClone, UnsealedSince: &stale},
+				UnsealReason: v1alpha1.UnsealReasonClone, UnsealTime: &stale},
 		},
 	}
 	r, _ := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
@@ -1158,7 +1158,7 @@ func TestCheckEscrowDeadline(t *testing.T) {
 	t.Run("within the window stays unsealed", func(t *testing.T) {
 		recent := metav1.NewTime(time.Now().Add(-10 * time.Second))
 		s := &v1alpha1.SiteEncryptionStatus{
-			Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealedSince: &recent,
+			Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealTime: &recent,
 		}
 		checkEscrowDeadline(fg, s)
 		if s.Phase != v1alpha1.KeyringPhaseUnsealed {
@@ -1169,7 +1169,7 @@ func TestCheckEscrowDeadline(t *testing.T) {
 	t.Run("past the window fails loudly", func(t *testing.T) {
 		old := metav1.NewTime(time.Now().Add(-5 * time.Minute))
 		s := &v1alpha1.SiteEncryptionStatus{
-			Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealedSince: &old,
+			Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealTime: &old,
 			Message: "waiting for the sidecar to escrow the keyring",
 		}
 		checkEscrowDeadline(fg, s)

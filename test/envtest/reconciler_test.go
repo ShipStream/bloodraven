@@ -233,8 +233,7 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 		{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
 	}
 	now := metav1.Now()
-	fg.Status.LastFailover = &now
-	fg.Status.LastFailoverTarget = "dc1"
+	fg.Status.SetLastFailover(&now, "dc1", "")
 
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatalf("failed to update status: %v", err)
@@ -255,8 +254,8 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	if fetched.Status.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Errorf("expected Sites[1] state 'read-only', got %q", fetched.Status.Sites[1].State)
 	}
-	if fetched.Status.LastFailoverTarget != "dc1" {
-		t.Errorf("expected LastFailoverTarget 'dc1', got %q", fetched.Status.LastFailoverTarget)
+	if fetched.Status.LastFailoverTarget() != "dc1" {
+		t.Errorf("expected LastFailoverTarget 'dc1', got %q", fetched.Status.LastFailoverTarget())
 	}
 }
 
@@ -657,8 +656,8 @@ func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: none.Name, Namespace: nsNone}, &afterNone); err != nil {
 		t.Fatal(err)
 	}
-	if afterInvalid.Status.LastFailoverTarget != afterNone.Status.LastFailoverTarget {
+	if afterInvalid.Status.LastFailoverTarget() != afterNone.Status.LastFailoverTarget() {
 		t.Fatalf("invalid license must not change failover status: invalid=%q none=%q",
-			afterInvalid.Status.LastFailoverTarget, afterNone.Status.LastFailoverTarget)
+			afterInvalid.Status.LastFailoverTarget(), afterNone.Status.LastFailoverTarget())
 	}
 }

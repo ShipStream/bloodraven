@@ -14,7 +14,7 @@ Start with the field, and be blunt about the documentation. **`spec.splitBrainPo
 
 Then the three tiers, in the order the operator evaluates them.
 
-Tier 1 — prior failover history. If `lastFailoverTarget` names a site that is **itself live, writable and promotable**, the operator fences everything else immediately, regardless of policy. All three conditions matter; a recorded target that is unreachable or has been demoted does not win by memory alone.
+Tier 1 — prior failover history. If the recorded `lastFailover.target` names a site that is **itself live, writable and promotable**, the operator fences everything else immediately, regardless of policy. All three conditions matter; a recorded target that is unreachable or has been demoted does not win by memory alone.
 
 Tier 2 — no usable history, plus a non-empty `sitePriorities`. `state.ResolveSplitBrain` picks the winner, the operator fences the losers, and the winner is re-promoted through the standard path. `ResolveSplitBrain` refuses sites that are not primary candidates and refuses to guess with an empty list; it never falls back to the order sites were declared in.
 
@@ -38,7 +38,7 @@ Do NOT cover the partition shapes or their test coverage (topic 3), or what happ
 
 - READ: 1000-1200 words. Lead with the `preferSite` doc error and how to verify a field exists, then the three tiers in evaluation order, then the deliberate absence of GTID from winner selection contrasted with GTID-freshest normal promotion, then CEL validation and the log keys and the non-transition retry, then the policy-not-safety paragraph, then the freshly-cloned-pod split-brain source, then the three external incidents, then the four-step recovery. Use one `terminal` widget showing the split-brain alert and the auto-resolve `Warn` line with its `winner` and `fencedSite` fields, and optionally one `anatomy` widget on a `splitBrainPolicy.sitePriorities` YAML block. Two widgets maximum.
 - FLASHCARDS: The split-brain vocabulary and its traps — `sitePriorities` vs the non-existent `preferSite`, the three tiers and their trigger conditions, the tier 1 live/writable/promotable conjunction, why GTID is not consulted, the CEL rule, `winner`/`fencedSite` log keys, what the loser loses. 8-10 cards.
-- QUIZ: 5 questions on discriminations: which tier applies given a status dump with and without `lastFailoverTarget`; what happens when `sitePriorities` is empty; whether the freshest site wins a split brain; what applying the documented `preferSite` YAML actually does; whether `sitePriorities` prevents data loss or chooses which data to lose.
+- QUIZ: 5 questions on discriminations: which tier applies given a status dump with and without `status.lastFailover.target`; what happens when `sitePriorities` is empty; whether the freshest site wins a split brain; what applying the documented `preferSite` YAML actually does; whether `sitePriorities` prevents data loss or chooses which data to lose.
 
 ## Handoff
 

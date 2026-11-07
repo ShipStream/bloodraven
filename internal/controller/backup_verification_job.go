@@ -79,8 +79,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if backup == nil {
 		return nil, fmt.Errorf("verification job: backup reference not resolved")
 	}
-	if backup.Status.Location == "" {
-		return nil, fmt.Errorf("verification job: referenced backup %q has no status.location", backup.Name)
+	// The artifact is read at the destination the backup's producing Job
+	// recorded; only the storage credentials come from the profile.
+	storage, err := recordedArtifactStorage(backup)
+	if err != nil {
+		return nil, fmt.Errorf("verification job: %w", err)
 	}
 
 	image := backupImage(fg)
@@ -100,7 +103,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		return nil, err
 	}
 
-	inputURL := mysqlShellDumpInput(backup.Status.Location, backup.Status.StorageType)
+	inputURL := mysqlShellDumpInput(storage.Location, storage.Type)
 
 	// PITR replay fragments (download init container + shared emptyDir
 	// + main-container env/mounts). buildRestorePITRFragmentsFor returns
@@ -137,7 +140,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if pitrReq != nil {
 		key := dumpKey
 		profile := in.Profile
-		src, err := pitrDumpSourceForBackup(fg, backup, &profile, key)
+		src, err := pitrDumpSourceForBackup(backup, &profile, key)
 		if err != nil {
 			return nil, fmt.Errorf("verification job: %w", err)
 		}
@@ -249,36 +252,28 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// Job mounts them. PVC-hosted backups need the backup PVC mounted
 	// read-only so mysqlsh util.loadDump() can read the on-disk dump.
 	awsCredsSecret := ""
-	switch backup.Status.StorageType {
+	switch storage.Type {
 	case v1alpha1.BackupStorageS3:
 		if in.Profile.Storage.S3 == nil {
-			return nil, fmt.Errorf("verification job: backup %q storageType=S3 but profile %q has no s3 config",
+			return nil, fmt.Errorf("verification job: backup %q is on S3 but profile %q has no s3 config",
 				backup.Name, in.Profile.Name)
 		}
 		awsCredsSecret = in.Profile.Storage.S3.CredentialsSecretName
 		env = append(env,
-			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: in.Profile.Storage.S3.Bucket},
+			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: storage.Bucket},
 		)
-		if in.Profile.Storage.S3.EndpointURL != "" {
-			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: in.Profile.Storage.S3.EndpointURL})
+		if storage.EndpointURL != "" {
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: storage.EndpointURL})
 		}
-		if in.Profile.Storage.S3.Region != "" {
-			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: in.Profile.Storage.S3.Region})
+		if storage.Region != "" {
+			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: storage.Region})
 		}
 	case v1alpha1.BackupStoragePVC:
-		if in.Profile.Storage.PVC == nil {
-			return nil, fmt.Errorf("verification job: backup %q storageType=PVC but profile %q has no pvc config",
-				backup.Name, in.Profile.Name)
-		}
-		claim := in.Profile.Storage.PVC.ClaimName
-		if claim == "" {
-			claim = ownedBackupPVCName(fg.Name, in.Profile.Name)
-		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "backup-src",
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: claim,
+					ClaimName: storage.ClaimName,
 					ReadOnly:  true,
 				},
 			},
@@ -287,8 +282,8 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			Name: "backup-src", MountPath: backupPVCMountPath, ReadOnly: true,
 		})
 	default:
-		return nil, fmt.Errorf("verification job: backup %q has unknown or empty storageType %q",
-			backup.Name, backup.Status.StorageType)
+		return nil, fmt.Errorf("verification job: backup %q has unknown storage type %q",
+			backup.Name, storage.Type)
 	}
 
 	if awsCredsSecret != "" {
@@ -363,7 +358,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 
 		decEnv := []corev1.EnvVar{
 			{Name: "BLOODRAVEN_TARGET_DIR", Value: decryptDir},
-			{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(backup.Status.StorageType)},
+			{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(storage.Type)},
 			{Name: "BLOODRAVEN_BACKUP_PASSPHRASE_FILE", Value: backupPassphraseMountPath + "/" + backupPassphraseFileName},
 		}
 		decMounts := []corev1.VolumeMount{
@@ -372,23 +367,20 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			{Name: "tmp", MountPath: tmpMountPath},
 		}
 
-		switch backup.Status.StorageType {
+		switch storage.Type {
 		case v1alpha1.BackupStorageS3:
-			bucket, prefix := splitS3Location(backup.Status.Location)
-			if bucket == "" {
-				bucket = in.Profile.Storage.S3.Bucket
-			}
+			_, prefix := splitS3Location(storage.Location)
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: literalArtifactEnvValue(prefix)},
-				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: bucket},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: storage.Bucket},
 			)
-			if in.Profile.Storage.S3.EndpointURL != "" {
+			if storage.EndpointURL != "" {
 				decEnv = append(decEnv, corev1.EnvVar{
-					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: in.Profile.Storage.S3.EndpointURL,
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: storage.EndpointURL,
 				})
 			}
-			if in.Profile.Storage.S3.Region != "" {
-				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: in.Profile.Storage.S3.Region})
+			if storage.Region != "" {
+				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: storage.Region})
 			}
 			if in.Profile.Storage.S3.CredentialsSecretName != "" {
 				decMounts = append(decMounts, corev1.VolumeMount{
@@ -424,15 +416,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			// mysqlsh no longer reads ciphertext directly.
 			volumes = filterOutVolumeByName(volumes, "backup-src")
 			mounts = filterOutMountByName(mounts, "backup-src")
-			claim := in.Profile.Storage.PVC.ClaimName
-			if claim == "" {
-				claim = ownedBackupPVCName(fg.Name, in.Profile.Name)
-			}
 			volumes = append(volumes, corev1.Volume{
 				Name: "decrypt-src",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: claim,
+						ClaimName: storage.ClaimName,
 						ReadOnly:  true,
 					},
 				},
@@ -440,10 +428,10 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			decMounts = append(decMounts, corev1.VolumeMount{
 				Name: "decrypt-src", MountPath: decPVCMount, ReadOnly: true,
 			})
-			// Derive the relative prefix under the PVC root from
-			// backup.Status.Location (which is the absolute pod-side
-			// path the backup wrote to).
-			prefix := strings.TrimPrefix(backup.Status.Location, backupPVCMountPath+"/")
+			// Derive the relative prefix under the PVC root from the
+			// recorded location (the absolute pod-side path the backup
+			// wrote to).
+			prefix := strings.TrimPrefix(storage.Location, backupPVCMountPath+"/")
 			prefix = strings.TrimSuffix(prefix, "/")
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_PVC_MOUNT_PATH", Value: decPVCMount},
@@ -458,8 +446,8 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 				}
 			}
 		default:
-			return nil, fmt.Errorf("verification job: backup %q has unknown storageType %q for decrypt wiring",
-				backup.Name, backup.Status.StorageType)
+			return nil, fmt.Errorf("verification job: backup %q has unknown storage type %q for decrypt wiring",
+				backup.Name, storage.Type)
 		}
 
 		// Add the read-only decrypt dir to the main container so
@@ -669,7 +657,7 @@ func marshalVerificationLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
 // plaintext backup; an encrypted backup that recorded none is refused with
 // PITRBackupDumpKeyMissing.
 func verificationDumpKey(backup *v1alpha1.MysqlBackup) (*v1alpha1.PassphraseSecretKeyRef, error) {
-	if !backup.Status.Encrypted {
+	if !backupStatusEncrypted(&backup.Status) {
 		return nil, nil
 	}
 	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecretKeyRef == nil ||

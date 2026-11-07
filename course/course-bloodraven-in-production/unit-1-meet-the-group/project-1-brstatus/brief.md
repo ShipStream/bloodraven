@@ -16,10 +16,10 @@ you learn, the hard way, that a lagging reader is not an unhealthy group.
 
 ```
 playground/bloodraven-playground  active=iad  ready=True  degraded=False(Healthy)
-SITE    ROLE              STATE     REPL  LAG      SERVING
-iad     PrimaryCandidate  Writable  no    unknown  no
-pdx     PrimaryCandidate  ReadOnly  yes   0s       yes
-reader  ReadOnly          ReadOnly  yes   0s       yes
+SITE    ROLE              STATE     REPL           LAG      SERVING
+iad     PrimaryCandidate  Writable  NotApplicable  unknown  no
+pdx     PrimaryCandidate  ReadOnly  Healthy        0s       yes
+reader  ReadOnly          ReadOnly  Healthy        0s       yes
 VERDICT: OK
 ```
 
@@ -60,7 +60,7 @@ group read endpoint. That Service selects on three labels — instance, `role=re
 For a site whose role is `ReadOnly`, all five must hold together:
 
 1. `sourceConvergenceState` is `Converged`
-2. `replicating` is true
+2. `replication` is `Healthy` or `Lagging`
 3. `secondsBehindSource` is present (not null)
 4. `canonical_host(sourceHost)` equals `expected_source_host(...)` for the active site — a replica
    chained off another replica does not count
@@ -108,10 +108,10 @@ seconds behind a 30 second threshold — must produce this, and exit **0**:
 
 ```
 playground/bloodraven-playground  active=iad  ready=True  degraded=False(Healthy)
-SITE    ROLE              STATE     REPL  LAG      SERVING
-iad     PrimaryCandidate  Writable  no    unknown  no
-pdx     PrimaryCandidate  ReadOnly  yes   0s       yes
-reader  ReadOnly          ReadOnly  yes   300s     no
+SITE    ROLE              STATE     REPL           LAG      SERVING
+iad     PrimaryCandidate  Writable  NotApplicable  unknown  no
+pdx     PrimaryCandidate  ReadOnly  Healthy        0s       yes
+reader  ReadOnly          ReadOnly  Lagging        300s     no
 VERDICT: OK
 ```
 
@@ -189,7 +189,7 @@ kubectl -n bloodraven-playground get mysqlfailovergroup playground -o json | jq 
   ( $st.sites[]? as $s
     | ([$spec.sites[] | select(.name == $s.name)][0].role // "PrimaryCandidate") as $role
     | [ $s.name, $role, ($s.state // "-"),
-        (if $s.replicating == null then "-" else ($s.replicating|tostring) end),
+        ($s.replication // "-"),
         (if $s.secondsBehindSource == null then "unknown"
          else "\($s.secondsBehindSource)s" end) ] | @tsv )
 ' | column -t

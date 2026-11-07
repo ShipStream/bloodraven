@@ -268,7 +268,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.updateStrategy.type` | string |  | `"OrderedUpdate"` | enum: `OrderedUpdate`, `Recreate` |
 
 
-### MysqlFailoverGroup `status` (312 fields)
+### MysqlFailoverGroup `status` (319 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -287,7 +287,6 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.conditions` | []metav1.Condition |  |  | listType=map keys=type |
 | `status.dragonfly` | object |  |  |  |
 | `status.dragonfly.activeSite` | string |  |  |  |
-| `status.dragonfly.enabled` | boolean |  |  |  |
 | `status.dragonfly.lastPromotionTarget` | string |  |  |  |
 | `status.dragonfly.lastPromotionTime` | string (date-time) |  |  |  |
 | `status.dragonfly.message` | string |  |  |  |
@@ -320,7 +319,6 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.dragonfly.upgrade.targetImage` | string |  |  |  |
 | `status.encryptionAtRest` | object |  |  |  |
 | `status.encryptionAtRest.observedGeneration` | integer (int64) |  |  |  |
-| `status.encryptionAtRest.sealed` | boolean |  |  |  |
 | `status.encryptionAtRest.sites` | []object |  |  | listType=map keys=name |
 | `status.encryptionAtRest.sites[].coverage` | object |  |  |  |
 | `status.encryptionAtRest.sites[].coverage.binlogEncrypted` | boolean |  |  |  |
@@ -339,10 +337,12 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.encryptionAtRest.sites[].name` | string | yes |  |  |
 | `status.encryptionAtRest.sites[].phase` | string |  |  | enum: `Pending`, `Unsealed`, `Escrowed`, `Sealed`, `Failed` |
 | `status.encryptionAtRest.sites[].unsealReason` | string |  |  | enum: `Bootstrap`, `Clone`, `Rotation` |
-| `status.encryptionAtRest.sites[].unsealedSince` | string (date-time) |  |  |  |
+| `status.encryptionAtRest.sites[].unsealTime` | string (date-time) |  |  |  |
 | `status.lastBackupTime` | string (date-time) |  |  |  |
-| `status.lastFailover` | string (date-time) |  |  |  |
-| `status.lastFailoverTarget` | string |  |  |  |
+| `status.lastFailover` | object |  |  |  |
+| `status.lastFailover.promotionGtidExecuted` | string |  |  |  |
+| `status.lastFailover.target` | string |  |  |  |
+| `status.lastFailover.time` | string (date-time) |  |  |  |
 | `status.pitr` | object |  |  |  |
 | `status.pitr.archive` | object |  |  |  |
 | `status.pitr.archive.archiveID` | string |  |  | pattern=`^(ar1-[a-z2-7]{26})?$` |
@@ -354,12 +354,10 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.pitr.archive.state` | string | yes |  | enum: `AwaitingDescriptor`, `Verified`, `Refused` |
 | `status.pitr.archivedBytes` | integer (int64) |  |  |  |
 | `status.pitr.archivedFileCount` | integer (int32) |  |  |  |
-| `status.pitr.enabled` | boolean |  |  |  |
 | `status.pitr.lastArchivedTime` | string (date-time) |  |  |  |
 | `status.pitr.message` | string |  |  |  |
 | `status.pitr.newestArchivedTime` | string (date-time) |  |  |  |
 | `status.pitr.oldestArchivedTime` | string (date-time) |  |  |  |
-| `status.pitr.profileName` | string |  |  |  |
 | `status.pitrArchiveBindings` | []object |  |  | maxItems=16; listType=map keys=id |
 | `status.pitrArchiveBindings[].archiveID` | string |  |  | pattern=`^(ar1-[a-z2-7]{26})?$` |
 | `status.pitrArchiveBindings[].check` | object |  |  |  |
@@ -454,49 +452,53 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.plannedFailoverHold.runID` | string | yes |  | minLength=1; maxLength=63 |
 | `status.plannedFailoverHold.sourceSite` | string |  |  |  |
 | `status.plannedFailoverHold.targetSite` | string |  |  |  |
-| `status.promotionGtidExecuted` | string |  |  |  |
 | `status.restore` | object |  |  |  |
 | `status.restore.completionTime` | string (date-time) |  |  |  |
 | `status.restore.jobName` | string |  |  |  |
 | `status.restore.jobUID` | string |  |  |  |
 | `status.restore.message` | string |  |  |  |
 | `status.restore.phase` | string |  |  | enum: `Pending`, `Running`, `Succeeded`, `Failed` |
-| `status.restore.pointInTime` | object |  |  |  |
-| `status.restore.pointInTime.archive` | object |  |  |  |
-| `status.restore.pointInTime.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
-| `status.restore.pointInTime.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
-| `status.restore.pointInTime.archive.destination` | string |  |  | maxLength=4096 |
-| `status.restore.pointInTime.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
-| `status.restore.pointInTime.archive.source` | object | yes |  |  |
-| `status.restore.pointInTime.archive.source.name` | string | yes |  | maxLength=253 |
-| `status.restore.pointInTime.archive.source.namespace` | string | yes |  | maxLength=63 |
-| `status.restore.pointInTime.archive.source.uid` | string | yes |  |  |
-| `status.restore.pointInTime.excludedDivergentTransactionCount` | integer (int64) |  |  |  |
-| `status.restore.pointInTime.gtidExecuted` | string |  |  | maxLength=2048 |
-| `status.restore.pointInTime.gtidExecutedSHA256` | string |  |  | pattern=`^([0-9a-f]{64})?$` |
-| `status.restore.pointInTime.lastReplayedBinlog` | object |  |  |  |
-| `status.restore.pointInTime.lastReplayedBinlog.name` | string | yes |  | maxLength=255 |
-| `status.restore.pointInTime.lastReplayedBinlog.site` | string | yes |  | maxLength=63; pattern=`^[a-z0-9-]+$` |
-| `status.restore.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
-| `status.restore.pointInTime.newestReplayedCommitTime` | string (date-time) |  |  |  |
-| `status.restore.pointInTime.onHistoryExclusionCount` | integer (int64) |  |  |  |
-| `status.restore.pointInTime.onHistoryExclusions` | string |  |  | maxLength=2048 |
-| `status.restore.pointInTime.outcome` | string | yes |  | enum: `TargetCovered`, `Partial`, `ArchiveHead` |
-| `status.restore.pointInTime.replaySites` | []string |  |  | maxItems=16; listType=atomic; items maxLength=63; items pattern=`^[a-z0-9-]+$` |
-| `status.restore.pointInTime.replaySitesOmitted` | integer (int32) |  |  | minimum=0 |
-| `status.restore.pointInTime.replayedBinlogCount` | integer (int32) |  |  |  |
-| `status.restore.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
-| `status.restore.pointInTime.segmentCount` | integer (int32) |  |  |  |
-| `status.restore.pointInTime.stopTime` | string (date-time) |  |  |  |
+| `status.restore.provenance` | object |  |  |  |
+| `status.restore.provenance.pointInTime` | object |  |  |  |
+| `status.restore.provenance.pointInTime.archive` | object |  |  |  |
+| `status.restore.provenance.pointInTime.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.restore.provenance.pointInTime.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
+| `status.restore.provenance.pointInTime.archive.destination` | string |  |  | maxLength=4096 |
+| `status.restore.provenance.pointInTime.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
+| `status.restore.provenance.pointInTime.archive.source` | object | yes |  |  |
+| `status.restore.provenance.pointInTime.archive.source.name` | string | yes |  | maxLength=253 |
+| `status.restore.provenance.pointInTime.archive.source.namespace` | string | yes |  | maxLength=63 |
+| `status.restore.provenance.pointInTime.archive.source.uid` | string | yes |  |  |
+| `status.restore.provenance.pointInTime.excludedDivergentTransactionCount` | integer (int64) |  |  |  |
+| `status.restore.provenance.pointInTime.gtidExecuted` | string |  |  | maxLength=2048 |
+| `status.restore.provenance.pointInTime.gtidExecutedSHA256` | string |  |  | pattern=`^([0-9a-f]{64})?$` |
+| `status.restore.provenance.pointInTime.lastReplayedBinlog` | object |  |  |  |
+| `status.restore.provenance.pointInTime.lastReplayedBinlog.name` | string | yes |  | maxLength=255 |
+| `status.restore.provenance.pointInTime.lastReplayedBinlog.site` | string | yes |  | maxLength=63; pattern=`^[a-z0-9-]+$` |
+| `status.restore.provenance.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
+| `status.restore.provenance.pointInTime.newestReplayedCommitTime` | string (date-time) |  |  |  |
+| `status.restore.provenance.pointInTime.onHistoryExclusionCount` | integer (int64) |  |  |  |
+| `status.restore.provenance.pointInTime.onHistoryExclusions` | string |  |  | maxLength=2048 |
+| `status.restore.provenance.pointInTime.outcome` | string | yes |  | enum: `TargetCovered`, `Partial`, `ArchiveHead` |
+| `status.restore.provenance.pointInTime.replaySites` | []string |  |  | maxItems=16; listType=atomic; items maxLength=63; items pattern=`^[a-z0-9-]+$` |
+| `status.restore.provenance.pointInTime.replaySitesOmitted` | integer (int32) |  |  | minimum=0 |
+| `status.restore.provenance.pointInTime.replayedBinlogCount` | integer (int32) |  |  |  |
+| `status.restore.provenance.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
+| `status.restore.provenance.pointInTime.segmentCount` | integer (int32) |  |  |  |
+| `status.restore.provenance.pointInTime.stopTime` | string (date-time) |  |  |  |
+| `status.restore.provenance.source` | object |  |  |  |
+| `status.restore.provenance.source.binlogPosition` | object |  |  |  |
+| `status.restore.provenance.source.binlogPosition.file` | string | yes |  | minLength=1; maxLength=512 |
+| `status.restore.provenance.source.binlogPosition.position` | integer (int64) | yes |  | minimum=0 |
+| `status.restore.provenance.source.gtidExecuted` | string |  |  |  |
+| `status.restore.provenance.source.sizeBytes` | integer (int64) |  |  | minimum=0 |
+| `status.restore.provenance.target` | object |  |  |  |
+| `status.restore.provenance.target.binlogPosition` | object |  |  |  |
+| `status.restore.provenance.target.binlogPosition.file` | string | yes |  | minLength=1; maxLength=512 |
+| `status.restore.provenance.target.binlogPosition.position` | integer (int64) | yes |  | minimum=0 |
+| `status.restore.provenance.target.gtidExecuted` | string |  |  |  |
 | `status.restore.reason` | string |  |  | maxLength=1024; pattern=`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$` |
-| `status.restore.sourceBinlogFile` | string |  |  |  |
-| `status.restore.sourceBinlogPos` | integer (int64) |  |  |  |
-| `status.restore.sourceGtidExecuted` | string |  |  |  |
-| `status.restore.sourceSizeBytes` | integer (int64) |  |  |  |
 | `status.restore.startTime` | string (date-time) |  |  |  |
-| `status.restore.targetBinlogFile` | string |  |  |  |
-| `status.restore.targetBinlogPos` | integer (int64) |  |  |  |
-| `status.restore.targetGtidExecuted` | string |  |  |  |
 | `status.restore.targetSite` | string |  |  |  |
 | `status.restoreInPlace` | object |  |  |  |
 | `status.restoreInPlace.completionTime` | string (date-time) |  |  |  |
@@ -505,46 +507,51 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restoreInPlace.jobName` | string |  |  |  |
 | `status.restoreInPlace.message` | string |  |  |  |
 | `status.restoreInPlace.phase` | string |  |  | enum: `Preflight`, `Fencing`, `Restoring`, `Resuming`, `Succeeded`, `Failed` |
-| `status.restoreInPlace.pointInTime` | object |  |  |  |
-| `status.restoreInPlace.pointInTime.archive` | object |  |  |  |
-| `status.restoreInPlace.pointInTime.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
-| `status.restoreInPlace.pointInTime.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
-| `status.restoreInPlace.pointInTime.archive.destination` | string |  |  | maxLength=4096 |
-| `status.restoreInPlace.pointInTime.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
-| `status.restoreInPlace.pointInTime.archive.source` | object | yes |  |  |
-| `status.restoreInPlace.pointInTime.archive.source.name` | string | yes |  | maxLength=253 |
-| `status.restoreInPlace.pointInTime.archive.source.namespace` | string | yes |  | maxLength=63 |
-| `status.restoreInPlace.pointInTime.archive.source.uid` | string | yes |  |  |
-| `status.restoreInPlace.pointInTime.excludedDivergentTransactionCount` | integer (int64) |  |  |  |
-| `status.restoreInPlace.pointInTime.gtidExecuted` | string |  |  | maxLength=2048 |
-| `status.restoreInPlace.pointInTime.gtidExecutedSHA256` | string |  |  | pattern=`^([0-9a-f]{64})?$` |
-| `status.restoreInPlace.pointInTime.lastReplayedBinlog` | object |  |  |  |
-| `status.restoreInPlace.pointInTime.lastReplayedBinlog.name` | string | yes |  | maxLength=255 |
-| `status.restoreInPlace.pointInTime.lastReplayedBinlog.site` | string | yes |  | maxLength=63; pattern=`^[a-z0-9-]+$` |
-| `status.restoreInPlace.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
-| `status.restoreInPlace.pointInTime.newestReplayedCommitTime` | string (date-time) |  |  |  |
-| `status.restoreInPlace.pointInTime.onHistoryExclusionCount` | integer (int64) |  |  |  |
-| `status.restoreInPlace.pointInTime.onHistoryExclusions` | string |  |  | maxLength=2048 |
-| `status.restoreInPlace.pointInTime.outcome` | string | yes |  | enum: `TargetCovered`, `Partial`, `ArchiveHead` |
-| `status.restoreInPlace.pointInTime.replaySites` | []string |  |  | maxItems=16; listType=atomic; items maxLength=63; items pattern=`^[a-z0-9-]+$` |
-| `status.restoreInPlace.pointInTime.replaySitesOmitted` | integer (int32) |  |  | minimum=0 |
-| `status.restoreInPlace.pointInTime.replayedBinlogCount` | integer (int32) |  |  |  |
-| `status.restoreInPlace.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
-| `status.restoreInPlace.pointInTime.segmentCount` | integer (int32) |  |  |  |
-| `status.restoreInPlace.pointInTime.stopTime` | string (date-time) |  |  |  |
+| `status.restoreInPlace.provenance` | object |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime` | object |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.archive` | object |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.archive.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.restoreInPlace.provenance.pointInTime.archive.archiveID` | string | yes |  | pattern=`^ar1-[a-z2-7]{26}$` |
+| `status.restoreInPlace.provenance.pointInTime.archive.destination` | string |  |  | maxLength=4096 |
+| `status.restoreInPlace.provenance.pointInTime.archive.encryptionMode` | string | yes |  | enum: `None`, `Passphrase` |
+| `status.restoreInPlace.provenance.pointInTime.archive.source` | object | yes |  |  |
+| `status.restoreInPlace.provenance.pointInTime.archive.source.name` | string | yes |  | maxLength=253 |
+| `status.restoreInPlace.provenance.pointInTime.archive.source.namespace` | string | yes |  | maxLength=63 |
+| `status.restoreInPlace.provenance.pointInTime.archive.source.uid` | string | yes |  |  |
+| `status.restoreInPlace.provenance.pointInTime.excludedDivergentTransactionCount` | integer (int64) |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.gtidExecuted` | string |  |  | maxLength=2048 |
+| `status.restoreInPlace.provenance.pointInTime.gtidExecutedSHA256` | string |  |  | pattern=`^([0-9a-f]{64})?$` |
+| `status.restoreInPlace.provenance.pointInTime.lastReplayedBinlog` | object |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.lastReplayedBinlog.name` | string | yes |  | maxLength=255 |
+| `status.restoreInPlace.provenance.pointInTime.lastReplayedBinlog.site` | string | yes |  | maxLength=63; pattern=`^[a-z0-9-]+$` |
+| `status.restoreInPlace.provenance.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
+| `status.restoreInPlace.provenance.pointInTime.newestReplayedCommitTime` | string (date-time) |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.onHistoryExclusionCount` | integer (int64) |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.onHistoryExclusions` | string |  |  | maxLength=2048 |
+| `status.restoreInPlace.provenance.pointInTime.outcome` | string | yes |  | enum: `TargetCovered`, `Partial`, `ArchiveHead` |
+| `status.restoreInPlace.provenance.pointInTime.replaySites` | []string |  |  | maxItems=16; listType=atomic; items maxLength=63; items pattern=`^[a-z0-9-]+$` |
+| `status.restoreInPlace.provenance.pointInTime.replaySitesOmitted` | integer (int32) |  |  | minimum=0 |
+| `status.restoreInPlace.provenance.pointInTime.replayedBinlogCount` | integer (int32) |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.segmentCount` | integer (int32) |  |  |  |
+| `status.restoreInPlace.provenance.pointInTime.stopTime` | string (date-time) |  |  |  |
+| `status.restoreInPlace.provenance.source` | object |  |  |  |
+| `status.restoreInPlace.provenance.source.binlogPosition` | object |  |  |  |
+| `status.restoreInPlace.provenance.source.binlogPosition.file` | string | yes |  | minLength=1; maxLength=512 |
+| `status.restoreInPlace.provenance.source.binlogPosition.position` | integer (int64) | yes |  | minimum=0 |
+| `status.restoreInPlace.provenance.source.gtidExecuted` | string |  |  |  |
+| `status.restoreInPlace.provenance.source.sizeBytes` | integer (int64) |  |  | minimum=0 |
+| `status.restoreInPlace.provenance.target` | object |  |  |  |
+| `status.restoreInPlace.provenance.target.binlogPosition` | object |  |  |  |
+| `status.restoreInPlace.provenance.target.binlogPosition.file` | string | yes |  | minLength=1; maxLength=512 |
+| `status.restoreInPlace.provenance.target.binlogPosition.position` | integer (int64) | yes |  | minimum=0 |
+| `status.restoreInPlace.provenance.target.gtidExecuted` | string |  |  |  |
 | `status.restoreInPlace.runConfirm` | string |  |  |  |
 | `status.restoreInPlace.runID` | string |  |  |  |
 | `status.restoreInPlace.scope` | object |  |  | CEL: `self.type == 'Schema' ? has(self.schema) : !has(self.schema)` |
 | `status.restoreInPlace.scope.schema` | string |  |  | minLength=1; maxLength=64 |
 | `status.restoreInPlace.scope.type` | string | yes |  | enum: `Full`, `Schema` |
-| `status.restoreInPlace.sourceBinlogFile` | string |  |  |  |
-| `status.restoreInPlace.sourceBinlogPos` | integer (int64) |  |  |  |
-| `status.restoreInPlace.sourceGtidExecuted` | string |  |  |  |
-| `status.restoreInPlace.sourceSizeBytes` | integer (int64) |  |  |  |
 | `status.restoreInPlace.startTime` | string (date-time) |  |  |  |
-| `status.restoreInPlace.targetBinlogFile` | string |  |  |  |
-| `status.restoreInPlace.targetBinlogPos` | integer (int64) |  |  |  |
-| `status.restoreInPlace.targetGtidExecuted` | string |  |  |  |
 | `status.restoreInPlace.targetSite` | string |  |  |  |
 | `status.restoreOfflineFence` | object |  |  |  |
 | `status.restoreOfflineFence.confirmToken` | string | yes |  |  |
@@ -561,8 +568,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.restoreReclones.fencedGtidExecuted` | string |  |  |  |
 | `status.restoreReclones.pending` | []string |  |  | listType=atomic |
 | `status.restoreReclones.phase` | string | yes |  | enum: `Armed`, `Draining`, `Held` |
+| `status.restoreReclones.requestTime` | string (date-time) |  |  |  |
 | `status.restoreReclones.requested` | string |  |  |  |
-| `status.restoreReclones.requestedAt` | string (date-time) |  |  |  |
 | `status.restoreReclones.superseded` | object |  |  |  |
 | `status.restoreReclones.superseded.confirmToken` | string | yes |  |  |
 | `status.restoreReclones.superseded.held` | boolean |  |  |  |
@@ -573,10 +580,10 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.sites[].divergentGtid` | string |  |  |  |
 | `status.sites[].divergentTransactionCount` | integer (int64) |  |  |  |
 | `status.sites[].gtidExecuted` | string |  |  |  |
-| `status.sites[].lastSeen` | string (date-time) |  |  |  |
+| `status.sites[].lastSeenTime` | string (date-time) |  |  |  |
 | `status.sites[].name` | string | yes |  | minLength=1 |
 | `status.sites[].recoveryState` | string |  |  | enum: `RecoveryInProgress`, `RecoveryBlocked` |
-| `status.sites[].replicating` | boolean |  |  |  |
+| `status.sites[].replication` | string |  |  | enum: `Healthy`, `Lagging`, `Broken`, `Unknown`, `NotApplicable` |
 | `status.sites[].secondsBehindSource` | integer (int64) |  |  |  |
 | `status.sites[].sourceConvergenceReason` | string |  |  | enum: `DirectSource`, `SourceMismatch`, `ProbeFailed`, `MutationFailed`, `GTIDDiverged`, `RestorePeerHold` |
 | `status.sites[].sourceConvergenceState` | string |  |  | enum: `Converged`, `Pending`, `Blocked` |
@@ -589,7 +596,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 - Scope: Namespaced; plural `mysqlbackups`; shortNames: none; categories: none
 - Versions: v1alpha1 (storage); subresources: status
-- Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Started (`.status.startTime`), Completed (`.status.completionTime`), Location (`.status.location`), Size (`.status.size`), Age (`.metadata.creationTimestamp`)
+- Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Started (`.status.startTime`), Completed (`.status.completionTime`), Location (`.status.artifactStorage.location`), Size (`.status.size`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`
 - Root CEL: `!self.metadata.name.endsWith('.bloodraven-backup.json')`
 - Root CEL: `!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location) || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage == oldSelf.status.artifactStorage)`
@@ -604,7 +611,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.sourceSite` | string |  |  | minLength=1; maxLength=253; pattern=`^[a-z0-9-]+$` |
 
 
-### MysqlBackup `status` (31 fields)
+### MysqlBackup `status` (32 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -618,17 +625,19 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.artifactStorage.passphraseSecretKeyRef.key` | string | yes |  | minLength=1; maxLength=253; pattern=`^[-._a-zA-Z0-9]+$` |
 | `status.artifactStorage.passphraseSecretKeyRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `status.artifactStorage.region` | string |  |  |  |
+| `status.artifactStorage.type` | string | yes |  | enum: `S3`, `PVC` |
 | `status.attempt` | integer (int32) |  |  |  |
-| `status.binlogFile` | string |  |  |  |
-| `status.binlogPos` | integer (int64) |  |  |  |
+| `status.binlogPosition` | object |  |  |  |
+| `status.binlogPosition.file` | string | yes |  | minLength=1; maxLength=512 |
+| `status.binlogPosition.position` | integer (int64) | yes |  | minimum=0 |
 | `status.completionTime` | string (date-time) |  |  |  |
 | `status.conditions` | []metav1.Condition |  |  | listType=map keys=type |
-| `status.encrypted` | boolean |  |  |  |
-| `status.encryptionAlgorithm` | string |  |  |  |
+| `status.encryption` | object |  |  |  |
+| `status.encryption.algorithm` | string |  |  | enum: `AES-256-GCM` |
+| `status.encryption.mode` | string | yes |  | enum: `None`, `Passphrase` |
 | `status.failoverGroupUID` | string |  |  |  |
 | `status.gtidExecuted` | string |  |  |  |
 | `status.jobName` | string |  |  |  |
-| `status.location` | string |  |  |  |
 | `status.message` | string |  |  |  |
 | `status.mysqlImage` | string |  |  |  |
 | `status.observedGeneration` | integer (int64) |  |  |  |
@@ -638,7 +647,6 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.sizeBytes` | integer (int64) |  |  |  |
 | `status.sourceSite` | string |  |  |  |
 | `status.startTime` | string (date-time) |  |  |  |
-| `status.storageType` | string |  |  | enum: `S3`, `PVC` |
 
 ## MysqlBackupVerification
 
@@ -670,14 +678,22 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.ttlSecondsAfterFinished` | integer (int32) |  |  | minimum=0 |
 
 
-### MysqlBackupVerification `status` (49 fields)
+### MysqlBackupVerification `status` (53 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
 | `status.backupRef` | object |  |  |  |
-| `status.backupRef.location` | string |  |  |  |
+| `status.backupRef.artifactStorage` | object |  |  |  |
+| `status.backupRef.artifactStorage.bucket` | string |  |  |  |
+| `status.backupRef.artifactStorage.claimName` | string |  |  |  |
+| `status.backupRef.artifactStorage.endpointURL` | string |  |  |  |
+| `status.backupRef.artifactStorage.location` | string |  |  |  |
+| `status.backupRef.artifactStorage.passphraseSecretKeyRef` | object |  |  |  |
+| `status.backupRef.artifactStorage.passphraseSecretKeyRef.key` | string | yes |  | minLength=1; maxLength=253; pattern=`^[-._a-zA-Z0-9]+$` |
+| `status.backupRef.artifactStorage.passphraseSecretKeyRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
+| `status.backupRef.artifactStorage.region` | string |  |  |  |
+| `status.backupRef.artifactStorage.type` | string | yes |  | enum: `S3`, `PVC` |
 | `status.backupRef.name` | string | yes |  |  |
-| `status.backupRef.storageType` | string |  |  | enum: `S3`, `PVC` |
 | `status.backupRef.uid` | string |  |  |  |
 | `status.completionTime` | string (date-time) |  |  |  |
 | `status.conditions` | []metav1.Condition |  |  | listType=map keys=type |
@@ -713,10 +729,6 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.pointInTime.replayedTransactionCount` | integer (int64) |  |  |  |
 | `status.pointInTime.segmentCount` | integer (int32) |  |  |  |
 | `status.pointInTime.stopTime` | string (date-time) |  |  |  |
-| `status.replayedThroughBinlog` | object |  |  |  |
-| `status.replayedThroughBinlog.file` | string |  |  |  |
-| `status.replayedThroughBinlog.position` | integer (int64) |  |  |  |
-| `status.replayedThroughBinlog.timestamp` | string (date-time) |  |  |  |
 | `status.sanityCheck` | object |  |  |  |
 | `status.sanityCheck.durationMilliseconds` | integer (int64) |  |  |  |
 | `status.sanityCheck.error` | string |  |  |  |

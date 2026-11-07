@@ -217,8 +217,8 @@ func verifyPlannedFailoverWatermark() runner.Step {
 			if pf.Promotion == nil || pf.Promotion.ConfirmationTime == nil || pf.Promotion.TargetServerUUID == "" {
 				return fmt.Errorf("promotion record incomplete on a Succeeded run: %+v", pf.Promotion)
 			}
-			if mfg.Status.PromotionGtidExecuted != *pf.Fence.GtidSet {
-				return fmt.Errorf("promotionGtidExecuted=%q, want the fenced set %q", mfg.Status.PromotionGtidExecuted, *pf.Fence.GtidSet)
+			if mfg.Status.PromotionGtidExecuted() != *pf.Fence.GtidSet {
+				return fmt.Errorf("promotionGtidExecuted=%q, want the fenced set %q", mfg.Status.PromotionGtidExecuted(), *pf.Fence.GtidSet)
 			}
 			return nil
 		},

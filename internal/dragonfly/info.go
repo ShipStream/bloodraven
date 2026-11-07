@@ -29,6 +29,11 @@ type ReplicationInfo struct {
 	// snapshot transfer) is in flight on a replica.
 	MasterSyncInProgress bool
 
+	// MasterSyncInProgressReported is true when master_sync_in_progress
+	// was on the wire and parsed, so a reported false is distinguishable
+	// from an absent field.
+	MasterSyncInProgressReported bool
+
 	// MasterLastIOSecondsAgo is seconds since the replica last received
 	// any byte from the master. -1 when not present on the wire.
 	MasterLastIOSecondsAgo int
@@ -96,7 +101,12 @@ func ParseInfoReplication(body string) ReplicationInfo {
 		case "master_link_status":
 			info.MasterLinkStatus = value
 		case "master_sync_in_progress":
-			info.MasterSyncInProgress = value == "1" || strings.EqualFold(value, "true")
+			switch v := strings.TrimSpace(value); {
+			case v == "1" || strings.EqualFold(v, "true"):
+				info.MasterSyncInProgress, info.MasterSyncInProgressReported = true, true
+			case v == "0" || strings.EqualFold(v, "false"):
+				info.MasterSyncInProgress, info.MasterSyncInProgressReported = false, true
+			}
 		case "master_last_io_seconds_ago":
 			if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
 				info.MasterLastIOSecondsAgo, info.MasterLastIOReported = n, true

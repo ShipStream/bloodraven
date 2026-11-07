@@ -223,13 +223,6 @@ const (
 // EncryptionAtRestStatus is the observed state of the encryption
 // subsystem, reported on MysqlFailoverGroup.status.
 type EncryptionAtRestStatus struct {
-	// Sealed is true when encryption is enabled and every site in the
-	// group is in the Sealed phase. It is the single field to alert on:
-	// false means at least one site is running with a writable keyring
-	// or has failed to escrow.
-	// +optional
-	Sealed bool `json:"sealed,omitempty"`
-
 	// Sites is the per-site keyring lifecycle state.
 	// +optional
 	// +listType=map
@@ -277,10 +270,10 @@ type SiteEncryptionStatus struct {
 	// +optional
 	LastEscrowTime *metav1.Time `json:"lastEscrowTime,omitempty"`
 
-	// UnsealedSince is when the site entered the Unsealed phase. Used to
+	// UnsealTime is when the site entered the Unsealed phase. Used to
 	// evaluate keyring.escrowTimeout.
 	// +optional
-	UnsealedSince *metav1.Time `json:"unsealedSince,omitempty"`
+	UnsealTime *metav1.Time `json:"unsealTime,omitempty"`
 
 	// Message is a human-readable explanation of the current phase,
 	// populated on Failed and on transient waits.
@@ -296,7 +289,9 @@ type SiteEncryptionStatus struct {
 // SiteEncryptionCoverage is what the operator actually observed on the
 // live instance, as opposed to what the spec asked for. A site can be
 // Sealed and still have incomplete coverage — for example when an
-// existing schema was adopted and its tables were never rebuilt.
+// existing schema was adopted and its tables were never rebuilt. Each flag
+// is unset when the probe did not report it; an unknown value is never
+// reported as false.
 type SiteEncryptionCoverage struct {
 	// KeyringComponent is the Component_name reported by
 	// performance_schema.keyring_component_status.
@@ -306,12 +301,12 @@ type SiteEncryptionCoverage struct {
 	// KeyringReadOnly mirrors the component's Read_only status. In the
 	// Sealed phase this must be true.
 	// +optional
-	KeyringReadOnly bool `json:"keyringReadOnly,omitempty"`
+	KeyringReadOnly *bool `json:"keyringReadOnly,omitempty"`
 
 	// SystemTablespaceEncrypted reports whether the `mysql` tablespace
 	// is encrypted.
 	// +optional
-	SystemTablespaceEncrypted bool `json:"systemTablespaceEncrypted,omitempty"`
+	SystemTablespaceEncrypted *bool `json:"systemTablespaceEncrypted,omitempty"`
 
 	// UnencryptedTablespaces counts user tablespaces reporting
 	// ENCRYPTION='N'. Non-zero on an adopted cluster whose pre-existing
@@ -321,15 +316,15 @@ type SiteEncryptionCoverage struct {
 
 	// RedoLogEncrypted mirrors @@innodb_redo_log_encrypt.
 	// +optional
-	RedoLogEncrypted bool `json:"redoLogEncrypted,omitempty"`
+	RedoLogEncrypted *bool `json:"redoLogEncrypted,omitempty"`
 
 	// UndoLogEncrypted mirrors @@innodb_undo_log_encrypt.
 	// +optional
-	UndoLogEncrypted bool `json:"undoLogEncrypted,omitempty"`
+	UndoLogEncrypted *bool `json:"undoLogEncrypted,omitempty"`
 
 	// BinlogEncrypted mirrors @@binlog_encryption.
 	// +optional
-	BinlogEncrypted bool `json:"binlogEncrypted,omitempty"`
+	BinlogEncrypted *bool `json:"binlogEncrypted,omitempty"`
 
 	// LastCheckTime is when coverage was last sampled.
 	// +optional

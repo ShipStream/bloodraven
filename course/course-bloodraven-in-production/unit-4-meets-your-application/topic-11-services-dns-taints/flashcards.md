@@ -35,7 +35,7 @@
 
 **Front:** Name the five conjuncts a `role: ReadOnly` site must satisfy to be labelled `healthy=yes`.
 
-**Back:** Source convergence `converged`; `replicating` true; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.
+**Back:** Source convergence `converged`; `replication` `Healthy` or `Lagging`; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.
 
 ---
 

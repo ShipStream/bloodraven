@@ -220,7 +220,11 @@ func waitForBackup(stdout, stderr io.Writer, cl client.Client, ns, name string, 
 		}
 		switch b.Status.Phase {
 		case v1alpha1.BackupPhaseSucceeded:
-			fmt.Fprintf(stdout, "Backup succeeded: %s (size: %s)\n", emptyDash(b.Status.Location), emptyDash(b.Status.Size))
+			location := ""
+			if b.Status.ArtifactStorage != nil {
+				location = b.Status.ArtifactStorage.Location
+			}
+			fmt.Fprintf(stdout, "Backup succeeded: %s (size: %s)\n", emptyDash(location), emptyDash(b.Status.Size))
 			return nil
 		case v1alpha1.BackupPhaseFailed:
 			fmt.Fprintf(stderr, "Backup failed: %s\n", b.Status.Message)

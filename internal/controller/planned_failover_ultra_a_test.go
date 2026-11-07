@@ -47,7 +47,7 @@ func ultraASetRecord(t *testing.T, h *pfEngineHarness, at time.Time, target stri
 	}
 	fg := h.fg()
 	ts := metav1.NewTime(at)
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &ts, target
+	fg.Status.SetLastFailover(&ts, target, "")
 	if err := h.c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestUltraA_K009_InvalidCopyBesideUnchangedWinner(t *testing.T) {
 	t.Run("predicate", func(t *testing.T) {
 		fg := plannedFailoverFG("")
 		ts := metav1.NewTime(old)
-		fg.Status.LastFailover, fg.Status.LastFailoverTarget = &ts, "iad"
+		fg.Status.SetLastFailover(&ts, "iad", "")
 		fg.SetAnnotations(bad)
 		pf := pfRunAt(v1alpha1.PlannedFailoverPhasePromoting, old.Add(time.Hour))
 		pf.ClaimBaseline = newFailoverRecordRef(old, "iad").toAPI()
@@ -75,13 +75,13 @@ func TestUltraA_K009_InvalidCopyBesideUnchangedWinner(t *testing.T) {
 			t.Fatal("unchanged valid winner beside a malformed copy reported as changed")
 		}
 		// No valid copy left: fail closed.
-		fg.Status.LastFailover, fg.Status.LastFailoverTarget = nil, ""
+		fg.Status.SetLastFailover(nil, "", "")
 		if plannedRecordUnchanged(fg, pf, old.Add(time.Hour)) {
 			t.Fatal("no valid copy left must fail closed")
 		}
 		// A removed site in one copy, the valid baseline in the other.
 		fg = plannedFailoverFG("")
-		fg.Status.LastFailover, fg.Status.LastFailoverTarget = &ts, "iad"
+		fg.Status.SetLastFailover(&ts, "iad", "")
 		fg.SetAnnotations(map[string]string{v1alpha1.LastFailoverAnnotation: old.Add(-time.Hour).Format(time.RFC3339), v1alpha1.LastFailoverTargetAnnotation: "gone"})
 		if !plannedRecordUnchanged(fg, pf, old.Add(time.Hour)) {
 			t.Fatal("a copy naming a removed site beside the unchanged winner reported as changed")
@@ -115,7 +115,7 @@ func TestUltraA_K009_InvalidCopyBesideUnchangedWinner(t *testing.T) {
 		pf.ClaimBaseline = newFailoverRecordRef(old, "dc1").toAPI()
 		fg := opsGroup(pf)
 		ts := metav1.NewTime(old)
-		fg.Status.LastFailover, fg.Status.LastFailoverTarget = &ts, "dc1"
+		fg.Status.SetLastFailover(&ts, "dc1", "")
 		fg.SetAnnotations(map[string]string{v1alpha1.LastFailoverAnnotation: "not-a-time", v1alpha1.LastFailoverTargetAnnotation: "dc1"})
 		res, err := f.topo.Reprove(context.Background(), f.ref, fg)
 		if err != nil || res.Hold != nil {
@@ -324,7 +324,7 @@ func TestUltraA_K075_DeferredRunDoesNotShortCircuitReconcile(t *testing.T) {
 	fg.Spec.Backup = fgWithBackup().Spec.Backup
 	now := metav1.Now()
 	at := metav1.NewTime(now.Add(-time.Minute))
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &at, "iad"
+	fg.Status.SetLastFailover(&at, "iad", "")
 	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: v1alpha1.PlannedFailoverCooldownDefer}
 	retry := metav1.NewTime(now.Add(4 * time.Minute))
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseDeferred,
@@ -894,7 +894,7 @@ func TestUltraA_K050_UnsettledRequestDefersOnCooldown(t *testing.T) {
 	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: v1alpha1.PlannedFailoverCooldownDefer}
 	fg.Status.ActiveSite = "" // an emergency failover to pdx is in flight
 	// Mid-failover, dr's replication is stopped: validation would refuse it.
-	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "dr", State: v1alpha1.SiteStateReadOnly, Replicating: false})
+	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "dr", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationBroken})
 	h := newPFEngineHarness(t, fg)
 	h.step()
 	if pf := h.pf(); pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitAuthorityUnsettled {
@@ -903,9 +903,10 @@ func TestUltraA_K050_UnsettledRequestDefersOnCooldown(t *testing.T) {
 	// The emergency failover is published; its cooldown now applies.
 	cur := h.fg()
 	at := metav1.NewTime(h.clk.Now())
-	cur.Status.ActiveSite, cur.Status.LastFailover, cur.Status.LastFailoverTarget = "pdx", &at, "pdx"
-	cur.Status.Sites[0].State, cur.Status.Sites[1].State, cur.Status.Sites[1].Replicating = v1alpha1.SiteStateReadOnly, v1alpha1.SiteStateWritable, false
-	cur.Status.Sites[2].Replicating = true
+	cur.Status.ActiveSite = "pdx"
+	cur.Status.SetLastFailover(&at, "pdx", "")
+	cur.Status.Sites[0].State, cur.Status.Sites[1].State, cur.Status.Sites[1].Replication = v1alpha1.SiteStateReadOnly, v1alpha1.SiteStateWritable, v1alpha1.SiteReplicationNotApplicable
+	cur.Status.Sites[2].Replication = v1alpha1.SiteReplicationHealthy
 	if err := h.c.Status().Update(context.Background(), cur); err != nil {
 		t.Fatal(err)
 	}
@@ -1254,7 +1255,7 @@ func TestUltraA_K149_NewRequestSeesPublishedFailover(t *testing.T) {
 	h := newPFEngineHarness(t, fg)
 	ultraASetRecord(t, h, h.clk.Now().Add(-5*time.Second), "pdx", nil)
 	cur := h.fg()
-	cur.Status.Sites[1].Replicating = false // pdx is being promoted
+	cur.Status.Sites[1].Replication = v1alpha1.SiteReplicationBroken // pdx is being promoted
 	if err := h.c.Status().Update(context.Background(), cur); err != nil {
 		t.Fatal(err)
 	}
@@ -1335,8 +1336,8 @@ func TestUltraA_K152_ConfirmedPromotionSurvivesManagerAbsence(t *testing.T) {
 	if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("result = %+v, want Succeeded", pf.Result)
 	}
-	if st := h.fg().Status; st.LastFailoverTarget != "pdx" || st.LastFailover == nil || st.PromotionGtidExecuted != "uuid-iad:1-10" {
-		t.Fatalf("failover record = %v/%v/%q; the confirmed promotion's record was not applied", st.LastFailover, st.LastFailoverTarget, st.PromotionGtidExecuted)
+	if st := h.fg().Status; st.LastFailoverTarget() != "pdx" || st.LastFailoverTime() == nil || st.PromotionGtidExecuted() != "uuid-iad:1-10" {
+		t.Fatalf("failover record = %v/%v/%q; the confirmed promotion's record was not applied", st.LastFailover, st.LastFailoverTarget(), st.PromotionGtidExecuted())
 	}
 }
 

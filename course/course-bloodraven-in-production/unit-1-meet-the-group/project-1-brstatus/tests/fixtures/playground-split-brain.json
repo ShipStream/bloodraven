@@ -46,23 +46,23 @@
       {
         "name": "iad",
         "state": "Writable",
-        "lastSeen": "2026-08-12T09:14:32Z",
+        "lastSeenTime": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
-        "replicating": false
+        "replication": "NotApplicable"
       },
       {
         "name": "pdx",
         "state": "Writable",
-        "lastSeen": "2026-08-12T09:14:32Z",
+        "lastSeenTime": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58402",
-        "replicating": false
+        "replication": "NotApplicable"
       },
       {
         "name": "reader",
         "state": "ReadOnly",
-        "lastSeen": "2026-08-12T09:14:32Z",
+        "lastSeenTime": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
-        "replicating": true,
+        "replication": "Healthy",
         "sourceHost": "mysql-playground-iad-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Converged",
         "sourceConvergenceReason": "DirectSource",

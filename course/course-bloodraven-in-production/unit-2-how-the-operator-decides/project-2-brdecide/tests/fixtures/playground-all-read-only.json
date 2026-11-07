@@ -35,21 +35,21 @@
         "name": "iad",
         "state": "ReadOnly",
         "role": "PrimaryCandidate",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0
       },
       {
         "name": "pdx",
         "state": "ReadOnly",
         "role": "PrimaryCandidate",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0
       },
       {
         "name": "reader",
         "state": "ReadOnly",
         "role": "ReadOnly",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 3
       }
     ]

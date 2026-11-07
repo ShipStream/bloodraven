@@ -338,7 +338,7 @@ func TestDragonflyManager_StopJoinsRunAndAdmitsNothing(t *testing.T) {
 // a recorded topology with dc2 behind the active Service.
 func TestDragonflyManager_StopAfterAcknowledgedRoleChangeRecordsIt(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	source := makeDragonflyPod(fg.Name, "dc1", "master", true)
 	target := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	cb, key := newDragonflyFakeClient(fg)
@@ -397,7 +397,7 @@ func TestDragonflyManager_StopAfterAcknowledgedRoleChangeRecordsIt(t *testing.T)
 // planned owner starts from labels and status that match the servers.
 func TestDragonflyManager_OwnerWaitingDuringTakeoverGetsRecordedState(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "master", true),
@@ -576,7 +576,7 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 	mgr, get := newEmergencyManager(t)
 	fg := get()
 	fg.Status.ActiveSite = "dc2"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +601,7 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	now := metav1.Now()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", LastPromotionTime: &now, LastPromotionTarget: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTime: &now, LastPromotionTarget: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -667,7 +667,7 @@ func TestDragonflyManager_RequestSkipsTargetObservedAsMaster(t *testing.T) {
 	mgr, get := newEmergencyManager(t)
 	fg := get()
 	earlier := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc2", LastPromotionTarget: "dc2", LastPromotionTime: &earlier}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc2", LastPromotionTarget: "dc2", LastPromotionTime: &earlier}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +835,7 @@ func TestDragonflyManager_TickRepairAndPromotionAreOrdered(t *testing.T) {
 // label sweep keeps dc2 behind the active Service.
 func TestDragonflyManager_TickPublicationCannotOverwritePromotion(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	source := makeDragonflyPod(fg.Name, "dc1", "master", true)
 	target := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	cb, key := newDragonflyFakeClient(fg)
@@ -1194,7 +1194,7 @@ func TestPlannedFailoverPromotingDragonfly_WaitsForSentEmergencyTakeover(t *test
 // status must not be undone from the status it is about to replace.
 func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "replica", true),
@@ -1230,7 +1230,7 @@ func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 // stamped after the reconcile read its copy is honoured.
 func TestSyncDragonflyPodLabels_ReadsStatusAfterTakingGate(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "replica", true),

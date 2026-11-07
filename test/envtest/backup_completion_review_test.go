@@ -30,7 +30,7 @@ func TestEnvtest_UnrecoverableHistoricalBackupCanBeDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := metav1.Now()
-	backup.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &now, StorageType: v1alpha1.BackupStorageS3}
+	backup.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &now}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatal(err)
 	}

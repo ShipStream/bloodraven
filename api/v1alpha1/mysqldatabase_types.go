@@ -537,6 +537,7 @@ type MysqlDatabaseStatus struct {
 	// CR that failed before any SQL (invalid spec, reserved owner,
 	// ownership conflict, unreachable primary) must not drop a database
 	// something else created under the same name.
+	// Durable: a lost record makes deletion leave the database behind.
 	// +optional
 	DatabaseCreated bool `json:"databaseCreated,omitempty"`
 
@@ -545,6 +546,8 @@ type MysqlDatabaseStatus struct {
 	// applies. During a username rotation it keeps the previous name until
 	// the old account has actually been dropped. The password is never
 	// echoed anywhere.
+	// Durable: it is the only attribution of the owner account; a lost
+	// record leaves the account behind at deletion.
 	// +optional
 	OwnerUser string `json:"ownerUser,omitempty"`
 
@@ -558,6 +561,7 @@ type MysqlDatabaseStatus struct {
 	// gate would see an account it cannot attribute and wedge the CR on
 	// PreExistingOwnerUser for a user it created itself. Deletion treats
 	// it as an owner candidate for the same reason.
+	// Durable: see OwnerUser.
 	// +optional
 	PendingOwnerUser string `json:"pendingOwnerUser,omitempty"`
 
@@ -570,6 +574,8 @@ type MysqlDatabaseStatus struct {
 	// its hosts) — and settled to the current list by the Ready stamp. Host
 	// removal and deletion drop OwnerUser off exactly these hosts. Empty
 	// means the pre-hosts default, ["%"].
+	// Durable: host removal and deletion drop the owner only on these
+	// hosts.
 	// +optional
 	// +listType=atomic
 	OwnerHosts []string `json:"ownerHosts,omitempty"`
@@ -581,6 +587,7 @@ type MysqlDatabaseStatus struct {
 	// drop an unrelated same-named account. Non-empty only while
 	// PendingOwnerUser is set; empty with PendingOwnerUser set is the
 	// shape an older operator wrote, and falls back to OwnerHosts.
+	// Durable: see OwnerHosts.
 	// +optional
 	// +listType=atomic
 	PendingOwnerHosts []string `json:"pendingOwnerHosts,omitempty"`
@@ -591,6 +598,7 @@ type MysqlDatabaseStatus struct {
 	// next apply, and deletion revokes the union of the current list and
 	// this record. spec.users[] principals are tracked separately in
 	// AppliedUsers, which pairs each username with its Secret.
+	// Durable: a grant missing from it is never revoked.
 	// +optional
 	// +listType=atomic
 	AppliedGrants []string `json:"appliedGrants,omitempty"`
@@ -605,6 +613,7 @@ type MysqlDatabaseStatus struct {
 	// created. Entries whose secretName has left the spec are dropped from
 	// MySQL and then removed here. Usernames only; never any credential
 	// material.
+	// Durable: it is what authorizes DROP USER for spec.users[] accounts.
 	// +optional
 	// +listType=map
 	// +listMapKey=secretName

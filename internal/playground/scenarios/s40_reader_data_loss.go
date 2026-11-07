@@ -212,7 +212,7 @@ func s40ReplaceReaderDataAndObserve(state *s40RunState) runner.Step {
 						return false, "reader status missing", nil
 					}
 					err := assertReaderServingStatus(mfg, status, state.donorHost)
-					return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s lag=%v", status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, formatLag(status.SecondsBehindSource)), nil
+					return err == nil, fmt.Sprintf("state=%s replication=%s source=%q convergence=%s lag=%v", status.State, status.Replication, status.SourceHost, status.SourceConvergenceState, formatLag(status.SecondsBehindSource)), nil
 				})
 			cancelWait()
 			if err != nil {

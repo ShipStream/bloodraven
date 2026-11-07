@@ -106,7 +106,7 @@ func verifyActiveSiteUnchanged() runner.Step {
 			}
 			if mfg.Status.ActiveSite != original {
 				return fmt.Errorf("activeSite changed during operator restart: was %q, now %q (lastFailoverTarget=%q)",
-					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 			}
 			// Defense-in-depth: also confirm the cluster still reports
 			// exactly one writable site so an in-flight unrelated

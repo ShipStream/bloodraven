@@ -215,7 +215,6 @@ const (
 	ReasonCredentialsUnavailable    = "CredentialsUnavailable"
 	ReasonDestinationMismatch       = "DestinationMismatch"
 	ReasonDestinationUnavailable    = "DestinationUnavailable"
-	ReasonDestinationUnverified     = "DestinationUnverified"
 	ReasonDumpKeySnapshotConflict   = "DumpKeySnapshotConflict"
 	ReasonForegroundDeletion        = "ForegroundDeletion"
 	ReasonHeldByVerification        = "HeldByVerification"

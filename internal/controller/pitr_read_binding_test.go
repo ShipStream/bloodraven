@@ -249,10 +249,10 @@ func TestVerificationDumpKeyIsRecorded(t *testing.T) {
 	fg := fgWithEncryptedBackup()
 	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "edited-since"
 	backup := successfulBackup("seed", "lion", "nightly-s3")
-	backup.Status.Location = "s3://bloodraven-backups/lion/seed/"
-	backup.Status.StorageType = v1alpha1.BackupStorageS3
-	backup.Status.Encrypted = true
-	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-uid-seed", Key: pitrKeySnapshotDataKey}}
+	setTestArtifactLocation(backup, "s3://bloodraven-backups/lion/seed/")
+	setTestArtifactType(backup, v1alpha1.BackupStorageS3)
+	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+	ensureTestArtifact(backup).PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-uid-seed", Key: pitrKeySnapshotDataKey}
 	v := verifyCR("verify-dump", "lion", "nightly-s3")
 	job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
 	if err != nil {
@@ -261,7 +261,7 @@ func TestVerificationDumpKeyIsRecorded(t *testing.T) {
 	if vol := findVolume(job.Spec.Template.Spec.Volumes, "backup-passphrase"); vol == nil || vol.Secret.SecretName != "mysqlbackup-seed-dump-key-uid-seed" || vol.Secret.Items[0].Key != pitrKeySnapshotDataKey {
 		t.Fatalf("decrypt mounts %+v, want the recorded snapshot", vol)
 	}
-	backup.Status.ArtifactStorage = nil
+	backup.Status.ArtifactStorage.PassphraseSecretKeyRef = nil
 	if _, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"}); err == nil ||
 		!strings.Contains(err.Error(), string(pitrarchive.TokenBackupDumpKeyMissing)) {
 		t.Fatalf("no recorded key: %v", err)

@@ -113,8 +113,8 @@ func prepareSplitBrainAutoResolvePolicyPath() runner.Step {
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					ready := pgkube.ReadyCondition(mfg)
 					msg := fmt.Sprintf("ready=%s active=%q lastFailoverTarget=%q",
-						ready, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
-					done := ready == "True" && mfg.Status.ActiveSite != "" && mfg.Status.LastFailoverTarget == ""
+						ready, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
+					done := ready == "True" && mfg.Status.ActiveSite != "" && mfg.Status.LastFailoverTarget() == ""
 					return done, msg, nil
 				},
 			)

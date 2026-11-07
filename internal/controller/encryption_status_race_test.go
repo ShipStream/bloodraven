@@ -69,7 +69,6 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	digest := keyringDigest([]byte("keyring"))
 	sealed := &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},

@@ -29,7 +29,7 @@ func encryptedAbandonedFixture(t *testing.T, withKey bool) *cleanupFixture {
 	t.Helper()
 	f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
 	ctx := context.Background()
-	f.mb.Status.Encrypted = true
+	f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: dumpKeySnapshotName(f.mb), Key: pitrKeySnapshotDataKey}
 	if err := f.c.Status().Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
@@ -124,10 +124,10 @@ func TestVerificationRecordedDumpKeyGone(t *testing.T) {
 	defer SetOperatorImageDefaults("", "")
 	fg := fgWithEncryptedBackup()
 	backup := successfulBackup("seed", "lion", "nightly-s3")
-	backup.Status.Location = "s3://bloodraven-backups/lion/seed/"
-	backup.Status.StorageType = v1alpha1.BackupStorageS3
-	backup.Status.Encrypted = true
-	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}}
+	setTestArtifactLocation(backup, "s3://bloodraven-backups/lion/seed/")
+	setTestArtifactType(backup, v1alpha1.BackupStorageS3)
+	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+	ensureTestArtifact(backup).PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}
 	v := verifyCR("verify-gone", "lion", "nightly-s3")
 	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)

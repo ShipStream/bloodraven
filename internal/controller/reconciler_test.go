@@ -1204,8 +1204,8 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 	healthyStatuses := func() []v1alpha1.SiteStatus {
 		return []v1alpha1.SiteStatus{
 			{Name: "dc1", State: v1alpha1.SiteStateWritable},
-			{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
-			{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replicating: true, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local", SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
+			{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+			{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local", SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
 		}
 	}
 	for _, tc := range []struct {
@@ -1233,7 +1233,7 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 		{name: "thread failure", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Sites = healthyStatuses()
-			fg.Status.Sites[2].Replicating = false
+			fg.Status.Sites[2].Replication = v1alpha1.SiteReplicationBroken
 		}, wantPrimary: true},
 		{name: "lag failure", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "dc1"
@@ -2024,7 +2024,7 @@ func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
 		{Name: "dc1", State: v1alpha1.SiteStateWritable},
-		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
 		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc1", v1alpha1.RoleLabel: "replica",

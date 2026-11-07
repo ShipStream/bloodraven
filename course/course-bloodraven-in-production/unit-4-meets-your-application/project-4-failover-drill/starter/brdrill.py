@@ -5,7 +5,7 @@ You give it two artefacts from one drill against the `playground` failover group
 
   --probe   a JSONL probe log, one line per write or read attempt your writer made
   --drill   a JSON capture of the drill: what you triggered, and the group status
-            afterwards (activeSite, lastFailover, lastFailoverTarget, and for a
+            afterwards (activeSite, lastFailover{time, target}, and for a
             planned move, status.plannedFailover)
 
 It prints a drill record: the measured write-gap, the stale-read window, the
@@ -98,9 +98,10 @@ def load_drill(path):
     for field in ("mode", "group", "demotedSite"):
         if not drill["drill"].get(field):
             raise SystemExit("%s: missing drill.%s" % (path, field))
-    for field in ("lastFailover", "lastFailoverTarget"):
-        if not drill["status"].get(field):
-            raise SystemExit("%s: missing status.%s" % (path, field))
+    record = drill["status"].get("lastFailover") or {}
+    for field in ("time", "target"):
+        if not record.get(field):
+            raise SystemExit("%s: missing status.lastFailover.%s" % (path, field))
     return drill
 
 
@@ -111,13 +112,13 @@ def demoted_site(drill):
 
 def promoted_site(drill):
     """The site the primary moved to, straight out of the group status."""
-    return drill["status"]["lastFailoverTarget"]
+    return drill["status"]["lastFailover"]["target"]
 
 
 def promotion_instant(drill):
-    """When the operator stamped the promotion. `status.lastFailover` is
+    """When the operator stamped the promotion. `status.lastFailover.time` is
     RFC3339 at second precision, so it is coarser than your probe log."""
-    return parse_ts(drill["status"]["lastFailover"])
+    return parse_ts(drill["status"]["lastFailover"]["time"])
 
 
 # --------------------------------------------------------------------------

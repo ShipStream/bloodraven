@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -95,7 +94,7 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
 						t.Fatal(err)
 					}
-					if mb.Status.Location != wantLocation || mb.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+					if testArtifactLocation(mb) != wantLocation || mb.Status.Phase != v1alpha1.BackupPhaseSucceeded {
 						t.Fatalf("recovery changed actual artifact identity: %+v want %q", mb.Status, wantLocation)
 					}
 					fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: mb.Name}}}
@@ -175,57 +174,6 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBackupMetadata_LegacyProducerLocationPreserved(t *testing.T) {
-	for _, reason := range []string{"", "Collected", "SentinelUnavailable", "SentinelMissing", "LocationMismatch"} {
-		t.Run("reason-"+reason, func(t *testing.T) {
-			ctx := context.Background()
-			r, c, _, mb, job := backupMetadataFixture(t, false)
-			const literal = "$(NOT_DECLARED)/metadata"
-			for i := range job.Spec.Template.Spec.Containers[0].Env {
-				if job.Spec.Template.Spec.Containers[0].Env[i].Name == "BLOODRAVEN_OUTPUT_URL" {
-					job.Spec.Template.Spec.Containers[0].Env[i].Value = literal
-				}
-			}
-			if err := c.Update(ctx, job); err != nil {
-				t.Fatal(err)
-			}
-			mb.Status.Phase, mb.Status.Location = v1alpha1.BackupPhaseSucceeded, literal
-			mb.Status.CompletionTime = job.Status.CompletionTime
-			mb.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Succeeded", Message: "original producer reported success", LastTransitionTime: metav1.Now()}}
-			if reason != "" {
-				status := metav1.ConditionFalse
-				if reason == "Collected" {
-					status = metav1.ConditionTrue
-				}
-				mb.Status.Conditions = append(mb.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionMetadataComplete, Status: status, Reason: reason, Message: "previous collection", LastTransitionTime: metav1.Now()})
-			}
-			if err := c.Status().Update(ctx, mb); err != nil {
-				t.Fatal(err)
-			}
-			before := *mb.Status.DeepCopy()
-			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mb)}); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
-				t.Fatal(err)
-			}
-			if reason == "" || reason == "Collected" {
-				if mb.Status.Location != literal || !reflect.DeepEqual(mb.Status.Conditions, before.Conditions) {
-					t.Fatalf("producer-reported legacy destination was altered: %+v", mb.Status)
-				}
-				// Exercise the collector directly as well as the repair predicate.
-				for i := 0; i < 2; i++ {
-					if _, err := r.collectBackupCompletion(ctx, mb, job, &before); err != nil || before.Location != literal || !reflect.DeepEqual(before.Conditions, mb.Status.Conditions) {
-						t.Fatalf("collector erased producer location/provenance: status=%+v err=%v", before, err)
-					}
-				}
-			} else if mb.Status.Location != "" {
-				t.Fatalf("fallback-written unknown template was not invalidated: %+v", mb.Status)
-			}
-		})
-	}
-}
-
 func TestBackupMetadata_CleanupWarningWithoutJob(t *testing.T) {
 	ctx := context.Background()
 	r, c, _, mb, job := backupMetadataFixture(t, false)
@@ -233,8 +181,7 @@ func TestBackupMetadata_CleanupWarningWithoutJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
-	mb.Status.Location = ""
-	// A historical backup: no destination snapshot either.
+	// No recorded destination.
 	mb.Status.ArtifactStorage = nil
 	if err := c.Status().Update(ctx, mb); err != nil {
 		t.Fatal(err)

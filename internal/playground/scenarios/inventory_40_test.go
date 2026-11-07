@@ -50,7 +50,7 @@ func TestAssertReaderServingStatus(t *testing.T) {
 	status := v1alpha1.SiteStatus{
 		Name:                   "reader",
 		State:                  v1alpha1.SiteStateReadOnly,
-		Replicating:            true,
+		Replication:            v1alpha1.SiteReplicationHealthy,
 		SecondsBehindSource:    &lag,
 		SourceHost:             "mysql-playground-iad-internal.ns.svc.cluster.local:3306",
 		SourceConvergenceState: v1alpha1.SourceConvergenceConverged,

@@ -176,7 +176,7 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 				Mode: v1alpha1.PointInTimeModeTimestamp, Outcome: v1alpha1.PointInTimeTargetCovered,
 				StopTime: &metav1.Time{Time: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)},
 				Archive: &v1alpha1.PITRArchiveIdentity{ArchiveID: outcomeArchiveID, Source: v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "src", UID: outcomeSourceUID},
-					EncryptionMode: v1alpha1.PITRArchiveEncryptionNone},
+					EncryptionMode: v1alpha1.EncryptionModeNone},
 				ReplaySites: []string{"dfw", "iad"}, SegmentCount: 2, ReplayedBinlogCount: 2,
 				LastReplayedBinlog:       &v1alpha1.ReplayedBinlogRef{Site: "iad", Name: "mysql-bin.000007"},
 				ReplayedTransactionCount: 32, NewestReplayedCommitTime: microPtr(time.Date(2029, 12, 31, 23, 59, 50, 123456000, time.UTC)),
@@ -253,16 +253,16 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 				t.Fatalf("outcome: %+v", status)
 			}
 			if tc.failed {
-				if !strings.HasPrefix(status.Message, "PITRCoverageInvalid: ") || status.PointInTime != nil {
+				if !strings.HasPrefix(status.Message, "PITRCoverageInvalid: ") || status.Provenance != nil && status.Provenance.PointInTime != nil {
 					t.Fatalf("invalid verdict leaked into status: %+v", status)
 				}
 				return
 			}
-			if status.PointInTime == nil || status.PointInTime.Archive == nil {
+			if status.Provenance == nil || status.Provenance.PointInTime == nil || status.Provenance.PointInTime.Archive == nil {
 				t.Fatalf("verdict result lost: %+v", status)
 			}
 			if tc.check != nil {
-				tc.check(t, status.PointInTime)
+				tc.check(t, status.Provenance.PointInTime)
 			}
 			events := []string{}
 			for len(rec.Events) > 0 {
@@ -660,8 +660,8 @@ func TestPITRVerificationVerdictOutcomes(t *testing.T) {
 				if res.Mode != wantMode || (res.StopTime == nil) != (tc.mode == "latest") {
 					t.Fatalf("result mode/stop: %+v", res)
 				}
-				if v.Status.ReplayedThroughBinlog == nil || v.Status.ReplayedThroughBinlog.File != "mysql-bin.000007" || v.Status.ReplayedThroughBinlog.Timestamp == nil {
-					t.Fatalf("replay mark lost: %+v", v.Status.ReplayedThroughBinlog)
+				if res.LastReplayedBinlog == nil || res.LastReplayedBinlog.Name != "mysql-bin.000007" || res.NewestReplayedCommitTime == nil {
+					t.Fatalf("replay result lost its last binlog or newest commit: %+v", res)
 				}
 			}
 			for _, want := range tc.events {

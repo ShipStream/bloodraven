@@ -271,11 +271,6 @@ const (
 // DragonflyStatus is the observed state of the Dragonfly subsystem for a
 // failover group.
 type DragonflyStatus struct {
-	// Enabled mirrors spec.dragonfly.enabled at the time of the last
-	// observation.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
 	// ActiveSite is the site currently acting as Dragonfly master.
 	// Normally equal to status.activeSite (MySQL active); during a
 	// planned-failover Dragonfly promotion the two may briefly diverge.
@@ -452,9 +447,10 @@ type DragonflySiteStatus struct {
 	LinkStatus string `json:"linkStatus,omitempty"`
 
 	// SyncInProgress is the parsed master_sync_in_progress field from
-	// INFO replication on a replica.
+	// INFO replication on a replica. Unset when Dragonfly did not report
+	// it.
 	// +optional
-	SyncInProgress bool `json:"syncInProgress,omitempty"`
+	SyncInProgress *bool `json:"syncInProgress,omitempty"`
 
 	// LastIOSecondsAgo is the parsed master_last_io_seconds_ago field from
 	// INFO replication on a replica. A value of -1 means the replica has

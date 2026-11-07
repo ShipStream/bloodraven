@@ -714,7 +714,7 @@ func TestMysqlBackupReconciler_StampsLabels(t *testing.T) {
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := &v1alpha1.MysqlBackup{
@@ -788,8 +788,7 @@ func TestBuildCleanupJob_S3_SetsStorageTypeEnvAndMountsAWSCreds(t *testing.T) {
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Location:    "lion/lion-done/",
-			StorageType: v1alpha1.BackupStorageS3,
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/lion-done/"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -837,8 +836,7 @@ func TestBuildCleanupJob_PVC_AttachesVolumeAndSetsMountPath(t *testing.T) {
 			ProfileName:      "daily-local",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Location:    "/backups/lion-local",
-			StorageType: v1alpha1.BackupStoragePVC,
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStoragePVC, "/backups/lion-local"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -892,7 +890,8 @@ func TestFinalize_NoLocationIsImmediatelyDone(t *testing.T) {
 
 func TestFinalize_MissingFailoverGroup_ReleasesWithWarning(t *testing.T) {
 	b := backupCR("orphan", "ghost", "nightly-s3")
-	b.Status.Location = "ghost/orphan/"
+	b.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	setTestArtifactLocation(b, "ghost/orphan/")
 	r, _ := newBackupReconciler(t, b)
 	done, _, err := r.finalize(context.Background(), b)
 	if err != nil || !done {
@@ -915,9 +914,8 @@ func TestFinalize_CreatesCleanupJobAndWaits(t *testing.T) {
 	t.Cleanup(func() { SetOperatorImageDefaults("", "") })
 	fg := fgWithBackup()
 	b := backupCR("done", "lion", "nightly-s3")
-	b.Status.Location = "lion/done/"
-	b.Status.StorageType = v1alpha1.BackupStorageS3
-	b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{Location: "lion/done/", Bucket: "bloodraven-backups"}
+	b.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "lion/done/", Bucket: "bloodraven-backups"}
 	// No MySQL credentials Secret: cleanup only talks to storage.
 	r, c := newBackupReconciler(t, fg, b)
 

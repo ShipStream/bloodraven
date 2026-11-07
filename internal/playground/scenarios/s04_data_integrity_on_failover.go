@@ -276,7 +276,7 @@ func waitForS04CleanupBaseline(ctx context.Context, env *runner.Env) (*v1alpha1.
 				if s.RecoveryState == "RecoveryBlocked" {
 					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
 				}
-				if s.Name != mfg.Status.ActiveSite && isPromotableSite(mfg, s.Name) && !s.Replicating {
+				if s.Name != mfg.Status.ActiveSite && isPromotableSite(mfg, s.Name) && !s.Replication.Running() {
 					bad = append(bad, fmt.Sprintf("%s=not-replicating", s.Name))
 				}
 			}

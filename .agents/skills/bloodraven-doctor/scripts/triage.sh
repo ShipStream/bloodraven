@@ -82,17 +82,18 @@ fi
 # kubectl -o jsonpath tolerates missing keys: an unset field yields an empty
 # string with exit 0, so the || fallbacks below never fire on their own.
 ACTIVE_SITE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.activeSite}' 2>/dev/null || true)
-LAST_FAILOVER=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover}' 2>/dev/null || true)
+LAST_FAILOVER=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover.time}{" target="}{.status.lastFailover.target}' 2>/dev/null || true)
 TOPOLOGY_GENERATION=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}' 2>/dev/null || true)
 
 echo "Active Primary Site: ${ACTIVE_SITE:-Unknown}"
+if [[ -z "$LAST_FAILOVER" || "$LAST_FAILOVER" == " target=" ]]; then LAST_FAILOVER=""; fi
 echo "Last Failover:       ${LAST_FAILOVER:-None}"
 echo "Topology generation: ${TOPOLOGY_GENERATION:-unavailable}"
 RESTORE_STATUS=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restore.phase}{" reason="}{.status.restore.reason}{" job="}{.status.restore.jobName}{" message="}{.status.restore.message}' 2>/dev/null || true)
 if [[ -n "$RESTORE_STATUS" && "$RESTORE_STATUS" != " reason= job= message=" ]]; then
     echo "Restore status:      $RESTORE_STATUS"
     # The certified point-in-time outcome, from the replay's verdict.
-    RESTORE_PIT=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restore.pointInTime.mode}{" outcome="}{.status.restore.pointInTime.outcome}{" stop="}{.status.restore.pointInTime.stopTime}{" newest="}{.status.restore.pointInTime.newestReplayedCommitTime}{" archive="}{.status.restore.pointInTime.archive.archiveID}{" segments="}{.status.restore.pointInTime.segmentCount}{" transactions="}{.status.restore.pointInTime.replayedTransactionCount}{" divergentExcluded="}{.status.restore.pointInTime.excludedDivergentTransactionCount}{" onHistoryExcluded="}{.status.restore.pointInTime.onHistoryExclusionCount}{" gtidExecuted="}{.status.restore.pointInTime.gtidExecuted}' 2>/dev/null || true)
+    RESTORE_PIT=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restore.provenance.pointInTime.mode}{" outcome="}{.status.restore.provenance.pointInTime.outcome}{" stop="}{.status.restore.provenance.pointInTime.stopTime}{" newest="}{.status.restore.provenance.pointInTime.newestReplayedCommitTime}{" archive="}{.status.restore.provenance.pointInTime.archive.archiveID}{" segments="}{.status.restore.provenance.pointInTime.segmentCount}{" transactions="}{.status.restore.provenance.pointInTime.replayedTransactionCount}{" divergentExcluded="}{.status.restore.provenance.pointInTime.excludedDivergentTransactionCount}{" onHistoryExcluded="}{.status.restore.provenance.pointInTime.onHistoryExclusionCount}{" gtidExecuted="}{.status.restore.provenance.pointInTime.gtidExecuted}' 2>/dev/null || true)
     if [[ -n "$RESTORE_PIT" && "$RESTORE_PIT" != " outcome="* ]]; then
         echo "  pointInTime:       $RESTORE_PIT"
         if [[ "$RESTORE_PIT" != *"onHistoryExcluded= "* && "$RESTORE_PIT" != *"onHistoryExcluded=0 "* ]]; then
@@ -109,7 +110,7 @@ if [[ "$RESTORE_RECLONES" != " pending=[] requested= failures=" && -n "$RESTORE_
     # Replication state of the queued sites as the operator last saw it. A
     # stopped IO thread (sourceConvergenceReason RestorePeerHold) is by design.
     for site in $(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.pending[*]}' 2>/dev/null || true); do
-        SITE_REPL=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{range .status.sites[?(@.name==\"$site\")]}replicating={.replicating} source={.sourceConvergenceState}/{.sourceConvergenceReason}{end}" 2>/dev/null || true)
+        SITE_REPL=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{range .status.sites[?(@.name==\"$site\")]}replication={.replication} source={.sourceConvergenceState}/{.sourceConvergenceReason}{end}" 2>/dev/null || true)
         echo "  queued $site: ${SITE_REPL:-not observed} (do not START REPLICA on a queued site)"
     done
 fi
@@ -260,7 +261,7 @@ fi
 
 echo ""
 echo "--- 2. Sites & Replication Summary ---"
-kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.sites[*]}Site: {.name}{"\n"}  State: {.state}{"\n"}  Replicating: {.replicating}{"\n"}  SecondsBehindSource: {.secondsBehindSource}{"\n"}  ReplicationError: {.replicationError}{"\n"}  RecoveryState: {.recoveryState}{"\n"}  Divergence: {.divergenceDetectedBy}{" vs "}{.divergenceComparedTo}{" "}{.divergentTransactionCount}{" "}{.divergentGtid}{"\n\n"}{end}' 2>/dev/null || echo "Could not parse site status."
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.sites[*]}Site: {.name}{"\n"}  State: {.state}{"\n"}  Replication: {.replication}{"\n"}  SecondsBehindSource: {.secondsBehindSource}{"\n"}  ReplicationError: {.replicationError}{"\n"}  RecoveryState: {.recoveryState}{"\n"}  Divergence: {.divergenceDetectedBy}{" vs "}{.divergenceComparedTo}{" "}{.divergentTransactionCount}{" "}{.divergentGtid}{"\n\n"}{end}' 2>/dev/null || echo "Could not parse site status."
 DEGRADED=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Degraded")].status}{" "}{.status.conditions[?(@.type=="Degraded")].reason}{": "}{.status.conditions[?(@.type=="Degraded")].message}' 2>/dev/null || true)
 echo "Degraded: ${DEGRADED:-unavailable}"
 if [[ "$DEGRADED" == *Initializing* ]]; then
@@ -284,6 +285,10 @@ echo "Replication Takeover Ready:   $DF_TAKEOVER"
 echo ""
 echo "--- 4. Encryption-at-Rest Keyring ---"
 kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.encryptionAtRest.sites[*]}Site: {.name} -> Phase: {.phase}, Message: {.message}{"\n"}{end}' 2>/dev/null || echo "Encryption status not available."
+EAR_READY=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="EncryptionAtRestReady")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
+if [[ -n "$EAR_READY" ]]; then
+    echo "EncryptionAtRestReady: $EAR_READY (True/AllSitesSealed = every site sealed)"
+fi
 
 echo ""
 echo "--- 5. Pod Health & Restarts ---"
@@ -305,7 +310,7 @@ if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "  - Warnings are throttled to one per 5 minutes, so a group that recovered and then broke again can still show TopologyManagerStarted last."
     echo "  - The operator forgets a failure episode when it restarts, so a group fixed after an operator restart never gets TopologyManagerStarted and can still show TopologyManagerStartFailed last."
     echo "  Confirm the current state before declaring the manager absent: the operator logs ERROR 'failed to start topology manager' for $NAMESPACE/$MFG_NAME every 30s while it is down"
-    echo "  (kubectl logs -n <operator-ns> deploy/bloodraven --since=2m | grep 'failed to start topology manager' | grep '$NAMESPACE/$MFG_NAME'), and status.sites[].lastSeen stops advancing. See playbook 24."
+    echo "  (kubectl logs -n <operator-ns> deploy/bloodraven --since=2m | grep 'failed to start topology manager' | grep '$NAMESPACE/$MFG_NAME'), and status.sites[].lastSeenTime stops advancing. See playbook 24."
     echo "$MANAGER_EVENTS"
 fi
 # A verification's exclusion and partial-outcome Warnings are recorded on the
@@ -332,10 +337,10 @@ echo ""
 echo "--- 8. Backup Completion Metadata ---"
 kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o 'jsonpath={range .status.backupSchedules[*]}Schedule: {.name}{"\t"}RetryConflict: {.retryConflict}{"\n"}{end}' 2>/dev/null || echo "Backup schedule status unavailable."
 # Project public fields only; never dump credential or passphrase env/volumes.
-kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.location,FG_UID:.status.failoverGroupUID,PITR_ARCHIVE_ID:.status.pitrArchiveID,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' 2>/dev/null || echo "Backup status unavailable."
+kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.artifactStorage.location,FG_UID:.status.failoverGroupUID,PITR_ARCHIVE_ID:.status.pitrArchiveID,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' 2>/dev/null || echo "Backup status unavailable."
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup" -o 'custom-columns=NAME:.metadata.name,OWNER_UID:.metadata.ownerReferences[*].uid,SUCCEEDED:.status.succeeded,CONTAINERS:.spec.template.spec.containers[*].name,STORAGE:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_STORAGE_TYPE")].value,OUTPUT:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_OUTPUT_URL")].value,BUCKET:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_S3_BUCKET")].value' 2>/dev/null || echo "Backup Job inputs unavailable."
 echo "Artifact cleanup (Terminating backups show DELETING; CLEANUP is the ArtifactCleanup reason):"
-kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,LOCATION:.status.location,RECORDED:.status.artifactStorage.location,BUCKET:.status.artifactStorage.bucket,CLAIM:.status.artifactStorage.claimName,CLEANUP:.status.conditions[?(@.type=="ArtifactCleanup")].reason,MESSAGE:.status.conditions[?(@.type=="ArtifactCleanup")].message' 2>/dev/null || echo "Artifact cleanup status unavailable."
+kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,LOCATION:.status.artifactStorage.location,BUCKET:.status.artifactStorage.bucket,CLAIM:.status.artifactStorage.claimName,CLEANUP:.status.conditions[?(@.type=="ArtifactCleanup")].reason,MESSAGE:.status.conditions[?(@.type=="ArtifactCleanup")].message' 2>/dev/null || echo "Artifact cleanup status unavailable."
 kubectl get pods -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup-cleanup" -o 'custom-columns=POD:.metadata.name,BACKUP:.metadata.labels.shipstream\.io/mysqlbackup,PHASE:.status.phase,EXIT:.status.containerStatuses[*].state.terminated.exitCode,VERDICT:.status.containerStatuses[*].state.terminated.message' 2>/dev/null || echo "Cleanup pods unavailable."
 if command -v jq >/dev/null 2>&1; then
   echo "Verification holds (backup -> {hold.verification.shipstream.io/<uid>: verification}):"
@@ -346,7 +351,7 @@ if command -v jq >/dev/null 2>&1; then
 fi
 echo ""
 echo "--- 9. Verification Execution Source ---"
-kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase,JOB:.status.jobName,BACKUP:.status.backupRef.name,BACKUP_UID:.status.backupRef.uid,LOCATION:.status.backupRef.location,STORAGE:.status.backupRef.storageType,VERIFIED:.status.conditions[?(@.type=="Verified")].status,REASON:.status.conditions[?(@.type=="Verified")].reason' 2>/dev/null || echo "Verification status unavailable."
+kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase,JOB:.status.jobName,BACKUP:.status.backupRef.name,BACKUP_UID:.status.backupRef.uid,LOCATION:.status.backupRef.artifactStorage.location,STORAGE:.status.backupRef.artifactStorage.type,VERIFIED:.status.conditions[?(@.type=="Verified")].status,REASON:.status.conditions[?(@.type=="Verified")].reason' 2>/dev/null || echo "Verification status unavailable."
 echo "Verification point-in-time results (status.pointInTime):"
 kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,MODE:.status.pointInTime.mode,OUTCOME:.status.pointInTime.outcome,STOP:.status.pointInTime.stopTime,NEWEST:.status.pointInTime.newestReplayedCommitTime,ARCHIVE:.status.pointInTime.archive.archiveID,SITES:.status.pointInTime.replaySites,TXNS:.status.pointInTime.replayedTransactionCount,DIVERGENT_EXCLUDED:.status.pointInTime.excludedDivergentTransactionCount,ON_HISTORY:.status.pointInTime.onHistoryExclusionCount,GTID_EXECUTED:.status.pointInTime.gtidExecuted' 2>/dev/null || echo "Verification point-in-time results unavailable."
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup-verification" -o 'custom-columns=NAME:.metadata.name,OWNER_UID:.metadata.ownerReferences[*].uid,SNAPSHOT:.spec.template.metadata.annotations.shipstream\.io/verification-backup,INPUT:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_INPUT_URL")].value,DECRYPT_STORAGE:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_STORAGE_TYPE")].value,DECRYPT_PREFIX:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_SOURCE_PREFIX")].value,DECRYPT_BUCKET:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_S3_BUCKET")].value' 2>/dev/null || echo "Verification Job inputs unavailable."

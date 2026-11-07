@@ -320,7 +320,7 @@ func TestSyncPodLabels_StaleCacheKeepsQueuedSiteOutOfReaderServices(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			cached := newTestFG()
 			cached.Status.ActiveSite = "dc1"
-			cached.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true}}
+			cached.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
 			authoritative := cached.DeepCopy()
 			if tc.queued {
 				authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"dc2"}}

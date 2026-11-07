@@ -115,7 +115,7 @@ func (p pitrRenderInputs) withAccess(src pitrRenderInputs) pitrRenderInputs {
 // pitrBindingEncryptionFor converts a profile's encryption identity to the
 // binding form with the given snapshot (empty for None).
 func pitrBindingEncryptionFor(ident pitrarchive.EncryptionIdentity, keySecretName string) v1alpha1.PITRArchiveBindingEncryption {
-	enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionMode(ident.Mode)}
+	enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionMode(ident.Mode)}
 	if ident.Mode == pitrarchive.EncryptionPassphrase {
 		enc.Algorithm = v1alpha1.EncryptionAlgorithm(ident.Algorithm)
 		enc.KeySecretName = keySecretName

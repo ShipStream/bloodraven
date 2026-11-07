@@ -306,17 +306,73 @@ spec:
                   verified. Populated once the reconciler resolves spec.backupRef
                   (or the latest-Succeeded default).
                 properties:
-                  location:
-                    description: Location copied from MysqlBackup.status.location.
-                    type: string
+                  artifactStorage:
+                    description: |-
+                      ArtifactStorage is the backup's status.artifactStorage at
+                      resolution time: the destination the verification read the artifact
+                      from, and the key it decrypted with.
+                    properties:
+                      bucket:
+                        description: Bucket is the S3 bucket the artifact was written
+                          to.
+                        type: string
+                      claimName:
+                        description: ClaimName is the PersistentVolumeClaim the artifact
+                          was written to.
+                        type: string
+                      endpointURL:
+                        description: |-
+                          EndpointURL is the S3 endpoint override in effect for the producing
+                          Job, empty for the AWS default endpoint.
+                        type: string
+                      location:
+                        description: |-
+                          Location is the artifact location the producing Job wrote, e.g.
+                          "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
+                        type: string
+                      passphraseSecretKeyRef:
+                        description: |-
+                          PassphraseSecretKeyRef is the passphrase Secret and key the producing Job
+                          mounted, for an encrypted backup: the backup's own immutable dump-key
+                          snapshot (mysqlbackup-<name>-dump-key-<uid8>, key passphrase), which
+                          the operator made from the profile's passphrase before the Job and
+                          deletes only after the backup's artifacts are deleted. Restores,
+                          verifications and cleanup of a backup that never succeeded decrypt
+                          with it, so a profile edited since the launch does not decide which
+                          passphrase is used.
+                        properties:
+                          key:
+                            description: Key is the data key within the Secret.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: Name is the Secret name.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      region:
+                        description: Region is the S3 region in effect for the producing
+                          Job.
+                        type: string
+                      type:
+                        description: Type is the storage backend the producing Job
+                          wrote to.
+                        enum:
+                        - S3
+                        - PVC
+                        type: string
+                    required:
+                    - type
+                    type: object
                   name:
                     description: Name of the verified MysqlBackup.
-                    type: string
-                  storageType:
-                    description: StorageType copied from MysqlBackup.status.storageType.
-                    enum:
-                    - S3
-                    - PVC
                     type: string
                   uid:
                     description: UID of the verified MysqlBackup at resolution time.
@@ -424,8 +480,9 @@ spec:
               pointInTime:
                 description: |-
                   PointInTime is the certified outcome of the point-in-time replay,
-                  read from the replay's verdict. Set on Succeeded verifications whose
-                  spec.pointInTime.mode is not none.
+                  read from the replay's verdict. Set on Succeeded verifications with
+                  spec.pointInTime. Its newestReplayedCommitTime feeds
+                  bloodraven_backup_verification_replay_lag_seconds.
                 properties:
                   archive:
                     description: Archive identifies the archive the replay read.
@@ -589,31 +646,6 @@ spec:
                 required:
                 - mode
                 - outcome
-                type: object
-              replayedThroughBinlog:
-                description: |-
-                  ReplayedThroughBinlog is populated on Succeeded verifications
-                  whose spec.pointInTime.mode was not "none". Captures the last
-                  binlog event that was applied so operators can correlate the
-                  verified coverage window against their RPO target.
-                properties:
-                  file:
-                    description: |-
-                      File is the last binlog file the replay applied, e.g.
-                      "mysql-bin.000412".
-                    type: string
-                  position:
-                    description: Position is not reported by current releases and
-                      stays unset.
-                    format: int64
-                    type: integer
-                  timestamp:
-                    description: |-
-                      Timestamp is the newest original commit time among the replayed
-                      transactions. Used to compute
-                      bloodraven_backup_verification_replay_lag_seconds.
-                    format: date-time
-                    type: string
                 type: object
               sanityCheck:
                 description: |-

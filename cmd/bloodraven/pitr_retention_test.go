@@ -143,7 +143,7 @@ func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "ns", UID: "uid-v"},
 		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "p"},
 		Status: v1alpha1.MysqlBackupVerificationStatus{Phase: v1alpha1.VerificationPhaseRestoring,
-			BackupRef: &v1alpha1.VerificationBackupRef{Name: "deleting", UID: "uid-deleting", Location: "x/deleting", StorageType: v1alpha1.BackupStorageS3}},
+			BackupRef: &v1alpha1.VerificationBackupRef{Name: "deleting", UID: "uid-deleting", ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "x/deleting"}}},
 	}
 	for _, tc := range []struct {
 		name      string

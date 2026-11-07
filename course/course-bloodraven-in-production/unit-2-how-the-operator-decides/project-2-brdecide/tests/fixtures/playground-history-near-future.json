@@ -35,26 +35,28 @@
         "name": "iad",
         "state": "Unreachable",
         "role": "PrimaryCandidate",
-        "replicating": false,
+        "replication": "Unknown",
         "secondsBehindSource": null
       },
       {
         "name": "pdx",
         "state": "ReadOnly",
         "role": "PrimaryCandidate",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0
       },
       {
         "name": "reader",
         "state": "ReadOnly",
         "role": "ReadOnly",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 3
       }
     ],
     "activeSite": "pdx",
-    "lastFailover": "2026-08-12T12:06:16Z",
-    "lastFailoverTarget": "pdx"
+    "lastFailover": {
+      "time": "2026-08-12T12:06:16Z",
+      "target": "pdx"
+    }
   }
 }

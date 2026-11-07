@@ -178,7 +178,7 @@ func TestPITRArchiveNewestCoverageAdvancesDuringLongSilence(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	oldest, newest, last := metav1.NewTime(t0.Add(-48*time.Hour)), metav1.NewTime(t0.Add(-time.Minute)), metav1.NewTime(t0.Add(-30*time.Second))
 	fg := pitrArchiveFG(nil)
-	fg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ProfileName: "nightly", ArchivedFileCount: 10, ArchivedBytes: 100,
+	fg.Status.PITR = &v1alpha1.PITRStatus{ArchivedFileCount: 10, ArchivedBytes: 100,
 		OldestArchivedTime: &oldest, NewestArchivedTime: &newest, LastArchivedTime: &last}
 	nn := FailoverGroupNamespacedName(fg)
 	r, c, _, p := pitrArchiveRunner(t, fg, nil)

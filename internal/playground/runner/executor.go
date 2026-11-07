@@ -356,7 +356,7 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 				if s.RecoveryState == "RecoveryBlocked" {
 					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
 				}
-				if s.Name != mfg.Status.ActiveSite && isPromotableStatusSite(mfg, s.Name) && !s.Replicating {
+				if s.Name != mfg.Status.ActiveSite && isPromotableStatusSite(mfg, s.Name) && !s.Replication.Running() {
 					bad = append(bad, fmt.Sprintf("%s=not-replicating", s.Name))
 				}
 			}
@@ -441,7 +441,7 @@ func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
 			if s.LinkStatus != "up" {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s.link=%s", s.Name, s.LinkStatus))
 			}
-			if s.SyncInProgress {
+			if s.SyncInProgress != nil && *s.SyncInProgress {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=syncing", s.Name))
 			}
 			if s.LastIOSecondsAgo == nil || *s.LastIOSecondsAgo < 0 {

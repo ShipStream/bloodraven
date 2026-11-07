@@ -141,7 +141,7 @@ func pfEnvGroup(t *testing.T, prefix string, annotations map[string]string) type
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -216,8 +216,8 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 	if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("final = %+v", pf)
 	}
-	if fg.Status.LastFailoverTarget != "dc2" || fg.Status.PromotionGtidExecuted != "uuid-dc1:1-5" || fg.Status.LastFailover == nil {
-		t.Errorf("failover record = %v %q %q", fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted)
+	if fg.Status.LastFailoverTarget() != "dc2" || fg.Status.PromotionGtidExecuted() != "uuid-dc1:1-5" || fg.Status.LastFailoverTime() == nil {
+		t.Errorf("failover record = %v %q %q", fg.Status.LastFailoverTime(), fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
 	}
 }
 
@@ -284,7 +284,9 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 			"sites": []any{
 				// No state: the old CRD admits only the lower-case spelling,
 				// which the final schema refuses on a status write that does
-				// not ratchet (1.31, 1.32). snapshotWrite sets the states.
+				// not ratchet (1.31, 1.32). snapshotWrite sets the states and
+				// the replication the final schema names (the old
+				// "replicating" is pruned).
 				map[string]any{"name": "dc1"},
 				map[string]any{"name": "dc2", "replicating": true},
 			},
@@ -402,8 +404,10 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		fg.Status.TopologyGeneration++
 		for i := range fg.Status.Sites {
 			fg.Status.Sites[i].State = v1alpha1.SiteStateReadOnly
+			fg.Status.Sites[i].Replication = v1alpha1.SiteReplicationHealthy
 			if fg.Status.Sites[i].Name == "dc1" {
 				fg.Status.Sites[i].State = v1alpha1.SiteStateWritable
+				fg.Status.Sites[i].Replication = v1alpha1.SiteReplicationNotApplicable
 			}
 		}
 		return c.Status().Update(ctx, fg)

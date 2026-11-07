@@ -43,7 +43,7 @@ func cutoffTestBinding(dest pitrarchive.Destination) v1alpha1.PITRArchiveBinding
 	return v1alpha1.PITRArchiveBinding{
 		ID:          "pab-" + hex.EncodeToString(sum[:])[:16],
 		Destination: dest.String(),
-		Encryption:  v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionNone},
+		Encryption:  v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModeNone},
 		State:       v1alpha1.PITRArchiveBindingBound,
 		Reason:      "Bound",
 	}

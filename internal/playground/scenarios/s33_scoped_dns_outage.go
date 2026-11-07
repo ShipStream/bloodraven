@@ -314,7 +314,7 @@ func s33RemovePolicyAndRecover() runner.Step {
 						if s.RecoveryState == "RecoveryBlocked" {
 							return false, "RecoveryBlocked on " + s.Name, fmt.Errorf("site %s RecoveryBlocked after policy removal", s.Name)
 						}
-						if s.Name != mfg.Status.ActiveSite && s.Replicating {
+						if s.Name != mfg.Status.ActiveSite && s.Replication.Running() {
 							replicatingPeers++
 						}
 					}

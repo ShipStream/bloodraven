@@ -57,9 +57,9 @@ relevant. If you alert on that counter, alert on the ordered-update log lines to
 
 ## The history, written twice
 
-`lastFailover` and `lastFailoverTarget` go to two durable places on every promotion: the CR **status
-subresource**, and two annotations on the object's own metadata, written together in a single JSON
-merge patch.
+The failover record — its time and target — goes to two durable places on every promotion: the CR
+**status subresource** (`status.lastFailover.time` and `.target`), and two annotations on the object's
+own metadata, written together in a single JSON merge patch.
 
 ```widget
 {"type":"anatomy","title":"bloodraven.shipstream.io/last-failover-target","parts":[{"text":"bloodraven.shipstream.io/","label":"domain prefix","note":"Namespaces the key to this operator. Everything Bloodraven stamps on an object — planned failover, reclone, chaos markers — shares it."},{"text":"last-failover","label":"record noun","note":"Names the promotion event. On its own this is the sibling key bloodraven.shipstream.io/last-failover, whose value is the promotion instant as RFC3339 UTC at second precision."},{"text":"-target","label":"target qualifier","note":"Switches the value from the instant to the promoted site name, verbatim. Never written alone — both keys go in one JSON merge patch, so a reader never sees a timestamp without its target."}]}
@@ -120,10 +120,10 @@ the same promotion produces an exact tie rather than an annotation that always l
 
 There is a wedge the pure table cannot escape. Every site is read-only, none is unreachable, so the
 table refuses to elect and raises `NoPrimary`. But the operator holds history the table refuses to
-consult: `lastFailoverTarget` names the site it already made authoritative. If that site is still
+consult: `status.lastFailover.target` names the site it already made authoritative. If that site is still
 GTID-complete, restoring its writability cannot lose a transaction or create a second primary.
 
-A group that has never failed over has no `lastFailoverTarget`, so the operator falls back to
+A group that has never failed over has no `lastFailover.target`, so the operator falls back to
 `lastActiveSite`: the last site it saw as the group's unique writable primary, restored from
 `status.activeSite` after an operator restart. How far it trusts that site depends on how it got
 there. A site the operator made primary itself — a fresh-deploy seed — is re-asserted from any

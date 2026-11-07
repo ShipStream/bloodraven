@@ -578,7 +578,7 @@ func TestGroupActiveSiteChangedPredicate(t *testing.T) {
 	base := mdbTestGroup()
 
 	unchanged := base.DeepCopy()
-	unchanged.Status.LastFailoverTarget = "dc2" // unrelated status churn
+	unchanged.Status.SetLastFailover(unchanged.Status.LastFailoverTime(), "dc2", unchanged.Status.PromotionGtidExecuted()) // unrelated status churn
 	if p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: unchanged}) {
 		t.Fatal("predicate fired on unrelated group status churn")
 	}

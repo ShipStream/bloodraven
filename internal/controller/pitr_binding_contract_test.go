@@ -66,7 +66,7 @@ func pbcRender(t *testing.T) pitrRenderInputs {
 		StorageType:       string(v1alpha1.BackupStorageS3),
 		Bucket:            d.Bucket,
 		KeyPrefix:         d.KeyPrefix,
-		EncryptionMode:    string(v1alpha1.PITRArchiveEncryptionPassphrase),
+		EncryptionMode:    string(v1alpha1.EncryptionModePassphrase),
 		Algorithm:         pitrarchive.AlgorithmAES256GCM,
 		KeySecretName:     "mysql-orders-pitr-key-0123456789",
 		Region:            "us-east-1",
@@ -233,9 +233,9 @@ func TestPITRBindingKeyRevision(t *testing.T) {
 		enc  v1alpha1.PITRArchiveBindingEncryption
 		want string
 	}{
-		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionNone}, "plaintext"},
-		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionPassphrase, KeySecretName: "snap"}, "snap"},
-		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionPassphrase}, ""},
+		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModeNone}, "plaintext"},
+		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModePassphrase, KeySecretName: "snap"}, "snap"},
+		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModePassphrase}, ""},
 		{v1alpha1.PITRArchiveBindingEncryption{}, ""},
 	}
 	for _, c := range cases {
@@ -247,7 +247,7 @@ func TestPITRBindingKeyRevision(t *testing.T) {
 	if r.keyRevision() != r.KeySecretName {
 		t.Errorf("render keyRevision = %q", r.keyRevision())
 	}
-	r.EncryptionMode, r.Algorithm, r.KeySecretName = string(v1alpha1.PITRArchiveEncryptionNone), "", ""
+	r.EncryptionMode, r.Algorithm, r.KeySecretName = string(v1alpha1.EncryptionModeNone), "", ""
 	if r.keyRevision() != "plaintext" {
 		t.Errorf("plaintext render keyRevision = %q", r.keyRevision())
 	}
@@ -420,7 +420,7 @@ func TestPITRRenderCanonical(t *testing.T) {
 	pvc := pitrRenderInputs{
 		Enabled: true, Destination: pd.String(), ArchiveID: pitrarchive.CreateArchiveID(pbcUID, pd),
 		StorageType: string(v1alpha1.BackupStoragePVC), Claim: pd.Claim, KeyPrefix: pd.KeyPrefix, SubPath: "pitr",
-		EncryptionMode: string(v1alpha1.PITRArchiveEncryptionNone), PollInterval: "1m0s",
+		EncryptionMode: string(v1alpha1.EncryptionModeNone), PollInterval: "1m0s",
 	}
 	back, err = parsePITRRender(pvc.Canonical())
 	if err != nil {
@@ -623,7 +623,7 @@ func pbcAccepted(t *testing.T, key string) (*v1alpha1.PITRArchiveBinding, *corev
 		ID: pitrBindingID(d), Destination: d.String(), ArchiveID: desc.ArchiveID,
 		Source: &v1alpha1.PITRArchiveSource{Namespace: "db", Name: "orders", UID: pbcUID},
 		Encryption: v1alpha1.PITRArchiveBindingEncryption{
-			Mode: v1alpha1.PITRArchiveEncryptionPassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM,
+			Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM,
 			KeySecretName: "mysql-orders-pitr-key-0123456789",
 		},
 		State: v1alpha1.PITRArchiveBindingBound, Reason: v1alpha1.PITRArchiveBindingReasonBound,
@@ -728,7 +728,7 @@ func TestPITRAcceptance(t *testing.T) {
 		{"not bound", func(e *v1alpha1.PITRArchiveBinding) { e.State = v1alpha1.PITRArchiveBindingPending }, key},
 		{"no source", func(e *v1alpha1.PITRArchiveBinding) { e.Source = nil }, key},
 		{"plaintext", func(e *v1alpha1.PITRArchiveBinding) {
-			e.Encryption = v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionNone}
+			e.Encryption = v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModeNone}
 		}, key},
 		{"no archive id", func(e *v1alpha1.PITRArchiveBinding) { e.ArchiveID = "" }, key},
 		{"empty key", func(*v1alpha1.PITRArchiveBinding) {}, " \n"},

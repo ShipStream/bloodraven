@@ -29,7 +29,7 @@
 
 **Front:** After a successful planned switchover, what shows that nothing acknowledged was lost?
 
-**Back:** `result.outcome: Succeeded`, and `status.promotionGtidExecuted` equal to `status.plannedFailover.fence.gtidSet`. There is no lost-transaction counter on this path: the gate makes the number zero by construction.
+**Back:** `result.outcome: Succeeded`, and `status.lastFailover.promotionGtidExecuted` equal to `status.plannedFailover.fence.gtidSet`. There is no lost-transaction counter on this path: the gate makes the number zero by construction.
 
 ---
 

@@ -273,18 +273,18 @@ func (e *pbtEnv) deploy(site, render string) {
 	}
 }
 
-func encOf(mode v1alpha1.PITRArchiveEncryptionMode, snap string) v1alpha1.PITRArchiveBindingEncryption {
-	if mode == v1alpha1.PITRArchiveEncryptionNone {
+func encOf(mode v1alpha1.EncryptionMode, snap string) v1alpha1.PITRArchiveBindingEncryption {
+	if mode == v1alpha1.EncryptionModeNone {
 		return v1alpha1.PITRArchiveBindingEncryption{Mode: mode}
 	}
 	return v1alpha1.PITRArchiveBindingEncryption{Mode: mode, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM, KeySecretName: snap}
 }
 
 func passEnc(snap string) v1alpha1.PITRArchiveBindingEncryption {
-	return encOf(v1alpha1.PITRArchiveEncryptionPassphrase, snap)
+	return encOf(v1alpha1.EncryptionModePassphrase, snap)
 }
 
-var noneEnc = encOf(v1alpha1.PITRArchiveEncryptionNone, "")
+var noneEnc = encOf(v1alpha1.EncryptionModeNone, "")
 
 // checkJob returns the check Job the entry records.
 func (e *pbtEnv) checkJob(entry *v1alpha1.PITRArchiveBinding) *batchv1.Job {
@@ -559,7 +559,7 @@ func TestPITRBindingNoCandidate(t *testing.T) {
 	e := newPBTEnv(t, pbtGroup(a))
 	e.pass()
 	entry := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
-	if entry.Encryption.KeySecretName != "" || entry.Encryption.Mode != v1alpha1.PITRArchiveEncryptionPassphrase || !strings.Contains(entry.Message, "pass-a") {
+	if entry.Encryption.KeySecretName != "" || entry.Encryption.Mode != v1alpha1.EncryptionModePassphrase || !strings.Contains(entry.Message, "pass-a") {
 		t.Fatalf("entry = %+v", entry)
 	}
 	e.expectCond(metav1.ConditionUnknown, string(v1alpha1.PITRArchiveBindingReasonAuthenticating))

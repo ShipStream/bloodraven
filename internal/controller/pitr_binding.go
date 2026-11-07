@@ -499,7 +499,7 @@ func (p *pitrBindingPass) confirmRecovered(ctx context.Context, before []v1alpha
 func (p *pitrBindingPass) accept(ctx context.Context, before []v1alpha1.PITRArchiveBinding) {
 	for i := range p.entries {
 		e := &p.entries[i]
-		if !p.newlyBound[e.ID] || e.Encryption.Mode != v1alpha1.PITRArchiveEncryptionPassphrase {
+		if !p.newlyBound[e.ID] || e.Encryption.Mode != v1alpha1.EncryptionModePassphrase {
 			continue
 		}
 		err := p.r.acceptPITRKeySnapshot(ctx, p.fg, e, p.checkedSnapshot[e.ID], p.now)
@@ -619,7 +619,7 @@ func (r *MysqlFailoverGroupReconciler) listPITRVerifications(ctx context.Context
 func (p *pitrBindingPass) checkIntegrity(ctx context.Context) error {
 	for i := range p.entries {
 		e := &p.entries[i]
-		if e.State != v1alpha1.PITRArchiveBindingBound || e.Encryption.Mode != v1alpha1.PITRArchiveEncryptionPassphrase || e.ID == p.releasePending {
+		if e.State != v1alpha1.PITRArchiveBindingBound || e.Encryption.Mode != v1alpha1.EncryptionModePassphrase || e.ID == p.releasePending {
 			continue
 		}
 		res, why, err := p.r.checkPITRKeySnapshotIntegrity(ctx, p.fg, e, p.byName[e.Encryption.KeySecretName])
@@ -739,7 +739,7 @@ func pitrProfileNames(ps []*v1alpha1.BackupProfile) string {
 // identityOf is the candidate encryption (mode, algorithm) of profile p.
 func identityOf(p *v1alpha1.BackupProfile) v1alpha1.PITRArchiveBindingEncryption {
 	id := pitrprofile.EncryptionIdentityFor(p)
-	return v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionMode(id.Mode), Algorithm: v1alpha1.EncryptionAlgorithm(id.Algorithm)}
+	return v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionMode(id.Mode), Algorithm: v1alpha1.EncryptionAlgorithm(id.Algorithm)}
 }
 
 // sameIdentity compares mode, algorithm and key snapshot.
@@ -752,7 +752,7 @@ func sameIdentity(a, b v1alpha1.PITRArchiveBindingEncryption) bool { return a ==
 // (nil when the Secret or key is missing, missing says why).
 func (p *pitrBindingPass) candidates(ctx context.Context, t *pitrBindingTarget) (cands []pitrCandidate, live *pitrCandidate, missing string, err error) {
 	ident := identityOf(t.profile)
-	if ident.Mode == v1alpha1.PITRArchiveEncryptionNone {
+	if ident.Mode == v1alpha1.EncryptionModeNone {
 		c := pitrCandidate{enc: ident}
 		return []pitrCandidate{c}, &c, "", nil
 	}
@@ -1125,7 +1125,7 @@ func (p *pitrBindingPass) startCheck(ctx context.Context, t *pitrBindingTarget, 
 }
 
 func pitrCandidateLabel(enc v1alpha1.PITRArchiveBindingEncryption) string {
-	if enc.Mode == v1alpha1.PITRArchiveEncryptionNone {
+	if enc.Mode == v1alpha1.EncryptionModeNone {
 		return "the plaintext identity"
 	}
 	return "key snapshot " + enc.KeySecretName
@@ -1351,7 +1351,7 @@ func (p *pitrBindingPass) evaluate(ctx context.Context) (eligibility []pitrRefus
 			}
 			// With the key material lost the accepted bytes are unknown, so
 			// a key change cannot be judged (row 18 reports the loss).
-			if got.Mode != v1alpha1.PITRArchiveEncryptionPassphrase || entry.Reason == v1alpha1.PITRArchiveBindingReasonKeyMaterialLost {
+			if got.Mode != v1alpha1.EncryptionModePassphrase || entry.Reason == v1alpha1.PITRArchiveBindingReasonKeyMaterialLost {
 				continue
 			}
 			live, err := p.r.readPITRLiveKey(ctx, p.fg, prof)

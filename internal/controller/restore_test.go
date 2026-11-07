@@ -70,7 +70,7 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 			Phase:            v1alpha1.BackupPhaseSucceeded,
 			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
 			CompletionTime:   &now,
-			Location:         "lion/seed/",
+			ArtifactStorage:  testArtifactStorage(v1alpha1.BackupStorageS3, "lion/seed/"),
 			FailoverGroupUID: "lion-uid",
 		},
 	}
@@ -226,8 +226,8 @@ func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T)
 	}
 	seed := succeededSeedBackup()
 	seed.Spec.ProfileName = "daily-local"
-	seed.Status.StorageType = v1alpha1.BackupStoragePVC
-	seed.Status.Location = backupPVCMountPath + "/seed/"
+	setTestArtifactType(seed, v1alpha1.BackupStoragePVC)
+	setTestArtifactLocation(seed, backupPVCMountPath+"/seed/")
 	r, _ := newReconciler(fg, seed)
 
 	job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
@@ -308,21 +308,6 @@ func TestEnsureTrailingSlash(t *testing.T) {
 	for in, want := range cases {
 		if got := ensureTrailingSlash(in); got != want {
 			t.Errorf("ensureTrailingSlash(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestIsS3Location(t *testing.T) {
-	cases := map[string]bool{
-		"":                 false,
-		"/backups/foo/":    false,
-		"pvc://foo":        false,
-		"s3://bucket/key/": true,
-		"lion/seed/":       true,
-	}
-	for in, want := range cases {
-		if got := isS3Location(in); got != want {
-			t.Errorf("isS3Location(%q) = %v, want %v", in, got, want)
 		}
 	}
 }
@@ -504,8 +489,8 @@ func TestBuildRestoreJob_DisablesLoadProgressFile(t *testing.T) {
 		{name: "ref pvc", src: refSrc, roMount: backupPVCMountPath, setup: func(*v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
 			seed := succeededSeedBackup()
 			seed.Spec.ProfileName = "daily-local"
-			seed.Status.StorageType = v1alpha1.BackupStoragePVC
-			seed.Status.Location = backupPVCMountPath + "/seed/"
+			setTestArtifactType(seed, v1alpha1.BackupStoragePVC)
+			setTestArtifactLocation(seed, backupPVCMountPath+"/seed/")
 			return seed
 		}},
 		{name: "ref s3 encrypted", src: refSrc, roMount: "/restore-decrypted", setup: func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {

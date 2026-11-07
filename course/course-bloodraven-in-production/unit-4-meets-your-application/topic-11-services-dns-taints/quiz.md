@@ -42,7 +42,7 @@ Fencing at the Service layer is a label change, not an object deletion. Because 
 
 **Type:** MULTIPLE_CHOICE
 
-The `reader` site in `playground` reports `replicating: true`, source convergence `converged`, and `secondsBehindSource: 45`. The group sets `replication.maxLagSeconds: 30` and does not set `readOnlyMaxLagSeconds`. Why is `reader` absent from `mysql-playground-replicas`?
+The `reader` site in `playground` reports `replication: Lagging`, source convergence `converged`, and `secondsBehindSource: 45`. The group sets `replication.maxLagSeconds: 30` and does not set `readOnlyMaxLagSeconds`. Why is `reader` absent from `mysql-playground-replicas`?
 
 - `role: ReadOnly` sites are never members of `-replicas`; they are reachable only through their own per-site Service
 - The lag conjunct fails: `readOnlyMaxLagSeconds` is unset, so the effective reader threshold inherits `maxLagSeconds` = 30, and 45 > 30 leaves the pod labelled `healthy=no`
@@ -53,7 +53,7 @@ The `reader` site in `playground` reports `replicating: true`, source convergenc
 
 **Explanation:**
 
-All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails, because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `ReadOnly` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)
+All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails (`Lagging` still satisfies the replication conjunct), because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `ReadOnly` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)
 
 ## Question 4
 

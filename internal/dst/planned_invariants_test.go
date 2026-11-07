@@ -620,7 +620,7 @@ func TestPlannedInvariant_WatermarkNeverWritten(t *testing.T) {
 		pf.Fence.GtidSet = &fence
 		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: "Confirmed", ConfirmationTime: &confirmed}
 	}, func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.LastFailover = &confirmed // the record, without promotionGtidExecuted
+		st.SetLastFailover(&confirmed, st.LastFailoverTarget(), st.PromotionGtidExecuted()) // the record, without promotionGtidExecuted
 	})
 	f.want("WatermarkRegressed")
 }
@@ -633,8 +633,8 @@ func TestPlannedInvariant_WatermarkRegressed(t *testing.T) {
 		pf.Fence.GtidSet = &fence
 		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: "Confirmed", ConfirmationTime: &confirmed}
 	}, func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.PromotionGtidExecuted = fence
-		st.LastFailover = &confirmed
+		st.SetLastFailover(st.LastFailoverTime(), st.LastFailoverTarget(), fence)
+		st.SetLastFailover(&confirmed, st.LastFailoverTarget(), st.PromotionGtidExecuted())
 	})
 	f.want()
 	// A runner snapshot with the same lastFailover and an older watermark
@@ -648,7 +648,7 @@ func TestPlannedInvariant_WatermarkRegressed(t *testing.T) {
 	f.want()
 	// A status writer that bypasses the merge does, and the monitor sees it.
 	f.write(v1alpha1.PlannedFailoverPhasePublishing, nil, func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.PromotionGtidExecuted = "00000000-0000-0000-0000-000000000001:1-50"
+		st.SetLastFailover(st.LastFailoverTime(), st.LastFailoverTarget(), "00000000-0000-0000-0000-000000000001:1-50")
 	})
 	f.want("WatermarkRegressed")
 
@@ -657,7 +657,9 @@ func TestPlannedInvariant_WatermarkRegressed(t *testing.T) {
 	g.write(v1alpha1.PlannedFailoverPhasePublishing, func(pf *v1alpha1.PlannedFailoverStatus) {
 		pf.Fence.GtidSet = &fence
 		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: "Confirmed", ConfirmationTime: &confirmed}
-	}, func(st *v1alpha1.MysqlFailoverGroupStatus) { st.PromotionGtidExecuted = fence })
+	}, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		st.SetLastFailover(st.LastFailoverTime(), st.LastFailoverTarget(), fence)
+	})
 	_ = g.store.MergeSnapshot(controller.TopologySnapshot{
 		LastFailover: confirmed.Add(time.Minute), LastFailoverTarget: "alpha", PromotionGtidExecuted: "00000000-0000-0000-0000-000000000002:1-3",
 	})
@@ -883,8 +885,12 @@ func TestPlannedInvariant_StatusRecordRegressed(t *testing.T) {
 	f := newMonFixture(t)
 	newer := metav1.NewTime(time.Date(2030, 1, 1, 0, 1, 0, 0, time.UTC))
 	older := metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
-	f.write(v1alpha1.PlannedFailoverPhaseDraining, nil, func(st *v1alpha1.MysqlFailoverGroupStatus) { st.LastFailover = &newer })
+	f.write(v1alpha1.PlannedFailoverPhaseDraining, nil, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		st.SetLastFailover(&newer, st.LastFailoverTarget(), st.PromotionGtidExecuted())
+	})
 	f.want()
-	f.write(v1alpha1.PlannedFailoverPhaseDraining, nil, func(st *v1alpha1.MysqlFailoverGroupStatus) { st.LastFailover = &older })
+	f.write(v1alpha1.PlannedFailoverPhaseDraining, nil, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		st.SetLastFailover(&older, st.LastFailoverTarget(), st.PromotionGtidExecuted())
+	})
 	f.want("StatusRecordRegressed")
 }

@@ -334,7 +334,7 @@ func TestPITRBindingSupersededCandidateDoesNotWedge(t *testing.T) {
 			e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b" })
 			e.pass()
 			entryB := e.expectEntry(b, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
-			if entryB.Check == nil || entryB.Encryption.Mode != v1alpha1.PITRArchiveEncryptionNone {
+			if entryB.Check == nil || entryB.Encryption.Mode != v1alpha1.EncryptionModeNone {
 				t.Fatalf("no plaintext check: %+v", entryB)
 			}
 			e.verdict(entryB, PITRArchiveCheckResult{State: PITRArchiveCheckStateAbsent})
@@ -354,7 +354,7 @@ func TestPITRBindingSupersededCandidateDoesNotWedge(t *testing.T) {
 				e.pass()
 			}
 			got := e.expectEntry(b2, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
-			if got.Encryption.Mode != v1alpha1.PITRArchiveEncryptionPassphrase || got.Encryption.KeySecretName != e.snapName(b2, "k2") {
+			if got.Encryption.Mode != v1alpha1.EncryptionModePassphrase || got.Encryption.KeySecretName != e.snapName(b2, "k2") {
 				t.Fatalf("entry candidate %+v, want the encrypted alias's key", got.Encryption)
 			}
 			if got.Check == nil {

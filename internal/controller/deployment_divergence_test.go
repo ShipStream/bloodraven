@@ -55,12 +55,12 @@ func TestDeploymentUnstableReason_ReplicaAuditDivergence(t *testing.T) {
 		{"replica audit block on a replica that is not replicating", func(fg *v1alpha1.MysqlFailoverGroup) {
 			block(fg, 1, divergenceDetectedByAudit)
 			conditions(fg)
-			fg.Status.Sites[1].Replicating = false
+			fg.Status.Sites[1].Replication = v1alpha1.SiteReplicationBroken
 		}, false},
 		{"replica audit block alongside recovery in progress", func(fg *v1alpha1.MysqlFailoverGroup) {
 			block(fg, 1, divergenceDetectedByAudit)
 			conditions(fg)
-			fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: v1alpha1.SiteStateReadOnly, Replicating: true, RecoveryState: v1alpha1.RecoveryStateInProgress})
+			fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, RecoveryState: v1alpha1.RecoveryStateInProgress})
 			fg.Spec.Sites = append(fg.Spec.Sites, fg.Spec.Sites[1])
 			fg.Spec.Sites[2].Name = "ord"
 		}, false},
@@ -101,7 +101,7 @@ func TestDeploymentUnstableReason_NamesTheGatingRecoveryState(t *testing.T) {
 	fg.Status.Sites[1].DivergenceDetectedBy = divergenceDetectedByAudit
 	fg.Spec.Sites = append(fg.Spec.Sites, fg.Spec.Sites[1])
 	fg.Spec.Sites[2].Name = "ord"
-	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: v1alpha1.SiteStateReadOnly, Replicating: true, RecoveryState: v1alpha1.RecoveryStateInProgress})
+	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, RecoveryState: v1alpha1.RecoveryStateInProgress})
 	fg.Status.Conditions = append(fg.Status.Conditions,
 		metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()},
 		metav1.Condition{Type: "RecoveryPending", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()})

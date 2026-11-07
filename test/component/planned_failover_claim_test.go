@@ -543,8 +543,8 @@ func TestPF_HappyPath_TwoSite(t *testing.T) {
 		t.Fatalf("records %+v", pf)
 	}
 	obj := h.store.Object()
-	if obj.Status.LastFailoverTarget != "dc2" || obj.Status.PromotionGtidExecuted != pfF {
-		t.Fatalf("status record target=%q watermark=%q", obj.Status.LastFailoverTarget, obj.Status.PromotionGtidExecuted)
+	if obj.Status.LastFailoverTarget() != "dc2" || obj.Status.PromotionGtidExecuted() != pfF {
+		t.Fatalf("status record target=%q watermark=%q", obj.Status.LastFailoverTarget(), obj.Status.PromotionGtidExecuted())
 	}
 }
 
@@ -1043,10 +1043,10 @@ func TestPF_I26_WatermarkFromFenceNotStatus(t *testing.T) {
 	h.request("dc2")
 	h.runToPromotingIntent()
 	h.store.MutateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.PromotionGtidExecuted = pfUUIDA + ":1-7"
+		st.SetLastFailover(st.LastFailoverTime(), st.LastFailoverTarget(), pfUUIDA+":1-7")
 	})
 	h.wantOutcome(h.runUntil(40, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
-	if got := h.store.Object().Status.PromotionGtidExecuted; got != pfF {
+	if got := h.store.Object().Status.PromotionGtidExecuted(); got != pfF {
 		t.Fatalf("watermark %q, want F", got)
 	}
 	if rec, _ := controller.FailoverRecordFromAnnotations(h.store.Object().GetAnnotations()); rec.PromotionGtidExecuted != pfF {
@@ -1472,7 +1472,7 @@ func TestPF_RestartedUnconfirmedRunNeverNamesOverNewerFailover(t *testing.T) {
 	// A newer failover lands elsewhere before the restarted process decides.
 	newer := metav1.NewTime(h.clk.Now().Add(time.Second))
 	h.store.MutateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.LastFailover, st.LastFailoverTarget = &newer, "dc1"
+		st.SetLastFailover(&newer, "dc1", st.PromotionGtidExecuted())
 	})
 	h.newProcess()
 	pf := h.runUntil(200, terminal)
@@ -1485,7 +1485,7 @@ func TestPF_RestartedUnconfirmedRunNeverNamesOverNewerFailover(t *testing.T) {
 	for range 2 {
 		h.tick()
 	}
-	if got := h.store.Object().Status.LastFailoverTarget; got != "dc1" {
+	if got := h.store.Object().Status.LastFailoverTarget(); got != "dc1" {
 		t.Fatalf("lastFailoverTarget %q: the unconfirmed run named over the newer failover", got)
 	}
 }

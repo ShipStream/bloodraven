@@ -27,7 +27,7 @@
     },
     {
       "front": "Name the five conjuncts a `role: ReadOnly` site must satisfy to be labelled `healthy=yes`.",
-      "back": "Source convergence `converged`; `replicating` true; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.",
+      "back": "Source convergence `converged`; `replication` `Healthy` or `Lagging`; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.",
       "orderIndex": 5
     },
     {
@@ -84,7 +84,7 @@
       "explanation": "Fencing at the Service layer is a label change, not an object deletion. Because the two shared selectors name mutually exclusive role values, one label edit removes the pod from application writes and application reads in a single step, while the per-site Service keeps it reachable for diagnosis. (objective 1)"
     },
     {
-      "question": "The `reader` site in `playground` reports `replicating: true`, source convergence `converged`, and `secondsBehindSource: 45`. The group sets `replication.maxLagSeconds: 30` and does not set `readOnlyMaxLagSeconds`. Why is `reader` absent from `mysql-playground-replicas`?",
+      "question": "The `reader` site in `playground` reports `replication: Lagging`, source convergence `converged`, and `secondsBehindSource: 45`. The group sets `replication.maxLagSeconds: 30` and does not set `readOnlyMaxLagSeconds`. Why is `reader` absent from `mysql-playground-replicas`?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -94,7 +94,7 @@
         "Endpoints are withheld until the anti-flap cooldown from the last failover has expired"
       ],
       "correctOptionIndex": 1,
-      "explanation": "All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails, because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `ReadOnly` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)"
+      "explanation": "All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails (`Lagging` still satisfies the replication conjunct), because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `ReadOnly` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)"
     },
     {
       "question": "An RBAC rule denied the operator's `DNSEndpoint` apply during the promotion of `playground`. Once the rule is fixed, an operator has to re-run the failover or re-apply the record by hand to get DNS pointing at the new primary.",

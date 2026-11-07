@@ -530,10 +530,10 @@ func deleteBackupAndAssertArtifactGone(ctx context.Context, env *runner.Env, nam
 // "/") of an S3 backup's artifact, from the recorded destination. ok is
 // false for a backup with no S3 artifact to check.
 func backupArtifactPrefix(b *v1alpha1.MysqlBackup) (bucket, prefix string, ok bool, err error) {
-	if b.Status.StorageType != v1alpha1.BackupStorageS3 || b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+	storage := b.Status.ArtifactStorage
+	if b.Status.Phase != v1alpha1.BackupPhaseSucceeded || storage != nil && storage.Type != v1alpha1.BackupStorageS3 {
 		return "", "", false, nil
 	}
-	storage := b.Status.ArtifactStorage
 	if storage == nil || storage.Location == "" || storage.Bucket == "" {
 		return "", "", false, fmt.Errorf("succeeded S3 backup has no recorded status.artifactStorage")
 	}
@@ -741,8 +741,16 @@ func originalPITRExpected(env *runner.Env) (enabled bool, profile string, err er
 }
 
 func backupStatusSummary(b *v1alpha1.MysqlBackup) string {
-	return fmt.Sprintf("name=%s phase=%s message=%q job=%q source=%q location=%q storage=%s sizeBytes=%d gtid=%q binlog=%s:%d conditions=%s",
-		b.Name, b.Status.Phase, b.Status.Message, b.Status.JobName, b.Status.SourceSite, b.Status.Location, b.Status.StorageType, b.Status.SizeBytes, b.Status.GtidExecuted, b.Status.BinlogFile, b.Status.BinlogPos, conditionsSummary(b.Status.Conditions))
+	location, storageType := "", v1alpha1.BackupStorageType("")
+	if st := b.Status.ArtifactStorage; st != nil {
+		location, storageType = st.Location, st.Type
+	}
+	binlog := "-"
+	if bp := b.Status.BinlogPosition; bp != nil {
+		binlog = fmt.Sprintf("%s:%d", bp.File, bp.Position)
+	}
+	return fmt.Sprintf("name=%s phase=%s message=%q job=%q source=%q location=%q storage=%s sizeBytes=%d gtid=%q binlog=%s conditions=%s",
+		b.Name, b.Status.Phase, b.Status.Message, b.Status.JobName, b.Status.SourceSite, location, storageType, b.Status.SizeBytes, b.Status.GtidExecuted, binlog, conditionsSummary(b.Status.Conditions))
 }
 
 func verificationStatusSummary(v *v1alpha1.MysqlBackupVerification) string {
@@ -750,8 +758,8 @@ func verificationStatusSummary(v *v1alpha1.MysqlBackupVerification) string {
 	if v.Status.BackupRef != nil {
 		backupRef = fmt.Sprintf("%s/%s", v.Status.BackupRef.Name, v.Status.BackupRef.UID)
 	}
-	return fmt.Sprintf("name=%s phase=%s message=%q backupRef=%s job=%q replay=%v sanity=%v conditions=%s",
-		v.Name, v.Status.Phase, v.Status.Message, backupRef, v.Status.JobName, v.Status.ReplayedThroughBinlog, v.Status.SanityCheck, conditionsSummary(v.Status.Conditions))
+	return fmt.Sprintf("name=%s phase=%s message=%q backupRef=%s job=%q pointInTime=%v sanity=%v conditions=%s",
+		v.Name, v.Status.Phase, v.Status.Message, backupRef, v.Status.JobName, v.Status.PointInTime, v.Status.SanityCheck, conditionsSummary(v.Status.Conditions))
 }
 
 func conditionsSummary(conds []metav1.Condition) string {

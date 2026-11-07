@@ -46,9 +46,8 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	plainProfile := fg.Spec.Backup.Profiles[1]
 
 	seed := successfulBackup("seed", fg.Name, encProfile.Name)
-	seed.Status.Encrypted = true
+	seed.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	recordTestDumpKey(seed)
-	seed.Status.EncryptionAlgorithm = "AES-256-GCM"
 
 	var pods []renderedPod
 	addJob := func(name string, job *batchv1.Job, err error) {
@@ -87,7 +86,6 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 
 	job, err = buildCleanupJob(cleanupJobInputs{
 		FailoverGroup: fg, Profile: &encProfile, Backup: seed,
-		Storage: &v1alpha1.BackupArtifactStorage{Bucket: "bloodraven-backups"},
 	})
 	addJob("cleanup", job, err)
 
@@ -108,9 +106,9 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionNone}
+		enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModeNone}
 		if tc.key != "" {
-			enc = v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionPassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM, KeySecretName: tc.key}
+			enc = v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM, KeySecretName: tc.key}
 		}
 		entry := &v1alpha1.PITRArchiveBinding{ID: pitrBindingID(dest), Destination: dest.String(), Encryption: enc}
 		job, err := buildPITRArchiveCheckJob(checkFG, entry, &pitrBindingTarget{dest: dest, write: tc.write, profile: &tc.profile}, tc.key)

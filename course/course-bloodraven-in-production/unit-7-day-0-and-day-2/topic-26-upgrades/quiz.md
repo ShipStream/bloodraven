@@ -10,7 +10,7 @@
 At 02:14 you are paged: `BloodravenFailoverOccurred` on the `ledger` group, `activeSite` has moved from `iad` to `pdx`, and the DNS record flipped. Nothing looks broken. What is the first thing to check, and why?
 
 - `status.updatePhase` — it is non-empty for exactly the duration of an ordered update, and a routine `spec.image` or `spec.sidecarImage` bump performs a real promotion that increments the same counter
-- `status.lastFailover` against `failoverCooldown` — if the promotion happened inside the cooldown window it must have been manual
+- `status.lastFailover.time` against `failoverCooldown` — if the promotion happened inside the cooldown window it must have been manual
 - `bloodraven_divergent_transactions` — a rollout-driven promotion never produces divergence, so a zero reading proves it was planned
 - The `Degraded` condition reason — an ordered update sets `reason: Updating`, which distinguishes it from an emergency failover
 

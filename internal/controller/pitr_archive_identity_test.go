@@ -479,9 +479,9 @@ func TestPITRArchiveTrackerOutdatedSidecar(t *testing.T) {
 func TestPITRArchiveWriteNeededArchiveIdentity(t *testing.T) {
 	base := func() *v1alpha1.MysqlFailoverGroupStatus {
 		obs := metav1.NewMicroTime(time.Unix(100, 0))
-		return &v1alpha1.MysqlFailoverGroupStatus{PITR: &v1alpha1.PITRStatus{Enabled: true, ProfileName: "nightly-s3",
+		return &v1alpha1.MysqlFailoverGroupStatus{PITR: &v1alpha1.PITRStatus{
 			Archive: &v1alpha1.PITRArchiveObservation{Destination: "s3://b/p", ArchiveID: "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa",
-				EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(pitrarchive.EncryptionNone), State: v1alpha1.PITRArchiveVerified,
+				EncryptionMode: v1alpha1.EncryptionMode(pitrarchive.EncryptionNone), State: v1alpha1.PITRArchiveVerified,
 				KeyRevision: "k1", ObservedTime: &obs}}}
 	}
 	tests := []struct {
@@ -497,7 +497,7 @@ func TestPITRArchiveWriteNeededArchiveIdentity(t *testing.T) {
 		}, wantImmediate: true},
 		{name: "key revision", mutate: func(a *v1alpha1.PITRArchiveObservation) { a.KeyRevision = "k2" }, wantImmediate: true},
 		{name: "encryption mode", mutate: func(a *v1alpha1.PITRArchiveObservation) {
-			a.EncryptionMode = v1alpha1.PITRArchiveEncryptionMode(pitrarchive.EncryptionPassphrase)
+			a.EncryptionMode = v1alpha1.EncryptionMode(pitrarchive.EncryptionPassphrase)
 		}, wantImmediate: true},
 		{name: "observed time only", mutate: func(a *v1alpha1.PITRArchiveObservation) {
 			later := metav1.NewMicroTime(time.Unix(200, 0))
@@ -568,7 +568,7 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 			fg.Status.ActiveSite = tt.to
 			if tt.failedOver {
 				at := metav1.Now()
-				fg.Status.LastFailover, fg.Status.LastFailoverTarget = &at, "iad"
+				fg.Status.SetLastFailover(&at, "iad", "")
 			}
 			r.emitPITRArchiveReissueRisk(fg, tt.from)
 			var got []string

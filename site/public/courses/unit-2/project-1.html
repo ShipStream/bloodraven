@@ -381,11 +381,11 @@ def observations_from(group: dict) -&gt; list[Observation]:
 
 def read_history(group: dict):
     &quot;&quot;&quot;Return the two durable copies as ((ts, target), (ts, target)).&quot;&quot;&quot;
-    status = group.get(&quot;status&quot;, {})
+    record = group.get(&quot;status&quot;, {}).get(&quot;lastFailover&quot;) or {}
     annotations = group.get(&quot;metadata&quot;, {}).get(&quot;annotations&quot;, {}) or {}
     status_record = (
-        parse_rfc3339(status.get(&quot;lastFailover&quot;)),
-        status.get(&quot;lastFailoverTarget&quot;) or None,
+        parse_rfc3339(record.get(&quot;time&quot;)),
+        record.get(&quot;target&quot;) or None,
     )
     annotation_record = (
         parse_rfc3339(annotations.get(LAST_FAILOVER_ANNOTATION)),

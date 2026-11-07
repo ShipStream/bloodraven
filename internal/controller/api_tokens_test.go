@@ -67,7 +67,7 @@ func stableDeploymentGroup() *v1alpha1.MysqlFailoverGroup {
 			Conditions: []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonHealthy}},
 			Sites: []v1alpha1.SiteStatus{
 				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 			},
 		},
 	}

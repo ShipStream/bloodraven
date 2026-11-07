@@ -103,7 +103,7 @@ func failoverObserved(mfg *v1alpha1.MysqlFailoverGroup, original string) (bool, 
 		}
 	}
 	active := mfg.Status.ActiveSite
-	msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q writable=%v", active, mfg.Status.LastFailoverTarget, writable)
+	msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q writable=%v", active, mfg.Status.LastFailoverTarget(), writable)
 	// Promotion authority can be published before the polled site state catches up.
 	return active != "" && active != original && len(writable) == 1 && writable[0] == active, msg
 }

@@ -334,7 +334,7 @@ func TestPlannedFailoverDragonfly_RefusesWhenDragonflyMasterIsAThirdSite(t *test
 	third := *fg.Spec.Sites[1].DeepCopy()
 	third.Name = "ord"
 	fg.Spec.Sites = append(fg.Spec.Sites, third)
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "ord"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "ord"}
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "replica", true)
 	ordPod := makeDragonflyPod(fg.Name, "ord", "master", true)
 	r, c, _ := pfDFReconciler(t, fg, sourcePod, ordPod, makeDragonflyPod(fg.Name, "pdx", "replica", true))
@@ -382,7 +382,7 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 	t.Run("superseded by a later promotion", func(t *testing.T) {
 		fg := fg.DeepCopy()
 		later := metav1.NewTime(completed.Add(5 * time.Second))
-		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "iad", LastPromotionTarget: "iad", LastPromotionTime: &later}
+		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "iad", LastPromotionTarget: "iad", LastPromotionTime: &later}
 		if got := effectiveDragonflyMasterSite(fg); got != "iad" {
 			t.Errorf("label master = %q after an emergency promotion to iad, want iad", got)
 		}

@@ -35,21 +35,21 @@
         "name": "iad",
         "state": "Unknown",
         "role": "PrimaryCandidate",
-        "replicating": false,
+        "replication": "Unknown",
         "secondsBehindSource": null
       },
       {
         "name": "pdx",
         "state": "Unknown",
         "role": "PrimaryCandidate",
-        "replicating": false,
+        "replication": "Unknown",
         "secondsBehindSource": null
       },
       {
         "name": "reader",
         "state": "Unknown",
         "role": "ReadOnly",
-        "replicating": false,
+        "replication": "Unknown",
         "secondsBehindSource": null
       }
     ]

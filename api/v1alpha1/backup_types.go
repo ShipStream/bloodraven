@@ -181,16 +181,6 @@ type PITRSpec struct {
 // that site's manifest. While a sidecar does not answer, its last
 // reported coverage is kept and Message says so.
 type PITRStatus struct {
-	// Enabled mirrors spec.backup.pitr.enabled so consumers (status
-	// widgets, `kubectl get -o wide`) can see at a glance whether
-	// archival is running.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// ProfileName mirrors spec.backup.pitr.profileName.
-	// +optional
-	ProfileName string `json:"profileName,omitempty"`
-
 	// OldestArchivedTime is the earliest first-event timestamp across
 	// all archived binlogs still present in storage. It bounds archive
 	// retention; it does not prove that a target can be restored.
@@ -1085,11 +1075,11 @@ type RestoreReclonesStatus struct {
 	// +optional
 	Requested string `json:"requested,omitempty"`
 
-	// RequestedAt is when Requested was set. A request whose clone has
+	// RequestTime is when Requested was set. A request whose clone has
 	// not started within a few minutes counts as a failed attempt, so one
 	// site that cannot be cloned does not hold up the others.
 	// +optional
-	RequestedAt *metav1.Time `json:"requestedAt,omitempty"`
+	RequestTime *metav1.Time `json:"requestTime,omitempty"`
 
 	// Failures holds the latest failed reclone attempt of each pending
 	// site that has one. A site is retried after a short backoff; other
@@ -1270,43 +1260,76 @@ type RestoreInPlaceStatus struct {
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// SourceSizeBytes is the source backup artifact size in bytes when
-	// known from a referenced MysqlBackup. 0 means unknown.
+	// Provenance records what the restore loaded and what the target held
+	// afterwards. An in-place restore never replays binary logs, so its
+	// provenance.pointInTime stays unset.
 	// +optional
-	SourceSizeBytes int64 `json:"sourceSizeBytes,omitempty"`
-
-	// SourceGtidExecuted is the referenced MysqlBackup GTID set when known.
-	// +optional
-	SourceGtidExecuted string `json:"sourceGtidExecuted,omitempty"`
-
-	// SourceBinlogFile is the referenced MysqlBackup binary log file when known.
-	// +optional
-	SourceBinlogFile string `json:"sourceBinlogFile,omitempty"`
-
-	// SourceBinlogPos is the referenced MysqlBackup binary log position when known.
-	// +optional
-	SourceBinlogPos int64 `json:"sourceBinlogPos,omitempty"`
-
-	// TargetGtidExecuted is @@global.gtid_executed on the target after load and optional PITR.
-	// +optional
-	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
-
-	// TargetBinlogFile is the target binary log file after load and optional PITR.
-	// +optional
-	TargetBinlogFile string `json:"targetBinlogFile,omitempty"`
-
-	// TargetBinlogPos is the target binary log position after load and optional PITR.
-	// +optional
-	TargetBinlogPos int64 `json:"targetBinlogPos,omitempty"`
-
-	// PointInTime is the certified outcome of the point-in-time replay,
-	// read from the replay's verdict. Unset without pointInTime.
-	// +optional
-	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
+	Provenance *RestoreProvenance `json:"provenance,omitempty"`
 
 	// Message is a human-readable status line.
 	// +optional
 	Message string `json:"message,omitempty"`
+}
+
+// RestoreProvenance is the provenance of a restore: the backup it loaded,
+// the target after the load, and the point-in-time replay's result.
+type RestoreProvenance struct {
+	// Source is what the referenced MysqlBackup recorded about its
+	// artifact. Absent when the source was not a MysqlBackup.
+	// +optional
+	Source *RestoreSourceProvenance `json:"source,omitempty"`
+
+	// Target is the target's state after the load and any replay.
+	// +optional
+	Target *RestoreTargetProvenance `json:"target,omitempty"`
+
+	// PointInTime is the certified outcome of the point-in-time replay,
+	// read from the replay's verdict. Unset when no replay ran.
+	// +optional
+	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
+}
+
+// RestoreSourceProvenance is what the source MysqlBackup recorded about
+// its artifact.
+type RestoreSourceProvenance struct {
+	// SizeBytes is the artifact size in bytes. Unset when unknown.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
+
+	// GtidExecuted is the GTID set the backup recorded.
+	// +optional
+	GtidExecuted string `json:"gtidExecuted,omitempty"`
+
+	// BinlogPosition is the binary-log position the backup recorded.
+	// +optional
+	BinlogPosition *BinlogCoordinate `json:"binlogPosition,omitempty"`
+}
+
+// RestoreTargetProvenance is the restore target's state after the load and
+// any point-in-time replay.
+type RestoreTargetProvenance struct {
+	// GtidExecuted is @@global.gtid_executed on the target.
+	// +optional
+	GtidExecuted string `json:"gtidExecuted,omitempty"`
+
+	// BinlogPosition is the target's binary-log position.
+	// +optional
+	BinlogPosition *BinlogCoordinate `json:"binlogPosition,omitempty"`
+}
+
+// BinlogCoordinate is a position in a server's binary log.
+type BinlogCoordinate struct {
+	// File is the binary-log file name, e.g. "mysql-bin.000412".
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	File string `json:"file"`
+
+	// Position is the byte offset within File.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Position int64 `json:"position"`
 }
 
 // RestoreStatus tracks an in-flight or completed initFromBackup run.
@@ -1343,39 +1366,11 @@ type RestoreStatus struct {
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// SourceSizeBytes is the source backup artifact size in bytes when
-	// known from a referenced MysqlBackup. 0 means unknown.
+	// Provenance records what the restore loaded, what the target held
+	// afterwards and, with spec.initFromBackup.pointInTime, the certified
+	// outcome of the point-in-time replay.
 	// +optional
-	SourceSizeBytes int64 `json:"sourceSizeBytes,omitempty"`
-
-	// SourceGtidExecuted is the referenced MysqlBackup GTID set when known.
-	// +optional
-	SourceGtidExecuted string `json:"sourceGtidExecuted,omitempty"`
-
-	// SourceBinlogFile is the referenced MysqlBackup binary log file when known.
-	// +optional
-	SourceBinlogFile string `json:"sourceBinlogFile,omitempty"`
-
-	// SourceBinlogPos is the referenced MysqlBackup binary log position when known.
-	// +optional
-	SourceBinlogPos int64 `json:"sourceBinlogPos,omitempty"`
-
-	// TargetGtidExecuted is @@global.gtid_executed on the target after load and optional PITR.
-	// +optional
-	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
-
-	// TargetBinlogFile is the target binary log file after load and optional PITR.
-	// +optional
-	TargetBinlogFile string `json:"targetBinlogFile,omitempty"`
-
-	// TargetBinlogPos is the target binary log position after load and optional PITR.
-	// +optional
-	TargetBinlogPos int64 `json:"targetBinlogPos,omitempty"`
-
-	// PointInTime is the certified outcome of the point-in-time replay,
-	// read from the replay's verdict. Unset without pointInTime.
-	// +optional
-	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
+	Provenance *RestoreProvenance `json:"provenance,omitempty"`
 
 	// Message is a human-readable status message.
 	// +optional

@@ -261,8 +261,8 @@ func TestDurableFailoverRecord(t *testing.T) {
 	older := metav1.NewTime(now.Add(-time.Hour))
 	fg := &v1alpha1.MysqlFailoverGroup{}
 	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
-	fg.Status.LastFailover = &older
-	fg.Status.LastFailoverTarget = "iad"
+	fg.Status.SetLastFailover(&older, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
+	fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), "iad", fg.Status.PromotionGtidExecuted())
 	fg.Annotations = map[string]string{
 		v1alpha1.LastFailoverAnnotation:       failoverStampFormat(now.Add(-time.Minute)),
 		v1alpha1.LastFailoverTargetAnnotation: "pdx",

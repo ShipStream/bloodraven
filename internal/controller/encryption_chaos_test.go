@@ -40,7 +40,6 @@ func TestEncryptionChaos_FailedSealedSiteKeepsSecretProjection(t *testing.T) {
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
@@ -365,7 +364,7 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &stored); err != nil {
 		t.Fatal(err)
 	}
-	siteStatus(&stored, "dc1").UnsealedSince = &old
+	siteStatus(&stored, "dc1").UnsealTime = &old
 	if err := c.Status().Update(ctx, &stored); err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +734,6 @@ func TestEncryptionChaos_StaleKeyringProjectionIsRepaired(t *testing.T) {
 	rotated := []byte("rotated-keyring")
 	digest := keyringDigest(rotated)
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v2", KeyringVersion: 2, KeyringDigest: digest},
@@ -897,7 +895,6 @@ func TestEncryptionChaos_DisableRetainsEscrowAndReEnableResumes(t *testing.T) {
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},

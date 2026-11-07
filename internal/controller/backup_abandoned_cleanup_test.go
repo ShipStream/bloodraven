@@ -20,7 +20,7 @@ import (
 )
 
 // abandonedFixture is a cleanup fixture whose backup never succeeded: no
-// status.location, but status.artifactStorage records the planned
+// completed artifact, but status.artifactStorage records the planned
 // destination its Job wrote the backup stamp to.
 func abandonedFixture(t *testing.T, phase v1alpha1.BackupPhase) *cleanupFixture {
 	t.Helper()
@@ -29,7 +29,7 @@ func abandonedFixture(t *testing.T, phase v1alpha1.BackupPhase) *cleanupFixture 
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	f.mb.Status.Phase, f.mb.Status.Location, f.mb.Status.CompletionTime = phase, "", nil
+	f.mb.Status.Phase, f.mb.Status.CompletionTime = phase, nil
 	if err := f.c.Status().Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
@@ -107,9 +107,6 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 		if _, ok := env["BLOODRAVEN_BACKUP_PASSPHRASE_FILE"]; ok {
 			t.Fatal("a plaintext backup's cleanup mounts a passphrase")
 		}
-		if f.mb.Status.Location != "" {
-			t.Fatalf("status.location = %q, want empty", f.mb.Status.Location)
-		}
 
 		f.finishCleanupJob(t, batchv1.JobComplete, 0, backupmeta.FormatCleanupComplete(3))
 		drainEvents(f.rec)
@@ -169,7 +166,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 
 	t.Run("encrypted backup mounts the producing Job's passphrase", func(t *testing.T) {
 		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
-		f.mb.Status.Encrypted = true
+		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 		if err := f.c.Status().Update(context.Background(), f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +194,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 
 	t.Run("encrypted backup without a passphrase source is skipped", func(t *testing.T) {
 		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
-		f.mb.Status.Encrypted = true
+		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 		if err := f.c.Status().Update(context.Background(), f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -391,7 +388,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 			t.Fatal(err)
 		}
-		f.mb.Status.Encrypted = true
+		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 		f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "secret-a", Key: "pp"}
 		if err := f.c.Status().Update(ctx, f.mb); err != nil {
 			t.Fatal(err)

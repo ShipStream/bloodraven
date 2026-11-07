@@ -146,14 +146,13 @@ func testBaselineMFG(dragonflyEnabled bool) *v1alpha1.MysqlFailoverGroup {
 			}},
 			Sites: []v1alpha1.SiteStatus{
 				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 			},
 		},
 	}
 	if dragonflyEnabled {
 		mfg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true}
 		mfg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-			Enabled:    true,
 			ActiveSite: "iad",
 			Phase:      v1alpha1.DragonflyPhaseReady,
 			Sites: []v1alpha1.DragonflySiteStatus{

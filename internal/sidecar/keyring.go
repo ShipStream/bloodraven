@@ -122,13 +122,15 @@ type KeyringComponentStatus struct {
 }
 
 // KeyringCoverage is what the instance actually reports about
-// encryption, as opposed to what my.cnf asked for.
+// encryption, as opposed to what my.cnf asked for. A flag is omitted when
+// the instance did not report it (no row, or NULL): unknown is never
+// reported as false.
 type KeyringCoverage struct {
-	SystemTablespaceEncrypted bool  `json:"systemTablespaceEncrypted"`
+	SystemTablespaceEncrypted *bool `json:"systemTablespaceEncrypted,omitempty"`
 	UnencryptedTablespaces    int64 `json:"unencryptedTablespaces"`
-	RedoLogEncrypted          bool  `json:"redoLogEncrypted"`
-	UndoLogEncrypted          bool  `json:"undoLogEncrypted"`
-	BinlogEncrypted           bool  `json:"binlogEncrypted"`
+	RedoLogEncrypted          *bool `json:"redoLogEncrypted,omitempty"`
+	UndoLogEncrypted          *bool `json:"undoLogEncrypted,omitempty"`
+	BinlogEncrypted           *bool `json:"binlogEncrypted,omitempty"`
 }
 
 // KeyringStatus is the sidecar's /keyring/status payload. It must stay
@@ -411,7 +413,7 @@ func (a *KeyringAgent) refreshMySQLView(ctx context.Context) error {
 			needWrite = true
 		}
 	}
-	if a.cfg.EncryptSystemTablespace && cov != nil && !cov.SystemTablespaceEncrypted {
+	if a.cfg.EncryptSystemTablespace && cov != nil && !isTrue(cov.SystemTablespaceEncrypted) {
 		needWrite = true
 	}
 	if !needWrite {
@@ -456,7 +458,7 @@ func (a *KeyringAgent) refreshMySQLView(ctx context.Context) error {
 	// the `mysql` system tablespace holding the data dictionary. This is
 	// replicated DDL, so running it on the primary carries it to the
 	// replicas.
-	if a.cfg.EncryptSystemTablespace && cov != nil && !cov.SystemTablespaceEncrypted {
+	if a.cfg.EncryptSystemTablespace && cov != nil && !isTrue(cov.SystemTablespaceEncrypted) {
 		writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
 		err := a.mysql.EncryptSystemTablespace(writeCtx)
 		writeCancel()
@@ -633,4 +635,9 @@ func keyringConfigFromEnv() (*KeyringConfig, error) {
 		cfg.PollInterval = d
 	}
 	return cfg, nil
+}
+
+// isTrue reports whether an optional observation is known to be true.
+func isTrue(b *bool) bool {
+	return b != nil && *b
 }

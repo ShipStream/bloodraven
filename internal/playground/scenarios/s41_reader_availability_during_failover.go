@@ -120,7 +120,7 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 			_, err := env.Wait.UntilCR(flipCtx, env.Namespace,
 				fmt.Sprintf("activeSite flips %s -> %s", state.topo.active, state.topo.standby),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 					if mfg.Status.ActiveSite == "" || mfg.Status.ActiveSite == state.topo.active {
 						return false, msg, nil
 					}
@@ -182,8 +182,8 @@ func (s *s41RunState) readerRepointed(mfg *v1alpha1.MysqlFailoverGroup) (bool, s
 		return false, "reader status missing", nil
 	}
 	err := assertReaderServingStatus(mfg, status, s.newHost)
-	return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s/%s lag=%v",
-		status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, status.SourceConvergenceReason, formatLag(status.SecondsBehindSource)), nil
+	return err == nil, fmt.Sprintf("state=%s replication=%s source=%q convergence=%s/%s lag=%v",
+		status.State, status.Replication, status.SourceHost, status.SourceConvergenceState, status.SourceConvergenceReason, formatLag(status.SecondsBehindSource)), nil
 }
 
 // s41VerifyReaderEndpointRestored asserts the reader's client Service

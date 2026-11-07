@@ -48,7 +48,7 @@ func assertReaderServingStatus(mfg *v1alpha1.MysqlFailoverGroup, status *v1alpha
 	if status.State != v1alpha1.SiteStateReadOnly {
 		return fmt.Errorf("state=%q, want %s", status.State, v1alpha1.SiteStateReadOnly)
 	}
-	if !status.Replicating {
+	if !status.Replication.Running() {
 		return fmt.Errorf("replicating=false")
 	}
 	if status.SourceConvergenceState != v1alpha1.SourceConvergenceConverged {

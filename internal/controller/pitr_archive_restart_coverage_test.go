@@ -27,7 +27,7 @@ func TestPITRArchiveCoverageKeptWhenASiteHasNoSampleAfterRestart(t *testing.T) {
 	oldest, newest, last := metav1.NewTime(t0.Add(-48*time.Hour)), metav1.NewTime(t0.Add(-time.Minute)), metav1.NewTime(t0.Add(-30*time.Second))
 	fg := pitrArchiveFG(nil)
 	fg.Status.PITR = &v1alpha1.PITRStatus{
-		Enabled: true, ProfileName: "nightly", ArchivedFileCount: 10, ArchivedBytes: 100,
+		ArchivedFileCount: 10, ArchivedBytes: 100,
 		OldestArchivedTime: &oldest, NewestArchivedTime: &newest, LastArchivedTime: &last,
 	}
 	nn := FailoverGroupNamespacedName(fg)

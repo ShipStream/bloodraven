@@ -122,7 +122,7 @@ runs exactly as it did on day one of this course.
   "lines": [
     {
       "cmd": "kubectl bloodraven status playground --context=dr -n bloodraven-dr",
-      "out": "MysqlFailoverGroup: bloodraven-dr/playground\n  Active site: east-1\n  Ready: True\n  DNS: playground-east.example.com (TTL 60s)\n\nSites:\n  NAME    ROLE              ZONE        STATE     REPL  LAG  RECOVERY  LAST-SEEN\n  east-1  PrimaryCandidate  us-east-1a  Writable  no    -    -         2s\n  east-2  PrimaryCandidate  us-east-1b  ReadOnly  yes   0s   -         2s\n\nInitial restore (initFromBackup):\n  Phase: Succeeded\n  Target site: east-1"
+      "out": "MysqlFailoverGroup: bloodraven-dr/playground\n  Active site: east-1\n  Ready: True\n  DNS: playground-east.example.com (TTL 60s)\n\nSites:\n  NAME    ROLE              ZONE        STATE     REPL           LAG  RECOVERY  LAST-SEEN\n  east-1  PrimaryCandidate  us-east-1a  Writable  NotApplicable  -    -         2s\n  east-2  PrimaryCandidate  us-east-1b  ReadOnly  Healthy        0s   -         2s\n\nInitial restore (initFromBackup):\n  Phase: Succeeded\n  Target site: east-1"
     }
   ],
   "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."

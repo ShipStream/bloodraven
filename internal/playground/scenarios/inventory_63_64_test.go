@@ -90,7 +90,7 @@ func TestS63HoldViolation(t *testing.T) {
 	held := func() *v1alpha1.MysqlFailoverGroup {
 		mfg := &v1alpha1.MysqlFailoverGroup{}
 		mfg.Status.ActiveSite = ""
-		mfg.Status.LastFailoverTarget = "iad"
+		mfg.Status.SetLastFailover(mfg.Status.LastFailoverTime(), "iad", mfg.Status.PromotionGtidExecuted())
 		mfg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, TargetSite: "pdx"}
 		return mfg
 	}
@@ -103,8 +103,10 @@ func TestS63HoldViolation(t *testing.T) {
 		"phase advanced": func(m *v1alpha1.MysqlFailoverGroup) {
 			m.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromoting
 		},
-		"target promoted":   func(m *v1alpha1.MysqlFailoverGroup) { m.Status.ActiveSite = "pdx" },
-		"failover recorded": func(m *v1alpha1.MysqlFailoverGroup) { m.Status.LastFailoverTarget = "pdx" },
+		"target promoted": func(m *v1alpha1.MysqlFailoverGroup) { m.Status.ActiveSite = "pdx" },
+		"failover recorded": func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.SetLastFailover(m.Status.LastFailoverTime(), "pdx", m.Status.PromotionGtidExecuted())
+		},
 	}
 	for name, mutate := range cases {
 		mfg := held()

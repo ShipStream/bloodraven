@@ -134,7 +134,7 @@ func s48VerifySealedState(state *s48RunState) runner.Step {
 					if st == nil {
 						return false, "status.encryptionAtRest not populated yet", nil
 					}
-					if !st.Sealed {
+					if !encryptionAllSitesSealed(m) {
 						return false, s48UnsealedSummary(st), nil
 					}
 					return true, "", nil

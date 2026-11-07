@@ -35,21 +35,21 @@
         "name": "iad",
         "state": "Unreachable",
         "role": "PrimaryCandidate",
-        "replicating": false,
+        "replication": "Unknown",
         "secondsBehindSource": null
       },
       {
         "name": "pdx",
         "state": "Unreachable",
         "role": "PrimaryCandidate",
-        "replicating": false,
+        "replication": "Unknown",
         "secondsBehindSource": null
       },
       {
         "name": "reader",
         "state": "Unreachable",
         "role": "ReadOnly",
-        "replicating": false,
+        "replication": "Unknown",
         "secondsBehindSource": null
       }
     ]

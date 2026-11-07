@@ -57,7 +57,7 @@ False. `Server.RunSafetyNet` runs at sidecar startup, before the `FencingMonitor
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` has two core sites, `iad` and `pdx`, plus a `role: ReadOnly` reader. Mid-upgrade, the `pdx` pod restarts before it has rolled onto the `--read-only=ON` mysqld flag, comes back writable, and the group goes to `SPLIT BRAIN: 2 sites are writable (iad, pdx)`. `spec.splitBrainPolicy` is omitted from the manifest entirely. `status.lastFailoverTarget` is `iad`, and `iad` is right now writable and still `role: PrimaryCandidate`. What does the operator do?
+`playground` has two core sites, `iad` and `pdx`, plus a `role: ReadOnly` reader. Mid-upgrade, the `pdx` pod restarts before it has rolled onto the `--read-only=ON` mysqld flag, comes back writable, and the group goes to `SPLIT BRAIN: 2 sites are writable (iad, pdx)`. `spec.splitBrainPolicy` is omitted from the manifest entirely. `status.lastFailover.target` is `iad`, and `iad` is right now writable and still `role: PrimaryCandidate`. What does the operator do?
 
 - Nothing but alert. With no `sitePriorities` there is no policy to apply, so this is tier 3 and resolution is manual by design.
 - Falls back to the order the sites are declared in under `spec.sites` and keeps whichever is listed first.
@@ -68,7 +68,7 @@ False. `Server.RunSafetyNet` runs at sidecar startup, before the `FencingMonitor
 
 **Explanation:**
 
-The three tiers are evaluated in order, and tier 1 — prior failover history — comes first. Its trigger is a conjunction: the recorded `lastFailoverTarget` must name a site that is live, writable **and** promotable. All three hold here, so the operator fences everything else immediately and the missing policy never matters. Option 1 is the trap: the absence of `sitePriorities` only puts you on tier 3 when there is *no usable history*, and here there is. Option 2 names a fallback that explicitly does not exist — `ResolveSplitBrain` never falls back to declared order; an empty list returns nothing and the operator refuses to guess. Option 3 imports the wrong selector: split-brain winner selection deliberately does not consult GTID, because every writable side may carry unique writes and neither set contains the other, so there is no freshest that is safe. A pod restart was the everyday source of this state until mysqld started read-only, and during the upgrade that rolls the flag out it still is — it is worth knowing which tier your group lands on before you cause one. (objective 4)
+The three tiers are evaluated in order, and tier 1 — prior failover history — comes first. Its trigger is a conjunction: the recorded `lastFailover.target` must name a site that is live, writable **and** promotable. All three hold here, so the operator fences everything else immediately and the missing policy never matters. Option 1 is the trap: the absence of `sitePriorities` only puts you on tier 3 when there is *no usable history*, and here there is. Option 2 names a fallback that explicitly does not exist — `ResolveSplitBrain` never falls back to declared order; an empty list returns nothing and the operator refuses to guess. Option 3 imports the wrong selector: split-brain winner selection deliberately does not consult GTID, because every writable side may carry unique writes and neither set contains the other, so there is no freshest that is safe. A pod restart was the everyday source of this state until mysqld started read-only, and during the upgrade that rolls the flag out it still is — it is worth knowing which tier your group lands on before you cause one. (objective 4)
 
 ## Question 5
 
@@ -92,7 +92,7 @@ The auto-resolve is the operator executing your standing decision about which wr
 
 **Type:** MULTIPLE_CHOICE
 
-A page on `playground`: "the network is partitioned". You look. `status.activeSite` is `iad`, `iad` is `Writable`, `pdx` is `ReadOnly`, `lastSeen` is fresh on every site including the reader, no site is `Unreachable`, `pdx`'s IO thread is stopped and `secondsBehindSource` is climbing, and `bloodraven_failovers_total` has not moved. Which of the five documented shapes is this?
+A page on `playground`: "the network is partitioned". You look. `status.activeSite` is `iad`, `iad` is `Writable`, `pdx` is `ReadOnly`, `lastSeenTime` is fresh on every site including the reader, no site is `Unreachable`, `pdx`'s IO thread is stopped and `secondsBehindSource` is climbing, and `bloodraven_failovers_total` has not moved. Which of the five documented shapes is this?
 
 - A — the operator cannot reach `iad` while `pdx` stays reachable.
 - B — the replica is isolated while the primary stays reachable.
@@ -103,7 +103,7 @@ A page on `playground`: "the network is partitioned". You look. `status.activeSi
 
 **Explanation:**
 
-Fresh `lastSeen` on every site is the discriminator: both sites poll cleanly, so nothing is blind to the operator and only the binlog stream is severed — shape C. Option 1 (A) requires `iad` to go `Unreachable` after 6 s and `pdx` to be promoted; neither happened. Option 2 (B) requires `pdx` to be unreachable to the operator, or at least for the isolation to be the replica's link to Bloodraven rather than to MySQL — here `pdx` polls fine and is merely not replicating. Option 4 (D) is a peer-reachability shape, visible as replication or peer checks failing one way only, and it is the one shape with no test of any kind — it is argued from the code, not observed, because the simulator's `pairKey` sorts the two site names and so cannot express one-way reachability at all. Shape C itself is DST-only, injected as `partitionPair`, with no live chaos scenario; knowing which shapes are exercised and which are merely argued is part of trusting the answer you just gave. (objective 7)
+Fresh `lastSeenTime` on every site is the discriminator: both sites poll cleanly, so nothing is blind to the operator and only the binlog stream is severed — shape C. Option 1 (A) requires `iad` to go `Unreachable` after 6 s and `pdx` to be promoted; neither happened. Option 2 (B) requires `pdx` to be unreachable to the operator, or at least for the isolation to be the replica's link to Bloodraven rather than to MySQL — here `pdx` polls fine and is merely not replicating. Option 4 (D) is a peer-reachability shape, visible as replication or peer checks failing one way only, and it is the one shape with no test of any kind — it is argued from the code, not observed, because the simulator's `pairKey` sorts the two site names and so cannot express one-way reachability at all. Shape C itself is DST-only, injected as `partitionPair`, with no live chaos scenario; knowing which shapes are exercised and which are merely argued is part of trusting the answer you just gave. (objective 7)
 
 ## Question 7
 

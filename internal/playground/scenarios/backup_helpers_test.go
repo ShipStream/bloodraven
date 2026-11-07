@@ -122,9 +122,12 @@ func TestBackupProfileRolloutReady(t *testing.T) {
 }
 
 func TestBackupArtifactPrefix(t *testing.T) {
-	succeeded := func(location string, storage *v1alpha1.BackupArtifactStorage) *v1alpha1.MysqlBackup {
+	succeeded := func(storage *v1alpha1.BackupArtifactStorage) *v1alpha1.MysqlBackup {
+		if storage != nil {
+			storage.Type = v1alpha1.BackupStorageS3
+		}
 		return &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{
-			Phase: v1alpha1.BackupPhaseSucceeded, StorageType: v1alpha1.BackupStorageS3, Location: location, ArtifactStorage: storage,
+			Phase: v1alpha1.BackupPhaseSucceeded, ArtifactStorage: storage,
 		}}
 	}
 	for _, tc := range []struct {
@@ -133,12 +136,14 @@ func TestBackupArtifactPrefix(t *testing.T) {
 		bucket, prefix string
 		ok, wantErr    bool
 	}{
-		{name: "plain", backup: succeeded("e2e/s30/x/b1", &v1alpha1.BackupArtifactStorage{Location: "e2e/s30/x/b1", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30/x/b1/", ok: true},
-		{name: "encrypted", backup: succeeded("s3://bk/e2e/s30e/x/b1/", &v1alpha1.BackupArtifactStorage{Location: "s3://bk/e2e/s30e/x/b1/", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30e/x/b1/", ok: true},
-		{name: "encrypted, other bucket", backup: succeeded("s3://other/x/b1/", &v1alpha1.BackupArtifactStorage{Location: "s3://other/x/b1/", Bucket: "bk"}), wantErr: true},
-		{name: "no recorded destination", backup: succeeded("x/b1", nil), wantErr: true},
-		{name: "PVC", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, StorageType: v1alpha1.BackupStoragePVC}}},
-		{name: "failed backup", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed, StorageType: v1alpha1.BackupStorageS3}}},
+		{name: "plain", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "e2e/s30/x/b1", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30/x/b1/", ok: true},
+		{name: "encrypted", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "s3://bk/e2e/s30e/x/b1/", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30e/x/b1/", ok: true},
+		{name: "encrypted, other bucket", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "s3://other/x/b1/", Bucket: "bk"}), wantErr: true},
+		{name: "no recorded destination", backup: succeeded(nil), wantErr: true},
+		{name: "PVC", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded,
+			ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStoragePVC, Location: "/backups/b1"}}}},
+		{name: "failed backup", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed,
+			ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "x/b1", Bucket: "bk"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bucket, prefix, ok, err := backupArtifactPrefix(tc.backup)

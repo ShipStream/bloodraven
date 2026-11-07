@@ -114,7 +114,7 @@ func verifyActivePrimaryUnchanged() runner.Step {
 			}
 			if mfg.Status.ActiveSite != original {
 				return fmt.Errorf("activeSite changed during replica partition: was %q, now %q (lastFailoverTarget=%q)",
-					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 			}
 			// The primary should still be writable; the replica's state
 			// may be "unreachable" — that's the expected, correct
@@ -137,7 +137,7 @@ func verifyActivePrimaryUnchanged() runner.Step {
 			env.Capture.Note(fmt.Sprintf("primary %s state=%s, replica %s state=%s", original, primaryState, replica, replicaState))
 			// Sanity check: the operator must not have flipped the
 			// failover-target field as if it were preparing one.
-			if mfg.Status.LastFailoverTarget == replica {
+			if mfg.Status.LastFailoverTarget() == replica {
 				return fmt.Errorf("operator set lastFailoverTarget=%q (the partitioned replica) — implies an attempted promotion", replica)
 			}
 			return nil

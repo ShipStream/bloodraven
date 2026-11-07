@@ -29,8 +29,8 @@ func TestFailoverObservedSnapshots(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			mfg := &v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{
-				ActiveSite:         tt.active,
-				LastFailoverTarget: "pdx",
+				ActiveSite:   tt.active,
+				LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Target: "pdx"}},
 				Sites: []v1alpha1.SiteStatus{
 					{Name: "iad", State: tt.original},
 					{Name: "reader", State: tt.reader},
@@ -86,7 +86,7 @@ func TestS41ReaderRepointedStatusSequence(t *testing.T) {
 					host = state.newHost
 				}
 				mfg.Status.Sites = append(mfg.Status.Sites, v1alpha1.SiteStatus{
-					Name: "reader", State: v1alpha1.SiteStateReadOnly, Replicating: true,
+					Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy,
 					SourceHost: host, SourceConvergenceState: v1alpha1.SourceConvergenceConverged,
 					SecondsBehindSource: &lag,
 				})

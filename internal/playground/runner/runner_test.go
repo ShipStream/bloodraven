@@ -236,10 +236,9 @@ func testReconvergeMFG(dfPhase v1alpha1.DragonflyPhase) *v1alpha1.MysqlFailoverG
 			}},
 			Sites: []v1alpha1.SiteStatus{
 				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replicating: true},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 			},
 			Dragonfly: &v1alpha1.DragonflyStatus{
-				Enabled:    true,
 				ActiveSite: "iad",
 				Phase:      dfPhase,
 				Sites: []v1alpha1.DragonflySiteStatus{

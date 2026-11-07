@@ -209,7 +209,7 @@ seed’s own sidecar fences it again before the operator’s answer reaches it, 
 the seed: it made that site primary itself.</p>
 <p>The emptiness requirement is the load-bearing part, and Unit 3 already showed you the failure it
 prevents. A populated cluster can reach the no-history, no-metadata state by accident: a failover
-whose status write was rejected, an operator restart that rehydrated a CR with no <code>lastFailoverTarget</code>,
+whose status write was rejected, an operator restart that rehydrated a CR with no <code>status.lastFailover.target</code>,
 and an old primary that respawned (writable on a pod that predates the boot flag, read-only after). The promoted primary’s own <code>RESET REPLICA ALL</code> erased its
 channel metadata, so <em>metadata absence alone cannot tell that cluster from a fresh one</em>. Treat it as
 fresh and the operator would seed by priority order and clone the newer side from the stale one,

@@ -245,16 +245,10 @@ type MysqlBackupVerificationStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
-	// ReplayedThroughBinlog is populated on Succeeded verifications
-	// whose spec.pointInTime.mode was not "none". Captures the last
-	// binlog event that was applied so operators can correlate the
-	// verified coverage window against their RPO target.
-	// +optional
-	ReplayedThroughBinlog *BinlogReplayMark `json:"replayedThroughBinlog,omitempty"`
-
 	// PointInTime is the certified outcome of the point-in-time replay,
-	// read from the replay's verdict. Set on Succeeded verifications whose
-	// spec.pointInTime.mode is not none.
+	// read from the replay's verdict. Set on Succeeded verifications with
+	// spec.pointInTime. Its newestReplayedCommitTime feeds
+	// bloodraven_backup_verification_replay_lag_seconds.
 	// +optional
 	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
 
@@ -281,29 +275,6 @@ type MysqlBackupVerificationStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-}
-
-// BinlogReplayMark summarizes how far a PITR replay reached. Its fields are
-// derived independently from the certified replay verdict, not read from
-// one final event: File is the last binlog file the replay applied,
-// Timestamp is the newest original commit time among the replayed
-// transactions (which need not be an event in File), and Position is not
-// reported.
-type BinlogReplayMark struct {
-	// File is the last binlog file the replay applied, e.g.
-	// "mysql-bin.000412".
-	// +optional
-	File string `json:"file,omitempty"`
-
-	// Position is not reported by current releases and stays unset.
-	// +optional
-	Position int64 `json:"position,omitempty"`
-
-	// Timestamp is the newest original commit time among the replayed
-	// transactions. Used to compute
-	// bloodraven_backup_verification_replay_lag_seconds.
-	// +optional
-	Timestamp *metav1.Time `json:"timestamp,omitempty"`
 }
 
 // SanityCheckOutcome is status.sanityCheck.outcome.
@@ -357,12 +328,11 @@ type VerificationBackupRef struct {
 	// UID of the verified MysqlBackup at resolution time.
 	// +optional
 	UID string `json:"uid,omitempty"`
-	// Location copied from MysqlBackup.status.location.
+	// ArtifactStorage is the backup's status.artifactStorage at
+	// resolution time: the destination the verification read the artifact
+	// from, and the key it decrypted with.
 	// +optional
-	Location string `json:"location,omitempty"`
-	// StorageType copied from MysqlBackup.status.storageType.
-	// +optional
-	StorageType BackupStorageType `json:"storageType,omitempty"`
+	ArtifactStorage *BackupArtifactStorage `json:"artifactStorage,omitempty"`
 }
 
 // VerificationSpec is embedded on BackupProfile. When set the

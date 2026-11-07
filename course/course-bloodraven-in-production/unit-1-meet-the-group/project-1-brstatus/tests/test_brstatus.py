@@ -107,7 +107,9 @@ def test_awkward_status_null_lag_and_lost_authority():
         "a detached reader still does not degrade the group"
     )
     reader = detached.site("reader")
-    assert reader["REPL"] == "no", detached.explain("replication is stopped")
+    assert reader["REPL"] == "Broken", detached.explain(
+        "replication is stopped, so status.sites[].replication reads Broken"
+    )
     assert reader["LAG"] == "unknown", detached.explain(
         "secondsBehindSource is absent; rendering it as 0s makes a detached "
         "replica look caught up"

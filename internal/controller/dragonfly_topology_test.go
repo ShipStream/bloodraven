@@ -246,7 +246,6 @@ func TestDragonflyManager_Tick_HappyPath(t *testing.T) {
 func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: "dc1",
 	}
 	sourcePod := makeDragonflyPod(fg.Name, "dc1", "master", true)
@@ -314,7 +313,6 @@ func TestDragonflyManager_Tick_SelfHealsStaleDragonflyActiveSite(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	fg.Status.ActiveSite = "dc2"
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: "dc1",
 	}
 	cb, key := newDragonflyFakeClient(fg)
@@ -357,7 +355,6 @@ func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testin
 	fg := fgWithDragonflyEnabledAndActive()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: "dc2",
 	}
 	cb, key := newDragonflyFakeClient(fg)

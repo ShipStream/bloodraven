@@ -35,8 +35,8 @@ func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup 
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
 		{Name: "dc1", State: v1alpha1.SiteStateWritable},
-		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replicating: true},
-		{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replicating: true, SourceHost: internalSiteServiceHost(fg.Name, "dc1", fg.Namespace),
+		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SourceHost: internalSiteServiceHost(fg.Name, "dc1", fg.Namespace),
 			SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
 	}
 	if phase != "" {

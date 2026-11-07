@@ -119,7 +119,7 @@ func pitrArchiveObservation(rendered pitrRenderInputs, sites []string, snaps, la
 	dest := rendered.Destination
 	out := &v1alpha1.PITRArchiveObservation{
 		Destination:    dest,
-		EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(rendered.EncryptionMode),
+		EncryptionMode: v1alpha1.EncryptionMode(rendered.EncryptionMode),
 		State:          v1alpha1.PITRArchiveAwaitingDescriptor,
 	}
 	var (
@@ -147,7 +147,7 @@ func pitrArchiveObservation(rendered pitrRenderInputs, sites []string, snaps, la
 			verified++
 			ids[a.ArchiveID] = true
 			if a.EncryptionMode != "" {
-				out.EncryptionMode = v1alpha1.PITRArchiveEncryptionMode(a.EncryptionMode)
+				out.EncryptionMode = v1alpha1.EncryptionMode(a.EncryptionMode)
 			}
 		}
 		keys[a.KeyRevision] = true
@@ -750,7 +750,7 @@ func pitrArchiveMessageSites(msg string, sites []string) []string {
 // pitrArchiveWriteNeeded compares what the poller's writer is
 // responsible for: the condition, and status.pitr's presence, identity
 // and message. immediate covers status, reason, generation, presence,
-// profile and the set of affected sites; messageOnly is a change confined
+// archive identity and the set of affected sites; messageOnly is a change confined
 // to message text (after removing per-request identifiers), which the
 // writer rate-limits. Coverage-only changes ride along with the next
 // write.
@@ -770,9 +770,6 @@ func pitrArchiveWriteNeeded(before, after *v1alpha1.MysqlFailoverGroupStatus, si
 		bMsg, aMsg = b.Message, a.Message
 	}
 	if after.PITR != nil {
-		if after.PITR.Enabled != before.PITR.Enabled || after.PITR.ProfileName != before.PITR.ProfileName {
-			return true, false
-		}
 		// The archive identity is written when it changes, not with the
 		// next coverage write.
 		if a, b := after.PITR.Archive, before.PITR.Archive; (a == nil) != (b == nil) ||

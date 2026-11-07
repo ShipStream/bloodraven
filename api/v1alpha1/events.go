@@ -198,7 +198,6 @@ const (
 	EventArtifactCleanupSkipped         = "ArtifactCleanupSkipped"
 	EventArtifactCleanupStarted         = "ArtifactCleanupStarted"
 	EventArtifactCleanupSucceeded       = "ArtifactCleanupSucceeded"
-	EventArtifactLocationRestored       = "ArtifactLocationRestored"
 	EventBackupFailed                   = "BackupFailed"
 	EventBackupMetadataIncomplete       = "BackupMetadataIncomplete"
 	EventBackupStarted                  = "BackupStarted"

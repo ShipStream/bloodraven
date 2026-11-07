@@ -67,15 +67,17 @@ read for the rest of the course.
 - **`.state`** — one of four values: `Writable`, `ReadOnly`, `Unreachable`, `Unknown`. It comes
   from one query per poll, `SELECT @@read_only`: `0` is `Writable`, `1` is `ReadOnly`, a failed
   connection is `Unreachable`.
-- **`.replicating`** — whether the operator currently regards replication on that follower as
-  healthy. It is a verdict, not a raw thread flag.
+- **`.replication`** — the operator's verdict on that site's replication: `Healthy`, `Lagging`
+  (running, but more than `spec.replication.maxLagSeconds` behind), `Broken` (a thread stopped or no
+  source set), `Unknown` (not read yet, or the healthy streak is still building), or `NotApplicable`
+  on the writable primary. It is a verdict, not a raw thread flag.
 - **`.secondsBehindSource`** — MySQL's `Seconds_Behind_Source` for that follower.
 - **`.gtidExecuted`** — the transaction history that follower has actually applied.
 
 There is a trap in that list. The operator probes replication only on sites whose state is
-`ReadOnly`, so the writable primary's entry carries no `replicating`, no `secondsBehindSource`
-and no `gtidExecuted` at all — those keys are absent, not zero. Absence means "not measured
-here", never `false`.
+`ReadOnly`, so the writable primary's entry reads `replication: NotApplicable` and carries no
+`secondsBehindSource` and no `gtidExecuted` at all — those keys are absent, not zero. Absence means
+"not measured here", never "caught up".
 
 And `.role` is not there at all. Role lives in `spec.sites[].role`. To tell which of two
 `ReadOnly` sites is the dedicated reader, read the spec.
@@ -90,8 +92,8 @@ And `.role` is not there at all. Role lives in `spec.sites[].role`. To tell whic
       "out": "iad"
     },
     {
-      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{range .status.sites[*]}{.name}{\"\\t\"}{.state}{\"\\t\"}{.replicating}{\"\\t\"}{.secondsBehindSource}{\"\\n\"}{end}'",
-      "out": "iad\tWritable\t\t\npdx\tReadOnly\ttrue\t0\nreader\tReadOnly\ttrue\t0"
+      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{range .status.sites[*]}{.name}{\"\\t\"}{.state}{\"\\t\"}{.replication}{\"\\t\"}{.secondsBehindSource}{\"\\n\"}{end}'",
+      "out": "iad\tWritable\tNotApplicable\t\npdx\tReadOnly\tHealthy\t0\nreader\tReadOnly\tHealthy\t0"
     },
     {
       "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.conditions[?(@.type==\"Degraded\")].reason}{\"\\n\"}'",
@@ -102,7 +104,7 @@ And `.role` is not there at all. Role lives in `spec.sites[].role`. To tell whic
 }
 ```
 
-Two blank columns on the `iad` row. That is the point.
+`NotApplicable` and a blank lag column on the `iad` row. That is the point.
 
 ## Conditions and the five reasons
 

@@ -397,7 +397,7 @@ func s43VerifyErrantGtidBlocksConvergence(state *s43RunState) runner.Step {
 					if status == nil {
 						return false, "reader status missing", nil
 					}
-					msg := fmt.Sprintf("convergence=%s/%s replicating=%v", status.SourceConvergenceState, status.SourceConvergenceReason, status.Replicating)
+					msg := fmt.Sprintf("convergence=%s/%s replication=%s", status.SourceConvergenceState, status.SourceConvergenceReason, status.Replication)
 					done := status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked && status.SourceConvergenceReason == v1alpha1.SourceReasonGTIDDiverged
 					return done, msg, nil
 				})
@@ -502,8 +502,8 @@ func s43RecoverErrantReader(ctx context.Context, env *runner.Env, state *s43RunS
 				return false, "reader status missing", nil
 			}
 			err := assertReaderServingStatus(mfg, status, state.topo.activeHost)
-			return err == nil, fmt.Sprintf("convergence=%s/%s replicating=%v lag=%v",
-				status.SourceConvergenceState, status.SourceConvergenceReason, status.Replicating, formatLag(status.SecondsBehindSource)), nil
+			return err == nil, fmt.Sprintf("convergence=%s/%s replication=%s lag=%v",
+				status.SourceConvergenceState, status.SourceConvergenceReason, status.Replication, formatLag(status.SecondsBehindSource)), nil
 		})
 	cancel()
 	if err != nil {

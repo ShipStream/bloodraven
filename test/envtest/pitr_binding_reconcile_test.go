@@ -159,9 +159,9 @@ func (h *bindingHarness) prove(profile, keyRevision string) {
 	fg := h.fg()
 	dest := h.dest(fg, profile)
 	now := metav1.NowMicro()
-	fg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ProfileName: fg.Spec.Backup.PITR.ProfileName, Archive: &v1alpha1.PITRArchiveObservation{
+	fg.Status.PITR = &v1alpha1.PITRStatus{Archive: &v1alpha1.PITRArchiveObservation{
 		Destination: dest.String(), ArchiveID: pitrarchive.CreateArchiveID(fg.UID, dest), State: v1alpha1.PITRArchiveVerified,
-		EncryptionMode: v1alpha1.PITRArchiveEncryptionPassphrase, KeyRevision: keyRevision, ObservedTime: &now,
+		EncryptionMode: v1alpha1.EncryptionModePassphrase, KeyRevision: keyRevision, ObservedTime: &now,
 	}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		h.t.Fatal(err)

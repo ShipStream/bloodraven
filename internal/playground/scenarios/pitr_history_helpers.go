@@ -1293,8 +1293,8 @@ func pitrSiteReplicating(mfg *v1alpha1.MysqlFailoverGroup, site string) (bool, s
 		if st.Name != site {
 			continue
 		}
-		msg := fmt.Sprintf("state=%s replicating=%t recovery=%q lastSeen=%v", st.State, st.Replicating, st.RecoveryState, st.LastSeen)
-		return st.State == v1alpha1.SiteStateReadOnly && st.Replicating && st.RecoveryState != "RecoveryBlocked", msg, nil
+		msg := fmt.Sprintf("state=%s replication=%s recovery=%q lastSeen=%v", st.State, st.Replication, st.RecoveryState, st.LastSeenTime)
+		return st.State == v1alpha1.SiteStateReadOnly && st.Replication.Running() && st.RecoveryState != "RecoveryBlocked", msg, nil
 	}
 	return false, "site not in status", nil
 }
@@ -1396,7 +1396,7 @@ func (w *pitrRecloneWatch) observe(boot *metav1.Condition, replicating bool) (bo
 	if boot == nil {
 		return false, "bootstrap not observed", nil
 	}
-	msg := fmt.Sprintf("bootstrap=%s replicating=%v", boot.Reason, replicating)
+	msg := fmt.Sprintf("bootstrap=%s replicating=%t", boot.Reason, replicating)
 	if boot.Status == metav1.ConditionTrue && boot.Reason != v1alpha1.ReasonFailed {
 		w.sawAttempt = true
 		return false, msg, nil
@@ -1484,7 +1484,7 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 		replicating := false
 		for _, s := range m.Status.Sites {
 			if s.Name == site {
-				replicating = s.Replicating && s.State == v1alpha1.SiteStateReadOnly
+				replicating = s.Replication.Running() && s.State == v1alpha1.SiteStateReadOnly
 			}
 		}
 		done, msg, err := watch.observe(findCondition(m.Status.Conditions, v1alpha1.ConditionBootstrapping), replicating)
@@ -1717,7 +1717,7 @@ func pitrReadDumpObject(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlB
 	if !found {
 		return nil, fmt.Errorf("dump object s3://%s/%s not found", bucket, key)
 	}
-	if b.Status.Encrypted {
+	if b.Status.Encryption != nil && b.Status.Encryption.Mode == v1alpha1.EncryptionModePassphrase {
 		pass, err := pitrBackupDumpPassphrase(ctx, env, b)
 		if err != nil {
 			return nil, err

@@ -403,9 +403,9 @@ type PlannedFailoverStatus struct {
 // FailoverRecordRef identifies a failover record by {time, target}: when the
 // last failover was recorded (at second precision, the precision of both
 // durable copies) and the site it promoted. It is what a planned run's
-// claimBaseline needs; the record's promotion watermark is not part of the
-// reference. Every field is optional because a group may have no failover
-// history.
+// claimBaseline needs; status.lastFailover (FailoverRecord) embeds it and
+// adds the promotion watermark, which is not part of the reference. Every
+// field is optional because a group may have no failover history.
 type FailoverRecordRef struct {
 	// Time is when the failover was recorded.
 	// +optional

@@ -12,7 +12,7 @@
 #
 # Required env:
 #   BLOODRAVEN_STORAGE_TYPE   "S3" or "PVC"
-#   BLOODRAVEN_OUTPUT_URL     the resolved dump location from MysqlBackup.status.location
+#   BLOODRAVEN_OUTPUT_URL     the resolved dump location from MysqlBackup.status.artifactStorage.location
 #
 # S3 path (BLOODRAVEN_STORAGE_TYPE=S3):
 #   BLOODRAVEN_S3_BUCKET              bucket name

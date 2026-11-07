@@ -92,14 +92,14 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 		ActiveSite: "dc1",
 		Sites: []v1alpha1.SiteStatus{
 			{
-				Name:     "dc1",
-				State:    v1alpha1.SiteStateWritable,
-				LastSeen: &lastSeen,
+				Name:         "dc1",
+				State:        v1alpha1.SiteStateWritable,
+				LastSeenTime: &lastSeen,
 			},
 			{
-				Name:     "dc2",
-				State:    v1alpha1.SiteStateReadOnly,
-				LastSeen: &lastSeen,
+				Name:         "dc2",
+				State:        v1alpha1.SiteStateReadOnly,
+				LastSeenTime: &lastSeen,
 			},
 		},
 		Conditions: []metav1.Condition{
@@ -111,7 +111,7 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 				Message:            "At least one site is writable",
 			},
 		},
-		LastFailoverTarget: "dc1",
+		LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Target: "dc1"}},
 	}
 
 	existing := status.DeepCopy()
@@ -184,7 +184,7 @@ func TestStatusDeepEqual_LastFailoverChange(t *testing.T) {
 
 	existing := status.DeepCopy()
 	failoverTime := metav1.NewTime(time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC))
-	status.LastFailover = &failoverTime
+	status.SetLastFailover(&failoverTime, status.LastFailoverTarget(), status.PromotionGtidExecuted())
 
 	if equality.Semantic.DeepEqual(existing, &status) {
 		t.Error("expected status with new LastFailover to be unequal")
@@ -573,9 +573,7 @@ func TestEmitFailoverEvents_FailoverExecuted(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		LastFailoverTarget: "",
-	}
+	existing := &v1alpha1.MysqlFailoverGroupStatus{}
 	snap := TopologySnapshot{
 		LastFailoverTarget: "dc2",
 	}
@@ -600,7 +598,7 @@ func TestEmitFailoverEvents_NoEventOnSameTarget(t *testing.T) {
 	runner := &TopologyManagerRunner{recorder: rec}
 
 	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		LastFailoverTarget: "dc2",
+		LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Target: "dc2"}},
 	}
 	snap := TopologySnapshot{
 		LastFailoverTarget: "dc2",

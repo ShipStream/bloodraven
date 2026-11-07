@@ -94,15 +94,15 @@ kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o yam
 kubectl get pods,pvc,endpoints,services -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME" -o wide > "$OUTPUT_DIR/resources.txt" 2>/dev/null || true
 
 # Project backup status and original main-container destinations without Secrets.
-kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.location,FG_UID:.status.failoverGroupUID,PITR_ARCHIVE_ID:.status.pitrArchiveID,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' > "$OUTPUT_DIR/backup-status.txt" 2>/dev/null || true
+kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.artifactStorage.location,FG_UID:.status.failoverGroupUID,PITR_ARCHIVE_ID:.status.pitrArchiveID,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' > "$OUTPUT_DIR/backup-status.txt" 2>/dev/null || true
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup" -o 'custom-columns=NAME:.metadata.name,OWNER_UID:.metadata.ownerReferences[*].uid,SUCCEEDED:.status.succeeded,CONTAINERS:.spec.template.spec.containers[*].name,STORAGE:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_STORAGE_TYPE")].value,OUTPUT:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_OUTPUT_URL")].value,BUCKET:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_S3_BUCKET")].value' > "$OUTPUT_DIR/backup-jobs.txt" 2>/dev/null || true
 
 # Artifact cleanup of deleted backups: recorded destination, condition and pod verdicts.
-kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,LOCATION:.status.location,RECORDED:.status.artifactStorage.location,BUCKET:.status.artifactStorage.bucket,CLAIM:.status.artifactStorage.claimName,CLEANUP:.status.conditions[?(@.type=="ArtifactCleanup")].reason,MESSAGE:.status.conditions[?(@.type=="ArtifactCleanup")].message' > "$OUTPUT_DIR/backup-cleanup-status.txt" 2>/dev/null || true
+kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,LOCATION:.status.artifactStorage.location,BUCKET:.status.artifactStorage.bucket,CLAIM:.status.artifactStorage.claimName,CLEANUP:.status.conditions[?(@.type=="ArtifactCleanup")].reason,MESSAGE:.status.conditions[?(@.type=="ArtifactCleanup")].message' > "$OUTPUT_DIR/backup-cleanup-status.txt" 2>/dev/null || true
 kubectl get pods -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup-cleanup" -o 'custom-columns=POD:.metadata.name,BACKUP:.metadata.labels.shipstream\.io/mysqlbackup,PHASE:.status.phase,EXIT:.status.containerStatuses[*].state.terminated.exitCode,VERDICT:.status.containerStatuses[*].state.terminated.message' > "$OUTPUT_DIR/backup-cleanup-pods.txt" 2>/dev/null || true
 
 # Record verification identity and original inputs; exclude Secrets and arbitrary env.
-kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase,JOB:.status.jobName,BACKUP:.status.backupRef.name,BACKUP_UID:.status.backupRef.uid,LOCATION:.status.backupRef.location,STORAGE:.status.backupRef.storageType,VERIFIED:.status.conditions[?(@.type=="Verified")].status,REASON:.status.conditions[?(@.type=="Verified")].reason' > "$OUTPUT_DIR/verification-status.txt" 2>/dev/null || true
+kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase,JOB:.status.jobName,BACKUP:.status.backupRef.name,BACKUP_UID:.status.backupRef.uid,LOCATION:.status.backupRef.artifactStorage.location,STORAGE:.status.backupRef.artifactStorage.type,VERIFIED:.status.conditions[?(@.type=="Verified")].status,REASON:.status.conditions[?(@.type=="Verified")].reason' > "$OUTPUT_DIR/verification-status.txt" 2>/dev/null || true
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup-verification" -o 'custom-columns=NAME:.metadata.name,OWNER_UID:.metadata.ownerReferences[*].uid,SNAPSHOT:.spec.template.metadata.annotations.shipstream\.io/verification-backup,INPUT:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_INPUT_URL")].value,DECRYPT_STORAGE:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_STORAGE_TYPE")].value,DECRYPT_PREFIX:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_SOURCE_PREFIX")].value,DECRYPT_BUCKET:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_S3_BUCKET")].value' > "$OUTPUT_DIR/verification-jobs.txt" 2>/dev/null || true
 
 # Capture only backup coverage fields; annotations and credential material are excluded.
@@ -120,8 +120,7 @@ kubectl get mysqlbackups.shipstream.io -n "$NAMESPACE" -o json 2>/dev/null | \
 kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o json 2>/dev/null | \
     jq '{uid: .metadata.uid, archive: .status.pitr.archive,
          pitrArchiveReady: [.status.conditions[]? | select(.type == "PITRArchiveReady")],
-         restore: (.status.restore // null | if . then {phase, reason, message, jobName, pointInTime} else null end),
-         restoreInPlacePointInTime: .status.restoreInPlace.pointInTime}' \
+         restore: (.status.restore // null | if . then {phase, reason, message, jobName, pointInTime: .provenance.pointInTime} else null end)}' \
     > "$OUTPUT_DIR/pitr-archive.json" 2> "$OUTPUT_DIR/pitr-archive-errors.txt" || true
 
 # PITR archive encryption bindings (#203): status entries and condition, then
@@ -143,8 +142,7 @@ kubectl get pods -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,ship
 kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o json 2>/dev/null | \
     jq '[.items[] | {name: .metadata.name, mode: .spec.pointInTime.mode, stopTime: .spec.pointInTime.stopTime,
          excludeGtids: .spec.pointInTime.excludeGtids, phase: .status.phase,
-         verified: [.status.conditions[]? | select(.type == "Verified")], pointInTime: .status.pointInTime,
-         replayedThroughBinlog: .status.replayedThroughBinlog}]' \
+         verified: [.status.conditions[]? | select(.type == "Verified")], pointInTime: .status.pointInTime}]' \
     > "$OUTPUT_DIR/verification-pitr.json" 2> "$OUTPUT_DIR/verification-pitr-errors.txt" || true
 
 # Per-site /archiver/status: archive block, promotionRecordedAt, historyIntegrity,

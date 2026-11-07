@@ -134,7 +134,13 @@ type SiteSnapshot struct {
 	SourceConvergenceState  SourceConvergenceState
 	SourceConvergenceReason v1alpha1.SourceConvergenceReason
 	ServingHealthy          bool
-	ReplicationHealthy      bool
+	// ReplicationHealthy is the debounced replication health: both
+	// threads running with a source set for consecutive polls.
+	ReplicationHealthy bool
+	// ReplicaStatusRead is true when this snapshot's SHOW REPLICA STATUS
+	// on the site succeeded, so a nil Replication means no source is set
+	// rather than not probed.
+	ReplicaStatusRead bool
 	// PendingWritable mirrors state.SiteObservation.PendingWritable.
 	PendingWritable bool
 	// ClassificationOverdue mirrors state.SiteObservation.ClassificationOverdue.
@@ -191,6 +197,9 @@ type TopologySnapshot struct {
 	BootstrapSource    string               // "fresh-deploy", "auto-clone", or "reclone"
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
+	// MaxLagSeconds is spec.replication.maxLagSeconds: above it a healthy
+	// site reports replication Lagging.
+	MaxLagSeconds int64
 	// ObservedAt is the manager's clock when the snapshot was built; the
 	// status merge uses it to recognise a future-dated stored record.
 	ObservedAt time.Time
@@ -263,8 +272,15 @@ type siteTracker struct {
 	// threads running and a configured source host, observed for replicatingStreak
 	// consecutive poll ticks. Used by checkUpdate to refuse ordered updates against
 	// a stale standby whose super_read_only=ON but replication is not actually running.
-	replicating             bool
-	replicatingStreak       int
+	replicating       bool
+	replicatingStreak int
+	// replicaStatusRead is true when this poll's SHOW REPLICA STATUS on
+	// the site succeeded: a nil result then means no source is set
+	// (replication Broken), not "not probed" (Unknown).
+	replicaStatusRead bool
+	// replicationState is the replication state last published for the
+	// site (status.sites[].replication, /ws/status).
+	replicationState        v1alpha1.SiteReplicationState
 	sourceHost              string
 	sourceConvergenceState  SourceConvergenceState
 	sourceConvergenceReason v1alpha1.SourceConvergenceReason
@@ -376,6 +392,11 @@ type TopologyManager struct {
 	// operator history a fence stays for a human. Both protected by mu.
 	lastActiveSite      string
 	lastActiveSiteNamed bool
+	// awaitingObservedPrimary is set by a restore whose status was lost
+	// (it names no authority although the group has failover history):
+	// automatic promotion is refused until a poll observes exactly one
+	// writable site. Protected by mu.
+	awaitingObservedPrimary bool
 
 	// failoverState persists lastFailover/lastFailoverTarget out of band
 	// from the CR status subresource, so a status-write outage that spans
@@ -1472,6 +1493,18 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				"site", tm.sites[i].name, "probes", tm.sites[i].probes)
 		}
 	}
+	if tm.awaitingObservedPrimary {
+		writable := 0
+		for k := range tm.sites {
+			if tm.sites[k].state == state.StateWritable {
+				writable++
+			}
+		}
+		if writable == 1 {
+			tm.awaitingObservedPrimary = false
+			tm.logger.Info("observed a unique writable primary after a lost status; automatic promotion re-enabled")
+		}
+	}
 	tm.mu.Unlock()
 
 	// Apply per-site transitions (outside the lock).
@@ -1575,6 +1608,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	sourceProbeChanged := false
 	const replicatingStreakThreshold = 2
 	for i := range tm.sites {
+		tm.mu.Lock()
+		tm.sites[i].replicaStatusRead = false
+		tm.mu.Unlock()
 		if tm.sites[i].state != state.StateReadOnly {
 			continue
 		}
@@ -1605,8 +1641,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 			continue
 		}
 		siteRepl[i] = rs
-		healthy := rs != nil && rs.IORunning && rs.SQLRunning && rs.SourceHost != ""
+		healthy := replicaThreadsHealthy(rs)
 		tm.mu.Lock()
+		tm.sites[i].replicaStatusRead = true
 		if rs != nil && strings.TrimSpace(rs.ExecutedGtidSet) != "" {
 			tm.groupHasData = true
 		}
@@ -1629,6 +1666,27 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	// Converge every configured follower directly onto the unique confirmed
 	// active primary before old-primary recovery considers source-less sites.
 	handledConvergence, convergenceChanged := tm.checkSourceConvergence(ctx, siteRepl)
+	// The published replication state also distinguishes Broken from
+	// Unknown and Lagging from Healthy; a change in either is a status
+	// change even when the debounced health did not flip. It is taken
+	// after source convergence, which re-reads a follower it repaired,
+	// so the status write reports the same value.
+	tm.mu.Lock()
+	for i := range tm.sites {
+		st := siteReplicationState(tm.sites[i].state, siteRepl[i], tm.sites[i].replicaStatusRead,
+			tm.sites[i].replicating, tm.cfg.MaxLagSeconds)
+		prev := tm.sites[i].replicationState
+		if prev == "" {
+			// Nothing published yet reads as Unknown: a site still
+			// unprobed is no change.
+			prev = v1alpha1.SiteReplicationUnknown
+		}
+		tm.sites[i].replicationState = st
+		if st != prev {
+			replicationChanged = true
+		}
+	}
+	tm.mu.Unlock()
 	for site := range replicaProbeFailed {
 		handledConvergence[site] = struct{}{}
 	}
@@ -2123,6 +2181,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			SourceConvergenceReason: tm.sites[i].sourceConvergenceReason,
 			ServingHealthy:          tm.sites[i].servingHealthy,
 			ReplicationHealthy:      tm.sites[i].replicating,
+			ReplicaStatusRead:       tm.sites[i].replicaStatusRead,
 			PendingWritable:         tm.sites[i].pendingWritable(),
 			ClassificationOverdue:   tm.classificationOverdueLocked(&tm.sites[i]),
 		}
@@ -2158,6 +2217,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		BootstrapPhase:          string(tm.bootstrapPhase),
 		BootstrapSource:         tm.bootstrapSource,
 		PromotionGtidExecuted:   tm.promotionGtidExecuted,
+		MaxLagSeconds:           tm.cfg.MaxLagSeconds,
 		KeyringPromotionSkipped: append([]string(nil), tm.keyringPromotionSkipped...),
 		KeyringPromotionRefused: append([]string(nil), tm.keyringPromotionRefused...),
 
@@ -2216,8 +2276,9 @@ func (tm *TopologyManager) broadcastTopology(siteRepl []*mysql.ReplicaStatus, al
 	tm.hub.Broadcast(tm.topologyMessageLocked(siteRepl, alertMsg))
 }
 
-// topologyMessageLocked builds the /ws/status payload. Its role and state
-// carry the CR values, as /status does. Caller must hold tm.mu.
+// topologyMessageLocked builds the /ws/status payload. Its role, state,
+// replication and failover record carry the CR values and shapes, as
+// status.sites[] and status.lastFailover do. Caller must hold tm.mu.
 func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus, alertMsg string) platform.TopologyMessage {
 	sites := make([]platform.TopologySite, 0, len(tm.sites))
 	for i := range tm.sites {
@@ -2226,15 +2287,18 @@ func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus
 			repl = siteRepl[i]
 		}
 		s := platform.TopologySite{
-			Name:  tm.sites[i].name,
-			Role:  string(APISiteRole(tm.sites[i].role)),
-			State: string(apiSiteState(tm.sites[i].state)),
+			Name:        tm.sites[i].name,
+			Role:        string(APISiteRole(tm.sites[i].role)),
+			State:       string(apiSiteState(tm.sites[i].state)),
+			Replication: string(v1alpha1.SiteReplicationUnknown),
+		}
+		if rs := tm.sites[i].replicationState; rs != "" {
+			s.Replication = string(rs)
 		}
 		if !tm.sites[i].lastSeen.IsZero() {
-			s.LastSeen = tm.sites[i].lastSeen.Format(time.RFC3339)
+			s.LastSeenTime = tm.sites[i].lastSeen.Format(time.RFC3339)
 		}
 		if repl != nil {
-			s.Replicating = repl.IORunning && repl.SQLRunning
 			s.SecondsBehindSource = repl.SecondsBehindSource
 			s.GtidExecuted = repl.ExecutedGtidSet
 		}
@@ -2252,19 +2316,49 @@ func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus
 	}
 
 	msg := platform.TopologyMessage{
-		Namespace:             tm.cfg.Namespace,
-		Group:                 tm.cfg.Name,
-		ActiveSite:            tm.activeSiteLocked(),
-		Sites:                 sites,
-		LastFailoverTarget:    tm.lastFailoverTarget,
-		Alert:                 alertMsg,
-		PollTime:              tm.lastPollTime.Format(time.RFC3339),
-		PromotionGtidExecuted: tm.promotionGtidExecuted,
+		Namespace:  tm.cfg.Namespace,
+		Group:      tm.cfg.Name,
+		ActiveSite: tm.activeSiteLocked(),
+		Sites:      sites,
+		Alert:      alertMsg,
+		PollTime:   tm.lastPollTime.Format(time.RFC3339),
 	}
-	if !tm.lastFailover.IsZero() {
-		msg.LastFailover = tm.lastFailover.Format(time.RFC3339)
+	if !tm.lastFailover.IsZero() || tm.lastFailoverTarget != "" || tm.promotionGtidExecuted != "" {
+		rec := &platform.FailoverRecord{Target: tm.lastFailoverTarget, PromotionGtidExecuted: tm.promotionGtidExecuted}
+		if !tm.lastFailover.IsZero() {
+			rec.Time = tm.lastFailover.Format(time.RFC3339)
+		}
+		msg.LastFailover = rec
 	}
 	return msg
+}
+
+// replicaThreadsHealthy reports whether a replica status read shows both
+// replication threads running with a source set.
+func replicaThreadsHealthy(rs *mysql.ReplicaStatus) bool {
+	return rs != nil && rs.IORunning && rs.SQLRunning && rs.SourceHost != ""
+}
+
+// siteReplicationState maps one site's observation to
+// status.sites[].replication. repl is this poll's replica status, read
+// whether it was read successfully (a nil repl then means no source is
+// set), healthyStreak the debounced health (threads healthy for
+// consecutive polls). Healthy and Lagging are exactly the observations the
+// boolean replicating reported true for.
+func siteReplicationState(st state.SiteState, repl *mysql.ReplicaStatus, read, healthyStreak bool, maxLagSeconds int64) v1alpha1.SiteReplicationState {
+	switch {
+	case st == state.StateWritable:
+		return v1alpha1.SiteReplicationNotApplicable
+	case repl != nil && healthyStreak:
+		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds {
+			return v1alpha1.SiteReplicationLagging
+		}
+		return v1alpha1.SiteReplicationHealthy
+	case read && !replicaThreadsHealthy(repl):
+		return v1alpha1.SiteReplicationBroken
+	default:
+		return v1alpha1.SiteReplicationUnknown
+	}
 }
 
 // computeState applies debounce logic and returns the new state for a site.
@@ -2538,6 +2632,16 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			tm.logger.Info("failover blocked by anti-flap cooldown",
 				"lastFailover", lastFailover, "cooldown", tm.failoverCooldown, "retryAt", retryAt)
 			tm.armCrossSiteRetryAfter(retryAt)
+			return
+		}
+		tm.mu.RLock()
+		awaiting := tm.awaitingObservedPrimary
+		tm.mu.RUnlock()
+		if awaiting {
+			// The observation that ends the wait is itself a state
+			// transition, which re-evaluates this action.
+			tm.logger.Warn("promotion refused: the status was lost and no writable primary has been observed since the operator started",
+				"site", promote)
 			return
 		}
 

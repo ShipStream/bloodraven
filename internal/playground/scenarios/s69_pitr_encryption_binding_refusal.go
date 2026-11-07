@@ -145,7 +145,7 @@ func s69AssertBound() runner.Step {
 			p1 := ctxFetch(env, "prefixP1")
 			mfg, entry, err := s69WaitBinding(ctx, env, "P1 binding Bound and PITRArchiveBindingReady=True", p1, backupE2EEndpoint,
 				func(mfg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.PITRArchiveBinding) (bool, string) {
-					ok := s69BoundBound(b) && b.Encryption.Mode == v1alpha1.PITRArchiveEncryptionPassphrase && b.Encryption.KeySecretName != "" &&
+					ok := s69BoundBound(b) && b.Encryption.Mode == v1alpha1.EncryptionModePassphrase && b.Encryption.KeySecretName != "" &&
 						s69BindingConditionIs(mfg, metav1.ConditionTrue, "")
 					return ok, s69BindingSummary(mfg, b)
 				})
@@ -1180,8 +1180,9 @@ func s69AssertArchiveKeySnapshot(ctx context.Context, env *runner.Env, mfg *v1al
 // s69AssertDumpKeySnapshot checks a backup's recorded dump key (Δ1, Δ24):
 // its own immutable, ownerless snapshot of the profile's bytes at launch.
 func s69AssertDumpKeySnapshot(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlBackup, want []byte) error {
-	if !b.Status.Encrypted || b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecretKeyRef == nil {
-		return fmt.Errorf("MysqlBackup %s: encrypted=%v, no recorded dump key", b.Name, b.Status.Encrypted)
+	if b.Status.Encryption == nil || b.Status.Encryption.Mode != v1alpha1.EncryptionModePassphrase ||
+		b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecretKeyRef == nil {
+		return fmt.Errorf("MysqlBackup %s: encryption=%+v, no recorded dump key", b.Name, b.Status.Encryption)
 	}
 	ref := b.Status.ArtifactStorage.PassphraseSecretKeyRef
 	if !strings.HasPrefix(ref.Name, "mysqlbackup-") || ref.Key != pitrSnapshotPassphraseKey {
@@ -1268,7 +1269,7 @@ func s69CheckRender(dep *appsv1.Deployment, key, userSecret string) error {
 	if err := json.Unmarshal([]byte(dep.Annotations[v1alpha1.PITRRenderAnnotation]), &render); err != nil {
 		return fmt.Errorf("annotation %s does not decode: %w", v1alpha1.PITRRenderAnnotation, err)
 	}
-	if !render.Enabled || render.EncryptionMode != string(v1alpha1.PITRArchiveEncryptionPassphrase) || render.KeySecretName != key {
+	if !render.Enabled || render.EncryptionMode != string(v1alpha1.EncryptionModePassphrase) || render.KeySecretName != key {
 		return fmt.Errorf("annotation %s=%s does not render the binding's identity (Passphrase, %s)", v1alpha1.PITRRenderAnnotation, dep.Annotations[v1alpha1.PITRRenderAnnotation], key)
 	}
 	return nil

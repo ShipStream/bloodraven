@@ -378,7 +378,7 @@ func writableEndpoints(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailover
 func newEmergencyManagerWithPods(t *testing.T) (*DragonflyManager, client.Client, *v1alpha1.MysqlFailoverGroup) {
 	t.Helper()
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "master", true),

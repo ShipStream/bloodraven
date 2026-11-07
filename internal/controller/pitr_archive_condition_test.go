@@ -333,7 +333,7 @@ func TestPITRArchiveConditionEventsOnlyOnEdges(t *testing.T) {
 		if cond.ObservedGeneration != fg.Generation {
 			t.Fatalf("step %d: observedGeneration = %d, want %d", i, cond.ObservedGeneration, fg.Generation)
 		}
-		if pitr == nil || !pitr.Enabled {
+		if pitr == nil {
 			t.Fatalf("step %d: status.pitr = %+v", i, pitr)
 		}
 		events := drainEventsPITR(rec)
@@ -391,7 +391,7 @@ func TestPITRArchiveConditionRemovedWhenPITRDisabled(t *testing.T) {
 	persisted := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1alpha1.ReasonArchiverError, Message: "iad: x"}
 	fg := pitrArchiveFG(persisted)
 	fg.Spec.Backup.PITR.Enabled = false
-	fg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ArchivedFileCount: 4}
+	fg.Status.PITR = &v1alpha1.PITRStatus{ArchivedFileCount: 4}
 	nn := FailoverGroupNamespacedName(fg)
 	r, c, rec, p := pitrArchiveRunner(t, fg, nil)
 	observeAndWrite(t, r, p, nn, time.Now(), pitrRound{iad: pitrDisabled(), pdx: pitrDisabled()}.results())

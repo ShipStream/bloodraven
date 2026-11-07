@@ -129,7 +129,7 @@ At `WaitingForLag` the operator polls `pdx`'s `GTID_EXECUTED` and asks one quest
 `fence.gtidSet`? The check is a genuine GTID-set superset test. Not seconds. And immediately before it
 clears `super_read_only` on `pdx`, a pre-write gate demands that `pdx` hold exactly the fenced set, with
 no channel left and every other promotable site answering read-only. On success
-`status.promotionGtidExecuted` equals `fence.gtidSet`: nothing acknowledged was lost, by construction.
+`status.lastFailover.promotionGtidExecuted` equals `fence.gtidSet`: nothing acknowledged was lost, by construction.
 There is no "transactions lost" counter on this path, because a clean switchover cannot produce a
 number.
 
@@ -192,7 +192,7 @@ and ends `AdmissionTimeout` after two minutes. A site it cannot read might be wr
 ## What you have now
 
 You can move `playground`' primary on purpose, follow `status.plannedFailover.phase` to `Succeeded`,
-check that `status.promotionGtidExecuted` is the fenced set, and argue the superset gate to anyone who
+check that `status.lastFailover.promotionGtidExecuted` is the fenced set, and argue the superset gate to anyone who
 thinks it is a lag threshold. You can also say which outcomes hand you the cluster back intact and which
 hand you a fenced primary, an automation hold and a pager. Everything above assumed MySQL was the only
 thing moving. Next: what happens when there is a Dragonfly beside it, and what Bloodraven does and does

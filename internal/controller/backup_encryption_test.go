@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -316,14 +317,10 @@ func TestBuildRestoreJob_EncryptedSource_AddsDecryptInitContainer(t *testing.T) 
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Phase:               v1alpha1.BackupPhaseSucceeded,
-			Location:            "lion/seed/",
-			StorageType:         v1alpha1.BackupStorageS3,
-			Encrypted:           true,
-			EncryptionAlgorithm: "AES-256-GCM",
-			ArtifactStorage: &v1alpha1.BackupArtifactStorage{
-				PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"},
-			},
+			Phase: v1alpha1.BackupPhaseSucceeded,
+			ArtifactStorage: testArtifactStorageWithKey(v1alpha1.BackupStorageS3, "lion/seed/",
+				&v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"}),
+			Encryption: &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM},
 		},
 	}
 	r, _ := newReconciler(fg, seed)
@@ -407,10 +404,9 @@ func TestBuildRestoreJob_EncryptedSource_NoPassphraseSecretErrors(t *testing.T) 
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Phase:       v1alpha1.BackupPhaseSucceeded,
-			Location:    "lion/seed/",
-			StorageType: v1alpha1.BackupStorageS3,
-			Encrypted:   true,
+			Phase:           v1alpha1.BackupPhaseSucceeded,
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/seed/"),
+			Encryption:      &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM},
 		},
 	}
 	r, _ := newReconciler(fg, seed)
@@ -461,10 +457,9 @@ func TestEncryptedS3Location_DecryptSourceIsObjectKey(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgWithEncryptedBackup()
 			seed := successfulBackup("seed", fg.Name, "nightly-s3")
-			seed.Status.Location = tc.location
-			seed.Status.Encrypted = true
+			setTestArtifactLocation(seed, tc.location)
+			seed.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 			recordTestDumpKey(seed)
-			seed.Status.EncryptionAlgorithm = "AES-256-GCM"
 
 			verify := &v1alpha1.MysqlBackupVerification{
 				ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: "ns"},
@@ -515,21 +510,23 @@ func TestEncryptedS3Location_DecryptSourceIsObjectKey(t *testing.T) {
 func encryptedRefSeed(profileName string, storage v1alpha1.BackupStorageType) *v1alpha1.MysqlBackup {
 	seed := succeededSeedBackup()
 	seed.Spec.ProfileName = profileName
-	seed.Status.StorageType = storage
-	seed.Status.Encrypted = true
+	setTestArtifactType(seed, storage)
+	seed.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	recordTestDumpKey(seed)
-	seed.Status.EncryptionAlgorithm = "AES-256-GCM"
+
 	if storage == v1alpha1.BackupStoragePVC {
-		seed.Status.Location = backupPVCMountPath + "/seed/"
+		setTestArtifactLocation(seed, backupPVCMountPath+"/seed/")
 	}
 	return seed
 }
 
 // TestBuildRestoreJob_EncryptedRef_ProfileDrift_ReturnsError covers an
-// encrypted backupRef whose profile was deleted or moved to the
-// other storage backend after the backup ran. Both restore builders must
-// return the source-resolution error instead of dereferencing the
-// profile's storage pointer for the backend the backup was written to.
+// encrypted S3 backupRef whose profile, which supplies the S3 credentials,
+// was deleted or moved to the other storage backend after the backup ran.
+// Both restore builders must return the source-resolution error instead of
+// dereferencing the profile's storage pointer. A PVC backup needs no
+// credentials, so its restore reads the recorded claim whatever the profile
+// says (TestBuildRestoreJob_PVCRef_ProfileDrift_ReadsRecordedClaim).
 func TestBuildRestoreJob_EncryptedRef_ProfileDrift_ReturnsError(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
@@ -538,10 +535,6 @@ func TestBuildRestoreJob_EncryptedRef_ProfileDrift_ReturnsError(t *testing.T) {
 	encryption := &v1alpha1.BackupEncryptionSpec{
 		Algorithm:              "AES-256-GCM",
 		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "backup-passphrase", Key: "passphrase"},
-	}
-	s3Storage := v1alpha1.BackupStorage{
-		Type: v1alpha1.BackupStorageS3,
-		S3:   &v1alpha1.S3Storage{Bucket: "moved", Prefix: "lion", CredentialsSecretName: "s3-creds"},
 	}
 	pvcStorage := v1alpha1.BackupStorage{
 		Type: v1alpha1.BackupStoragePVC,
@@ -558,7 +551,6 @@ func TestBuildRestoreJob_EncryptedRef_ProfileDrift_ReturnsError(t *testing.T) {
 	}
 	backends := []backend{
 		{"s3", "nightly-s3", v1alpha1.BackupStorageS3, pvcStorage, "PVC", "source.s3"},
-		{"pvc", "daily-local", v1alpha1.BackupStoragePVC, s3Storage, "S3", "source.pvc"},
 	}
 	setups := []struct {
 		name       string
@@ -649,6 +641,61 @@ func TestBuildRestoreJob_EncryptedRef_ProfileDrift_ReturnsError(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestBuildRestoreJob_PVCRef_ProfileDrift_ReadsRecordedClaim: a PVC
+// backup's restore mounts the claim its artifactStorage records, even after
+// its profile was deleted or moved to S3 (A-96: only credentials come from
+// the profile, and a PVC has none).
+func TestBuildRestoreJob_PVCRef_ProfileDrift_ReadsRecordedClaim(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+	explicit := &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "restore-pass", Key: "passphrase"}}
+	for _, tc := range []struct {
+		name   string
+		mutate func(fg *v1alpha1.MysqlFailoverGroup)
+	}{
+		{"profile missing", func(fg *v1alpha1.MysqlFailoverGroup) {
+			kept := fg.Spec.Backup.Profiles[:0]
+			for _, p := range fg.Spec.Backup.Profiles {
+				if p.Name != "daily-local" {
+					kept = append(kept, p)
+				}
+			}
+			fg.Spec.Backup.Profiles = kept
+		}},
+		{"profile moved to S3", func(fg *v1alpha1.MysqlFailoverGroup) {
+			findProfile(fg, "daily-local").Storage = v1alpha1.BackupStorage{
+				Type: v1alpha1.BackupStorageS3,
+				S3:   &v1alpha1.S3Storage{Bucket: "moved", Prefix: "lion", CredentialsSecretName: "s3-creds"},
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := fgWithBackup()
+			tc.mutate(fg)
+			seed := encryptedRefSeed("daily-local", v1alpha1.BackupStoragePVC)
+			seed.Status.ArtifactStorage.ClaimName = "recorded-claim"
+			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+				Source:     v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: seed.Name}},
+				Decryption: explicit,
+			}
+			r, _ := newReconciler(fg, seed)
+			job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+			if err != nil {
+				t.Fatalf("buildRestoreJob: %v", err)
+			}
+			claims := []string{}
+			for _, v := range job.Spec.Template.Spec.Volumes {
+				if v.PersistentVolumeClaim != nil {
+					claims = append(claims, v.PersistentVolumeClaim.ClaimName)
+				}
+			}
+			if !slices.Contains(claims, "recorded-claim") || slices.Contains(claims, "moved") {
+				t.Fatalf("restore mounted %v, want the recorded claim", claims)
+			}
+		})
 	}
 }
 

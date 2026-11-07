@@ -72,12 +72,11 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded || backup.Status.Encrypted || backup.Status.EncryptionAlgorithm != "" {
+	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded || backup.Status.Encryption == nil || *backup.Status.Encryption != (v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModeNone}) {
 		t.Fatalf("plaintext Job misattributed after profile change: %+v", backup.Status)
 	}
 	// Reproduce a historical bad status and repair through a fresh reconciler.
-	backup.Status.Encrypted = true
-	backup.Status.EncryptionAlgorithm = "AES-256-GCM"
+	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +89,7 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	if backup.Status.Encrypted || backup.Status.EncryptionAlgorithm != "" {
+	if backup.Status.Encryption == nil || backup.Status.Encryption.Mode != v1alpha1.EncryptionModeNone || backup.Status.Encryption.Algorithm != "" {
 		t.Fatalf("historical attribution not repaired: %+v", backup.Status)
 	}
 }
