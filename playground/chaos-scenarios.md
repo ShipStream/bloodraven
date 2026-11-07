@@ -1230,7 +1230,7 @@ of a production adoption.
 component; `ALTER INSTANCE ROTATE INNODB MASTER KEY` is rejected on a
 sealed site; annotating the replica for rotation mints escrow version N+1
 and returns it to `Sealed` with data intact; annotating the active primary
-is refused with a `KeyringRotationRefused` event.
+is refused with a `KeyringRotationRejected` event.
 
 **What it actually proves**, in order:
 

@@ -54,7 +54,7 @@ func TestDeploymentLeaseRevocationReconcilesBeforeEarlyReturn(t *testing.T) {
 	}
 	for _, lease := range []DeploymentLeaseResult{migration, hold, hold2} {
 		_, err := m.Renew(ctx, fg, lease.Kind, lease.OperationID, "tenant", "tenant-ns", "deployer", lease.Token, 30)
-		if e := requireDeploymentError(t, err, 409, "revoked"); e.Reason != "operator_revoked" {
+		if e := requireDeploymentError(t, err, 409, "revoked"); e.Reason != "OperatorRevoked" {
 			t.Fatal(e)
 		}
 	}
@@ -92,7 +92,7 @@ func TestDeploymentLeaseRevocationPartialFailureClosesAdmission(t *testing.T) {
 		t.Fatal("request lost on partial revocation")
 	}
 	_, err = m.Renew(ctx, fg, "failover-hold", "op1", "tenant", "tenant-ns", "deployer", hold.Token, 30)
-	if e := requireDeploymentError(t, err, 409, "revoked"); e.Reason != "operator_revoked" {
+	if e := requireDeploymentError(t, err, 409, "revoked"); e.Reason != "OperatorRevoked" {
 		t.Fatal(e)
 	}
 	_, err = m.Renew(ctx, fg, "migration", "op1", "tenant", "tenant-ns", "deployer", migration.Token, 30)
@@ -106,7 +106,7 @@ func TestDeploymentLeaseRevocationPartialFailureClosesAdmission(t *testing.T) {
 	fail = false
 	// A heartbeat can durably revoke its own lease before the controller retry.
 	_, err = m.Renew(ctx, fg, "migration", "op1", "tenant", "tenant-ns", "deployer", migration.Token, 30)
-	if e := requireDeploymentError(t, err, 409, "revoked"); e.Reason != "operator_revoked" {
+	if e := requireDeploymentError(t, err, 409, "revoked"); e.Reason != "OperatorRevoked" {
 		t.Fatal(e)
 	}
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(fg)}); err != nil {
@@ -219,7 +219,7 @@ func TestDeploymentLeaseRevocationDuringWrite(t *testing.T) {
 			} else {
 				_, err = m.Grant(context.Background(), fg, "migration", "op1", "tenant", "tenant-ns", "deployer", 30)
 			}
-			if e := requireDeploymentError(t, err, 409, "revoked"); e.Reason != "operator_revoked" {
+			if e := requireDeploymentError(t, err, 409, "revoked"); e.Reason != "OperatorRevoked" {
 				t.Fatal(e)
 			}
 		})

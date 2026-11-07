@@ -74,7 +74,7 @@ class DeploymentClientTest(unittest.TestCase):
 
     @staticmethod
     def revoked(generation=8):
-        return 409, {"error": "revoked", "reason": "topology_changed", "topologyGeneration": generation}
+        return 409, {"error": "revoked", "reason": "TopologyChanged", "topologyGeneration": generation}
 
     def test_renewal_and_409_stop(self):
         responses = [self.snapshot(), self.grant(),

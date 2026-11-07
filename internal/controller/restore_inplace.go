@@ -351,7 +351,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 			// Invalid new confirm: leave the terminal status alone but
 			// surface the error on the CR events so the user knows
 			// why the re-arm did not take.
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceRejected,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceConfirmIgnored,
 				"invalid spec.restoreInPlace.confirm: %v", err)
 			return 0, nil
 		}
@@ -443,7 +443,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 			if advances, err := confirmAdvances(spec.Confirm, cur.RunConfirm); err != nil || !advances {
 				r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
 					fmt.Sprintf("cancelled: spec.restoreInPlace.confirm changed from %s to %s, which does not advance past it, before the restore Job was created; nothing was restored",
-						cur.RunConfirm, spec.Confirm), v1alpha1.EventRestoreInPlaceCancelled)
+						cur.RunConfirm, spec.Confirm), v1alpha1.EventRestoreInPlaceCanceled)
 				return 0, nil
 			}
 		}
@@ -479,7 +479,7 @@ func (r *MysqlFailoverGroupReconciler) noteWaitingForPreviousQueue(fg *v1alpha1.
 	r.restoreSettleNoted[nn] = key
 	r.restorePeerStopMu.Unlock()
 	if !seen {
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceWaitingForPreviousQueue,
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreInPlaceDeferredPreviousQueue,
 			"in-place restore confirm=%s waits until the reclone queue of the previous restore (confirm=%s) is settled: "+
 				"its Job's pods may still be running, or the primary is briefly unreadable (at most ten minutes)", requested, previous)
 	}
@@ -1037,9 +1037,8 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	// failed — record the confirm the Job ran with (not whatever spec.confirm
 	// says right now) so the terminal Failed holds and the destructive restore
 	// is not silently re-armed on the same confirm; the user must bump confirm
-	// to a strictly newer timestamp to retry.
-	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreInPlaceFailed,
-		"in-place restore Job %s failed: %s", job.Name, message)
+	// to a strictly newer timestamp to retry. stampTerminalFailure emits
+	// the RestoreInPlaceFailed Event.
 	r.stampTerminalFailure(ctx, fg, target, cur.Scope, acceptedConfirm, message, v1alpha1.EventRestoreInPlaceFailed)
 	// Even on failure we unfence so the cluster is not indefinitely
 	// stuck read-only. stampTerminalFailure triggers the runner to
@@ -1347,7 +1346,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestoreWithoutSpec(ctx co
 	// Preflight, Fencing, or Restoring before the Job was created.
 	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
 		fmt.Sprintf("cancelled: spec.restoreInPlace was removed in phase %s, before the restore Job started; nothing was restored", cur.Phase),
-		v1alpha1.EventRestoreInPlaceCancelled)
+		v1alpha1.EventRestoreInPlaceCanceled)
 	return 0, nil
 }
 

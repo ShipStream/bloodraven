@@ -946,7 +946,7 @@ func (r *TopologyManagerRunner) emitPITRArchiveEvents(fg *v1alpha1.MysqlFailover
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveNotReady,
 			"PITRArchiveReady is False (%s): %s", cur.Reason, cur.Message)
 	case cur.Status == metav1.ConditionTrue && prev != nil && prev.Status == metav1.ConditionFalse:
-		r.recorder.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPITRArchiveReady,
+		r.recorder.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPITRArchiveRecovered,
 			"PITRArchiveReady is True again: every site reports a running archiver with a ready store and no error")
 	}
 }

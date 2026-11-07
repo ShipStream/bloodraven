@@ -705,7 +705,7 @@ func (r *MysqlFailoverGroupReconciler) cancelOnPeerSetChange(ctx context.Context
 	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
 		fmt.Sprintf("cancelled: the peer set changed after the restore was accepted (%s not in status.restoreReclones.pending); nothing was restored. "+
 			"The restore re-runs with the current peers", strings.Join(added, ", ")),
-		v1alpha1.EventRestoreInPlaceCancelled)
+		v1alpha1.EventRestoreInPlaceCanceled)
 	return true
 }
 
@@ -828,7 +828,7 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 		return wait, nil
 	}
 	if len(incomplete) > 0 {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestorePeerReplicationIncomplete,
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestorePeerReplicationStoppedBehind,
 			"stopped the replication receiver of %s before it received every transaction the primary had committed before the fence; "+
 				"the peer keeps its pre-restore data without those transactions", strings.Join(incomplete, ", "))
 	}

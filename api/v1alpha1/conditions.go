@@ -513,6 +513,6 @@ const (
 // response, of a revoked lease record and of the DeploymentLeaseRevoked
 // Event message.
 const (
-	DeploymentLeaseRevokedByOperator      = "operator_revoked"
-	DeploymentLeaseRevokedTopologyChanged = "topology_changed"
+	DeploymentLeaseRevokedByOperator      = "OperatorRevoked"
+	DeploymentLeaseRevokedTopologyChanged = "TopologyChanged"
 )

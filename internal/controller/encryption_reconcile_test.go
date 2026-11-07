@@ -1179,6 +1179,35 @@ func TestCheckEscrowDeadline(t *testing.T) {
 	})
 }
 
+// TestEscrowDeadline_WarnsOnceWhenTheSiteFails pins A-75 for the keyring:
+// KeyringPhaseChanged is always Normal, so the escrow timeout's move to
+// Failed carries its own Warning, recorded once, on the transition.
+func TestEscrowDeadline_WarnsOnceWhenTheSiteFails(t *testing.T) {
+	fg := encTestFG()
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 60 * time.Second}}
+	rec := record.NewFakeRecorder(10)
+	r := &MysqlFailoverGroupReconciler{Recorder: rec}
+	old := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	s := &v1alpha1.SiteEncryptionStatus{
+		Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealTime: &old,
+		Message: "waiting for the sidecar to escrow the keyring",
+	}
+	r.escrowDeadline(fg, s)
+	if s.Phase != v1alpha1.KeyringPhaseFailed {
+		t.Fatalf("phase = %q, want Failed", s.Phase)
+	}
+	events := drainEvents(rec)
+	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning "+v1alpha1.EventKeyringEscrowTimedOut+" ") ||
+		!strings.Contains(events[0], "dc1") {
+		t.Fatalf("events = %q, want one Warning %s naming dc1", events, v1alpha1.EventKeyringEscrowTimedOut)
+	}
+	// Already Failed: no second Warning.
+	r.escrowDeadline(fg, s)
+	if events := drainEvents(rec); len(events) != 0 {
+		t.Fatalf("events after the site is already Failed = %q, want none", events)
+	}
+}
+
 func findCondition(conds []metav1.Condition, t string) *metav1.Condition {
 	for i := range conds {
 		if conds[i].Type == t {
@@ -1492,7 +1521,7 @@ func TestReconcileEncryption_DeferralNoteClearsWithRequest(t *testing.T) {
 		for {
 			select {
 			case e := <-rec.Events:
-				if strings.Contains(e, "KeyringRotationRefused") {
+				if strings.Contains(e, "KeyringRotationRejected") {
 					n++
 				}
 			default:

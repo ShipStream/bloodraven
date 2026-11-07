@@ -260,7 +260,7 @@ func TestRestoreReclone_DrainsEveryPeerOneAtATime(t *testing.T) {
 		t.Fatalf("queue should be cleared after every peer was recloned, got %+v", q)
 	}
 	events := strings.Join(drainEvents(rec), "\n")
-	for _, want := range []string{"RestoreRecloneRequested", "RestoreRecloneSucceeded", "RestoreReclonesComplete"} {
+	for _, want := range []string{"RestoreRecloneRequested", "RestoreRecloneSucceeded", "RestoreReclonesDrained"} {
 		if !strings.Contains(events, want) {
 			t.Errorf("missing %s event in:\n%s", want, events)
 		}
@@ -898,8 +898,8 @@ func TestRunner_EmitsPendingRecloneRefusalOnce(t *testing.T) {
 
 	runner.emitKeyringPromotionEvents(fg, snap)
 	events := drainEvents(rec)
-	if len(events) != 1 || !strings.Contains(events[0], "Warning PromotionRefusedPendingReclone") || !strings.Contains(events[0], "pdx") {
-		t.Fatalf("events = %q, want one PromotionRefusedPendingReclone warning naming pdx", events)
+	if len(events) != 1 || !strings.Contains(events[0], "Warning PromotionRefusedReclonePending") || !strings.Contains(events[0], "pdx") {
+		t.Fatalf("events = %q, want one PromotionRefusedReclonePending warning naming pdx", events)
 	}
 	runner.emitKeyringPromotionEvents(fg, snap)
 	if again := drainEvents(rec); len(again) != 0 {

@@ -95,7 +95,7 @@ func TestInPlaceFencing_StopsPeerReceiversBeforeRestoring(t *testing.T) {
 		t.Fatal("peer not held after its receiver was stopped")
 	}
 	if events := strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"); !strings.Contains(events, "RestorePeerReplicationStopped") ||
-		strings.Contains(events, "RestorePeerReplicationIncomplete") {
+		strings.Contains(events, "RestorePeerReplicationStoppedBehind") {
 		t.Fatalf("events %q, want RestorePeerReplicationStopped only", events)
 	}
 }
@@ -143,7 +143,7 @@ func TestInPlaceFencing_CatchUpTimeoutStopsAndWarns(t *testing.T) {
 		t.Fatalf("phase %s stops %d, want Restoring with the receiver stopped after the catch-up bound", fg.Status.RestoreInPlace.Phase, peer.stopIOCalls)
 	}
 	events := strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n")
-	if !strings.Contains(events, "RestorePeerReplicationIncomplete") || !strings.Contains(events, peerGTID("6-10")) {
+	if !strings.Contains(events, "RestorePeerReplicationStoppedBehind") || !strings.Contains(events, peerGTID("6-10")) {
 		t.Fatalf("events %q, want an incomplete warning naming the missing transactions", events)
 	}
 }
@@ -158,8 +158,8 @@ func TestInPlaceFencing_ConnectingReceiverStoppedAtOnce(t *testing.T) {
 	if fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceRestoring || peer.stopIOCalls != 1 || peer.replicaStatusVal.IOConnecting {
 		t.Fatalf("phase %s stops %d status %+v, want the connecting receiver stopped without waiting", fg.Status.RestoreInPlace.Phase, peer.stopIOCalls, peer.replicaStatusVal)
 	}
-	if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestorePeerReplicationIncomplete") {
-		t.Fatal("want RestorePeerReplicationIncomplete for the transactions it never received")
+	if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestorePeerReplicationStoppedBehind") {
+		t.Fatal("want RestorePeerReplicationStoppedBehind for the transactions it never received")
 	}
 }
 

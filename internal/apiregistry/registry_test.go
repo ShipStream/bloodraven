@@ -133,6 +133,24 @@ func (r registry) forKind(kind string) (map[string]string, string) {
 			}
 		}
 		return all, "an UnstableReason*, condition type or condition reason in conditions.go"
+	case sinkMetricReason:
+		// A-114: a metric's reason label carries a reason constant
+		// verbatim: a condition reason, a lease revocation or refusal
+		// reason, or a value of a typed reason.
+		all := map[string]string{}
+		for _, m := range []map[string]string{r.unstable, r.conditionReasons} {
+			for v, n := range m {
+				all[v] = n
+			}
+		}
+		for typ, m := range r.byType {
+			if strings.HasSuffix(typ, "Reason") {
+				for v, n := range m {
+					all[v] = n
+				}
+			}
+		}
+		return all, "a reason constant in api/v1alpha1"
 	}
 	return nil, ""
 }
@@ -393,7 +411,7 @@ func TestRegistryCatchesUndeclaredValues(t *testing.T) {
 	}
 	sort.Strings(undeclared)
 	sort.Strings(literal)
-	if got, want := strings.Join(undeclared, ","), "event:FixtureUndeclaredEvent"; got != want {
+	if got, want := strings.Join(undeclared, ","), "event:FixtureUndeclaredEvent,metricReason:FixtureUndeclaredMetricReason"; got != want {
 		t.Errorf("undeclared values = %s, want %s", got, want)
 	}
 	if got, want := strings.Join(literal, ","), "conditionReason:Bound"; got != want {
@@ -401,6 +419,37 @@ func TestRegistryCatchesUndeclaredValues(t *testing.T) {
 	}
 	if got, want := strings.Join(dynamic, ","), "event"; got != want {
 		t.Errorf("unfollowable sinks = %s, want %s", got, want)
+	}
+}
+
+// TestEventPairsFollowEachCall: a helper that forwards both the Event type
+// and the reason is paired per call, so a reason recorded with two types is
+// caught (A-75) and a reason is not charged with a type another call
+// passes.
+func TestEventPairsFollowEachCall(t *testing.T) {
+	a := loadAnalysis(t, nil, "./internal/apiregistry/testdata/emitter")
+	types := map[string][]string{}
+	for _, s := range a.sinks() {
+		if !s.recorded {
+			continue
+		}
+		for _, p := range s.pairProblems {
+			t.Errorf("pairing problem at %s: %s", s.pos, p)
+		}
+		for _, p := range s.pairs {
+			types[p.reason] = append(types[p.reason], p.eventType)
+		}
+	}
+	for reason, want := range map[string]string{
+		"PlannedFailoverSkipped":  "Normal,Warning",
+		"PlannedFailoverRejected": "Warning",
+		"PlannedFailoverStarted":  "Warning",
+	} {
+		got := types[reason]
+		sort.Strings(got)
+		if strings.Join(got, ",") != want {
+			t.Errorf("%s recorded as %v, want %s", reason, got, want)
+		}
 	}
 }
 

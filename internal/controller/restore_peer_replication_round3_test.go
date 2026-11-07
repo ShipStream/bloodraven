@@ -124,7 +124,7 @@ func TestConfirmBumpDuringSettlement_DoesNotStallReconcile(t *testing.T) {
 	if fresh.Status.PlannedFailover == nil {
 		t.Fatal("the planned-failover step did not run: the pass stopped at the restore")
 	}
-	if n := strings.Count(strings.Join(events, "\n"), "RestoreInPlaceWaitingForPreviousQueue"); n != 1 {
+	if n := strings.Count(strings.Join(events, "\n"), "RestoreInPlaceDeferredPreviousQueue"); n != 1 {
 		t.Fatalf("waiting events = %d, want exactly one (%q)", n, events)
 	}
 }

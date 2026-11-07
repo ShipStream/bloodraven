@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -639,6 +640,16 @@ func TestReconcileInPlaceRestore_MatchingFailedJobIsHonored(t *testing.T) {
 		Name: inPlaceRestoreJobName(fg.Name, site), Namespace: fg.Namespace}, &still); err != nil {
 		t.Errorf("matching Job must not be deleted: %v", err)
 	}
+	// A-75: one failed run, one RestoreInPlaceFailed Event.
+	failed := 0
+	for _, e := range drainEvents(r.Recorder.(*record.FakeRecorder)) {
+		if strings.HasPrefix(e, "Warning "+v1alpha1.EventRestoreInPlaceFailed+" ") {
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Errorf("RestoreInPlaceFailed Events = %d, want 1", failed)
+	}
 }
 
 // Changing spec.confirm while a destructive restore Job is RUNNING must never
@@ -1145,6 +1156,33 @@ func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testi
 // topology-generation bump, and without consuming the confirm. The
 // rejection must also be stable: the next reconcile neither rewrites status
 // nor re-emits the event (a rewrite would itself trigger another reconcile).
+// TestReconcileInPlaceRestore_InvalidConfirmOnTerminalIsIgnored pins
+// A-75's advisory reason: a new confirm that does not parse on a finished
+// restore changes nothing and is RestoreInPlaceConfirmIgnored, not the
+// RestoreInPlaceRejected that ends a run Failed.
+func TestReconcileInPlaceRestore_InvalidConfirmOnTerminalIsIgnored(t *testing.T) {
+	fg := fgInPlaceRestore("")
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
+		Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
+		ConfirmTokenUsed: fg.Spec.RestoreInPlace.Confirm, StartTime: ptrTime(time.Now()), CompletionTime: ptrTime(time.Now()),
+	}
+	fg.Spec.RestoreInPlace.Confirm = "not-a-timestamp"
+	before := fg.Status.RestoreInPlace.DeepCopy()
+	r, _ := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
+	rec := r.Recorder.(*record.FakeRecorder)
+
+	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !reflect.DeepEqual(fg.Status.RestoreInPlace, before) {
+		t.Errorf("terminal status changed: %+v, want %+v", fg.Status.RestoreInPlace, before)
+	}
+	events := drainEvents(rec)
+	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning "+v1alpha1.EventRestoreInPlaceConfirmIgnored+" ") {
+		t.Errorf("events = %q, want one Warning %s", events, v1alpha1.EventRestoreInPlaceConfirmIgnored)
+	}
+}
+
 func TestReconcileInPlaceRestore_ValidationRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

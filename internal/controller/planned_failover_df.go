@@ -406,7 +406,7 @@ const dragonflySyncPollInterval = 1 * time.Second
 // takeover with sessions lost; Fail rolls back.
 func (e *PlannedFailoverEngine) dragonflySyncTimeout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	elapsed time.Duration, why string) (time.Duration, error) {
-	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflySyncTimeout,
+	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflySyncTimedOut,
 		fmt.Sprintf("dragonfly sync timed out (%s): %s", truncateDur(elapsed), why))
 	if plannedSettings(pf).Dragonfly.OnSyncTimeout == v1alpha1.DragonflySyncTimeoutFail {
 		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonDragonflySyncTimeout)
@@ -570,7 +570,7 @@ func (e *PlannedFailoverEngine) noteDragonflyGateWait(ctx context.Context, fg *v
 		plannedDragonflyBlock(next).Message = plannedDragonflyGateWaitMessage
 	})
 	if out == WriteCommitted {
-		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionWaiting,
+		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionDeferred,
 			fmt.Sprintf("planned failover to %q is waiting for an in-progress Dragonfly promotion to finish; MySQL writes stay paused on %q until it does (at most about 40s)",
 				pf.TargetSite, pf.SourceSite))
 	}
@@ -835,7 +835,7 @@ func (o reconcilerDragonflyOps) finishPromotion(ctx context.Context, fg *v1alpha
 	r.stampDragonflyLastPromotion(ctx, fg, pf.TargetSite, metav1.Now())
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, pf.TargetSite, "success").Inc()
 	if r.Recorder != nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionCompleted,
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionSucceeded,
 			"Dragonfly target %q promoted via REPLTAKEOVER", pf.TargetSite)
 	}
 }

@@ -1352,7 +1352,7 @@ func TestUltraA_K035_AckWithoutHoldIsNotASuccess(t *testing.T) {
 	h.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-1")
 	h.step()
 	if h.sink.eventCount(v1alpha1.EventPlannedFailoverHoldAcknowledged) != 0 ||
-		h.sink.eventCount(v1alpha1.EventPlannedFailoverHoldAcknowledgementIgnored) != 1 {
+		h.sink.eventCount(v1alpha1.EventPlannedFailoverHoldAcknowledgmentIgnored) != 1 {
 		t.Fatalf("events = %v, want only an ignored acknowledgement", h.sink.events)
 	}
 	if run, hold := h.topo.held(); run != "run-other" || !hold {

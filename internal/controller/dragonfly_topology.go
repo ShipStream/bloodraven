@@ -1390,7 +1390,7 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 			m.logger.Info("dragonfly emergency: REPLTAKEOVER succeeded", "site", target, "fg", fgKey)
 			metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "success").Inc()
 			if m.recorder != nil {
-				m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionCompleted,
+				m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionSucceeded,
 					"emergency: target Dragonfly %q promoted via REPLTAKEOVER (best-effort)", target)
 			}
 			m.finishDragonflyPromotion(ctx, fg, target, oldSource, password)
@@ -1474,8 +1474,6 @@ func (m *DragonflyManager) resolveUnconfirmedPromotion(ctx context.Context, fg *
 func (m *DragonflyManager) recordSessionsLostPromotion(fg *v1alpha1.MysqlFailoverGroup, target, what string) {
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "sessions_lost").Inc()
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionCompleted,
-			"emergency: target Dragonfly %q %s", target, what)
 		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflySessionsLost,
 			"emergency: target Dragonfly %q %s", target, what)
 	}

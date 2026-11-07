@@ -195,7 +195,7 @@ func TestDeployAPIUnauthorizedMetricsBounded(t *testing.T) {
 }
 
 func TestDeployAPIExpiredAndRevoked(t *testing.T) {
-	for _, state := range []string{"expired", "operator_revoked", "topology_changed"} {
+	for _, state := range []string{"expired", "OperatorRevoked", "TopologyChanged"} {
 		t.Run(state, func(t *testing.T) {
 			f := newDeployAPIFixture(t)
 			token := f.grant(t, "migration", "op1", "tenant", 5, 201)["token"].(string)
@@ -204,11 +204,11 @@ func TestDeployAPIExpiredAndRevoked(t *testing.T) {
 			case "expired":
 				f.now = f.now.Add(5*time.Second + time.Nanosecond)
 				status, code = 404, "not_found"
-			case "operator_revoked":
+			case "OperatorRevoked":
 				if err := f.api.leases.Revoke(context.Background(), f.group, state); err != nil {
 					t.Fatal(err)
 				}
-			case "topology_changed":
+			case "TopologyChanged":
 				f.group.Status.TopologyGeneration++
 				if err := f.client.Status().Update(context.Background(), f.group); err != nil {
 					t.Fatal(err)

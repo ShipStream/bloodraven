@@ -160,7 +160,7 @@ func (e *PlannedFailoverEngine) ackPass(ctx context.Context, fg *v1alpha1.MysqlF
 				msg = fmt.Sprintf("%s=%s ignored: the planned-failover claim is held for another run, which this acknowledgement does not release",
 					v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, ack)
 			}
-			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverHoldAcknowledgementIgnored, msg)
+			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverHoldAcknowledgmentIgnored, msg)
 			return plannedRequeueNext, true
 		}
 		e.groupMemo(nn).holdPendingAt = time.Time{}
@@ -171,7 +171,7 @@ func (e *PlannedFailoverEngine) ackPass(ctx context.Context, fg *v1alpha1.MysqlF
 	if ack != hold.RunID {
 		if g := e.groupMemo(nn); g.ackWarned != ack {
 			g.ackWarned = ack
-			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverHoldAcknowledgementIgnored,
+			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverHoldAcknowledgmentIgnored,
 				fmt.Sprintf("%s=%s ignored: the automation hold is for planned failover %q", v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, ack, hold.RunID))
 		}
 		return 0, false

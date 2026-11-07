@@ -122,7 +122,7 @@ func TestPITRBindingContractStrings(t *testing.T) {
 		v1alpha1.EventPITRArchiveKeySourceRemoved:        "PITRArchiveKeySourceRemoved",
 		v1alpha1.EventPITRArchiveKeySnapshotRecreated:    "PITRArchiveKeySnapshotRecreated",
 		v1alpha1.EventPITRArchiveKeyMaterialLost:         "PITRArchiveKeyMaterialLost",
-		v1alpha1.EventPITRArchiveKeySnapshotUnreadable:   "PITRArchiveKeySnapshotUnreadable",
+		v1alpha1.EventPITRArchiveKeySnapshotReadFailed:   "PITRArchiveKeySnapshotReadFailed",
 		v1alpha1.EventPITRArchiveBindingReleaseRefused:   "PITRArchiveBindingReleaseRefused",
 		v1alpha1.EventPITRArchiveBindingReleaseRejected:  "PITRArchiveBindingReleaseRejected",
 		v1alpha1.EventPITRArchiveBindingLimitReached:     "PITRArchiveBindingLimitReached",

@@ -1717,7 +1717,7 @@ func (p *pitrBindingPass) emit(ctx context.Context, before []v1alpha1.PITRArchiv
 	}
 	for _, n := range p.notes {
 		if !strings.Contains(old, "key snapshot "+n.secret+" is unreadable") {
-			rec.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveKeySnapshotUnreadable,
+			rec.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveKeySnapshotReadFailed,
 				"key snapshot %s is unreadable: %s; it is never used for recovery and never deleted by the operator", n.secret, n.detail)
 		}
 	}

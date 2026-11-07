@@ -33,7 +33,7 @@ func countPITREvents(events []string) (warnings, normals int) {
 		switch {
 		case strings.HasPrefix(e, "Warning PITRArchiveNotReady"):
 			warnings++
-		case strings.HasPrefix(e, "Normal PITRArchiveReady"):
+		case strings.HasPrefix(e, "Normal PITRArchiveRecovered"):
 			normals++
 		}
 	}

@@ -61,14 +61,14 @@ An in-place restore of `playground` completed on 20 May with `spec.restoreInPlac
 
 - The restore re-runs — `restoreInPlace` is the re-runnable field, which is exactly what 'no teardown-and-rename cycle' means
 - The sync fails at admission: the API server rejects any `confirm` that is not strictly greater than `confirmTokenUsed`
-- The operator clears the terminal status, re-enters `Preflight`, and emits a `RestoreInPlaceRejected` event on every sync
+- The operator clears the terminal status, re-enters `Preflight`, and emits a `RestoreInPlaceConfirmIgnored` event on every sync
 - Nothing. The token is not greater than `confirmTokenUsed`, so the reconciler returns on an already-matching status
 
 **Correct option index:** 3
 
 **Explanation:**
 
-`confirm` is required, must parse as an **RFC 3339 timestamp**, and must be **strictly greater** than `status.restoreInPlace.confirmTokenUsed`. Re-applying an unchanged manifest therefore carries a token that is no longer greater, and the reconciler returns on a terminal status already reflecting that value — GitOps cannot replay a destructive restore, which is the entire point of the design. Option one gets 're-runnable' right but reads it as 'runs again on its own': it means you may run another restore later, by bumping the token, not that every apply triggers one. Option two puts the check in the wrong layer — like the `pointInTime` rejection this is reconciler-side, so the apply succeeds. Option three confuses the rejection path: an *invalid* token on a re-arm emits `RestoreInPlaceRejected` and leaves the previous terminal status **visible**; it does not tear the status down, and an unchanged valid token emits nothing at all. Programmatic callers simply send `now()`. (objective 5)
+`confirm` is required, must parse as an **RFC 3339 timestamp**, and must be **strictly greater** than `status.restoreInPlace.confirmTokenUsed`. Re-applying an unchanged manifest therefore carries a token that is no longer greater, and the reconciler returns on a terminal status already reflecting that value — GitOps cannot replay a destructive restore, which is the entire point of the design. Option one gets 're-runnable' right but reads it as 'runs again on its own': it means you may run another restore later, by bumping the token, not that every apply triggers one. Option two puts the check in the wrong layer — like the `pointInTime` rejection this is reconciler-side, so the apply succeeds. Option three confuses the rejection path: an *invalid* token on a re-arm emits `RestoreInPlaceConfirmIgnored` and leaves the previous terminal status **visible**; it does not tear the status down, and an unchanged valid token emits nothing at all. Programmatic callers simply send `now()`. (objective 5)
 
 ## Question 5
 

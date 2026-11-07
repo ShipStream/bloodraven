@@ -276,7 +276,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return r.pendBackup(ctx, &backup, v1alpha1.ReasonPITRArchiveRolloutPending, why)
 			}
 			archiveID = ""
-			r.Recorder.Eventf(&backup, corev1.EventTypeNormal, v1alpha1.EventPITRArchiveNotStamped,
+			r.Recorder.Eventf(&backup, corev1.EventTypeNormal, v1alpha1.EventPITRArchiveStampSkipped,
 				"the backup is not stamped with a PITR archive and is no PITR baseline: %s", why)
 		}
 
@@ -1063,7 +1063,7 @@ func (r *MysqlBackupReconciler) stopAbandonedProducer(ctx context.Context, backu
 			stuck, producerStopStuckAfter)
 		previous := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
 		if previous == nil || previous.Reason != v1alpha1.ReasonProducerStopStuck || previous.Message != message {
-			r.Recorder.Event(backup, corev1.EventTypeWarning, v1alpha1.EventArtifactCleanupProducerStuck, message)
+			r.Recorder.Event(backup, corev1.EventTypeWarning, v1alpha1.EventArtifactCleanupStalledProducerStop, message)
 		}
 		if err := r.setArtifactCleanupCondition(ctx, backup, v1alpha1.ReasonProducerStopStuck, message); err != nil {
 			return 0, err

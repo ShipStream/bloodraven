@@ -63,7 +63,7 @@ func scenario48KeyringSealAndRotation() runner.Scenario {
 		Hypothesis: "Every site reports phase=Sealed with a read-only keyring component; ALTER INSTANCE ROTATE " +
 			"INNODB MASTER KEY fails on a sealed site; annotating the replica for rotation mints escrow version " +
 			"N+1 and returns it to Sealed with data intact; annotating the active primary is refused with a " +
-			"KeyringRotationRefused event.",
+			"KeyringRotationRejected event.",
 		Risk:    "medium",
 		DocLink: "playground/chaos-scenarios.md#48-keyring-seal-and-rotation",
 		Timeout: 20 * time.Minute,
@@ -285,7 +285,7 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 			}
 
 			// Capture notBefore before the annotation so a leftover
-			// KeyringRotationRefused from a previous run cannot satisfy
+			// KeyringRotationRejected from a previous run cannot satisfy
 			// this one. LastTimestamp is second-granularity; matchMFGEvent
 			// allows 2s of slack.
 			before := time.Now()
@@ -317,7 +317,7 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 					return err
 				}
 				if eventSeenAt.IsZero() {
-					ev, ok, err := findMFGEvent(ctx, env, before, v1alpha1.EventKeyringRotationRefused, snippet)
+					ev, ok, err := findMFGEvent(ctx, env, before, v1alpha1.EventKeyringRotationRejected, snippet)
 					if err != nil {
 						return fmt.Errorf("list events: %w", err)
 					}
@@ -325,7 +325,7 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 						eventSeenAt = time.Now()
 						env.Logger.Info("operator refused primary rotation", "message", ev.Message)
 					} else if !time.Now().Before(eventDeadline) {
-						return fmt.Errorf("no KeyringRotationRefused event was emitted for the active primary %s", state.activeSite)
+						return fmt.Errorf("no KeyringRotationRejected event was emitted for the active primary %s", state.activeSite)
 					}
 				}
 				return nil

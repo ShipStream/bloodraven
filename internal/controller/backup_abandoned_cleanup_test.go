@@ -434,7 +434,7 @@ func TestFinalize_AbandonedReportsStuckProducer(t *testing.T) {
 	if done, requeue := f.finalize(t); done || requeue != 5*time.Second {
 		t.Fatalf("done=%v requeue=%s, want a quiet short wait before the deadline", done, requeue)
 	}
-	if n := countEvents(f.rec, "ArtifactCleanupProducerStuck"); n != 0 {
+	if n := countEvents(f.rec, "ArtifactCleanupStalledProducerStop"); n != 0 {
 		t.Fatal("stuck warning before the deadline")
 	}
 	f.r.now = func() time.Time { return time.Now().Add(producerStopStuckAfter + time.Minute) }
@@ -448,11 +448,11 @@ func TestFinalize_AbandonedReportsStuckProducer(t *testing.T) {
 		!strings.Contains(cond.Message, "--force") {
 		t.Fatalf("condition %+v", cond)
 	}
-	if n := countEvents(f.rec, "Warning ArtifactCleanupProducerStuck"); n != 1 {
+	if n := countEvents(f.rec, "Warning ArtifactCleanupStalledProducerStop"); n != 1 {
 		t.Fatal("no stuck warning")
 	}
 	f.finalize(t)
-	if n := countEvents(f.rec, "ArtifactCleanupProducerStuck"); n != 0 {
+	if n := countEvents(f.rec, "ArtifactCleanupStalledProducerStop"); n != 0 {
 		t.Fatal("stuck warning repeated for an unchanged wait")
 	}
 	if _, ok := f.cleanupJob(t); ok {

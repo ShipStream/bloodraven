@@ -144,7 +144,7 @@ that was running when the primary moved anyway?
 site — planned promotion, emergency failover, the failover inside an ordered update, restore-in-place
 promotion, bootstrap completion. It is not the CR's `metadata.generation` and it is not a restart
 counter. Every lease is stamped with the generation it was granted under, and a generation change
-revokes every lease in the group with reason `topology_changed`, raising a `DeploymentLeaseRevoked`
+revokes every lease in the group with reason `TopologyChanged`, raising a `DeploymentLeaseRevoked`
 event on the `MysqlFailoverGroup`.
 
 The pipeline finds out on its next heartbeat. `PUT` comes back `409 revoked` with the new generation; a
@@ -165,7 +165,7 @@ server.
 
 When you need every lease gone — a pipeline that will not die, a hold you must clear before a
 switchover — annotate the group with `bloodraven.shipstream.io/revoke-deployment-leases`. Renewals
-then report `operator_revoked`, and the same fenced-abort rules apply to the client. What you never do is
+then report `OperatorRevoked`, and the same fenced-abort rules apply to the client. What you never do is
 delete the leader-election Lease or edit `topologyGeneration` to clear a hold; both are ways of lying to
 the fence. `bloodraven_deploy_leases_active` and `bloodraven_planned_failovers_deferred_total` tell you
 whether a hold is live and how often it has cost a switchover, and every request logs `msg="deploy api"`

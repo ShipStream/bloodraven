@@ -260,13 +260,13 @@ func TestDeployLeasesRevokedAndStopped(t *testing.T) {
 	records := []deployClientRecord{
 		rec("grant", "migration", 201, 5, "", "", at),
 		rec("grant", "failover-hold", 201, 5, "", "", at),
-		rec("renew", "migration", 409, 6, "revoked", "topology_changed", at.Add(30*time.Second)),
+		rec("renew", "migration", 409, 6, "revoked", "TopologyChanged", at.Add(30*time.Second)),
 	}
 	if deployLeasesRevokedAndStopped(records, 5, 2) {
 		t.Fatal("one revoked lease and no stop must not satisfy two")
 	}
 	records = append(records,
-		rec("renew", "failover-hold", 409, 6, "revoked", "operator_revoked", at.Add(31*time.Second)),
+		rec("renew", "failover-hold", 409, 6, "revoked", "OperatorRevoked", at.Add(31*time.Second)),
 		deployClientRecord{Action: "stopped", Status: 409})
 	if !deployLeasesRevokedAndStopped(records, 5, 2) {
 		t.Fatal("both leases revoked by a newer generation and stopped must satisfy")

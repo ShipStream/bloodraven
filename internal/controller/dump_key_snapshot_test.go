@@ -361,7 +361,7 @@ func TestDumpKeySnapshotKeptWithoutProducerAttribution(t *testing.T) {
 
 // F-B: backups never pend on a disagreement that only the user can end,
 // and a dump-only profile never pends on PITR at all. Each case runs the
-// backup Job without an archive stamp and says so (PITRArchiveNotStamped);
+// backup Job without an archive stamp and says so (PITRArchiveStampSkipped);
 // only a PITR-profile backup during a roll waits (TestBackupWaitsForPITRRollout).
 func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 	for _, tc := range []struct {
@@ -401,8 +401,8 @@ func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 			if got.Status.PITRArchiveID != "" {
 				t.Fatalf("stamped archive %q, want none", got.Status.PITRArchiveID)
 			}
-			if countEvents(rec, v1alpha1.EventPITRArchiveNotStamped) != 1 {
-				t.Fatal("no PITRArchiveNotStamped Event")
+			if countEvents(rec, v1alpha1.EventPITRArchiveStampSkipped) != 1 {
+				t.Fatal("no PITRArchiveStampSkipped Event")
 			}
 		})
 	}

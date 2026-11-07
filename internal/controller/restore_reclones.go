@@ -412,7 +412,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 		q = fg.Status.RestoreReclones
 	}
 	if len(known) == 0 {
-		return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeNormal, v1alpha1.EventRestoreReclonesComplete,
+		return 0, r.clearRestoreReclones(ctx, fg, corev1.EventTypeNormal, v1alpha1.EventRestoreReclonesDrained,
 			"every peer of the in-place restore (confirm=%s) has been recloned", q.ConfirmToken)
 	}
 	active := fg.Status.ActiveSite
@@ -1036,7 +1036,7 @@ func (r *TopologyManagerRunner) recordRestoreRecloneOutcome(ctx context.Context,
 				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreRecloneSucceeded,
 					"recloned %s from the restored primary (%d site(s) still queued)", site, left)
 				if left == 0 {
-					r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreReclonesComplete,
+					r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreReclonesDrained,
 						"every peer of the in-place restore (confirm=%s) has been recloned", confirm)
 				}
 			}

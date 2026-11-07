@@ -2548,7 +2548,7 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDivergenceResolved,
 					"Replica %s no longer holds transactions the primary lacks", s.Name)
 			} else {
-				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRecoveryComplete,
+				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventOldPrimaryRecovered,
 					"Old primary %s recovered and is now replicating", s.Name)
 			}
 		}
@@ -2671,7 +2671,7 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 	}
 	if !stringSlicesEqual(snap.RestoreReclonePromotionRefused, mt.lastRestoreReclonePromotionRefused) {
 		if len(snap.RestoreReclonePromotionRefused) > 0 {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPromotionRefusedPendingReclone,
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPromotionRefusedReclonePending,
 				"automatic promotion refused: %s not yet recloned after the in-place restore and hold pre-restore data; "+
 					"bring the primary back, or accept that data by removing status.restoreReclones "+
 					"(kubectl patch mfg <group> --subresource=status --type=json -p '[{\"op\":\"remove\",\"path\":\"/status/restoreReclones\"}]')",

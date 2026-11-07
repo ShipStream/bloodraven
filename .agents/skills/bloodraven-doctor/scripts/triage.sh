@@ -317,7 +317,7 @@ MANAGER_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedOb
     | grep -E 'TopologyManagerStart(ed|Failed)' || true)
 PITR_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.name=$MFG_NAME" --sort-by=.lastTimestamp \
     -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
-    | grep -E 'PITRArchive(ReissueRiskDetected|UnsafeHistoryDetected)|PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PointInTimePartial|PITRArchive(EncryptionChangeRefused|KeyChangeRefused|BindingRefused|KeySourceRemoved|KeySnapshotRecreated|KeyMaterialLost|KeySnapshotUnreadable|BindingReleaseRefused|BindingReleaseRejected|BindingLimitReached)|BackupScheduleRefused' || true)
+    | grep -E 'PITRArchive(ReissueRiskDetected|UnsafeHistoryDetected)|PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PITRReplayTruncated|PITRArchive(EncryptionChangeRefused|KeyChangeRefused|BindingRefused|KeySourceRemoved|KeySnapshotRecreated|KeyMaterialLost|KeySnapshotUnreadable|BindingReleaseRefused|BindingReleaseRejected|BindingLimitReached)|BackupScheduleRefused' || true)
 if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "Topology manager start history for $MFG_NAME. History only, not current state, in either direction:"
     echo "  - Warnings are throttled to one per 5 minutes, so a group that recovered and then broke again can still show TopologyManagerStarted last."
@@ -332,13 +332,13 @@ fi
 for verification in $(kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
     VERIFICATION_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.kind=MysqlBackupVerification,involvedObject.name=$verification" --sort-by=.lastTimestamp \
         -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
-        | grep -E 'PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PointInTimePartial' | sed "s|^|[verification/$verification] |" || true)
+        | grep -E 'PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PITRReplayTruncated' | sed "s|^|[verification/$verification] |" || true)
     if [[ -n "$VERIFICATION_EVENTS" ]]; then
         PITR_EVENTS+="${PITR_EVENTS:+$'\n'}$VERIFICATION_EVENTS"
     fi
 done
 if [[ -n "$PITR_EVENTS" ]]; then
-    echo "PITR warnings for $MFG_NAME and its verifications (PITRArchiveReissueRiskDetected: playbook 41; PITRArchiveUnsafeHistoryDetected: playbook 40; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PointInTimePartial: playbooks 32 and 42; PITRArchive*Refused/KeyMaterialLost/KeySourceRemoved/BindingLimitReached/BackupScheduleRefused: playbook 26):"
+    echo "PITR warnings for $MFG_NAME and its verifications (PITRArchiveReissueRiskDetected: playbook 41; PITRArchiveUnsafeHistoryDetected: playbook 40; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PITRReplayTruncated: playbooks 32 and 42; PITRArchive*Refused/KeyMaterialLost/KeySourceRemoved/BindingLimitReached/BackupScheduleRefused: playbook 26):"
     echo "$PITR_EVENTS"
 fi
 

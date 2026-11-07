@@ -265,8 +265,8 @@ func TestReconcileInPlaceRestore_SpecRemovedBeforeJobCancels(t *testing.T) {
 					t.Fatalf("no Job may be created for a cancelled run, got err=%v", err)
 				}
 			}
-			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreInPlaceCancelled") {
-				t.Error("want a RestoreInPlaceCancelled event")
+			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreInPlaceCanceled") {
+				t.Error("want a RestoreInPlaceCanceled event")
 			}
 
 			// Re-applying the earlier, already executed confirm does nothing.
@@ -897,8 +897,8 @@ func TestReconcileInPlaceRestore_ConfirmMovedBackBeforeJobCancels(t *testing.T) 
 			if err := c.Get(context.Background(), key, &job); !apierrors.IsNotFound(err) {
 				t.Fatalf("a restore Job was built from the reverted spec: err=%v", err)
 			}
-			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreInPlaceCancelled") {
-				t.Error("want a RestoreInPlaceCancelled event")
+			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreInPlaceCanceled") {
+				t.Error("want a RestoreInPlaceCanceled event")
 			}
 		})
 	}

@@ -132,6 +132,8 @@ type analysis struct {
 	memo     map[any]*flow
 	visiting map[any]int // key -> depth while it is being computed
 	cutDepth int         // the shallowest key a cycle cut reached
+	// reasonMetrics caches metricReasonLabels.
+	reasonMetrics map[*types.Var]int
 }
 
 func loadAnalysis(t *testing.T, trusted []trustedSource, patterns ...string) *analysis {
@@ -544,11 +546,12 @@ func (a *analysis) memoized(key any, f func() flow) flow {
 }
 
 func (a *analysis) resolveVar(v *types.Var, at token.Pos) flow {
-	if ref, ok := a.params[v]; ok {
-		return a.resolveParam(v, ref, at)
-	}
 	var out flow
-	if v.Pkg() != nil && !strings.HasPrefix(v.Pkg().Path(), modulePath) {
+	if ref, ok := a.params[v]; ok {
+		// A parameter carries its callers' arguments and whatever the body
+		// assigns to it.
+		out.add(a.resolveParam(v, ref, at))
+	} else if v.Pkg() != nil && !strings.HasPrefix(v.Pkg().Path(), modulePath) {
 		return a.problem(at, "reads %s.%s from another module", v.Pkg().Path(), v.Name())
 	}
 	for _, w := range a.writes[v] {
@@ -704,18 +707,7 @@ func (a *analysis) resolveParam(v *types.Var, ref paramRef, at token.Pos) flow {
 		out.add(a.problem(at, "parameter %s of %s, which is used as a function value at %s", v.Name(), ref.fn.Name(), esc[0]))
 	}
 	sig := ref.fn.Type().(*types.Signature)
-	sites := append([]callRef(nil), a.calls[ref.fn]...)
-	if sig.Recv() != nil {
-		for _, c := range a.iface[ref.fn.Name()] {
-			im := c.pkg.TypesInfo.Uses[ast.Unparen(c.call.Fun).(*ast.SelectorExpr).Sel].(*types.Func)
-			it := im.Type().(*types.Signature).Recv().Type().Underlying().(*types.Interface)
-			rt := sig.Recv().Type()
-			if types.Implements(rt, it) || types.Implements(types.NewPointer(rt), it) {
-				sites = append(sites, c)
-			}
-		}
-	}
-	for _, c := range sites {
+	for _, c := range a.funcSites(ref.fn) {
 		if sig.Variadic() && ref.idx == sig.Params().Len()-1 {
 			out.add(a.problem(c.call.Pos(), "variadic parameter %s", v.Name()))
 			continue
@@ -725,6 +717,36 @@ func (a *analysis) resolveParam(v *types.Var, ref paramRef, at token.Pos) flow {
 			continue
 		}
 		out.add(a.resolve(c.pkg, c.call.Args[ref.idx]))
+	}
+	return out
+}
+
+// funcSites lists the calls of fn: static calls, and for a method, the
+// calls through every interface it implements.
+func (a *analysis) funcSites(fn *types.Func) []callRef {
+	sig := fn.Type().(*types.Signature)
+	sites := append([]callRef(nil), a.calls[fn]...)
+	if sig.Recv() != nil {
+		for _, c := range a.iface[fn.Name()] {
+			im := c.pkg.TypesInfo.Uses[ast.Unparen(c.call.Fun).(*ast.SelectorExpr).Sel].(*types.Func)
+			it := im.Type().(*types.Signature).Recv().Type().Underlying().(*types.Interface)
+			rt := sig.Recv().Type()
+			if types.Implements(rt, it) || types.Implements(types.NewPointer(rt), it) {
+				sites = append(sites, c)
+			}
+		}
+	}
+	return sites
+}
+
+// paramSites lists the calls that bind ref's parameters.
+func (a *analysis) paramSites(ref paramRef) []callRef {
+	if ref.fn != nil {
+		return a.funcSites(ref.fn)
+	}
+	var out []callRef
+	for _, o := range a.litVars[ref.lit] {
+		out = append(out, a.varCalls[o]...)
 	}
 	return out
 }
@@ -878,6 +900,22 @@ type sink struct {
 	// object is the API kind an Event is recorded on, when the recorder's
 	// object argument has a static API type.
 	object string
+	// objects are the API kinds a recorder call records its Event on:
+	// the object argument's static type, or, for a helper's parameter,
+	// the static types its callers pass.
+	objects []string
+	// recorded is set for an Event recorder call (not an Event read back).
+	recorded bool
+	// pairs are the (reason, Event type) pairs a recorder call records.
+	pairs []eventPair
+	// pairProblems are the reasons pairs is incomplete.
+	pairProblems []string
+}
+
+// eventPair is one reason an Event call records, with its Event type.
+type eventPair struct {
+	reason, eventType string
+	pos               token.Position
 }
 
 const (
@@ -885,6 +923,8 @@ const (
 	sinkConditionReason = "conditionReason"
 	sinkConditionType   = "conditionType"
 	sinkUnstableReason  = "unstableReason"
+	// sinkMetricReason is the value of a metric's "reason" label.
+	sinkMetricReason = "metricReason"
 	// sinkStatusReasonPrefix + "<type>" is a typed status reason field that
 	// is not a condition: its values are the api/v1alpha1 constants of
 	// that type.
@@ -925,6 +965,17 @@ var fieldSinks = map[string]string{
 	apiPath + ".PITRArchiveObservation.Reason":         sinkStatusReasonPrefix + "PITRArchiveRefusalReason",
 	apiPath + ".PITRArchiveBinding.Reason":             sinkStatusReasonPrefix + "PITRArchiveBindingReason",
 	apiPath + ".SiteEncryptionStatus.UnsealReason":     sinkStatusReasonPrefix + "KeyringUnsealReason",
+}
+
+// eventTypeIndex is the index of a recorder method's Event type parameter.
+func eventTypeIndex(fn *types.Func) int {
+	sig := fn.Type().(*types.Signature)
+	for i := 0; i < sig.Params().Len(); i++ {
+		if strings.EqualFold(sig.Params().At(i).Name(), "eventtype") {
+			return i
+		}
+	}
+	return -1
 }
 
 func paramIndex(fn *types.Func, name string) int {
@@ -998,9 +1049,25 @@ func (a *analysis) sinks() []sink {
 					if eventMethods[fn.Name()] {
 						if i := paramIndex(fn, "reason"); i >= 0 && i < len(x.Args) {
 							add(sinkEvent, p, x.Args[i])
+							s := &out[len(out)-1]
+							s.recorded = true
 							if len(x.Args) > 0 {
-								out[len(out)-1].object = apiKindOf(info.Types[x.Args[0]].Type)
+								s.object = apiKindOf(info.Types[x.Args[0]].Type)
+								s.objects = a.objectKinds(p, x.Args[0], 0)
 							}
+							if j := eventTypeIndex(fn); j >= 0 && j < len(x.Args) {
+								s.pairs, s.pairProblems = a.eventPairs(p, x.Args[i], x.Args[j], 0)
+							} else {
+								s.pairProblems = []string{fmt.Sprintf("%s: %s has no eventtype parameter", a.pos(x.Pos()), fn.Name())}
+							}
+						}
+					}
+					if idx, ok := a.metricReasonIndex(p, x); ok {
+						if idx < 0 {
+							out = append(out, sink{kind: sinkMetricReason, pos: a.pos(x.Pos()),
+								flow: a.problem(x.Pos(), "labels of a metric with a reason label set by name; use WithLabelValues")})
+						} else if idx < len(x.Args) {
+							add(sinkMetricReason, p, x.Args[idx])
 						}
 					}
 					if fn.Pkg() != nil && fn.Pkg().Path() == apiMetaPkg {
@@ -1134,4 +1201,194 @@ func apiKindOf(t types.Type) string {
 		return strings.TrimPrefix(p, apiPath+".")
 	}
 	return ""
+}
+
+// eventPairs pairs the reasons an Event call can record with its Event
+// types. When both take several values and both are parameters of the
+// function the call is in, each call of that function is paired on its
+// own (a helper that forwards both); several values on both sides that
+// cannot be split that way are a problem, because the analysis could not
+// tell which reason is recorded with which type.
+func (a *analysis) eventPairs(p *packages.Package, reason, typ ast.Expr, depth int) ([]eventPair, []string) {
+	rf, tf := a.resolve(p, reason), a.resolve(p, typ)
+	problems := append([]string(nil), tf.problems...)
+	if tf.conditionReason {
+		problems = append(problems, fmt.Sprintf("%s: the Event type is a condition reason", a.pos(typ.Pos())))
+	}
+	var reasons []origin
+	for _, o := range rf.values {
+		if o.value != "" {
+			reasons = append(reasons, o)
+		}
+	}
+	typeSet := map[string]bool{}
+	for _, o := range tf.values {
+		typeSet[o.value] = true
+	}
+	reasonSet := map[string]bool{}
+	for _, o := range reasons {
+		reasonSet[o.value] = true
+	}
+	if len(typeSet) > 1 && len(reasonSet) > 1 {
+		ri, ti, sites, ok := a.sharedParams(p, reason, typ)
+		if !ok || depth > 16 {
+			return nil, append(problems, fmt.Sprintf("%s: reasons %v and Event types %v cannot be paired",
+				a.pos(reason.Pos()), sortedKeys(reasonSet), sortedKeys(typeSet)))
+		}
+		var out []eventPair
+		for _, c := range sites {
+			if c.call.Ellipsis.IsValid() || ri >= len(c.call.Args) || ti >= len(c.call.Args) {
+				problems = append(problems, fmt.Sprintf("%s: call spreads its arguments", a.pos(c.call.Pos())))
+				continue
+			}
+			pp, pr := a.eventPairs(c.pkg, c.call.Args[ri], c.call.Args[ti], depth+1)
+			out = append(out, pp...)
+			problems = append(problems, pr...)
+		}
+		return out, problems
+	}
+	var out []eventPair
+	for _, r := range reasons {
+		for t := range typeSet {
+			out = append(out, eventPair{reason: r.value, eventType: t, pos: r.pos})
+		}
+	}
+	return out, problems
+}
+
+// sharedParams reports whether reason and typ are both parameters of the
+// same function, never assigned in its body, and returns their indexes and
+// the calls that bind them.
+func (a *analysis) sharedParams(p *packages.Package, reason, typ ast.Expr) (int, int, []callRef, bool) {
+	param := func(e ast.Expr) (*types.Var, paramRef, bool) {
+		id, ok := ast.Unparen(e).(*ast.Ident)
+		if !ok {
+			return nil, paramRef{}, false
+		}
+		v, ok := a.objOf(p, id).(*types.Var)
+		if !ok {
+			return nil, paramRef{}, false
+		}
+		ref, ok := a.params[v]
+		return v, ref, ok && len(a.writes[v]) == 0
+	}
+	rv, rref, ok1 := param(reason)
+	tv, tref, ok2 := param(typ)
+	if !ok1 || !ok2 || rv == tv || rref.fn != tref.fn || rref.lit != tref.lit {
+		return 0, 0, nil, false
+	}
+	if rref.fn != nil && len(a.escapes[rref.fn]) > 0 {
+		return 0, 0, nil, false
+	}
+	return rref.idx, tref.idx, a.paramSites(rref), true
+}
+
+// metricVecPkg is the client_golang package whose *Vec constructors take
+// the label names.
+const metricVecPkg = "github.com/prometheus/client_golang/prometheus"
+
+// metricReasonIndex reports whether call sets the labels of a metric
+// vector declared with a "reason" label, and the index of that label in
+// its WithLabelValues arguments (-1 for a call that sets labels by name).
+func (a *analysis) metricReasonIndex(p *packages.Package, call *ast.CallExpr) (int, bool) {
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return 0, false
+	}
+	var v *types.Var
+	switch x := ast.Unparen(sel.X).(type) {
+	case *ast.Ident:
+		v, _ = a.objOf(p, x).(*types.Var)
+	case *ast.SelectorExpr:
+		v, _ = p.TypesInfo.Uses[x.Sel].(*types.Var)
+	}
+	if v == nil {
+		return 0, false
+	}
+	idx, ok := a.metricReasonLabels()[v]
+	if !ok {
+		return 0, false
+	}
+	switch sel.Sel.Name {
+	case "WithLabelValues", "GetMetricWithLabelValues", "DeleteLabelValues":
+		return idx, true
+	case "With", "GetMetricWith", "Delete", "CurryWith", "MustCurryWith", "DeletePartialMatch":
+		return -1, true
+	}
+	return 0, false
+}
+
+// metricReasonLabels maps each package-level metric vector declared with a
+// "reason" label to that label's index.
+func (a *analysis) metricReasonLabels() map[*types.Var]int {
+	if a.reasonMetrics != nil {
+		return a.reasonMetrics
+	}
+	a.reasonMetrics = map[*types.Var]int{}
+	for _, p := range a.pkgs {
+		for _, f := range p.Syntax {
+			for _, d := range f.Decls {
+				gd, ok := d.(*ast.GenDecl)
+				if !ok || gd.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range gd.Specs {
+					vs := spec.(*ast.ValueSpec)
+					for i, n := range vs.Names {
+						if i >= len(vs.Values) {
+							continue
+						}
+						call, ok := ast.Unparen(vs.Values[i]).(*ast.CallExpr)
+						if !ok || len(call.Args) == 0 {
+							continue
+						}
+						fn, _ := typeutil.Callee(p.TypesInfo, call).(*types.Func)
+						if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != metricVecPkg || !strings.HasSuffix(fn.Name(), "Vec") {
+							continue
+						}
+						labels, ok := ast.Unparen(call.Args[len(call.Args)-1]).(*ast.CompositeLit)
+						if !ok {
+							continue
+						}
+						for j, l := range labels.Elts {
+							if tv := p.TypesInfo.Types[l]; tv.Value != nil && constant.StringVal(tv.Value) == "reason" {
+								a.reasonMetrics[p.TypesInfo.Defs[n].(*types.Var)] = j
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return a.reasonMetrics
+}
+
+// objectKinds returns the API kinds e can be: its static type, or, for a
+// parameter (of an interface type, say), the static types of the
+// arguments its callers pass, followed transitively.
+func (a *analysis) objectKinds(p *packages.Package, e ast.Expr, depth int) []string {
+	if k := apiKindOf(p.TypesInfo.Types[e].Type); k != "" {
+		return []string{k}
+	}
+	id, ok := ast.Unparen(e).(*ast.Ident)
+	if !ok || depth > 16 {
+		return nil
+	}
+	v, ok := a.objOf(p, id).(*types.Var)
+	if !ok {
+		return nil
+	}
+	ref, ok := a.params[v]
+	if !ok || len(a.writes[v]) > 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, c := range a.paramSites(ref) {
+		if ref.idx < len(c.call.Args) {
+			for _, k := range a.objectKinds(c.pkg, c.call.Args[ref.idx], depth+1) {
+				seen[k] = true
+			}
+		}
+	}
+	return sortedKeys(seen)
 }

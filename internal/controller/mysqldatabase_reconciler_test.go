@@ -523,7 +523,7 @@ func TestMysqlDatabaseDeleteWithoutAppliedDDLReleases(t *testing.T) {
 	if err == nil && controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer still present; a never-applied CR must release without dropping anything")
 	}
-	assertEventContains(t, rec, "DatabaseDropSkipped")
+	assertEventContains(t, rec, "Normal "+v1alpha1.EventDatabaseDropSkipped+" ")
 }
 
 // TestMysqlDatabaseDeleteDefersWithoutActiveSite proves the opposite side of
@@ -1151,6 +1151,47 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 			t.Fatalf("dropOwners = %v, want none — a sibling still grants acme_app", dropOwners)
 		}
 		assertEventContains(t, rec, "OwnerUserDropSkipped")
+	})
+
+	// A-75: a drop blocked for safety is DatabaseDropRefused, an owner user a
+	// sibling still claims is OwnerUserDropSkipped; neither reuses the
+	// Normal DatabaseDropSkipped ("nothing to drop").
+	t.Run("sibling declaring the database refuses the drop", func(t *testing.T) {
+		mdb := deleting()
+		sibling := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+			m.Name = "tenant-sibling"
+			m.Spec.Owner.SecretName = "sibling-owner"
+		})
+		r, _, rec := newMdbReconciler(t, mdb, sibling, mdbTestGroup())
+
+		dropDB, _, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
+		if err != nil {
+			t.Fatalf("deleteScope() error = %v", err)
+		}
+		if dropDB {
+			t.Fatal("dropDB = true, want false — a sibling still declares the database")
+		}
+		assertEventContains(t, rec, "Warning "+v1alpha1.EventDatabaseDropRefused+" ")
+	})
+
+	t.Run("sibling claiming the owner user skips its drop", func(t *testing.T) {
+		mdb := deleting()
+		sibling := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+			m.Name = "tenant-sibling"
+			m.Spec.DatabaseName = "sibling_wms"
+			m.Spec.Owner.SecretName = "sibling-owner"
+			m.Status.OwnerUser = "acme_app"
+		})
+		r, _, rec := newMdbReconciler(t, mdb, sibling, mdbTestGroup())
+
+		_, dropOwners, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
+		if err != nil {
+			t.Fatalf("deleteScope() error = %v", err)
+		}
+		if len(dropOwners) != 0 {
+			t.Fatalf("dropOwners = %v, want none — a sibling still claims acme_app", dropOwners)
+		}
+		assertEventContains(t, rec, "Warning "+v1alpha1.EventOwnerUserDropSkipped+" ")
 	})
 
 	t.Run("sibling users ledger claim survives deletion", func(t *testing.T) {

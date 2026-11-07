@@ -143,7 +143,7 @@ func TestPITRBindingRecovery(t *testing.T) {
 	if !strings.Contains(cond.Message, "key snapshot "+bad.Name+" is unreadable") {
 		t.Fatalf("message %q", cond.Message)
 	}
-	e.expectEvents(v1alpha1.EventPITRArchiveKeySnapshotUnreadable)
+	e.expectEvents(v1alpha1.EventPITRArchiveKeySnapshotReadFailed)
 	e.pass()
 	e.expectEvents()
 	if _, ok := e.secret(bad.Name); !ok {

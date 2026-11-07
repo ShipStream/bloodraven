@@ -320,7 +320,7 @@ func TestPITRArchiveConditionEventsOnlyOnEdges(t *testing.T) {
 		{initFail2, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, nil},
 		{disabled, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, nil},
 		{ok, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, nil},
-		{ok, cTrue, v1alpha1.ReasonArchiving, []string{"Normal PITRArchiveReady"}},
+		{ok, cTrue, v1alpha1.ReasonArchiving, []string{"Normal PITRArchiveRecovered"}},
 		{ok, cTrue, v1alpha1.ReasonArchiving, nil},
 		{initFail, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, []string{"Warning PITRArchiveNotReady"}},
 	}

@@ -19,8 +19,8 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 	for _, tc := range []struct{ state, reason string }{
 		{"expired", ""},
 		{"released", ""},
-		{"revoked", "operator_revoked"},
-		{"revoked", "topology_changed"},
+		{"revoked", "OperatorRevoked"},
+		{"revoked", "TopologyChanged"},
 	} {
 		t.Run(tc.state+"/"+tc.reason, func(t *testing.T) {
 			ns := createNamespace(t, "deploy-terminal")
@@ -74,7 +74,7 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 					}
 				}
 			case "revoked":
-				if tc.reason == "topology_changed" {
+				if tc.reason == "TopologyChanged" {
 					fg.Status.TopologyGeneration++
 					if err := k8sClient.Status().Update(ctx, fg); err != nil {
 						t.Fatal(err)

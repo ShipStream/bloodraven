@@ -266,7 +266,7 @@ func deployLeasesRevokedAndStopped(records []deployClientRecord, grantGeneration
 		}
 		if r.Action == "renew" && r.Status == 409 && r.Body.Error == "revoked" &&
 			!r.At.IsZero() && r.At.Before(expires[r.Kind]) &&
-			(r.Body.Reason == "topology_changed" || r.Body.Reason == "operator_revoked") &&
+			(r.Body.Reason == "TopologyChanged" || r.Body.Reason == "OperatorRevoked") &&
 			r.Body.TopologyGeneration > grantGeneration {
 			revoked[r.Kind] = true
 		}

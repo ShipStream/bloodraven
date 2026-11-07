@@ -199,7 +199,7 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 				t.Fatalf("digest-only result: %+v", res)
 			}
 		}},
-		{name: "partial", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial"}), warnings: []string{"Warning PointInTimePartial"}},
+		{name: "partial", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial"}), warnings: []string{"Warning PITRReplayTruncated"}},
 		{name: "divergent and on-history exclusions", pit: v1alpha1.PointInTimeSpec{ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3"},
 			verdict:  testVerdict(verdictFields{divergent: 2, onHistory: 1, onHistorySet: "3e11fa47-71ca-11e1-9e33-c80aa9429562:3"}),
 			warnings: []string{"Warning PITRDivergentHistoryExcluded replay excluded 2 transactions", "Warning PITROnHistoryTransactionsExcluded excluded 3e11fa47-71ca-11e1-9e33-c80aa9429562:3 precedes"},

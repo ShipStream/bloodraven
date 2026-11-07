@@ -327,7 +327,7 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeReattachReplicas(ctx cont
 	if r.Runner != nil {
 		r.Runner.SetDragonflyUpgradePaused(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, false)
 	}
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyUpgradeCompleted,
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyUpgradeSucceeded,
 		"Dragonfly snapshot-restore upgrade completed on image %s", cur.TargetImage)
 	return 0, nil
 }

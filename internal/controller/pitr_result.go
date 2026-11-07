@@ -11,7 +11,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 )
 
-// pointInTimePartialMessage is status.message (and the PointInTimePartial
+// pointInTimePartialMessage is status.message (and the PITRReplayTruncated
 // Event) for a Partial outcome.
 func pointInTimePartialMessage(res *v1alpha1.PointInTimeResult) string {
 	requested, newest := "none", "none"
@@ -21,7 +21,7 @@ func pointInTimePartialMessage(res *v1alpha1.PointInTimeResult) string {
 	if res.NewestReplayedCommitTime != nil {
 		newest = res.NewestReplayedCommitTime.UTC().Format(backupmeta.MicroTimeLayout)
 	}
-	return fmt.Sprintf("PointInTimePartial: requested %s; the archive holds no transaction at or after it, so replay stopped at the archive head (newest replayed commit %s)", requested, newest)
+	return fmt.Sprintf("PITRReplayTruncated: requested %s; the archive holds no transaction at or after it, so replay stopped at the archive head (newest replayed commit %s)", requested, newest)
 }
 
 // onHistoryExclusionsMessage is the PITROnHistoryTransactionsExcluded text
@@ -42,7 +42,7 @@ func emitPointInTimeEvents(rec record.EventRecorder, obj runtime.Object, res *v1
 		return
 	}
 	if res.Outcome == v1alpha1.PointInTimePartial {
-		rec.Eventf(obj, corev1.EventTypeWarning, v1alpha1.EventPointInTimePartial, "%s", pointInTimePartialMessage(res))
+		rec.Eventf(obj, corev1.EventTypeWarning, v1alpha1.EventPITRReplayTruncated, "%s", pointInTimePartialMessage(res))
 	}
 	if res.ExcludedDivergentTransactionCount > 0 {
 		rec.Eventf(obj, corev1.EventTypeWarning, v1alpha1.EventPITRDivergentHistoryExcluded,

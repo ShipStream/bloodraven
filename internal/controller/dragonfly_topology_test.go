@@ -304,8 +304,13 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 	if !eventsContain(events, v1alpha1.EventDragonflyPromotionStarted) {
 		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionStarted)
 	}
-	if !eventsContain(events, v1alpha1.EventDragonflyPromotionCompleted) {
-		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionCompleted)
+	// The old master is unreachable, so the promotion falls back to
+	// REPLICAOF NO ONE: one Warning, DragonflySessionsLost (A-75).
+	if !eventsContain(events, v1alpha1.EventDragonflySessionsLost) {
+		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflySessionsLost)
+	}
+	if eventsContain(events, v1alpha1.EventDragonflyPromotionSucceeded) {
+		t.Errorf("events = %v, want no %s for a sessions-lost promotion", events, v1alpha1.EventDragonflyPromotionSucceeded)
 	}
 }
 
@@ -396,8 +401,8 @@ func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testin
 	if !eventsContain(events, v1alpha1.EventDragonflyPromotionStarted) {
 		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionStarted)
 	}
-	if !eventsContain(events, v1alpha1.EventDragonflyPromotionCompleted) {
-		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionCompleted)
+	if !eventsContain(events, v1alpha1.EventDragonflyPromotionSucceeded) {
+		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionSucceeded)
 	}
 }
 
@@ -686,11 +691,11 @@ func TestDragonflyManager_TryEmergencyPromote_Success(t *testing.T) {
 
 	select {
 	case ev := <-rec.Events:
-		if !contains(ev, v1alpha1.EventDragonflyPromotionCompleted) {
-			t.Errorf("event = %q, want %q", ev, v1alpha1.EventDragonflyPromotionCompleted)
+		if !contains(ev, v1alpha1.EventDragonflyPromotionSucceeded) {
+			t.Errorf("event = %q, want %q", ev, v1alpha1.EventDragonflyPromotionSucceeded)
 		}
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("no DragonflyPromotionCompleted event emitted")
+		t.Fatal("no DragonflyPromotionSucceeded event emitted")
 	}
 }
 
@@ -713,7 +718,7 @@ func TestDragonflyManager_TryEmergencyPromote_TakeoverFailsFallsBack(t *testing.
 
 	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
 
-	// Drain at most 4 events; we expect a Warning DragonflyPromotionCompleted
+	// Drain at most 4 events; we expect a Warning DragonflyPromotionSucceeded
 	// (best-effort fallback path).
 	got := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
 	found := false

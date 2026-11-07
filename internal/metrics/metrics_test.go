@@ -21,7 +21,7 @@ func TestDeploymentMetricsContract(t *testing.T) {
 		{"bloodraven_deploy_leases_active", DeployLeasesActive, nil, groupKind},
 		{"bloodraven_deploy_lease_grants_total", nil, DeployLeaseGrantsTotal, map[string]string{"group": "deploy-test", "kind": "migration", "result": "granted"}},
 		{"bloodraven_deploy_lease_expirations_total", nil, DeployLeaseExpirationsTotal, groupKind},
-		{"bloodraven_deploy_lease_revocations_total", nil, DeployLeaseRevocationsTotal, map[string]string{"group": "deploy-test", "kind": "migration", "reason": "topology_changed"}},
+		{"bloodraven_deploy_lease_revocations_total", nil, DeployLeaseRevocationsTotal, map[string]string{"group": "deploy-test", "kind": "migration", "reason": "TopologyChanged"}},
 		{"bloodraven_deploy_lease_age_seconds", DeployLeaseAgeSeconds, nil, groupKind},
 		{"bloodraven_planned_failovers_deferred_total", nil, PlannedFailoversDeferredTotal, map[string]string{"group": "deploy-test", "reason": "DeploymentHold"}},
 	}

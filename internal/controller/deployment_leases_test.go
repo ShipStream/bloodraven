@@ -195,13 +195,13 @@ func TestDeploymentLeaseHoldIdentity(t *testing.T) {
 }
 
 func TestDeploymentLeaseRevokedTombstoneSurvivesReplacementAndRelease(t *testing.T) {
-	for _, reason := range []string{"topology_changed", "operator_revoked"} {
+	for _, reason := range []string{"TopologyChanged", "OperatorRevoked"} {
 		t.Run(reason, func(t *testing.T) {
 			m, fg, now := deploymentLeaseFixture(t)
 			old := grantDeploymentLease(t, m, fg, "migration", "old-operation", 120)
 			grantDeploymentLease(t, m, fg, "failover-hold", "old-operation", 120)
 			before := testutil.ToFloat64(metrics.DeployLeaseRevocationsTotal.WithLabelValues(fg.Name, "migration", reason))
-			if reason == "topology_changed" {
+			if reason == "TopologyChanged" {
 				fg.Status.TopologyGeneration++
 				if err := m.client.Status().Update(context.Background(), fg); err != nil {
 					t.Fatal(err)
@@ -546,7 +546,7 @@ func TestDeploymentLeaseHoldsSurviveMigrationHandoff(t *testing.T) {
 	if err != nil || hold == nil || hold.OperationID != "op1" {
 		t.Fatalf("remaining hold = %+v, %v", hold, err)
 	}
-	if err := m.Revoke(ctx, fg, "operator_revoked"); err != nil {
+	if err := m.Revoke(ctx, fg, "OperatorRevoked"); err != nil {
 		t.Fatal(err)
 	}
 	_, err = m.Renew(ctx, fg, "failover-hold", "op1", "tenant", "tenant-ns", "deployer", hold1.Token, 30)

@@ -352,15 +352,15 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// deletionPolicy: Delete would DROP the survivor's live database, and two
 	// CRs sharing an owner Secret would take turns resetting each other's
 	// password. Oldest CR wins; the newer one fails loudly.
-	conflictKind, conflictReason, conflictMsg, err := r.ownershipConflict(ctx, &mdb, ownerUser)
+	conflict, err := r.ownershipConflict(ctx, &mdb, ownerUser)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	switch conflictKind {
-	case conflictVerdictFail:
-		return r.fail(ctx, &mdb, conflictReason, conflictMsg)
-	case conflictVerdictPending:
-		return r.pending(ctx, &mdb, conflictReason, conflictMsg)
+	switch {
+	case conflict.failReason != "":
+		return r.fail(ctx, &mdb, conflict.failReason, conflict.message)
+	case conflict.pendingReason != "":
+		return r.pending(ctx, &mdb, conflict.pendingReason, conflict.message)
 	}
 
 	currentHash, err := computeDatabaseHash(&mdb, &ownerSecret, users, &fg)
@@ -959,7 +959,7 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 		}
 	}
 	if !dropDB {
-		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventDatabaseDropSkipped,
+		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventDatabaseDropRefused,
 			"another MysqlDatabase still declares database %q; not dropping it", mdb.Spec.DatabaseName)
 	}
 
@@ -1058,7 +1058,7 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 // claimedBySibling reports whether another live CR on the same group claims
 // username as its owner — by sharing this CR's Secret, by recording the same
 // username, or by naming a Secret that resolves to it. It emits the
-// corresponding DatabaseDropSkipped event.
+// corresponding OwnerUserDropSkipped event.
 func (r *MysqlDatabaseReconciler) claimedBySibling(ctx context.Context, mdb *v1alpha1.MysqlDatabase, list *v1alpha1.MysqlDatabaseList, username string) bool {
 	for i := range list.Items {
 		other := &list.Items[i]
@@ -1067,12 +1067,12 @@ func (r *MysqlDatabaseReconciler) claimedBySibling(ctx context.Context, mdb *v1a
 			continue
 		}
 		if other.Spec.Owner.SecretName == mdb.Spec.Owner.SecretName || other.Status.OwnerUser == username {
-			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventDatabaseDropSkipped,
+			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventOwnerUserDropSkipped,
 				"MysqlDatabase %q still claims owner user %q; not dropping it", other.Name, username)
 			return true
 		}
 		if otherUser, err := r.ownerUsernameFromSecret(ctx, other); err == nil && otherUser == username {
-			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventDatabaseDropSkipped,
+			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventOwnerUserDropSkipped,
 				"MysqlDatabase %q's owner Secret still resolves to user %q; not dropping it", other.Name, username)
 			return true
 		}
@@ -1120,14 +1120,15 @@ func mdbOutranks(a, b *v1alpha1.MysqlDatabase) bool {
 	return a.Name < b.Name
 }
 
-// ownershipConflict verdicts: "" is no conflict; fail is a terminal
-// conflict the CR must report; pending is an arbitration that cannot
+// ownershipVerdict is the result of ownershipConflict: no reason is no
+// conflict; failReason is a terminal conflict the CR must report (a
+// Warning Event and Failed); pendingReason is an arbitration that cannot
 // complete yet (a higher-ranked peer whose Secret is absent) and must wait
-// rather than guess.
-const (
-	conflictVerdictFail    = "fail"
-	conflictVerdictPending = "pending"
-)
+// rather than guess. The two reasons are separate fields so each reaches
+// only its own writer.
+type ownershipVerdict struct {
+	failReason, pendingReason, message string
+}
 
 // ownershipConflict reports whether a higher-ranked live MysqlDatabase on
 // the same group already claims this CR's database name or owner principal.
@@ -1137,10 +1138,10 @@ const (
 // CR happened to run first. When the peer's Secret cannot be read, the
 // verdict is pending — failing open here would let two CRs share one MySQL
 // account until the peer's first reconcile.
-func (r *MysqlDatabaseReconciler) ownershipConflict(ctx context.Context, mdb *v1alpha1.MysqlDatabase, ownerUser string) (kind, reason, message string, err error) {
+func (r *MysqlDatabaseReconciler) ownershipConflict(ctx context.Context, mdb *v1alpha1.MysqlDatabase, ownerUser string) (ownershipVerdict, error) {
 	var list v1alpha1.MysqlDatabaseList
 	if err := r.List(ctx, &list, client.InNamespace(mdb.Namespace)); err != nil {
-		return "", "", "", fmt.Errorf("list mysqldatabases for conflict check: %w", err)
+		return ownershipVerdict{}, fmt.Errorf("list mysqldatabases for conflict check: %w", err)
 	}
 	for i := range list.Items {
 		other := &list.Items[i]
@@ -1152,34 +1153,35 @@ func (r *MysqlDatabaseReconciler) ownershipConflict(ctx context.Context, mdb *v1
 			continue // we outrank; the other CR reports the conflict
 		}
 		if other.Spec.DatabaseName == mdb.Spec.DatabaseName {
-			return conflictVerdictFail, v1alpha1.ReasonDatabaseNameConflict, fmt.Sprintf(
+			return ownershipVerdict{failReason: v1alpha1.ReasonDatabaseNameConflict, message: fmt.Sprintf(
 				"MysqlDatabase %q already declares database %q on group %q; two CRs must not manage one database (deletionPolicy: Delete on either would drop the other's data)",
-				other.Name, mdb.Spec.DatabaseName, mdb.Spec.FailoverGroupRef.Name), nil
+				other.Name, mdb.Spec.DatabaseName, mdb.Spec.FailoverGroupRef.Name)}, nil
 		}
 		if other.Spec.Owner.SecretName == mdb.Spec.Owner.SecretName {
-			return conflictVerdictFail, v1alpha1.ReasonOwnerConflict, fmt.Sprintf(
+			return ownershipVerdict{failReason: v1alpha1.ReasonOwnerConflict, message: fmt.Sprintf(
 				"MysqlDatabase %q already shares owner Secret %q on group %q; each MysqlDatabase must own a distinct user (deleting one CR would drop the other's credential)",
-				other.Name, mdb.Spec.Owner.SecretName, mdb.Spec.FailoverGroupRef.Name), nil
+				other.Name, mdb.Spec.Owner.SecretName, mdb.Spec.FailoverGroupRef.Name)}, nil
 		}
 		peerUser := other.Status.OwnerUser
 		if peerUser == "" {
+			var err error
 			peerUser, err = r.ownerUsernameFromSecret(ctx, other)
 			if err != nil {
 				if apierrors.IsNotFound(err) {
-					return conflictVerdictPending, v1alpha1.ReasonPeerOwnerSecretMissing, fmt.Sprintf(
+					return ownershipVerdict{pendingReason: v1alpha1.ReasonPeerOwnerSecretMissing, message: fmt.Sprintf(
 						"higher-ranked MysqlDatabase %q's owner Secret %q cannot be read; deferring until the ownership check against it can be complete",
-						other.Name, other.Spec.Owner.SecretName), nil
+						other.Name, other.Spec.Owner.SecretName)}, nil
 				}
-				return "", "", "", fmt.Errorf("read owner secret of MysqlDatabase %q: %w", other.Name, err)
+				return ownershipVerdict{}, fmt.Errorf("read owner secret of MysqlDatabase %q: %w", other.Name, err)
 			}
 		}
 		if peerUser == ownerUser {
-			return conflictVerdictFail, v1alpha1.ReasonOwnerConflict, fmt.Sprintf(
+			return ownershipVerdict{failReason: v1alpha1.ReasonOwnerConflict, message: fmt.Sprintf(
 				"MysqlDatabase %q already owns MySQL user %q on group %q; each MysqlDatabase must own a distinct user (deleting one CR would drop the other's credential)",
-				other.Name, ownerUser, mdb.Spec.FailoverGroupRef.Name), nil
+				other.Name, ownerUser, mdb.Spec.FailoverGroupRef.Name)}, nil
 		}
 	}
-	return "", "", "", nil
+	return ownershipVerdict{}, nil
 }
 
 // findAppliedUser returns a pointer into states for secretName, or nil.

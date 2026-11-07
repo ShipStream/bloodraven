@@ -605,7 +605,7 @@ func TestPlannedFailoverPromotingDragonfly_ReportsGateWait(t *testing.T) {
 	events := drainEventsCh(rec.Events, 4, 50*time.Millisecond)
 	n := 0
 	for _, ev := range events {
-		if strings.Contains(ev, v1alpha1.EventDragonflyPromotionWaiting) && strings.Contains(ev, "MySQL writes stay paused") {
+		if strings.Contains(ev, v1alpha1.EventDragonflyPromotionDeferred) && strings.Contains(ev, "MySQL writes stay paused") {
 			n++
 		}
 	}

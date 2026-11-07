@@ -90,7 +90,7 @@ An in-place restore runs against a live cluster, so it walks discrete phases one
 
 `spec.restoreInPlace.confirm` is required, must parse as an **RFC 3339 timestamp**, and must be **strictly greater** than the timestamp in `status.restoreInPlace.confirmTokenUsed`. Programmatic callers just send `now()`.
 
-Look at what that buys. Re-applying last week's manifest does nothing: its token is no longer greater than the recorded one, so the reconciler sees a terminal status that already reflects that confirm value and returns. GitOps cannot replay a destructive restore. An invalid token on a re-arm emits a `RestoreInPlaceRejected` event and leaves the previous terminal status visible.
+Look at what that buys. Re-applying last week's manifest does nothing: its token is no longer greater than the recorded one, so the reconciler sees a terminal status that already reflects that confirm value and returns. GitOps cannot replay a destructive restore. An invalid token on a re-arm emits a `RestoreInPlaceConfirmIgnored` event and leaves the previous terminal status visible.
 
 ## Why `pointInTime` gets rejected, and where it does not exist
 

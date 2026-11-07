@@ -45,7 +45,7 @@ func TestHoldAckLifecycle(t *testing.T) {
 	// An acknowledgement naming another run is ignored.
 	h.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-0")
 	h.step()
-	if PlannedHoldFrom(h.fg()) == nil || h.sink.eventCount("PlannedFailoverHoldAcknowledgementIgnored") != 1 {
+	if PlannedHoldFrom(h.fg()) == nil || h.sink.eventCount("PlannedFailoverHoldAcknowledgmentIgnored") != 1 {
 		t.Fatalf("a foreign acknowledgement cleared the hold (events %v)", h.sink.events)
 	}
 

@@ -734,7 +734,7 @@ func TestEmitFailoverEvents_DataLossEventWhenDivergenceGrows(t *testing.T) {
 	}
 }
 
-func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
+func TestEmitFailoverEvents_OldPrimaryRecovered(t *testing.T) {
 	rec := record.NewFakeRecorder(10)
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
@@ -758,8 +758,8 @@ func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("want 1 event, got %d: %v", len(events), events)
 	}
-	if !strings.Contains(events[0], "RecoveryComplete") {
-		t.Errorf("want RecoveryComplete event, got %s", events[0])
+	if !strings.Contains(events[0], "OldPrimaryRecovered") {
+		t.Errorf("want OldPrimaryRecovered event, got %s", events[0])
 	}
 	if !strings.Contains(events[0], "dc1") {
 		t.Errorf("want event to mention dc1, got %s", events[0])

@@ -1150,7 +1150,7 @@ func (e *PlannedFailoverEngine) writeDeferred(ctx context.Context, fg *v1alpha1.
 func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	reason v1alpha1.PlannedFailoverReason, msg string, why ClaimReleaseReason, consume bool) (time.Duration, error) {
 	d, err := e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: reason, msg: msg,
-		why: why, eventReason: v1alpha1.EventPlannedFailoverRejected})
+		why: why, failedReason: v1alpha1.EventPlannedFailoverRejected})
 	if consume && d == 0 && err == nil {
 		d = e.consumeRequest(ctx, fg, "rejected")
 	}
@@ -2295,7 +2295,7 @@ func (e *PlannedFailoverEngine) publishingPass(ctx context.Context, fg *v1alpha1
 	// claim hydrated again in between (a restart), harmless to repeat.
 	e.release(ctx, nn, pf.RunID, ReleasePublishing, "")
 	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded,
-		msg: fmt.Sprintf("promoted %q", pf.TargetSite), why: ReleasePublishing, eventReason: v1alpha1.EventPlannedFailoverSucceeded})
+		msg: fmt.Sprintf("promoted %q", pf.TargetSite), why: ReleasePublishing})
 }
 
 // toRollingBack writes the rollback intent.
@@ -2412,7 +2412,7 @@ func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1alpha1.
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, confirmedAt: m.promote.confirmedAt,
 			msg: fmt.Sprintf("promoted %q; no topology manager for %s, so the failover record is applied by this terminal write and DNS is left to the next manager",
 				pf.TargetSite, plannedFailoverManagerAbsentDeadline),
-			why: ReleaseManagerAbsent, noNaming: true, eventReason: v1alpha1.EventPlannedFailoverSucceeded})
+			why: ReleaseManagerAbsent, noNaming: true})
 	}
 	reason := v1alpha1.PlannedFailoverReasonManagerUnavailable
 	if pf.Phase == v1alpha1.PlannedFailoverPhaseRollingBack && pf.Rollback != nil {
@@ -2457,8 +2457,9 @@ type plannedEnd struct {
 	msg      string
 	// why is the release reason (default terminal).
 	why ClaimReleaseReason
-	// eventReason overrides the terminal Event's reason.
-	eventReason string
+	// failedReason replaces PlannedFailoverFailed as the terminal Event's
+	// reason when the run did not succeed.
+	failedReason string
 	// noNaming skips the topology-manager naming (no manager to name in).
 	noNaming  bool
 	holdSites []string
@@ -2663,7 +2664,7 @@ func (e *PlannedFailoverEngine) finish(ctx context.Context, fg *v1alpha1.MysqlFa
 		// failover record and make the run's own later check 1 fail.
 		e.nameForOutcome(ctx, fg, pf, ref, end)
 	}
-	e.afterTerminal(ctx, nn, fg, written, end.why, end.eventReason)
+	e.afterTerminal(ctx, nn, fg, written, end.why, end.failedReason)
 	return 0, nil
 }
 
@@ -2707,7 +2708,7 @@ func (e *PlannedFailoverEngine) nameForOutcome(ctx context.Context, fg *v1alpha1
 // run has committed: release or hold, report, and clean the durable
 // deadline annotations.
 func (e *PlannedFailoverEngine) afterTerminal(ctx context.Context, nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup,
-	final *v1alpha1.PlannedFailoverStatus, why ClaimReleaseReason, eventReason string) {
+	final *v1alpha1.PlannedFailoverStatus, why ClaimReleaseReason, failedReason string) {
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
 	m := e.runMemo(final.RunID)
@@ -2722,7 +2723,7 @@ func (e *PlannedFailoverEngine) afterTerminal(ctx context.Context, nn types.Name
 	}
 	if !m.reported {
 		m.reported = true
-		e.reportTerminal(nn, fg, final, eventReason)
+		e.reportTerminal(nn, fg, final, failedReason)
 	}
 	fresh := e.reload(ctx, fg)
 	if fresh == nil {
@@ -2770,29 +2771,30 @@ func (e *PlannedFailoverEngine) clearStaleRunAnnotations(ctx context.Context, fg
 var plannedRunAnnotationKinds = []DeadlineKind{DeadlineManagerAbsent, DeadlineStatusStall, DeadlinePromotionConfirmed}
 
 // reportTerminal emits the run's metrics and its terminal Event.
+// failedReason, when set, replaces PlannedFailoverFailed as the Event
+// reason of a run that did not succeed (PlannedFailoverRejected for a run
+// that never started).
 func (e *PlannedFailoverEngine) reportTerminal(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup,
-	final *v1alpha1.PlannedFailoverStatus, eventReason string) {
+	final *v1alpha1.PlannedFailoverStatus, failedReason string) {
 	e.sink.RunTerminal(nn, final)
 	r := final.Result
 	switch {
 	case r.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded:
-		if eventReason == "" {
-			eventReason = v1alpha1.EventPlannedFailoverSucceeded
-		}
-		e.sink.Event(fg, corev1.EventTypeNormal, eventReason,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSucceeded,
 			fmt.Sprintf("planned failover to %q complete (warnings: %s)", final.TargetSite, plannedWarningList(r.Warnings)))
 	case r.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
 		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverManualRecoveryRequired,
 			fmt.Sprintf("planned failover %s ended ManualRecoveryRequired (%s): resolve the split brain by hand, then annotate %s=%s",
 				final.RunID, r.Reason, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, final.RunID))
 	default:
-		if eventReason == "" {
-			eventReason = v1alpha1.EventPlannedFailoverFailed
+		reason := v1alpha1.EventPlannedFailoverFailed
+		if failedReason != "" {
+			reason = failedReason
 		}
 		if r.Outcome == v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed {
 			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverPromotionConfirmationFailed, final.Message)
 		}
-		e.sink.Event(fg, corev1.EventTypeWarning, eventReason,
+		e.sink.Event(fg, corev1.EventTypeWarning, reason,
 			fmt.Sprintf("planned failover %s (%s): %s", r.Outcome, r.Reason, final.Message))
 	}
 }

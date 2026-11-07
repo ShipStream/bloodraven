@@ -178,7 +178,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 			logger.Info("keyring phase transition",
 				"site", site.Name, "from", before.Phase, "to", site.Phase,
 				"reason", site.UnsealReason, "version", site.KeyringVersion)
-			r.Recorder.Eventf(fg, eventTypeForKeyringPhase(site.Phase), v1alpha1.EventKeyringPhase,
+			r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventKeyringPhaseChanged,
 				"site %s keyring %s -> %s (%s)", site.Name, before.Phase, site.Phase, site.Message)
 		}
 		publishKeyringMetrics(fg.Namespace, fg.Name, site)
@@ -340,7 +340,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 			retry = !ok && why != rotationRefusedActivePrimary
 		}
 		if !ok && !retry {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringRotationRefused,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringRotationRejected,
 				"refusing to rotate keyring on site %s: %s", site.Name, why)
 			site.Message = why
 			if rotation != nil {
@@ -361,7 +361,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 			}
 			deferred := rotationDeferredNote + why
 			if !strings.Contains(site.Message, deferred) {
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringRotationRefused,
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringRotationRejected,
 					"refusing to rotate keyring on site %s: %s", site.Name, why)
 			}
 			if _, err := r.verifySealedSite(ctx, fg, site, store, fetch); err != nil {
@@ -449,18 +449,18 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 	}
 	if live.Digest == "" {
 		site.Message = withSidecarError("waiting for MySQL to create the keyring", live.LastError)
-		return checkEscrowDeadline(fg, site), nil
+		return r.escrowDeadline(fg, site), nil
 	}
 	if site.UnsealReason == v1alpha1.UnsealReasonRotation && !live.RotateDone {
 		site.Message = "waiting for MySQL to complete the requested keyring rotation"
 		if live.RotateError != "" {
 			site.Message = fmt.Sprintf("keyring rotation failed; waiting for retry: %s", live.RotateError)
 		}
-		return checkEscrowDeadline(fg, site), nil
+		return r.escrowDeadline(fg, site), nil
 	}
 	if site.UnsealReason == v1alpha1.UnsealReasonRotation && live.Digest == site.KeyringDigest {
 		site.Message = "waiting for MySQL to rotate away from the previously escrowed keyring"
-		return checkEscrowDeadline(fg, site), nil
+		return r.escrowDeadline(fg, site), nil
 	}
 
 	// The operator does not take the sidecar's word for it: re-read the
@@ -473,13 +473,13 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 	}
 	if !ok {
 		site.Message = withSidecarError("waiting for the sidecar to escrow the keyring", live.LastError)
-		return checkEscrowDeadline(fg, site), nil
+		return r.escrowDeadline(fg, site), nil
 	}
 	if current.Digest != live.Digest {
 		site.Message = withSidecarError(fmt.Sprintf(
 			"escrowed keyring (v%d) does not match the live keyring; waiting for a fresh escrow",
 			current.Version), live.LastError)
-		return checkEscrowDeadline(fg, site), nil
+		return r.escrowDeadline(fg, site), nil
 	}
 
 	// Clone is sticky: the recipient must keep a writable keyring until
@@ -684,6 +684,19 @@ func (r *MysqlFailoverGroupReconciler) verifySealedSite(
 	// Housekeeping only — safe to ignore failures.
 	_ = store.prune(ctx, fg, site.Name, site.KeyringSecret)
 	return false, nil
+}
+
+// escrowDeadline applies checkEscrowDeadline and records the Warning
+// KeyringEscrowTimedOut when it flips the site to Failed (the
+// KeyringPhaseChanged Event that follows is Normal).
+func (r *MysqlFailoverGroupReconciler) escrowDeadline(fg *v1alpha1.MysqlFailoverGroup, site *v1alpha1.SiteEncryptionStatus) bool {
+	was := site.Phase
+	requeue := checkEscrowDeadline(fg, site)
+	if was != v1alpha1.KeyringPhaseFailed && site.Phase == v1alpha1.KeyringPhaseFailed {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringEscrowTimedOut,
+			"site %s: %s", site.Name, site.Message)
+	}
+	return requeue
 }
 
 // checkEscrowDeadline flips a stuck site to Failed once
@@ -987,13 +1000,6 @@ func copyBool(b *bool) *bool {
 	}
 	v := *b
 	return &v
-}
-
-func eventTypeForKeyringPhase(p v1alpha1.SiteKeyringPhase) string {
-	if p == v1alpha1.KeyringPhaseFailed {
-		return corev1.EventTypeWarning
-	}
-	return corev1.EventTypeNormal
 }
 
 func publishKeyringMetrics(namespace, group string, site *v1alpha1.SiteEncryptionStatus) {

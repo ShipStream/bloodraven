@@ -130,7 +130,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 					}
 					if r.Action == "renew" && r.Status == 409 && r.Body.Error == "revoked" &&
 						!r.At.IsZero() && r.At.Before(expires[r.Kind]) &&
-						(r.Body.Reason == "topology_changed" || r.Body.Reason == "operator_revoked") &&
+						(r.Body.Reason == "TopologyChanged" || r.Body.Reason == "OperatorRevoked") &&
 						r.Body.TopologyGeneration > state.grant.Body.TopologyGeneration {
 						revoked[r.Kind] = true
 					}
