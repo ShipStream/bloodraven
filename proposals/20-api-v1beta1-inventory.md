@@ -26,7 +26,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - `spec` CEL: `self.sites.all(s, !has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)`
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))`
-- `spec` CEL: `oldSelf.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime) || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup) && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name == self.initFromBackup.pointInTime.archiveProfileName))`
+- `spec` CEL: `oldSelf.?sites.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime) || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup) && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name == self.initFromBackup.pointInTime.archiveProfileName))`
 
 ### MysqlFailoverGroup `spec` (244 fields)
 

@@ -21,6 +21,7 @@ var (
 	celStringLiteral = regexp.MustCompile(`'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"`)
 	celChain         = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*`)
 	celMacro         = regexp.MustCompile(`\.(all|exists|exists_one|filter|map)\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,`)
+	celOptionalHas   = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(?:\.\??[A-Za-z_][A-Za-z0-9_]*)*\.\?[A-Za-z_][A-Za-z0-9_]*(?:\.\??[A-Za-z_][A-Za-z0-9_]*)*\.hasValue\(\)`)
 )
 
 // celMatchingParen returns the index of the ')' closing the '(' at open.
@@ -42,10 +43,12 @@ func celMatchingParen(s string, open int) int {
 
 // celNormalize blanks string literals (they hold regexes and paths, not
 // field references), reads oldSelf.value() as oldSelf, and replaces every
-// has(...) with true: has() tests presence and costs nothing per byte.
+// has(...) and x.?f.hasValue() with true: both test presence and cost
+// nothing per byte.
 func celNormalize(rule string) string {
 	rule = celStringLiteral.ReplaceAllString(rule, "''")
 	rule = strings.ReplaceAll(rule, "oldSelf.value()", "oldSelf")
+	rule = celOptionalHas.ReplaceAllString(rule, "true")
 	for {
 		i := -1
 		for j := strings.Index(rule, "has("); j >= 0; {
@@ -324,6 +327,8 @@ func TestCELRuleInputsResolve(t *testing.T) {
 		{"self.conf.all(k, k.matches('^a$'))", []string{"N.conf (map)"}},
 		{"self.ref == oldSelf.ref", []string{"N.ref.name"}},
 		{"oldSelf.hasValue() || size(self.name) > 0", []string{"N.name"}},
+		{"oldSelf.?name.hasValue() || size(self.name) > 0", []string{"N.name"}},
+		{"oldSelf.?ref.name.hasValue() || self.label == 'a'", nil},
 		{"self.items.exists(i, i.name == 'a') && self.items.all(i, has(i.name))", []string{"N.items (list)", "N.items[].name"}},
 	} {
 		got := map[string]bool{}

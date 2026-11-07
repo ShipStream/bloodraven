@@ -81,7 +81,18 @@ func restoreJobName(fgName, siteName string) string {
 
 // scheduleCronJobName returns the CronJob name for a given schedule entry.
 func scheduleCronJobName(fgName, scheduleName string) string {
-	return truncateDNS1123(fmt.Sprintf("mysql-%s-backup-%s", fgName, scheduleName))
+	return truncateCronJobName(fmt.Sprintf("mysql-%s-backup-%s", fgName, scheduleName))
+}
+
+// maxCronJobNameLength is the longest CronJob name the API server accepts:
+// the CronJob controller names each Job <cronjob>-<up to 11-digit
+// scheduled time>, and that Job name must be a DNS-1123 label.
+const maxCronJobNameLength = 52
+
+// truncateCronJobName bounds a derived CronJob name to
+// maxCronJobNameLength, as truncateDNS1123 does for 63.
+func truncateCronJobName(name string) string {
+	return truncateDNS1123To(name, maxCronJobNameLength)
 }
 
 // ownedBackupPVCName returns the operator-managed PVC name for a PVC-backed
@@ -109,15 +120,20 @@ func checkPVCSubPath(sub string) error {
 // exceeds the limit we append a short hash of the original so truncated
 // names that would otherwise collide stay distinct.
 func truncateDNS1123(name string) string {
-	if len(name) <= 63 {
+	return truncateDNS1123To(name, 63)
+}
+
+// truncateDNS1123To is truncateDNS1123 for a limit other than 63.
+func truncateDNS1123To(name string, limit int) string {
+	if len(name) <= limit {
 		return trimDNS1123Tail(name)
 	}
 	// Reserve 9 chars for "-" + 8-char hex hash so the truncated body
-	// plus the suffix stay within the 63-char label limit.
+	// plus the suffix stay within the limit.
 	const reserve = 9
 	sum := sha256.Sum256([]byte(name))
 	suffix := "-" + hex.EncodeToString(sum[:])[:8]
-	body := name[:63-reserve]
+	body := name[:limit-reserve]
 	return trimDNS1123Tail(body) + suffix
 }
 

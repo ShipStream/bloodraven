@@ -71,7 +71,16 @@ func TestDerivedNamesFitNameBounds(t *testing.T) {
 		subdomain("owned backup PVC", ownedBackupPVCName(group, boundedName(63, "p")))
 		dnsLabel("restore Job", restoreJobName(group, site))
 		dnsLabel("in-place restore Job", inPlaceRestoreJobName(group, site))
-		dnsLabel("schedule CronJob", scheduleCronJobName(group, boundedName(63, "c")))
+		// The API server refuses a CronJob name over 52 characters.
+		cronJob := func(what, v string) {
+			t.Helper()
+			dnsLabel(what, v)
+			if len(v) > 52 {
+				t.Errorf("%s %q is %d characters, want at most 52", what, v, len(v))
+			}
+		}
+		cronJob("schedule CronJob", scheduleCronJobName(group, boundedName(63, "c")))
+		cronJob("verification CronJob", verificationScheduleCronJobName(group, boundedName(63, "p")))
 		dnsLabel("PITR check Job", pitrCheckJobName(group, "binding-id", site))
 		subdomain("PITR key snapshot Secret", pitrKeySnapshotName(group, []byte("k"), "s3://bucket/prefix", []byte("p")))
 		subdomain("digest key Secret", digestKeySecretName(group))

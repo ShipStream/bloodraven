@@ -563,6 +563,8 @@ const (
 	// changed to a value that is not an RFC 3339 timestamp, so no new run
 	// starts and the previous terminal status stays. Set `confirm` to a
 	// valid timestamp newer than `status.restoreInPlace.confirmTokenUsed`.
+	// Admission refuses such a value, so only an object stored before that
+	// rule reaches it.
 	EventRestoreInPlaceConfirmIgnored = "RestoreInPlaceConfirmIgnored"
 	// The restore credentials Secret could not be refreshed while the
 	// run's restore Job exists. The Job is left running; the refresh is

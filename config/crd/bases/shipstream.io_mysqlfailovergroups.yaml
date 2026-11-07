@@ -6888,7 +6888,7 @@ spec:
                       minimum: 1
                       type: integer
                       x-kubernetes-validations:
-                      - message: serverID is immutable
+                      - message: serverID is immutable; see the site-replacement procedure
                         rule: self == oldSelf
                     serviceTemplate:
                       description: |-
@@ -6936,7 +6936,8 @@ spec:
                           type: string
                           x-kubernetes-validations:
                           - message: 'size is immutable: the operator does not resize
-                              a site''s volume'
+                              a site''s volume; expand the PVC itself, or see the
+                              site-replacement procedure'
                             rule: quantity(self).compareTo(quantity(oldSelf)) == 0
                           - message: a storage size must be greater than 0
                             rule: quantity(self).isGreaterThan(quantity('0'))
@@ -6947,7 +6948,8 @@ spec:
                           minLength: 1
                           type: string
                           x-kubernetes-validations:
-                          - message: storageClassName is immutable
+                          - message: storageClassName is immutable; see the site-replacement
+                              procedure
                             rule: self == oldSelf
                       required:
                       - size
@@ -6972,7 +6974,7 @@ spec:
                       type: string
                       x-kubernetes-validations:
                       - message: 'zone is immutable: the site''s volume cannot follow
-                          its pods into another zone'
+                          its pods into another zone; see the site-replacement procedure'
                         rule: self == oldSelf
                   required:
                   - name
@@ -7112,7 +7114,7 @@ spec:
             - message: spec.initFromBackup.pointInTime.archiveProfileName must name
                 an entry of spec.backup.profiles
               optionalOldSelf: true
-              rule: oldSelf.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime)
+              rule: oldSelf.?sites.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime)
                 || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup)
                 && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name
                 == self.initFromBackup.pointInTime.archiveProfileName))

@@ -551,7 +551,6 @@ A full-instance in-place restore replaces the primary's data. The other sites st
    - Restore the held data into the primary: create a `MysqlBackup` with `spec.sourceSite: <held-site>`, then run a new full-instance restore from it (it reclones every peer once it succeeds).
    - Keep the primary's data once it is verified good: `kubectl patch mfg <group> -n <ns> --subresource=status --type=merge -p '{"status":{"restoreReclones":{"phase":"Draining"}}}'`; the held sites are recloned from it.
    - Remove `status.restoreReclones`: this resumes the held sites' replication from the current primary, which replicates whatever the failed restore did to it.
-   A `Held` queue keeps a site removed from `spec.sites`, so re-adding it does not resume its replication.
 
 ## 21. In-place restore stays fenced after `spec.restoreInPlace` was removed, or ends "cancelled"
 
@@ -600,7 +599,7 @@ A full-instance in-place restore fences the primary with `SET GLOBAL offline_mod
 3. Locked out after a terminal restore because the release keeps failing: fix operator reachability to the primary. If applications must come back now, run `SET GLOBAL offline_mode = OFF;` on the primary. If `priorOfflineMode` was `true`, the primary was already in offline mode before the restore; leave it ON. The operator clears the record once its release succeeds.
 4. Applications running as accounts with `CONNECTION_ADMIN`/`SUPER` are not fenced at all. Remove those privileges from application accounts.
 5. After an operator downgrade during a full-instance restore, nothing releases the fence (older operators do not know `status.restoreOfflineFence`). Once the restore is terminal, run `SET GLOBAL offline_mode = OFF;` on the primary unless `priorOfflineMode` was `true`.
-6. Fencing waits on a peer, or the run ended `RestoreInPlacePeerStopFailed`: restore the operator's connectivity to the peer (or its `REPLICATION_SLAVE_ADMIN` grant), or remove the peer from `spec.sites`, then bump `spec.restoreInPlace.confirm`. Do not stop the peer's replication by hand to get past the check and then start it again: while a full-instance restore runs or its queue is `Armed`/`Held`, a running receiver pulls the restore's `DROP` statements. Do not downgrade the operator while `status.restoreReclones` is `Armed` or `Held`: an older operator restarts the held receivers.
+6. Fencing waits on a peer, or the run ended `RestoreInPlacePeerStopFailed`: restore the operator's connectivity to the peer (or its `REPLICATION_SLAVE_ADMIN` grant), then bump `spec.restoreInPlace.confirm`. A site cannot be removed from `spec.sites`: admission refuses the edit, and dropping a site means replacing the group (site docs "Replacing a site"). Do not stop the peer's replication by hand to get past the check and then start it again: while a full-instance restore runs or its queue is `Armed`/`Held`, a running receiver pulls the restore's `DROP` statements. Do not downgrade the operator while `status.restoreReclones` is `Armed` or `Held`: an older operator restarts the held receivers.
 
 ## 23. Ordered update stalls on the active site (`maintenance handoff aborted`)
 

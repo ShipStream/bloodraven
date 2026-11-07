@@ -917,17 +917,17 @@ func backupRefS3CredentialsError(fp string, ref *v1alpha1.MysqlBackup, profile *
 	case profile == nil:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles (it supplies the S3 credentials); "+
-				"either restore the profile or %s explicitly",
+				"either restore the profile or %s",
 			fp, ref.Name, location, ref.Spec.ProfileName, restoreSpecFix(fp, "source.s3"))
 	case profile.Storage.Type != v1alpha1.BackupStorageS3:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q now stores to %s (it supplies the S3 credentials); "+
-				"either restore the profile's S3 storage or %s explicitly",
+				"either restore the profile's S3 storage or %s",
 			fp, ref.Name, location, ref.Spec.ProfileName, profile.Storage.Type, restoreSpecFix(fp, "source.s3"))
 	case profile.Storage.S3 == nil:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q has no storage.s3 configuration to supply its credentials; "+
-				"either restore the profile's S3 storage or %s explicitly",
+				"either restore the profile's S3 storage or %s",
 			fp, ref.Name, location, ref.Spec.ProfileName, restoreSpecFix(fp, "source.s3"))
 	}
 	return nil

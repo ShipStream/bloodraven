@@ -40,6 +40,12 @@ type MysqlFailoverGroupList struct {
 	Items           []MysqlFailoverGroup `json:"items"`
 }
 
+// The initFromBackup archive-profile rule runs at creation only
+// (optionalOldSelf: oldSelf has no value on create). It tests
+// oldSelf.?sites, not oldSelf.hasValue(), so it still compiles where the
+// API server drops optionalOldSelf from a CRD (CRDValidationRatcheting off,
+// possible on 1.31 and 1.32): there it is an update-only rule that passes.
+
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
 // +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.serverID == x.serverID).size() == 1)",message="spec.sites[].serverID must be unique within the group"
 // +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'PrimaryCandidate').size() >= 2",message="spec.sites must contain at least two sites with role PrimaryCandidate"
@@ -50,7 +56,7 @@ type MysqlFailoverGroupList struct {
 // +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="inherited externalTrafficPolicy requires each effective site service type to be NodePort or LoadBalancer"
 // +kubebuilder:validation:XValidation:rule="!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)",message="spec.encryptionAtRest.enabled requires spec.tls: MySQL requires a secure connection to clone encrypted data"
 // +kubebuilder:validation:XValidation:rule="!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))",message="spec.encryptionAtRest.keyring.dataFileDir must not be inside the MySQL data directory"
-// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime) || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup) && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name == self.initFromBackup.pointInTime.archiveProfileName))",message="spec.initFromBackup.pointInTime.archiveProfileName must name an entry of spec.backup.profiles",optionalOldSelf=true
+// +kubebuilder:validation:XValidation:rule="oldSelf.?sites.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime) || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup) && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name == self.initFromBackup.pointInTime.archiveProfileName))",message="spec.initFromBackup.pointInTime.archiveProfileName must name an entry of spec.backup.profiles",optionalOldSelf=true
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.7
 	// +kubebuilder:default="mysql:9.7"
@@ -444,7 +450,7 @@ type SiteSpec struct {
 	// +required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=4294967295
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="serverID is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="serverID is immutable; see the site-replacement procedure"
 	ServerID int64 `json:"serverID"`
 
 	// Role governs whether this site can be auto-promoted on failover.
@@ -457,7 +463,7 @@ type SiteSpec struct {
 	// change: the site's volume is bound to its zone.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="zone is immutable: the site's volume cannot follow its pods into another zone"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="zone is immutable: the site's volume cannot follow its pods into another zone; see the site-replacement procedure"
 	// +required
 	Zone string `json:"zone"`
 
@@ -521,13 +527,13 @@ type StorageSpec struct {
 	// StorageClassName is the name of the StorageClass. Immutable.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="storageClassName is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="storageClassName is immutable; see the site-replacement procedure"
 	// +required
 	StorageClassName string `json:"storageClassName"`
 
 	// Size is the requested storage size, such as "100Gi". Immutable; it is
 	// compared by value, so 1Gi and 1024Mi are the same size.
-	// +kubebuilder:validation:XValidation:rule="quantity(self).compareTo(quantity(oldSelf)) == 0",message="size is immutable: the operator does not resize a site's volume"
+	// +kubebuilder:validation:XValidation:rule="quantity(self).compareTo(quantity(oldSelf)) == 0",message="size is immutable: the operator does not resize a site's volume; expand the PVC itself, or see the site-replacement procedure"
 	// +required
 	Size StorageQuantity `json:"size"`
 }

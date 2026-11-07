@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -41,7 +43,7 @@ func scenario36RustFSOutageRestoreInPlace() runner.Scenario {
 		Title: "RustFS outage during in-place restore fails safely, canary survives",
 		Hypothesis: "A per-schema in-place restore whose RustFS storage is scaled to 0 mid-run terminates Failed " +
 			"with targetSite=active, status.activeSite unchanged, no reclone annotation, and the untouched safe " +
-			"schema still readable. An invalid confirm is rejected without a run (confirmTokenUsed stays empty). A " +
+			"schema still readable. Admission refuses an invalid confirm, leaving spec and status.restoreInPlace unchanged. A " +
 			"genuine execution failure holds terminal Failed on the same confirm (confirmTokenUsed records the " +
 			"executed confirm); the operator does not auto-re-arm the destructive restore, so retrying needs a new " +
 			"monotonic confirm.",
@@ -194,41 +196,49 @@ func s36MutateAfterBackup() runner.Step {
 func s36RejectInvalidConfirm() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "confirm-token gate: an invalid confirm is rejected without a run",
+		Name:  "confirm-token gate: admission refuses an invalid confirm and nothing runs",
 		Do: func(ctx context.Context, env *runner.Env) error {
+			before, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
 			backupName := ctxFetch(env, "backupName")
 			spec := v1alpha1.RestoreInPlaceSpec{
 				Confirm:     "not-a-timestamp",
 				Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
 				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
 			}
-			if _, err := patchRestoreInPlace(ctx, env, spec); err != nil {
-				return fmt.Errorf("patch invalid-confirm restoreInPlace: %w", err)
+			_, err = patchRestoreInPlace(ctx, env, spec)
+			if err == nil {
+				return errors.New("admission accepted spec.restoreInPlace.confirm=\"not-a-timestamp\"; the CRD must refuse a confirm that is not an RFC 3339 timestamp")
 			}
-			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "invalid confirm rejected (phase=Failed, no Job)",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					rip := mfg.Status.RestoreInPlace
-					if rip == nil {
-						return false, "no restoreInPlace status yet", nil
-					}
-					msg := fmt.Sprintf("phase=%q job=%q confirmUsed=%q message=%q", rip.Phase, rip.JobName, rip.ConfirmTokenUsed, rip.Message)
-					if rip.Phase == v1alpha1.RestoreInPlaceFailed {
-						if rip.JobName != "" {
-							return false, msg, fmt.Errorf("invalid confirm should be rejected before a Job is created, got jobName=%q", rip.JobName)
-						}
-						if rip.ConfirmTokenUsed != "" {
-							return false, msg, fmt.Errorf("invalid confirm must not populate confirmTokenUsed, got %q", rip.ConfirmTokenUsed)
-						}
-						return true, msg, nil
-					}
-					return false, msg, nil
-				})
+			if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.restoreInPlace.confirm") {
+				return fmt.Errorf("patch invalid-confirm restoreInPlace: want an admission refusal of spec.restoreInPlace.confirm, got: %w", err)
+			}
+			env.Capture.Note("admission refused the invalid confirm: " + err.Error())
+			after, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
-				return fmt.Errorf("invalid confirm was not cleanly rejected: %w", err)
+				return err
 			}
-			env.Capture.Note("invalid confirm rejected (phase=Failed, no Job, confirmTokenUsed empty)")
+			if !equality.Semantic.DeepEqual(before.Spec.RestoreInPlace, after.Spec.RestoreInPlace) {
+				return fmt.Errorf("spec.restoreInPlace changed after a refused patch: before %+v, after %+v", before.Spec.RestoreInPlace, after.Spec.RestoreInPlace)
+			}
+			// No run may start: the status names neither the refused
+			// confirm nor a new Job. (A status left by an earlier request
+			// may still settle, so it is not compared whole.)
+			if rip := after.Status.RestoreInPlace; rip != nil {
+				if rip.RunConfirm == spec.Confirm || rip.ConfirmTokenUsed == spec.Confirm {
+					return fmt.Errorf("status.restoreInPlace records the refused confirm: runConfirm=%q confirmTokenUsed=%q", rip.RunConfirm, rip.ConfirmTokenUsed)
+				}
+				var beforeJob string
+				if before.Status.RestoreInPlace != nil {
+					beforeJob = before.Status.RestoreInPlace.JobName
+				}
+				if rip.JobName != "" && rip.JobName != beforeJob {
+					return fmt.Errorf("a restore Job %q appeared after a refused patch", rip.JobName)
+				}
+			}
+			env.Capture.Note("spec.restoreInPlace unchanged and no run started after the refusal")
 			return nil
 		},
 	}
@@ -283,11 +293,10 @@ func s36StartRestoreThenOutage() runner.Step {
 
 			// Wait until the restore Job is actually running before pulling
 			// storage — otherwise the failure could be attributed to backup
-			// creation or validation rather than the RustFS outage. The
-			// invalid-confirm step above already drove status.restoreInPlace to
-			// a terminal Failed; the reconciler does not clear that status the
-			// instant this patch lands, so the wait must be able to tell it
-			// apart from genuine progress on this fresh request (stale).
+			// creation or validation rather than the RustFS outage. A
+			// status.restoreInPlace left by an earlier request is not cleared
+			// the instant this patch lands, so the wait must be able to tell
+			// it apart from genuine progress on this fresh request (stale).
 			waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
 			rip, err := waitRestoreInPlaceActive(waitCtx, env, stale)
