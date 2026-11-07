@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -476,9 +478,9 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{
 		Enabled:  true,
 		Schedule: "0 5 * * *",
-		RetentionPolicy: &v1alpha1.VerificationRetentionPolicy{
-			KeepSuccessful: 2,
-			KeepFailures:   10,
+		Retention: v1alpha1.VerificationRetention{
+			KeepLast:   new(int32(2)),
+			KeepFailed: new(int32(10)),
 		},
 	}
 
@@ -524,6 +526,76 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 	if succeeded > 2 {
 		t.Errorf("retention did not prune: %d Succeeded remain (want <=2)", succeeded)
 	}
+}
+
+// A-55: verification retention counts Succeeded and Failed runs
+// separately; an omitted field (or verification block) means the default
+// 30 / 10 and an explicit 0 keeps none.
+func TestVerificationRetention(t *testing.T) {
+	withRetention := func(rt v1alpha1.VerificationRetention) *v1alpha1.BackupProfile {
+		return &v1alpha1.BackupProfile{Verification: &v1alpha1.VerificationSpec{Retention: rt}}
+	}
+	for _, tc := range []struct {
+		name                 string
+		profile              *v1alpha1.BackupProfile
+		wantLast, wantFailed int32
+	}{
+		{name: "missing profile", profile: nil, wantLast: 30, wantFailed: 10},
+		{name: "no verification block", profile: &v1alpha1.BackupProfile{}, wantLast: 30, wantFailed: 10},
+		{name: "omitted fields", profile: withRetention(v1alpha1.VerificationRetention{}), wantLast: 30, wantFailed: 10},
+		{name: "set", profile: withRetention(v1alpha1.VerificationRetention{KeepLast: new(int32(2)), KeepFailed: new(int32(3))}), wantLast: 2, wantFailed: 3},
+		{name: "explicit zeros keep none", profile: withRetention(v1alpha1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))}), wantLast: 0, wantFailed: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			last, failed := resolveVerificationRetention(tc.profile)
+			if last != tc.wantLast || failed != tc.wantFailed {
+				t.Fatalf("resolveVerificationRetention = (%d, %d), want (%d, %d)", last, failed, tc.wantLast, tc.wantFailed)
+			}
+		})
+	}
+
+	t.Run("keepLast 0 prunes every success, keepFailed omitted keeps 10", func(t *testing.T) {
+		fg := verifyFG()
+		fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{
+			Retention: v1alpha1.VerificationRetention{KeepLast: new(int32(0))},
+		}
+		objs := []client.Object{fg}
+		mk := func(name string, phase v1alpha1.VerificationPhase, age time.Duration) {
+			v := verifyCR(name, fg.Name, "nightly-s3")
+			v.Status.Phase = phase
+			ct := metav1.NewTime(time.Now().Add(-age))
+			v.Status.CompletionTime = &ct
+			objs = append(objs, v)
+		}
+		for i := 0; i < 3; i++ {
+			mk(fmt.Sprintf("ok-%02d", i), v1alpha1.VerificationPhaseSucceeded, time.Duration(i)*time.Hour)
+		}
+		for i := 0; i < 12; i++ {
+			mk(fmt.Sprintf("bad-%02d", i), v1alpha1.VerificationPhaseFailed, time.Duration(i)*time.Hour)
+		}
+		mk("running", v1alpha1.VerificationPhaseRestoring, 0)
+		r, c := newVerificationReconciler(t, objs...)
+		if err := r.pruneRetention(context.Background(), verifyCR("trigger", fg.Name, "nightly-s3")); err != nil {
+			t.Fatal(err)
+		}
+		var list v1alpha1.MysqlBackupVerificationList
+		if err := c.List(context.Background(), &list, client.InNamespace("ns")); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, it := range list.Items {
+			got = append(got, it.Name)
+		}
+		want := []string{"running"}
+		for i := 0; i < 10; i++ {
+			want = append(want, fmt.Sprintf("bad-%02d", i))
+		}
+		sort.Strings(got)
+		sort.Strings(want)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("kept %v, want %v", got, want)
+		}
+	})
 }
 
 // --- Phase 2: PITR, sanity, and sentinel parsing ------------------------

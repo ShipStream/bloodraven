@@ -157,7 +157,7 @@ func TestPruneSuccessful_SkipsBackupsBeingRead(t *testing.T) {
 	reader := holdVerification("reader", v1alpha1.VerificationPhaseRestoring, "uid-b-b")
 	objs := append(asClientObjects(backups), reader)
 	r, _ := newBackupReconciler(t, objs...)
-	if err := r.pruneSuccessful(context.Background(), backups, 1, 0, 0); err != nil {
+	if err := r.pruneSuccessful(context.Background(), backups, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	// b-b is out of the count window but is being verified; b-c is not.
@@ -178,7 +178,7 @@ func TestPruneSuccessful_DoesNotDeleteSameNameReplacement(t *testing.T) {
 	// incarnation with another UID.
 	stale := backups
 	stale[1].UID = "uid-b-b-previous"
-	if err := r.pruneSuccessful(context.Background(), stale, 1, 0, 0); err != nil {
+	if err := r.pruneSuccessful(context.Background(), stale, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	var live v1alpha1.MysqlBackup
@@ -489,7 +489,7 @@ func TestPruneSuccessful_LogsHeldBackup(t *testing.T) {
 	var lines []string
 	logger := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
 	ctx := log.IntoContext(context.Background(), logger)
-	if err := r.pruneSuccessful(ctx, backups, 1, 0, 0); err != nil {
+	if err := r.pruneSuccessful(ctx, backups, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	for _, line := range lines {

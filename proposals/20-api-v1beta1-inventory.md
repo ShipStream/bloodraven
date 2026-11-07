@@ -21,7 +21,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)`
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))`
 
-### MysqlFailoverGroup `spec` (243 fields)
+### MysqlFailoverGroup `spec` (241 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -54,12 +54,10 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].encryption.passphraseSecretKeyRef.key` | string |  | `"passphrase"` | minLength=1; maxLength=253; pattern=`^[-._a-zA-Z0-9]+$` |
 | `spec.backup.profiles[].encryption.passphraseSecretKeyRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.backup.profiles[].name` | string | yes |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
-| `spec.backup.profiles[].retention` | integer (int32) |  | `7` | minimum=0 |
-| `spec.backup.profiles[].retentionPolicy` | object |  |  |  |
-| `spec.backup.profiles[].retentionPolicy.count` | integer (int32) |  |  | minimum=0 |
-| `spec.backup.profiles[].retentionPolicy.maxAgeDays` | integer (int32) |  |  | minimum=0 |
-| `spec.backup.profiles[].retentionPolicy.maxFailedKeep` | integer (int32) |  | `10` | minimum=0 |
-| `spec.backup.profiles[].retentionPolicy.minKeep` | integer (int32) |  | `1` | minimum=0 |
+| `spec.backup.profiles[].retention` | object |  | `{}` |  |
+| `spec.backup.profiles[].retention.keepFailed` | integer (int32) |  | `10` | minimum=0 |
+| `spec.backup.profiles[].retention.keepLast` | integer (int32) |  | `7` | minimum=1 |
+| `spec.backup.profiles[].retention.keepWithinDays` | integer (int32) |  |  | minimum=1 |
 | `spec.backup.profiles[].storage` | object | yes |  | CEL: `(self.type == 'S3' && has(self.s3) && !has(self.pvc)) \|\| (self.type == 'PVC' && has(self.pvc) && !has(self.s3))` |
 | `spec.backup.profiles[].storage.pvc` | object |  |  |  |
 | `spec.backup.profiles[].storage.pvc.claimName` | string |  |  | maxLength=253; CEL: `bytes(self).size() <= 253` |
@@ -83,9 +81,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].verification.pointInTime.excludeGtids` | string |  |  | maxLength=131072 |
 | `spec.backup.profiles[].verification.pointInTime.mode` | string | yes |  | enum: `Timestamp`, `Latest` |
 | `spec.backup.profiles[].verification.pointInTime.stopTime` | string (date-time) |  |  | maxLength=40; pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z\|[+-]([01][0-9]\|2[0-3]):[0-5][0-9])$` |
-| `spec.backup.profiles[].verification.retentionPolicy` | object |  |  |  |
-| `spec.backup.profiles[].verification.retentionPolicy.keepFailures` | integer (int32) |  | `10` | minimum=0 |
-| `spec.backup.profiles[].verification.retentionPolicy.keepSuccessful` | integer (int32) |  | `30` | minimum=0 |
+| `spec.backup.profiles[].verification.retention` | object |  | `{}` |  |
+| `spec.backup.profiles[].verification.retention.keepFailed` | integer (int32) |  | `10` | minimum=0 |
+| `spec.backup.profiles[].verification.retention.keepLast` | integer (int32) |  | `30` | minimum=0 |
 | `spec.backup.profiles[].verification.sanityCheck` | object |  |  |  |
 | `spec.backup.profiles[].verification.sanityCheck.minResult` | integer (int64) |  |  | minimum=0 |
 | `spec.backup.profiles[].verification.sanityCheck.query` | string | yes |  | minLength=1 |

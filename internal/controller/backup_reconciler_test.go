@@ -190,7 +190,7 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 							Compression:   "zstd",
 							Consistent:    &t,
 						},
-						Retention: 5,
+						Retention: v1alpha1.BackupRetention{KeepLast: 5},
 					},
 					{
 						Name: "daily-local",

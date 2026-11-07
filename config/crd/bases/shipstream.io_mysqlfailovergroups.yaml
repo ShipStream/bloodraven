@@ -731,50 +731,36 @@ spec:
                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         retention:
-                          default: 7
+                          default: {}
                           description: |-
-                            Retention is the legacy shorthand for count-based retention: the
-                            maximum number of successful MysqlBackup CRs to keep for this
-                            profile. 0 disables count-based pruning. If RetentionPolicy is
-                            set it fully overrides this field.
-                          format: int32
-                          minimum: 0
-                          type: integer
-                        retentionPolicy:
-                          description: |-
-                            RetentionPolicy is the structured retention configuration. When
-                            set it replaces the shorthand Retention field and enables
-                            age-based pruning plus a min-keep safety floor.
+                            Retention decides which of this profile's MysqlBackup objects are
+                            deleted after each terminal backup. Deleting a backup removes its
+                            artifacts. See BackupRetention.
                           properties:
-                            count:
-                              description: |-
-                                Count is the max number of successful CRs to keep. 0 disables
-                                count-based pruning.
-                              format: int32
-                              minimum: 0
-                              type: integer
-                            maxAgeDays:
-                              description: |-
-                                MaxAgeDays is the maximum age (in days) of a successful CR before
-                                it becomes eligible for pruning. 0 disables age-based pruning.
-                              format: int32
-                              minimum: 0
-                              type: integer
-                            maxFailedKeep:
+                            keepFailed:
                               default: 10
                               description: |-
-                                MaxFailedKeep caps the Failed bucket independently of the success
-                                retention policy. Default: 10.
+                                KeepFailed is how many of the newest failed backups are kept; 0
+                                keeps none.
                               format: int32
                               minimum: 0
                               type: integer
-                            minKeep:
-                              default: 1
+                            keepLast:
+                              default: 7
                               description: |-
-                                MinKeep is a safety floor: this many newest successful CRs are
-                                always kept, regardless of Count / MaxAgeDays. Default: 1.
+                                KeepLast is how many of the newest successful backups are always
+                                kept. At least one is, so retention never deletes the last good
+                                backup.
                               format: int32
-                              minimum: 0
+                              minimum: 1
+                              type: integer
+                            keepWithinDays:
+                              description: |-
+                                KeepWithinDays also keeps every successful backup that completed
+                                within this many days, however many there are. Unset keeps by count
+                                only.
+                              format: int32
+                              minimum: 1
                               type: integer
                           type: object
                         storage:
@@ -978,25 +964,27 @@ spec:
                                   is Timestamp and forbidden when mode is Latest
                                 rule: 'self.mode == ''Timestamp'' ? has(self.stopTime)
                                   : !has(self.stopTime)'
-                            retentionPolicy:
+                            retention:
+                              default: {}
                               description: |-
-                                RetentionPolicy caps how many verification CRs per profile are
-                                retained after they reach a terminal phase.
+                                Retention caps how many of this profile's MysqlBackupVerification
+                                objects are kept once they finish. It applies to every verification
+                                of the profile, scheduled or not. See VerificationRetention.
                               properties:
-                                keepFailures:
+                                keepFailed:
                                   default: 10
                                   description: |-
-                                    KeepFailures is the max number of Failed CRs to keep. Failed
-                                    runs are what operators most want to investigate, so they are
-                                    retained independently of the Succeeded bucket. Default: 10.
+                                    KeepFailed is how many of the newest Failed verifications are kept;
+                                    0 keeps none. Failed runs are what operators most want to
+                                    investigate, so they are not counted against KeepLast.
                                   format: int32
                                   minimum: 0
                                   type: integer
-                                keepSuccessful:
+                                keepLast:
                                   default: 30
                                   description: |-
-                                    KeepSuccessful is the max number of Succeeded CRs to keep.
-                                    Default: 30.
+                                    KeepLast is how many of the newest Succeeded verifications are kept;
+                                    0 keeps none.
                                   format: int32
                                   minimum: 0
                                   type: integer

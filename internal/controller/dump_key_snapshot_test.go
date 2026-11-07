@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -404,5 +405,70 @@ func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 				t.Fatal("no PITRArchiveNotStamped Event")
 			}
 		})
+	}
+}
+
+// A-55: a backup that retention prunes goes through the same finalizer as
+// a manual delete: its artifacts are removed first, then the dump-key
+// snapshot that decrypts them.
+func TestRetentionPrunedEncryptedBackupReleasesDumpKey(t *testing.T) {
+	ctx := context.Background()
+	f := newCleanupFixture(t)
+	f.fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 1}
+	if err := f.c.Update(ctx, f.fg); err != nil {
+		t.Fatal(err)
+	}
+	f.mb.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	if err := f.c.Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	snapKey := types.NamespacedName{Namespace: f.mb.Namespace, Name: dumpKeySnapshotName(f.mb)}
+	if err := f.c.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: snapKey.Namespace, Name: snapKey.Name,
+		Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(f.mb.UID)}}}); err != nil {
+		t.Fatal(err)
+	}
+	newer := backupCR("art-newer", f.fg.Name, f.mb.Spec.ProfileName)
+	newer.UID = "art-newer-uid"
+	if err := f.c.Create(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	later := metav1.NewTime(f.mb.Status.CompletionTime.Add(time.Hour))
+	newer.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &later}
+	if err := f.c.Status().Update(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.r.pruneRetention(ctx, newer); err != nil {
+		t.Fatalf("pruneRetention: %v", err)
+	}
+	if got := getBackup(t, f.c, f.mb); got.DeletionTimestamp.IsZero() {
+		t.Fatal("retention did not delete the backup outside keepLast")
+	}
+	if getBackup(t, f.c, newer).DeletionTimestamp != nil {
+		t.Fatal("retention deleted the newest backup")
+	}
+
+	f.finalize(t)
+	job, ok := f.cleanupJob(t)
+	if !ok {
+		t.Fatal("the pruned backup started no cleanup Job")
+	}
+	var snap corev1.Secret
+	if err := f.c.Get(ctx, snapKey, &snap); err != nil {
+		t.Fatalf("dump-key snapshot deleted before its artifacts: %v", err)
+	}
+	job.UID = "cleanup-ok"
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := f.c.Status().Update(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Create(ctx, cleanupPodFor(job, corev1.PodSucceeded, 0, backupmeta.FormatCleanupComplete(3))); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := f.finalize(t); !done {
+		t.Fatal("cleanup did not finish")
+	}
+	if err := f.c.Get(ctx, snapKey, &snap); err == nil {
+		t.Fatal("dump-key snapshot kept after retention pruned the backup and its artifacts")
 	}
 }

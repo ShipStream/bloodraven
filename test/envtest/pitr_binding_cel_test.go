@@ -355,7 +355,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 				a := pitrProfile(fg, "a")
 				a.Storage.S3.CredentialsSecretName = "s3-creds-2"
 				a.Storage.S3.Region = strings.Repeat("r", 2048)
-				a.Retention = 7
+				a.Retention = v1alpha1.BackupRetention{KeepLast: 3, KeepFailed: new(int32(0))}
 			},
 		},
 		{

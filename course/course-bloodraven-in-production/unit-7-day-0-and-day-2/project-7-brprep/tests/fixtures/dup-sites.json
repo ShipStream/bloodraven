@@ -46,7 +46,10 @@
               "prefix": "ledger"
             }
           },
-          "retention": 7
+          "retention": {
+            "keepLast": 7,
+            "keepFailed": 10
+          }
         }
       ]
     },

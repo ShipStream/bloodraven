@@ -214,7 +214,7 @@ func TestEnvtest_RetentionHoldsUnstampedRun(t *testing.T) {
 	ns := createNamespace(t, "verification-hold-upgrade")
 	ensureSecret(t, ns)
 	fg := newVerificationFG(ns)
-	fg.Spec.Backup.Profiles[0].Retention = 1
+	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 1}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}

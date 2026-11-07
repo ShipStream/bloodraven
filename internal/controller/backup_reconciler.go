@@ -31,10 +31,13 @@ import (
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 )
 
-// maxFailedRetention caps the number of Failed MysqlBackup CRs kept per
-// (group, profile) pair. Prevents unbounded growth when backups repeatedly
-// fail against a misconfigured profile.
-const maxFailedRetention = 10
+// defaultBackupKeepLast and defaultBackupKeepFailed are the CRD defaults
+// of BackupRetention.KeepLast and KeepFailed, applied when a profile built
+// in Go (not read back through the API server) leaves them unset.
+const (
+	defaultBackupKeepLast   = int32(7)
+	defaultBackupKeepFailed = int32(10)
+)
 
 // maxBackupPendingDuration caps how long a MysqlBackup waits for a healthy
 // source before it is failed terminally. A missing source is normally
@@ -1668,8 +1671,8 @@ func (r *MysqlBackupReconciler) maybeWarnInFlightFailover(backup *v1alpha1.Mysql
 // pruneRetention deletes old MysqlBackup CRs for the same (failover
 // group, profile). List happens in-namespace rather than via a label
 // selector so the sweep works for ad-hoc CRs that may not carry the
-// canonical labels. Successes go through the combined count/age/
-// min-keep policy; failures go through a simple count cap.
+// canonical labels. Successes go through the keep-if-any rules of the
+// profile's retention; failures go through a count cap.
 func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1alpha1.MysqlBackup) error {
 	var list v1alpha1.MysqlBackupList
 	if err := r.List(ctx, &list, client.InNamespace(trigger.Namespace)); err != nil {
@@ -1696,65 +1699,71 @@ func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1a
 	if err := r.Get(ctx, types.NamespacedName{Namespace: trigger.Namespace, Name: trigger.Spec.FailoverGroupRef.Name}, &fg); err == nil {
 		profile = findProfile(&fg, trigger.Spec.ProfileName)
 	}
-	count, maxAge, minKeep, maxFailed := resolveRetention(profile)
+	policy := resolveRetention(profile)
 
-	if err := r.pruneSuccessful(ctx, filtered, count, maxAge, minKeep); err != nil {
-		return err
+	if policy.pruneSucceeded {
+		if err := r.pruneSuccessful(ctx, filtered, policy.keepLast, policy.keepWithin); err != nil {
+			return err
+		}
 	}
-	return r.pruneByPhase(ctx, filtered, v1alpha1.BackupPhaseFailed, int(maxFailed))
+	return r.pruneByPhase(ctx, filtered, v1alpha1.BackupPhaseFailed, int(policy.keepFailed))
 }
 
-// resolveRetention dispatches on BackupProfile.RetentionPolicy vs. the
-// shorthand Retention field and returns the effective policy knobs:
-//
-//	count   = max successful CRs to keep (0 disables count-based)
-//	maxAge  = max age of a successful CR (0 disables age-based)
-//	minKeep = safety floor: this many newest successes always kept
-//	maxFailed = cap on the Failed bucket
-//
-// The shorthand path applies a MinKeep=1 safety floor so a retention
-// sweep after a long outage can't wipe the last good backup.
-func resolveRetention(profile *v1alpha1.BackupProfile) (count int32, maxAge time.Duration, minKeep int32, maxFailed int32) {
+// backupRetentionPolicy is a profile's effective retention.
+type backupRetentionPolicy struct {
+	// pruneSucceeded is false when the profile is gone: without its rules,
+	// no successful backup is deleted.
+	pruneSucceeded bool
+	// keepLast is at least 1.
+	keepLast int32
+	// keepWithin is 0 when there is no age rule.
+	keepWithin time.Duration
+	// keepFailed is at least 0; 0 keeps no failed backup.
+	keepFailed int32
+}
+
+// resolveRetention returns the retention the reconciler applies for
+// profile. Admission defaults keepLast and keepFailed and refuses a
+// keepLast below 1, so the defaults here only fill a profile built in Go.
+// An explicit keepFailed of 0 is kept: it means keep none. A missing
+// profile keeps every successful backup and caps failures at the default.
+func resolveRetention(profile *v1alpha1.BackupProfile) backupRetentionPolicy {
 	if profile == nil {
-		return 0, 0, 0, int32(maxFailedRetention)
+		return backupRetentionPolicy{keepFailed: defaultBackupKeepFailed}
 	}
-	if profile.RetentionPolicy != nil {
-		p := profile.RetentionPolicy
-		mk := p.MinKeep
-		if mk < 0 {
-			mk = 0
-		}
-		mf := p.MaxFailedKeep
-		if mf == 0 {
-			mf = int32(maxFailedRetention)
-		}
-		return p.Count, time.Duration(p.MaxAgeDays) * 24 * time.Hour, mk, mf
+	rt := profile.Retention
+	policy := backupRetentionPolicy{pruneSucceeded: true, keepLast: rt.KeepLast, keepFailed: defaultBackupKeepFailed}
+	if policy.keepLast < 1 {
+		policy.keepLast = defaultBackupKeepLast
 	}
-	// Shorthand: single-count retention with a MinKeep=1 safety floor.
-	return profile.Retention, 0, 1, int32(maxFailedRetention)
+	if rt.KeepWithinDays != nil && *rt.KeepWithinDays > 0 {
+		policy.keepWithin = time.Duration(*rt.KeepWithinDays) * 24 * time.Hour
+	}
+	if rt.KeepFailed != nil {
+		policy.keepFailed = max(*rt.KeepFailed, 0)
+	}
+	return policy
 }
 
-// pruneSuccessful applies the combined count/age/min-keep retention
-// policy to the Succeeded bucket of a filtered MysqlBackup slice. A CR
-// is kept when ANY of the following are true:
+// pruneSuccessful applies the keep-if-any retention rules to the
+// Succeeded bucket of a filtered MysqlBackup slice. A CR is kept when
+// either is true:
 //
-//   - its rank from newest is < MinKeep (safety floor),
-//   - count > 0 and its rank from newest is < count, or
-//   - maxAge > 0 and its completion time is within the age window.
+//   - its rank from newest is < keepLast (at least 1, so the newest
+//     successful backup is never deleted), or
+//   - keepWithin > 0 and its completion time is within that window.
 //
-// When both count and maxAge are zero the function is a no-op so users
-// who set neither don't accidentally wipe their history.
-func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alpha1.MysqlBackup, count int32, maxAge time.Duration, minKeep int32) error {
-	if count == 0 && maxAge == 0 {
-		return nil
-	}
+// A CR no rule keeps is deleted unless a verification may still be
+// reading its artifact (deleteUnreadBackup).
+func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alpha1.MysqlBackup, keepLast int32, keepWithin time.Duration) error {
+	keepLast = max(keepLast, 1)
 	bucket := make([]v1alpha1.MysqlBackup, 0, len(all))
 	for _, b := range all {
 		if b.Status.Phase == v1alpha1.BackupPhaseSucceeded {
 			bucket = append(bucket, b)
 		}
 	}
-	if len(bucket) == 0 {
+	if len(bucket) <= int(keepLast) {
 		return nil
 	}
 	sort.Slice(bucket, func(i, j int) bool {
@@ -1762,26 +1771,22 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 		tj := timeOrZero(bucket[j].Status.CompletionTime)
 		return ti.After(tj)
 	})
-	cutoff := time.Now().Add(-maxAge)
+	cutoff := time.Now().Add(-keepWithin)
 	var checker *BackupReadChecker
 	for i, b := range bucket {
-		// Safety floor.
-		if int32(i) < minKeep {
-			continue
-		}
 		// Within the count window.
-		if count > 0 && int32(i) < count {
+		if int32(i) < keepLast {
 			continue
 		}
 		// Within the age window.
-		if maxAge > 0 {
+		if keepWithin > 0 {
 			t := timeOrZero(b.Status.CompletionTime)
 			if !t.IsZero() && t.After(cutoff) {
 				continue
 			}
 		}
-		// Not kept by any policy check => delete, unless a verification
-		// may still be reading the artifact.
+		// Not kept by any rule => delete, unless a verification may still
+		// be reading the artifact.
 		victim := b
 		if checker == nil {
 			checker = NewBackupReadChecker(r.apiReader())
@@ -1794,11 +1799,10 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 }
 
 // pruneByPhase keeps the newest `keep` entries in the given phase and
-// deletes the rest. Entries without a CompletionTime sort last.
+// deletes the rest; 0 keeps none. Entries without a CompletionTime sort
+// last.
 func (r *MysqlBackupReconciler) pruneByPhase(ctx context.Context, all []v1alpha1.MysqlBackup, phase v1alpha1.BackupPhase, keep int) error {
-	if keep <= 0 {
-		return nil
-	}
+	keep = max(keep, 0)
 	bucket := make([]v1alpha1.MysqlBackup, 0, len(all))
 	for _, b := range all {
 		if b.Status.Phase == phase {

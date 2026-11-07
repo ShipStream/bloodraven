@@ -65,11 +65,10 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 		BackoffLimit:           new(int32(0)),
 		Profiles: []v1alpha1.BackupProfile{{
 			Name: backupE2EProfile,
-			RetentionPolicy: &v1alpha1.RetentionPolicy{
-				Count:         2,
-				MaxAgeDays:    1,
-				MinKeep:       1,
-				MaxFailedKeep: 2,
+			Retention: v1alpha1.BackupRetention{
+				KeepLast:       2,
+				KeepWithinDays: new(int32(1)),
+				KeepFailed:     new(int32(2)),
 			},
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,

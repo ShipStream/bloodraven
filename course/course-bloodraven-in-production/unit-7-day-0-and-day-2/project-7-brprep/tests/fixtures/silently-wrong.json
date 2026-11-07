@@ -46,7 +46,10 @@
               "size": "500Gi"
             }
           },
-          "retention": 7
+          "retention": {
+            "keepLast": 7,
+            "keepFailed": 10
+          }
         }
       ]
     },

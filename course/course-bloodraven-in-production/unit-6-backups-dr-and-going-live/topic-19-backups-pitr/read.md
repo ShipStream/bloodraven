@@ -112,7 +112,8 @@ spec:
             prefix: playground
             endpointURL: http://minio.bloodraven-playground:9000
             credentialsSecretName: playground-backup-s3
-        retention: 7                     # default
+        retention:
+          keepLast: 7                    # default
     pitr:
       enabled: true                      # NEW — turns the archiver on
       profileName: nightly

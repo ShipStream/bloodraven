@@ -30,10 +30,9 @@ spec:
         dump:
           threads: 4
           compression: zstd
-        retentionPolicy:
-          count: 14
-          maxAgeDays: 35
-          minKeep: 2
+        retention:
+          keepLast: 14
+          keepWithinDays: 35
         verification:
           enabled: true
           schedule: "30 8 * * *"

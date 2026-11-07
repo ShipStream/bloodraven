@@ -433,10 +433,12 @@ type VerificationSpec struct {
 	// +optional
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
-	// RetentionPolicy caps how many verification CRs per profile are
-	// retained after they reach a terminal phase.
+	// Retention caps how many of this profile's MysqlBackupVerification
+	// objects are kept once they finish. It applies to every verification
+	// of the profile, scheduled or not. See VerificationRetention.
+	// +kubebuilder:default={}
 	// +optional
-	RetentionPolicy *VerificationRetentionPolicy `json:"retentionPolicy,omitempty"`
+	Retention VerificationRetention `json:"retention,omitempty"`
 
 	// PointInTime is copied onto each scheduled verification CR by
 	// trigger-verification. See PointInTimeVerificationSpec.
@@ -449,25 +451,25 @@ type VerificationSpec struct {
 	SanityCheck *SanityCheckSpec `json:"sanityCheck,omitempty"`
 }
 
-// VerificationRetentionPolicy caps the number of MysqlBackupVerification
-// CRs retained per (group, profile). The Succeeded bucket and the
-// Failed bucket are capped independently so a flood of failures does
-// not evict the record of last week's successful verification.
-type VerificationRetentionPolicy struct {
-	// KeepSuccessful is the max number of Succeeded CRs to keep.
-	// Default: 30.
+// VerificationRetention caps the MysqlBackupVerification objects kept per
+// (group, profile). Succeeded and Failed runs are counted separately, so a
+// run of failures does not evict the record of the last successful
+// verification.
+type VerificationRetention struct {
+	// KeepLast is how many of the newest Succeeded verifications are kept;
+	// 0 keeps none.
 	// +kubebuilder:default=30
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	KeepSuccessful int32 `json:"keepSuccessful,omitempty"`
+	KeepLast *int32 `json:"keepLast,omitempty"`
 
-	// KeepFailures is the max number of Failed CRs to keep. Failed
-	// runs are what operators most want to investigate, so they are
-	// retained independently of the Succeeded bucket. Default: 10.
+	// KeepFailed is how many of the newest Failed verifications are kept;
+	// 0 keeps none. Failed runs are what operators most want to
+	// investigate, so they are not counted against KeepLast.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	KeepFailures int32 `json:"keepFailures,omitempty"`
+	KeepFailed *int32 `json:"keepFailed,omitempty"`
 }
 
 func init() {

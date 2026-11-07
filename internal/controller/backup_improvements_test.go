@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -195,37 +196,120 @@ func TestEnsureBackupLabels_StampsMissing(t *testing.T) {
 	}
 }
 
-// --- resolveRetention -------------------------------------------------------
+// --- resolveRetention / pruneRetention -------------------------------------
 
-func TestResolveRetention_ShorthandKeepsCountPlusFloor(t *testing.T) {
-	p := &v1alpha1.BackupProfile{Retention: 5}
-	count, age, min, maxFail := resolveRetention(p)
-	if count != 5 || age != 0 || min != 1 || maxFail != int32(maxFailedRetention) {
-		t.Errorf("got (%d, %v, %d, %d)", count, age, min, maxFail)
+func TestResolveRetention(t *testing.T) {
+	day := 24 * time.Hour
+	for _, tc := range []struct {
+		name    string
+		profile *v1alpha1.BackupProfile
+		want    backupRetentionPolicy
+	}{
+		{name: "missing profile prunes no success", profile: nil,
+			want: backupRetentionPolicy{keepFailed: defaultBackupKeepFailed}},
+		{name: "omitted fields take the defaults", profile: &v1alpha1.BackupProfile{},
+			want: backupRetentionPolicy{pruneSucceeded: true, keepLast: defaultBackupKeepLast, keepFailed: defaultBackupKeepFailed}},
+		{name: "every field set", profile: &v1alpha1.BackupProfile{Retention: v1alpha1.BackupRetention{
+			KeepLast: 3, KeepWithinDays: new(int32(7)), KeepFailed: new(int32(4))}},
+			want: backupRetentionPolicy{pruneSucceeded: true, keepLast: 3, keepWithin: 7 * day, keepFailed: 4}},
+		// An explicit 0 is kept, never rewritten to the default (A-37, F-26).
+		{name: "explicit keepFailed 0 keeps none", profile: &v1alpha1.BackupProfile{Retention: v1alpha1.BackupRetention{
+			KeepLast: 1, KeepFailed: new(int32(0))}},
+			want: backupRetentionPolicy{pruneSucceeded: true, keepLast: 1, keepFailed: 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveRetention(tc.profile); got != tc.want {
+				t.Fatalf("resolveRetention = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestResolveRetention_PolicyOverridesShorthand(t *testing.T) {
-	p := &v1alpha1.BackupProfile{
-		Retention: 99,
-		RetentionPolicy: &v1alpha1.RetentionPolicy{
-			Count: 3, MaxAgeDays: 7, MinKeep: 2, MaxFailedKeep: 4,
-		},
-	}
-	count, age, min, maxFail := resolveRetention(p)
-	if count != 3 || age != 7*24*time.Hour || min != 2 || maxFail != 4 {
-		t.Errorf("got (%d, %v, %d, %d)", count, age, min, maxFail)
-	}
+// failedBackup is a Failed MysqlBackup of fgName/profile that completed at
+// completed.
+func failedBackup(name, fgName, profile string, completed metav1.Time) v1alpha1.MysqlBackup {
+	b := succeededBackup(name, "ns", fgName, profile, completed)
+	b.Status.Phase = v1alpha1.BackupPhaseFailed
+	return b
 }
 
-func TestResolveRetention_NilProfile(t *testing.T) {
-	count, age, min, maxFail := resolveRetention(nil)
-	if count != 0 || age != 0 || min != 0 || maxFail != int32(maxFailedRetention) {
-		t.Errorf("got (%d, %v, %d, %d)", count, age, min, maxFail)
+// TestPruneRetention_KeepIfAny is the A-55 table: a successful backup is
+// deleted only when it is outside keepLast and older than keepWithinDays;
+// failed backups are capped by keepFailed, where an explicit 0 keeps none
+// and an omitted field means the default.
+func TestPruneRetention_KeepIfAny(t *testing.T) {
+	h, d := time.Hour, 24*time.Hour
+	ages := func(n int, step time.Duration) []time.Duration {
+		out := make([]time.Duration, n)
+		for i := range out {
+			out[i] = time.Duration(i) * step
+		}
+		return out
+	}
+	names := func(prefix string, n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("%s-%02d", prefix, i)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name          string
+		retention     *v1alpha1.BackupRetention // nil: the profile is gone
+		succeeded     []time.Duration
+		failed        []time.Duration
+		wantSucceeded int // how many of the newest are kept
+		wantFailed    int
+	}{
+		{name: "omitted: keepLast 7, keepFailed 10", retention: &v1alpha1.BackupRetention{},
+			succeeded: ages(9, h), failed: ages(12, h), wantSucceeded: 7, wantFailed: 10},
+		{name: "keepLast only", retention: &v1alpha1.BackupRetention{KeepLast: 2},
+			succeeded: ages(5, h), wantSucceeded: 2},
+		{name: "age keeps beyond the count", retention: &v1alpha1.BackupRetention{KeepLast: 1, KeepWithinDays: new(int32(7))},
+			succeeded: []time.Duration{h, 2 * d, 10 * d, 20 * d}, wantSucceeded: 2},
+		{name: "count keeps beyond the age", retention: &v1alpha1.BackupRetention{KeepLast: 3, KeepWithinDays: new(int32(1))},
+			succeeded: []time.Duration{2 * d, 3 * d, 4 * d, 5 * d}, wantSucceeded: 3},
+		{name: "keepLast 0 from Go means the default", retention: &v1alpha1.BackupRetention{KeepLast: 0},
+			succeeded: ages(8, h), wantSucceeded: 7},
+		{name: "explicit keepFailed 0 keeps none", retention: &v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))},
+			succeeded: ages(2, h), failed: ages(3, h), wantSucceeded: 2, wantFailed: 0},
+		{name: "keepFailed 2", retention: &v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(2))},
+			failed: ages(5, h), wantFailed: 2},
+		{name: "missing profile keeps every success", retention: nil,
+			succeeded: ages(9, d), failed: ages(12, h), wantSucceeded: 9, wantFailed: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			fg := fgWithBackup()
+			profile := "nightly-s3"
+			if tc.retention != nil {
+				fg.Spec.Backup.Profiles[0].Retention = *tc.retention
+			} else {
+				profile = "removed"
+			}
+			var objs []client.Object
+			objs = append(objs, fg)
+			sNames, fNames := names("s", len(tc.succeeded)), names("f", len(tc.failed))
+			for i, age := range tc.succeeded {
+				b := succeededBackup(sNames[i], "ns", fg.Name, profile, metav1.NewTime(now.Add(-age)))
+				objs = append(objs, &b)
+			}
+			for i, age := range tc.failed {
+				b := failedBackup(fNames[i], fg.Name, profile, metav1.NewTime(now.Add(-age)))
+				objs = append(objs, &b)
+			}
+			r, _ := newBackupReconciler(t, objs...)
+			trigger := v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: "trigger", Namespace: "ns"},
+				Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: profile}}
+			if err := r.pruneRetention(context.Background(), &trigger); err != nil {
+				t.Fatalf("pruneRetention: %v", err)
+			}
+			// Both buckets are named in age order, newest first.
+			want := append(append([]string(nil), sNames[:tc.wantSucceeded]...), fNames[:tc.wantFailed]...)
+			assertEqualSet(t, listBackupNames(t, r), want)
+		})
 	}
 }
-
-// --- pruneSuccessful --------------------------------------------------------
 
 func makeBackups(t *testing.T, now time.Time, ages ...time.Duration) []v1alpha1.MysqlBackup {
 	t.Helper()
@@ -238,48 +322,6 @@ func makeBackups(t *testing.T, now time.Time, ages ...time.Duration) []v1alpha1.
 		))
 	}
 	return out
-}
-
-func TestPruneSuccessful_CountWindow(t *testing.T) {
-	now := time.Now()
-	backups := makeBackups(t, now, 0, time.Hour, 2*time.Hour, 3*time.Hour, 4*time.Hour)
-	r, _ := newBackupReconciler(t, asClientObjects(backups)...)
-	if err := r.pruneSuccessful(context.Background(), backups, 2, 0, 0); err != nil {
-		t.Fatalf("pruneSuccessful: %v", err)
-	}
-	assertEqualSet(t, listBackupNames(t, r), []string{"b-a", "b-b"})
-}
-
-func TestPruneSuccessful_AgeWindow(t *testing.T) {
-	now := time.Now()
-	// b-a: 1h old, b-b: 2d old, b-c: 10d old
-	backups := makeBackups(t, now, time.Hour, 48*time.Hour, 240*time.Hour)
-	r, _ := newBackupReconciler(t, asClientObjects(backups)...)
-	if err := r.pruneSuccessful(context.Background(), backups, 0, 7*24*time.Hour, 0); err != nil {
-		t.Fatalf("pruneSuccessful: %v", err)
-	}
-	assertEqualSet(t, listBackupNames(t, r), []string{"b-a", "b-b"})
-}
-
-func TestPruneSuccessful_MinKeepFloor(t *testing.T) {
-	now := time.Now()
-	// All older than 1-day window, but minKeep=2 protects the two newest.
-	backups := makeBackups(t, now, 48*time.Hour, 72*time.Hour, 96*time.Hour, 120*time.Hour)
-	r, _ := newBackupReconciler(t, asClientObjects(backups)...)
-	if err := r.pruneSuccessful(context.Background(), backups, 0, 24*time.Hour, 2); err != nil {
-		t.Fatalf("pruneSuccessful: %v", err)
-	}
-	assertEqualSet(t, listBackupNames(t, r), []string{"b-a", "b-b"})
-}
-
-func TestPruneSuccessful_DisabledWhenBothZero(t *testing.T) {
-	now := time.Now()
-	backups := makeBackups(t, now, time.Hour, 2*time.Hour, 3*time.Hour)
-	r, _ := newBackupReconciler(t, asClientObjects(backups)...)
-	if err := r.pruneSuccessful(context.Background(), backups, 0, 0, 0); err != nil {
-		t.Fatalf("pruneSuccessful: %v", err)
-	}
-	assertEqualSet(t, listBackupNames(t, r), []string{"b-a", "b-b", "b-c"})
 }
 
 // --- pruneRetention on unlabelled CRs ---------------------------------------
@@ -303,8 +345,8 @@ func TestPruneRetention_WorksForUnlabelledAdHocBackups(t *testing.T) {
 	b1 := mk("adhoc-1", 0)
 	b2 := mk("adhoc-2", time.Hour)
 	b3 := mk("adhoc-3", 2*time.Hour)
-	fg := fgWithBackup() // profile "nightly-s3" has Retention=5 by default in fixture
-	fg.Spec.Backup.Profiles[0].Retention = 2
+	fg := fgWithBackup() // profile "nightly-s3" keeps 5 in the fixture
+	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 2}
 	r, _ := newBackupReconciler(t, fg, b1, b2, b3)
 
 	trigger := *b1

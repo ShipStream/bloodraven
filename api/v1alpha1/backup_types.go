@@ -334,20 +334,12 @@ type BackupProfile struct {
 	// +optional
 	Dump *DumpOptions `json:"dump,omitempty"`
 
-	// Retention is the legacy shorthand for count-based retention: the
-	// maximum number of successful MysqlBackup CRs to keep for this
-	// profile. 0 disables count-based pruning. If RetentionPolicy is
-	// set it fully overrides this field.
-	// +kubebuilder:default=7
-	// +kubebuilder:validation:Minimum=0
+	// Retention decides which of this profile's MysqlBackup objects are
+	// deleted after each terminal backup. Deleting a backup removes its
+	// artifacts. See BackupRetention.
+	// +kubebuilder:default={}
 	// +optional
-	Retention int32 `json:"retention,omitempty"`
-
-	// RetentionPolicy is the structured retention configuration. When
-	// set it replaces the shorthand Retention field and enables
-	// age-based pruning plus a min-keep safety floor.
-	// +optional
-	RetentionPolicy *RetentionPolicy `json:"retentionPolicy,omitempty"`
+	Retention BackupRetention `json:"retention,omitempty"`
 
 	// Verification, when set and Enabled=true, schedules periodic
 	// MysqlBackupVerification runs against the most recent Succeeded
@@ -462,45 +454,34 @@ type BackupDecryptionSpec struct {
 	PassphraseSecretKeyRef PassphraseSecretKeyRef `json:"passphraseSecretKeyRef"`
 }
 
-// RetentionPolicy is the structured retention configuration that replaces
-// the legacy single-int Retention shorthand on BackupProfile. All fields
-// are optional; a zero value disables the corresponding policy knob. The
-// reconciler keeps a successful MysqlBackup iff ANY of the enabled checks
-// say "keep":
-//
-//   - MinKeep: this many newest successes are always kept (safety floor).
-//   - Count: keep the newest Count successful CRs.
-//   - MaxAgeDays: keep successful CRs with completionTime newer than this.
-//
-// MinKeep is the critical knob: it prevents a retention sweep from wiping
-// the last good backup after a long outage in which every recent attempt
-// has failed.
-type RetentionPolicy struct {
-	// Count is the max number of successful CRs to keep. 0 disables
-	// count-based pruning.
-	// +kubebuilder:validation:Minimum=0
+// BackupRetention is a profile's retention. A successful backup is kept
+// when any rule keeps it: it is one of the newest KeepLast, or it
+// completed within KeepWithinDays. So a successful backup is deleted only
+// when it is outside KeepLast and older than KeepWithinDays. Failed
+// backups are counted separately, against KeepFailed. A backup that a
+// verification may be reading is kept until that run stops.
+type BackupRetention struct {
+	// KeepLast is how many of the newest successful backups are always
+	// kept. At least one is, so retention never deletes the last good
+	// backup.
+	// +kubebuilder:default=7
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	Count int32 `json:"count,omitempty"`
+	KeepLast int32 `json:"keepLast,omitempty"`
 
-	// MaxAgeDays is the maximum age (in days) of a successful CR before
-	// it becomes eligible for pruning. 0 disables age-based pruning.
-	// +kubebuilder:validation:Minimum=0
+	// KeepWithinDays also keeps every successful backup that completed
+	// within this many days, however many there are. Unset keeps by count
+	// only.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	MaxAgeDays int32 `json:"maxAgeDays,omitempty"`
+	KeepWithinDays *int32 `json:"keepWithinDays,omitempty"`
 
-	// MinKeep is a safety floor: this many newest successful CRs are
-	// always kept, regardless of Count / MaxAgeDays. Default: 1.
-	// +kubebuilder:default=1
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	MinKeep int32 `json:"minKeep,omitempty"`
-
-	// MaxFailedKeep caps the Failed bucket independently of the success
-	// retention policy. Default: 10.
+	// KeepFailed is how many of the newest failed backups are kept; 0
+	// keeps none.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	MaxFailedKeep int32 `json:"maxFailedKeep,omitempty"`
+	KeepFailed *int32 `json:"keepFailed,omitempty"`
 }
 
 // BackupStorageType enumerates the supported storage backends.

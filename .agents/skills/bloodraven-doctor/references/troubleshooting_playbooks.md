@@ -1075,7 +1075,7 @@ Do not:
 ## 36. Backup kept past retention, or deletion waiting on a verification
 
 ### Symptoms
-- A successful `MysqlBackup` outside its profile's `count`/`maxAgeDays` window is not pruned, with `RetentionDeferred` Events.
+- A successful `MysqlBackup` outside its profile's `retention.keepLast`/`keepWithinDays` windows is not pruned, with `RetentionDeferred` Events. Without `RetentionDeferred`, it is not a hold: see [playbook 43](#43-backups-or-verifications-kept-or-deleted-against-expectation-retention).
 - A deleted `MysqlBackup` stays Terminating with `ArtifactCleanup=False/HeldByVerification` and `ArtifactCleanupDeferred` Events.
 - A deleted `MysqlBackupVerification` stays Terminating.
 
@@ -1328,3 +1328,32 @@ A restore or verification fails with one of `PITRArchiveDivergentHistory`, `PITR
 - **Order conflict or inversion**: exclude the errant transaction the message names, or use a backup and an archive prefix that start after it. Do not edit binlogs.
 - **Reuse**: start a new archive prefix and take a full backup (playbook 41 when a reclone and failback caused it). Never delete or rename archived objects to force a plan.
 - After excluding transactions that are on the target history (for example a bad `UPDATE`), the result is not certified for them: check `pointInTime.onHistoryExclusions` and the Warning `PITROnHistoryTransactionsExcluded`, and inspect the affected rows.
+
+## 43. Backups or verifications kept or deleted against expectation (retention)
+
+### Symptoms
+- More successful `MysqlBackup` CRs (and artifacts) remain than the profile should keep, with no `RetentionDeferred` Events.
+- Failed `MysqlBackup` or `MysqlBackupVerification` CRs disappear as soon as they finish, or Succeeded verifications vanish right after their run.
+
+### How retention decides
+- It runs whenever a finished (`Succeeded` or `Failed`) backup or verification is reconciled, over the CRs of the same group and `spec.profileName` (labels are not used), skipping CRs already being deleted.
+- A successful backup is kept when **any** rule keeps it: it is one of the newest `spec.backup.profiles[].retention.keepLast` (default 7, at least 1, so the newest successful backup is never pruned), or it completed within `keepWithinDays` (unset: no age rule). It is deleted only outside both, and then only when no verification may be reading it (playbook 36).
+- Failed backups are capped by `keepFailed` (default 10), separately. An explicit `keepFailed: 0` keeps none: each failed backup is deleted right after it is recorded, and its leftovers go through artifact cleanup (playbook 35). That is configuration, not a fault.
+- Verifications use `verification.retention.keepLast` (default 30) for Succeeded and `keepFailed` (default 10) for Failed runs; `0` keeps none. They apply to hand-made verifications of the profile too.
+- A backup whose profile is no longer in the group keeps every successful CR (only the default failed cap applies): no rules, no deletion.
+- There is no "never prune" setting. Released manifests with `retention: 0` (or `retentionPolicy` with `count: 0` and `maxAgeDays: 0`) disabled pruning; that has no equivalent and must become an explicit `keepLast`.
+
+### Diagnostic steps
+1. Read the effective retention (defaults are stored, so what you see is what applies):
+   ```bash
+   kubectl get mfg <group> -n <ns> -o json | jq '.spec.backup.profiles[] | {name, retention, verificationRetention: .verification.retention}'
+   ```
+2. List the profile's backups newest first, with phase and deletion state:
+   ```bash
+   kubectl get mysqlbackups -n <ns> -o json | jq -r '.items[] | select(.spec.failoverGroupRef.name=="<group>" and .spec.profileName=="<profile>") | [.status.completionTime, .metadata.name, .status.phase, (.metadata.deletionTimestamp // "-")] | @tsv' | sort -r
+   ```
+3. A backup outside both windows that stays with no `RetentionDeferred` Event: check that a finished backup of the same profile has been reconciled since the profile changed (a new backup finishing is enough), and that the CR names the profile exactly. One that is Terminating is in artifact cleanup (playbook 35), not retention.
+
+### Safe remediation
+- Change `retention` on the profile; it applies the next time a finished backup or verification of that profile is reconciled. To keep failed runs for investigation, set `keepFailed` above 0 (or omit it for 10).
+- Do not delete a held backup by hand to enforce retention (playbook 36), and do not delete backups to free the PITR archive faster than retention would: the binlog cutoff follows the oldest successful backup still kept.

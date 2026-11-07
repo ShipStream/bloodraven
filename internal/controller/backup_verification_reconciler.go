@@ -30,13 +30,13 @@ import (
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
-// defaultVerificationKeepSuccessful / KeepFailures are the retention
-// caps applied when a profile's Verification.RetentionPolicy is not
-// set. Failed runs are kept separately because they're what operators
-// most want to investigate.
+// defaultVerificationKeepLast and defaultVerificationKeepFailed are the
+// CRD defaults of VerificationRetention, applied when a profile has no
+// verification block or leaves a field unset. Failed runs are kept
+// separately because they're what operators most want to investigate.
 const (
-	defaultVerificationKeepSuccessful = int32(30)
-	defaultVerificationKeepFailures   = int32(10)
+	defaultVerificationKeepLast   = int32(30)
+	defaultVerificationKeepFailed = int32(10)
 )
 
 // MysqlBackupVerificationReconciler reconciles MysqlBackupVerification CRs.
@@ -1015,42 +1015,44 @@ func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, 
 		filtered = append(filtered, it)
 	}
 
-	keepSuccess, keepFailure := r.resolveVerificationRetention(ctx, trigger)
-
-	if err := r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseSucceeded, int(keepSuccess)); err != nil {
-		return err
-	}
-	return r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseFailed, int(keepFailure))
-}
-
-// resolveVerificationRetention returns the effective (keepSuccessful,
-// keepFailures) counts for a trigger CR. The policy comes from the
-// profile's Verification.RetentionPolicy when set; otherwise the
-// package-level defaults apply.
-func (r *MysqlBackupVerificationReconciler) resolveVerificationRetention(ctx context.Context, trigger *v1alpha1.MysqlBackupVerification) (int32, int32) {
-	keepSuccess := defaultVerificationKeepSuccessful
-	keepFailure := defaultVerificationKeepFailures
+	var profile *v1alpha1.BackupProfile
 	var fg v1alpha1.MysqlFailoverGroup
 	if err := r.Get(ctx, types.NamespacedName{Namespace: trigger.Namespace, Name: trigger.Spec.FailoverGroupRef.Name}, &fg); err == nil {
-		if profile := findProfile(&fg, trigger.Spec.ProfileName); profile != nil && profile.Verification != nil && profile.Verification.RetentionPolicy != nil {
-			if profile.Verification.RetentionPolicy.KeepSuccessful > 0 {
-				keepSuccess = profile.Verification.RetentionPolicy.KeepSuccessful
-			}
-			if profile.Verification.RetentionPolicy.KeepFailures > 0 {
-				keepFailure = profile.Verification.RetentionPolicy.KeepFailures
-			}
-		}
+		profile = findProfile(&fg, trigger.Spec.ProfileName)
 	}
-	return keepSuccess, keepFailure
+	keepLast, keepFailed := resolveVerificationRetention(profile)
+
+	if err := r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseSucceeded, int(keepLast)); err != nil {
+		return err
+	}
+	return r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseFailed, int(keepFailed))
+}
+
+// resolveVerificationRetention returns the effective (keepLast,
+// keepFailed) counts for the verifications of profile: the profile's
+// verification.retention, with the defaults for a missing profile,
+// verification block or field. An explicit 0 is kept: it means keep none.
+func resolveVerificationRetention(profile *v1alpha1.BackupProfile) (keepLast, keepFailed int32) {
+	keepLast, keepFailed = defaultVerificationKeepLast, defaultVerificationKeepFailed
+	if profile == nil || profile.Verification == nil {
+		return keepLast, keepFailed
+	}
+	rt := profile.Verification.Retention
+	if rt.KeepLast != nil {
+		keepLast = max(*rt.KeepLast, 0)
+	}
+	if rt.KeepFailed != nil {
+		keepFailed = max(*rt.KeepFailed, 0)
+	}
+	return keepLast, keepFailed
 }
 
 // pruneVerificationsByPhase keeps the newest `keep` entries in the
-// given phase and deletes the rest. Entries without CompletionTime
-// sort last so an in-flight CR never gets swept.
+// given phase and deletes the rest; 0 keeps none. Only terminal phases
+// are passed, so an in-flight CR is never swept; entries without a
+// CompletionTime sort last.
 func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx context.Context, all []v1alpha1.MysqlBackupVerification, phase v1alpha1.VerificationPhase, keep int) error {
-	if keep <= 0 {
-		return nil
-	}
+	keep = max(keep, 0)
 	bucket := make([]v1alpha1.MysqlBackupVerification, 0, len(all))
 	for _, it := range all {
 		if it.Status.Phase == phase {
