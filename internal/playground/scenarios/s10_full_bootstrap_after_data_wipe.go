@@ -21,8 +21,9 @@ func init() {
 // scenario10FullBootstrapAfterDataWipe wipes the read-only site's PVC,
 // scales it back up, and asserts the operator drives the empty datadir
 // through the bootstrap state machine: Bootstrapping condition cycles
-// from `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done`,
-// and replication on the new replica reports IO+SQL threads running.
+// from `Cloning` → `WaitingForRestart` → `SetupReplication` (True) to
+// False/`NotBootstrapping`, and replication on the new replica reports
+// IO+SQL threads running.
 //
 // This exercises the fresh-deploy detection path that scenario 19's
 // reclone interlock skips: 19 manufactures divergence and rides the
@@ -41,7 +42,7 @@ func scenario10FullBootstrapAfterDataWipe() runner.Scenario {
 		Title: "Full bootstrap after replica data wipe",
 		Hypothesis: "Deleting the read-only site's PVC and scaling it back up triggers the operator's " +
 			"fresh-deploy bootstrap: Bootstrapping condition cycles Cloning → WaitingForRestart → " +
-			"SetupReplication → Done with replica replication threads ON at the end.",
+			"SetupReplication (True) → False/NotBootstrapping with replica replication threads ON at the end.",
 		Risk:              "high",
 		DocLink:           "playground/chaos-scenarios.md#10-full-bootstrap-after-data-wipe-clone-instance",
 		Timeout:           8 * time.Minute,
@@ -80,6 +81,7 @@ func s10InjectWipeReplicaPVC() runner.Step {
 			if err := ctxStash(ctx, env, "wipedSite", replica); err != nil {
 				return err
 			}
+			stashTime(env, "bootstrapRequested", time.Now())
 			// Open the operator log tailer BEFORE inject so the
 			// SinceTime filter covers bootstrap state transitions.
 			if _, err := env.Logs("operator"); err != nil {
@@ -132,34 +134,33 @@ func s10ObserveBootstrapStarted() runner.Step {
 	}
 }
 
-// s10ObserveBootstrapDone waits for the Bootstrapping condition to
-// settle at Status=False, Reason=Done. The operator emits this once
-// the clone, restart, and SetupReplication phases have all completed
-// and the replica has REPLICA threads running.
+// s10ObserveBootstrapDone waits for the clone into the wiped site to
+// finish: Bootstrapping settles at Status=False, Reason=NotBootstrapping
+// with a transition after the wipe, and the wiped site replicates. A
+// BootstrapFailed after the wipe fails the step at once.
 func s10ObserveBootstrapDone() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "Bootstrapping condition settles at Status=False Reason=Done",
+		Name:  "Bootstrapping condition settles at Status=False Reason=NotBootstrapping",
 		Do: func(ctx context.Context, env *runner.Env) error {
+			since, err := fetchTime(env, "bootstrapRequested")
+			if err != nil {
+				return err
+			}
+			replica := ctxFetch(env, "wipedSite")
 			// Bootstrap can take 60-180s in the playground depending on
 			// k3d storage speed and image-pull state.
 			waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				"Bootstrapping done",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
-					if c == nil {
-						return false, "no Bootstrapping condition yet", nil
+					if bootstrapFailed(c) && !c.LastTransitionTime.Time.Before(since.Truncate(time.Second)) {
+						return false, c.Message, fmt.Errorf("bootstrap failed: %s", c.Message)
 					}
-					msg := fmt.Sprintf("status=%s reason=%s message=%q", c.Status, c.Reason, c.Message)
-					if c.Reason == v1alpha1.ReasonFailed {
-						return false, msg, fmt.Errorf("bootstrap failed: %s", c.Message)
-					}
-					if c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonDone {
-						return true, msg, nil
-					}
-					return false, msg, nil
+					done, msg := bootstrapCompletedSince(mfg, since, replica)
+					return done, msg, nil
 				},
 			)
 			return err

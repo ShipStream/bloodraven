@@ -17,6 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
@@ -698,12 +699,12 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	noHealthyCount := 0
 	for len(rec.Events) > 0 {
 		ev := <-rec.Events
-		if strings.Contains(ev, "NoHealthySource") {
+		if strings.Contains(ev, v1alpha1.ReasonWaitingForHealthySource) {
 			noHealthyCount++
 		}
 	}
 	if noHealthyCount != 1 {
-		t.Fatalf("NoHealthySource warning events=%d, want exactly 1 on transition into Pending", noHealthyCount)
+		t.Fatalf("WaitingForHealthySource warning events=%d, want exactly 1 on transition into Pending", noHealthyCount)
 	}
 	var job batchv1.Job
 	if err := c.Get(context.Background(), types.NamespacedName{
@@ -785,6 +786,96 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 	}
 	if cond := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Fatalf("JobCreated condition=%v, want False after pre-launch deadline fail", cond)
+	}
+}
+
+// TestPendBackup_TimeoutNeverCarriesAPendingReason pins F-29: a backup
+// pending past maxBackupPendingDuration fails with a terminal reason, never
+// the reason it waited with. A wait for a source fails NoHealthySource;
+// every other wait fails PendingTimedOut and names the wait in the message.
+func TestPendBackup_TimeoutNeverCarriesAPendingReason(t *testing.T) {
+	pending := []string{
+		v1alpha1.ReasonPending,
+		v1alpha1.ReasonWaitingForHealthySource,
+		v1alpha1.ReasonBackupJobConflict,
+		v1alpha1.ReasonPITRArchiveRolloutPending,
+		v1alpha1.ReasonDumpKeySnapshotConflict,
+		v1alpha1.ReasonPassphraseSecretMissing,
+	}
+	for _, reason := range pending {
+		t.Run(reason, func(t *testing.T) {
+			mb := backupCR("timed-out", "lion", "nightly-s3")
+			mb.CreationTimestamp = metav1.NewTime(time.Now().Add(-(maxBackupPendingDuration + time.Minute)))
+			r, c := newBackupReconciler(t, fgWithBackup(), mb)
+			rec := record.NewFakeRecorder(20)
+			r.Recorder = rec
+			if _, err := r.pendBackup(context.Background(), mb, reason, "still waiting"); err != nil {
+				t.Fatal(err)
+			}
+			var got v1alpha1.MysqlBackup
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), &got); err != nil {
+				t.Fatal(err)
+			}
+			want := v1alpha1.ReasonPendingTimedOut
+			if reason == v1alpha1.ReasonWaitingForHealthySource {
+				want = v1alpha1.ReasonNoHealthySource
+			}
+			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			if got.Status.Phase != v1alpha1.BackupPhaseFailed || ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != want {
+				t.Fatalf("phase=%s Ready=%+v, want Failed with Ready=False/%s", got.Status.Phase, ready, want)
+			}
+			for _, p := range pending {
+				if ready.Reason == p {
+					t.Fatalf("a timed-out backup carries the pending reason %s", p)
+				}
+			}
+			if !strings.Contains(ready.Message, "pending for") || !strings.Contains(ready.Message, "still waiting") {
+				t.Fatalf("message %q, want the wait duration and the pending message", ready.Message)
+			}
+			if want == v1alpha1.ReasonPendingTimedOut && !strings.Contains(ready.Message, reason) {
+				t.Fatalf("message %q does not name the wait %s", ready.Message, reason)
+			}
+			if n := countEvents(rec, want); n != 1 {
+				t.Fatalf("%s events = %d, want 1", want, n)
+			}
+		})
+	}
+}
+
+// TestMysqlBackupReconciler_ReadyFromCreation pins A-70: a MysqlBackup has
+// Ready=False from its first reconcile (Pending, then the specific pending
+// reason or Running) and the condition's generation is the backup's.
+func TestMysqlBackupReconciler_ReadyFromCreation(t *testing.T) {
+	fg := fgWithBackup()
+	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+		ActiveSite: "iad",
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "iad", State: v1alpha1.SiteStateWritable},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		},
+	}
+	mb := backupCR("ready-from-creation", "lion", "nightly-s3")
+	mb.Generation = 3
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
+	var reasons []string
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if b, ok := obj.(*v1alpha1.MysqlBackup); ok && sub == "status" {
+				if ready := meta.FindStatusCondition(b.Status.Conditions, v1alpha1.ConditionReady); ready != nil {
+					if ready.Status != metav1.ConditionFalse || ready.ObservedGeneration != b.Generation {
+						t.Errorf("Ready=%+v at generation %d, want False stamped with the backup's generation", ready, b.Generation)
+					}
+					if len(reasons) == 0 || reasons[len(reasons)-1] != ready.Reason {
+						reasons = append(reasons, ready.Reason)
+					}
+				}
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	})
+	reconcileUntilStable(t, r, mb.Name)
+	if len(reasons) < 2 || reasons[0] != v1alpha1.ReasonPending || reasons[len(reasons)-1] != v1alpha1.ReasonRunning {
+		t.Fatalf("Ready reasons written %v, want Pending first and Running once the Job runs", reasons)
 	}
 }
 

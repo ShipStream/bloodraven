@@ -14,7 +14,7 @@ carry their own 100.
 ## 35 — The rows are evaluated in the operator's order, with the fence-first return above everything
 
 `evaluate_cross_site()` is a sequence of guarded early returns in the order fence-first, TotalLoss,
-SplitBrain, Failover, NoPrimary, Degraded, Healthy — not an unordered set of cases and not a lookup
+SplitBrain, Failover, NoPrimary, SiteUnhealthy, Healthy — not an unordered set of cases and not a lookup
 keyed on a state tuple.
 
 Full marks require all of:
@@ -29,7 +29,7 @@ Full marks require all of:
   read-only sites and zero unreachable.
 - Every alert string is verbatim, comma-space joins included.
 
-Deduct for any invented reason string outside the five the operator emits (`Healthy`, `Degraded`,
+Deduct for any invented reason string outside the five the operator emits (`Healthy`, `SiteUnhealthy`,
 `SplitBrain`, `NoPrimary`, `TotalLoss`) — a `Failover` reason in particular, which the docs promise
 and the code never emits.
 

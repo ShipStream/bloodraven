@@ -89,6 +89,16 @@ echo "Active Primary Site: ${ACTIVE_SITE:-Unknown}"
 if [[ -z "$LAST_FAILOVER" || "$LAST_FAILOVER" == " target=" ]]; then LAST_FAILOVER=""; fi
 echo "Last Failover:       ${LAST_FAILOVER:-None}"
 echo "Topology generation: ${TOPOLOGY_GENERATION:-unavailable}"
+# status.observedGeneration is the metadata.generation the topology manager
+# has applied; the topology conditions carry the same value. Lower than
+# metadata.generation means the last spec edit is not applied yet and those
+# conditions still describe the previous spec.
+SPEC_GENERATION=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.generation}' 2>/dev/null || true)
+OBSERVED_GENERATION=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+echo "Spec generation:     ${SPEC_GENERATION:-unavailable} (applied by the topology manager: ${OBSERVED_GENERATION:-none})"
+if [[ "$SPEC_GENERATION" =~ ^[0-9]+$ && "${OBSERVED_GENERATION:-0}" =~ ^[0-9]+$ && "${OBSERVED_GENERATION:-0}" -lt "$SPEC_GENERATION" ]]; then
+    echo "  The topology manager has not applied the latest spec yet; Ready, Degraded, Bootstrapping and Updating describe generation ${OBSERVED_GENERATION:-<none>}. Re-run in a few seconds; a gap that stays usually means no topology manager runs for this group (playbook 24)."
+fi
 RESTORE_STATUS=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restore.phase}{" reason="}{.status.restore.reason}{" job="}{.status.restore.jobName}{" message="}{.status.restore.message}' 2>/dev/null || true)
 if [[ -n "$RESTORE_STATUS" && "$RESTORE_STATUS" != " reason= job= message=" ]]; then
     echo "Restore status:      $RESTORE_STATUS"
@@ -266,6 +276,9 @@ DEGRADED=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESP
 echo "Degraded: ${DEGRADED:-unavailable}"
 if [[ "$DEGRADED" == *Initializing* ]]; then
     echo "  The operator just started and has not classified every PrimaryCandidate site yet; this is not an outage. Re-run in a few seconds; a site still unclassified after failureThreshold+recoveryThreshold probes is reported as NoPrimary instead."
+fi
+if [[ "$DEGRADED" == *BootstrapFailed* ]]; then
+    echo "  The last clone (bootstrap, reclone or auto-clone) failed and its target does not replicate; deployment leases are refused until it replicates or a new clone starts. Fix the cause in the message, then reclone it: see the BootstrapFailed row of the alert matrix."
 fi
 if [[ "$DEGRADED" == *DivergentTransactions* ]]; then
     echo "  A site holds transactions the primary lacks (replication may still be running). Ordered updates and planned failovers will not promote it: run gtid-audit.sh and see playbook 33."

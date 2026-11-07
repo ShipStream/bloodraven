@@ -358,6 +358,12 @@ func TestMysqlStandbyCluster_SuccessfulDiscovery(t *testing.T) {
 		t.Errorf("SourceConfigKnown: want True, got %v", skc)
 	}
 
+	// Ready summarises the two (A-70).
+	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionTrue ||
+		ready.Reason != v1alpha1.ReasonSourceDiscovered || ready.ObservedGeneration != updated.Generation {
+		t.Errorf("Ready: want True/SourceDiscovered at generation %d, got %v", updated.Generation, ready)
+	}
+
 	// status.discovered populated.
 	d := updated.Status.Discovered
 	if d == nil {
@@ -470,6 +476,10 @@ func TestMysqlStandbyCluster_ListError(t *testing.T) {
 	if skc == nil || skc.Status != metav1.ConditionFalse {
 		t.Errorf("SourceConfigKnown: want False, got %v", skc)
 	}
+	// Ready names BucketReadable's failure first.
+	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ListFailed" {
+		t.Errorf("Ready: want False/ListFailed, got %v", ready)
+	}
 	// Warning event emitted.
 	select {
 	case ev := <-recorder.Events:
@@ -503,6 +513,11 @@ func TestMysqlStandbyCluster_NoDumpFound(t *testing.T) {
 	}
 	if skc.Reason != "NoDumpFound" {
 		t.Errorf("Reason: want NoDumpFound, got %q", skc.Reason)
+	}
+	// Ready carries the first failing condition's reason.
+	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse ||
+		ready.Reason != v1alpha1.ReasonNoDumpFound || ready.Message != skc.Message {
+		t.Errorf("Ready: want False/NoDumpFound with SourceConfigKnown's message, got %v", ready)
 	}
 }
 

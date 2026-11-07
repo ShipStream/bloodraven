@@ -466,8 +466,8 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 	if cond == nil {
 		t.Fatal("Ready condition missing; it is part of the polling contract")
 	}
-	if cond.Status != metav1.ConditionFalse || cond.Reason != "GroupNotFound" {
-		t.Errorf("Ready = %s/%s, want False/GroupNotFound", cond.Status, cond.Reason)
+	if cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1.ReasonGroupNotYetCreated {
+		t.Errorf("Ready = %s/%s, want False/GroupNotYetCreated", cond.Status, cond.Reason)
 	}
 	if cond.ObservedGeneration != got.Generation {
 		t.Errorf("Ready condition observedGeneration = %d, want %d", cond.ObservedGeneration, got.Generation)

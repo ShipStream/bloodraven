@@ -18,12 +18,12 @@ Before any row is evaluated, one loop walks the observations and does three thin
   "type": "order",
   "title": "EvalCrossSite — put the rows in the order the code evaluates them",
   "items": [
-    "Fence-first early return — len(FenceSites) > 0 → Alert \"writable non-promotable site requires fencing (…)\", Reason \"Degraded\", return",
+    "Fence-first early return — len(FenceSites) > 0 → Alert \"writable non-promotable site requires fencing (…)\", Reason \"SiteUnhealthy\", return",
     "TotalLoss — len(unreachable) == coreCount → \"TOTAL LOSS: all sites are unreachable\", Reason \"TotalLoss\"",
     "SplitBrain — len(writable) > 1 → \"SPLIT BRAIN: N sites are writable (…)\", Reason \"SplitBrain\"",
-    "Failover — len(writable)==0 AND len(unreachable)>0 AND len(readOnly)>0 → PromotionCandidates set, Reason \"Degraded\", no Alert",
+    "Failover — len(writable)==0 AND len(unreachable)>0 AND len(readOnly)>0 → PromotionCandidates set, Reason \"SiteUnhealthy\", no Alert",
     "NoPrimary — len(writable)==0 and the three conjuncts did not hold → Reason \"NoPrimary\", alert only",
-    "Degraded (primary up, peer down) — exactly one writable AND len(unreachable) > 0 → \"<site> unreachable while <site> is primary\", Reason \"Degraded\"",
+    "SiteUnhealthy (primary up, peer down) — exactly one writable AND len(unreachable) > 0 → \"<site> unreachable while <site> is primary\", Reason \"SiteUnhealthy\"",
     "Healthy — exactly one writable, zero unreachable → Reason \"Healthy\""
   ]
 }
@@ -35,17 +35,17 @@ Three details inside that sequence earn their own sentence.
 
 **`NoPrimary` has two messages.** Exactly two read-only sites and zero unreachable gives `NO PRIMARY: both sites are read-only`. Everything else gives `NO PRIMARY: no writable site available`.
 
-**The one row that acts is the only row that sets no alert.** The failover branch fills `PromotionCandidates` and sets `Reason = "Degraded"` — it never assigns `action.Alert`. Every other non-healthy row sets one.
+**The one row that acts is the only row that sets no alert.** The failover branch fills `PromotionCandidates` and sets `Reason = "SiteUnhealthy"` — it never assigns `action.Alert`. Every other non-healthy row sets one.
 
 ## There is no `Failover` reason
 
 The single most expensive misreading of this function has nothing to do with which row fires. It is what the winning row *writes down*.
 
-The failover row sets `Reason = "Degraded"`. That string is written verbatim onto the `Degraded` condition in `status.conditions`, with `snap.Alert` as the message. There is **no `Failover` reason**, and there never was one — the topology that is one promotion away from recovery reports the same reason as every other unhealthy shape. So a Prometheus or `kubectl` rule matching a condition reason of `Failover` does not fire rarely. It fires **never**, silently, through every promotion you will ever do.
+The failover row sets `Reason = "SiteUnhealthy"`. That string is written verbatim onto the `Degraded` condition in `status.conditions`, with `snap.Alert` as the message. There is **no `Failover` reason**, and there never was one — the topology that is one promotion away from recovery reports the same reason as every other unhealthy shape. So a Prometheus or `kubectl` rule matching a condition reason of `Failover` does not fire rarely. It fires **never**, silently, through every promotion you will ever do.
 
 Exactly five reason strings reach `status.conditions`:
 
-`Healthy` · `Degraded` · `SplitBrain` · `NoPrimary` · `TotalLoss`
+`Healthy` · `SiteUnhealthy` · `SplitBrain` · `NoPrimary` · `TotalLoss`
 
 Write your rules against those, and read "a failover happened" off `bloodraven_failovers_total` — a counter, not a condition.
 
@@ -53,7 +53,7 @@ Write your rules against those, and read "a failover happened" off `bloodraven_f
 
 The published documentation renders this function as a handful of two-column rows. Summaries lose things, and it is worth naming what this one loses, because both omissions describe states `playground` really sits in.
 
-**There is no row for "the primary is fine and a peer is down."** That is the shape of the entire recovery window after a site failure: one writable, at least one unreachable, `Reason = "Degraded"`, with an alert naming the pair. It is a real branch of `EvalCrossSite`, and it belongs on any table you build for your own on-call.
+**There is no row for "the primary is fine and a peer is down."** That is the shape of the entire recovery window after a site failure: one writable, at least one unreachable, `Reason = "SiteUnhealthy"`, with an alert naming the pair. It is a real branch of `EvalCrossSite`, and it belongs on any table you build for your own on-call.
 
 **There is no row for the fence-first early return.** A summary that lists site states in columns structurally cannot express that one branch *preempts every branch below it*. Fence-first is not a case among cases; it is a `return`.
 
@@ -61,9 +61,9 @@ Take the habit rather than the grievance. The CRD is the contract, the code is t
 
 ## Worked: two states of `playground`
 
-**A — `iad` dies.** After 6 s of failed polls `iad` is `Unreachable`, `pdx` is `ReadOnly`, `reader` is `ReadOnly`. The loop: `reader` is excluded, so `coreCount = 2`. No writable non-candidate, so `FenceSites` is empty. Tallies: `writable = []`, `readOnly = [pdx]`, `unreachable = [iad]`. Row by row — fence-first declines (empty); `TotalLoss` declines (1 ≠ 2); `SplitBrain` declines (0 is not > 1); the failover row's three conjuncts all hold, so `PromotionCandidates = [pdx]` and `Reason = "Degraded"`, with no alert. The caller then runs `pickFreshestCandidate` over that list.
+**A — `iad` dies.** After 6 s of failed polls `iad` is `Unreachable`, `pdx` is `ReadOnly`, `reader` is `ReadOnly`. The loop: `reader` is excluded, so `coreCount = 2`. No writable non-candidate, so `FenceSites` is empty. Tallies: `writable = []`, `readOnly = [pdx]`, `unreachable = [iad]`. Row by row — fence-first declines (empty); `TotalLoss` declines (1 ≠ 2); `SplitBrain` declines (0 is not > 1); the failover row's three conjuncts all hold, so `PromotionCandidates = [pdx]` and `Reason = "SiteUnhealthy"`, with no alert. The caller then runs `pickFreshestCandidate` over that list.
 
-**B — `reader` turns writable.** Every `mysqld` starts with `read_only=ON`, so a restart alone no longer does this; a manual `SET GLOBAL read_only=OFF`, or a reader pod not yet rolled onto that flag mid-upgrade, does. Now `iad` is `Writable`, `pdx` is `ReadOnly`, `reader` is `Writable`. The loop: `reader` is not counted in `coreCount` (still 2), and because it is writable while non-candidate it goes to `FenceSites` and is skipped — it never joins the `writable` tally. So `writable = [iad]`. Fence-first fires: alert `writable non-promotable site requires fencing (reader)`, `Reason = "Degraded"`, return. Note what did *not* happen: two sites in the group were genuinely accepting writes, and the operator did **not** report split brain, because `len(writable) > 1` counts core sites only and the reader was already removed (objective 6).
+**B — `reader` turns writable.** Every `mysqld` starts with `read_only=ON`, so a restart alone no longer does this; a manual `SET GLOBAL read_only=OFF`, or a reader pod not yet rolled onto that flag mid-upgrade, does. Now `iad` is `Writable`, `pdx` is `ReadOnly`, `reader` is `Writable`. The loop: `reader` is not counted in `coreCount` (still 2), and because it is writable while non-candidate it goes to `FenceSites` and is skipped — it never joins the `writable` tally. So `writable = [iad]`. Fence-first fires: alert `writable non-promotable site requires fencing (reader)`, `Reason = "SiteUnhealthy"`, return. Note what did *not* happen: two sites in the group were genuinely accepting writes, and the operator did **not** report split brain, because `len(writable) > 1` counts core sites only and the reader was already removed (objective 6).
 
 ```widget
 {
@@ -76,11 +76,11 @@ Take the habit rather than the grievance. The CRD is the contract, the code is t
     },
     {
       "term": "iad writable, pdx unreachable",
-      "match": "Degraded (\"pdx unreachable while iad is primary\")"
+      "match": "SiteUnhealthy (\"pdx unreachable while iad is primary\")"
     },
     {
       "term": "iad unreachable, pdx read-only",
-      "match": "Degraded (promotion candidates set, no alert)"
+      "match": "SiteUnhealthy (promotion candidates set, no alert)"
     },
     {
       "term": "iad read-only, pdx read-only, none unreachable",
@@ -96,7 +96,7 @@ Take the habit rather than the grievance. The CRD is the contract, the code is t
     },
     {
       "term": "iad writable, reader writable",
-      "match": "Degraded (fence-first, reader fenced)"
+      "match": "SiteUnhealthy (fence-first, reader fenced)"
     }
   ]
 }
@@ -114,4 +114,4 @@ Before ranking, the picker drops any candidate whose data has gone backwards: an
 
 ## Handoff
 
-You can now read any set of site states for `playground` and name three things without running anything: the action, the alert string, and the `Reason` that lands in `status.conditions`. Example A said `Reason = "Degraded"` with `PromotionCandidates = [pdx]` — the table selected a failover. That is not the same as the operator performing one. Something between the table's verdict and the promotion can still refuse, and it keeps its own record of what it did last.
+You can now read any set of site states for `playground` and name three things without running anything: the action, the alert string, and the `Reason` that lands in `status.conditions`. Example A said `Reason = "SiteUnhealthy"` with `PromotionCandidates = [pdx]` — the table selected a failover. That is not the same as the operator performing one. Something between the table's verdict and the promotion can still refuse, and it keeps its own record of what it did last.

@@ -154,6 +154,25 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return recovery, nil
 	}
 
+	// Ready is False from the first reconcile: generic Pending until a
+	// launch attempt names a specific reason, Running once the Job runs.
+	if backup.Status.Phase == "" && apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionReady) == nil {
+		patch := client.MergeFrom(backup.DeepCopy())
+		backup.Status.Phase = v1alpha1.BackupPhasePending
+		backup.Status.ObservedGeneration = backup.Generation
+		setCondition(&backup.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: backup.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             v1alpha1.ReasonPending,
+			Message:            "waiting for the operator to select a source and launch the backup Job",
+		})
+		if err := r.Status().Patch(ctx, &backup, patch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("patch initial pending status: %w", err)
+		}
+	}
+
 	// Resolve the referenced failover group.
 	var fg v1alpha1.MysqlFailoverGroup
 	fgKey := types.NamespacedName{Namespace: backup.Namespace, Name: backup.Spec.FailoverGroupRef.Name}
@@ -229,7 +248,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if backup.Spec.SourceSite != "" {
 				return r.failBackup(ctx, &backup, v1alpha1.ReasonNoHealthySource, err.Error())
 			}
-			return r.pendBackup(ctx, &backup, v1alpha1.ReasonNoHealthySource, err.Error())
+			return r.pendBackup(ctx, &backup, v1alpha1.ReasonWaitingForHealthySource, err.Error())
 		}
 
 		// A read-only profile (D-10, Δ23: the initFromBackup archive
@@ -331,6 +350,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			Reason:             v1alpha1.ReasonCreated,
 			Message:            fmt.Sprintf("Job %s created", built.Name),
 		})
+		setBackupRunningReady(&backup, built.Name, now)
 		if err := r.Status().Patch(ctx, &backup, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("patch status after job create: %w", err)
 		}
@@ -468,19 +488,44 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // running Job pinned into a status that lost them. Only the backup's own
 // Job is trusted, and recorded values are never replaced.
 func (r *MysqlBackupReconciler) recoverBackupIdentity(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) error {
+	if !metav1.IsControlledBy(job, backup) {
+		return nil
+	}
 	uid, archiveID := backupJobIdentity(job)
-	if uid == "" || backup.Status.FailoverGroupUID != "" || !metav1.IsControlledBy(job, backup) {
+	recoverIdentity := uid != "" && backup.Status.FailoverGroupUID == ""
+	ready := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionReady)
+	recoverRunning := backup.Status.Phase != v1alpha1.BackupPhaseRunning || ready == nil || ready.Reason != v1alpha1.ReasonRunning
+	if !recoverIdentity && !recoverRunning {
 		return nil
 	}
 	patch := client.MergeFrom(backup.DeepCopy())
-	backup.Status.FailoverGroupUID, backup.Status.PITRArchiveID = uid, archiveID
+	if recoverIdentity {
+		backup.Status.FailoverGroupUID, backup.Status.PITRArchiveID = uid, archiveID
+	}
 	if backup.Status.JobName == "" {
 		backup.Status.JobName = job.Name
+	}
+	if recoverRunning {
+		backup.Status.Phase = v1alpha1.BackupPhaseRunning
+		setBackupRunningReady(backup, job.Name, metav1.Now())
 	}
 	if err := r.Status().Patch(ctx, backup, patch); err != nil {
 		return fmt.Errorf("patch backup identity recovered from job: %w", err)
 	}
 	return nil
+}
+
+// setBackupRunningReady sets Ready=False/Running for a backup whose Job
+// runs.
+func setBackupRunningReady(backup *v1alpha1.MysqlBackup, jobName string, now metav1.Time) {
+	setCondition(&backup.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: backup.Generation,
+		LastTransitionTime: now,
+		Reason:             v1alpha1.ReasonRunning,
+		Message:            fmt.Sprintf("backup Job %s is running", jobName),
+	})
 }
 
 // backupArtifactCompleted reports whether status records a completed
@@ -1343,6 +1388,7 @@ func clearPreLaunchJobStatus(backup *v1alpha1.MysqlBackup, now metav1.Time) {
 //
 // If the wait exceeds maxBackupPendingDuration the CR is failed terminally so
 // stalled backups do not accumulate while the schedule keeps creating new ones.
+// The failure never carries a pending reason (pendingTimeoutReason).
 // Callers only reach this path when no Job exists yet; clear any stale
 // Job-related status so Pending/Failed never advertises a Job that is gone.
 func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string) (ctrl.Result, error) {
@@ -1351,13 +1397,15 @@ func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1
 	// it stops occupying the schedule and becomes eligible for pruning.
 	if !backup.CreationTimestamp.IsZero() {
 		if age := now.Sub(backup.CreationTimestamp.Time); age > maxBackupPendingDuration {
-			return r.failBackupOpts(ctx, backup, reason,
-				fmt.Sprintf("%s (pending for %s)", message, age.Truncate(time.Second)),
-				true /*clearPreLaunchJob*/)
+			failReason, failMessage := pendingTimeoutReason(reason, message, age)
+			return r.failBackupOpts(ctx, backup, failReason, failMessage, true /*clearPreLaunchJob*/)
 		}
 	}
 
-	wasPending := backup.Status.Phase == v1alpha1.BackupPhasePending
+	// One Event per wait: on entering Pending or a different pending
+	// reason, not on every retry.
+	prev := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionReady)
+	wasPending := backup.Status.Phase == v1alpha1.BackupPhasePending && prev != nil && prev.Reason == reason
 	patch := client.MergeFrom(backup.DeepCopy())
 	backup.Status.Phase = v1alpha1.BackupPhasePending
 	backup.Status.CompletionTime = nil
@@ -1377,12 +1425,22 @@ func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1
 	if err := r.Status().Patch(ctx, backup, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch pending status: %w", err)
 	}
-	// Preserve the NoHealthySource signal operators used to get from failBackup,
-	// but only on the transition into Pending — not on every 15s retry.
 	if !wasPending {
 		r.Recorder.Eventf(backup, corev1.EventTypeWarning, reason, "%s", message)
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+// pendingTimeoutReason maps a pending reason to the terminal reason of a
+// backup that waited longer than maxBackupPendingDuration: a wait for a
+// healthy source fails NoHealthySource, any other PendingTimedOut with the
+// pending reason in the message.
+func pendingTimeoutReason(reason, message string, age time.Duration) (string, string) {
+	waited := age.Truncate(time.Second)
+	if reason == v1alpha1.ReasonWaitingForHealthySource {
+		return v1alpha1.ReasonNoHealthySource, fmt.Sprintf("%s (pending for %s)", message, waited)
+	}
+	return v1alpha1.ReasonPendingTimedOut, fmt.Sprintf("pending for %s (%s): %s", waited, reason, message)
 }
 
 // ensureDerivedCredsSecret creates or updates the per-backup Secret

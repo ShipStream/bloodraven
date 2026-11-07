@@ -268,7 +268,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.updateStrategy.type` | string |  | `"OrderedUpdate"` | enum: `OrderedUpdate`, `Recreate` |
 
 
-### MysqlFailoverGroup `status` (319 fields)
+### MysqlFailoverGroup `status` (320 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -343,6 +343,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.lastFailover.promotionGtidExecuted` | string |  |  |  |
 | `status.lastFailover.target` | string |  |  |  |
 | `status.lastFailover.time` | string (date-time) |  |  |  |
+| `status.observedGeneration` | integer (int64) |  |  | minimum=0 |
 | `status.pitr` | object |  |  |  |
 | `status.pitr.archive` | object |  |  |  |
 | `status.pitr.archive.archiveID` | string |  |  | pattern=`^(ar1-[a-z2-7]{26})?$` |
@@ -596,7 +597,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 - Scope: Namespaced; plural `mysqlbackups`; shortNames: none; categories: none
 - Versions: v1alpha1 (storage); subresources: status
-- Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Started (`.status.startTime`), Completed (`.status.completionTime`), Location (`.status.artifactStorage.location`), Size (`.status.size`), Age (`.metadata.creationTimestamp`)
+- Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Started (`.status.startTime`), Completed (`.status.completionTime`), Location (`.status.artifactStorage.location`), Size (`.status.size`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`
 - Root CEL: `!self.metadata.name.endsWith('.bloodraven-backup.json')`
 - Root CEL: `!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location) || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage == oldSelf.status.artifactStorage)`
@@ -652,7 +653,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 - Scope: Namespaced; plural `mysqlbackupverifications`; shortNames: none; categories: none
 - Versions: v1alpha1 (storage); subresources: status
-- Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Backup (`.status.backupRef.name`), Started (`.status.startTime`), Completed (`.status.completionTime`), Age (`.metadata.creationTimestamp`)
+- Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Backup (`.status.backupRef.name`), Started (`.status.startTime`), Completed (`.status.completionTime`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`
 
 ### MysqlBackupVerification `spec` (17 fields)
@@ -803,7 +804,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 - Scope: Namespaced; plural `mysqlstandbyclusters`; shortNames: `msc`, `mscs`; categories: bloodraven, mysql, dr
 - Versions: v1alpha1 (storage); subresources: status
-- Printer columns: Dump (`.status.discovered.latestDump.name`), NewestBinlog (`.status.discovered.binlogArchive.newestEventTime`), BucketReadable (`.status.conditions[?(@.type=="BucketReadable")].status`), SourceKnown (`.status.conditions[?(@.type=="SourceConfigKnown")].status`), Age (`.metadata.creationTimestamp`)
+- Printer columns: Dump (`.status.discovered.latestDump.name`), NewestBinlog (`.status.discovered.binlogArchive.newestEventTime`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`
 
 ### MysqlStandbyCluster `spec` (14 fields)

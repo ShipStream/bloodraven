@@ -662,6 +662,18 @@ type CredentialsSpec struct {
 
 // MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
 type MysqlFailoverGroupStatus struct {
+	// ObservedGeneration is the .metadata.generation the topology manager
+	// has applied: the generation its configuration was built from, or the
+	// newest generation an unchanged configuration was resynchronised
+	// against. The topology conditions (Ready, Degraded, Bootstrapping,
+	// Updating, RecoveryPending, DivergentPromotion) carry the same value.
+	// A condition another writer owns carries the generation that writer
+	// evaluated, and status.encryptionAtRest.observedGeneration is the
+	// encryption reconcile's own.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// ActiveSite is the name of the site currently acting as primary (writable).
 	// Durable: the topology manager restores it after a restart, before it
 	// has observed the sites. Lost beside a failover record, it makes the

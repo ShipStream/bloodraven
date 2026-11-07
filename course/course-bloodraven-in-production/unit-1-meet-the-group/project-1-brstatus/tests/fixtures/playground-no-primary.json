@@ -41,6 +41,7 @@
     ]
   },
   "status": {
+    "observedGeneration": 4,
     "activeSite": "",
     "sites": [
       {
@@ -83,7 +84,7 @@
         "status": "False",
         "observedGeneration": 4,
         "lastTransitionTime": "2026-08-12T09:14:32Z",
-        "reason": "TopologyPolled",
+        "reason": "NoWritablePrimary",
         "message": "No site is writable"
       },
       {

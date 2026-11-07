@@ -230,7 +230,8 @@ type EncryptionAtRestStatus struct {
 	Sites []SiteEncryptionStatus `json:"sites,omitempty"`
 
 	// ObservedGeneration is the CR generation the encryption subsystem
-	// last reconciled.
+	// last reconciled. It is the encryption reconcile's own and can lag or
+	// lead status.observedGeneration, the topology manager's.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }

@@ -223,8 +223,11 @@ the reason to do it consciously is that you are overriding a safety check, not c
 when it is killed after MySQL has already dropped the recipient’s data. So before it configures
 replication the operator reads the recipient’s <code>performance_schema.clone_status</code> and requires a new
 <code>Completed</code> row and a non-empty <code>GTID_EXECUTED</code>. Anything else fails the bootstrap — the
-<code>Bootstrapping</code> condition goes to reason <code>Failed</code> and the operator logs <code>bootstrap failed</code> — and the
-recipient is fenced again. Throughout the clone the recipient keeps <code>read_only=ON</code>; only
+<code>Bootstrapping</code> condition goes to <code>False/BootstrapFailed</code>, <code>Degraded</code> goes to <code>True/BootstrapFailed</code>,
+and the operator logs <code>bootstrap failed</code> — and the recipient is fenced again. <code>Bootstrapping</code> is <code>True</code>
+only while a clone runs, and <code>False/NotBootstrapping</code> both before any clone and after a successful one,
+so “the clone finished” means <code>False/NotBootstrapping</code> with a <code>lastTransitionTime</code> after you asked
+<em>and</em> the recipient’s <code>replication</code> reading <code>Healthy</code>. Throughout the clone the recipient keeps <code>read_only=ON</code>; only
 <code>super_read_only</code> is cleared, because <code>CLONE INSTANCE</code> refuses to run under it.</p>
 <h2 id="where-this-leaves-you">Where this leaves you</h2>
 <p>You can write a <code>MysqlFailoverGroup</code> into an empty namespace and say, for every line, which earlier

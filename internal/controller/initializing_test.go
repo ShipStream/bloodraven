@@ -136,8 +136,8 @@ func TestPoll_PendingWritableBlocksPromotionOverIt(t *testing.T) {
 
 			if !primaryDies {
 				pollN(tm, 2)
-				if tm.sites[0].state != state.StateWritable || snap.DegradedReason != "Degraded" {
-					t.Fatalf("dc1=%s reason=%q, want writable dc1 and Degraded for unreachable dc2", tm.sites[0].state, snap.DegradedReason)
+				if tm.sites[0].state != state.StateWritable || snap.DegradedReason != v1alpha1.ReasonSiteUnhealthy {
+					t.Fatalf("dc1=%s reason=%q, want writable dc1 and SiteUnhealthy for unreachable dc2", tm.sites[0].state, snap.DegradedReason)
 				}
 				if !isReadOnly(standby) {
 					t.Fatal("dc3 promoted alongside the confirmed primary")

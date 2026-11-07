@@ -92,7 +92,7 @@ Label sets are not uniform, which bites when you templatise. Site metrics carry 
 
 ## Two traps
 
-**A `Failover` condition reason does not exist.** The failover row of the decision matrix sets `Reason = "Degraded"`. The reason is one of exactly five strings: `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss`. Any rule or automation matching a reason of `Failover` sits green forever through every promotion you will ever do. Use `bloodraven_failovers_total` for "a failover happened" and the five real reasons from Units 1 and 2 for condition state.
+**A `Failover` condition reason does not exist.** The failover row of the decision matrix sets `Reason = "SiteUnhealthy"`. The reason is one of exactly five strings: `Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss`. Any rule or automation matching a reason of `Failover` sits green forever through every promotion you will ever do. Use `bloodraven_failovers_total` for "a failover happened" and the five real reasons from Units 1 and 2 for condition state.
 
 **No shipped alert fires for "the application is still broken after a successful failover."** `BloodravenFailoverOccurred` is informational and operator-scoped: it says the operator finished, not that traffic recovered. Everything from Unit 4 lives in that gap — the pool still handing out a connection to the demoted primary, the driver that needs `rejectReadOnly`, the JVM DNS cache that ignores your 60 s TTL. Bloodraven cannot see any of it, and the docs are explicit that you must alert on application write failures, pool exhaustion and repeated read-only errors yourself. That alert is yours, and it is the only one measuring your actual outage.
 

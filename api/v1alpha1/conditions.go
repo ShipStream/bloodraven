@@ -8,10 +8,33 @@ package v1alpha1
 // Condition types. Ready is shared by the kinds that have it; the
 // MysqlStandbyCluster types are the StandbyCondition constants.
 const (
-	// ConditionReady is the Ready condition type. On a MysqlDatabase,
-	// together with status.observedGeneration, it is the contract a caller
-	// polls instead of opening a MySQL connection, so treat both as API
-	// surface rather than as diagnostics.
+	// ConditionReady is the Ready condition type. Every kind has it. On a
+	// MysqlDatabase, together with status.observedGeneration, it is the
+	// contract a caller polls instead of opening a MySQL connection, so
+	// treat both as API surface rather than as diagnostics.
+	//
+	// MysqlFailoverGroup: True/Healthy when a site is writable and
+	// replication is healthy; False/NoWritablePrimary,
+	// False/ReplicationUnhealthy, or False/InitFromBackupInProgress or
+	// False/InitFromBackupFailed while the spec.initFromBackup restore has
+	// not succeeded; Unknown/Initializing until the sites are classified
+	// after an operator start.
+	//
+	// MysqlBackup: False from the first reconcile: Pending until a
+	// specific reason is known, the pending reason while the backup waits
+	// (WaitingForHealthySource, BackupJobConflict,
+	// PITRArchiveRolloutPending, DumpKeySnapshotConflict,
+	// PassphraseSecretMissing), Running while the Job runs; then
+	// True/Succeeded, or False with the failure reason. A wait longer than
+	// 30 minutes fails the backup with NoHealthySource (it waited for a
+	// source) or PendingTimedOut (any other wait, named in the message).
+	//
+	// MysqlBackupVerification: mirrors Verified once it is set, and is
+	// False/InProgress before.
+	//
+	// MysqlStandbyCluster: True/SourceDiscovered when BucketReadable and
+	// SourceConfigKnown are both True; otherwise False with the reason of
+	// the first of the two that is not.
 	ConditionReady = "Ready"
 )
 
@@ -25,9 +48,28 @@ const (
 	// False once an administrator has acknowledged the hold with the
 	// bloodraven.shipstream.io/acknowledge-planned-failover-hold=<runID>
 	// annotation. It is absent on a group that was never held.
+	//
+	// Its observedGeneration is the generation of the object the hold was
+	// read from and written to (the planned failover's terminal write, or
+	// the acknowledgement), not status.observedGeneration: the hold comes
+	// from durable run evidence, not from the configuration the topology
+	// manager applied.
 	ConditionAutomaticFailoverHeld = "AutomaticFailoverHeld"
-	ConditionBootstrapping         = "Bootstrapping"
-	ConditionDegraded              = "Degraded"
+	// ConditionBootstrapping is True only while a clone into a site runs,
+	// with the clone's phase as its reason (Cloning, WaitingForRestart,
+	// SetupReplication). Otherwise it is False/NotBootstrapping, or
+	// False/BootstrapFailed after the last clone failed; the failure also
+	// sets Degraded=True/BootstrapFailed until the site replicates or a
+	// new clone starts.
+	ConditionBootstrapping = "Bootstrapping"
+	// ConditionDegraded is False/Healthy, Unknown/Initializing, or True
+	// with the most important problem: a cross-site alert (SplitBrain,
+	// NoPrimary, TotalLoss, CrossSiteAlert), BootstrapFailed, a site that
+	// is not healthy (SiteUnhealthy), or a per-site replication problem
+	// (ReplicationBroken, ReplicationError, ReplicationLagging,
+	// ReplicationSourceMismatch), DivergentTransactions or
+	// RestoreReclonePending.
+	ConditionDegraded = "Degraded"
 	// ConditionDivergentPromotion records that a site holding transactions its
 	// former primary lacked was promoted. Set by the operator, removed only by
 	// an administrator.
@@ -56,7 +98,11 @@ const (
 	// instance-profile) credentials, so a Secret that relied on the fallback
 	// would otherwise surface only when the next scheduled Job fails.
 	ConditionS3CredentialsReady = "S3CredentialsReady"
-	ConditionUpdating           = "Updating"
+	// ConditionUpdating is True while an ordered update runs, with the
+	// update phase as its reason, and True/OrderedUpdateStalled while it is
+	// stopped on a site whose pod is not Ready; otherwise
+	// False/NotUpdating.
+	ConditionUpdating = "Updating"
 )
 
 // MysqlBackup condition types.
@@ -93,8 +139,8 @@ const (
 	// StandbyConditionSourceConfigKnown is True when the controller has
 	// resolved at least one full dump AND at least one binlog manifest
 	// under the configured prefix, and verified the source PITR archive's
-	// identity (descriptor and every manifest). The default `kubectl get` printcolumn
-	// surfaces this as the neutral `SourceKnown`.
+	// identity (descriptor and every manifest). The Ready condition, and
+	// its `kubectl get` column, summarise it with BucketReadable.
 	//
 	// Reasons:
 	//   - DumpFound (True): a dump and at least one binlog manifest exist,
@@ -149,7 +195,6 @@ const (
 const (
 	ReasonAccepted                 = "Accepted"
 	ReasonAdoptionRefused          = "AdoptionRefused"
-	ReasonAlert                    = "Alert"
 	ReasonAllSitesSealed           = "AllSitesSealed"
 	ReasonArchiveStoreInitFailed   = "ArchiveStoreInitFailed"
 	ReasonArchiverDisabled         = "ArchiverDisabled"
@@ -158,13 +203,13 @@ const (
 	ReasonAwaitingFirstPoll        = "AwaitingFirstPoll"
 	ReasonAwaitingRollout          = "AwaitingRollout"
 	ReasonBindingLimitReached      = "BindingLimitReached"
+	ReasonBootstrapFailed          = "BootstrapFailed"
 	ReasonCloning                  = "Cloning"
 	ReasonCredentialsComplete      = "CredentialsComplete"
 	ReasonCredentialsIncomplete    = "CredentialsIncomplete"
-	ReasonDegraded                 = "Degraded"
+	ReasonCrossSiteAlert           = "CrossSiteAlert"
 	ReasonDivergentSitePromoted    = "DivergentSitePromoted"
 	ReasonDivergentTransactions    = "DivergentTransactions"
-	ReasonDone                     = "Done"
 	ReasonEncryptionChangeRefused  = "EncryptionChangeRefused"
 	ReasonFailover                 = "Failover"
 	ReasonHealthy                  = "Healthy"
@@ -176,6 +221,7 @@ const (
 	ReasonKeyringNotSealed         = "KeyringNotSealed"
 	ReasonNoPrimary                = "NoPrimary"
 	ReasonNoRecoveryPending        = "NoRecoveryPending"
+	ReasonNoWritablePrimary        = "NoWritablePrimary"
 	ReasonNotBootstrapping         = "NotBootstrapping"
 	ReasonNotUpdating              = "NotUpdating"
 	// ReasonOrderedUpdateStalled is the Updating condition reason, and the
@@ -188,12 +234,13 @@ const (
 	ReasonReplicationError          = "ReplicationError"
 	ReasonReplicationLagging        = "ReplicationLagging"
 	ReasonReplicationSourceMismatch = "ReplicationSourceMismatch"
+	ReasonReplicationUnhealthy      = "ReplicationUnhealthy"
 	ReasonRestoreReclonePending     = "RestoreReclonePending"
 	ReasonSetupReplication          = "SetupReplication"
 	ReasonSidecarOutdated           = "SidecarOutdated"
 	ReasonSidecarUnreachable        = "SidecarUnreachable"
+	ReasonSiteUnhealthy             = "SiteUnhealthy"
 	ReasonSplitBrain                = "SplitBrain"
-	ReasonTopologyPolled            = "TopologyPolled"
 	ReasonTotalLoss                 = "TotalLoss"
 	ReasonUpdateOldPrimary          = "UpdateOldPrimary"
 	ReasonUpdateReplica             = "UpdateReplica"
@@ -225,10 +272,24 @@ const (
 	ReasonOrphanDeletion            = "OrphanDeletion"
 	ReasonPITRArchiveRolloutPending = "PITRArchiveRolloutPending"
 	ReasonPassphraseSecretMissing   = "PassphraseSecretMissing"
-	ReasonProducerStopStuck         = "ProducerStopStuck"
-	ReasonProfileReadOnly           = "ProfileReadOnly"
-	ReasonSentinelMissing           = "SentinelMissing"
-	ReasonSentinelUnavailable       = "SentinelUnavailable"
+	// ReasonPending is the generic Ready=False reason of a MysqlBackup
+	// before its first launch attempt names a specific one.
+	ReasonPending = "Pending"
+	// ReasonPendingTimedOut fails a MysqlBackup that waited longer than 30
+	// minutes for anything but a healthy source; the message names the
+	// wait.
+	ReasonPendingTimedOut   = "PendingTimedOut"
+	ReasonProducerStopStuck = "ProducerStopStuck"
+	ReasonProfileReadOnly   = "ProfileReadOnly"
+	// ReasonRunning is the Ready=False reason of a MysqlBackup whose Job
+	// runs.
+	ReasonRunning             = "Running"
+	ReasonSentinelMissing     = "SentinelMissing"
+	ReasonSentinelUnavailable = "SentinelUnavailable"
+	// ReasonWaitingForHealthySource keeps a MysqlBackup Pending while no
+	// site qualifies as its source. Past 30 minutes the backup fails with
+	// NoHealthySource.
+	ReasonWaitingForHealthySource = "WaitingForHealthySource"
 )
 
 // MysqlBackupVerification condition reasons.
@@ -236,18 +297,22 @@ const (
 	ReasonBackupNotAvailable          = "BackupNotAvailable"
 	ReasonBlockedByActiveVerification = "BlockedByActiveVerification"
 	ReasonCleanedUp                   = "CleanedUp"
+	ReasonInProgress                  = "InProgress"
 	ReasonSanityCheckFailed           = "SanityCheckFailed"
 	ReasonSanityCheckTimeout          = "SanityCheckTimeout"
 )
 
 // MysqlDatabase condition reasons.
 const (
-	ReasonApplying                  = "Applying"
-	ReasonDatabaseNameConflict      = "DatabaseNameConflict"
-	ReasonDatabasePreExists         = "DatabasePreExists"
-	ReasonDatabaseReconciled        = "DatabaseReconciled"
-	ReasonDeleting                  = "Deleting"
-	ReasonGrantUserMissing          = "GrantUserMissing"
+	ReasonApplying             = "Applying"
+	ReasonDatabaseNameConflict = "DatabaseNameConflict"
+	ReasonDatabasePreExists    = "DatabasePreExists"
+	ReasonDatabaseReconciled   = "DatabaseReconciled"
+	ReasonDeleting             = "Deleting"
+	ReasonGrantUserMissing     = "GrantUserMissing"
+	// ReasonGroupNotYetCreated keeps a MysqlDatabase Pending until its
+	// MysqlFailoverGroup exists.
+	ReasonGroupNotYetCreated        = "GroupNotYetCreated"
 	ReasonGroupSecretMissing        = "GroupSecretMissing"
 	ReasonGroupTerminating          = "GroupTerminating"
 	ReasonInvalidSpec               = "InvalidSpec"
@@ -289,14 +354,15 @@ const (
 	ReasonNoBinlogManifests       = "NoBinlogManifests"
 	ReasonNoDumpFound             = "NoDumpFound"
 	ReasonScanIncomplete          = "ScanIncomplete"
+	ReasonSourceDiscovered        = "SourceDiscovered"
 )
 
 // Condition reasons used by more than one kind.
 const (
 	ReasonBackupIdentityMismatch = "BackupIdentityMismatch" // MysqlBackupVerification, MysqlStandbyCluster
 	ReasonBuildJobFailed         = "BuildJobFailed"         // MysqlBackup, MysqlBackupVerification
-	ReasonFailed                 = "Failed"                 // MysqlFailoverGroup, MysqlBackup, MysqlBackupVerification
-	ReasonGroupNotFound          = "GroupNotFound"          // MysqlBackup, MysqlBackupVerification, MysqlDatabase
+	ReasonFailed                 = "Failed"                 // MysqlBackup, MysqlBackupVerification
+	ReasonGroupNotFound          = "GroupNotFound"          // MysqlBackup, MysqlBackupVerification
 	ReasonProfileNotFound        = "ProfileNotFound"        // MysqlBackup, MysqlBackupVerification
 	ReasonSucceeded              = "Succeeded"              // MysqlBackup, MysqlBackupVerification
 )
@@ -399,16 +465,25 @@ const (
 	UnstableReasonDeploymentRevocationPending = "DeploymentRevocationPending"
 	UnstableReasonInitializing                = ReasonInitializing
 	UnstableReasonNoPrimary                   = ReasonNoPrimary
-	UnstableReasonPlannedFailover             = "PlannedFailover"
-	UnstableReasonOrderedUpdate               = "OrderedUpdate"
-	UnstableReasonRestore                     = "Restore"
-	UnstableReasonDragonflyUpgrade            = "DragonflyUpgrade"
-	UnstableReasonRestoreInPlace              = "RestoreInPlace"
-	UnstableReasonNotReady                    = "NotReady"
-	UnstableReasonSiteNotObserved             = "SiteNotObserved"
-	UnstableReasonSiteNotReady                = "SiteNotReady"
-	UnstableReasonRestoreReclonePending       = ReasonRestoreReclonePending
-	UnstableReasonReplicationNotRunning       = "ReplicationNotRunning"
+	// UnstableReasonPlannedFailover: a planned failover run is in flight,
+	// or the operator holds its claim (including a provisional grant
+	// status does not show yet).
+	UnstableReasonPlannedFailover = "PlannedFailover"
+	// UnstableReasonAutomaticFailoverHeld: a planned failover ended
+	// ManualRecoveryRequired and its automation hold stands until it is
+	// acknowledged (status.plannedFailoverHold, a True
+	// AutomaticFailoverHeld condition, a ManualRecoveryRequired terminal
+	// marker, or the hold the operator loaded from one of them).
+	UnstableReasonAutomaticFailoverHeld = ConditionAutomaticFailoverHeld
+	UnstableReasonOrderedUpdate         = "OrderedUpdate"
+	UnstableReasonRestore               = "Restore"
+	UnstableReasonDragonflyUpgrade      = "DragonflyUpgrade"
+	UnstableReasonRestoreInPlace        = "RestoreInPlace"
+	UnstableReasonNotReady              = "NotReady"
+	UnstableReasonSiteNotObserved       = "SiteNotObserved"
+	UnstableReasonSiteNotReady          = "SiteNotReady"
+	UnstableReasonRestoreReclonePending = ReasonRestoreReclonePending
+	UnstableReasonReplicationNotRunning = "ReplicationNotRunning"
 
 	// The Dragonfly subsystem is in a phase other than Disabled or Ready:
 	// "Dragonfly" followed by the DragonflyPhase.

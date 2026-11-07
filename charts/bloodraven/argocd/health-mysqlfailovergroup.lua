@@ -6,11 +6,21 @@ if obj.status == nil or obj.status.conditions == nil then
   return hs
 end
 
+-- status.observedGeneration is the generation the topology manager has
+-- applied; every topology condition carries the same value.
+if obj.metadata.generation ~= nil then
+  if obj.status.observedGeneration == nil or obj.status.observedGeneration < obj.metadata.generation then
+    hs.message = "Controller processing updated spec"
+    return hs
+  end
+end
+
 local degraded = nil
 local ready = nil
 local bootstrapping = nil
 local updating = nil
 local recoveryPending = nil
+local held = nil
 
 for _, c in ipairs(obj.status.conditions) do
   if c.type == "Degraded" then
@@ -23,17 +33,20 @@ for _, c in ipairs(obj.status.conditions) do
     updating = c
   elseif c.type == "RecoveryPending" then
     recoveryPending = c
+  elseif c.type == "AutomaticFailoverHeld" then
+    held = c
   end
 end
 
-if ready ~= nil and ready.observedGeneration ~= nil and obj.metadata.generation ~= nil then
-  if ready.observedGeneration < obj.metadata.generation then
-    hs.status = "Progressing"
-    hs.message = "Controller processing updated spec"
-    return hs
-  end
+-- A standing planned-failover automation hold needs an administrator:
+-- automatic failover stays held until it is acknowledged.
+if held ~= nil and held.status == "True" then
+  hs.status = "Degraded"
+  hs.message = "AutomaticFailoverHeld: " .. (held.message or "Automatic failover is held")
+  return hs
 end
 
+-- Degraded covers a failed clone too (reason BootstrapFailed).
 if degraded ~= nil and degraded.status == "True" then
   hs.status = "Degraded"
   hs.message = (degraded.reason or "Degraded") .. ": " .. (degraded.message or "")
@@ -46,20 +59,16 @@ if recoveryPending ~= nil and recoveryPending.status == "True" then
   return hs
 end
 
-if bootstrapping ~= nil and bootstrapping.status == "True" then
-  if bootstrapping.reason == "Failed" then
-    hs.status = "Degraded"
-    hs.message = "Bootstrapping: " .. (bootstrapping.message or "Bootstrap failed")
-  else
-    hs.status = "Progressing"
-    hs.message = bootstrapping.message or "Bootstrapping"
-  end
+if updating ~= nil and updating.status == "True" and updating.reason == "OrderedUpdateStalled" then
+  hs.status = "Degraded"
+  hs.message = "OrderedUpdateStalled: " .. (updating.message or "Ordered update stalled")
   return hs
 end
 
-if updating ~= nil and updating.status == "False" and updating.reason == "OrderedUpdateStalled" then
-  hs.status = "Degraded"
-  hs.message = "OrderedUpdateStalled: " .. (updating.message or "Ordered update stalled")
+-- Bootstrapping is True only while a clone runs.
+if bootstrapping ~= nil and bootstrapping.status == "True" then
+  hs.status = "Progressing"
+  hs.message = bootstrapping.message or "Bootstrapping"
   return hs
 end
 

@@ -45,7 +45,7 @@ There are exactly five, they come straight from `EvalCrossSite`, and **`Failover
 | Reason | The topology it describes |
 |---|---|
 | `Healthy` | Exactly one core site writable, none unreachable. `Degraded` is `False`. |
-| `Degraded` | Everything else that is not one of the three below — including *the promotion is about to happen* and *a writable non-promotable site needs fencing*. |
+| `SiteUnhealthy` | Everything else that is not one of the three below — including *the promotion is about to happen* and *a writable non-promotable site needs fencing*. |
 | `SplitBrain` | More than one **core** site writable. Readers are excluded from the tally. |
 | `NoPrimary` | No core site writable and none unreachable. Will not self-heal; the matrix refuses to auto-elect. |
 | `TotalLoss` | Every core site unreachable. |

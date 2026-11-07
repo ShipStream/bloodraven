@@ -112,7 +112,7 @@ def evaluate_cross_site(observations: list[Observation], site_priorities: list[s
 
       1. fence-first — ``fenceSites`` non-empty:
          alert ``writable non-promotable site requires fencing (<sites>)``
-         (comma-space joined), reason ``Degraded``.
+         (comma-space joined), reason ``SiteUnhealthy``.
       2. TotalLoss — ``len(unreachable) == coreCount``:
          alert ``TOTAL LOSS: all sites are unreachable``, reason ``TotalLoss``.
       3. SplitBrain — ``len(writable) > 1``: ``splitBrain`` True,
@@ -120,14 +120,14 @@ def evaluate_cross_site(observations: list[Observation], site_priorities: list[s
          reason ``SplitBrain``.
       4. Failover — ``len(writable) == 0`` and ``len(unreachable) > 0`` and
          ``len(readOnly) > 0`` and ranking yields at least one candidate:
-         set ``promotionCandidates``, reason ``Degraded``, **no alert**.
+         set ``promotionCandidates``, reason ``SiteUnhealthy``, **no alert**.
       5. NoPrimary — still no writable site: reason ``NoPrimary``, alert
          ``NO PRIMARY: both sites are read-only`` when exactly two read-only
          sites and zero unreachable, otherwise
          ``NO PRIMARY: no writable site available``.
-      6. Degraded — exactly one writable and at least one unreachable:
+      6. SiteUnhealthy — exactly one writable and at least one unreachable:
          alert ``<unreachable sites> unreachable while <writable site> is primary``,
-         reason ``Degraded``.
+         reason ``SiteUnhealthy``.
       7. Healthy — reason ``Healthy``, no alert.
 
     Use rank_promotion_candidates() for row 4; it is already written.

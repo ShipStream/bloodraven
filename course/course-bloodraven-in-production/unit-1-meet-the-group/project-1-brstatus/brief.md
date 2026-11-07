@@ -70,7 +70,7 @@ For **every other role**, `healthy=yes` as soon as `state` is `Writable` or `Rea
 lag gate on those sites at all. That asymmetry is real and it is the point of this project.
 
 **TODO C — `verdict`.** Return `(word, exit_code)` from the table above. Read the `Degraded`
-condition the operator already wrote — its `reason` is one of `Healthy`, `Degraded`, `SplitBrain`,
+condition the operator already wrote — its `reason` is one of `Healthy`, `SiteUnhealthy`, `SplitBrain`,
 `NoPrimary`, `TotalLoss`, or a replication reason such as `ReplicationLagging`. Do not re-derive
 group health from the site rows.
 

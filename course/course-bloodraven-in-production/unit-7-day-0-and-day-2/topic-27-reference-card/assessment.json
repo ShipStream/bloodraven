@@ -12,7 +12,7 @@
     },
     {
       "front": "The five condition reasons",
-      "back": "`Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss`. There is no `Failover` reason — a rule matching one never fires.",
+      "back": "`Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss`. There is no `Failover` reason — a rule matching one never fires.",
       "orderIndex": 2
     },
     {

@@ -186,6 +186,12 @@ func (r *TopologyManagerRunner) PlannedClaimHeld(nn types.NamespacedName) bool {
 	return r.PlannedTopology().PlannedClaimHeld(nn)
 }
 
+// PlannedHoldHeld reports whether nn's claim slot holds an automation hold.
+func (r *TopologyManagerRunner) PlannedHoldHeld(nn types.NamespacedName) bool {
+	_, held := r.PlannedTopology().HeldHoldClaim(nn)
+	return held
+}
+
 // SetDragonflyUpgradePaused sets the Dragonfly manager's upgrade pause
 // source; false when no Dragonfly manager runs for nn.
 func (r *TopologyManagerRunner) SetDragonflyUpgradePaused(nn types.NamespacedName, paused bool) bool {
@@ -608,6 +614,14 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
+			// The running manager is now current for this generation: an
+			// edit outside the topology configuration (a backup schedule,
+			// a pod label) was applied by the setters above or is owned by
+			// another reconciler. Unreadable connection material keeps the
+			// old credentials, so that generation is not applied yet.
+			if materialErr == nil {
+				existing.tm.SetAppliedGeneration(fg.Generation)
+			}
 			continue
 		}
 
@@ -1022,6 +1036,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	updateCtl := NewUpdateController(failoverCtl, r.logger.With("fg", nn.String()))
 	tm := NewTopologyManager(cfg, siteMySQL, failoverCtl, updateCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))
+	tm.SetAppliedGeneration(fg.Generation)
 
 	// Encryption-at-rest clone gate: a CLONE INSTANCE recipient needs a
 	// writable keyring to rewrap the donor's tablespace keys, so the
@@ -1124,7 +1139,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// ReplicationBroken, Updating, ...) are not clobbered by a partially
 	// populated snapshot from the async bootstrap goroutine.
 	tm.BootstrapStatusCallback = func(phase, errMsg, source string) {
-		r.updateBootstrappingCondition(ctx, nn, phase, errMsg, source)
+		r.updateBootstrappingCondition(ctx, nn, tm.AppliedGeneration(), phase, errMsg, source)
 	}
 	tm.RecloneCompleteCallback = func(completeCtx context.Context, site string, outcome RecloneOutcome) error {
 		// Record the outcome on the restore queue first: once the
@@ -1790,17 +1805,19 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			s.SourceConvergenceState == sourceConvergenceConverged
 	}
 
-	// Update conditions using freshFG.Generation so ObservedGeneration reflects
-	// the generation of the object we are actually writing against.
+	// The topology conditions are stamped with the generation the manager
+	// applied (snap.AppliedGeneration), not the fetched object's: a spec
+	// edit the manager has not taken up yet must not read as observed.
+	gen := snap.AppliedGeneration
 	now := metav1.Now()
 	reason := degradedReason(snap)
 	readyStatus := conditionBool(hasWritable && replicationHealthy)
-	readyReason := v1alpha1.ReasonTopologyPolled
+	readyReason := v1alpha1.ReasonHealthy
 	readyMessage := "At least one site is writable and replication is healthy"
 	if !hasWritable {
-		readyMessage = "No site is writable"
+		readyReason, readyMessage = v1alpha1.ReasonNoWritablePrimary, "No site is writable"
 	} else if !replicationHealthy {
-		readyMessage = "Replication is not healthy"
+		readyReason, readyMessage = v1alpha1.ReasonReplicationUnhealthy, "Replication is not healthy"
 		if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 {
 			readyMessage = fmt.Sprintf("Replication is not healthy; %s await their post-restore reclone with replication stopped",
 				strings.Join(q.Pending, ", "))
@@ -1808,19 +1825,21 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 	degradedStatus, degradedMessage := metav1.ConditionTrue, snap.Alert
 	switch reason {
-	case "Healthy":
+	case v1alpha1.ReasonHealthy:
 		degradedStatus, degradedMessage = metav1.ConditionFalse, "No cross-site alerts"
-	case "Initializing":
+	case v1alpha1.ReasonInitializing:
 		// Neither is known yet. Unknown keeps Ready=False and Degraded=True
 		// consumers from reading every operator start as an outage.
-		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, reason, initializingMessage(snap)
+		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, v1alpha1.ReasonInitializing, initializingMessage(snap)
 		degradedStatus, degradedMessage = metav1.ConditionUnknown, readyMessage
+	case v1alpha1.ReasonBootstrapFailed:
+		degradedMessage = bootstrapFailedMessage(snap, nn.Name)
 	}
 	// A group whose initFromBackup restore has not succeeded is not ready
 	// for applications whatever its topology: the operator keeps them off
 	// it (no DNS record, no Service endpoints). Ready says why and, after a
 	// failed load, how to recover. Initializing keeps its Unknown.
-	if reason != "Initializing" {
+	if reason != v1alpha1.ReasonInitializing {
 		if restoreReason, restoreMessage := initRestoreReadyCondition(&freshFG); restoreReason != "" {
 			readyStatus, readyReason, readyMessage = metav1.ConditionFalse, restoreReason, restoreMessage
 		}
@@ -1828,7 +1847,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionReady,
 		Status:             readyStatus,
-		ObservedGeneration: freshFG.Generation,
+		ObservedGeneration: gen,
 		LastTransitionTime: now,
 		Reason:             readyReason,
 		Message:            readyMessage,
@@ -1836,7 +1855,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionDegraded,
 		Status:             degradedStatus,
-		ObservedGeneration: freshFG.Generation,
+		ObservedGeneration: gen,
 		LastTransitionTime: now,
 		Reason:             reason,
 		Message:            degradedMessage,
@@ -1859,10 +1878,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// Pending/ProbeFailed, and skipping here would suppress the Degraded
 		// condition. Only read-only followers carry convergence state — the
 		// writable primary is excluded.
-		if reason == "Healthy" && s.State == state.StateReadOnly && s.SourceConvergenceState != sourceConvergenceConverged {
+		if reason == v1alpha1.ReasonHealthy && s.State == state.StateReadOnly && s.SourceConvergenceState != sourceConvergenceConverged {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				ObservedGeneration: gen, LastTransitionTime: now,
 				Reason:  v1alpha1.ReasonReplicationSourceMismatch,
 				Message: fmt.Sprintf("Replication source on %s is not the active primary", s.Name),
 			})
@@ -1872,11 +1891,17 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			continue
 		}
 		siteName := s.Name
+		if reason == v1alpha1.ReasonBootstrapFailed {
+			// The failed clone outranks the per-site replication
+			// reasons: the site needs another clone, not a replication
+			// fix, and the reason must hold until it gets one.
+			continue
+		}
 		if !repl.IORunning || !repl.SQLRunning {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation,
+				ObservedGeneration: gen,
 				LastTransitionTime: now,
 				Reason:             v1alpha1.ReasonReplicationBroken,
 				Message:            fmt.Sprintf("Replication IO/SQL thread not running on %s", siteName),
@@ -1888,7 +1913,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation,
+				ObservedGeneration: gen,
 				LastTransitionTime: now,
 				Reason:             v1alpha1.ReasonReplicationLagging,
 				Message:            fmt.Sprintf("Replication lag on %s is %ds (threshold %ds)", siteName, *repl.SecondsBehindSource, maxLagSeconds),
@@ -1898,7 +1923,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation,
+				ObservedGeneration: gen,
 				LastTransitionTime: now,
 				Reason:             v1alpha1.ReasonReplicationError,
 				Message:            fmt.Sprintf("Replication error on %s: %s", siteName, repl.LastError),
@@ -1914,11 +1939,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// persisted status, not a topology observation, so it is known before
 	// the topology is classified, and True keeps the deployment API
 	// refusing leases while peers are held.
-	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == "Healthy" || reason == "Initializing") {
+	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonInitializing) {
 		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, v1alpha1.ConditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				ObservedGeneration: gen, LastTransitionTime: now,
 				Reason: v1alpha1.ReasonRestoreReclonePending,
 				Message: fmt.Sprintf("%s await their post-restore reclone (status.restoreReclones phase %s); their replication is stopped until then",
 					strings.Join(q.Pending, ", "), q.Phase),
@@ -1932,11 +1957,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// (split brain, no primary, total loss) still win; Initializing is not
 	// an alert and does not. Ready is untouched: the group serves, and Ready
 	// gates application rollouts.
-	if reason == "Healthy" || reason == "Initializing" {
+	if reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonInitializing {
 		if msg := divergenceDegradedMessage(snap); msg != "" {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				ObservedGeneration: gen, LastTransitionTime: now,
 				Reason:  v1alpha1.ReasonDivergentTransactions,
 				Message: msg,
 			})
@@ -1959,7 +1984,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			}
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.ConditionDivergentPromotion, Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				ObservedGeneration: gen, LastTransitionTime: now,
 				Reason:  v1alpha1.ReasonDivergentSitePromoted,
 				Message: combined,
 			})
@@ -1967,23 +1992,24 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Bootstrapping condition reflects fresh-deploy bootstrap progress.
-	setBootstrappingCondition(&freshFG.Status.Conditions, freshFG.Generation, now, snap.BootstrapPhase, snap.BootstrapError, snap.BootstrapSource)
+	setBootstrappingCondition(&freshFG.Status.Conditions, gen, now, BootstrapPhase(snap.BootstrapPhase), snap.BootstrapError, snap.BootstrapSource)
 
 	// Update phase tracking (status.updatePhase itself is merged above).
 	if snap.UpdatePhase != "" {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionUpdating,
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
 			Reason:             string(snap.UpdatePhase),
 			Message:            fmt.Sprintf("Ordered update in progress: %s", snap.UpdatePhase),
 		})
 	} else if snap.UpdateStalled != "" {
+		// Still updating: the update resumes once the pod is Ready.
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionUpdating,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshFG.Generation,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
 			Reason:             v1alpha1.ReasonOrderedUpdateStalled,
 			Message:            orderedUpdateStalledMessage(snap.UpdateStalled),
@@ -1992,7 +2018,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionUpdating,
 			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
 			Reason:             v1alpha1.ReasonNotUpdating,
 			Message:            "No update in progress",
@@ -2004,7 +2030,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
 			Reason:             v1alpha1.ReasonRecoveryInProgress,
 			Message:            fmt.Sprintf("Old primary %s is being reconfigured as a replica", snap.RecoverySite),
@@ -2018,7 +2044,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
 			Reason:             v1alpha1.ReasonDivergentTransactions,
 			Message:            msg,
@@ -2027,7 +2053,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
 			Reason:             v1alpha1.ReasonNoRecoveryPending,
 			Message:            "No old primary recovery pending",
@@ -2199,7 +2225,8 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 }
 
 // MergeTopologySnapshotStatus merges the topology manager's snapshot into
-// st: the active site, topologyGeneration, the per-site observations and
+// st: observedGeneration (never backwards), the active site,
+// topologyGeneration, the per-site observations and
 // recovery fields, the failover record {lastFailover, lastFailoverTarget,
 // promotionGtidExecuted} and updatePhase. It returns false, leaving st
 // untouched, when the snapshot is older than the stored topologyGeneration.
@@ -2207,6 +2234,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) bool {
 	if snap.TopologyGeneration < st.TopologyGeneration {
 		return false
+	}
+	if snap.AppliedGeneration > st.ObservedGeneration {
+		st.ObservedGeneration = snap.AppliedGeneration
 	}
 
 	st.ActiveSite = snap.ActiveSite
@@ -2671,7 +2701,7 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 	}
 
 	newReason := degradedReason(snap)
-	if newReason == "Initializing" {
+	if newReason == v1alpha1.ReasonInitializing {
 		// Not a topology verdict: neither raise an event nor record it, so
 		// the first real verdict compares against what came before (no
 		// SiteRecovered for a group that was never reported degraded).
@@ -2691,10 +2721,10 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 	}
 
 	switch newReason {
-	case "SplitBrain":
+	case v1alpha1.ReasonSplitBrain:
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSplitBrainDetected,
 			"Both sites are writable: %s", snap.Alert)
-	case "NoPrimary":
+	case v1alpha1.ReasonNoPrimary:
 		if strings.Contains(snap.Alert, "UnsealReason=Rotation") || strings.Contains(snap.Alert, "pending post-restore reclone") {
 			// KeyringPromotionRefused / PromotionRefusedPendingReclone is
 			// the specific Event; the generic "Both sites are read-only"
@@ -2704,10 +2734,10 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 		}
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventNoPrimaryDetected,
 			"Both sites are read-only: %s", snap.Alert)
-	case "TotalLoss":
+	case v1alpha1.ReasonTotalLoss:
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventTotalLossDetected,
 			"Both sites are unreachable: %s", snap.Alert)
-	case "Healthy":
+	case v1alpha1.ReasonHealthy:
 		if oldReason != "" {
 			r.recorder.Event(fg, corev1.EventTypeNormal, v1alpha1.EventSiteRecovered,
 				"Degraded condition cleared, topology is healthy")
@@ -2718,10 +2748,63 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 }
 
 // degradedReason returns the Degraded condition reason for a topology
-// snapshot. Prefers the pre-computed DegradedReason from the state
-// machine; falls back to inspecting aggregate site states when the
-// snapshot is a partial update (e.g. bootstrap-only).
+// snapshot: the topology verdict (topologyDegradedReason), or
+// BootstrapFailed when the last clone failed and its target does not
+// replicate yet. BootstrapFailed ranks below the cross-site alerts and above
+// SiteUnhealthy; Initializing is no verdict and keeps its Unknown.
 func degradedReason(snap TopologySnapshot) string {
+	reason := topologyDegradedReason(snap)
+	if (reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonSiteUnhealthy) && bootstrapFailureStands(snap) {
+		return v1alpha1.ReasonBootstrapFailed
+	}
+	return reason
+}
+
+// bootstrapFailureStands reports whether the snapshot's failed bootstrap
+// still needs attention: the phase is Failed and its target neither
+// replicates (Healthy or Lagging) nor is the writable primary. A failure
+// before a target was chosen stands until the next bootstrap starts. A
+// target no longer configured has nothing left to report.
+func bootstrapFailureStands(snap TopologySnapshot) bool {
+	if BootstrapPhase(snap.BootstrapPhase) != BootstrapPhaseFailed {
+		return false
+	}
+	if snap.BootstrapTarget == "" {
+		return true
+	}
+	for _, s := range snap.Sites {
+		if s.Name != snap.BootstrapTarget {
+			continue
+		}
+		if s.State == state.StateWritable {
+			return false
+		}
+		return !siteReplicationState(s.State, s.Replication, s.ReplicaStatusRead, s.ReplicationHealthy, snap.MaxLagSeconds).Running()
+	}
+	return false
+}
+
+// bootstrapFailedMessage is the Degraded=True/BootstrapFailed message.
+func bootstrapFailedMessage(snap TopologySnapshot, group string) string {
+	label := bootstrapLabel(snap.BootstrapSource)
+	msg := label + " failed"
+	if snap.BootstrapTarget != "" {
+		msg = fmt.Sprintf("%s into %s failed", label, snap.BootstrapTarget)
+	}
+	if snap.BootstrapError != "" {
+		msg += ": " + snap.BootstrapError
+	}
+	if snap.BootstrapTarget != "" {
+		msg += fmt.Sprintf(". It clears when %s replicates; to clone it again, annotate %s=%s:confirm=%s", snap.BootstrapTarget, v1alpha1.RecloneAnnotation, snap.BootstrapTarget, group)
+	}
+	return msg
+}
+
+// topologyDegradedReason returns the topology verdict for a snapshot.
+// Prefers the pre-computed DegradedReason from the state machine; falls
+// back to inspecting aggregate site states when the snapshot is a partial
+// update (e.g. bootstrap-only).
+func topologyDegradedReason(snap TopologySnapshot) string {
 	if snap.DegradedReason != "" {
 		return snap.DegradedReason
 	}
@@ -2744,7 +2827,7 @@ func degradedReason(snap TopologySnapshot) string {
 		}
 	}
 	if coreSites == 0 {
-		return v1alpha1.ReasonAlert
+		return v1alpha1.ReasonCrossSiteAlert
 	}
 	switch {
 	case writable > 1:
@@ -2754,7 +2837,7 @@ func degradedReason(snap TopologySnapshot) string {
 	case writable == 0 && readOnly > 0:
 		return v1alpha1.ReasonNoPrimary
 	}
-	return v1alpha1.ReasonAlert
+	return v1alpha1.ReasonCrossSiteAlert
 }
 
 // initializingMessage names the primary-candidates not yet classified since
@@ -2853,72 +2936,64 @@ func (r *TopologyManagerRunner) ackDivergentPromotion(nn types.NamespacedName, s
 // setBootstrappingCondition writes the Bootstrapping condition based on the
 // current phase. It is shared between the full-status writer (updateCRStatus)
 // and the dedicated bootstrap-only writer (updateBootstrappingCondition) so
-// they stay in sync.
-func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64, now metav1.Time, phase, errMsg, source string) {
-	label := "Bootstrap"
+// they stay in sync. The condition is True only while a clone runs; a
+// finished clone is False/NotBootstrapping and a failed one
+// False/BootstrapFailed (Degraded carries the failure while it stands).
+func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64, now metav1.Time, phase BootstrapPhase, errMsg, source string) {
+	label := bootstrapLabel(source)
+	c := metav1.Condition{
+		Type:               v1alpha1.ConditionBootstrapping,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: generation,
+		LastTransitionTime: now,
+	}
+	switch phase {
+	case BootstrapPhaseCloning:
+		c.Reason = v1alpha1.ReasonCloning
+	case BootstrapPhaseRestarting:
+		c.Reason = v1alpha1.ReasonWaitingForRestart
+	case BootstrapPhaseSetupRepl:
+		c.Reason = v1alpha1.ReasonSetupReplication
+	case BootstrapPhaseDone:
+		c.Status, c.Reason, c.Message = metav1.ConditionFalse, v1alpha1.ReasonNotBootstrapping, label+" completed successfully"
+	case BootstrapPhaseFailed:
+		c.Status, c.Reason, c.Message = metav1.ConditionFalse, v1alpha1.ReasonBootstrapFailed, label+" failed"
+		if errMsg != "" {
+			c.Message = fmt.Sprintf("%s failed: %s", label, errMsg)
+		}
+	default:
+		c.Status, c.Reason, c.Message = metav1.ConditionFalse, v1alpha1.ReasonNotBootstrapping, "No bootstrap in progress"
+	}
+	if c.Status == metav1.ConditionTrue {
+		c.Message = fmt.Sprintf("%s in progress: %s", label, c.Reason)
+	}
+	setCondition(conditions, c)
+}
+
+// bootstrapLabel names a bootstrap source in condition messages.
+func bootstrapLabel(source string) string {
 	switch source {
 	case "reclone":
-		label = "Reclone"
+		return "Reclone"
 	case "auto-clone":
-		label = "Auto-clone"
+		return "Auto-clone"
 	}
-
-	switch phase {
-	case "":
-		setCondition(conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionBootstrapping,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: generation,
-			LastTransitionTime: now,
-			Reason:             v1alpha1.ReasonNotBootstrapping,
-			Message:            "No bootstrap in progress",
-		})
-	case string(BootstrapPhaseDone):
-		setCondition(conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionBootstrapping,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: generation,
-			LastTransitionTime: now,
-			Reason:             string(BootstrapPhaseDone),
-			Message:            fmt.Sprintf("%s completed successfully", label),
-		})
-	case string(BootstrapPhaseFailed):
-		msg := fmt.Sprintf("%s failed", label)
-		if errMsg != "" {
-			msg = fmt.Sprintf("%s failed: %s", label, errMsg)
-		}
-		setCondition(conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionBootstrapping,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: generation,
-			LastTransitionTime: now,
-			Reason:             v1alpha1.ReasonFailed,
-			Message:            msg,
-		})
-	default:
-		setCondition(conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionBootstrapping,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: generation,
-			LastTransitionTime: now,
-			Reason:             phase,
-			Message:            fmt.Sprintf("%s in progress: %s", label, phase),
-		})
-	}
+	return "Bootstrap"
 }
 
 // updateBootstrappingCondition updates ONLY the Bootstrapping condition on the
-// CR. It is invoked from the bootstrap goroutine on phase transitions; using a
+// CR, stamped with generation (the manager's applied generation). It is
+// invoked from the bootstrap goroutine on phase transitions; using a
 // dedicated path (rather than updateCRStatus with a partially populated
 // TopologySnapshot) prevents inadvertently clearing unrelated conditions.
-func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context, nn types.NamespacedName, phase, errMsg, source string) {
+func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context, nn types.NamespacedName, generation int64, phase, errMsg, source string) {
 	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.client.Get(ctx, nn, &fresh); err != nil {
 			return err
 		}
 		before := fresh.Status.DeepCopy()
-		setBootstrappingCondition(&fresh.Status.Conditions, fresh.Generation, metav1.Now(), phase, errMsg, source)
+		setBootstrappingCondition(&fresh.Status.Conditions, generation, metav1.Now(), BootstrapPhase(phase), errMsg, source)
 		if equality.Semantic.DeepEqual(before, &fresh.Status) {
 			return nil
 		}

@@ -52,7 +52,9 @@ func TestMysqlBackupReconciler_EncryptionFollowsLaunchedJob(t *testing.T) {
 			if tc.lostStatus {
 				r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
 					SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-						if _, ok := obj.(*v1alpha1.MysqlBackup); ok && sub == "status" {
+						// The initial Ready=False/Pending write lands; the
+						// status write after the Job's create is lost.
+						if b, ok := obj.(*v1alpha1.MysqlBackup); ok && sub == "status" && b.Status.JobName != "" {
 							return fmt.Errorf("injected launch status failure")
 						}
 						return c.SubResource(sub).Patch(ctx, obj, patch, opts...)

@@ -1273,6 +1273,28 @@ type standbyConditionPair struct {
 	sourceMsg      string
 }
 
+// standbyReadyCondition summarises cp: True/SourceDiscovered when the bucket
+// is readable and the source is known, otherwise False with the reason and
+// message of the first of BucketReadable and SourceConfigKnown that is not
+// True.
+func standbyReadyCondition(cp standbyConditionPair, generation int64, now metav1.Time) metav1.Condition {
+	c := metav1.Condition{
+		Type:               v1alpha1.ConditionReady,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: generation,
+		LastTransitionTime: now,
+		Reason:             v1alpha1.ReasonSourceDiscovered,
+		Message:            "the source bucket is readable and its dump and PITR archive are known",
+	}
+	switch {
+	case cp.bucketReadable != metav1.ConditionTrue:
+		c.Status, c.Reason, c.Message = metav1.ConditionFalse, cp.bucketReason, cp.bucketMsg
+	case cp.sourceKnown != metav1.ConditionTrue:
+		c.Status, c.Reason, c.Message = metav1.ConditionFalse, cp.sourceReason, cp.sourceMsg
+	}
+	return c
+}
+
 // stampConditionsAndRequeue applies the conditions and discovered status to the
 // CR, then returns a ctrl.Result that requeues after interval.
 //
@@ -1310,6 +1332,7 @@ func (r *MysqlStandbyClusterReconciler) stampConditionsAndRequeue(
 		Reason:             cp.sourceReason,
 		Message:            cp.sourceMsg,
 	})
+	setCondition(&sc.Status.Conditions, standbyReadyCondition(cp, sc.Generation, now))
 	sc.Status.ObservedGeneration = sc.Generation
 
 	if discovered != nil {

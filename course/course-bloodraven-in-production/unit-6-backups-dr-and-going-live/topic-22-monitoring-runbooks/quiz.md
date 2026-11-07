@@ -45,7 +45,7 @@ The reader shedding its endpoint is the `ReadOnly` role working as designed, so 
 You wrote automation that watches the failover group's condition and acts when the reason equals `Failover`. It has never fired, through several confirmed promotions. Why?
 
 - The condition reason is only written on state transitions, and a 12 s promotion is too fast for a scrape to observe
-- The failover row of the decision matrix sets `Reason = "Degraded"`; `Failover` is not one of the five reasons the code can emit
+- The failover row of the decision matrix sets `Reason = "SiteUnhealthy"`; `Failover` is not one of the five reasons the code can emit
 - Condition reasons are only populated when `spec.splitBrainPolicy.sitePriorities` is set, and yours is empty
 - A promotion sets the reason to `SplitBrain` until the old primary rejoins as a replica
 
@@ -53,7 +53,7 @@ You wrote automation that watches the failover group's condition and acts when t
 
 **Explanation:**
 
-The matrix emits exactly five reasons — `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss` — and the failover row is stamped `Degraded`, so a matcher on `Failover` sits green forever. Use `bloodraven_failovers_total` for 'a failover happened'. The scrape-timing option is tempting but wrong twice over: the matrix is evaluated every poll so status always carries the current topology, and the reason would still be the wrong string at any scrape interval. `sitePriorities` governs split-brain auto-resolution only; it does not gate whether conditions carry reasons. And `SplitBrain` is a distinct matrix row requiring more than one writable core site, which a completed promotion is not. (objective 10)
+The matrix emits exactly five reasons — `Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss` — and the failover row is stamped `SiteUnhealthy`, so a matcher on `Failover` sits green forever. Use `bloodraven_failovers_total` for 'a failover happened'. The scrape-timing option is tempting but wrong twice over: the matrix is evaluated every poll so status always carries the current topology, and the reason would still be the wrong string at any scrape interval. `sitePriorities` governs split-brain auto-resolution only; it does not gate whether conditions carry reasons. And `SplitBrain` is a distinct matrix row requiring more than one writable core site, which a completed promotion is not. (objective 10)
 
 ## Question 4
 

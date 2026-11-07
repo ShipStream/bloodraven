@@ -1,0 +1,12 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: bloodraven
+  generation: 5
+status:
+  observedGeneration: 5
+  activeSite: iad
+  conditions:
+  - {type: Ready, status: "True", reason: Healthy, observedGeneration: 5, message: At least one site is writable and replication is healthy}
+  - {type: Degraded, status: "True", reason: SiteUnhealthy, observedGeneration: 5, message: pdx unreachable while iad is primary}

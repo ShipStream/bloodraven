@@ -99,12 +99,12 @@
       "orderIndex": 2,
       "options": [
         "The condition reason is only written on state transitions, and a 12 s promotion is too fast for a scrape to observe",
-        "The failover row of the decision matrix sets `Reason = \"Degraded\"`; `Failover` is not one of the five reasons the code can emit",
+        "The failover row of the decision matrix sets `Reason = \"SiteUnhealthy\"`; `Failover` is not one of the five reasons the code can emit",
         "Condition reasons are only populated when `spec.splitBrainPolicy.sitePriorities` is set, and yours is empty",
         "A promotion sets the reason to `SplitBrain` until the old primary rejoins as a replica"
       ],
       "correctOptionIndex": 1,
-      "explanation": "The matrix emits exactly five reasons — `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss` — and the failover row is stamped `Degraded`, so a matcher on `Failover` sits green forever. Use `bloodraven_failovers_total` for 'a failover happened'. The scrape-timing option is tempting but wrong twice over: the matrix is evaluated every poll so status always carries the current topology, and the reason would still be the wrong string at any scrape interval. `sitePriorities` governs split-brain auto-resolution only; it does not gate whether conditions carry reasons. And `SplitBrain` is a distinct matrix row requiring more than one writable core site, which a completed promotion is not. (objective 10)"
+      "explanation": "The matrix emits exactly five reasons — `Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss` — and the failover row is stamped `SiteUnhealthy`, so a matcher on `Failover` sits green forever. Use `bloodraven_failovers_total` for 'a failover happened'. The scrape-timing option is tempting but wrong twice over: the matrix is evaluated every poll so status always carries the current topology, and the reason would still be the wrong string at any scrape interval. `sitePriorities` governs split-brain auto-resolution only; it does not gate whether conditions carry reasons. And `SplitBrain` is a distinct matrix row requiring more than one writable core site, which a completed promotion is not. (objective 10)"
     },
     {
       "question": "`bloodraven_archiver_backlog_files{site=\"iad\"}` has been non-zero at every scrape for five minutes. `playground` is Ready, the counter app is writing normally and replication lag is 0. What is actually degrading?",

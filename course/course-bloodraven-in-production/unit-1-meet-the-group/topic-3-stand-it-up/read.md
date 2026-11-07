@@ -115,13 +115,13 @@ Each describes a *shape*, not an action:
 | Reason | The shape it describes |
 | --- | --- |
 | `Healthy` | Exactly one core site writable, none unreachable. `Degraded` is `False`. |
-| `Degraded` | Anything short of healthy that is not one of the three below — a live primary with an unreachable peer, or a writable non-promotable site awaiting fencing. |
+| `SiteUnhealthy` | Anything short of healthy that is not one of the three below — a live primary with an unreachable peer, or a writable non-promotable site awaiting fencing. |
 | `SplitBrain` | More than one core site is writable at the same time. |
 | `NoPrimary` | No core site is writable and none is unreachable — every one of them is read-only. |
 | `TotalLoss` | Every core site is unreachable. |
 
 Two surprises. There is no `Failover` reason: the topology one promotion away from recovery
-reports `Degraded`. And **`role: ReadOnly` sites are excluded from those tallies** — a dead
+reports `SiteUnhealthy`. And **`role: ReadOnly` sites are excluded from those tallies** — a dead
 reader never reads as `TotalLoss`.
 
 What the operator *does* about each shape is Unit 2. Here, you only read them.

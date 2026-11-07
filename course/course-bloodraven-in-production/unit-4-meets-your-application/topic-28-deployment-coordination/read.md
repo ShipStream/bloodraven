@@ -56,7 +56,8 @@ is the only new authority in the system.
 
 `GET /deploy/v1/groups/{group}` is an observation: the active site, `topologyGeneration`, the health
 block, every in-flight operation phase, and `stable` with an `unstableReason`. `stable` is false during
-any operation phase — including a planned failover sitting in `Deferred` — and whenever the group is
+any operation phase — including a planned failover sitting in `Deferred` — while a planned failover's
+automation hold still stands (`unstableReason: AutomaticFailoverHeld`), and whenever the group is
 Degraded, SplitBrain or NoPrimary, recovery is pending, or replication is not running. Lag alone does
 not make it false; your lag threshold is your policy, so read `health.replicationLagSeconds` and decide.
 

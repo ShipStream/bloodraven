@@ -182,6 +182,7 @@ func main() {
 	// Admission and stability also exclude a held planned-failover claim
 	// (a provisional grant or an automation hold) that status does not show.
 	deploymentLeases.SetPlannedClaimHeld(runner.PlannedClaimHeld)
+	deploymentLeases.SetPlannedHoldHeld(runner.PlannedHoldHeld)
 
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)

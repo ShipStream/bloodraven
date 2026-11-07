@@ -365,8 +365,9 @@ func s59RestorePrimary(st *s59State) runner.Step {
 // s59RepairCandidate waits for the empty candidate to be cloned again.
 // The operator does not retry a failed reclone on its own today: the
 // recipient keeps its replication metadata, so empty-site auto-bootstrap
-// skips it. If the Bootstrapping condition is still Failed a minute after
-// the primary returned, the scenario requests the reclone itself.
+// skips it. If the Bootstrapping condition is still BootstrapFailed a
+// minute after the primary returned, the scenario requests the reclone
+// itself.
 func s59RepairCandidate(st *s59State) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseSettle,
@@ -383,8 +384,9 @@ func s59RepairCandidate(st *s59State) runner.Step {
 					if boot != nil {
 						bootState = boot.Reason
 					}
-					// A failed bootstrap reports Status=True, Reason=Failed.
-					if !requested && time.Since(start) > time.Minute && boot != nil && boot.Reason == v1alpha1.ReasonFailed {
+					// A failed bootstrap reports Status=False,
+					// Reason=BootstrapFailed (and Degraded=BootstrapFailed).
+					if !requested && time.Since(start) > time.Minute && bootstrapFailed(boot) {
 						value := fmt.Sprintf("%s:confirm=%s", st.candidate, env.FG)
 						if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
 							v1alpha1.RecloneAnnotation, value); err != nil {
@@ -396,7 +398,7 @@ func s59RepairCandidate(st *s59State) runner.Step {
 					if err := AssertHealthyBaseline(ctx, env); err != nil {
 						return false, "boot=" + bootState + " " + err.Error(), nil
 					}
-					return boot == nil || boot.Reason != v1alpha1.ReasonFailed, "boot=" + bootState, nil
+					return !bootstrapFailed(boot), "boot=" + bootState, nil
 				})
 			if err != nil {
 				return err

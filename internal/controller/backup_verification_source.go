@@ -150,6 +150,7 @@ func (r *MysqlBackupVerificationReconciler) pinVerificationJobSource(ctx context
 	if v.Status.Phase == "" || v.Status.Phase == v1alpha1.VerificationPhasePending || v.Status.Phase == v1alpha1.VerificationPhaseProvisioning {
 		v.Status.Phase = v1alpha1.VerificationPhaseRestoring
 	}
+	setVerificationReady(&v.Status, v.Generation)
 	if err := r.Status().Patch(ctx, v, patch); err != nil {
 		return fmt.Errorf("persist verification Job source: %w", err)
 	}

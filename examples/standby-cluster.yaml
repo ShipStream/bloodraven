@@ -7,7 +7,8 @@
 #
 # The standby is passive: the controller scans the configured prefix,
 # populates status.discovered (the newest dump and the verified binlog archive
-# window), and stamps the BucketReadable and SourceConfigKnown conditions. No
+# window), and stamps the BucketReadable and SourceConfigKnown conditions,
+# summarised by Ready (the Ready column of kubectl get msc). No
 # MySQL is started and nothing is written to the bucket. To bring up a group
 # in the DR cluster, create a MysqlFailoverGroup with spec.initFromBackup
 # pointed at the same prefix (see the multi-cluster DR guide).

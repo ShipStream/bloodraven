@@ -7218,7 +7218,8 @@ spec:
                   observedGeneration:
                     description: |-
                       ObservedGeneration is the CR generation the encryption subsystem
-                      last reconciled.
+                      last reconciled. It is the encryption reconcile's own and can lag or
+                      lead status.observedGeneration, the topology manager's.
                     format: int64
                     type: integer
                   sites:
@@ -7363,6 +7364,19 @@ spec:
                     format: date-time
                     type: string
                 type: object
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation the topology manager
+                  has applied: the generation its configuration was built from, or the
+                  newest generation an unchanged configuration was resynchronised
+                  against. The topology conditions (Ready, Degraded, Bootstrapping,
+                  Updating, RecoveryPending, DivergentPromotion) carry the same value.
+                  A condition another writer owns carries the generation that writer
+                  evaluated, and status.encryptionAtRest.observedGeneration is the
+                  encryption reconcile's own.
+                format: int64
+                minimum: 0
+                type: integer
               pitr:
                 description: |-
                   PITR summarizes the continuous binary-log archive (oldest/newest

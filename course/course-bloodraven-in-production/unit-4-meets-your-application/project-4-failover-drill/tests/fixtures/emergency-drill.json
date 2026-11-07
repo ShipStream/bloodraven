@@ -27,7 +27,7 @@
       {
         "type": "Degraded",
         "status": "True",
-        "reason": "Degraded",
+        "reason": "SiteUnhealthy",
         "message": "iad unreachable while pdx is primary"
       }
     ],

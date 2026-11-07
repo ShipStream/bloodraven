@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -24,7 +22,7 @@ func init() {
 //
 //	A) bare site name      — REJECTED (RecloneRejected event), annotation cleared
 //	B) site:wrongprefix    — REJECTED (RecloneRejected event), annotation cleared
-//	C) site:correctprefix  — ACCEPTED (RecloneRequested event), Bootstrapping condition cycles to Done
+//	C) site:correctprefix  — ACCEPTED (RecloneRequested event), Bootstrapping condition cycles back to False/NotBootstrapping
 //
 // The cold-reclone "must include :confirm=<fg-name>" interlock branch
 // is intentionally NOT exercised here — sub-case C drives the divergent
@@ -317,7 +315,8 @@ func verifyRecloneRejectedMismatch() runner.Step {
 // verifyRecloneAcceptedMatching submits the correct 8-character prefix
 // and waits for the clone to complete. The Bootstrapping condition is
 // the operator-side narrative: it cycles Cloning → WaitingForRestart →
-// SetupReplication → Done as the clone runs.
+// SetupReplication (True) as the clone runs and returns to
+// False/NotBootstrapping after it, with the recloned site replicating.
 func verifyRecloneAcceptedMatching() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
@@ -370,15 +369,10 @@ func verifyRecloneAcceptedMatching() runner.Step {
 						}
 					}
 					boot := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
-					bootState := "<missing>"
-					bootDone := false
-					if boot != nil {
-						bootState = fmt.Sprintf("%s/%s", boot.Status, boot.Reason)
-						if boot.Status == metav1.ConditionFalse && boot.Reason == v1alpha1.ReasonFailed {
-							return false, bootState, fmt.Errorf("reclone bootstrap failed: %s", boot.Message)
-						}
-						bootDone = boot.Status == metav1.ConditionFalse && boot.Reason == v1alpha1.ReasonDone
+					if bootstrapFailed(boot) && !boot.LastTransitionTime.Time.Before(before.Truncate(time.Second)) {
+						return false, boot.Message, fmt.Errorf("reclone bootstrap failed: %s", boot.Message)
 					}
+					bootDone, bootState := bootstrapCompletedSince(mfg, before, site)
 					clean := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0 && len(divergent) == 0 && bootDone
 					now := time.Now()
 					if clean {

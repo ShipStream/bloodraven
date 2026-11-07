@@ -290,8 +290,8 @@ func TestPoll_FirstWritableNonPromotableObservationFencesImmediately(t *testing.
 				if tm.sites[1].state != state.StateWritable || tm.activeSiteLocked() != "" {
 					t.Fatalf("anomaly did not immediately invalidate authority: state=%s active=%q", tm.sites[1].state, tm.activeSiteLocked())
 				}
-				if snapshot.DegradedReason != "Degraded" {
-					t.Fatalf("degraded reason = %q, want Degraded", snapshot.DegradedReason)
+				if snapshot.DegradedReason != v1alpha1.ReasonSiteUnhealthy {
+					t.Fatalf("degraded reason = %q, want SiteUnhealthy", snapshot.DegradedReason)
 				}
 			})
 		}

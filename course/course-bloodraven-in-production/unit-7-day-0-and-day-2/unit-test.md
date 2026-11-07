@@ -139,8 +139,8 @@ Helm installs CRDs from `crds/` on first install and never upgrades them — on 
 
 A rule you inherited alerts on the `Degraded` condition with `reason=Failover`. It has never fired. What is the correct fix?
 
-- Delete it and alert on `bloodraven_failovers_total` instead — there is no `Failover` reason; the failover row of the matrix emits `Degraded`, and the five reasons that reach status are `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss`
-- Change it to `reason=Degraded`, which is the same condition under a different name and will now fire correctly
+- Delete it and alert on `bloodraven_failovers_total` instead — there is no `Failover` reason; the failover row of the matrix emits `SiteUnhealthy`, and the five reasons that reach status are `Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss`
+- Change it to `reason=SiteUnhealthy`, which is the same condition under a different name and will now fire correctly
 - Add a `for: 0s` so it catches the transient window in which `Failover` is set before the promotion completes
 - Nothing is wrong with it; it has not fired because no failover has occurred since it was written
 
@@ -148,7 +148,7 @@ A rule you inherited alerts on the `Degraded` condition with `reason=Failover`. 
 
 **Explanation:**
 
-A rule matching a reason string the operator never emits does not fire rarely. It sits green forever, through every promotion. Option 2 is a real trap rather than an obvious wrong answer: `reason=Degraded` *is* what the failover row emits, but it is also what a live primary with an unreachable peer emits and what a writable non-promotable site awaiting fencing emits, so as a failover alert it is far too broad. The counter is the right signal for 'a failover happened'; the reason strings are for topology shape. (objectives 11, 12)
+A rule matching a reason string the operator never emits does not fire rarely. It sits green forever, through every promotion. Option 2 is a real trap rather than an obvious wrong answer: `reason=SiteUnhealthy` *is* what the failover row emits, but it is also what a live primary with an unreachable peer emits and what a writable non-promotable site awaiting fencing emits, so as a failover alert it is far too broad. The counter is the right signal for 'a failover happened'; the reason strings are for topology shape. (objectives 11, 12)
 
 ## Question 10
 

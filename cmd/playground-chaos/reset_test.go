@@ -186,6 +186,7 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 	// reason. A new status field fails here until someone decides.
 	kept := map[string]string{
 		"topologyGeneration":  "fences deployment leases across restarts; it must only grow",
+		"observedGeneration":  "the spec generation the operator applied, not failover state; it never moves backwards",
 		"restore":             "backup/restore history, not failover state",
 		"restoreInPlace":      "backup/restore history, not failover state",
 		"restoreReclones":     "backup/restore history, not failover state",

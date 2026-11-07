@@ -26,7 +26,7 @@ if !lastFailover.IsZero() && tm.clock.Since(lastFailover) < tm.failoverCooldown 
 
 One `if`, one `msg` with three fields, one retry armed, one `return`. That is the entire mechanism.
 The table still evaluated, the candidate was still ranked, the status condition still says
-`Degraded` — the operator simply declined to promote *yet*.
+`SiteUnhealthy` — the operator simply declined to promote *yet*.
 
 The armed retry is what makes it a delay rather than a veto. Cross-site actions fire on state
 transitions, and a dead primary that stays dead produces no new transition, so without the retry a

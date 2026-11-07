@@ -39,7 +39,7 @@
 
 ---
 
-**Front:** Condition reason `Degraded`
+**Front:** Condition reason `SiteUnhealthy`
 
 **Back:** Any shape short of healthy that is not split brain, no primary or total loss — including a live primary with an unreachable peer.
 

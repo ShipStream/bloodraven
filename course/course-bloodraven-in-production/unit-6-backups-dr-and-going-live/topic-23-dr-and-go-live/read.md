@@ -67,12 +67,14 @@ across two clusters, with no shared GTID history to reason from.
 
 You will find a CRD called `MysqlStandbyCluster` and assume it is the DR mechanism. It is not.
 Today it is **observability only**. Its controller re-scans the source bucket on
-`spec.freshness.discoveryInterval` (default 5m) and publishes exactly two conditions:
+`spec.freshness.discoveryInterval` (default 5m) and publishes two conditions, plus a `Ready` that
+summarises them:
 
 | Condition | True means |
 |---|---|
 | `BucketReadable` | The DR cluster listed the source prefix and could read it. |
 | `SourceConfigKnown` | The dump metadata parsed — `status.discovered` now carries dump name, location, GTID set, and the archived binlog window. |
+| `Ready` | Both of the above are `True` (reason `SourceDiscovered`). Otherwise it carries the reason of the first one that is not, `BucketReadable` first. `kubectl get mysqlstandbycluster` shows only this one as a column. |
 
 That is the whole of it: **no MySQL contact, no restore Jobs, no activation.** A standby cluster
 sitting at `BucketReadable=True` has told you that a DR bootstrap would be *possible* and roughly

@@ -19,7 +19,7 @@ already chosen a candidate.</p>
 <span class="line"><span style="color:#24292E;--shiki-dark:#ADBAC7">}</span></span></code></pre>
 <p>One <code>if</code>, one <code>msg</code> with three fields, one retry armed, one <code>return</code>. That is the entire mechanism.
 The table still evaluated, the candidate was still ranked, the status condition still says
-<code>Degraded</code> — the operator simply declined to promote <em>yet</em>.</p>
+<code>SiteUnhealthy</code> — the operator simply declined to promote <em>yet</em>.</p>
 <p>The armed retry is what makes it a delay rather than a veto. Cross-site actions fire on state
 transitions, and a dead primary that stays dead produces no new transition, so without the retry a
 blocked failover would wait for the dead site to come back. With it, the operator re-evaluates the

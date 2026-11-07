@@ -108,8 +108,10 @@ const (
 	BootstrapPhaseCloning    BootstrapPhase = v1alpha1.ReasonCloning
 	BootstrapPhaseRestarting BootstrapPhase = v1alpha1.ReasonWaitingForRestart
 	BootstrapPhaseSetupRepl  BootstrapPhase = v1alpha1.ReasonSetupReplication
-	BootstrapPhaseDone       BootstrapPhase = v1alpha1.ReasonDone
-	BootstrapPhaseFailed     BootstrapPhase = v1alpha1.ReasonFailed
+	// Done and Failed are internal: the Bootstrapping condition reports
+	// both as False (NotBootstrapping, BootstrapFailed).
+	BootstrapPhaseDone   BootstrapPhase = "Done"
+	BootstrapPhaseFailed BootstrapPhase = "Failed"
 )
 
 const pendingPromotionActiveSiteTTL = 30 * time.Second
@@ -189,12 +191,22 @@ type TopologySnapshot struct {
 	LastFailover       time.Time
 	LastFailoverTarget string
 	Alert              string               // non-empty if a cross-site alert fired this cycle
-	DegradedReason     string               // one of "Healthy", "Degraded", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
+	DegradedReason     string               // one of "Healthy", "SiteUnhealthy", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
 	UpdatePhase        v1alpha1.UpdatePhase // non-empty if an ordered update is in progress
 	UpdateStalled      string               // why the ordered update is stopped on a pod that is not Ready (PodNotReadyError), or ""
 	BootstrapPhase     string               // non-empty if a fresh-deploy bootstrap is in progress or finished
 	BootstrapError     string               // non-empty if bootstrap failed
 	BootstrapSource    string               // "fresh-deploy", "auto-clone", or "reclone"
+	// BootstrapTarget is the site the failed bootstrap was cloning into, or
+	// "" when it failed before choosing one. Set only while BootstrapPhase
+	// is Failed.
+	BootstrapTarget string
+	// AppliedGeneration is the .metadata.generation the manager has
+	// applied: the one its configuration was built from, or a newer one
+	// whose unchanged configuration the runner resynchronised. The status
+	// write stamps it on status.observedGeneration and the topology
+	// conditions.
+	AppliedGeneration int64
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
 	// MaxLagSeconds is spec.replication.maxLagSeconds: above it a healthy
@@ -490,6 +502,15 @@ type TopologyManager struct {
 	// in the topology moves when only status.restore does. Poll clears it
 	// when it fires the callback. Protected by mu.
 	statusRefreshRequested bool
+
+	// appliedGeneration is the CR generation the manager's configuration
+	// is current for (AppliedGeneration). Protected by mu.
+	appliedGeneration int64
+
+	// bootstrapFailedTarget is the recipient of the bootstrap that last
+	// failed, or "" when it failed before choosing one. Read only while
+	// bootstrapPhase is Failed. Protected by mu.
+	bootstrapFailedTarget string
 
 	// Recovery state for old primaries after failover, per site. More than
 	// one site can need recovery at once (e.g. two former primaries after
@@ -1815,6 +1836,8 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				snapshot.UpdateStalled = tm.updateStall
 				snapshot.BootstrapPhase = string(tm.bootstrapPhase)
 				snapshot.BootstrapSource = tm.bootstrapSource
+				snapshot.BootstrapTarget = tm.bootstrapTargetLocked()
+				snapshot.AppliedGeneration = tm.appliedGeneration
 				// A note acknowledged since the snapshot was built must not
 				// be written again: an administrator may have removed it.
 				snapshot.DivergentPromotion = nil
@@ -2216,6 +2239,8 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		UpdateStalled:           tm.updateStall,
 		BootstrapPhase:          string(tm.bootstrapPhase),
 		BootstrapSource:         tm.bootstrapSource,
+		BootstrapTarget:         tm.bootstrapTargetLocked(),
+		AppliedGeneration:       tm.appliedGeneration,
 		PromotionGtidExecuted:   tm.promotionGtidExecuted,
 		MaxLagSeconds:           tm.cfg.MaxLagSeconds,
 		KeyringPromotionSkipped: append([]string(nil), tm.keyringPromotionSkipped...),
@@ -3140,6 +3165,30 @@ func (tm *TopologyManager) SetAutoBootstrapSuppressed(v bool) {
 		tm.initRestoreSeed = ""
 	}
 	tm.mu.Unlock()
+}
+
+// SetAppliedGeneration records that the manager's configuration is current
+// for the CR's metadata.generation gen: the generation it was built from,
+// or a newer one whose configuration equals the running one and has been
+// resynchronised (its setters applied). A newer generation asks the next
+// Poll for a status write, so status.observedGeneration and the conditions
+// reach it although no topology state changed. An older one is ignored.
+func (tm *TopologyManager) SetAppliedGeneration(gen int64) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if gen <= tm.appliedGeneration {
+		return
+	}
+	tm.appliedGeneration = gen
+	tm.statusRefreshRequested = true
+}
+
+// AppliedGeneration returns the generation SetAppliedGeneration last
+// recorded.
+func (tm *TopologyManager) AppliedGeneration() int64 {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.appliedGeneration
 }
 
 // RequestStatusRefresh makes the next Poll write a status snapshot built
@@ -4301,6 +4350,7 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
 		tm.bootstrapErr = err
+		tm.bootstrapFailedTarget = ""
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
 		return
@@ -4320,6 +4370,7 @@ func (tm *TopologyManager) seedFreshDeploy(ctx context.Context) string {
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
 		tm.bootstrapErr = err
+		tm.bootstrapFailedTarget = ""
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
 		return ""
@@ -4424,6 +4475,7 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
 		tm.bootstrapErr = err
+		tm.bootstrapFailedTarget = recipient
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
 		return false
@@ -4529,6 +4581,7 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
 			tm.bootstrapErr = err
+			tm.bootstrapFailedTarget = recipient
 			tm.logger.Error("bootstrap failed", "source", source, "error", err)
 		} else {
 			tm.bootstrapPhase = BootstrapPhaseDone
@@ -5879,6 +5932,9 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 // It uses a dedicated BootstrapStatusCallback so that only the Bootstrapping
 // condition is updated on the CR.
 func (tm *TopologyManager) emitBootstrapStatus() {
+	// Degraded=BootstrapFailed is recomputed from the phase on a full
+	// status write, so every phase change asks the next Poll for one.
+	tm.RequestStatusRefresh()
 	if tm.BootstrapStatusCallback == nil {
 		return
 	}
@@ -5891,4 +5947,13 @@ func (tm *TopologyManager) emitBootstrapStatus() {
 	source := tm.bootstrapSource
 	tm.mu.RUnlock()
 	tm.BootstrapStatusCallback(phase, errMsg, source)
+}
+
+// bootstrapTargetLocked is TopologySnapshot.BootstrapTarget. Caller holds
+// mu.
+func (tm *TopologyManager) bootstrapTargetLocked() string {
+	if tm.bootstrapPhase != BootstrapPhaseFailed {
+		return ""
+	}
+	return tm.bootstrapFailedTarget
 }

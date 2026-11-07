@@ -1370,12 +1370,14 @@ func pitrRecloneRequest(sites []v1alpha1.SiteStatus, site, group string, expectD
 }
 
 // pitrRecloneWatch tells a reclone attempt's outcome apart from an earlier
-// one's. setCondition keeps LastTransitionTime while Status is unchanged,
-// so a Failed → Cloning → Failed attempt keeps the old time (Failed and
-// every in-progress phase are Status=True): the attempt is identified by
-// observing one of its in-progress phases, or by any change of the
-// condition's reason, transition time or message from the pre-request
-// snapshot (F188).
+// one's. Bootstrapping is True only while a clone runs, and both outcomes
+// are False (NotBootstrapping, BootstrapFailed), so an earlier attempt's
+// outcome reads like this one's: the attempt is identified by observing
+// one of its in-progress phases, or by any change of the condition's
+// reason, transition time or message from the pre-request snapshot
+// (F188). setCondition keeps LastTransitionTime while Status is
+// unchanged, so a transition time alone is not enough when the True write
+// of a short attempt was never persisted.
 type pitrRecloneWatch struct {
 	pre        *metav1.Condition
 	sawAttempt bool
@@ -1397,7 +1399,7 @@ func (w *pitrRecloneWatch) observe(boot *metav1.Condition, replicating bool) (bo
 		return false, "bootstrap not observed", nil
 	}
 	msg := fmt.Sprintf("bootstrap=%s replicating=%t", boot.Reason, replicating)
-	if boot.Status == metav1.ConditionTrue && boot.Reason != v1alpha1.ReasonFailed {
+	if bootstrapRunning(boot) {
 		w.sawAttempt = true
 		return false, msg, nil
 	}
@@ -1406,10 +1408,10 @@ func (w *pitrRecloneWatch) observe(boot *metav1.Condition, replicating bool) (bo
 	if !w.sawAttempt && !changed {
 		return false, msg + " (the condition still shows the state before the request)", nil
 	}
-	switch boot.Reason {
-	case v1alpha1.ReasonFailed:
+	switch {
+	case bootstrapFailed(boot):
 		return false, boot.Message, fmt.Errorf("reclone failed: %s", boot.Message)
-	case v1alpha1.ReasonDone:
+	case boot.Reason == v1alpha1.ReasonNotBootstrapping:
 		return replicating, msg, nil
 	}
 	return false, msg, nil

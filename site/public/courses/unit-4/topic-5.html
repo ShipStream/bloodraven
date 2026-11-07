@@ -33,7 +33,8 @@ is the only new authority in the system.</p>
 <h2 id="two-leases-in-one-order">Two leases, in one order</h2>
 <p><code>GET /deploy/v1/groups/{group}</code> is an observation: the active site, <code>topologyGeneration</code>, the health
 block, every in-flight operation phase, and <code>stable</code> with an <code>unstableReason</code>. <code>stable</code> is false during
-any operation phase — including a planned failover sitting in <code>Deferred</code> — and whenever the group is
+any operation phase — including a planned failover sitting in <code>Deferred</code> — while a planned failover’s
+automation hold still stands (<code>unstableReason: AutomaticFailoverHeld</code>), and whenever the group is
 Degraded, SplitBrain or NoPrimary, recovery is pending, or replication is not running. Lag alone does
 not make it false; your lag threshold is your policy, so read <code>health.replicationLagSeconds</code> and decide.</p>
 <p>Then two <code>POST</code>s to <code>/leases</code>, and the order is not optional. The <code>migration</code> lease is the mutex: one

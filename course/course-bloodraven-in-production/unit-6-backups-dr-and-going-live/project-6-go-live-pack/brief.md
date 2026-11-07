@@ -87,7 +87,7 @@ Exit code 0.
 - Keep the `BloodravenReplicationLagging` threshold at `30`, which is what `playground` sets. The backup-staleness and failover-window thresholds are SLOs you choose, not Bloodraven defaults.
 - Do not remove a rule to silence it. The reader exclusion has to be an exclusion.
 - `BloodravenFailoverOccurred` carries `severity: info`. It says the operator finished, not that traffic recovered.
-- There is no `Failover` condition reason to match on. The failover row of the decision matrix emits `Reason="Degraded"`.
+- There is no `Failover` condition reason to match on. The failover row of the decision matrix emits `Reason="SiteUnhealthy"`.
 
 ## Steps
 

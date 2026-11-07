@@ -84,9 +84,9 @@ func repairDivergentSites(ctx context.Context, env *runner.Env, timeout time.Dur
 		if err != nil {
 			return err
 		}
-		boot := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
-		// A failed bootstrap also reports Status=True (Reason=Failed).
-		cloning := boot != nil && boot.Status == metav1.ConditionTrue && boot.Reason != v1alpha1.ReasonFailed
+		// Bootstrapping is True only while a clone runs; a failed one is
+		// False/BootstrapFailed and does not block the next request.
+		cloning := bootstrapRunning(findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping))
 		_, pending := mfg.GetAnnotations()[v1alpha1.RecloneAnnotation]
 		if !cloning && !pending && mfg.Status.ActiveSite != "" {
 			if site, value := nextBlockedSite(mfg, requested); site != "" {

@@ -930,7 +930,34 @@ func TestVerificationReconciler_PITRBuildRefusalKeepsToken(t *testing.T) {
 				!strings.HasPrefix(cond.Message, tc.want+": ") {
 				t.Fatalf("phase %s condition %+v, want Verified=False/%s token first", got.Status.Phase, cond, tc.want)
 			}
+			if ready := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady); ready == nil ||
+				ready.Status != cond.Status || ready.Reason != cond.Reason || ready.Message != cond.Message {
+				t.Fatalf("Ready %+v, want a mirror of Verified %+v", ready, cond)
+			}
 		})
+	}
+}
+
+// TestSetVerificationReady pins A-70 for MysqlBackupVerification: Ready is
+// False/InProgress until Verified is set, then mirrors it, and carries the
+// generation it was evaluated for.
+func TestSetVerificationReady(t *testing.T) {
+	var st v1alpha1.MysqlBackupVerificationStatus
+	setVerificationReady(&st, 4)
+	ready := apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != v1alpha1.ReasonInProgress || ready.ObservedGeneration != 4 {
+		t.Fatalf("Ready before a verdict = %+v, want False/InProgress at generation 4", ready)
+	}
+	for _, verified := range []metav1.Condition{
+		{Type: v1alpha1.ConditionVerified, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonSucceeded, Message: "restored", LastTransitionTime: metav1.Now()},
+		{Type: v1alpha1.ConditionVerified, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonSanityCheckFailed, Message: "no tables", LastTransitionTime: metav1.Now()},
+	} {
+		apimeta.SetStatusCondition(&st.Conditions, verified)
+		setVerificationReady(&st, 5)
+		ready = apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionReady)
+		if ready == nil || ready.Status != verified.Status || ready.Reason != verified.Reason || ready.Message != verified.Message || ready.ObservedGeneration != 5 {
+			t.Fatalf("Ready = %+v, want a mirror of %+v at generation 5", ready, verified)
+		}
 	}
 }
 

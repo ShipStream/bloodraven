@@ -85,6 +85,9 @@ type DeploymentLeaseManager struct {
 	// is held (a run, a provisional grant, or an automation hold). Nil means
 	// no runner: only status is consulted.
 	plannedClaimHeld atomic.Pointer[func(types.NamespacedName) bool]
+	// plannedHoldHeld reports whether that slot holds an automation hold
+	// (rather than a run's claim). Nil means no runner.
+	plannedHoldHeld atomic.Pointer[func(types.NamespacedName) bool]
 }
 
 // The operations that take BeginPlanned's admission reservation. A refusal
@@ -117,24 +120,47 @@ func (m *DeploymentLeaseManager) SetPlannedClaimHeld(held func(types.NamespacedN
 	m.plannedClaimHeld.Store(&held)
 }
 
+// SetPlannedHoldHeld injects the runner's check that the claim slot holds
+// an automation hold, which UnstableReason reports as
+// AutomaticFailoverHeld rather than PlannedFailover.
+func (m *DeploymentLeaseManager) SetPlannedHoldHeld(hold func(types.NamespacedName) bool) {
+	if hold == nil {
+		m.plannedHoldHeld.Store(nil)
+		return
+	}
+	m.plannedHoldHeld.Store(&hold)
+}
+
 // claimHeld reports the injected planned-failover claim check for fg.
 func (m *DeploymentLeaseManager) claimHeld(fg *v1alpha1.MysqlFailoverGroup) bool {
 	held := m.plannedClaimHeld.Load()
 	return held != nil && (*held)(client.ObjectKeyFromObject(fg))
 }
 
+// holdClaimed reports the injected automation-hold check for fg.
+func (m *DeploymentLeaseManager) holdClaimed(fg *v1alpha1.MysqlFailoverGroup) bool {
+	hold := m.plannedHoldHeld.Load()
+	return hold != nil && (*hold)(client.ObjectKeyFromObject(fg))
+}
+
 // UnstableReason is DeploymentUnstableReason plus the planned-failover
-// claim slot and the durable automation hold: a held claim is
-// "PlannedFailover" even before status shows a run, and a durable hold is
-// too before the slot has been hydrated from it.
+// claim slot and the durable automation hold. A run's claim, held before
+// status shows the run, is "PlannedFailover". A standing automation hold,
+// loaded into the slot or only durable (before the slot has been hydrated
+// from it), is "AutomaticFailoverHeld": unlike a run it does not end by
+// itself.
 func (m *DeploymentLeaseManager) UnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 	reason := DeploymentUnstableReason(fg)
 	switch reason {
 	case v1alpha1.UnstableReasonDeploymentRevocationPending, v1alpha1.UnstableReasonInitializing, v1alpha1.UnstableReasonNoPrimary, v1alpha1.UnstableReasonPlannedFailover:
 		return reason
 	}
-	if m.claimHeld(fg) || PlannedHoldFrom(fg) != nil {
+	holdClaimed := m.holdClaimed(fg)
+	if m.claimHeld(fg) && !holdClaimed {
 		return v1alpha1.UnstableReasonPlannedFailover
+	}
+	if holdClaimed || PlannedHoldFrom(fg) != nil {
+		return v1alpha1.UnstableReasonAutomaticFailoverHeld
 	}
 	return reason
 }

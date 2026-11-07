@@ -74,7 +74,7 @@
 <li>Keep the <code>BloodravenReplicationLagging</code> threshold at <code>30</code>, which is what <code>playground</code> sets. The backup-staleness and failover-window thresholds are SLOs you choose, not Bloodraven defaults.</li>
 <li>Do not remove a rule to silence it. The reader exclusion has to be an exclusion.</li>
 <li><code>BloodravenFailoverOccurred</code> carries <code>severity: info</code>. It says the operator finished, not that traffic recovered.</li>
-<li>There is no <code>Failover</code> condition reason to match on. The failover row of the decision matrix emits <code>Reason="Degraded"</code>.</li>
+<li>There is no <code>Failover</code> condition reason to match on. The failover row of the decision matrix emits <code>Reason="SiteUnhealthy"</code>.</li>
 </ul>
 <h2 id="steps">Steps</h2>
 <ul class="contains-task-list">

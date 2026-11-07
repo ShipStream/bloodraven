@@ -42,6 +42,7 @@
     ]
   },
   "status": {
+    "observedGeneration": 4,
     "activeSite": "iad",
     "sites": [
       {
@@ -80,7 +81,7 @@
         "status": "True",
         "observedGeneration": 4,
         "lastTransitionTime": "2026-08-12T09:14:32Z",
-        "reason": "TopologyPolled",
+        "reason": "Healthy",
         "message": "At least one site is writable and replication is healthy"
       },
       {

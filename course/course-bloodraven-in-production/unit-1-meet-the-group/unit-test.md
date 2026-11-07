@@ -67,13 +67,13 @@ This is the trade, made visible: Bloodraven buys write availability with consist
 - `SplitBrain`, and the operator resolves it by picking a winner between `iad` and `reader`
 - `Healthy`, and nothing happens to `reader` — a `ReadOnly` site is excluded from the tallies, so the operator ignores it entirely
 - `NoPrimary`, and the operator waits for a human because authority is now ambiguous
-- `Degraded`, and `reader` is fenced — a writable non-`PrimaryCandidate` site is routed straight to fencing, never to promotion
+- `SiteUnhealthy`, and `reader` is fenced — a writable non-`PrimaryCandidate` site is routed straight to fencing, never to promotion
 
 **Correct option index:** 3
 
 **Explanation:**
 
-Two rules meet here. A `role: ReadOnly` site is excluded from `coreCount` and from all three state tallies, so it cannot make the group `SplitBrain` — that reason needs more than one *core* site writable, and only `iad` qualifies. But exclusion from the tallies is not the same as being ignored: any site that is writable while its role is not `PrimaryCandidate` is routed to fencing, and that shape reports `Degraded`. `Healthy` is the trap for anyone who learns the exclusion rule and stops there — the tallies ignore `reader`, the fencing path does not. `NoPrimary` describes the opposite topology, no core site writable and none unreachable, whereas `iad` is writable right now. And `reader` is never a promotion candidate to pick a winner between: promotability is exactly `role == PrimaryCandidate`, and fresh data or a writable state does not earn it. (objectives 6, 8)
+Two rules meet here. A `role: ReadOnly` site is excluded from `coreCount` and from all three state tallies, so it cannot make the group `SplitBrain` — that reason needs more than one *core* site writable, and only `iad` qualifies. But exclusion from the tallies is not the same as being ignored: any site that is writable while its role is not `PrimaryCandidate` is routed to fencing, and that shape reports `SiteUnhealthy`. `Healthy` is the trap for anyone who learns the exclusion rule and stops there — the tallies ignore `reader`, the fencing path does not. `NoPrimary` describes the opposite topology, no core site writable and none unreachable, whereas `iad` is writable right now. And `reader` is never a promotion candidate to pick a winner between: promotability is exactly `role == PrimaryCandidate`, and fresh data or a writable state does not earn it. (objectives 6, 8)
 
 ## Question 5
 
@@ -154,7 +154,7 @@ You add a third site, `fra`, purely to serve analytics reads. It must never be p
 
 **Explanation:**
 
-The two non-promotable roles differ in visibility, not in promotability. A `DisasterRecovery` site is a full participant in the topology view: it is counted in `coreCount` and in the writable, read-only and unreachable tallies, so losing it produces the shape "a site is unreachable while the primary is up" and the `Degraded` reason follows. A `ReadOnly` site is excluded from all of that, so a dead `fra` would leave the group reporting `Healthy` — and it also never taints its node and is refused as a backup source. "Identical" is the common flattening and it will surprise you at 03:00, when a reporting replica takes your alerting off `Healthy`. `DisasterRecovery` as a last-resort candidate is the more dangerous misreading: promotability is exactly `role == PrimaryCandidate`, with no fallback, and a planned failover naming a non-candidate is hard-refused. And `ReadOnly` sites do appear in `status.sites[]` with their own state and replication fields; what they are absent from is the tallies that compute the condition reasons. (objectives 6, 8)
+The two non-promotable roles differ in visibility, not in promotability. A `DisasterRecovery` site is a full participant in the topology view: it is counted in `coreCount` and in the writable, read-only and unreachable tallies, so losing it produces the shape "a site is unreachable while the primary is up" and the `SiteUnhealthy` reason follows. A `ReadOnly` site is excluded from all of that, so a dead `fra` would leave the group reporting `Healthy` — and it also never taints its node and is refused as a backup source. "Identical" is the common flattening and it will surprise you at 03:00, when a reporting replica takes your alerting off `Healthy`. `DisasterRecovery` as a last-resort candidate is the more dangerous misreading: promotability is exactly `role == PrimaryCandidate`, with no fallback, and a planned failover naming a non-candidate is hard-refused. And `ReadOnly` sites do appear in `status.sites[]` with their own state and replication fields; what they are absent from is the tallies that compute the condition reasons. (objectives 6, 8)
 
 ## Question 10
 

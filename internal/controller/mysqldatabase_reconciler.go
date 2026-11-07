@@ -226,7 +226,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	fgKey := types.NamespacedName{Namespace: mdb.Namespace, Name: mdb.Spec.FailoverGroupRef.Name}
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.pending(ctx, &mdb, v1alpha1.ReasonGroupNotFound,
+			return r.pending(ctx, &mdb, v1alpha1.ReasonGroupNotYetCreated,
 				fmt.Sprintf("MysqlFailoverGroup %q not found in namespace %s", fgKey.Name, mdb.Namespace))
 		}
 		return ctrl.Result{}, fmt.Errorf("get failover group: %w", err)

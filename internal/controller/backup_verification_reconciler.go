@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -200,6 +201,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if v.Status.BackupRef == nil {
 		patch := client.MergeFrom(v.DeepCopy())
 		v.Status.BackupRef = verificationBackupSnapshot(backup)
+		setVerificationReady(&v.Status, v.Generation)
 		if err := r.Status().Patch(ctx, v, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("persist pinned backup reference: %w", err)
 		}
@@ -238,6 +240,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 		v.Status.StartTime = &now
 		v.Status.Message = "ephemeral resources provisioned"
 		v.Status.ObservedGeneration = v.Generation
+		setVerificationReady(&v.Status, v.Generation)
 		if err := r.Status().Patch(ctx, v, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("patch provisioning status: %w", err)
 		}
@@ -328,6 +331,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	v.Status.JobName = built.Name
 	v.Status.Message = "running restore Job against ephemeral mysqld"
 	v.Status.ObservedGeneration = v.Generation
+	setVerificationReady(&v.Status, v.Generation)
 	if err := r.Status().Patch(ctx, v, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch running status: %w", err)
 	}
@@ -448,6 +452,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	next.Message = message
 	next.ObservedGeneration = v.Generation
 	next.JobName = job.Name
+	setVerificationReady(&next, v.Generation)
 
 	if v.Status.Phase == next.Phase && equality.Semantic.DeepEqual(v.Status, &next) {
 		// Idempotent — just run post-terminal cleanup + retention.
@@ -676,6 +681,23 @@ func (r *MysqlBackupVerificationReconciler) ensureVerificationCredsSecret(ctx co
 	return err
 }
 
+// setVerificationReady sets Ready from Verified: a copy of it once the
+// verification has a verdict, False/InProgress before.
+func setVerificationReady(st *v1alpha1.MysqlBackupVerificationStatus, generation int64) {
+	c := metav1.Condition{
+		Type:               v1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             v1alpha1.ReasonInProgress,
+		Message:            "the verification has not finished",
+	}
+	if verified := apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionVerified); verified != nil {
+		c.Status, c.Reason, c.Message, c.LastTransitionTime = verified.Status, verified.Reason, verified.Message, verified.LastTransitionTime
+	}
+	setCondition(&st.Conditions, c)
+}
+
 // failVerification transitions a verification to Failed with the given
 // reason. Mirrors MysqlBackupReconciler.failBackup.
 func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification, reason, message string) (ctrl.Result, error) {
@@ -696,6 +718,7 @@ func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context
 		Reason:             reason,
 		Message:            message,
 	})
+	setVerificationReady(&v.Status, v.Generation)
 	if err := r.Status().Patch(ctx, v, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch failed status: %w", err)
 	}
@@ -1073,6 +1096,7 @@ func (r *MysqlBackupVerificationReconciler) waitVerification(ctx context.Context
 		patch := client.MergeFrom(v.DeepCopy())
 		v.Status.Message = message
 		v.Status.ObservedGeneration = v.Generation
+		setVerificationReady(&v.Status, v.Generation)
 		if err := r.Status().Patch(ctx, v, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("patch waiting status: %w", err)
 		}

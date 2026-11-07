@@ -152,7 +152,7 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 			objects: func() []client.Object {
 				return []client.Object{mdbTestCR(), mdbTestOwnerSecret()}
 			},
-			wantReason: "GroupNotFound",
+			wantReason: v1alpha1.ReasonGroupNotYetCreated,
 		},
 		{
 			name: "group has no active site",

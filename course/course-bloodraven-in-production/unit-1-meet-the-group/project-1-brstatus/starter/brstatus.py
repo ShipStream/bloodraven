@@ -184,7 +184,7 @@ def verdict(group):
     """Return (word, exit_code) for the group.
 
     The operator has already done this work. Every poll it writes a Degraded
-    condition whose reason is one of Healthy, Degraded, SplitBrain,
+    condition whose reason is one of Healthy, SiteUnhealthy, SplitBrain,
     NoPrimary or TotalLoss, plus the replication reasons
     ReplicationBroken, ReplicationLagging, ReplicationError and
     ReplicationSourceMismatch. Read the condition. Do not re-derive group

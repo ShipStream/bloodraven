@@ -75,10 +75,10 @@ type CrossSiteAction struct {
 	// nothing may act on it until then.
 	SplitBrain bool
 	// Alert, when non-empty, is a human-readable summary of a cross-site
-	// condition (TotalLoss / SplitBrain / NoPrimary / Degraded).
+	// condition (TotalLoss / SplitBrain / NoPrimary / SiteUnhealthy).
 	Alert string
 	// Reason is a short machine-readable reason tag suitable for metric
-	// labels or CR condition reasons: "Healthy", "Degraded",
+	// labels or CR condition reasons: "Healthy", "SiteUnhealthy",
 	// "SplitBrain", "NoPrimary", "TotalLoss", or "Initializing" (no site is
 	// confirmed writable and a primary-candidate is still unclassified;
 	// never an alert).
@@ -89,12 +89,12 @@ type CrossSiteAction struct {
 // MysqlFailoverGroup Ready and Degraded condition reasons, so each must also
 // be declared in api/v1alpha1 (internal/apiregistry pins that).
 const (
-	ReasonHealthy      = "Healthy"
-	ReasonDegraded     = "Degraded"
-	ReasonSplitBrain   = "SplitBrain"
-	ReasonNoPrimary    = "NoPrimary"
-	ReasonTotalLoss    = "TotalLoss"
-	ReasonInitializing = "Initializing"
+	ReasonHealthy       = "Healthy"
+	ReasonSiteUnhealthy = "SiteUnhealthy"
+	ReasonSplitBrain    = "SplitBrain"
+	ReasonNoPrimary     = "NoPrimary"
+	ReasonTotalLoss     = "TotalLoss"
+	ReasonInitializing  = "Initializing"
 )
 
 // EvalCrossSite evaluates an N-site topology and returns the cross-site
@@ -162,7 +162,7 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 	if coreCount == 0 {
 		if len(action.FenceSites) > 0 {
 			action.Alert = fmt.Sprintf("writable non-promotable site requires fencing (%s)", strings.Join(action.FenceSites, ", "))
-			action.Reason = ReasonDegraded
+			action.Reason = ReasonSiteUnhealthy
 		} else {
 			action.Reason = ReasonHealthy
 		}
@@ -174,7 +174,7 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 	// leave two sites accepting writes.
 	if len(action.FenceSites) > 0 {
 		action.Alert = fmt.Sprintf("writable non-promotable site requires fencing (%s)", strings.Join(action.FenceSites, ", "))
-		action.Reason = ReasonDegraded
+		action.Reason = ReasonSiteUnhealthy
 		return action
 	}
 
@@ -217,7 +217,7 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 			candidates := RankPromotionCandidates(readOnly, sitePriorities)
 			if len(candidates) > 0 {
 				action.PromotionCandidates = candidates
-				action.Reason = ReasonDegraded
+				action.Reason = ReasonSiteUnhealthy
 				return action
 			}
 			rotating, pendingReclone := blockedCandidateNames(readOnly)
@@ -262,7 +262,7 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 	if len(unreachable) > 0 {
 		action.Alert = fmt.Sprintf("%s unreachable while %s is primary",
 			strings.Join(siteNames(unreachable), ", "), writable[0].Name)
-		action.Reason = ReasonDegraded
+		action.Reason = ReasonSiteUnhealthy
 		return action
 	}
 	action.Reason = ReasonHealthy

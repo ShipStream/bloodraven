@@ -1547,3 +1547,52 @@ func TestUltraA_K118_HeldSlotGuardsDeploymentAdmission(t *testing.T) {
 		t.Fatalf("UnstableReason = %q after release", reason)
 	}
 }
+
+// WE-Q8: a standing automation hold is unstableReason AutomaticFailoverHeld,
+// not PlannedFailover (a run in flight or its claim), whether the operator
+// holds it in the claim slot or it is only durable (status, condition or
+// terminal marker) before the slot is hydrated. Leases stay refused.
+func TestUnstableReason_AutomaticFailoverHeld(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		slotRun, slotHold bool
+		durable           func(*v1alpha1.MysqlFailoverGroup)
+		want              string
+	}{
+		{name: "run claim in the slot", slotRun: true, want: v1alpha1.UnstableReasonPlannedFailover},
+		{name: "hold in the slot", slotRun: true, slotHold: true, want: v1alpha1.UnstableReasonAutomaticFailoverHeld},
+		{name: "status.plannedFailoverHold", durable: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.PlannedFailoverHold = &v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonPromotionUnconfirmed}
+		}, want: v1alpha1.UnstableReasonAutomaticFailoverHeld},
+		{name: "True AutomaticFailoverHeld condition", durable: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.Conditions = append(fg.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue,
+				Reason: v1alpha1.ReasonPlannedFailoverManualRecoveryRequired, LastTransitionTime: metav1.Now()})
+		}, want: v1alpha1.UnstableReasonAutomaticFailoverHeld},
+		{name: "an acknowledged hold", durable: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.Conditions = append(fg.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionFalse,
+				Reason: v1alpha1.ReasonPlannedFailoverHoldAcknowledged, LastTransitionTime: metav1.Now()})
+		}, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, fg, _ := deploymentLeaseFixture(t)
+			m.SetPlannedClaimHeld(func(types.NamespacedName) bool { return tc.slotRun })
+			m.SetPlannedHoldHeld(func(types.NamespacedName) bool { return tc.slotHold })
+			if tc.durable != nil {
+				tc.durable(fg)
+				if err := m.client.Status().Update(context.Background(), fg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if reason := m.UnstableReason(fg); reason != tc.want {
+				t.Fatalf("UnstableReason = %q, want %q", reason, tc.want)
+			}
+			if tc.want == "" {
+				return
+			}
+			_, err := m.Grant(context.Background(), fg, "migration", "op1", "tenant", "tenant-ns", "deployer", 30)
+			if e := requireDeploymentError(t, err, 423, "unstable"); e.Reason != tc.want {
+				t.Fatalf("refusal reason %q, want %q", e.Reason, tc.want)
+			}
+		})
+	}
+}

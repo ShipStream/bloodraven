@@ -15,7 +15,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
-// A pod stall reads as Updating=False/OrderedUpdateStalled with the cause,
+// A pod stall reads as Updating=True/OrderedUpdateStalled with the cause,
 // and fires one Warning Event per new stall: not on every retry that finds
 // the same cause, and again only after an attempt got past it.
 func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
@@ -49,8 +49,8 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	cond, events := write(stalled)
 	wantMsg := "Ordered update stalled: " + stalled.UpdateStalled +
 		". No other site is rolled and the active site is not handed off until that pod has been Ready for 30s; the update retries every 30s"
-	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1.ReasonOrderedUpdateStalled || cond.Message != wantMsg {
-		t.Fatalf("Updating = %+v, want False/%s %q", cond, v1alpha1.ReasonOrderedUpdateStalled, wantMsg)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != v1alpha1.ReasonOrderedUpdateStalled || cond.Message != wantMsg {
+		t.Fatalf("Updating = %+v, want True/%s %q", cond, v1alpha1.ReasonOrderedUpdateStalled, wantMsg)
 	}
 	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning OrderedUpdateStalled "+wantMsg) {
 		t.Fatalf("events = %q, want one OrderedUpdateStalled Warning", events)

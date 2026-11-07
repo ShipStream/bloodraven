@@ -36,11 +36,11 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `08-gtid-divergence-detection` (§8; manufactures a rogue write on the old primary, asserts `recoveryState=RecoveryBlocked` + `divergentTransactionCount>0` + `divergence detected` log; auto-reclones in cleanup)
 - `09-anti-flap-cooldown` (§9; force-deletes the active primary, waits for failover + the original primary to come back as a reachable read-only candidate, then scales the new primary to 0 inside `failoverCooldown` and asserts `failovers_total` increments by exactly 1 across all sites — best-effort log scan for `failover blocked by anti-flap cooldown`)
 - `09-network-partition-self-fence` (§3 of this doc, NetworkPolicy partition path)
-- `10-full-bootstrap-after-data-wipe` (§10; scales a candidate replica to 0, scrubs the per-FG readonly taint from every node, deletes that replica's data PVC, and waits for the operator's `Bootstrapping` condition to cycle through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done` with replica IO+SQL threads ON at the end)
+- `10-full-bootstrap-after-data-wipe` (§10; scales a candidate replica to 0, scrubs the per-FG readonly taint from every node, deletes that replica's data PVC, and waits for the operator's `Bootstrapping` condition to cycle through `Cloning` → `WaitingForRestart` → `SetupReplication` (`True`) to `False`/`NotBootstrapping` with a transition after the wipe and the wiped replica's IO+SQL threads ON; a `BootstrapFailed` after the wipe fails the step at once)
 - `11-total-loss-recovery` (§11; scales every site to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
 - `12-old-primary-recovery-no-divergence` (§7 of this doc; recovery without divergence)
 - `12-rolling-update-healthy-state` (§12; patches `spec.sites[*].resources.requests.memory` and asserts `status.updatePhase` engages then is absent again, both deployments end at the new memory request, no `TOTAL LOSS` log fires during the roll)
-- `13-operator-kill-during-bootstrap` (§13; wipes the read-only site's PVC, scales it back up, then kills the operator pod once `Bootstrapping=True` and asserts the replacement operator drives the clone to `Status=False Reason=Done` with replica IO+SQL threads ON — runs `ResetBeforeRunAll` so `lastFailover.target` is empty when the precondition gate runs)
+- `13-operator-kill-during-bootstrap` (§13; wipes the read-only site's PVC, scales it back up, then kills the operator pod once `Bootstrapping=True` and asserts the replacement operator drives the clone to `Status=False Reason=NotBootstrapping` (transition after the wipe) with the wiped site's IO+SQL threads ON; a restarted operator writes `False`/`NotBootstrapping` before it starts a clone, so the replication check is what tells completion apart — runs `ResetBeforeRunAll` so `lastFailover.target` is empty when the precondition gate runs)
 - `14-failover-with-replication-lag` (§14; pauses the replica SQL applier, seeds rows over 5s on the primary so they sit in the relay log unapplied, then scales the primary to 0 and asserts the new primary's relay-log drain recovered every transaction — `GTID_SUBSET(post-write, current)=1` and full row count)
 - `15-sidecar-crash-no-failover` (§15; ephemeral container `kill 1` against the sidecar PID namespace, asserts restartCount increments and activeSite/SELF-FENC/failover all stay quiet)
 - `16-mysql-process-kill` (§16; issues SQL `SHUTDOWN` against the active site's mysqld and asserts the mysql container restartCount increments and the cluster never enters split-brain — accepts either "no failover" or "failover" outcomes, but rejects `>1 writable`, `RecoveryBlocked`, or sustained zero-writable)
@@ -266,7 +266,7 @@ Automated as `09-anti-flap-cooldown`.
 
 **Injection**: `./playground/reset-mysql.sh` (wipes both sites and bootstraps from scratch)
 
-**Verify**: Bootstrap phases progress (Cloning -> WaitingForRestart -> SetupReplication -> Done). Replica ends up read-only with replication running, data matches primary. GTID sets aligned. Typically takes 30-60s.
+**Verify**: Bootstrap phases progress (Cloning -> WaitingForRestart -> SetupReplication, `Bootstrapping=True`), then `Bootstrapping` returns to `False`/`NotBootstrapping`. Replica ends up read-only with replication running, data matches primary. GTID sets aligned. Typically takes 30-60s.
 
 ---
 
@@ -547,7 +547,7 @@ kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.la
 |---|---|
 | A. bare site, divergent | `RecloneRejected` Warning event with "annotation must include the divergent-GTID prefix" text; annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
 | B. mismatched prefix | `RecloneRejected` Warning event with "does not match the observed divergentGtid" text; annotation removed; site still fenced; no clone executed. |
-| C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done`; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
+| C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` (`True`) and returns to `False`/`NotBootstrapping`, with the recloned site replicating; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
 | D. cold bare site | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms we didn't accidentally make the interlock mandatory in the non-divergent case. |
 
 **Timing**: Sub-cases A and B resolve within one sync cycle (~30s; the runner's `sync()` ticker). Sub-case C takes 30-60s for the clone + restart. Sub-case D is the same.
@@ -1493,7 +1493,7 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 
 **History (total data loss)**: The operator cleared `read_only` on the recipient for CLONE. The recipient's own sidecar then saw a writable non-active site, fenced it and killed the CLONE session. The operator treated the dropped connection as the expected post-clone restart and reported success on an empty site. This happened unprompted in 2 of about 8 reclones. When the primary later died, the picker promoted the empty site. The sidecar's first fix matched CLONE by processlist `info`, which MySQL hides. It now uses `clone_status`.
 
-**Still open**: the operator does not retry a failed reclone. The recipient keeps the replication metadata it had before the clone, so empty-site auto-bootstrap skips it, and the group runs without that replica (`Bootstrapping=True/Failed`, `Ready=False`) until someone sets `reclone-site` again. The scenario's settle step does exactly that.
+**Still open**: the operator does not retry a failed reclone. The recipient keeps the replication metadata it had before the clone, so empty-site auto-bootstrap skips it, and the group runs without that replica (`Bootstrapping=False/BootstrapFailed`, `Degraded=True/BootstrapFailed`, `Ready=False`) until someone sets `reclone-site` again. The scenario's settle step does exactly that.
 
 ### 60. Operator-Only Partition {#60-operator-only-partition}
 **Category**: Partition / data safety | **Risk**: High | **Automated (quarantined)**: `60-operator-only-partition-no-acked-loss`

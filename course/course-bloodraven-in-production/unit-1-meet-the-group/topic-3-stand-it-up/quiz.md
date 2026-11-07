@@ -44,7 +44,7 @@ Role is spec, not status: `status.sites[]` carries name, state, lastSeenTime, re
 `playground` now reports `activeSite: iad`; `iad` state `Writable`; `pdx` state `ReadOnly`, `replication: Healthy`; `reader` state `Unreachable`. What `reason` does the `Degraded` condition carry?
 
 - `Healthy` — `role: ReadOnly` sites are excluded from the writable/read-only/unreachable tallies
-- `Degraded` — one site is unreachable while the primary is up
+- `SiteUnhealthy` — one site is unreachable while the primary is up
 - `TotalLoss` — a site the operator cannot reach counts as lost
 - `NoPrimary` — the group is down to one writable site with no spare reader
 
@@ -52,7 +52,7 @@ Role is spec, not status: `status.sites[]` carries name, state, lastSeenTime, re
 
 **Explanation:**
 
-The reasons are computed over core sites only, and a site with `role: ReadOnly` is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is `Healthy`. The second option is the most tempting and would be right if the unreachable site were `pdx`: a live primary with an unreachable *core* peer is exactly the `Degraded` shape, but the reader does not count. `TotalLoss` requires every core site unreachable, not one site of any kind. `NoPrimary` describes the opposite situation — no writable site at all, every core site read-only — and here `iad` is writable. (objective 8)
+The reasons are computed over core sites only, and a site with `role: ReadOnly` is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is `Healthy`. The second option is the most tempting and would be right if the unreachable site were `pdx`: a live primary with an unreachable *core* peer is exactly the `SiteUnhealthy` shape, but the reader does not count. `TotalLoss` requires every core site unreachable, not one site of any kind. `NoPrimary` describes the opposite situation — no writable site at all, every core site read-only — and here `iad` is writable. (objective 8)
 
 ## Question 4
 

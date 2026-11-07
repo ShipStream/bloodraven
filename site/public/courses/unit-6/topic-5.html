@@ -32,7 +32,8 @@ across two clusters, with no shared GTID history to reason from.</p>
 <h2 id="mysqlstandbycluster-is-a-dashboard-not-a-lifeboat"><code>MysqlStandbyCluster</code> is a dashboard, not a lifeboat</h2>
 <p>You will find a CRD called <code>MysqlStandbyCluster</code> and assume it is the DR mechanism. It is not.
 Today it is <strong>observability only</strong>. Its controller re-scans the source bucket on
-<code>spec.freshness.discoveryInterval</code> (default 5m) and publishes exactly two conditions:</p>
+<code>spec.freshness.discoveryInterval</code> (default 5m) and publishes two conditions, plus a <code>Ready</code> that
+summarises them:</p>
 
 
 
@@ -50,7 +51,11 @@ Today it is <strong>observability only</strong>. Its controller re-scans the sou
 
 
 
-<table><thead><tr><th>Condition</th><th>True means</th></tr></thead><tbody><tr><td><code>BucketReadable</code></td><td>The DR cluster listed the source prefix and could read it.</td></tr><tr><td><code>SourceConfigKnown</code></td><td>The dump metadata parsed — <code>status.discovered</code> now carries dump name, location, GTID set, and the archived binlog window.</td></tr></tbody></table>
+
+
+
+
+<table><thead><tr><th>Condition</th><th>True means</th></tr></thead><tbody><tr><td><code>BucketReadable</code></td><td>The DR cluster listed the source prefix and could read it.</td></tr><tr><td><code>SourceConfigKnown</code></td><td>The dump metadata parsed — <code>status.discovered</code> now carries dump name, location, GTID set, and the archived binlog window.</td></tr><tr><td><code>Ready</code></td><td>Both of the above are <code>True</code> (reason <code>SourceDiscovered</code>). Otherwise it carries the reason of the first one that is not, <code>BucketReadable</code> first. <code>kubectl get mysqlstandbycluster</code> shows only this one as a column.</td></tr></tbody></table>
 <p>That is the whole of it: <strong>no MySQL contact, no restore Jobs, no activation.</strong> A standby cluster
 sitting at <code>BucketReadable=True</code> has told you that a DR bootstrap would be <em>possible</em> and roughly
 how far back it could reach. It has not proven the dump restores, and it will not lift a finger

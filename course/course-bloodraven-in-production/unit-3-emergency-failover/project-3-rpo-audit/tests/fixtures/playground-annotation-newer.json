@@ -65,7 +65,7 @@
       {
         "type": "Degraded",
         "status": "True",
-        "reason": "Degraded",
+        "reason": "SiteUnhealthy",
         "message": "pdx unreachable while iad is primary",
         "lastTransitionTime": "2026-05-02T05:34:11Z"
       }

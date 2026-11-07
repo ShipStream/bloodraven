@@ -5,7 +5,7 @@
 
 **Front:** Any site is writable while its role is not PrimaryCandidate. What does EvalCrossSite do?
 
-**Back:** Fills action.FenceSites, sets Alert `writable non-promotable site requires fencing (…)` and Reason "Degraded", and returns immediately — before TotalLoss, SplitBrain, failover or anything else is evaluated.
+**Back:** Fills action.FenceSites, sets Alert `writable non-promotable site requires fencing (…)` and Reason "SiteUnhealthy", and returns immediately — before TotalLoss, SplitBrain, failover or anything else is evaluated.
 
 ---
 
@@ -29,7 +29,7 @@
 
 **Front:** Which single row of EvalCrossSite sets no action.Alert at all?
 
-**Back:** The failover row. It fills PromotionCandidates and sets Reason "Degraded" but never assigns Alert; every other non-healthy row sets one.
+**Back:** The failover row. It fills PromotionCandidates and sets Reason "SiteUnhealthy" but never assigns Alert; every other non-healthy row sets one.
 
 ---
 
@@ -41,13 +41,13 @@
 
 **Front:** One site writable, one or more unreachable — what is emitted?
 
-**Back:** Alert `<site> unreachable while <site> is primary` with Reason "Degraded". This row is absent from the published docs table.
+**Back:** Alert `<site> unreachable while <site> is primary` with Reason "SiteUnhealthy". This row is absent from the published docs table.
 
 ---
 
 **Front:** The five Reason strings that actually reach status.conditions
 
-**Back:** Healthy, Degraded, SplitBrain, NoPrimary, TotalLoss. "Failover" is not among them.
+**Back:** Healthy, SiteUnhealthy, SplitBrain, NoPrimary, TotalLoss. "Failover" is not among them.
 
 ---
 

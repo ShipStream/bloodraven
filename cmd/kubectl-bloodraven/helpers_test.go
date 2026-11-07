@@ -269,7 +269,7 @@ func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
 		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{
-			Type: "Updating", Status: metav1.ConditionFalse, Reason: "OrderedUpdateStalled", Message: msg,
+			Type: "Updating", Status: metav1.ConditionTrue, Reason: "OrderedUpdateStalled", Message: msg,
 		}}},
 	}
 	var buf bytes.Buffer

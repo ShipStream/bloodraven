@@ -99,7 +99,7 @@ func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 			Sites:              []v1alpha1.SiteStatus{{Name: "iad", State: "Writable", DivergentTransactionCount: &stale, DivergenceDetectedBy: "audit"}, {Name: "pdx", State: "ReadOnly"}},
 			LastFailover:       &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &earlier, Target: "iad"}, PromotionGtidExecuted: "uuid1:1-10"},
 			UpdatePhase:        "UpdatingReplicas",
-			Conditions:         []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "TopologyPolled"}},
+			Conditions:         []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy"}},
 			PlannedFailover:    &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, TargetSite: "pdx"},
 			RestoreReclones:    &v1alpha1.RestoreReclonesStatus{Pending: []string{"pdx"}},
 			Dragonfly:          &v1alpha1.DragonflyStatus{},

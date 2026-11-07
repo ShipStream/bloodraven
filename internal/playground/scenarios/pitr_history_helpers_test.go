@@ -379,14 +379,15 @@ func TestPITRRecloneRequest(t *testing.T) {
 
 // TestPITRRecloneWatch pins F188: an attempt that fails again while the
 // earlier failure's LastTransitionTime is kept is still reported, and an
-// earlier attempt's outcome is never taken for this one's.
+// earlier attempt's outcome (False/BootstrapFailed or
+// False/NotBootstrapping) is never taken for this one's.
 func TestPITRRecloneWatch(t *testing.T) {
 	t0 := metav1.NewTime(mustMicro(t, "2026-11-05T10:00:00.000000Z").Truncate(time.Second))
 	t1 := metav1.NewTime(t0.Add(time.Minute))
 	cond := func(status metav1.ConditionStatus, reason, msg string, ltt metav1.Time) *metav1.Condition {
 		return &metav1.Condition{Type: "Bootstrapping", Status: status, Reason: reason, Message: msg, LastTransitionTime: ltt}
 	}
-	oldFail := cond(metav1.ConditionTrue, "Failed", "Reclone failed: donor gone", t0)
+	oldFail := cond(metav1.ConditionFalse, "BootstrapFailed", "Reclone failed: donor gone", t0)
 	t.Run("old failure is not this attempt's", func(t *testing.T) {
 		w := newPitrRecloneWatch(oldFail)
 		if done, _, err := w.observe(oldFail, false); done || err != nil {
@@ -404,23 +405,23 @@ func TestPITRRecloneWatch(t *testing.T) {
 	})
 	t.Run("failure with a new message", func(t *testing.T) {
 		w := newPitrRecloneWatch(oldFail)
-		if _, _, err := w.observe(cond(metav1.ConditionTrue, "Failed", "Reclone failed: clone plugin error", t0), false); err == nil {
+		if _, _, err := w.observe(cond(metav1.ConditionFalse, "BootstrapFailed", "Reclone failed: clone plugin error", t0), false); err == nil {
 			t.Fatal("a changed failure message is this attempt's failure")
 		}
 	})
-	t.Run("old Done is not this attempt's", func(t *testing.T) {
-		oldDone := cond(metav1.ConditionFalse, "Done", "Reclone completed successfully", t0)
+	t.Run("old completion is not this attempt's", func(t *testing.T) {
+		oldDone := cond(metav1.ConditionFalse, "NotBootstrapping", "Reclone completed successfully", t0)
 		w := newPitrRecloneWatch(oldDone)
 		if done, _, _ := w.observe(oldDone, true); done {
-			t.Fatal("the previous reclone's Done must not complete this one")
+			t.Fatal("the previous reclone's completion must not complete this one")
 		}
-		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "Done", "Reclone completed successfully", t1), true); !done {
-			t.Fatal("a Done with a new transition time completes the attempt")
+		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "NotBootstrapping", "Reclone completed successfully", t1), true); !done {
+			t.Fatal("a completion with a new transition time completes the attempt")
 		}
 	})
 	t.Run("done needs replication", func(t *testing.T) {
 		w := newPitrRecloneWatch(nil)
-		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "Done", "", t1), false); done {
+		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "NotBootstrapping", "", t1), false); done {
 			t.Fatal("done before the site replicates")
 		}
 	})

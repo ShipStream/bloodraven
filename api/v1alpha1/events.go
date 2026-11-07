@@ -263,7 +263,9 @@ const (
 	EventNoHealthySource           = ReasonNoHealthySource
 	EventPITRArchiveRolloutPending = ReasonPITRArchiveRolloutPending
 	EventPassphraseSecretMissing   = ReasonPassphraseSecretMissing
+	EventPendingTimedOut           = ReasonPendingTimedOut
 	EventProfileReadOnly           = ReasonProfileReadOnly
+	EventWaitingForHealthySource   = ReasonWaitingForHealthySource
 )
 
 // Condition-mirror Event reasons recorded on a MysqlBackupVerification: each repeats

@@ -49,8 +49,8 @@ A four-site `playground`: `iad` (`PrimaryCandidate`) writable, `pdx` (`PrimaryCa
 
 - `SplitBrain` — `DisasterRecovery` sites count toward `coreCount`, so two core sites are writable and `len(writable) > 1` holds
 - `Healthy` — `DisasterRecovery` is non-promotable, so like `role: ReadOnly` it is dropped before the tallies and only `iad` is visible
-- `FenceSites = [dr]`, Alert `writable non-promotable site requires fencing (dr)`, `Reason = "Degraded"`, returned before any other row is evaluated
-- `Reason = "Degraded"` with `PromotionCandidates = [pdx]` — the failover row, because the group no longer has a single trustworthy primary
+- `FenceSites = [dr]`, Alert `writable non-promotable site requires fencing (dr)`, `Reason = "SiteUnhealthy"`, returned before any other row is evaluated
+- `Reason = "SiteUnhealthy"` with `PromotionCandidates = [pdx]` — the failover row, because the group no longer has a single trustworthy primary
 
 **Correct option index:** 2
 
@@ -157,7 +157,7 @@ A second failover group — not `playground`, which overrides both — leaves `s
 
 `playground` failed over to `pdx` ninety seconds ago; `spec.failoverCooldown` is `5m`. Now `pdx` goes unreachable and `iad` is read-only. What do you see on this poll?
 
-- `Reason = "Degraded"` with `PromotionCandidates = [iad]` and no alert, plus INFO `failover blocked by anti-flap cooldown` with fields `lastFailover`, `cooldown` and `retryAt` — and no promotion until the cooldown expires
+- `Reason = "SiteUnhealthy"` with `PromotionCandidates = [iad]` and no alert, plus INFO `failover blocked by anti-flap cooldown` with fields `lastFailover`, `cooldown` and `retryAt` — and no promotion until the cooldown expires
 - `Reason = "CooldownBlocked"` on the `Degraded` condition, so you can alert on the block directly
 - `Reason = "Failover"`, as the cross-site evaluation table in `site/content/docs/6.operations/6.failover.md` publishes it, with the promotion deferred until the cooldown expires
 - No condition update at all — the matrix is skipped while the cooldown is running, so `status.conditions` keeps whatever it last wrote
@@ -166,4 +166,4 @@ A second failover group — not `playground`, which overrides both — leaves `s
 
 **Explanation:**
 
-The three conjuncts of the failover row hold — zero writable, one unreachable, one read-only — so the matrix fills `PromotionCandidates` and sets `Reason = "Degraded"`; it is the one acting row that sets no alert. The cooldown then bites at the single guard immediately before the promotion call and returns after logging `failover blocked by anti-flap cooldown` with `lastFailover`, `cooldown` and `retryAt`, having armed a retry for that instant. Option two invents a reason string: exactly five reach `status.conditions` — `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss`. Option three is the published docs table, and it is wrong in the code's favour: there is no `Failover` reason, so an alerting rule matching on one never fires. Option four contradicts the every-poll evaluation — the matrix runs on every poll so status always carries the current topology condition, and only the *mutating* cross-site actions are transition-driven (or fire on an armed retry, as this promotion will at `retryAt`). (objectives 4, 7)
+The three conjuncts of the failover row hold — zero writable, one unreachable, one read-only — so the matrix fills `PromotionCandidates` and sets `Reason = "SiteUnhealthy"`; it is the one acting row that sets no alert. The cooldown then bites at the single guard immediately before the promotion call and returns after logging `failover blocked by anti-flap cooldown` with `lastFailover`, `cooldown` and `retryAt`, having armed a retry for that instant. Option two invents a reason string: exactly five reach `status.conditions` — `Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss`. Option three is the published docs table, and it is wrong in the code's favour: there is no `Failover` reason, so an alerting rule matching on one never fires. Option four contradicts the every-poll evaluation — the matrix runs on every poll so status always carries the current topology condition, and only the *mutating* cross-site actions are transition-driven (or fire on an armed retry, as this promotion will at `retryAt`). (objectives 4, 7)

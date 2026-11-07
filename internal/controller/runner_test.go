@@ -30,7 +30,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: oldTime,
-			Reason:             "TopologyPolled",
+			Reason:             "Healthy",
 			Message:            "At least one site is writable",
 		},
 	}
@@ -40,7 +40,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: newTime,
-		Reason:             "TopologyPolled",
+		Reason:             "Healthy",
 		Message:            "At least one site is writable",
 	})
 
@@ -54,7 +54,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: newTime,
-		Reason:             "TopologyPolled",
+		Reason:             "Healthy",
 		Message:            "No site is writable",
 	})
 
@@ -107,7 +107,7 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 				Type:               "Ready",
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
-				Reason:             "TopologyPolled",
+				Reason:             "Healthy",
 				Message:            "At least one site is writable",
 			},
 		},
@@ -164,7 +164,7 @@ func TestStatusDeepEqual_DifferentConditionStatus(t *testing.T) {
 				Type:               "Ready",
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
-				Reason:             "TopologyPolled",
+				Reason:             "Healthy",
 			},
 		},
 	}
@@ -461,7 +461,7 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 					{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 					{Name: "anomaly", Role: role, State: state.StateWritable, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 				},
-				DegradedReason: "Degraded",
+				DegradedReason: v1alpha1.ReasonSiteUnhealthy,
 				Alert:          "writable non-promotable site requires fencing (anomaly)",
 			})
 			var updated v1alpha1.MysqlFailoverGroup
@@ -481,8 +481,8 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 			if ready == nil || ready.Status != metav1.ConditionFalse {
 				t.Fatalf("Ready condition = %+v, want False", ready)
 			}
-			if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != "Degraded" {
-				t.Fatalf("Degraded condition = %+v, want True/Degraded", degraded)
+			if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != v1alpha1.ReasonSiteUnhealthy {
+				t.Fatalf("Degraded condition = %+v, want True/SiteUnhealthy", degraded)
 			}
 		})
 	}

@@ -159,7 +159,7 @@ func TestPoll_StatusRetryPreservesRejectedSnapshot(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		pollN(tm, 1)
 	}
-	want := TopologySnapshot{ActiveSite: "dc1", Alert: "full rejected alert", DegradedReason: "Degraded"}
+	want := TopologySnapshot{ActiveSite: "dc1", Alert: "full rejected alert", DegradedReason: v1alpha1.ReasonSiteUnhealthy}
 	tm.mu.Lock()
 	tm.statusRetrySnapshot = &want
 	tm.statusWriteFailed = true

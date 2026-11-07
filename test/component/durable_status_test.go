@@ -177,14 +177,14 @@ func TestDurableStatus_LostHoldKeptByTerminalMarker(t *testing.T) {
 		{Name: "dc1", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
 		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 	}
-	fg.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonTopologyPolled}}
+	fg.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonHealthy}}
 
 	hold := controller.PlannedHoldFrom(fg)
 	if hold == nil || !hold.FromMarker || hold.RunID != marker.RunID {
 		t.Fatalf("the terminal marker did not keep the hold: %+v", hold)
 	}
 	leases := controller.NewDeploymentLeaseManager(nil, nil, nil)
-	if reason := leases.UnstableReason(fg); reason != v1alpha1.UnstableReasonPlannedFailover {
+	if reason := leases.UnstableReason(fg); reason != v1alpha1.UnstableReasonAutomaticFailoverHeld {
 		t.Fatalf("deployment leases are not fenced by a hold the marker keeps: unstable reason %q", reason)
 	}
 

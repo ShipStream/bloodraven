@@ -9,16 +9,15 @@ import (
 // +kubebuilder:resource:shortName=msc;mscs,categories=bloodraven;mysql;dr
 // +kubebuilder:printcolumn:name="Dump",type=string,JSONPath=`.status.discovered.latestDump.name`
 // +kubebuilder:printcolumn:name="NewestBinlog",type=date,JSONPath=`.status.discovered.binlogArchive.newestEventTime`
-// +kubebuilder:printcolumn:name="BucketReadable",type=string,JSONPath=`.status.conditions[?(@.type=="BucketReadable")].status`
-// +kubebuilder:printcolumn:name="SourceKnown",type=string,JSONPath=`.status.conditions[?(@.type=="SourceConfigKnown")].status`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MysqlStandbyCluster is a passive observability descriptor for a DR
 // relationship from this cluster to a source MysqlFailoverGroup's dumps and
 // PITR archive in a shared object store. The controller scans the source
 // prefix every spec.freshness.discoveryInterval and publishes the
-// BucketReadable and SourceConfigKnown conditions with status.discovered
-// (the newest dump and the verified binlog archive window). It never
+// BucketReadable and SourceConfigKnown conditions, summarised by Ready, with
+// status.discovered (the newest dump and the verified binlog archive window). It never
 // contacts MySQL, runs no restore Jobs and writes nothing to the bucket.
 //
 // One MysqlStandbyCluster per DR relationship per namespace. Failback uses a
@@ -161,7 +160,8 @@ type MysqlStandbyClusterStatus struct {
 	// +optional
 	Discovered *StandbyDiscovered `json:"discovered,omitempty"`
 
-	// Conditions are BucketReadable and SourceConfigKnown.
+	// Conditions are BucketReadable and SourceConfigKnown, and Ready, which
+	// summarises the two.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

@@ -28,7 +28,7 @@ func TestInitRestoreReadyStale(t *testing.T) {
 		reason, message := initRestoreReadyCondition(withRestore(phase, nil))
 		return &metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: reason, Message: message}
 	}
-	topologyReady := &metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "TopologyPolled", Message: "ok"}
+	topologyReady := &metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", Message: "ok"}
 	for _, tc := range []struct {
 		name string
 		fg   *v1alpha1.MysqlFailoverGroup

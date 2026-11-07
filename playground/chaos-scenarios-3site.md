@@ -455,8 +455,10 @@ kubectl -n $NS scale deployment mysql-playground-fra --replicas=1
 
 **Verify**:
 - `status.conditions[type=Bootstrapping]` transitions through
-  `Cloning → WaitingForRestart → SetupReplication → Done` on `fra`
-  only.
+  `Cloning → WaitingForRestart → SetupReplication` (`True`) on `fra`
+  only, then returns to `False`/`NotBootstrapping` with `fra` replicating.
+  `False`/`BootstrapFailed` (with `Degraded=True/BootstrapFailed`) is a
+  failed clone.
 - Operator log: `starting bootstrap source=auto-clone donor=iad
   recipient=fra` (or `donor=<current-active>`, whichever it is).
   Donor must match `status.activeSite`, never `pdx`.

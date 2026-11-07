@@ -190,7 +190,7 @@ func TestUpdateCRStatus_ReadyFalseUntilInitRestoreSucceeds(t *testing.T) {
 	}{
 		{v1alpha1.BackupPhaseRunning, metav1.ConditionFalse, v1alpha1.ReasonInitFromBackupInProgress, "applications are kept off the group"},
 		{v1alpha1.BackupPhaseFailed, metav1.ConditionFalse, v1alpha1.ReasonInitFromBackupFailed, "delete the restore Job"},
-		{v1alpha1.BackupPhaseSucceeded, metav1.ConditionTrue, "TopologyPolled", ""},
+		{v1alpha1.BackupPhaseSucceeded, metav1.ConditionTrue, v1alpha1.ReasonHealthy, ""},
 	} {
 		t.Run(string(tc.phase), func(t *testing.T) {
 			fg := newTestFG()

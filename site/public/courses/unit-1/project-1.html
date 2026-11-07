@@ -74,7 +74,7 @@ chained off another replica does not count</li>
 <p>For <strong>every other role</strong>, <code>healthy=yes</code> as soon as <code>state</code> is <code>Writable</code> or <code>ReadOnly</code>. There is no
 lag gate on those sites at all. That asymmetry is real and it is the point of this project.</p>
 <p><strong>TODO C — <code>verdict</code>.</strong> Return <code>(word, exit_code)</code> from the table above. Read the <code>Degraded</code>
-condition the operator already wrote — its <code>reason</code> is one of <code>Healthy</code>, <code>Degraded</code>, <code>SplitBrain</code>,
+condition the operator already wrote — its <code>reason</code> is one of <code>Healthy</code>, <code>SiteUnhealthy</code>, <code>SplitBrain</code>,
 <code>NoPrimary</code>, <code>TotalLoss</code>, or a replication reason such as <code>ReplicationLagging</code>. Do not re-derive
 group health from the site rows.</p>
 <p>Then do the cluster half: with <code>playground</code> up, capture a live status and read it with your own tool.</p>
@@ -374,7 +374,7 @@ def verdict(group):
     &quot;&quot;&quot;Return (word, exit_code) for the group.
 
     The operator has already done this work. Every poll it writes a Degraded
-    condition whose reason is one of Healthy, Degraded, SplitBrain,
+    condition whose reason is one of Healthy, SiteUnhealthy, SplitBrain,
     NoPrimary or TotalLoss, plus the replication reasons
     ReplicationBroken, ReplicationLagging, ReplicationError and
     ReplicationSourceMismatch. Read the condition. Do not re-derive group
