@@ -342,8 +342,8 @@ if [[ "$SETUP_TLS" == "true" ]]; then
   {
     while IFS= read -r line; do
       printf '%s\n' "$line"
-      if [[ "$line" == "  secretName: mysql-credentials" ]]; then
-        printf '  tls:\n    secretName: mysql-playground-tls\n    issuerRef:\n      name: playground-ca\n      kind: Issuer\n'
+      if [[ "$line" == "    operatorSecret: mysql-credentials" ]]; then
+        printf '  tls:\n    secretName: mysql-playground-tls\n'
       fi
     done < <(sed "s|sidecarImage: bloodraven-sidecar|sidecarImage: ${IMG_PREFIX}bloodraven-sidecar|" \
       "$SCRIPT_DIR/manifests/failovergroup.yaml")

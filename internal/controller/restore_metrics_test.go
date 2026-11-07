@@ -114,7 +114,7 @@ func TestReconcileRestoreJob_JobSucceeded_EmitsMetricsOnce(t *testing.T) {
 	seed.Status.Location = fggroup + "/seed/"
 	seed.Status.SizeBytes = 2048
 	deploy := primaryReadyDeployment(fggroup, fg.Spec.Sites[0].Name)
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 	defer bmetrics.RestoreDurationSeconds.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
 	defer bmetrics.RestoreLastSuccessTimestamp.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
 	defer bmetrics.RestoreLastSourceSizeBytes.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
@@ -181,7 +181,7 @@ func TestReconcileRestoreJob_JobFailed_DoesNotEmitSuccessMetrics(t *testing.T) {
 	seed.Status.Location = fggroup + "/seed/"
 	seed.Status.SizeBytes = 4096
 	deploy := primaryReadyDeployment(fggroup, "iad")
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 	defer bmetrics.RestoreDurationSeconds.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
 	defer bmetrics.RestoreLastSuccessTimestamp.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
 	defer bmetrics.RestoreLastSourceSizeBytes.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
@@ -256,7 +256,7 @@ func TestInPlaceRestorePreservesMetadataThroughResuming(t *testing.T) {
 		TargetGtidExecuted: "uuid:1-7",
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)

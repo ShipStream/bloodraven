@@ -29,7 +29,7 @@ func TestVerificationSource_RemainsPinnedWhenNewBackupCompletes(t *testing.T) {
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
 			v.UID = "pinned-verification-uid"
 			v.Spec.TTLSecondsAfterFinished = 3600
-			r, c := newVerificationReconciler(t, fg, a, v, dsnSecret())
+			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 			key := client.ObjectKeyFromObject(v)
 			if beforeJob {
 				for i := 0; i < 6; i++ {
@@ -108,7 +108,7 @@ func TestVerificationSource_RejectsMissingOrReplacedPinBeforeLaunch(t *testing.T
 			if mode == "replaced-explicit" {
 				v.Spec.BackupRef = &corev1.LocalObjectReference{Name: a.Name}
 			}
-			r, c := newVerificationReconciler(t, fg, a, v, dsnSecret())
+			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 			provisionVerificationSource(t, r, c, v)
 			if err := c.Delete(ctx, a); err != nil {
 				t.Fatal(err)
@@ -144,7 +144,7 @@ func TestVerificationSource_BuildsFromPinnedDestination(t *testing.T) {
 	a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	a.Status.Location = "original/artifact"
 	v := verifyCR("pinned", fg.Name, "nightly-s3")
-	r, c := newVerificationReconciler(t, fg, a, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 	provisionVerificationSource(t, r, c, v)
 	// The verification stamped its hold on the backup; start from that copy.
 	if err := c.Get(ctx, client.ObjectKeyFromObject(a), a); err != nil {
@@ -178,7 +178,7 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 			a.Status.Location = "backup-a/artifact"
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
 			v.Spec.TTLSecondsAfterFinished = 3600
-			r, c := newVerificationReconciler(t, fg, a, v, dsnSecret())
+			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 			reconcileVerifUntilStable(t, r, v.Name)
 			if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 				t.Fatal(err)
@@ -273,7 +273,7 @@ func TestVerificationSource_StatusFailuresRemainRetryable(t *testing.T) {
 			fg := verifyFG()
 			a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
-			r, c := newVerificationReconciler(t, fg, a, v, dsnSecret())
+			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 			if stage == "observe-job" {
 				reconcileVerifUntilStable(t, r, v.Name)
 				if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
@@ -333,7 +333,7 @@ func TestVerificationSource_ObservesJobAfterLaunchInputsDisappear(t *testing.T) 
 	a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("pinned", fg.Name, "nightly-s3")
 	v.Spec.BackupRef = &corev1.LocalObjectReference{Name: a.Name}
-	r, c := newVerificationReconciler(t, fg, a, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Delete(ctx, a); err != nil {
 		t.Fatal(err)
@@ -345,7 +345,7 @@ func TestVerificationSource_ObservesJobAfterLaunchInputsDisappear(t *testing.T) 
 	if err := c.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{dsnSecret().Name, verificationCredsSecretName(v.Name)} {
+	for _, secret := range []string{operatorCredsSecret().Name, verificationCredsSecretName(v.Name)} {
 		if err := c.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secret, Namespace: v.Namespace}}); err != nil {
 			t.Fatal(err)
 		}

@@ -29,7 +29,7 @@ func encryptedBackupFixture(t *testing.T, extra ...client.Object) (*MysqlBackupR
 	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
 	mb := backupCR("dk", fg.Name, "nightly-s3")
 	mb.UID = "0123abcd-dk-uid"
-	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, dsnSecret()}, extra...)...)
+	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, operatorCredsSecret()}, extra...)...)
 	return r, c, fg, mb
 }
 
@@ -175,7 +175,7 @@ func TestBackupWaitsForPITRRollout(t *testing.T) {
 	if !render.Enabled {
 		t.Fatal("fixture: the group renders no archive")
 	}
-	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, dsnSecret()}, deps...)...)
+	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, operatorCredsSecret()}, deps...)...)
 	reconcileUntilStable(t, r, mb.Name)
 	got := getBackup(t, c, mb)
 	if got.Status.Phase != v1alpha1.BackupPhasePending || !strings.Contains(conditionReasons(got.Status.Conditions), v1alpha1.ReasonPITRArchiveRolloutPending) {
@@ -206,7 +206,7 @@ func TestBackupOfReadOnlyProfileFails(t *testing.T) {
 	e := bindTestPITRArchive(t, fg, "nightly-s3")
 	e.Source.UID = "another-group"
 	mb := backupCR("ro", fg.Name, "nightly-s3")
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, mb.Name)
 	got := getBackup(t, c, mb)
 	if got.Status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(conditionReasons(got.Status.Conditions), v1alpha1.ReasonProfileReadOnly) {
@@ -384,7 +384,7 @@ func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 			mb := backupCR("unstamped", fg.Name, tc.profile)
 			mb.UID = "unstamped-uid"
-			objs := []client.Object{fg, mb, dsnSecret()}
+			objs := []client.Object{fg, mb, operatorCredsSecret()}
 			for i, render := range tc.renders(fg) {
 				d := siteDeploy(fg, fg.Spec.Sites[i].Name, render)
 				objs = append(objs, &d)

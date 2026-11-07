@@ -486,16 +486,13 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// credentialRoleSecretNames is the Secret keys the MySQL pods read in
-// credentials mode (Δ15, O10): username and password of the five role
+// credentialRoleSecretNames is the Secret keys the MySQL pods read
+// (Δ15, O10): username and password of the five role
 // Secrets, and the operator Secret's MYSQL_ROOT_PASSWORD. Nothing else of
 // those Secrets (a passphrase sharing one, say) enters the pod hash.
 func credentialRoleSecretNames(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
 	out := consumedSecretKeys{}
 	c := fg.Spec.Credentials
-	if c == nil {
-		return out
-	}
 	out.add(c.OperatorSecret, "username", "password", "MYSQL_ROOT_PASSWORD")
 	for _, name := range []string{c.AppSecret, c.ReadOnlySecret, c.MonitorSecret, c.BackupSecret} {
 		out.add(name, "username", "password")
@@ -504,15 +501,12 @@ func credentialRoleSecretNames(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKe
 }
 
 // credentialHashSecretKeys is what reconcileCredentials consumes (Δ15): the
-// role keys of credentialRoleSecretNames, the operator Secret's
-// replication account (a reserved principal), and in legacy mode the dsn of
-// spec.secretName. No passphrase or decryption Secret enters it.
+// role keys of credentialRoleSecretNames and the operator Secret's
+// replication account (a reserved principal). No passphrase or decryption
+// Secret enters it.
 func credentialHashSecretKeys(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
 	out := credentialRoleSecretNames(fg)
-	if c := fg.Spec.Credentials; c != nil {
-		out.add(c.OperatorSecret, "MYSQL_REPLICATION_USER", "MYSQL_REPLICATION_PASSWORD")
-	}
-	out.add(fg.Spec.SecretName, "dsn")
+	out.add(fg.Spec.Credentials.OperatorSecret, "MYSQL_REPLICATION_USER", "MYSQL_REPLICATION_PASSWORD")
 	return out
 }
 

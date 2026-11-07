@@ -64,7 +64,7 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
 					mb := backupCR("metadata", fg.Name, "nightly-s3")
 					mb.UID = "literal-backup"
-					r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+					r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 					reconcileUntilStable(t, r, mb.Name)
 					var producer batchv1.Job
 					if err := c.Get(ctx, client.ObjectKey{Namespace: mb.Namespace, Name: backupJobName(mb.Name)}, &producer); err != nil {

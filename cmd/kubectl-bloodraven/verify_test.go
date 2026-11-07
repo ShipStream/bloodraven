@@ -39,8 +39,8 @@ func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 	if cr.Spec.FailoverGroupRef.Name != "orders" {
 		t.Errorf("FailoverGroupRef = %q, want orders", cr.Spec.FailoverGroupRef.Name)
 	}
-	if cr.Spec.TriggeredBy != "manual" {
-		t.Errorf("TriggeredBy = %q, want manual", cr.Spec.TriggeredBy)
+	if got := cr.Annotations[v1alpha1.TriggeredByAnnotation]; got != "manual" {
+		t.Errorf("triggered-by annotation = %q, want manual", got)
 	}
 	if cr.Spec.KeepOnFailure == nil || !*cr.Spec.KeepOnFailure {
 		t.Errorf("KeepOnFailure not inherited from VerificationSpec")

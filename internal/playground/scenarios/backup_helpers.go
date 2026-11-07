@@ -295,11 +295,11 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 				"chaos.playground.bloodraven.io/scenario":       scenarioID,
 				"chaos.playground.bloodraven.io/created-by-e2e": "true",
 			},
+			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: env.FG},
 			ProfileName:      profile,
-			TriggeredBy:      "chaos/" + scenarioID,
 		},
 	}
 	if err := env.Kube.Controller.Create(ctx, b); err != nil {
@@ -321,6 +321,7 @@ func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, b
 				"chaos.playground.bloodraven.io/scenario":       scenarioID,
 				"chaos.playground.bloodraven.io/created-by-e2e": "true",
 			},
+			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
 			FailoverGroupRef:        v1alpha1.LocalGroupRef{Name: env.FG},
@@ -328,7 +329,6 @@ func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, b
 			BackupRef:               &corev1.LocalObjectReference{Name: backupName},
 			KeepOnFailure:           &keep,
 			TTLSecondsAfterFinished: 0,
-			TriggeredBy:             "chaos/" + scenarioID,
 			PointInTime:             pit,
 			SanityCheck: &v1alpha1.SanityCheckSpec{
 				Query: query,
@@ -753,8 +753,8 @@ func verificationStatusSummary(v *v1alpha1.MysqlBackupVerification) string {
 	if v.Status.BackupRef != nil {
 		backupRef = fmt.Sprintf("%s/%s", v.Status.BackupRef.Name, v.Status.BackupRef.UID)
 	}
-	return fmt.Sprintf("name=%s phase=%s message=%q backupRef=%s job=%q pod=%q pvc=%q replay=%v sanity=%v conditions=%s",
-		v.Name, v.Status.Phase, v.Status.Message, backupRef, v.Status.JobName, v.Status.PodName, v.Status.PVCName, v.Status.ReplayedThroughBinlog, v.Status.SanityCheck, conditionsSummary(v.Status.Conditions))
+	return fmt.Sprintf("name=%s phase=%s message=%q backupRef=%s job=%q replay=%v sanity=%v conditions=%s",
+		v.Name, v.Status.Phase, v.Status.Message, backupRef, v.Status.JobName, v.Status.ReplayedThroughBinlog, v.Status.SanityCheck, conditionsSummary(v.Status.Conditions))
 }
 
 func conditionsSummary(conds []metav1.Condition) string {

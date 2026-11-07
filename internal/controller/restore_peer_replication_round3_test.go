@@ -23,7 +23,7 @@ import (
 func TestSettlementWait_KeepsReassertingOfflineFence(t *testing.T) {
 	fg := jobLostFG(time.Now())
 	pod := restorePod(corev1.PodRunning)
-	r, c := newReconciler(fg, dsnSecret(), pod)
+	r, c := newReconciler(fg, operatorCredsSecret(), pod)
 	tm, mocks := withFenceRunner(r, c, fg)
 	primary := mocks["iad"]
 	primary.offlineMode, primary.gtidExecuted = true, peerGTID("1-10")
@@ -98,7 +98,7 @@ func TestConfirmBumpDuringSettlement_DoesNotStallReconcile(t *testing.T) {
 	fg := jobLostFG(time.Now())
 	fg.Spec.RestoreInPlace.Confirm = confirmB
 	fg.SetAnnotations(map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx"})
-	r, c := newReconciler(fg, dsnSecret(), restorePod(corev1.PodRunning))
+	r, c := newReconciler(fg, operatorCredsSecret(), restorePod(corev1.PodRunning))
 	r.Recorder = record.NewFakeRecorder(200)
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].offlineMode, mocks["iad"].gtidExecuted = true, peerGTID("1-10")

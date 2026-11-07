@@ -27,7 +27,6 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
-	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -638,9 +637,8 @@ func verificationTerminal(p v1alpha1.VerificationPhase) bool {
 }
 
 // ensureVerificationCredsSecret creates the derived Secret used by the
-// verification Job. In credentials mode, pulls from the group's backup
-// credential secret; in legacy mode, parses the DSN. The Secret is
-// owned by the verification CR so it GCs with the CR.
+// verification Job, pulled from the group's backup credential secret. The
+// Secret is owned by the verification CR so it GCs with the CR.
 //
 // The verification Pod uses an in-pod synthetic root for the ephemeral
 // mysqld, so this Secret's MYSQL_USER / MYSQL_PASSWORD are only needed
@@ -655,21 +653,8 @@ func (r *MysqlBackupVerificationReconciler) ensureVerificationCredsSecret(ctx co
 	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: backupSecretName}, &srcSecret); err != nil {
 		return fmt.Errorf("get backup credential secret %s: %w", backupSecretName, err)
 	}
-	if fg.Spec.UsesCredentials() {
-		user = string(srcSecret.Data["username"])
-		password = string(srcSecret.Data["password"])
-	} else {
-		dsnBytes, ok := srcSecret.Data["dsn"]
-		if !ok {
-			return fmt.Errorf("secret %s missing 'dsn' key", backupSecretName)
-		}
-		parsed, err := internalmysql.ParseDSN(string(dsnBytes))
-		if err != nil {
-			return fmt.Errorf("parse dsn: %w", err)
-		}
-		user = parsed.User
-		password = parsed.Passwd
-	}
+	user = string(srcSecret.Data["username"])
+	password = string(srcSecret.Data["password"])
 
 	derived := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

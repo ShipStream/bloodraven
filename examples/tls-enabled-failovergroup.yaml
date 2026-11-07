@@ -29,9 +29,6 @@ spec:
     monitorSecret: orders-mysql-monitor
     backupSecret: orders-mysql-backup
   tls:
-    issuerRef:
-      name: mysql-ca
-      kind: ClusterIssuer
     secretName: orders-mysql-tls
   dns:
     hostname: orders.az.example.com

@@ -682,7 +682,7 @@ func TestMysqlBackupReconciler_StampsLabels(t *testing.T) {
 			ProfileName:      "nightly-s3",
 		},
 	}
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "bare-adhoc")
 	var got v1alpha1.MysqlBackup
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "bare-adhoc", Namespace: "ns"}, &got)

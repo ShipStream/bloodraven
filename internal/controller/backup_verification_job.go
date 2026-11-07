@@ -3,14 +3,12 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"regexp"
 	"strconv"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -48,12 +46,6 @@ const (
 	// is not set. Verification loads a dump into a cold instance so the
 	// ceiling matches the backup default.
 	verificationDefaultActiveDeadline = int64(7200)
-
-	// verificationMinPVCSize is the floor autoSizeVerificationPVC returns.
-	// MySQL's initial datadir plus a small dump is already a few hundred
-	// MB; 10Gi keeps us comfortable for tiny backups. Nothing applies the
-	// result yet (see the datadir volume TODO in buildVerificationJob).
-	verificationMinPVCSize = int64(10 * 1024 * 1024 * 1024) // 10 GiB
 )
 
 // verificationJobInputs bundles the resolved inputs for building the
@@ -67,38 +59,9 @@ type verificationJobInputs struct {
 	ScriptsConfigMapName string
 }
 
-// autoSizeVerificationPVC returns the intended capacity for the
-// verification run's ephemeral datadir (~1.5x the backup size). It is not
-// applied to the Job today: the datadir emptyDir carries no SizeLimit, and
-// the helper is kept for the planned container ephemeral-storage limit (see
-// the TODO in buildVerificationJob). Explicit spec.storage.size wins; otherwise we use
-// max(verificationMinPVCSize, ceil(1.5 * backup.status.sizeBytes / 10 GiB) * 10 GiB).
-func autoSizeVerificationPVC(v *v1alpha1.MysqlBackupVerification, backup *v1alpha1.MysqlBackup) resource.Quantity {
-	if v.Spec.Storage != nil && !v.Spec.Storage.Size.IsZero() {
-		return v.Spec.Storage.Size
-	}
-
-	var src int64
-	if backup != nil {
-		src = backup.Status.SizeBytes
-	}
-	if src <= 0 {
-		return *resource.NewQuantity(verificationMinPVCSize, resource.BinarySI)
-	}
-	need := int64(math.Ceil(float64(src) * 1.5))
-	// Round up to the nearest 10 GiB.
-	const step = int64(10 * 1024 * 1024 * 1024)
-	blocks := (need + step - 1) / step
-	sized := blocks * step
-	if sized < verificationMinPVCSize {
-		sized = verificationMinPVCSize
-	}
-	return *resource.NewQuantity(sized, resource.BinarySI)
-}
-
 // buildVerificationJob constructs the batchv1.Job that runs verify.sh
 // inside the container image pinned on spec.backup.image. verify.sh
-// boots an ephemeral mysqld on the mounted PVC, then delegates the
+// boots an ephemeral mysqld on the emptyDir datadir, then delegates the
 // actual load to the shared restore.py script.
 func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	fg := in.FailoverGroup
@@ -245,10 +208,8 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// there during --initialize, which fails with EROFS otherwise.
 	//
 	// Do NOT set EmptyDir.SizeLimit: a size-limited emptyDir is set up as a
-	// separate mount that is not always fsGroup-chowned. (TODO: re-introduce
-	// node-disk bounding via a container ephemeral-storage limit once we
-	// confirm CI nodes have the headroom; autoSizeVerificationPVC stays
-	// available for that.)
+	// separate mount that is not always fsGroup-chowned. Node disk is
+	// bounded through spec.resources.limits.ephemeral-storage instead.
 	volumes := []corev1.Volume{
 		{
 			Name:         "datadir",
@@ -678,19 +639,17 @@ func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrRep
 }
 
 // verificationLoadOptions returns the util.loadDump() options used for
-// a verification run. ResetProgress=true is inert: verification Jobs
-// disable load-progress tracking, so every run starts clean anyway.
-// SkipBinlog=true because the ephemeral mysqld runs with --skip-log-bin
-// anyway; LoadIndexes=true so a
+// a verification run. Verification Jobs disable load-progress tracking, so
+// every run starts clean. SkipBinlog=true because the ephemeral mysqld runs
+// with --skip-log-bin anyway; LoadIndexes=true so a
 // "restore loads successfully" result is not weakened by deferred
 // index builds that would only fail later.
 func verificationLoadOptions() *v1alpha1.LoadOptions {
 	t := true
 	return &v1alpha1.LoadOptions{
-		Threads:       4,
-		ResetProgress: &t,
-		SkipBinlog:    &t,
-		LoadIndexes:   &t,
+		Threads:     4,
+		SkipBinlog:  &t,
+		LoadIndexes: &t,
 	}
 }
 

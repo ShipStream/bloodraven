@@ -57,9 +57,6 @@ spec:
   # to clone encrypted data, and Bloodraven bootstraps every replica with
   # CLONE INSTANCE.
   tls:
-    issuerRef:
-      name: mysql-ca
-      kind: ClusterIssuer
     secretName: orders-mysql-tls
 
   encryptionAtRest:

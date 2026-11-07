@@ -33,7 +33,6 @@ type MysqlFailoverGroupList struct {
 }
 
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
-// +kubebuilder:validation:XValidation:rule="(has(self.secretName) && self.secretName != \"\" && !has(self.credentials)) || ((!has(self.secretName) || self.secretName == \"\") && has(self.credentials))",message="exactly one of secretName or credentials must be set"
 // +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.name == x.name).size() == 1)",message="spec.sites[].name must be unique"
 // +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'primary-candidate').size() >= 2",message="spec.sites must contain at least two sites with role 'primary-candidate'"
 // +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))",message="splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'"
@@ -66,17 +65,10 @@ type MysqlFailoverGroupSpec struct {
 	// +kubebuilder:validation:MaxItems=16
 	Sites []SiteSpec `json:"sites"`
 
-	// SecretName references the secret containing MySQL credentials (legacy).
-	// The secret must contain a 'dsn' key with a MySQL DSN string.
-	// Mutually exclusive with credentials.
-	// +optional
-	SecretName string `json:"secretName,omitempty"`
-
-	// Credentials configures per-role MySQL credential management.
-	// When set, the operator manages MySQL users and privileges for each
-	// configured role. Mutually exclusive with secretName.
-	// +optional
-	Credentials *CredentialsSpec `json:"credentials,omitempty"`
+	// Credentials configures per-role MySQL credential management. The
+	// operator manages MySQL users and privileges for each configured role.
+	// +required
+	Credentials CredentialsSpec `json:"credentials"`
 
 	// TLS configures TLS for the MySQL instances.
 	TLS *TLSSpec `json:"tls,omitempty"`
@@ -413,24 +405,12 @@ type StorageSpec struct {
 
 // TLSSpec configures TLS for MySQL.
 type TLSSpec struct {
-	// IssuerRef references a cert-manager Issuer or ClusterIssuer.
-	IssuerRef IssuerRef `json:"issuerRef"`
-
-	// SecretName is the name of the Secret containing the TLS certificates.
-	// cert-manager should be configured to create this secret from the IssuerRef.
+	// SecretName is the name of the Secret holding the server certificate
+	// (tls.crt), its private key (tls.key) and the CA bundle (ca.crt). The
+	// operator does not issue certificates; create the Secret yourself or
+	// with a tool such as cert-manager.
 	// +kubebuilder:validation:MinLength=1
 	SecretName string `json:"secretName"`
-}
-
-// IssuerRef is a reference to a cert-manager issuer.
-type IssuerRef struct {
-	// Name of the issuer.
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-
-	// Kind of the issuer (Issuer or ClusterIssuer).
-	// +kubebuilder:validation:Enum=Issuer;ClusterIssuer
-	Kind string `json:"kind"`
 }
 
 // DNSSpec configures the external DNS record managed by the operator.

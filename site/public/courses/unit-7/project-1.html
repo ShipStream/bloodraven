@@ -8,9 +8,10 @@ first time anyone sees your production group’s problems is before it is applie
 incident.</p>
 <h2 id="how-this-works">How this works</h2>
 <p>Topic 1 of this unit drew the line that matters on day 0: <strong>admission validates the object, and
-nothing validates the object against the cluster.</strong> A manifest that sets both credential modes is
-refused in milliseconds. A manifest whose <code>taintNodeSelector</code> names labels no node carries is
-accepted, applied, and silently does nothing for the rest of its life.</p>
+nothing validates the object against the cluster.</strong> A manifest that still carries the removed
+<code>spec.secretName</code> beside <code>spec.credentials</code> is refused in milliseconds. A manifest whose
+<code>taintNodeSelector</code> names labels no node carries is accepted, applied, and silently does nothing for
+the rest of its life.</p>
 <p><code>brprep</code> makes that line executable. It reads a manifest as JSON and prints three kinds of line:</p>
 
 
@@ -52,8 +53,9 @@ grader first, before you change anything:</p>
 is measured against.</p>
 <p><strong>TODO A — <code>check_admission</code>.</strong> Print one <code>REJECT &#x3C;rule></code> line per admission rule the manifest
 violates, in the order the <code>RULE_*</code> constants are declared. A clean manifest prints nothing at all. The nine rules
-are documented in the script — seven CEL rules on the CRD plus the <code>MinItems</code>/<code>MaxItems</code> bound on
-<code>spec.sites</code>, all of them refusals at <code>kubectl apply</code> — and two are worth flagging here.</p>
+are documented in the script — CEL rules on the CRD, the <code>MinItems</code>/<code>MaxItems</code> bound on
+<code>spec.sites</code> and the required <code>spec.credentials</code>, all of them refusals at <code>kubectl apply</code> — and two
+are worth flagging here.</p>
 <p><em>The role default is load-bearing.</em> <code>spec.sites[].role</code> is optional and defaults to
 <code>primary-candidate</code>, so a site with no <code>role</code> key counts toward the two-candidate minimum and is
 required to carry <code>lbIP</code> and <code>taintNodeSelector</code>. Reading a missing role as “not a candidate” fails
@@ -203,11 +205,13 @@ secs() {
   echo &quot;$total&quot;
 }
 
-# The nine admission rules, in the fixed order brprep reports them. Seven are
+# The nine admission rules, in the fixed order brprep reports them. Most are
 # CEL rules on the CRD; the site-count one is a MinItems/MaxItems constraint on
-# the schema. Both are refusals at `kubectl apply`, which is all brprep claims.
+# the schema, and the credentials one is a required field plus kubectl&#39;s strict
+# field validation. All are refusals at `kubectl apply`, which is all brprep
+# claims.
 # The grader matches these tokens exactly, so do not reword them.
-RULE_CREDENTIALS=&quot;exactly one of secretName or credentials must be set&quot;
+RULE_CREDENTIALS=&quot;spec.credentials.operatorSecret is required and spec.secretName is not a field&quot;
 RULE_SITE_COUNT=&quot;spec.sites must contain between 2 and 16 entries&quot;
 RULE_SITE_NAMES=&quot;spec.sites[].name must be unique&quot;
 RULE_TWO_CANDIDATES=&quot;spec.sites must contain at least two sites with role primary-candidate&quot;
@@ -233,9 +237,12 @@ WARN_RECREATE=&quot;updateStrategy Recreate patches every site Deployment in one
 #
 # The nine rules, and what each one actually checks:
 #
-#   RULE_CREDENTIALS    exactly one of .spec.secretName and .spec.credentials
-#                       is present and non-empty. Both, or neither, is a
-#                       rejection.
+#   RULE_CREDENTIALS    .spec.credentials.operatorSecret is present and
+#                       non-empty, and .spec.secretName is absent. A missing
+#                       credentials block is a required-field error; the
+#                       single-Secret secretName mode was removed in v1.7.0,
+#                       so kubectl&#39;s strict field validation refuses it as
+#                       an unknown field.
 #   RULE_SITE_COUNT     2 &lt;= (.spec.sites | length) &lt;= 16.
 #   RULE_SITE_NAMES     every .spec.sites[].name is distinct.
 #   RULE_TWO_CANDIDATES at least two sites have role &quot;primary-candidate&quot;.

@@ -30,7 +30,7 @@ things it never will.
       "aspect": "Inside MySQL",
       "cells": [
         "Nothing, on a fresh datadir. Everything, if you point it at a datadir that already exists.",
-        "The clone plugin, the replication user, and — in credentials mode — the app, read-only, monitor and backup users, each with a fixed grant set."
+        "The clone plugin and the operator user, plus the app, read-only, monitor and backup users whose Secrets you set, each with a fixed grant set. Not a dedicated replication user."
       ]
     },
     {
@@ -52,16 +52,14 @@ Read the bottom-left cell twice. Bloodraven's own non-goals list from Unit 1 sai
 external-dns, cert-manager, Prometheus or your object store, and this is where that stops being a
 sentence and becomes a work item on somebody's sprint.
 
-## Credentials: two modes, and they are mutually exclusive
+## Credentials: one required Secret, four optional ones
 
-`spec.secretName` and `spec.credentials` are the only two ways to give the operator a way in, and a
-CEL rule refuses an object that sets both or neither:
+`spec.credentials` is the operator's only way in, and it is required: an object without it is refused at
+`kubectl apply` with `spec.credentials: Required value`. Releases before v1.7.0 also accepted a single
+`spec.secretName` Secret with a `dsn` key; that mode is gone, and the field is no longer part of the
+schema.
 
-> `exactly one of secretName or credentials must be set`
-
-**`secretName` is the legacy, single-Secret mode.** One Secret, and the operator reads a `dsn` key from
-it. The playground uses this, and its Secret is worth reading in full because it is the minimum that
-works:
+The playground's operator Secret is worth reading in full because it is the minimum that works:
 
 ```yaml
 apiVersion: v1
@@ -71,16 +69,15 @@ metadata:
   namespace: bloodraven-playground
 type: Opaque
 stringData:
+  username: "root"                           # the playground runs the operator account as root
+  password: "playground-root-pw"
   MYSQL_ROOT_PASSWORD: "playground-root-pw"
-  MYSQL_ROOT_HOST: "%"                       # root over TCP, not only the unix socket
   MYSQL_REPLICATION_USER: "replicator"
   MYSQL_REPLICATION_PASSWORD: "repl-pw-playground"
-  dsn: "root:playground-root-pw@tcp(127.0.0.1:3306)/mysql"
 ```
 
-**`credentials` is the per-role mode**, and it is what a production group should use. You supply up to
-five Secrets, each with `username` and `password`, and the operator creates each user with a fixed
-grant set it will not let you widen:
+You supply up to five Secrets, each with `username` and `password`, and the operator creates each user
+with a fixed grant set it will not let you widen:
 
 | Field | Purpose | Grants the operator issues |
 |---|---|---|
@@ -91,8 +88,9 @@ grant set it will not let you widen:
 | `backupSecret` | backup and restore jobs | `SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT` |
 
 `operatorSecret` also carries `MYSQL_ROOT_PASSWORD`, and optionally
-`MYSQL_REPLICATION_USER` / `MYSQL_REPLICATION_PASSWORD` — omit those and the replication user simply
-reuses the operator's username and password.
+`MYSQL_REPLICATION_USER` / `MYSQL_REPLICATION_PASSWORD` — omit those and replication simply
+reuses the operator's username and password. Name a dedicated replication user and it is yours to
+create on every site: the operator does not (the playground's setup script does it for you).
 
 The grant lists are worth one careful read, because they are the security review answer you will be
 asked for. The application user cannot grant privileges to anyone. The monitor user cannot read your
@@ -120,11 +118,11 @@ connections** — and never again.
       "detail": "INSTALL PLUGIN clone SONAME 'mysql_clone.so' — guarded by a COUNT(*) on information_schema.PLUGINS, so it is idempotent."
     },
     {
-      "label": "Create the replication user",
-      "detail": "CREATE USER IF NOT EXISTS + ALTER USER (so a password change is applied), then GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.*."
+      "label": "Create the operator user",
+      "detail": "CREATE USER IF NOT EXISTS + ALTER USER (so a password change is applied), then GRANT ALL PRIVILEGES ON *.* WITH GRANT OPTION."
     },
     {
-      "label": "Credentials mode only: create the other four",
+      "label": "Create the other four",
       "detail": "app, readonly, monitor and backup, each created only when its Secret is set, each with the grant list above."
     },
     {
@@ -138,14 +136,15 @@ connections** — and never again.
 Two consequences follow, and both are the kind of thing you meet once.
 
 **Adopting an existing datadir means the init script does not run.** If you point a new group at PVCs
-that already hold MySQL data, the entrypoint skips initialisation entirely, so there is no replication
-user, no clone plugin, and no app or backup users unless you create them by hand with exactly the
-grants above. `CLONE_ADMIN` and `BACKUP_ADMIN` are the two people forget, and their absence surfaces
+that already hold MySQL data, the entrypoint skips initialisation entirely, so there is no clone
+plugin and no operator user until you create them by hand with exactly the grants above. `CLONE_ADMIN` and `BACKUP_ADMIN` are the two people forget, and their absence surfaces
 much later — as a reclone that will not start, or a backup job that cannot take a consistent dump.
 
-**Rotating a password in the Secret does not, by itself, change MySQL.** The `ALTER USER` line only
-runs on a fresh datadir. Changing the Secret changes what the operator *presents*; it does not change
-what MySQL *accepts*, and the failure looks like a site going `unreachable` for no reason.
+**Rotating a password is the operator's job only for the role users.** Change a role Secret's
+`password` and the operator runs `ALTER USER` on the primary for you. `MYSQL_ROOT_PASSWORD` and a
+dedicated replication user's password are read only by the first-boot script, so changing them in
+the Secret changes what the operator *presents*, not what MySQL *accepts*, and the failure looks like
+a site going `unreachable` for no reason.
 
 ## The manifest, decision by decision
 
@@ -161,7 +160,7 @@ metadata:
 spec:
   image: mysql:9.7                        # one supported baseline; pin it, never mysql:9
   sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:1.0.0   # match the operator's release
-  credentials:                            # not secretName — per-role users, fixed grants
+  credentials:                            # required — per-role users, fixed grants
     operatorSecret: ledger-operator
     appSecret: ledger-app
     readOnlySecret: ledger-readonly
@@ -225,7 +224,8 @@ Learn this split. It decides which of your mistakes cost you seconds and which c
 
 **Rejected at `kubectl apply`, by the CRD schema and its CEL rules:**
 
-- exactly one of `secretName` or `credentials` must be set
+- `spec.credentials` is required; a manifest that still carries `spec.secretName` gets
+  `unknown field "spec.secretName"` from `kubectl apply` (strict field validation)
 - `spec.sites[].name` must be unique
 - at least two sites with role `primary-candidate`
 - `splitBrainPolicy.sitePriorities` entries must name `primary-candidate` sites
@@ -243,7 +243,7 @@ Learn this split. It decides which of your mistakes cost you seconds and which c
   surfaces as MySQL pod failures rather than an operator error
 - a floating tag such as `mysql:9`, which can drift you onto an unsupported version between restarts
 - `maxLagSeconds` chosen as though it gated promotion
-- a `secretName` Secret whose `dsn` names credentials MySQL does not have
+- an operator Secret whose `username` and `password` name credentials MySQL does not have
 - backups configured on a PVC in the same storage class as the data
 
 Every item in that second list is on the Unit 6 go-live gate for a reason.
@@ -291,7 +291,7 @@ recipient is fenced again. Throughout the clone the recipient keeps `read_only=O
 ## Where this leaves you
 
 You can write a `MysqlFailoverGroup` into an empty namespace and say, for every line, which earlier
-unit decided it. You can pick a credentials mode and recite the grants each user gets. You can say
+unit decided it. You can write `spec.credentials` and recite the grants each user gets. You can say
 which of your mistakes the API server will catch and which will wait for an incident, and you can
 explain why a group of freshly created, all read-only sites is not stuck at `NoPrimary`.
 

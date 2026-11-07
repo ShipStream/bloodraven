@@ -25,7 +25,7 @@ func newEncryptionFG(namespace, name string) *v1alpha1.MysqlFailoverGroup {
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image:        "mysql:9.7",
 			SidecarImage: "ghcr.io/shipstream/bloodraven-sidecar:1.3.2",
-			SecretName:   "mysql-credentials",
+			Credentials:  v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
 				{
 					Name: "dc1", Zone: "lion-dc1", LBIP: "203.0.113.1",
@@ -41,7 +41,6 @@ func newEncryptionFG(namespace, name string) *v1alpha1.MysqlFailoverGroup {
 			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTL: 60},
 			TLS: &v1alpha1.TLSSpec{
 				SecretName: "mysql-tls",
-				IssuerRef:  v1alpha1.IssuerRef{Name: "ca", Kind: "Issuer"},
 			},
 		},
 	}

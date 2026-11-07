@@ -266,20 +266,6 @@ func inPlaceRunScope(fg *v1alpha1.MysqlFailoverGroup) (string, string) {
 	return inPlaceRestoreScope(fg.Spec.RestoreInPlace)
 }
 
-// errInPlacePointInTimeUnsupported rejects in-place PITR. The replay
-// pipes archived binlogs with their original GTIDs into the live
-// primary, whose gtid_executed already holds them (it ran or replicated
-// those transactions), so MySQL skips every one and the restore would
-// report success with the data left at the backup. Installing the dump's
-// GTID set cannot fix that on a live server. Doing it safely needs the
-// replay to run against a staging instance first; until then the spec is
-// refused.
-var errInPlacePointInTimeUnsupported = errors.New(
-	"restoreInPlace.pointInTime is not supported: the archived binlogs carry GTIDs the live primary has " +
-		"already executed, so the replay would be skipped and the restore would stop at the backup; " +
-		"remove pointInTime to restore to the backup, or restore to a point in time into a new failover " +
-		"group with initFromBackup.pointInTime")
-
 // validateInPlaceRestoreSpec enforces invariants that cannot be (or are
 // awkward to) encode as CEL rules. Returns a human-readable error
 // suitable for stamping into status.message. These checks run at
@@ -291,9 +277,6 @@ func validateInPlaceRestoreSpec(spec *v1alpha1.RestoreInPlaceSpec) error {
 	}
 	if _, err := parseConfirmTimestamp(spec.Confirm); err != nil {
 		return err
-	}
-	if spec.PointInTime != nil {
-		return errInPlacePointInTimeUnsupported
 	}
 	if spec.LoadOptions != nil && len(spec.LoadOptions.IncludeSchemas) > 1 {
 		return fmt.Errorf("restoreInPlace.loadOptions.includeSchemas supports at most one schema (got %d); use a full-instance restore instead",
@@ -1214,7 +1197,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencePrivilegeRejection(ctx contex
 			"that remain, and the operator account must keep working under it; grant these ON *.* to the operator account (%s). "+
 			"The restore is retried with the same confirm about once a minute",
 			restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), target,
-			fg.Spec.EffectiveOperatorSecretName()), nil
+			fg.Spec.Credentials.OperatorSecret), nil
 	}
 	if err != nil {
 		return "", err
@@ -1440,15 +1423,8 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRunJob(ctx context.Context, fg *v1
 // For per-schema restores it also forces LoadOptions.SkipBinlog=false
 // so the DROP+load flows through the primary's binlog to the replica
 // and the replica resyncs via normal replication.
-//
-// It refuses spec.pointInTime (see errInPlacePointInTimeUnsupported):
-// validateInPlaceRestoreSpec rejects it before Fencing, and this check
-// keeps a spec that got past an older operator from building a Job.
 func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite, credsName string, isFullInstance bool, schema string) (*batchv1.Job, error) {
 	spec := fg.Spec.RestoreInPlace
-	if spec.PointInTime != nil {
-		return nil, errInPlacePointInTimeUnsupported
-	}
 
 	// Copy LoadOptions so we can force skipBinlog=false for per-schema
 	// without mutating the user-supplied spec.

@@ -209,7 +209,7 @@ func TestSpecSecretInputsNeverReadsPassphrase(t *testing.T) {
 
 // Δ15: the credential hash reads the role keys only. A missing passphrase
 // Secret no longer fails it, a passphrase edit in a role Secret does not
-// change it, and the legacy dsn is still hashed.
+// change it, and the operator Secret's replication account is hashed.
 func TestComputeCredentialHashConsumedKeysOnly(t *testing.T) {
 	ctx := context.Background()
 	fg := pitrRolloutFG(true)
@@ -243,7 +243,8 @@ func TestComputeCredentialHashConsumedKeysOnly(t *testing.T) {
 	}
 
 	keys := credentialHashSecretKeys(newTestFG())
-	if got := keys[newTestFG().Spec.SecretName]; strings.Join(got, ",") != "dsn" {
-		t.Fatalf("legacy mode hashes %v of spec.secretName, want dsn", got)
+	want := "username,password,MYSQL_ROOT_PASSWORD,MYSQL_REPLICATION_USER,MYSQL_REPLICATION_PASSWORD"
+	if got := keys[newTestFG().Spec.Credentials.OperatorSecret]; strings.Join(got, ",") != want {
+		t.Fatalf("credential hash reads %v of the operator Secret, want %s", got, want)
 	}
 }

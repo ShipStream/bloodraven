@@ -12,11 +12,11 @@ import (
 )
 
 // credentialsModeGroup builds a group that exercises every optional secret so
-// the generated credentials-mode script contains all create_user_with_grants
+// the generated script contains all create_user_with_grants
 // call sites.
 func credentialsModeGroup() *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{}
-	fg.Spec.Credentials = &v1alpha1.CredentialsSpec{
+	fg.Spec.Credentials = v1alpha1.CredentialsSpec{
 		OperatorSecret: "op",
 		AppSecret:      "app",
 		ReadOnlySecret: "ro",
@@ -28,8 +28,8 @@ func credentialsModeGroup() *v1alpha1.MysqlFailoverGroup {
 
 func initScriptVariants() map[string]string {
 	return map[string]string{
-		"secretName":  generateSecretNameModeInitScript(),
-		"credentials": generateCredentialsModeInitScript(credentialsModeGroup()),
+		"all roles":     generateInitUsersScript(credentialsModeGroup()),
+		"operator only": generateInitUsersScript(&v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "op"}}}),
 	}
 }
 

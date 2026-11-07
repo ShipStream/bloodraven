@@ -509,9 +509,8 @@ type restorePITRFragments struct {
 // The bootstrap restore (spec.initFromBackup.pointInTime) and verification
 // share buildRestorePITRFragmentsFor. Both load the dump with its GTID set
 // installed (updateGtidSet "replace"), which restore.py proves equals the
-// plan's baseline before replaying. In-place restores reject pointInTime
-// (errInPlacePointInTimeUnsupported): a live primary's gtid_executed cannot
-// be the dump's.
+// plan's baseline before replaying. In-place restores have no pointInTime:
+// a live primary's gtid_executed cannot be the dump's.
 func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
 	if fg.Spec.InitFromBackup == nil {
 		return restorePITRFragments{}, nil

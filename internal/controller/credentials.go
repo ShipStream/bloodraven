@@ -18,7 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // credentialGrantsVersion is mixed into the credential hash so a change to
@@ -378,8 +377,8 @@ func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context
 	if err != nil {
 		return "", err
 	}
-	// Only what reconcileCredentials consumes (Δ15): the role accounts,
-	// the operator's replication account and, in legacy mode, the dsn.
+	// Only what reconcileCredentials consumes (Δ15): the role accounts
+	// and the operator's replication account.
 	// A passphrase or decryption Secret is never read here, so a missing
 	// one does not fail the reconcile and a passphrase edit does not
 	// re-run credential reconciliation.
@@ -413,16 +412,10 @@ func (r *MysqlFailoverGroupReconciler) setCredentialAnnotation(ctx context.Conte
 
 // adminCredentials resolves the username/password Bloodraven uses to connect
 // to a group's primary as an administrator, plus the root password used for
-// the initial-setup fallback.
-//
-// Both credential modes are handled here because openAdminConnection is the
-// single admin path and must therefore work wherever a MysqlFailoverGroup
-// works. In credentials mode the operator Secret carries username/password
-// keys; in legacy DSN mode (spec.secretName) the same information lives
-// inside the `dsn` key, which is what the backup and restore reconcilers
-// already parse.
+// the initial-setup fallback, from the operator Secret's username, password
+// and MYSQL_ROOT_PASSWORD keys.
 func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) (user, password, rootPassword string, err error) {
-	secretName := fg.Spec.EffectiveOperatorSecretName()
+	secretName := fg.Spec.Credentials.OperatorSecret
 	if secretName == "" {
 		return "", "", "", fmt.Errorf("group %q references no operator credential secret", fg.Name)
 	}
@@ -432,28 +425,12 @@ func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.Mys
 		return "", "", "", fmt.Errorf("get operator secret: %w", err)
 	}
 	rootPassword = string(secret.Data["MYSQL_ROOT_PASSWORD"])
-
-	if fg.Spec.UsesCredentials() {
-		return string(secret.Data["username"]), string(secret.Data["password"]), rootPassword, nil
-	}
-
-	dsnBytes, ok := secret.Data["dsn"]
-	if !ok {
-		return "", "", "", fmt.Errorf("secret %s missing 'dsn' key", secretName)
-	}
-	parsed, err := internalmysql.ParseDSN(string(dsnBytes))
-	if err != nil {
-		return "", "", "", fmt.Errorf("parse dsn from secret %s: %w", secretName, err)
-	}
-	if parsed.User == "" {
-		return "", "", "", fmt.Errorf("dsn in secret %s has an empty user", secretName)
-	}
-	return parsed.User, parsed.Passwd, rootPassword, nil
+	return string(secret.Data["username"]), string(secret.Data["password"]), rootPassword, nil
 }
 
 // reservedGroupUsernames returns the MySQL account names that belong to the
 // MysqlFailoverGroup itself: root, the replication user, and every principal
-// named by spec.credentials (or by the legacy DSN).
+// named by spec.credentials.
 //
 // The MysqlDatabase reconciler uses this to refuse to adopt a group-level
 // principal as a tenant database owner. The reason is specific and worth
@@ -497,14 +474,12 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 		}
 	}
 
-	names := []string{fg.Spec.EffectiveOperatorSecretName()}
-	if fg.Spec.Credentials != nil {
-		names = append(names,
-			fg.Spec.Credentials.AppSecret,
-			fg.Spec.Credentials.ReadOnlySecret,
-			fg.Spec.Credentials.MonitorSecret,
-			fg.Spec.Credentials.BackupSecret,
-		)
+	names := []string{
+		fg.Spec.Credentials.OperatorSecret,
+		fg.Spec.Credentials.AppSecret,
+		fg.Spec.Credentials.ReadOnlySecret,
+		fg.Spec.Credentials.MonitorSecret,
+		fg.Spec.Credentials.BackupSecret,
 	}
 
 	for _, name := range names {
@@ -517,16 +492,6 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 		}
 		add(string(secret.Data["username"]))
 		add(string(secret.Data["MYSQL_REPLICATION_USER"]))
-		if dsn, ok := secret.Data["dsn"]; ok {
-			// A dsn that does not parse hides the account it names, so it
-			// fails the gate like an unreadable Secret does — a corrupt
-			// group Secret must not un-reserve the group's own principal.
-			parsed, err := internalmysql.ParseDSN(string(dsn))
-			if err != nil {
-				return nil, fmt.Errorf("parse dsn in group credential secret %s/%s: %w", fg.Namespace, name, err)
-			}
-			add(parsed.User)
-		}
 	}
 	return reserved, nil
 }
@@ -581,10 +546,8 @@ func openAdminConnection(
 	}
 
 	// Try operator credentials first, fall back to root for initial setup.
-	// The fallback only exists where MYSQL_ROOT_PASSWORD is part of the
-	// Secret contract (credentials mode); a DSN-mode Secret without the key
-	// must not turn every operator-connect failure into an empty-password
-	// root login attempt.
+	// An operator Secret without MYSQL_ROOT_PASSWORD must not turn every
+	// operator-connect failure into an empty-password root login attempt.
 	db, err := open(operatorUser, operatorPass, primaryHost, tlsConfigName)
 	if err != nil {
 		if rootPass == "" {

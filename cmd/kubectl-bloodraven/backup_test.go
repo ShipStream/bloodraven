@@ -9,19 +9,29 @@ import (
 
 func TestBuildBackupCR(t *testing.T) {
 	tests := []struct {
-		name        string
-		group       string
-		profile     string
-		sourceSite  string
-		triggeredBy string
-		wantPrefix  string
+		name         string
+		group        string
+		profile      string
+		sourceSite   string
+		triggeredBy  string
+		wantPrefix   string
 		wantOverride bool
+		wantTrigger  string
 	}{
 		{
-			name:       "manual backup without source override",
-			group:      "orders",
-			profile:    "nightly",
-			wantPrefix: "orders-nightly-",
+			name:        "manual backup without source override",
+			group:       "orders",
+			profile:     "nightly",
+			wantPrefix:  "orders-nightly-",
+			wantTrigger: "manual",
+		},
+		{
+			name:        "explicit trigger",
+			group:       "orders",
+			profile:     "nightly",
+			triggeredBy: "ci/release",
+			wantPrefix:  "orders-nightly-",
+			wantTrigger: "ci/release",
 		},
 		{
 			name:         "manual backup with source override",
@@ -30,6 +40,7 @@ func TestBuildBackupCR(t *testing.T) {
 			sourceSite:   "pdx",
 			wantPrefix:   "orders-ondemand-",
 			wantOverride: true,
+			wantTrigger:  "manual",
 		},
 	}
 	for _, tc := range tests {
@@ -61,6 +72,9 @@ func TestBuildBackupCR(t *testing.T) {
 			}
 			if got := b.Labels["app.kubernetes.io/managed-by"]; got != "bloodraven" {
 				t.Errorf("managed-by label = %q, want bloodraven", got)
+			}
+			if got := b.Annotations[v1alpha1.TriggeredByAnnotation]; got != tc.wantTrigger {
+				t.Errorf("triggered-by annotation = %q, want %q", got, tc.wantTrigger)
 			}
 		})
 	}

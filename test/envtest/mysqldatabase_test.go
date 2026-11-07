@@ -622,7 +622,7 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: ns},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image:       "mysql:9.7",
-			Credentials: &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "dc1", Zone: "main-dc1", LBIP: "203.0.113.1",
 					TaintNodeSelector: map[string]string{"shipstream.io/site.main": "dc1"},

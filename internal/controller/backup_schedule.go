@@ -633,6 +633,7 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 				v1alpha1.BackupRetryRootAnnotation:    rootName,
 				v1alpha1.BackupRetryRootUIDAnnotation: rootUID,
 				v1alpha1.BackupAttemptAnnotation:      strconv.FormatInt(int64(nextAttempt), 10),
+				v1alpha1.TriggeredByAnnotation:        fmt.Sprintf("retry/%s/attempt-%d", sched.Name, nextAttempt),
 			},
 			Labels: map[string]string{
 				v1alpha1.BackupRetryOfLabel:  string(failed.UID),
@@ -645,7 +646,6 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 		Spec: v1alpha1.MysqlBackupSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
 			ProfileName:      sched.ProfileName,
-			TriggeredBy:      fmt.Sprintf("retry/%s/attempt-%d", sched.Name, nextAttempt),
 		},
 	}
 	if err := r.Create(ctx, retryCR); err != nil {

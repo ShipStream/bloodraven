@@ -32,7 +32,7 @@ func readBindingVerification(t *testing.T, state v1alpha1.PITRArchiveBindingStat
 	v := verifyCR("verify-binding", "lion", "nightly-s3")
 	v.UID = "verify-binding-uid"
 	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: outcomeStop}
-	r, c := newVerificationReconciler(t, append([]client.Object{fg, backup, v, dsnSecret()}, extra...)...)
+	r, c := newVerificationReconciler(t, append([]client.Object{fg, backup, v, operatorCredsSecret()}, extra...)...)
 	return r, c, v
 }
 
@@ -101,7 +101,7 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		v := verifyCR("verify-limit", "lion", "nightly-s3")
 		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
-		r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+		r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 		reconcileVerifUntilStable(t, r, v.Name)
 		if got := getVerification(t, c, v); got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(v1alpha1.PITRTokenArchiveBindingNotReady) {
 			t.Fatalf("phase %s reason %q", got.Status.Phase, verifiedReason(got))
@@ -127,7 +127,7 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		v := verifyCR("verify-limit", "lion", "nightly-s3")
 		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
-		r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+		r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 		reconcileVerifUntilStable(t, r, v.Name)
 		got := getVerification(t, c, v)
 		if verificationTerminal(got.Status.Phase) || !strings.Contains(got.Status.Message, "make room") {
@@ -299,7 +299,7 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 			e := bindTestPITRArchive(t, fg, name)
 			e.State, e.Reason = tc.state, tc.reason
 			fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, ArchiveProfileName: name}
-			r, c := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), dsnSecret())
+			r, c := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), operatorCredsSecret())
 			if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 				t.Fatal(err)
 			}

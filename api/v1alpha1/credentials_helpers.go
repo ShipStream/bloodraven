@@ -1,33 +1,13 @@
 package v1alpha1
 
-// UsesCredentials returns true when the spec uses per-role credential
-// management rather than the legacy single-secret model.
-func (s *MysqlFailoverGroupSpec) UsesCredentials() bool {
-	return s.Credentials != nil
-}
-
-// EffectiveOperatorSecretName returns the secret name used for operator
-// connections, regardless of whether legacy or credentials mode is active.
-func (s *MysqlFailoverGroupSpec) EffectiveOperatorSecretName() string {
-	if s.Credentials != nil {
-		return s.Credentials.OperatorSecret
-	}
-	return s.SecretName
-}
-
 // EffectiveBackupSecretName returns the secret name used for backup (and
-// backup verification) Jobs; restore Jobs use EffectiveOperatorSecretName.
-// In credentials mode it prefers the dedicated backup
-// secret, falling back to the operator secret. In legacy mode it returns
-// the single secret name.
+// backup verification) Jobs; restore Jobs use the operator secret. It
+// prefers the dedicated backup secret, falling back to the operator secret.
 func (s *MysqlFailoverGroupSpec) EffectiveBackupSecretName() string {
-	if s.Credentials != nil {
-		if s.Credentials.BackupSecret != "" {
-			return s.Credentials.BackupSecret
-		}
-		return s.Credentials.OperatorSecret
+	if s.Credentials.BackupSecret != "" {
+		return s.Credentials.BackupSecret
 	}
-	return s.SecretName
+	return s.Credentials.OperatorSecret
 }
 
 // AllReferencedSecretNames returns every distinct secret name referenced
@@ -47,14 +27,11 @@ func (s *MysqlFailoverGroupSpec) AllReferencedSecretNames() []string {
 		names = append(names, name)
 	}
 
-	add(s.SecretName)
-	if s.Credentials != nil {
-		add(s.Credentials.OperatorSecret)
-		add(s.Credentials.AppSecret)
-		add(s.Credentials.ReadOnlySecret)
-		add(s.Credentials.MonitorSecret)
-		add(s.Credentials.BackupSecret)
-	}
+	add(s.Credentials.OperatorSecret)
+	add(s.Credentials.AppSecret)
+	add(s.Credentials.ReadOnlySecret)
+	add(s.Credentials.MonitorSecret)
+	add(s.Credentials.BackupSecret)
 	if s.Backup != nil {
 		for i := range s.Backup.Profiles {
 			if enc := s.Backup.Profiles[i].Encryption; enc != nil {

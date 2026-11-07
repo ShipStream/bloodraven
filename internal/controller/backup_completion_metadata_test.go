@@ -38,7 +38,7 @@ func backupMetadataFixture(t *testing.T, encrypted bool) (*MysqlBackupReconciler
 	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
 	mb := backupCR("metadata", fg.Name, "nightly-s3")
 	mb.UID = types.UID("metadata-backup-uid")
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, mb.Name)
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 		t.Fatal(err)

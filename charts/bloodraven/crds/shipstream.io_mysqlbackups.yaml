@@ -92,12 +92,6 @@ spec:
                   SourceSiteOverride, if set, forces a specific site to be the dump
                   source. Leave empty to let the reconciler choose (replica-first).
                 type: string
-              triggeredBy:
-                description: |-
-                  TriggeredBy is a free-form label recording what created this CR
-                  (e.g. "schedule/nightly", "manual", "retry/nightly/attempt-2").
-                  Informational only.
-                type: string
             required:
             - failoverGroupRef
             - profileName

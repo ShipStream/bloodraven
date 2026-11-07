@@ -15,31 +15,31 @@ You are writing a `MysqlFailoverGroup` for a new production group. Which of thes
 
 - The per-site Deployments, PVCs and ConfigMaps, eight Services for a three-site group, a PodDisruptionBudget, the `DNSEndpoint`, and the init-users ConfigMap that creates the MySQL users
 - Everything in option 1, plus the credential Secrets — the operator generates passwords on first reconcile and writes them back
-- Everything in option 1, plus the cert-manager `Certificate`, derived from `spec.tls.issuerRef`
+- Everything in option 1, plus the cert-manager `Certificate` for the `spec.tls.secretName` Secret
 - Only the Deployments and Services; PVCs are created by the StatefulSet controller and the DNS record by external-dns directly
 
 **Correct option index:** 0
 
 **Explanation:**
 
-The line between yours and the operator's is the first thing to get right on day 0. Option 2 is a common hope and would be a security problem: you supply the Secrets, always. Option 3 is the specific trap this unit warns about — `issuerRef` records which issuer *should* produce the material, and the operator never creates the `Certificate`; forget it and the pods sit in `ContainerCreating` mounting a Secret that does not exist. Option 4 misattributes both the PVC (the operator reconciles it per site) and the `DNSEndpoint` (the operator writes the object; external-dns turns it into a record). (objective 1)
+The line between yours and the operator's is the first thing to get right on day 0. Option 2 is a common hope and would be a security problem: you supply the Secrets, always. Option 3 is the specific trap this unit warns about — the operator only reads the Secret `spec.tls.secretName` names and never creates the `Certificate`; forget it and the pods sit in `ContainerCreating` mounting a Secret that does not exist. Option 4 misattributes both the PVC (the operator reconciles it per site) and the `DNSEndpoint` (the operator writes the object; external-dns turns it into a record). (objective 1)
 
 ## Question 2
 
 **Type:** MULTIPLE_CHOICE
 
-A group is running in credentials mode. You rotate the password in the Secret named by `spec.credentials.appSecret` and apply. What happens?
+You rotate the password in the Secret named by `spec.credentials.appSecret` and apply. What happens?
 
 - The pods roll, because credential Secret data is folded into the spec hash — but MySQL still expects the old password, because the `ALTER USER` only runs on a fresh datadir
 - Nothing until the next pod restart, at which point the init script re-runs and applies the new password
 - The operator reconciles the MySQL user on its next poll and the new password takes effect within seconds
 - The apply is rejected: credential Secrets are immutable once a group has bootstrapped
 
-**Correct option index:** 0
+**Correct option index:** 2
 
 **Explanation:**
 
-Two mechanisms are in play and only one of them does what you want. The spec hash includes credential Secret data, so the rotation genuinely rolls the pods — which makes it *look* as though the change took effect. But the `CREATE USER IF NOT EXISTS` / `ALTER USER` pair lives in the init script that the MySQL entrypoint runs only on an empty datadir, so MySQL's own view of the password is unchanged. Option 2 is the misreading the restart encourages. Option 3 invents a user-reconcile loop for this path. Option 4 invents an immutability rule. (objective 2)
+The operator watches every Secret `spec.credentials` names. A changed role Secret changes its credential hash, so on the next reconcile it connects to the primary and runs `CREATE USER IF NOT EXISTS` / `ALTER USER … IDENTIFIED BY` with the new bytes, and replication carries the change to the other sites. The spec hash includes the role Secrets too, so the pods also roll. Option 1 describes the first-boot script, which is not the only path: it is what still applies to `MYSQL_ROOT_PASSWORD` and a dedicated replication user's password. Option 2 is the misreading the restart encourages. Option 4 invents an immutability rule. (objective 2)
 
 ## Question 3
 

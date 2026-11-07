@@ -84,7 +84,6 @@ func TestDeploymentSpecHashNeedsDigestKey(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()
 	fg.Spec.TLS = &v1alpha1.TLSSpec{
-		IssuerRef:  v1alpha1.IssuerRef{Name: "letsencrypt", Kind: "ClusterIssuer"},
 		SecretName: "mysql-tls",
 	}
 	tlsSecret := &corev1.Secret{

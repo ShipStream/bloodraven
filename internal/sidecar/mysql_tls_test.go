@@ -101,10 +101,6 @@ func TestRegisterMySQLTLS_RejectsUnusableCA(t *testing.T) {
 // really happened rather than just string-matching "tls=".
 func TestConfigFromEnv_TLSStampsDSN(t *testing.T) {
 	clearMySQLTLSEnv(t)
-	t.Setenv("MYSQL_DSN", "")
-	if err := os.Unsetenv("MYSQL_DSN"); err != nil {
-		t.Fatalf("unset MYSQL_DSN: %v", err)
-	}
 	t.Setenv("MYSQL_USER", "bloodraven")
 	t.Setenv("MYSQL_PASSWORD", "pw")
 	t.Setenv("BLOODRAVEN_MYSQL_TLS_CA_FILE", writeCAFile(t))
@@ -132,10 +128,6 @@ func TestConfigFromEnv_TLSStampsDSN(t *testing.T) {
 
 func TestConfigFromEnv_NoTLSLeavesDSNUntouched(t *testing.T) {
 	clearMySQLTLSEnv(t)
-	t.Setenv("MYSQL_DSN", "")
-	if err := os.Unsetenv("MYSQL_DSN"); err != nil {
-		t.Fatalf("unset MYSQL_DSN: %v", err)
-	}
 	t.Setenv("MYSQL_USER", "bloodraven")
 	t.Setenv("MYSQL_PASSWORD", "pw")
 
@@ -426,9 +418,8 @@ func writeTLSKeyPair(t *testing.T, certPath, keyPath string, cert tls.Certificat
 	}
 }
 
-// TestWithMySQLTLSConfig_PreservesExplicitChoice guards the legacy
-// spec.secretName escape hatch: an operator who pinned their own tls=
-// parameter in the DSN keeps it.
+// TestWithMySQLTLSConfig_PreservesExplicitChoice pins that a DSN which
+// already names a TLS config keeps it.
 func TestWithMySQLTLSConfig_PreservesExplicitChoice(t *testing.T) {
 	in := "u:p@tcp(127.0.0.1:3306)/?tls=skip-verify"
 	got, err := withMySQLTLSConfig(in, mysqlTLSConfigName)

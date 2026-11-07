@@ -980,7 +980,7 @@ func TestReconcile_DoesNotAdoptAnotherBackupsJob(t *testing.T) {
 	foreign := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: backupJobName(mb.Name), Namespace: "ns",
 		OwnerReferences: []metav1.OwnerReference{{APIVersion: "shipstream.io/v1alpha1", Kind: "MysqlBackup", Name: "art", UID: "uid-art", Controller: boolPtr(true)}}},
 		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}}
-	r, c := newBackupReconciler(t, fg, mb, foreign, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, foreign, operatorCredsSecret())
 	rec := record.NewFakeRecorder(20)
 	r.Recorder = rec
 	for range 2 {

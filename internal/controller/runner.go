@@ -470,7 +470,7 @@ func connectionMaterialHash(ctx context.Context, c client.Client, fg *v1alpha1.M
 	h := sha256.New()
 	wrote := false
 
-	if name := fg.Spec.EffectiveOperatorSecretName(); name != "" {
+	if name := fg.Spec.Credentials.OperatorSecret; name != "" {
 		var secret corev1.Secret
 		nn := types.NamespacedName{Namespace: fg.Namespace, Name: name}
 		if err := c.Get(ctx, nn, &secret); err != nil {
@@ -915,16 +915,23 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	nn := FailoverGroupNamespacedName(fg)
 
 	// Read the operator credentials secret.
-	operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
+	operatorSecretName := fg.Spec.Credentials.OperatorSecret
 	var secret corev1.Secret
 	secretNN := types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}
 	if err := r.client.Get(ctx, secretNN, &secret); err != nil {
 		return fmt.Errorf("get secret %s: %w", secretNN, err)
 	}
+	// A manager dialing with an empty account would only report every site
+	// unreachable; fail the start instead, so the group gets a
+	// TopologyManagerStartFailed Warning naming the Secret.
+	for _, key := range []string{"username", "password"} {
+		if _, ok := secret.Data[key]; !ok {
+			return fmt.Errorf("operator secret %s missing %q key", secretNN, key)
+		}
+	}
 
 	siteMySQL := make([]internalmysql.Checker, len(fg.Spec.Sites))
 	for i, site := range fg.Spec.Sites {
-		var dsn string
 		var err error
 		tlsConfigName := ""
 		if fg.Spec.TLS != nil {
@@ -938,25 +945,11 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 				return fmt.Errorf("configure TLS for site %s: %w", site.Name, err)
 			}
 		}
-		if fg.Spec.UsesCredentials() {
-			dsn = buildSiteDSNFromCreds(
-				string(secret.Data["username"]),
-				string(secret.Data["password"]),
-				fg, site, tlsConfigName,
-			)
-		} else {
-			dsnBytes, ok := secret.Data["dsn"]
-			if !ok {
-				return fmt.Errorf("secret %s missing 'dsn' key", secretNN)
-			}
-			dsn, err = buildSiteDSN(string(dsnBytes), fg, site, tlsConfigName)
-			if err != nil {
-				for j := 0; j < i; j++ {
-					siteMySQL[j].Close()
-				}
-				return fmt.Errorf("build site %s DSN: %w", site.Name, err)
-			}
-		}
+		dsn := buildSiteDSNFromCreds(
+			string(secret.Data["username"]),
+			string(secret.Data["password"]),
+			fg, site, tlsConfigName,
+		)
 
 		checker, err := internalmysql.NewChecker(dsn)
 		if err != nil {
@@ -976,21 +969,15 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		spec.SetRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 	}
 
-	// Build bootstrap configuration. In credentials mode, use operator
-	// username/password as replication credentials unless overridden.
-	var replUser, replPassword string
-	if fg.Spec.UsesCredentials() {
-		replUser = string(secret.Data["MYSQL_REPLICATION_USER"])
-		replPassword = string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
-		if replUser == "" {
-			replUser = string(secret.Data["username"])
-		}
-		if replPassword == "" {
-			replPassword = string(secret.Data["password"])
-		}
-	} else {
-		replUser = string(secret.Data["MYSQL_REPLICATION_USER"])
-		replPassword = string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
+	// Build bootstrap configuration: the operator username/password are the
+	// replication credentials unless the operator Secret overrides them.
+	replUser := string(secret.Data["MYSQL_REPLICATION_USER"])
+	replPassword := string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
+	if replUser == "" {
+		replUser = string(secret.Data["username"])
+	}
+	if replPassword == "" {
+		replPassword = string(secret.Data["password"])
 	}
 
 	var bootstrapCtl *BootstrapController
@@ -2979,30 +2966,8 @@ func removeCondition(conditions *[]metav1.Condition, condType string) {
 	}
 }
 
-// buildSiteDSN takes a base DSN and replaces the host with the site
-// service endpoint. tlsConfigName, when non-empty, names a MySQL driver
-// TLS config registered for the site's service host.
-//
-// The TLS config is only stamped on when the supplied DSN does not
-// already choose one: this is the legacy spec.secretName mode where the
-// DSN is user-authored, so an explicit `tls=` parameter is a deliberate
-// choice and wins. Without this, a group that turns on spec.tls — which
-// sets require_secure_transport=ON — would have every site probe fail
-// with Error 3159, and no failover could ever run.
-func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsConfigName string) (string, error) {
-	parsed, err := internalmysql.ParseDSN(baseDSN)
-	if err != nil {
-		return "", fmt.Errorf("parse DSN: %w", err)
-	}
-	parsed.Addr = fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, site.Name, fg.Namespace), mysqlPort)
-	if tlsConfigName != "" && parsed.TLSConfig == "" {
-		parsed.TLSConfig = tlsConfigName
-	}
-	return parsed.FormatDSN(), nil
-}
-
 // buildSiteDSNFromCreds constructs a DSN from username/password credentials
-// and the site service endpoint (used in credentials mode). tlsConfigName, when
+// and the site service endpoint. tlsConfigName, when
 // non-empty, names a MySQL driver TLS config registered for the site's service host.
 func buildSiteDSNFromCreds(username, password string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsConfigName string) string {
 	cfg := mysql.NewConfig()

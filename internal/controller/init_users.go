@@ -41,13 +41,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileInitUsersConfigMap(ctx context.C
 	return err
 }
 
-func generateInitUsersScript(fg *v1alpha1.MysqlFailoverGroup) string {
-	if fg.Spec.UsesCredentials() {
-		return generateCredentialsModeInitScript(fg)
-	}
-	return generateSecretNameModeInitScript()
-}
-
 // initScriptSocketPreamble resolves the Unix socket the *temporary* server
 // started by the image entrypoint is actually listening on, and defines
 // run_mysql() to talk to it explicitly.
@@ -86,50 +79,9 @@ run_mysql() {
 }
 `
 
-// generateSecretNameModeInitScript creates the replication user from env vars
-// injected by the legacy secretName secret (MYSQL_REPLICATION_USER/PASSWORD).
-func generateSecretNameModeInitScript() string {
-	return `#!/bin/bash
-set -euo pipefail
-
-escape_sql() {
-    local val="$1"
-    val="${val//\\/\\\\}"
-    val="${val//\'/\'\'}"
-    printf '%s' "$val"
-}
-
-if [ -z "${MYSQL_REPLICATION_USER:-}" ] || [ -z "${MYSQL_REPLICATION_PASSWORD:-}" ]; then
-    echo "bloodraven-init: MYSQL_REPLICATION_USER/PASSWORD not set, skipping replication user"
-    exit 0
-fi
-` + initScriptSocketPreamble + `
-install_clone_plugin() {
-    local installed
-    installed=$(run_mysql -Nse "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone'" 2>/dev/null || echo 0)
-    if [ "$installed" = "0" ]; then
-        echo "bloodraven-init: installing MySQL clone plugin"
-        run_mysql -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
-    fi
-}
-
-install_clone_plugin
-
-REPL_USER=$(escape_sql "$MYSQL_REPLICATION_USER")
-REPL_PASS=$(escape_sql "$MYSQL_REPLICATION_PASSWORD")
-
-echo "bloodraven-init: creating replication user '${REPL_USER}'"
-run_mysql <<EOSQL
-CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
-ALTER USER '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
-GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%';
-FLUSH PRIVILEGES;
-EOSQL
-echo "bloodraven-init: replication user setup complete"
-`
-}
-
-func generateCredentialsModeInitScript(fg *v1alpha1.MysqlFailoverGroup) string {
+// generateInitUsersScript creates the replication user and the configured
+// role users from the credential Secrets mounted under /etc/mysql/creds.
+func generateInitUsersScript(fg *v1alpha1.MysqlFailoverGroup) string {
 	script := `#!/bin/bash
 set -euo pipefail
 

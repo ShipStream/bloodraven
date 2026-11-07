@@ -90,19 +90,16 @@ func runTriggerVerification(args []string) {
 			GenerateName: fmt.Sprintf("%s-%s-verify-", *group, *profile),
 			Namespace:    ns,
 			Labels:       labels,
+			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: "schedule"},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: *group},
 			ProfileName:      *profile,
-			TriggeredBy:      "schedule",
 		},
 	}
 	if verifSpec != nil {
 		verify.Spec.KeepOnFailure = verifSpec.KeepOnFailure
 		verify.Spec.TTLSecondsAfterFinished = verifSpec.TTLSecondsAfterFinished
-		if verifSpec.Storage != nil {
-			verify.Spec.Storage = verifSpec.Storage.DeepCopy()
-		}
 		if verifSpec.PointInTime != nil {
 			verify.Spec.PointInTime = verifSpec.PointInTime.DeepCopy()
 		}

@@ -39,10 +39,10 @@ type RestoreFencer interface {
 }
 
 // ReplicaIOStopper stops a peer's replication receiver while a
-// full-instance in-place restore runs on the primary. In credentials mode
-// the peers replicate as the operator account, which offline_mode does
-// not disconnect, and a legacy replicator reconnects once the fence is
-// released, so either way the restore's binlogged DROP DATABASE would
+// full-instance in-place restore runs on the primary. By default the
+// peers replicate as the operator account, which offline_mode does not
+// disconnect, and a dedicated replication user reconnects once the fence
+// is released, so either way the restore's binlogged DROP DATABASE would
 // reach the peers unless their IO thread is stopped. Only the receiver
 // is stopped: the applier keeps applying the relay log received before
 // the stop (transactions committed before the fence). The production

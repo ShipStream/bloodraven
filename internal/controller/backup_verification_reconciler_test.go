@@ -20,52 +20,12 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// --- autoSizeVerificationPVC ---------------------------------------------
-
-func TestAutoSizeVerificationPVC_ExplicitSizeWins(t *testing.T) {
-	v := &v1alpha1.MysqlBackupVerification{
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			Storage: &v1alpha1.VerificationStorage{Size: resource.MustParse("42Gi")},
-		},
-	}
-	got := autoSizeVerificationPVC(v, &v1alpha1.MysqlBackup{
-		Status: v1alpha1.MysqlBackupStatus{SizeBytes: 500 << 30}, // 500Gi
-	})
-	if got.String() != "42Gi" {
-		t.Errorf("want 42Gi, got %s", got.String())
-	}
-}
-
-func TestAutoSizeVerificationPVC_NoBackupSize_FallsBackToMinimum(t *testing.T) {
-	v := &v1alpha1.MysqlBackupVerification{}
-	got := autoSizeVerificationPVC(v, &v1alpha1.MysqlBackup{})
-	want := int64(10 * 1024 * 1024 * 1024)
-	if gotBytes, _ := got.AsInt64(); gotBytes != want {
-		t.Errorf("want minimum %d bytes, got %s", want, got.String())
-	}
-}
-
-func TestAutoSizeVerificationPVC_RoundsUpToTenGiBBlocks(t *testing.T) {
-	v := &v1alpha1.MysqlBackupVerification{}
-	// 12 GiB backup * 1.5 = 18 GiB, rounds up to 20 GiB.
-	got := autoSizeVerificationPVC(v, &v1alpha1.MysqlBackup{
-		Status: v1alpha1.MysqlBackupStatus{SizeBytes: 12 * 1024 * 1024 * 1024},
-	})
-	want := int64(20 * 1024 * 1024 * 1024)
-	if gotBytes, _ := got.AsInt64(); gotBytes != want {
-		t.Errorf("want %d bytes (20Gi), got %s", want, got.String())
-	}
-}
-
 // --- verificationLoadOptions ---------------------------------------------
 
-func TestVerificationLoadOptions_ResetsProgressSkipsBinlog(t *testing.T) {
+func TestVerificationLoadOptions_SkipsBinlog(t *testing.T) {
 	got := verificationLoadOptions()
 	if got.Threads != 4 {
 		t.Errorf("want threads=4, got %d", got.Threads)
-	}
-	if got.ResetProgress == nil || !*got.ResetProgress {
-		t.Errorf("want resetProgress=true")
 	}
 	if got.SkipBinlog == nil || !*got.SkipBinlog {
 		t.Errorf("want skipBinlog=true")
@@ -186,6 +146,47 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	}
 }
 
+// TestBuildVerificationJob_NoStorageDiskBoundedByResources pins A-56: a
+// verification has no storage of its own. Its Job mounts no
+// PersistentVolumeClaim for an S3 backup, and node disk is bounded only
+// through spec.resources.limits.ephemeral-storage, forwarded verbatim.
+func TestBuildVerificationJob_NoStorageDiskBoundedByResources(t *testing.T) {
+	fg := verifyFG()
+	backup := successfulBackup("bounded", "lion", "nightly-s3")
+	limits := corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("50Gi")}
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-bounded", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			ProfileName:      "nightly-s3",
+			Resources:        corev1.ResourceRequirements{Limits: limits},
+		},
+	}
+	job, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup:        fg,
+		Profile:              fg.Spec.Backup.Profiles[0],
+		Verification:         v,
+		Backup:               backup,
+		CredsSecretName:      "mysqlverify-verify-bounded-creds",
+		ScriptsConfigMapName: "mysql-lion-backup-scripts",
+	})
+	if err != nil {
+		t.Fatalf("buildVerificationJob: %v", err)
+	}
+	for _, vol := range job.Spec.Template.Spec.Volumes {
+		if vol.PersistentVolumeClaim != nil {
+			t.Errorf("verification Job of an S3 backup mounts PVC volume %q: %+v", vol.Name, vol)
+		}
+		if vol.EmptyDir != nil && vol.EmptyDir.SizeLimit != nil {
+			t.Errorf("emptyDir %q sets SizeLimit %s; disk is bounded by spec.resources", vol.Name, vol.EmptyDir.SizeLimit)
+		}
+	}
+	got := job.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceEphemeralStorage]
+	if got.Cmp(resource.MustParse("50Gi")) != 0 {
+		t.Errorf("ephemeral-storage limit = %s, want 50Gi from spec.resources", got.String())
+	}
+}
+
 func TestBuildVerificationJob_PVCBackedBackup_MountsBackupPVC(t *testing.T) {
 	fg := verifyFG()
 	// The fg has two profiles; the second is PVC-backed ("daily-local").
@@ -302,7 +303,7 @@ func TestVerificationReconciler_GroupNotFound_TransitionsToFailed(t *testing.T) 
 func TestVerificationReconciler_ProfileNotFound_TransitionsToFailed(t *testing.T) {
 	fg := verifyFG()
 	v := verifyCR("bad-prof", "lion", "does-not-exist")
-	r, c := newVerificationReconciler(t, fg, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "bad-prof")
 
 	var got v1alpha1.MysqlBackupVerification
@@ -315,7 +316,7 @@ func TestVerificationReconciler_ProfileNotFound_TransitionsToFailed(t *testing.T
 func TestVerificationReconciler_NoSucceededBackup_TransitionsToFailed(t *testing.T) {
 	fg := verifyFG()
 	v := verifyCR("no-backup", "lion", "nightly-s3")
-	r, c := newVerificationReconciler(t, fg, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "no-backup")
 
 	var got v1alpha1.MysqlBackupVerification
@@ -329,7 +330,7 @@ func TestVerificationReconciler_CreatesJobWithEmptyDirDatadir(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("nightly-happy", "lion", "nightly-s3")
 	v := verifyCR("verify-happy", "lion", "nightly-s3")
-	r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "verify-happy")
 
 	var got v1alpha1.MysqlBackupVerification
@@ -379,7 +380,7 @@ func TestVerificationReconciler_JobSucceeded_TransitionsToSucceeded(t *testing.T
 	fg := verifyFG()
 	backup := successfulBackup("nightly-happy", "lion", "nightly-s3")
 	v := verifyCR("verify-happy", "lion", "nightly-s3")
-	r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "verify-happy")
 
 	// Simulate successful Job completion.
@@ -414,7 +415,7 @@ func TestVerificationReconciler_JobFailed_TransitionsToFailed(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("nightly-happy", "lion", "nightly-s3")
 	v := verifyCR("verify-sad", "lion", "nightly-s3")
-	r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "verify-sad")
 
 	var job batchv1.Job
@@ -451,7 +452,7 @@ func TestVerificationReconciler_ConcurrentRun_SecondBlocked(t *testing.T) {
 	later := verifyCR("verify-second", "lion", "nightly-s3")
 	later.CreationTimestamp = metav1.NewTime(time.Now())
 
-	r, c := newVerificationReconciler(t, fg, backup, earlier, later, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, backup, earlier, later, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "verify-second")
 
 	var got v1alpha1.MysqlBackupVerification
@@ -505,7 +506,7 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 	trigger.Status.Phase = v1alpha1.VerificationPhaseSucceeded
 	ct := metav1.NewTime(time.Now().Add(time.Hour))
 	trigger.Status.CompletionTime = &ct
-	crs = append(crs, trigger, dsnSecret())
+	crs = append(crs, trigger, operatorCredsSecret())
 
 	r, c := newVerificationReconciler(t, crs...)
 	reconcileVerifUntilStable(t, r, "trigger")
@@ -845,7 +846,7 @@ func TestVerificationReconciler_PITRBuildRefusalKeepsToken(t *testing.T) {
 			v := verifyCR("verify-pitr", "lion", "nightly-s3")
 			v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
 			tc.mutate(fg, backup, v)
-			r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+			r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 			reconcileVerifUntilStable(t, r, "verify-pitr")
 			var got v1alpha1.MysqlBackupVerification
 			if err := c.Get(context.Background(), types.NamespacedName{Name: "verify-pitr", Namespace: "ns"}, &got); err != nil {

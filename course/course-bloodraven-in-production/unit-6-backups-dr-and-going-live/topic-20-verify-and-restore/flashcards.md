@@ -15,9 +15,9 @@
 
 ---
 
-**Front:** Minimum size of the ephemeral verification datadir PVC
+**Front:** Where a verification's datadir lives, and what bounds it
 
-**Back:** 10 GiB. Auto-sizing is max(10Gi, 1.5 × the backup's sizeBytes rounded up to the nearest 10Gi).
+**Back:** An `emptyDir` on the Job's node, never a PVC, and not size-limited. Budget about 1.5 × the backup's `sizeBytes` of node disk; bound it with `spec.resources.limits.ephemeral-storage`.
 
 ---
 
@@ -71,4 +71,4 @@
 
 **Front:** spec.keepOnFailure on a MysqlBackupVerification — default, and what it preserves
 
-**Back:** Defaults to true; it leaves the verification Pod and its ephemeral PVC in place after a Failed run so you can exec in and inspect why the load failed.
+**Back:** Defaults to true; it leaves the verification Job and its Pod (with the `emptyDir` datadir) in place after a Failed run so you can exec in and inspect why the load failed.

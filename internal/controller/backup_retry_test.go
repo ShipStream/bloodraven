@@ -53,7 +53,7 @@ func TestBackupRetry_HistoryDoesNotSuppressNewRun(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, b := range backups.Items {
-				if b.Spec.TriggeredBy == "retry/nightly/attempt-2" {
+				if b.Annotations[v1alpha1.TriggeredByAnnotation] == "retry/nightly/attempt-2" {
 					if b.Labels["shipstream.io/backup-retry-of"] != string(failed.UID) || b.Annotations["shipstream.io/backup-attempt"] != "2" {
 						t.Fatalf("retry lacks durable predecessor/attempt: %+v", b.ObjectMeta)
 					}
@@ -110,7 +110,7 @@ func TestBackupRetry_AttemptSurvivesLaunchStatusLoss(t *testing.T) {
 	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
 	backup := backupCR("retry-launch", fg.Name, "nightly-s3")
 	backup.Annotations = map[string]string{v1alpha1.BackupAttemptAnnotation: "2"}
-	r, c := newBackupReconciler(t, fg, backup, dsnSecret())
+	r, c := newBackupReconciler(t, fg, backup, operatorCredsSecret())
 	reconcileUntilStable(t, r, backup.Name)
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(backup), backup); err != nil {
 		t.Fatal(err)

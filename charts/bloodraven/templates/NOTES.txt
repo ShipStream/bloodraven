@@ -75,7 +75,15 @@ Grafana dashboards are available but disabled. To enable:
 
 Next steps:
   1. Install external-dns with the DNSEndpoint CRD source enabled for your DNS provider.
-  2. Create a Secret with MySQL credentials (ROOT_PASSWORD, REPLICATION_USER, etc.)
+  2. Create the operator credentials Secret (keys username, password,
+     MYSQL_ROOT_PASSWORD; optionally MYSQL_REPLICATION_USER and
+     MYSQL_REPLICATION_PASSWORD), e.g.:
+
+     kubectl create secret generic orders-mysql-operator -n {{ .Release.Namespace }} \
+       --from-literal=username=bloodraven \
+       --from-literal=password=<operator-password> \
+       --from-literal=MYSQL_ROOT_PASSWORD=<root-password>
+
   3. Create a MysqlFailoverGroup custom resource:
 
      kubectl apply -f - <<EOF
@@ -85,7 +93,8 @@ Next steps:
        name: orders
        namespace: {{ .Release.Namespace }}
      spec:
-       secretName: mysql-credentials
+       credentials:
+         operatorSecret: orders-mysql-operator
        sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:{{ .Chart.AppVersion }}
        dns:
          hostname: orders.az.example.com

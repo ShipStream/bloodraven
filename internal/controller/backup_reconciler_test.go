@@ -157,8 +157,8 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "ns"},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Image:      "mysql:9.7",
-			SecretName: "mysql-credentials",
+			Image:       "mysql:9.7",
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "iad", Zone: "az-iad", LBIP: "10.0.0.1",
 					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
@@ -405,12 +405,10 @@ func TestMarshalLoadOptions_ExcludeSchemas(t *testing.T) {
 }
 
 func TestMarshalLoadOptions_AllFields(t *testing.T) {
-	reset := true
 	skipBin := false
 	loadIdx := true
 	l := &v1alpha1.LoadOptions{
 		Threads:        8,
-		ResetProgress:  &reset,
 		SkipBinlog:     &skipBin,
 		LoadIndexes:    &loadIdx,
 		IncludeSchemas: []string{"orders"},
@@ -421,7 +419,6 @@ func TestMarshalLoadOptions_AllFields(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"threads":8`,
-		`"resetProgress":true`,
 		`"skipBinlog":false`,
 		`"loadIndexes":true`,
 		`"includeSchemas":["orders"]`,
@@ -542,10 +539,14 @@ func backupCR(name, fgName, profile string) *v1alpha1.MysqlBackup {
 	}
 }
 
-func dsnSecret() *corev1.Secret {
+func operatorCredsSecret() *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "mysql-credentials", Namespace: "ns"},
-		Data:       map[string][]byte{"dsn": []byte("backup:s3cret@tcp(host:3306)/")},
+		Data: map[string][]byte{
+			"username":            []byte("backup"),
+			"password":            []byte("s3cret"),
+			"MYSQL_ROOT_PASSWORD": []byte("root-s3cret"),
+		},
 	}
 }
 
@@ -563,7 +564,7 @@ func reconcileUntilStable(t *testing.T, r *MysqlBackupReconciler, name string) {
 
 func TestMysqlBackupReconciler_GroupNotFound_TransitionsToFailed(t *testing.T) {
 	mb := backupCR("orphan", "ghost", "x")
-	r, c := newBackupReconciler(t, mb, dsnSecret())
+	r, c := newBackupReconciler(t, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "orphan")
 
 	var got v1alpha1.MysqlBackup
@@ -585,7 +586,7 @@ func TestMysqlBackupReconciler_ProfileNotFound_TransitionsToFailed(t *testing.T)
 		},
 	}
 	mb := backupCR("bad-profile", "lion", "does-not-exist")
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "bad-profile")
 
 	var got v1alpha1.MysqlBackup
@@ -605,7 +606,7 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 		},
 	}
 	mb := backupCR("happy-path", "lion", "nightly-s3")
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "happy-path")
 
 	var job batchv1.Job
@@ -669,7 +670,7 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 			Reason: "Created",
 		}},
 	}
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "wait-for-source")
 
 	var got v1alpha1.MysqlBackup
@@ -762,7 +763,7 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 			Reason: "Created",
 		}},
 	}
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "pending-too-long")
 
 	var got v1alpha1.MysqlBackup
@@ -797,7 +798,7 @@ func TestMysqlBackupReconciler_RunningJobSurvivesTransientNoActiveSite(t *testin
 		},
 	}
 	mb := backupCR("in-flight-failover", "lion", "nightly-s3")
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "in-flight-failover")
 
 	backupKey := types.NamespacedName{Name: mb.Name, Namespace: mb.Namespace}
@@ -873,7 +874,7 @@ func TestMysqlBackupReconciler_JobSucceeded_MarksSucceeded(t *testing.T) {
 		},
 	}
 	mb := backupCR("done", "lion", "nightly-s3")
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 
 	// First pass: creates Job.
 	reconcileUntilStable(t, r, "done")
@@ -918,7 +919,7 @@ func TestMysqlBackupReconciler_JobFailed_MarksFailed(t *testing.T) {
 		},
 	}
 	mb := backupCR("boom", "lion", "nightly-s3")
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "boom")
 
 	var job batchv1.Job

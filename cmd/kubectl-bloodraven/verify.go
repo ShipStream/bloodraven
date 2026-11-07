@@ -137,6 +137,7 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: generateNameWithInfix(group, profile, "verify"),
 			Namespace:    ns,
+			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: triggeredBy},
 			Labels: map[string]string{
 				v1alpha1.FailoverGroupLabel:    group,
 				v1alpha1.BackupProfileLabel:    profile,
@@ -146,7 +147,6 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: group},
 			ProfileName:      profile,
-			TriggeredBy:      triggeredBy,
 		},
 	}
 	if backupName != "" {
@@ -155,9 +155,6 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 	if vs := profileVerificationSpec(fg, profile); vs != nil {
 		cr.Spec.KeepOnFailure = vs.KeepOnFailure
 		cr.Spec.TTLSecondsAfterFinished = vs.TTLSecondsAfterFinished
-		if vs.Storage != nil {
-			cr.Spec.Storage = vs.Storage.DeepCopy()
-		}
 		if vs.PointInTime != nil {
 			cr.Spec.PointInTime = vs.PointInTime.DeepCopy()
 		}

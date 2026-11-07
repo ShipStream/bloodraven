@@ -472,7 +472,7 @@ Restore Jobs mount the dump read-only: source PVCs at `/restore` or `/backups`, 
 2. For in-place, list what survived on the primary: `SHOW DATABASES`.
 
 ### Safe remediation
-1. Upgrade the operator. `loadOptions.resetProgress` has no effect on restores, and changing it does not help.
+1. Upgrade the operator. Load-progress tracking is not a `loadOptions` setting, so no spec change helps.
 2. Bootstrap: delete the failed restore Job; the reconciler rebuilds it. Restore Jobs no longer resume a partial load. If the failed Job's log shows `BLOODRAVEN_LOAD_START`, empty the target first (delete the new group's MySQL PVCs, or `./playground/reset-mysql.sh`), or the reload stops on objects the first attempt created.
 3. In-place: bump `spec.restoreInPlace.confirm` to a newer RFC 3339 timestamp to re-run the restore. It drops and reloads the same scope, which is what is needed when the earlier attempt dropped the schemas and never loaded them.
 
@@ -501,20 +501,19 @@ A PITR replay pipes archived binlogs, with their original GTIDs, into the new pr
 3. Error 1146 or 1049 during replay rather than 1062/1032 means the replay touched a schema the dump or load left out (`dumpSchemas`, `loadOptions.includeSchemas`/`excludeSchemas`). Restore from an instance dump, without load-time schema filters.
 4. Do not work around it with `pointInTime.excludeGtids` set to the dump's GTID set. That skips the in-dump transactions but leaves `gtid_purged` without the dump's history.
 
-## 19. In-place restore with `pointInTime` rejected, or an earlier one stopped at the backup
+## 19. In-place point-in-time recovery, or an earlier one stopped at the backup
 
-In-place PITR cannot work against a live primary. The replay keeps the archived transactions' original GTIDs, and the primary has already executed every one of them, so MySQL skips them all. Current operators reject `spec.restoreInPlace.pointInTime` in Preflight. Earlier operators ran the replay anyway, logged `BLOODRAVEN_PITR_COMPLETE` and reported `Succeeded`, with the data left at the backup.
+In-place PITR cannot work against a live primary. The replay keeps the archived transactions' original GTIDs, and the primary has already executed every one of them, so MySQL skips them all. `spec.restoreInPlace` has no `pointInTime` field (removed in v1.7.0; the API server prunes it from a manifest). Operators before v1.7.0 accepted it: the earliest ran the replay anyway, logged `BLOODRAVEN_PITR_COMPLETE` and reported `Succeeded` with the data left at the backup, and later ones rejected it in Preflight (`RestoreInPlaceRejected`).
 
 ### Symptoms
-- `status.restoreInPlace.phase: Failed`, `confirmTokenUsed` unchanged (the confirm of the last restore that ran, empty if none), message `restoreInPlace.pointInTime is not supported: ...`, and a `RestoreInPlaceRejected` warning event. No Job exists and nothing was fenced.
+- A manifest with `restoreInPlace.pointInTime` restores to the backup: the field was pruned, so the restore is a plain in-place restore.
 - Or, after an older operator ran in-place PITR: rows written between the backup and `stopDatetime` are missing, although the restore reported success.
 
 ### Diagnostic steps
-1. Confirm the spec: `kubectl get mfg <group> -n <ns> -o jsonpath='{.spec.restoreInPlace.pointInTime}'`.
-2. For a past run, compare the expected post-backup rows with what the primary holds. An older operator's `status.restoreInPlace.pitrReplayedBinlogCount > 0` does not mean anything was applied (the field is gone in v1.7.0).
+1. For a past run, compare the expected post-backup rows with what the primary holds. An older operator's `status.restoreInPlace.pitrReplayedBinlogCount > 0` does not mean anything was applied (the field is gone in v1.7.0).
 
 ### Safe remediation
-1. To restore to the backup itself, remove `pointInTime`; the same `confirm` re-runs.
+1. Remove `pointInTime` from the `restoreInPlace` manifest so it says what runs.
 2. To reach a point in time, restore into a new failover group with `spec.initFromBackup.pointInTime` (fresh target, so the dump's GTID set is installed and the replay applies). Then move the data or traffic across. For a single tenant schema, dump it from the recovered group with `mysqlsh util.dumpSchemas` and run a per-schema in-place restore from that dump.
 3. Do not try to force replay on the live primary with `RESET BINARY LOGS AND GTIDS` or `mysqlbinlog --skip-gtids`. The first destroys unarchived binlogs and archive continuity. The second re-applies in-dump and cross-site duplicate transactions.
 
@@ -666,7 +665,7 @@ A healthy operator pod does not guarantee that every group has a live topology m
    ```
 2. Typical causes:
    - The operator Secret is missing (`get operator secret ... not found`).
-   - It has no `dsn` key (DSN mode).
+   - It has no `username` or `password` key (`operator secret <ns>/<name> missing "username" key`).
    - The `spec.tls.secretName` Secret is missing or its material does not load.
 3. A WARN `connection material unreadable; keeping the running topology manager` is not this failure. The manager is still running on its existing connections while the Secret is being replaced.
 

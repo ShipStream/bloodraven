@@ -129,7 +129,7 @@ func TestVerificationRecordedDumpKeyGone(t *testing.T) {
 	backup.Status.Encrypted = true
 	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}}
 	v := verifyCR("verify-gone", "lion", "nightly-s3")
-	r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	got := getVerification(t, c, v)
 	if got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(pitrarchive.TokenBackupDumpKeyMissing) {

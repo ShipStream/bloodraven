@@ -183,7 +183,7 @@ func TestInitRestoreProtection_InheritsEveryGuardOnReadFailure(t *testing.T) {
 func TestSync_NewManagerTakesRestoreGuardsFromUncachedRead(t *testing.T) {
 	cached, authoritative := heldGroupViews()
 	secret := newTestSecret()
-	secret.Data = map[string][]byte{"dsn": []byte("op:pw@tcp(127.0.0.1:1)/mysql")}
+	secret.Data = lifecycleSecretData()
 	cachedClient := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(cached, secret).Build()
 	reader := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -244,7 +244,7 @@ func TestEarlierRunQueueHeldWhenNextRunEndsInPreflight(t *testing.T) {
 			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1alpha1.RestoreReclonesArmed,
 				Pending: []string{peerName}, FencedGtidExecuted: peerGTID("1-10")}
 			fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: site, ConfirmToken: confirmA, RunID: "run-a", PriorOfflineMode: &no, SessionsEvicted: true}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			tm, mocks := withFenceRunner(r, c, fg)
 			r.Recorder = record.NewFakeRecorder(100)
 			mocks[site].gtidExecuted = peerGTID("1-14") // A's DROPs

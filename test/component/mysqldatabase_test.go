@@ -159,7 +159,7 @@ func mdbGroup(activeSite string) *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: mdbGroupName, Namespace: mdbNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "dc1", Role: "primary-candidate"},
 				{Name: "dc2", Role: "primary-candidate"},

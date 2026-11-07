@@ -242,7 +242,6 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 	}
 	live.Spec.TLS = &v1alpha1.TLSSpec{
 		SecretName: "mysql-tls",
-		IssuerRef:  v1alpha1.IssuerRef{Name: "ca", Kind: "Issuer"},
 	}
 	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
 	if live.Annotations == nil {

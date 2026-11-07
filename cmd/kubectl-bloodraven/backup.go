@@ -115,6 +115,7 @@ func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1alpha1
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: backupGenerateName(group, profile),
 			Namespace:    ns,
+			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: triggeredBy},
 			Labels: map[string]string{
 				v1alpha1.FailoverGroupLabel:    group,
 				v1alpha1.BackupProfileLabel:    profile,
@@ -125,7 +126,6 @@ func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1alpha1
 			FailoverGroupRef:   v1alpha1.LocalGroupRef{Name: group},
 			ProfileName:        profile,
 			SourceSiteOverride: sourceSite,
-			TriggeredBy:        triggeredBy,
 		},
 	}
 }

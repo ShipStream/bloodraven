@@ -48,13 +48,13 @@ spec:
           bloodraven_backup_verified_timestamp_seconds gauge give operators a
           concrete signal that recent backups are restorable.
 
-          Phase 1 implementation runs the ephemeral mysqld inside the
-          verification Job's Pod on a dedicated PVC, with a derived
-          credentials Secret for the restore script. No Service is created;
-          the Pod binds 127.0.0.1 only and is not reachable from outside its
-          own network namespace. On success all artifacts are cleaned up; on
-          failure KeepOnFailure (default true) leaves the Job Pod and PVC in
-          place for inspection until the retention sweep reclaims them.
+          The ephemeral mysqld runs inside the verification Job's Pod on an
+          emptyDir datadir, with a derived credentials Secret for the restore
+          script. No Service or PersistentVolumeClaim is created; the Pod binds
+          127.0.0.1 only and is not reachable from outside its own network
+          namespace. On success all artifacts are cleaned up; on failure
+          KeepOnFailure (default true) leaves the Job and its Pod in place for
+          inspection until the retention sweep reclaims them.
         properties:
           apiVersion:
             description: |-
@@ -109,7 +109,7 @@ spec:
               keepOnFailure:
                 default: true
                 description: |-
-                  KeepOnFailure leaves the ephemeral Pod and PVC in place when the
+                  KeepOnFailure leaves the verification Job and its Pod in place when the
                   verification terminates in Failed, so operators can kubectl exec
                   into the verification instance to inspect why the load failed.
                   On success all artifacts are always cleaned up regardless of
@@ -178,7 +178,8 @@ spec:
                   container. Forwarded to the Job pod verbatim; when unset, no
                   verification-specific resource requests or limits are
                   configured (the container inherits cluster / namespace default
-                  limits if any).
+                  limits if any). The datadir is an emptyDir on the node's disk, so
+                  bound it with limits.ephemeral-storage.
                 properties:
                   claims:
                     description: |-
@@ -279,37 +280,11 @@ spec:
                 required:
                 - query
                 type: object
-              storage:
-                description: |-
-                  Storage is accepted for compatibility but is not applied: the
-                  verification Job keeps its datadir on an emptyDir and no longer
-                  creates a PersistentVolumeClaim.
-                properties:
-                  size:
-                    anyOf:
-                    - type: integer
-                    - type: string
-                    description: |-
-                      Size is accepted but not applied; the verification Job creates no
-                      PersistentVolumeClaim.
-                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                    x-kubernetes-int-or-string: true
-                  storageClassName:
-                    description: |-
-                      StorageClassName is accepted but not applied; the verification Job
-                      creates no PersistentVolumeClaim.
-                    type: string
-                type: object
-              triggeredBy:
-                description: |-
-                  TriggeredBy records what created this CR ("manual",
-                  "schedule/<schedule-name>"). Informational only.
-                type: string
               ttlSecondsAfterFinished:
                 default: 0
                 description: |-
-                  TTLSecondsAfterFinished controls how long the verification Pod +
-                  Service + PVC persist after a successful verification before the
+                  TTLSecondsAfterFinished controls how long the verification Job and
+                  its Pod persist after a successful verification before the
                   reconciler cleans them up. Default: 0 (clean up immediately).
                   Failed verifications with KeepOnFailure=true ignore this value.
                 format: int32
@@ -438,13 +413,8 @@ spec:
                 - Pending
                 - Provisioning
                 - Restoring
-                - Checking
-                - Cleaning
                 - Succeeded
                 - Failed
-                type: string
-              podName:
-                description: PodName is the name of the ephemeral MySQL Pod.
                 type: string
               pointInTime:
                 description: |-
@@ -615,9 +585,6 @@ spec:
                 - mode
                 - outcome
                 type: object
-              pvcName:
-                description: PVCName is the name of the ephemeral MySQL PVC.
-                type: string
               replayedThroughBinlog:
                 description: |-
                   ReplayedThroughBinlog is populated on Succeeded verifications
@@ -672,11 +639,6 @@ spec:
                       the query returned zero rows.
                     type: string
                 type: object
-              serviceName:
-                description: |-
-                  ServiceName is the name of the headless Service routing the
-                  restore Job to the ephemeral MySQL Pod.
-                type: string
               startTime:
                 description: StartTime is when the verification entered Provisioning.
                 format: date-time

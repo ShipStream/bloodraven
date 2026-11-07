@@ -53,11 +53,6 @@ type MysqlBackupSpec struct {
 	// source. Leave empty to let the reconciler choose (replica-first).
 	// +optional
 	SourceSiteOverride string `json:"sourceSiteOverride,omitempty"`
-
-	// TriggeredBy is a free-form label recording what created this CR
-	// (e.g. "schedule/nightly", "manual", "retry/nightly/attempt-2").
-	// Informational only.
-	TriggeredBy string `json:"triggeredBy,omitempty"`
 }
 
 // LocalGroupRef is a same-namespace reference to a MysqlFailoverGroup.

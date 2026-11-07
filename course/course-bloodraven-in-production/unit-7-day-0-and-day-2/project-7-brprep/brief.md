@@ -12,9 +12,10 @@ incident.
 ## How this works
 
 Topic 1 of this unit drew the line that matters on day 0: **admission validates the object, and
-nothing validates the object against the cluster.** A manifest that sets both credential modes is
-refused in milliseconds. A manifest whose `taintNodeSelector` names labels no node carries is
-accepted, applied, and silently does nothing for the rest of its life.
+nothing validates the object against the cluster.** A manifest that still carries the removed
+`spec.secretName` beside `spec.credentials` is refused in milliseconds. A manifest whose
+`taintNodeSelector` names labels no node carries is accepted, applied, and silently does nothing for
+the rest of its life.
 
 `brprep` makes that line executable. It reads a manifest as JSON and prints three kinds of line:
 
@@ -49,8 +50,9 @@ is measured against.
 
 **TODO A — `check_admission`.** Print one `REJECT <rule>` line per admission rule the manifest
 violates, in the order the `RULE_*` constants are declared. A clean manifest prints nothing at all. The nine rules
-are documented in the script — seven CEL rules on the CRD plus the `MinItems`/`MaxItems` bound on
-`spec.sites`, all of them refusals at `kubectl apply` — and two are worth flagging here.
+are documented in the script — CEL rules on the CRD, the `MinItems`/`MaxItems` bound on
+`spec.sites` and the required `spec.credentials`, all of them refusals at `kubectl apply` — and two
+are worth flagging here.
 
 *The role default is load-bearing.* `spec.sites[].role` is optional and defaults to
 `primary-candidate`, so a site with no `role` key counts toward the two-candidate minimum and is

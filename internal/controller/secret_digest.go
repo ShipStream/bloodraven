@@ -150,7 +150,7 @@ func secretContentDigest(key []byte, secrets map[string]map[string][]byte) strin
 
 // specSecretInputs collects the Secret contents a site's pod template
 // consumes (Δ15, K10, O10): the TLS Secret's ca.crt, tls.crt and tls.key,
-// and in credentials mode the role Secrets' username and password plus the
+// and the role Secrets' username and password plus the
 // operator Secret's MYSQL_ROOT_PASSWORD (credentialRoleSecretNames). Nothing
 // else of those Secrets enters the digest, so a passphrase kept in a shared
 // TLS or credentials Secret does not roll the pods; the PITR archive key
@@ -168,12 +168,10 @@ func specSecretInputs(ctx context.Context, r client.Reader, fg *v1alpha1.MysqlFa
 			return nil, fmt.Errorf("get TLS secret %s: %w", fg.Spec.TLS.SecretName, err)
 		}
 	}
-	if fg.Spec.UsesCredentials() {
-		for name, keys := range credentialRoleSecretNames(fg) {
-			var s corev1.Secret
-			if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
-				secrets["cred."+name] = pickSecretKeys(s.Data, keys)
-			}
+	for name, keys := range credentialRoleSecretNames(fg) {
+		var s corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
+			secrets["cred."+name] = pickSecretKeys(s.Data, keys)
 		}
 	}
 	return secrets, nil

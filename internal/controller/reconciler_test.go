@@ -79,7 +79,7 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					},
 				},
 			},
-			SecretName: "mysql-credentials",
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
 			DNS: v1alpha1.DNSSpec{
 				Hostname: "lion.az.example.com",
 				TTL:      60,
@@ -100,7 +100,9 @@ func newTestSecret() *corev1.Secret {
 			Namespace: "shared-lion",
 		},
 		Data: map[string][]byte{
-			"dsn": []byte("root:password@tcp(localhost:3306)/mysql"),
+			"username":            []byte("bloodraven"),
+			"password":            []byte("password"),
+			"MYSQL_ROOT_PASSWORD": []byte("root-password"),
 		},
 	}
 }
@@ -349,12 +351,7 @@ func TestReconcile_Idempotent(t *testing.T) {
 
 func TestReconcile_TLSConfig(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.TLS = &v1alpha1.TLSSpec{
-		IssuerRef: v1alpha1.IssuerRef{
-			Name: "letsencrypt",
-			Kind: "ClusterIssuer",
-		},
-	}
+	fg.Spec.TLS = &v1alpha1.TLSSpec{}
 	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -856,7 +853,6 @@ func TestGenerateMyCnf_PITRDisabledLeavesDefault(t *testing.T) {
 func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 	fg := newTestFG()
 	fg.Spec.TLS = &v1alpha1.TLSSpec{
-		IssuerRef:  v1alpha1.IssuerRef{Name: "letsencrypt", Kind: "ClusterIssuer"},
 		SecretName: "mysql-tls",
 	}
 	tlsSecret := &corev1.Secret{
@@ -1362,8 +1358,7 @@ func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
 
 func newTestFGWithCredentials() *v1alpha1.MysqlFailoverGroup {
 	fg := newTestFG()
-	fg.Spec.SecretName = ""
-	fg.Spec.Credentials = &v1alpha1.CredentialsSpec{
+	fg.Spec.Credentials = v1alpha1.CredentialsSpec{
 		OperatorSecret: "mysql-operator-creds",
 		AppSecret:      "mysql-app-creds",
 		BackupSecret:   "mysql-backup-creds",

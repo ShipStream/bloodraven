@@ -216,7 +216,7 @@ func TestVerificationHold_StampedOnLaunchAndReleasedWhenStopped(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("hold", fg.Name, "nightly-s3")
 	v.UID = "uid-hold"
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
 		t.Fatal(err)
@@ -274,7 +274,7 @@ func TestVerificationHold_RefusesTerminatingBackupAtLaunch(t *testing.T) {
 	b.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 	v := verifyCR("late", fg.Name, "nightly-s3")
 	v.Spec.BackupRef = &corev1.LocalObjectReference{Name: b.Name}
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
@@ -295,7 +295,7 @@ func TestVerificationHold_DeletionWaitsForPods(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("deleting", fg.Name, "nightly-s3")
 	v.UID = "uid-deleting"
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	pod := holdPod(v.Name, corev1.PodRunning)
 	if err := c.Create(ctx, pod); err != nil {
@@ -376,7 +376,7 @@ func TestVerificationHold_StampedAfterCrashBetweenPinAndStamp(t *testing.T) {
 	v.UID = "uid-crashed"
 	v.Status.Phase = v1alpha1.VerificationPhaseProvisioning
 	v.Status.BackupRef = verificationBackupSnapshot(pinned)
-	r, c := newVerificationReconciler(t, fg, pinned, newer, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, pinned, newer, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	for _, b := range []*v1alpha1.MysqlBackup{pinned, newer} {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
@@ -395,7 +395,7 @@ func TestVerificationHold_ReleaseConflictIsRetried(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("conflict", fg.Name, "nightly-s3")
 	v.UID = "uid-conflict"
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
@@ -447,7 +447,7 @@ func TestVerificationHold_StampedOnObserveAfterCrash(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("observe", fg.Name, "nightly-s3")
 	v.UID = "uid-observe"
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	// Rewind to the crash point: Job exists, status and hold do not.
 	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {

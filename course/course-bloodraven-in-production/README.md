@@ -188,7 +188,7 @@ A failover group protects you from losing a site. It does not protect you from l
 
   4. Run a backup verification and say precisely what a `Succeeded` result proved
   5. Restore `playground` in place using the RFC 3339 confirmation token
-  6. Explain why a `pointInTime` request is rejected: on `initFromBackup` when PITR is disabled, and always on `restoreInPlace`
+  6. Explain why a `pointInTime` request is rejected on `initFromBackup` when PITR is disabled, and why `restoreInPlace` has none
 
 **Encryption at rest and the keyring lifecycle** — Five phases, one steady state, and the moment etcd becomes part of your key custody. Plus the one site you must never rotate.
 
@@ -219,7 +219,7 @@ Six units started from a group somebody else's script created. This one builds o
 **Building a group from nothing** — An empty namespace, and every line of the manifest a decision you already know how to defend. Credentials, storage, node labels — and which of your mistakes admission catches.
 
   1. Write a `MysqlFailoverGroup` into an empty namespace and say, line by line, which earlier unit decided it
-  2. Choose between `secretName` and `credentials` and name the users and grants each one produces
+  2. Write `spec.credentials` and name the users and grants each role produces
   3. Separate the mistakes admission rejects from the ones you discover during an incident
 
 **TLS, and what it unlocks** — The field the CRD demanded in Unit 6 and nobody taught. A SAN list that keeps the sidecar able to fence, a renewal that moves your primary, and the door it opens to encryption at rest.

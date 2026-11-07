@@ -525,10 +525,6 @@ type S3Storage struct {
 	//   AWS_REGION (optional, overrides .region)
 	// +kubebuilder:validation:MinLength=1
 	CredentialsSecret string `json:"credentialsSecret"`
-
-	// StorageClass is the S3 storage class (e.g. STANDARD_IA,
-	// DEEP_ARCHIVE). Informational; not enforced by the operator.
-	StorageClass string `json:"storageClass,omitempty"`
 }
 
 // PVCStorage configures a local persistent volume as the backup destination.
@@ -721,14 +717,6 @@ type LoadOptions struct {
 	// +kubebuilder:validation:Minimum=1
 	Threads int32 `json:"threads,omitempty"`
 
-	// ResetProgress clears previous loadDump progress tracking. Restore
-	// and verification Jobs disable progress tracking (local dump sources
-	// are mounted read-only, and restore state is kept out of backup
-	// storage), so this field currently has no effect and is kept for
-	// compatibility.
-	// +kubebuilder:default=true
-	ResetProgress *bool `json:"resetProgress,omitempty"`
-
 	// SkipBinlog disables binary logging during the load to speed it up.
 	// For in-place restores that must replicate to the peer site via
 	// normal MySQL replication (per-schema in-place restore), callers
@@ -852,17 +840,6 @@ type RestoreInPlaceSpec struct {
 	// through the primary's binlog to the replica.
 	// +optional
 	LoadOptions *LoadOptions `json:"loadOptions,omitempty"`
-
-	// PointInTime is not supported for in-place restores yet; the
-	// operator rejects a restore that sets it (RestoreInPlaceRejected)
-	// before fencing anything, without consuming confirm. The replayed
-	// binlogs carry GTIDs the live primary has already executed, so the
-	// replay would be skipped and the restore would stop at the backup.
-	// To recover to a point in time, restore into a new failover group
-	// with initFromBackup.pointInTime. The field is kept so existing
-	// objects still validate.
-	// +optional
-	PointInTime *PointInTimeSpec `json:"pointInTime,omitempty"`
 
 	// Decryption, when set, provides the passphrase that decrypts the
 	// source dump, resolved as InitFromBackupSpec.Decryption is:

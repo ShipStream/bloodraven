@@ -109,7 +109,7 @@ func TestReconcileInPlaceRestore_SpecRemovedMidJobHoldsUntilJobFinishes(t *testi
 	job := runningInPlaceJob(fg, site, testRestoreConfirm, start.Add(5*time.Second))
 	pod := primaryFencedPod(fg.Name, site)
 	fg.Spec.RestoreInPlace = nil
-	r, c := newReconciler(fg, job, pod, dsnSecret())
+	r, c := newReconciler(fg, job, pod, operatorCredsSecret())
 	rec := r.Recorder.(*record.FakeRecorder)
 
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
@@ -198,7 +198,7 @@ func TestReconcileInPlaceRestore_SpecRemovedAdoptsJobFromCrashWindow(t *testing.
 	}
 	job := runningInPlaceJob(fg, site, testRestoreConfirm, start.Add(5*time.Second))
 	fg.Spec.RestoreInPlace = nil
-	r, c := newReconciler(fg, job, dsnSecret())
+	r, c := newReconciler(fg, job, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestReconcileInPlaceRestore_SpecRemovedBeforeJobCancels(t *testing.T) {
 				ConfirmTokenUsed: previousRestoreConfirm,
 			}
 			fg.Spec.RestoreInPlace = nil
-			r, c := newReconciler(fg, dsnSecret())
+			r, c := newReconciler(fg, operatorCredsSecret())
 			if tc.staleJob {
 				stale := runningInPlaceJob(fg, site, previousRestoreConfirm, start.Add(-time.Hour))
 				stale.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
@@ -290,7 +290,7 @@ func TestReconcileInPlaceRestore_NewRunKeepsLastConsumedConfirm(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: "full", ConfirmTokenUsed: previousRestoreConfirm,
 	}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -301,11 +301,11 @@ func TestReconcileInPlaceRestore_NewRunKeepsLastConsumedConfirm(t *testing.T) {
 	}
 
 	rejected := fgInPlaceRestore("")
-	rejected.Spec.RestoreInPlace.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-17T13:00:00Z"}
+	rejected.Spec.RestoreInPlace.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{"orders", "billing"}}
 	rejected.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: "full", ConfirmTokenUsed: previousRestoreConfirm,
 	}
-	r2, c2 := newReconciler(rejected, succeededSeedBackup(), dsnSecret())
+	r2, c2 := newReconciler(rejected, succeededSeedBackup(), operatorCredsSecret())
 	if _, err := r2.reconcileInPlaceRestore(context.Background(), rejected); err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestReconcileInPlaceRestore_ScopeChangedBeforeJobIsRejected(t *testing.T) {
 		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "full", StartTime: ptrTime(time.Now()),
 		ConfirmTokenUsed: previousRestoreConfirm,
 	}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestReconcileInPlaceRestore_SpecRemovedWaitsForForeignRunningJob(t *testing
 	}
 	fg.Spec.RestoreInPlace = nil
 	foreign := runningInPlaceJob(fg, site, previousRestoreConfirm, start.Add(-time.Hour))
-	r, c := newReconciler(fg, foreign, dsnSecret())
+	r, c := newReconciler(fg, foreign, operatorCredsSecret())
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ func TestReconcileInPlaceRestore_JobLostConsumesTheRunsConfirm(t *testing.T) {
 			fg := fgInPlaceRestore("orders")
 			fg.Status.RestoreInPlace = tc.prior
 			manifest := fg.Spec.RestoreInPlace.DeepCopy()
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 
 			for i := 0; i < 4 && (fg.Status.RestoreInPlace == nil || fg.Status.RestoreInPlace.JobName == ""); i++ {
 				if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -435,7 +435,7 @@ func TestReconcileInPlaceRestore_JobLostConsumesTheRunsConfirm(t *testing.T) {
 func TestReconcileInPlaceRestore_ConfirmBumpedBeforeJobIsBoundToTheJob(t *testing.T) {
 	const bumped = "2026-04-18T10:00:00Z"
 	fg := fgInPlaceRestore("orders")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	step := func() {
 		t.Helper()
 		*fg = *getFG(t, c, fg)
@@ -508,7 +508,7 @@ func TestReconcileInPlaceRestore_AdoptedJobRecordsItsConfirm(t *testing.T) {
 	}
 	job := runningInPlaceJob(fg, site, bumped, start.Add(5*time.Second))
 	fg.Spec.RestoreInPlace = nil
-	r, c := newReconciler(fg, job, dsnSecret())
+	r, c := newReconciler(fg, job, operatorCredsSecret())
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +578,7 @@ func driveToJobCreate(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Cl
 func TestReconcileInPlaceRestore_LostPostCreateWriteStillCountsAsExecuted(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
 	manifest := fg.Spec.RestoreInPlace.DeepCopy()
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	driveToJobCreate(t, r, c, fg)
 
 	failStatusWrites(t, r, c, func(fg *v1alpha1.MysqlFailoverGroup) bool {
@@ -629,7 +629,7 @@ func TestReconcileInPlaceRestore_LostPostCreateWriteStillCountsAsExecuted(t *tes
 // No Job is created unless the write-ahead succeeded.
 func TestReconcileInPlaceRestore_NoJobWithoutWriteAhead(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	driveToJobCreate(t, r, c, fg)
 	failStatusWrites(t, r, c, func(fg *v1alpha1.MysqlFailoverGroup) bool {
 		return fg.Status.RestoreInPlace != nil && fg.Status.RestoreInPlace.JobCreating
@@ -661,7 +661,7 @@ func TestReconcileInPlaceRestore_LostJobIsNeverRecreated(t *testing.T) {
 			if tc.jobName {
 				fg.Status.RestoreInPlace.JobName = inPlaceRestoreJobName(fg.Name, site)
 			}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 				t.Fatal(err)
 			}
@@ -683,7 +683,7 @@ func TestReconcileInPlaceRestore_LostJobIsNeverRecreated(t *testing.T) {
 // afterwards is still a clean cancellation that consumes nothing.
 func TestReconcileInPlaceRestore_RefusedCreateWithdrawsWriteAhead(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	driveToJobCreate(t, r, c, fg)
 	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
@@ -733,7 +733,7 @@ func TestReconcileInPlaceRestore_UnrecordedLostJobHoldsSupersededQueue(t *testin
 		ConfirmTokenUsed: testRestoreConfirm, RunConfirm: confirmB, JobCreating: true,
 	}
 	fg.Spec.RestoreInPlace = nil
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -790,7 +790,7 @@ func TestReconcileInPlaceRestore_CachedJobMissDoesNotEndLiveRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInPlaceRestore("orders")
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			driveToJobCreate(t, r, c, fg)
 			if tc.loseNameWrite {
 				failStatusWrites(t, r, c, func(fg *v1alpha1.MysqlFailoverGroup) bool {
@@ -834,7 +834,7 @@ func TestReconcileInPlaceRestore_CachedJobMissDoesNotEndLiveRun(t *testing.T) {
 // A failed authoritative read keeps the run as it is and retries.
 func TestReconcileInPlaceRestore_JobReadErrorKeepsGuards(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	driveToJobCreate(t, r, c, fg)
 	_, _ = r.reconcileInPlaceRestore(context.Background(), fg)
 	r.APIReader = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
@@ -881,7 +881,7 @@ func TestReconcileInPlaceRestore_ConfirmMovedBackBeforeJobCancels(t *testing.T) 
 				Phase: tc.phase, TargetSite: site, Scope: "schema:orders", StartTime: ptrTime(time.Now()),
 				ConfirmTokenUsed: executed, RunConfirm: newer,
 			}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			for i := 0; i < 3; i++ {
 				*fg = *getFG(t, c, fg)
 				if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -918,7 +918,7 @@ func TestReconcileInPlaceRestore_ConfirmMovedBackWhileJobRunsStartsNothing(t *te
 		ConfirmTokenUsed: fg.Spec.RestoreInPlace.Confirm, RunConfirm: newer,
 	}
 	job := runningInPlaceJob(fg, site, newer, start.Add(5*time.Second))
-	r, c := newReconciler(fg, job, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, job, succeededSeedBackup(), operatorCredsSecret())
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}

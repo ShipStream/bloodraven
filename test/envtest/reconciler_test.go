@@ -51,7 +51,7 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 					},
 				},
 			},
-			SecretName: "mysql-credentials",
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
 			DNS: v1alpha1.DNSSpec{
 				Hostname: "lion.az.example.com",
 				TTL:      60,
@@ -82,7 +82,9 @@ func ensureSecret(t *testing.T, namespace string) {
 			Namespace: namespace,
 		},
 		Data: map[string][]byte{
-			"dsn": []byte("root:password@tcp(localhost:3306)/mysql"),
+			"username":            []byte("bloodraven"),
+			"password":            []byte("password"),
+			"MYSQL_ROOT_PASSWORD": []byte("root-password"),
 		},
 	}
 	if err := k8sClient.Create(ctx, secret); err != nil {

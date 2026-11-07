@@ -22,9 +22,10 @@ import (
 //
 // The restore drops every user schema on the primary with binlogged DROP
 // DATABASE statements. A peer whose replication receiver is running pulls
-// them: in credentials mode the peers replicate as the operator account,
-// which offline_mode does not disconnect, and a legacy replicator that
-// offline_mode did disconnect reconnects once the fence is released. So:
+// them: by default the peers replicate as the operator account, which
+// offline_mode does not disconnect, and a dedicated replication user
+// (MYSQL_REPLICATION_USER) that offline_mode did disconnect reconnects once
+// the fence is released. So:
 //
 //   - Fencing stops every queued peer's receiver (STOP REPLICA IO_THREAD;
 //     the applier keeps applying what it already received) and verifies
@@ -852,7 +853,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePeerStopRejection(ctx context.Cont
 			return fmt.Sprintf("%s%v on %s. A full-instance restore stops the replication receiver of every peer so the restore's DROP statements "+
 				"do not reach them; grant it ON *.* to the operator account (%s). The restore is retried with the same confirm about once a minute",
 				restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), site,
-				fg.Spec.EffectiveOperatorSecretName()), nil
+				fg.Spec.Credentials.OperatorSecret), nil
 		}
 		if errors.Is(err, errReplicaIOStopUnsupported) {
 			return fmt.Sprintf("restoreInPlace rejected: the operator cannot stop the replication receiver of peer %s (its MySQL checker does not "+

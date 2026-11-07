@@ -126,7 +126,7 @@ func TestRestoreReclone_ConsumerAcceptsRestoreRequest(t *testing.T) {
 			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
 				ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"dc2"},
 			}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 
 			// Resuming -> Succeeded releases the queue; the drain requests dc2.
 			reconcileRestoreStep(t, r, fg)
@@ -205,7 +205,7 @@ func TestRestoreReclone_ArmedWhenRestoreIsAccepted(t *testing.T) {
 			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 				Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now()),
 			}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			withFenceRunner(r, c, fg)
 			if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 				t.Fatal(err)
@@ -235,7 +235,7 @@ func TestRestoreReclone_ArmedWhenRestoreIsAccepted(t *testing.T) {
 // its clone succeeded.
 func TestRestoreReclone_DrainsEveryPeerOneAtATime(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	rec := r.Recorder.(*record.FakeRecorder)
 
 	for _, site := range []string{"pdx", "sea"} {
@@ -273,7 +273,7 @@ func TestRestoreReclone_DrainsEveryPeerOneAtATime(t *testing.T) {
 // retried after its backoff.
 func TestRestoreReclone_FailedCloneDoesNotBlockOtherPeers(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	rec := r.Recorder.(*record.FakeRecorder)
 
 	reconcileRestoreStep(t, r, fg)
@@ -319,7 +319,7 @@ func TestRestoreReclone_FailedCloneDoesNotBlockOtherPeers(t *testing.T) {
 // unseal never ready, ...) gives up its slot after the start timeout.
 func TestRestoreReclone_StalledRequestMovesOn(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	tm, _, _ := newTestTopologyManagerWithBootstrap(&mockMySQL{}, &mockMySQL{readOnly: true})
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	r.Runner = &TopologyManagerRunner{client: c, recorder: r.Recorder, logger: testLogger(),
@@ -374,7 +374,7 @@ func ageRestoreRecloneIdle(r *MysqlFailoverGroupReconciler, nn types.NamespacedN
 // again.
 func TestRestoreReclone_CompletedCloneAwaitingCallbackIsNotStalled(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	tm, _, _ := newTestTopologyManagerWithBootstrap(&mockMySQL{}, &mockMySQL{readOnly: true})
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	r.Runner = &TopologyManagerRunner{client: c, recorder: r.Recorder, logger: testLogger(),
@@ -408,7 +408,7 @@ func TestRestoreReclone_CompletedCloneAwaitingCallbackIsNotStalled(t *testing.T)
 // started before the restore.
 func TestRestoreReclone_ForeignCloneDoesNotCompleteSite(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 
 	reconcileRestoreStep(t, r, fg)
 	finishReclone(t, c, r.Recorder, fg, "pdx", RecloneOutcome{})
@@ -426,7 +426,7 @@ func TestRestoreReclone_ForeignCloneDoesNotCompleteSite(t *testing.T) {
 func TestRestoreReclone_NeverOverwritesAnotherRequest(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
 	fg.Annotations = map[string]string{v1alpha1.RecloneAnnotation: "sea:confirm=lion"}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 
 	if d := reconcileRestoreStep(t, r, fg); d <= 0 {
 		t.Errorf("want a requeue while another request is pending, got %s", d)
@@ -443,7 +443,7 @@ func TestRestoreReclone_NeverOverwritesAnotherRequest(t *testing.T) {
 func TestRestoreReclone_LostRequestIsRetried(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
 	fg.Status.RestoreReclones.Requested = "pdx"
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 
 	reconcileRestoreStep(t, r, fg)
 	q := getFG(t, c, fg).Status.RestoreReclones
@@ -464,7 +464,7 @@ func TestRestoreReclone_DiscardedWhenRestoreFails(t *testing.T) {
 	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
 		ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"},
 	}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if _, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestRestoreReclone_HeldWhenRestoreStatusGone(t *testing.T) {
 	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
 		ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"},
 	}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if _, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +503,7 @@ func TestRestoreReclone_ArmedQueueKeptWhileRestoreRuns(t *testing.T) {
 	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
 		ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"},
 	}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if _, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +517,7 @@ func TestRestoreReclone_ArmedQueueKeptWhileRestoreRuns(t *testing.T) {
 func TestRestoreReclone_AbandonedWhenQueuedSiteBecomesPrimary(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
 	fg.Status.ActiveSite = "pdx"
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	reconcileRestoreStep(t, r, fg)
 	fresh := getFG(t, c, fg)
 	if fresh.Status.RestoreReclones != nil || fresh.GetAnnotations()[v1alpha1.RecloneAnnotation] != "" {
@@ -573,7 +573,7 @@ func TestPlannedFailover_RollbackKeepsRecloneQueue(t *testing.T) {
 func TestRestoreReclone_NoRequestDuringPlannedFailover(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "pdx", SourceSite: "iad"}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if d := reconcileRestoreStep(t, r, fg); d <= 0 {
 		t.Errorf("want a requeue, got %s", d)
 	}
@@ -588,7 +588,7 @@ func TestRestoreReclone_NoRequestDuringPlannedFailover(t *testing.T) {
 func TestRestoreReclone_FailedSecondRestoreKeepsEarlierQueue(t *testing.T) {
 	const confirmB = "2026-04-18T10:00:00Z"
 	fg := fgDrainingRestore("pdx", "sea")
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 
 	if err := r.armRestoreReclones(context.Background(), fg, "iad", confirmB); err != nil {
 		t.Fatal(err)
@@ -628,7 +628,7 @@ func TestRestoreReclone_ExecutedFailedSecondRestoreHoldsEarlierQueue(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgDrainingRestore("pdx", "sea")
-			r, c := newReconciler(fg, dsnSecret())
+			r, c := newReconciler(fg, operatorCredsSecret())
 			rec := r.Recorder.(*record.FakeRecorder)
 			if err := r.armRestoreReclones(context.Background(), fg, "iad", confirmB); err != nil {
 				t.Fatal(err)
@@ -666,7 +666,7 @@ func TestRestoreReclone_ExecutedFailedSecondRestoreHoldsEarlierQueue(t *testing.
 func TestRestoreReclone_HeldQueueResumesWhenSetToDraining(t *testing.T) {
 	fg := fgDrainingRestore("pdx")
 	fg.Status.RestoreReclones.Phase = v1alpha1.RestoreReclonesHeld
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	reconcileRestoreStep(t, r, fg)
 	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("held queue requested %q", got)
@@ -688,7 +688,7 @@ func TestRestoreReclone_HeldQueueSurvivesAnotherFailedRestore(t *testing.T) {
 	const confirmC = "2026-04-19T10:00:00Z"
 	fg := fgDrainingRestore("pdx")
 	fg.Status.RestoreReclones.Phase = v1alpha1.RestoreReclonesHeld
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if err := r.armRestoreReclones(context.Background(), fg, "iad", confirmC); err != nil {
 		t.Fatal(err)
 	}
@@ -714,7 +714,7 @@ func TestRestoreReclone_HeldQueueSurvivesAnotherFailedRestore(t *testing.T) {
 // A successful newer restore replaces the older queue for good.
 func TestRestoreReclone_SuccessfulSecondRestoreDropsSuperseded(t *testing.T) {
 	fg := fgDrainingRestore("pdx")
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if err := r.armRestoreReclones(context.Background(), fg, "iad", "2026-04-18T10:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
@@ -911,7 +911,7 @@ func TestRestoreReclone_SiteRemovedFromSpecLeavesQueue(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
 	fg.Spec.Sites = fg.Spec.Sites[:2] // drop sea
 	fg.Status.RestoreReclones.Pending = []string{"sea", "pdx"}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	reconcileRestoreStep(t, r, fg)
 	fresh := getFG(t, c, fg)
 	if q := fresh.Status.RestoreReclones; q == nil || !slices.Equal(q.Pending, []string{"pdx"}) {
@@ -929,7 +929,7 @@ func TestRestoreReclone_PendingSetPushedToTopologyManager(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now()),
 	}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	tm, _, _ := newTestTopologyManagerWithBootstrap(&mockMySQL{}, &mockMySQL{readOnly: true})
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	r.Runner = &TopologyManagerRunner{client: c, recorder: r.Recorder, logger: testLogger(),
@@ -1015,7 +1015,7 @@ func stepInPlace(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client,
 func TestRestoreReclone_NewRestoreWithdrawsOutstandingRequest(t *testing.T) {
 	const confirmB = "2026-04-18T10:00:00Z"
 	fg := fgDrainingRestore("pdx", "sea")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	rec := r.Recorder.(*record.FakeRecorder)
 	tm, _ := reclonesTopologyManager(t, r, c, fg)
 
@@ -1060,7 +1060,7 @@ func TestRestoreReclone_NewRestoreWaitsForRunningClone(t *testing.T) {
 	const confirmB = "2026-04-18T10:00:00Z"
 	fg := fgDrainingRestore("pdx", "sea")
 	fg.Spec.RestoreInPlace.Confirm = confirmB
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	tm, _ := reclonesTopologyManager(t, r, c, fg)
 	tm.mu.Lock()
 	tm.bootstrapPhase, tm.bootstrapRecipient, tm.bootstrapSource = BootstrapPhaseCloning, "pdx", "reclone"
@@ -1093,7 +1093,7 @@ func TestRestoreReclone_HeldQueueRefusesOutstandingRequest(t *testing.T) {
 	fg := fgDrainingRestore("pdx")
 	fg.Status.RestoreReclones.Phase = v1alpha1.RestoreReclonesHeld
 	fg.Annotations = map[string]string{v1alpha1.RecloneAnnotation: "pdx:confirm=lion"}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	rec := r.Recorder.(*record.FakeRecorder)
 	tm, mocks := reclonesTopologyManager(t, r, c, fg)
 	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg)) // as the runner does at start
@@ -1201,7 +1201,7 @@ func TestUpdateCRStatus_DoesNotResurrectClearedRestoreReclones(t *testing.T) {
 func TestRestoreReclone_ArmedQueueOfSucceededRestoreIsReleased(t *testing.T) {
 	fg := fgDrainingRestore("pdx", "sea")
 	fg.Status.RestoreReclones.Phase = v1alpha1.RestoreReclonesArmed
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if _, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}

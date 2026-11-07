@@ -19,15 +19,20 @@ import (
 	"github.com/shipstream/bloodraven/internal/platform"
 )
 
+// lifecycleSecretData is the operator Secret of lifecycleRunner's group.
+func lifecycleSecretData() map[string][]byte {
+	return map[string][]byte{"username": []byte("op"), "password": []byte("pw")}
+}
+
 // lifecycleRunner returns a runner over a fake API server holding fg and its
-// DSN-mode operator secret. The DSN points at a closed local port; the
-// managers it starts poll MySQL in the background and fail to connect, which
-// is all these tests need.
+// operator secret. The site Services do not resolve; the managers it starts
+// poll MySQL in the background and fail to connect, which is all these tests
+// need.
 func lifecycleRunner(t *testing.T) (*TopologyManagerRunner, client.Client, *v1alpha1.MysqlFailoverGroup, *corev1.Secret) {
 	t.Helper()
 	fg := newTestFG()
 	secret := newTestSecret()
-	secret.Data = map[string][]byte{"dsn": []byte("op:pw@tcp(127.0.0.1:1)/mysql")}
+	secret.Data = lifecycleSecretData()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
 		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
 		WithObjects(fg, secret).Build()
@@ -83,9 +88,9 @@ func TestSync_FailedRestartThenRevertStartsLiveManager(t *testing.T) {
 	}
 
 	// Readable but unusable material: the hash changes, the old manager is
-	// stopped, and the replacement fails on the missing dsn key.
+	// stopped, and the replacement fails on the missing username key.
 	original := secret.Data
-	secret.Data = map[string][]byte{"not-dsn": []byte("x")}
+	secret.Data = map[string][]byte{"password": []byte("pw")}
 	if err := c.Update(ctx, secret); err != nil {
 		t.Fatalf("break secret: %v", err)
 	}

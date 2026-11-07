@@ -58,7 +58,7 @@ func TestOpenAdminConnectionRootFallback(t *testing.T) {
 		fg := &v1alpha1.MysqlFailoverGroup{
 			ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 			Spec: v1alpha1.MysqlFailoverGroupSpec{
-				Credentials: &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+				Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
 				Sites:       []v1alpha1.SiteSpec{{Name: "dc1", Role: "primary-candidate"}},
 			},
 		}
@@ -186,7 +186,7 @@ func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1a
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: &v1alpha1.CredentialsSpec{
+			Credentials: v1alpha1.CredentialsSpec{
 				OperatorSecret: "mysql-operator",
 				AppSecret:      "mysql-app",
 			},
@@ -248,7 +248,7 @@ func TestReconcileCredentialsDefersDuringInitFromBackup(t *testing.T) {
 			fg := &v1alpha1.MysqlFailoverGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
 				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Credentials:    &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+					Credentials:    v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
 					Sites:          []v1alpha1.SiteSpec{{Name: "dc1", Role: "primary-candidate"}},
 					InitFromBackup: &v1alpha1.InitFromBackupSpec{},
 				},
@@ -287,7 +287,7 @@ func TestComputeCredentialHashIsKeyedOnContent(t *testing.T) {
 	getSecret := func() *corev1.Secret {
 		t.Helper()
 		var s corev1.Secret
-		if err := c.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: fg.Spec.SecretName}, &s); err != nil {
+		if err := c.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: fg.Spec.Credentials.OperatorSecret}, &s); err != nil {
 			t.Fatalf("get secret: %v", err)
 		}
 		return &s
@@ -300,7 +300,7 @@ func TestComputeCredentialHashIsKeyedOnContent(t *testing.T) {
 	unkeyed := sha256.New()
 	fmt.Fprintf(unkeyed, "grants=%s\n", credentialGrantsVersion)
 	fmt.Fprintf(unkeyed, "secrets=%s\n", secretContentDigest(make([]byte, digestKeyBytes),
-		map[string]map[string][]byte{fg.Spec.SecretName: getSecret().Data}))
+		map[string]map[string][]byte{fg.Spec.Credentials.OperatorSecret: getSecret().Data}))
 	if hex.EncodeToString(unkeyed.Sum(nil))[:16] == base {
 		t.Fatal("credential hash is reproducible without the group's digest key")
 	}
@@ -317,7 +317,7 @@ func TestComputeCredentialHashIsKeyedOnContent(t *testing.T) {
 
 	// A password rotation must re-run the grants.
 	rotated := getSecret()
-	rotated.Data["dsn"] = []byte("root:rotated@tcp(localhost:3306)/mysql")
+	rotated.Data["password"] = []byte("rotated")
 	if err := c.Update(ctx, rotated); err != nil {
 		t.Fatalf("rotate secret: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestAppGrantExcludesAdminPrivileges(t *testing.T) {
 			}
 		}
 	}
-	script := generateCredentialsModeInitScript(credentialsModeGroup())
+	script := generateInitUsersScript(credentialsModeGroup())
 	if strings.Contains(script, "create_user_with_grants app \"GRANT ALL") {
 		t.Fatal("init script still grants ALL to the app user")
 	}

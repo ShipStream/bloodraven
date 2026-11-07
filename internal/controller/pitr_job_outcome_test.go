@@ -106,7 +106,7 @@ func outcomeRestore(t *testing.T, pit v1alpha1.PointInTimeSpec) (*MysqlFailoverG
 		pit.ArchiveProfileName = addSourceArchiveProfile(fg)
 	}
 	fg.Spec.InitFromBackup.PointInTime = &pit
-	r, c := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), dsnSecret())
+	r, c := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), operatorCredsSecret())
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +436,7 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 			if tc.seed != nil {
 				tc.seed(seed)
 			}
-			r, _ := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), dsnSecret())
+			r, _ := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), operatorCredsSecret())
 			if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 				t.Fatal(err)
 			}
@@ -556,7 +556,7 @@ func outcomeVerification(t *testing.T, mode string) (*MysqlBackupVerificationRec
 	backup.Status.FailoverGroupUID = outcomeSourceUID
 	v := verifyCR("verify-outcome", "lion", "nightly-s3")
 	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: mode, Timestamp: outcomeStop}
-	r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	job := &batchv1.Job{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: verificationJobName(v.Name)}, job); err != nil {

@@ -145,21 +145,19 @@ func TestEncryption_EscrowTokenTightensWithFSGroup(t *testing.T) {
 // sidecar never wired into its DSN, and neither side's unit tests could
 // see the gap.
 func TestEncryption_SidecarMySQLDSNUsesTLS(t *testing.T) {
-	// Both credential shapes: spec.credentials (MYSQL_USER/MYSQL_PASSWORD)
-	// and the legacy spec.secretName DSN. The lab report was the latter's
-	// sibling, but the operator renders TLS for both, so both must dial
-	// TLS or the same crash loop follows.
+	// The sidecar reads the operator credential files (MYSQL_CREDS_DIR);
+	// both an operator Secret shared with the fixture and a dedicated one
+	// must dial TLS or the same crash loop follows.
 	for _, tc := range []struct {
 		name string
 		fg   func() *v1alpha1.MysqlFailoverGroup
 	}{
-		{"credentials", func() *v1alpha1.MysqlFailoverGroup {
+		{"dedicated operator secret", func() *v1alpha1.MysqlFailoverGroup {
 			fg := encTestFG()
-			fg.Spec.SecretName = ""
-			fg.Spec.Credentials = &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator-creds"}
+			fg.Spec.Credentials = v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator-creds"}
 			return fg
 		}},
-		{"dsnSecret", encTestFG},
+		{"default fixture", encTestFG},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := tc.fg()
@@ -259,61 +257,6 @@ func TestEncryption_SidecarDSNPlaintextWithoutTLS(t *testing.T) {
 	}
 }
 
-// --- The operator's own legacy-DSN-mode client ----------------------
-
-// TestBuildSiteDSN_StampsTLSWhenUnset covers the same class of bug on
-// the operator's side of the fence. In legacy spec.secretName mode the
-// site DSN is user-authored; without a tls= parameter every site probe
-// fails against require_secure_transport=ON and no failover can run. An
-// explicit user choice still wins.
-func TestBuildSiteDSN_StampsTLSWhenUnset(t *testing.T) {
-	fg := encTestFG()
-	site := fg.Spec.Sites[0]
-
-	for _, tc := range []struct {
-		name    string
-		in      string
-		tlsName string
-		want    string
-	}{
-		{
-			name:    "plaintext DSN gets the registered config",
-			in:      "u:p@tcp(old-host:3306)/",
-			tlsName: "bloodraven-test-tls",
-			want:    "tls=bloodraven-test-tls",
-		},
-		{
-			name:    "explicit user choice is preserved",
-			in:      "u:p@tcp(old-host:3306)/?tls=skip-verify",
-			tlsName: "bloodraven-test-tls",
-			want:    "tls=skip-verify",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := buildSiteDSN(tc.in, fg, site, tc.tlsName)
-			if err != nil {
-				t.Fatalf("buildSiteDSN: %v", err)
-			}
-			if !strings.Contains(got, tc.want) {
-				t.Errorf("DSN = %q, want it to contain %q", redactDSN(got), tc.want)
-			}
-			// The host rewrite must survive either way.
-			if !strings.Contains(got, internalSiteServiceHost("lion", "dc1", "shared-lion")) {
-				t.Errorf("DSN lost the site host rewrite: %q", redactDSN(got))
-			}
-		})
-	}
-
-	// No TLS configured -> untouched apart from the host rewrite.
-	got, err := buildSiteDSN("u:p@tcp(old-host:3306)/", fg, site, "")
-	if err != nil {
-		t.Fatalf("buildSiteDSN: %v", err)
-	}
-	if strings.Contains(got, "tls=") {
-		t.Errorf("non-TLS group must not gain a tls parameter: %q", redactDSN(got))
-	}
-}
-
 // --- Escrow stall diagnosability ------------------------------------
 
 // TestWithSidecarError_SurfacesStallReason pins that a stalled escrow
@@ -382,11 +325,6 @@ func sidecarDSNFromRenderedEnv(t *testing.T, c *corev1.Container) string {
 			}
 			t.Setenv(e.Name, dir)
 		case e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil:
-			if e.ValueFrom.SecretKeyRef.Key == "dsn" {
-				// Shape-accurate stand-in for the legacy DSN secret.
-				t.Setenv(e.Name, "bloodraven:pw@tcp(127.0.0.1:3306)/")
-				continue
-			}
 			t.Setenv(e.Name, "stub-"+e.ValueFrom.SecretKeyRef.Key)
 		case e.ValueFrom != nil:
 			// FieldRef (pod name / namespace) — irrelevant to the DSN.

@@ -2,7 +2,6 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -23,13 +22,13 @@ import (
 // bloodraven_backup_verified_timestamp_seconds gauge give operators a
 // concrete signal that recent backups are restorable.
 //
-// Phase 1 implementation runs the ephemeral mysqld inside the
-// verification Job's Pod on a dedicated PVC, with a derived
-// credentials Secret for the restore script. No Service is created;
-// the Pod binds 127.0.0.1 only and is not reachable from outside its
-// own network namespace. On success all artifacts are cleaned up; on
-// failure KeepOnFailure (default true) leaves the Job Pod and PVC in
-// place for inspection until the retention sweep reclaims them.
+// The ephemeral mysqld runs inside the verification Job's Pod on an
+// emptyDir datadir, with a derived credentials Secret for the restore
+// script. No Service or PersistentVolumeClaim is created; the Pod binds
+// 127.0.0.1 only and is not reachable from outside its own network
+// namespace. On success all artifacts are cleaned up; on failure
+// KeepOnFailure (default true) leaves the Job and its Pod in place for
+// inspection until the retention sweep reclaims them.
 type MysqlBackupVerification struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -64,13 +63,7 @@ type MysqlBackupVerificationSpec struct {
 	// +optional
 	BackupRef *corev1.LocalObjectReference `json:"backupRef,omitempty"`
 
-	// Storage is accepted for compatibility but is not applied: the
-	// verification Job keeps its datadir on an emptyDir and no longer
-	// creates a PersistentVolumeClaim.
-	// +optional
-	Storage *VerificationStorage `json:"storage,omitempty"`
-
-	// KeepOnFailure leaves the ephemeral Pod and PVC in place when the
+	// KeepOnFailure leaves the verification Job and its Pod in place when the
 	// verification terminates in Failed, so operators can kubectl exec
 	// into the verification instance to inspect why the load failed.
 	// On success all artifacts are always cleaned up regardless of
@@ -81,8 +74,8 @@ type MysqlBackupVerificationSpec struct {
 	// +kubebuilder:default=true
 	KeepOnFailure *bool `json:"keepOnFailure,omitempty"`
 
-	// TTLSecondsAfterFinished controls how long the verification Pod +
-	// Service + PVC persist after a successful verification before the
+	// TTLSecondsAfterFinished controls how long the verification Job and
+	// its Pod persist after a successful verification before the
 	// reconciler cleans them up. Default: 0 (clean up immediately).
 	// Failed verifications with KeepOnFailure=true ignore this value.
 	// +kubebuilder:default=0
@@ -93,14 +86,10 @@ type MysqlBackupVerificationSpec struct {
 	// container. Forwarded to the Job pod verbatim; when unset, no
 	// verification-specific resource requests or limits are
 	// configured (the container inherits cluster / namespace default
-	// limits if any).
+	// limits if any). The datadir is an emptyDir on the node's disk, so
+	// bound it with limits.ephemeral-storage.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// TriggeredBy records what created this CR ("manual",
-	// "schedule/<schedule-name>"). Informational only.
-	// +optional
-	TriggeredBy string `json:"triggeredBy,omitempty"`
 
 	// PointInTime configures whether the verification replays archived
 	// binlogs on top of the restored dump. Leave nil or set mode=none to
@@ -204,24 +193,8 @@ type SanityCheckExpectation struct {
 	MaxDurationSeconds int32 `json:"maxDurationSeconds,omitempty"`
 }
 
-// VerificationStorage once sized the ephemeral PVC used as MySQL datadir
-// for a single verification run. The fields are accepted by the API but
-// not applied: the verification Job uses an emptyDir datadir. All fields
-// optional.
-type VerificationStorage struct {
-	// StorageClassName is accepted but not applied; the verification Job
-	// creates no PersistentVolumeClaim.
-	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-
-	// Size is accepted but not applied; the verification Job creates no
-	// PersistentVolumeClaim.
-	// +optional
-	Size resource.Quantity `json:"size,omitempty"`
-}
-
 // VerificationPhase is the lifecycle phase of a MysqlBackupVerification.
-// +kubebuilder:validation:Enum=Pending;Provisioning;Restoring;Checking;Cleaning;Succeeded;Failed
+// +kubebuilder:validation:Enum=Pending;Provisioning;Restoring;Succeeded;Failed
 type VerificationPhase string
 
 const (
@@ -229,20 +202,11 @@ const (
 	// no ephemeral resources exist yet.
 	VerificationPhasePending VerificationPhase = "Pending"
 	// VerificationPhaseProvisioning indicates the reconciler is
-	// creating the ephemeral PVC / Service / Pod for the run.
+	// resolving inputs and creating the verification Job for the run.
 	VerificationPhaseProvisioning VerificationPhase = "Provisioning"
 	// VerificationPhaseRestoring indicates the restore Job is loading
 	// the backup artifact into the ephemeral MySQL instance.
 	VerificationPhaseRestoring VerificationPhase = "Restoring"
-	// VerificationPhaseChecking indicates the restore completed and
-	// any optional post-load sanity check is running. Phase 1 of the
-	// verification feature treats load-success as the sanity check
-	// and transitions directly to Cleaning.
-	VerificationPhaseChecking VerificationPhase = "Checking"
-	// VerificationPhaseCleaning indicates the reconciler is tearing
-	// down the ephemeral resources. On failure with KeepOnFailure=true
-	// this phase is skipped.
-	VerificationPhaseCleaning VerificationPhase = "Cleaning"
 	// VerificationPhaseSucceeded is the terminal success phase.
 	VerificationPhaseSucceeded VerificationPhase = "Succeeded"
 	// VerificationPhaseFailed is the terminal failure phase.
@@ -272,16 +236,6 @@ type MysqlBackupVerificationStatus struct {
 	// JobName is the name of the restore Job that loaded the dump into
 	// the ephemeral MySQL instance.
 	JobName string `json:"jobName,omitempty"`
-
-	// PodName is the name of the ephemeral MySQL Pod.
-	PodName string `json:"podName,omitempty"`
-
-	// PVCName is the name of the ephemeral MySQL PVC.
-	PVCName string `json:"pvcName,omitempty"`
-
-	// ServiceName is the name of the headless Service routing the
-	// restore Job to the ephemeral MySQL Pod.
-	ServiceName string `json:"serviceName,omitempty"`
 
 	// ReplayedThroughBinlog is populated on Succeeded verifications
 	// whose spec.pointInTime.mode was not "none". Captures the last
@@ -408,7 +362,8 @@ type VerificationSpec struct {
 
 	// ConcurrencyPolicy is forwarded to the CronJob spec. Only Forbid
 	// (default) and Replace are allowed; Allow would stack overlapping
-	// verifications against the same profile, which can't share a PVC.
+	// verifications against the same profile, each restoring a full copy
+	// of the backup onto node disk and racing for the newest backup.
 	// +kubebuilder:default=Forbid
 	// +kubebuilder:validation:Enum=Forbid;Replace
 	ConcurrencyPolicy string `json:"concurrencyPolicy,omitempty"`
@@ -426,12 +381,6 @@ type VerificationSpec struct {
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
 	FailedJobsHistoryLimit *int32 `json:"failedJobsHistoryLimit,omitempty"`
-
-	// Storage, KeepOnFailure, and TTLSecondsAfterFinished seed the
-	// per-CR spec fields of the same name. The reconciler copies these
-	// into each MysqlBackupVerification created by the CronJob.
-	// +optional
-	Storage *VerificationStorage `json:"storage,omitempty"`
 
 	// KeepOnFailure mirrors MysqlBackupVerificationSpec.KeepOnFailure
 	// for CRs created by this schedule. Default: true.

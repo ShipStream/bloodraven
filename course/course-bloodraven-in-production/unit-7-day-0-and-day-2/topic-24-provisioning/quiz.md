@@ -26,7 +26,7 @@ The `NoPrimary` refusal is real, and a *separate*, deliberately conservative che
 
 Your platform team hands you three PVCs that already contain a working MySQL dataset, and asks you to put a `MysqlFailoverGroup` in front of them. What do you have to do that a green-field install would have done for you?
 
-- Create the replication user with `REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN`, install the clone plugin, and create any credentials-mode users by hand — the init script only runs on an empty datadir
+- Create the operator user with `ALL PRIVILEGES ON *.* WITH GRANT OPTION` (and any dedicated replication user with `REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN`), install the clone plugin, and create the role users by hand — the init script only runs on an empty datadir
 - Nothing: the init-users ConfigMap is applied on every pod start, so the users appear on the first restart
 - Set `spec.credentials.operatorSecret` and restart the pods; the operator reconciles MySQL users on every poll
 - Delete the PVCs and let the operator bootstrap, because adopting an existing datadir is not supported
@@ -35,13 +35,13 @@ Your platform team hands you three PVCs that already contain a working MySQL dat
 
 **Explanation:**
 
-The init-users ConfigMap is mounted at `/docker-entrypoint-initdb.d`, which the MySQL entrypoint runs only when it is initialising an empty datadir. Adopt a populated one and none of it runs. `CLONE_ADMIN` and `BACKUP_ADMIN` are the two grants people miss, and their absence surfaces much later as a reclone that will not start or a backup job that cannot take a consistent dump. Option 2 misremembers the entrypoint contract. Option 3 invents a reconcile loop over MySQL users that does not exist for this path. Option 4 is over-cautious: adoption works, it just moves the user setup onto you. (objectives 1, 2)
+The init-users ConfigMap is mounted at `/docker-entrypoint-initdb.d`, which the MySQL entrypoint runs only when it is initialising an empty datadir. Adopt a populated one and none of it runs. `CLONE_ADMIN` and `BACKUP_ADMIN` are the two grants people miss, and their absence surfaces much later as a reclone that will not start or a backup job that cannot take a consistent dump. Option 2 misremembers the entrypoint contract. Option 3 overstates the reconcile: the operator re-applies the role users only when their Secrets change, never on every poll, and only once it can log in as the operator user or as `root`. Option 4 is over-cautious: adoption works, it just moves the user setup onto you. (objectives 1, 2)
 
 ## Question 3
 
 **Type:** MULTIPLE_CHOICE
 
-A security review asks which MySQL user your application connects as, and what it could do if the credentials leaked. You are in credentials mode with `appSecret` set. What is the honest answer?
+A security review asks which MySQL user your application connects as, and what it could do if the credentials leaked. `appSecret` is set. What is the honest answer?
 
 - It holds DML and DDL on `*.*` but no `GRANT OPTION`, `SUPER` or other admin privileges, so it can read and write everything and cannot create users, grant privileges or bypass `super_read_only`
 - It holds only the grants you listed in `spec.credentials`, so the answer depends on your manifest
@@ -58,28 +58,28 @@ The grant sets are fixed by the operator, not configurable, and that is precisel
 
 **Type:** TRUE_FALSE
 
-Rotating the password in a credentials-mode Secret changes the password MySQL will accept for that user.
+Rotating the password in a role Secret changes the password MySQL will accept for that user.
 
-**Correct answer:** false
+**Correct answer:** true
 
 **Explanation:**
 
-It does not. The `CREATE USER IF NOT EXISTS` / `ALTER USER` pair lives in the init script, which the MySQL entrypoint runs only on an empty datadir. Changing the Secret changes what the operator and sidecar *present*; MySQL still expects the old password, and the site drops to `unreachable` with no obvious cause. What the rotation *does* do is change the spec hash — credential Secret data is folded into it — so the pods roll, which makes it look like the change took effect. Rotate the password inside MySQL as well, or the restart is the only thing you achieved. (objective 2)
+It does, for the role users. The operator hashes the role Secrets, and when the hash changes it connects to the primary and runs `CREATE USER IF NOT EXISTS` / `ALTER USER … IDENTIFIED BY` with the Secret's exact bytes; replication carries the change to the other sites. If the rotated password is the operator's own, it connects as `root` with `MYSQL_ROOT_PASSWORD` to apply it. The spec hash changes too, so the pods roll and the sidecar re-reads its files. Two passwords are not covered: `MYSQL_ROOT_PASSWORD` itself and a dedicated replication user's, which only the first-boot script reads — change those inside MySQL as well. (objective 2)
 
 ## Question 5
 
 **Type:** SHORT_ANSWER
 
-You are reviewing a colleague's first `MysqlFailoverGroup` before they apply it. It sets both `secretName` and `credentials`; gives one site a `taintNodeSelector` naming labels no node carries; lists a `storageClassName` that does not exist in the cluster; and sets `image: mysql:9`. Which of these will they find out about from `kubectl apply`, and which will they find out about later — and for the later ones, how?
+You are reviewing a colleague's first `MysqlFailoverGroup` before they apply it. It leaves out `spec.credentials`; gives one site a `taintNodeSelector` naming labels no node carries; lists a `storageClassName` that does not exist in the cluster; and sets `image: mysql:9`. Which of these will they find out about from `kubectl apply`, and which will they find out about later — and for the later ones, how?
 
 **Sample answer:**
 
-Only the first is caught at apply time: a CEL rule refuses an object that sets both `secretName` and `credentials` — *exactly one of secretName or credentials must be set* — so the apply fails immediately and costs them seconds. The other three are admitted. The bogus `taintNodeSelector` fails silently and completely: the operator selects nodes by those labels, matches nothing, and applies the `NoExecute` taint to no node, so the eviction half of their failover strategy does not exist and nothing anywhere says so. The missing `storageClassName` shows up as PVCs stuck `Pending` and pods stuck `ContainerCreating` — visible within a minute, if they look. And `image: mysql:9` is admitted because there is no version admission check of any kind; a floating tag can drift them onto an unsupported MySQL between pod restarts, and it surfaces as MySQL pod failures rather than an operator error.
+Only the first is caught at apply time: the schema requires `spec.credentials`, so the API server refuses the object (`spec.credentials: Required value`) and the apply fails immediately and costs them seconds. The other three are admitted. The bogus `taintNodeSelector` fails silently and completely: the operator selects nodes by those labels, matches nothing, and applies the `NoExecute` taint to no node, so the eviction half of their failover strategy does not exist and nothing anywhere says so. The missing `storageClassName` shows up as PVCs stuck `Pending` and pods stuck `ContainerCreating` — visible within a minute, if they look. And `image: mysql:9` is admitted because there is no version admission check of any kind; a floating tag can drift them onto an unsupported MySQL between pod restarts, and it surfaces as MySQL pod failures rather than an operator error.
 
 **A full-credit answer shows:**
 
-A strong answer separates the four correctly: (1) both-credentials-modes is a CEL rejection at apply; (2) the bad `taintNodeSelector` is silent and permanent, and names the consequence — no taint is applied, so nothing is evicted at the demoted site; (3) the missing StorageClass is visible as `Pending` PVCs; (4) the floating tag is admitted because no version admission check exists, and the risk is drifting onto an unsupported version between restarts. Credit an answer that notes the general rule: admission catches structural mistakes about the object, and catches nothing about the cluster the object refers to.
+A strong answer separates the four correctly: (1) the missing `spec.credentials` is a schema rejection at apply; (2) the bad `taintNodeSelector` is silent and permanent, and names the consequence — no taint is applied, so nothing is evicted at the demoted site; (3) the missing StorageClass is visible as `Pending` PVCs; (4) the floating tag is admitted because no version admission check exists, and the risk is drifting onto an unsupported version between restarts. Credit an answer that notes the general rule: admission catches structural mistakes about the object, and catches nothing about the cluster the object refers to.
 
 **Explanation:**
 
-The split is the whole point of the topic. CEL rules validate the *object* — uniqueness, mutual exclusion, required fields per role, the interval relationships on `spec.sidecar` — and they are cheap and immediate. Nothing validates the object against the *cluster*: not node labels, not storage classes, not image tags, not whether the Secret's credentials are ones MySQL actually has. The `taintNodeSelector` case is the one worth remembering, because unlike a `Pending` PVC it produces no symptom at all until a failover that should have evicted an application pod quietly does not. (objective 3)
+The split is the whole point of the topic. The schema and its CEL rules validate the *object* — required fields, uniqueness, mutual exclusion, required fields per role, the interval relationships on `spec.sidecar` — and they are cheap and immediate. Nothing validates the object against the *cluster*: not node labels, not storage classes, not image tags, not whether the Secret's credentials are ones MySQL actually has. The `taintNodeSelector` case is the one worth remembering, because unlike a `Pending` PVC it produces no symptom at all until a failover that should have evicted an application pod quietly does not. (objective 3)

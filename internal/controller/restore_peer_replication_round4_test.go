@@ -35,7 +35,7 @@ func backdateGTIDReadFailure(r *MysqlFailoverGroupReconciler, fg *v1alpha1.Mysql
 // first read error into a permanent Held.
 func TestSettle_GTIDReadRetryCountsFromFirstFailure(t *testing.T) {
 	fg := jobLostFG(time.Now().Add(-5 * time.Minute))
-	r, c := newReconciler(fg, dsnSecret(), restorePod(corev1.PodSucceeded))
+	r, c := newReconciler(fg, operatorCredsSecret(), restorePod(corev1.PodSucceeded))
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].gtidExecuted, mocks["iad"].gtidExecutedErr = peerGTID("1-10"), errors.New("connection reset")
 	wait, err := r.settleArmedRestoreReclones(context.Background(), fg)
@@ -51,7 +51,7 @@ func TestSettle_GTIDReadRetryCountsFromFirstFailure(t *testing.T) {
 // the pod bound, not an unreadable primary.
 func TestSettle_MissingManagerWaits(t *testing.T) {
 	fg := jobLostFG(time.Now().Add(-5 * time.Minute))
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	r.Runner = &TopologyManagerRunner{client: c, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{}}
 	backdateGTIDReadFailure(r, fg, restoreGTIDReadBound+time.Second) // irrelevant: no read was made
 	wait, err := r.settleArmedRestoreReclones(context.Background(), fg)
@@ -62,7 +62,7 @@ func TestSettle_MissingManagerWaits(t *testing.T) {
 		t.Fatalf("queue = %+v, want still Armed", q)
 	}
 	late := jobLostFG(time.Now().Add(-restoreSettleBound - time.Minute))
-	r2, c2 := newReconciler(late, dsnSecret())
+	r2, c2 := newReconciler(late, operatorCredsSecret())
 	r2.Runner = &TopologyManagerRunner{client: c2, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{}}
 	if wait, err := r2.settleArmedRestoreReclones(context.Background(), late); err != nil || wait != 0 {
 		t.Fatalf("wait=%s err=%v past the bound, want a decision", wait, err)
@@ -76,7 +76,7 @@ func TestSettle_MissingManagerWaits(t *testing.T) {
 // move gtid_executed while the queue is still Armed.
 func TestSettle_FailedDiscardWriteKeepsFence(t *testing.T) {
 	fg := jobLostFG(time.Now())
-	r, base := newReconciler(fg, dsnSecret())
+	r, base := newReconciler(fg, operatorCredsSecret())
 	failing := true
 	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
 		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {

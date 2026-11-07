@@ -6,7 +6,8 @@ metadata:
 spec:
   image: mysql:9.7
   sidecarImage: bloodraven-sidecar:playground
-  secretName: mysql-credentials
+  credentials:
+    operatorSecret: mysql-credentials
   pollInterval: 2s
   failureThreshold: 3
   recoveryThreshold: 2

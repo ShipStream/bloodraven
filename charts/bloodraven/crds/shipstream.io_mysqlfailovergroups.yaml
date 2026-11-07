@@ -851,11 +851,6 @@ spec:
                                   description: Region is the AWS region. Optional
                                     for non-AWS S3 stores.
                                   type: string
-                                storageClass:
-                                  description: |-
-                                    StorageClass is the S3 storage class (e.g. STANDARD_IA,
-                                    DEEP_ARCHIVE). Informational; not enforced by the operator.
-                                  type: string
                               required:
                               - bucket
                               - credentialsSecret
@@ -888,7 +883,8 @@ spec:
                               description: |-
                                 ConcurrencyPolicy is forwarded to the CronJob spec. Only Forbid
                                 (default) and Replace are allowed; Allow would stack overlapping
-                                verifications against the same profile, which can't share a PVC.
+                                verifications against the same profile, each restoring a full copy
+                                of the backup onto node disk and racing for the newest backup.
                               enum:
                               - Forbid
                               - Replace
@@ -1028,27 +1024,6 @@ spec:
                                 the CronJob spec.
                               format: int64
                               type: integer
-                            storage:
-                              description: |-
-                                Storage, KeepOnFailure, and TTLSecondsAfterFinished seed the
-                                per-CR spec fields of the same name. The reconciler copies these
-                                into each MysqlBackupVerification created by the CronJob.
-                              properties:
-                                size:
-                                  anyOf:
-                                  - type: integer
-                                  - type: string
-                                  description: |-
-                                    Size is accepted but not applied; the verification Job creates no
-                                    PersistentVolumeClaim.
-                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                  x-kubernetes-int-or-string: true
-                                storageClassName:
-                                  description: |-
-                                    StorageClassName is accepted but not applied; the verification Job
-                                    creates no PersistentVolumeClaim.
-                                  type: string
-                              type: object
                             successfulJobsHistoryLimit:
                               default: 3
                               description: SuccessfulJobsHistoryLimit is forwarded
@@ -1487,9 +1462,8 @@ spec:
                 type: object
               credentials:
                 description: |-
-                  Credentials configures per-role MySQL credential management.
-                  When set, the operator manages MySQL users and privileges for each
-                  configured role. Mutually exclusive with secretName.
+                  Credentials configures per-role MySQL credential management. The
+                  operator manages MySQL users and privileges for each configured role.
                 properties:
                   appSecret:
                     description: |-
@@ -5594,15 +5568,6 @@ spec:
                         description: LoadIndexes controls whether indexes are rebuilt
                           during load.
                         type: boolean
-                      resetProgress:
-                        default: true
-                        description: |-
-                          ResetProgress clears previous loadDump progress tracking. Restore
-                          and verification Jobs disable progress tracking (local dump sources
-                          are mounted read-only, and restore state is kept out of backup
-                          storage), so this field currently has no effect and is kept for
-                          compatibility.
-                        type: boolean
                       skipBinlog:
                         default: true
                         description: |-
@@ -5767,11 +5732,6 @@ spec:
                           region:
                             description: Region is the AWS region. Optional for non-AWS
                               S3 stores.
-                            type: string
-                          storageClass:
-                            description: |-
-                              StorageClass is the S3 storage class (e.g. STANDARD_IA,
-                              DEEP_ARCHIVE). Informational; not enforced by the operator.
                             type: string
                         required:
                         - bucket
@@ -6220,15 +6180,6 @@ spec:
                         description: LoadIndexes controls whether indexes are rebuilt
                           during load.
                         type: boolean
-                      resetProgress:
-                        default: true
-                        description: |-
-                          ResetProgress clears previous loadDump progress tracking. Restore
-                          and verification Jobs disable progress tracking (local dump sources
-                          are mounted read-only, and restore state is kept out of backup
-                          storage), so this field currently has no effect and is kept for
-                          compatibility.
-                        type: boolean
                       skipBinlog:
                         default: true
                         description: |-
@@ -6244,67 +6195,6 @@ spec:
                         format: int32
                         minimum: 1
                         type: integer
-                    type: object
-                  pointInTime:
-                    description: |-
-                      PointInTime is not supported for in-place restores yet; the
-                      operator rejects a restore that sets it (RestoreInPlaceRejected)
-                      before fencing anything, without consuming confirm. The replayed
-                      binlogs carry GTIDs the live primary has already executed, so the
-                      replay would be skipped and the restore would stop at the backup.
-                      To recover to a point in time, restore into a new failover group
-                      with initFromBackup.pointInTime. The field is kept so existing
-                      objects still validate.
-                    properties:
-                      allowPartial:
-                        default: false
-                        description: |-
-                          AllowPartial accepts an archive with no transaction at or after
-                          StopDatetime: the restore then replays to the archive head (outcome
-                          Partial). It relaxes nothing else; archive identity, lineage and
-                          continuity checks still apply.
-                        type: boolean
-                      archiveProfileName:
-                        description: |-
-                          ArchiveProfileName names the spec.backup.profiles entry whose binlog
-                          archive the restore reads. Required under initFromBackup: the restore
-                          reads the source group's archive through it, and it may not resolve
-                          to this group's own active PITR destination, so the new group never
-                          writes into the archive it restores from. Replay considers every
-                          site manifest under that archive.
-                        maxLength: 63
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                        type: string
-                      excludeGtids:
-                        description: |-
-                          ExcludeGtids are never replayed and must not intersect the backup.
-                          Every archived transaction committed between the backup's newest
-                          transaction and the target that is outside the target history (lost
-                          at a failover, errant, or on another branch) must be listed; the
-                          PITRArchiveDivergentHistory refusal prints that set. Excluding a
-                          transaction on the target history (for example an accidental DROP
-                          TABLE) skips its GTID, but later row images may still carry its
-                          effects; such exclusions are reported as onHistoryExclusions.
-                        maxLength: 131072
-                        type: string
-                      stopDatetime:
-                        description: |-
-                          StopDatetime is the target instant, a whole second: RFC 3339
-                          ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00") or
-                          "YYYY-MM-DD HH:MM:SS", which is read as UTC. Fractional seconds are
-                          refused. Replay restores the history of the first archived
-                          transaction committed at or after it (commit times are compared to
-                          the microsecond), cut just before that transaction. Required.
-                          An object stored with a fractional target before this rule existed
-                          fails every update (finalizer removal included) on clusters without
-                          CRD validation ratcheting until an update also corrects the target;
-                          correct such targets before applying the CRD.
-                        maxLength: 40
-                        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
-                        type: string
-                    required:
-                    - stopDatetime
                     type: object
                   source:
                     description: Source is a tagged reference to the artifact to restore.
@@ -6397,11 +6287,6 @@ spec:
                             description: Region is the AWS region. Optional for non-AWS
                               S3 stores.
                             type: string
-                          storageClass:
-                            description: |-
-                              StorageClass is the S3 storage class (e.g. STANDARD_IA,
-                              DEEP_ARCHIVE). Informational; not enforced by the operator.
-                            type: string
                         required:
                         - bucket
                         - credentialsSecret
@@ -6415,12 +6300,6 @@ spec:
                 - confirm
                 - source
                 type: object
-              secretName:
-                description: |-
-                  SecretName references the secret containing MySQL credentials (legacy).
-                  The secret must contain a 'dsn' key with a MySQL DSN string.
-                  Mutually exclusive with credentials.
-                type: string
               serviceTemplate:
                 description: ServiceTemplate customizes the Services created by the
                   operator (site, primary, and replicas).
@@ -6768,31 +6647,15 @@ spec:
               tls:
                 description: TLS configures TLS for the MySQL instances.
                 properties:
-                  issuerRef:
-                    description: IssuerRef references a cert-manager Issuer or ClusterIssuer.
-                    properties:
-                      kind:
-                        description: Kind of the issuer (Issuer or ClusterIssuer).
-                        enum:
-                        - Issuer
-                        - ClusterIssuer
-                        type: string
-                      name:
-                        description: Name of the issuer.
-                        minLength: 1
-                        type: string
-                    required:
-                    - kind
-                    - name
-                    type: object
                   secretName:
                     description: |-
-                      SecretName is the name of the Secret containing the TLS certificates.
-                      cert-manager should be configured to create this secret from the IssuerRef.
+                      SecretName is the name of the Secret holding the server certificate
+                      (tls.crt), its private key (tls.key) and the CA bundle (ca.crt). The
+                      operator does not issue certificates; create the Secret yourself or
+                      with a tool such as cert-manager.
                     minLength: 1
                     type: string
                 required:
-                - issuerRef
                 - secretName
                 type: object
               updateStrategy:
@@ -6804,13 +6667,11 @@ spec:
                 - Recreate
                 type: string
             required:
+            - credentials
             - dns
             - sites
             type: object
             x-kubernetes-validations:
-            - message: exactly one of secretName or credentials must be set
-              rule: (has(self.secretName) && self.secretName != "" && !has(self.credentials))
-                || ((!has(self.secretName) || self.secretName == "") && has(self.credentials))
             - message: spec.sites[].name must be unique
               rule: self.sites.all(x, self.sites.filter(y, y.name == x.name).size()
                 == 1)

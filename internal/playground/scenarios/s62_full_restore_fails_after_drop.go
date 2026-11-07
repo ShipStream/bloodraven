@@ -30,9 +30,10 @@ const (
 
 // scenario62FullRestoreFailsAfterDrop covers #212. A full-instance in-place
 // restore drops every user schema on the primary with binlogged DROP
-// DATABASE statements. Before the fix the peers replicated them (in
-// credentials mode the replication account is exempt from offline_mode; a
-// legacy replicator reconnected once the fence was released), so a restore
+// DATABASE statements. Before the fix the peers replicated them (the
+// operator account they replicate as by default is exempt from
+// offline_mode; a dedicated replication user reconnected once the fence was
+// released), so a restore
 // that failed after its DROP left the peers as damaged as the primary.
 //
 // The scenario seeds a marker schema (one row in the backup, one written

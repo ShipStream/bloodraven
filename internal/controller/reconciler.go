@@ -494,16 +494,14 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		deferredRequeue = minPositiveDuration(deferredRequeue, dragonflyRequeue)
 	}
 
-	// Reconcile MySQL users for credentials mode.
-	if fg.Spec.UsesCredentials() {
-		if err := r.reconcileCredentials(ctx, &fg); err != nil {
-			logger.Error(err, "credential reconciliation failed, will retry")
-			r.Recorder.Eventf(&fg, corev1.EventTypeWarning, v1alpha1.EventCredentialReconcileFailed,
-				"failed to reconcile MySQL users: %v", err)
-			// Nothing else wakes this up: the step can be waiting on a
-			// site that comes back without touching the CR.
-			deferredRequeue = minPositiveDuration(deferredRequeue, credentialRetryInterval)
-		}
+	// Reconcile MySQL users.
+	if err := r.reconcileCredentials(ctx, &fg); err != nil {
+		logger.Error(err, "credential reconciliation failed, will retry")
+		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, v1alpha1.EventCredentialReconcileFailed,
+			"failed to reconcile MySQL users: %v", err)
+		// Nothing else wakes this up: the step can be waiting on a
+		// site that comes back without touching the CR.
+		deferredRequeue = minPositiveDuration(deferredRequeue, credentialRetryInterval)
 	}
 
 	// Drive the one-shot restore Job when spec.initFromBackup is set.
@@ -711,7 +709,7 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 }
 
 // secretToFailoverGroup maps a Secret change to the MysqlFailoverGroups that reference it
-// (via spec.secretName, spec.credentials.*, or spec.tls.secretName), triggering
+// (via spec.credentials.*, spec.tls.secretName or a backup passphrase), triggering
 // reconciliation on credential or cert rotation.
 func (r *MysqlFailoverGroupReconciler) secretToFailoverGroup(ctx context.Context, obj client.Object) []ctrl.Request {
 	var fgList v1alpha1.MysqlFailoverGroupList
@@ -785,34 +783,8 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 }
 
 // validateCredentialSecrets validates that the referenced credential
-// secrets exist and contain the expected keys for the active mode.
+// secrets exist and contain the expected keys.
 func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (ctrl.Result, error) {
-	if fg.Spec.UsesCredentials() {
-		return r.validateCredentialsMode(ctx, fg)
-	}
-	return r.validateLegacySecret(ctx, fg)
-}
-
-func (r *MysqlFailoverGroupReconciler) validateLegacySecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (ctrl.Result, error) {
-	var secret corev1.Secret
-	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}
-	if err := r.Get(ctx, secretKey, &secret); err != nil {
-		if !errors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get secret %s: %w", fg.Spec.SecretName, err)
-		}
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretNotFound,
-			"secret %q not found", fg.Spec.SecretName)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-	if _, ok := secret.Data["dsn"]; !ok {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretMissingKey,
-			"secret %q does not contain required key 'dsn'", fg.Spec.SecretName)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-	return ctrl.Result{}, nil
-}
-
-func (r *MysqlFailoverGroupReconciler) validateCredentialsMode(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (ctrl.Result, error) {
 	operatorSecretName := fg.Spec.Credentials.OperatorSecret
 	var secret corev1.Secret
 	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}
@@ -1540,7 +1512,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			mysqlContainer.Args = args
 		}
 
-		operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
+		operatorSecretName := fg.Spec.Credentials.OperatorSecret
 
 		sidecarEnv := []corev1.EnvVar{
 			{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
@@ -1558,96 +1530,60 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
 		}
 
-		if fg.Spec.UsesCredentials() {
-			mysqlContainer.Env = []corev1.EnvVar{
-				{Name: "MYSQL_ROOT_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-						Key:                  "MYSQL_ROOT_PASSWORD",
-					},
-				}},
-			}
-			mysqlContainer.Lifecycle = &corev1.Lifecycle{
-				PreStop: &corev1.LifecycleHandler{
-					Exec: &corev1.ExecAction{
-						// MYSQL_PWD keeps the password off argv, as in
-						// the legacy branch below.
-						Command: []string{
-							"sh", "-c",
-							`MYSQL_PWD="$(cat /etc/mysql/creds/operator/password)" mysql -u "$(cat /etc/mysql/creds/operator/username)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
-						},
-					},
+		mysqlContainer.Env = []corev1.EnvVar{
+			{Name: "MYSQL_ROOT_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+					Key:                  "MYSQL_ROOT_PASSWORD",
 				},
-			}
-			mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-				corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
-				corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
-			)
-			appendCredVolume := func(name string) {
-				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-					corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
-			}
-			if fg.Spec.Credentials.AppSecret != "" {
-				appendCredVolume("app")
-			}
-			if fg.Spec.Credentials.ReadOnlySecret != "" {
-				appendCredVolume("readonly")
-			}
-			if fg.Spec.Credentials.MonitorSecret != "" {
-				appendCredVolume("monitor")
-			}
-			if fg.Spec.Credentials.BackupSecret != "" {
-				appendCredVolume("backup")
-			}
-
-			// Files rather than MYSQL_USER/MYSQL_PASSWORD env so the
-			// operator password stays out of the pod spec's env and
-			// /proc/<pid>/environ. Rotation still rolls the pod through
-			// the spec hash, and the sidecar re-reads the files on start.
-			sidecarEnv = append([]corev1.EnvVar{
-				{Name: "MYSQL_CREDS_DIR", Value: "/etc/mysql/creds/operator"},
-			}, sidecarEnv...)
-			sidecarVolumeMounts = append(sidecarVolumeMounts, corev1.VolumeMount{
-				Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true,
-			})
-		} else {
-			mysqlContainer.EnvFrom = []corev1.EnvFromSource{
-				{
-					SecretRef: &corev1.SecretEnvSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: fg.Spec.SecretName,
-						},
-					},
-				},
-			}
-			mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-				corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
-			)
-			mysqlContainer.Lifecycle = &corev1.Lifecycle{
-				PreStop: &corev1.LifecycleHandler{
-					Exec: &corev1.ExecAction{
-						// MYSQL_PWD keeps the password off argv so it
-						// doesn't show up in /proc/<pid>/cmdline where
-						// anything sharing the pod PID namespace could
-						// read it. `mysql --help` explicitly warns
-						// against the -p"$..." argv form (AUDIT M1).
-						Command: []string{
-							"sh", "-c",
-							`MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
-						},
-					},
-				},
-			}
-
-			sidecarEnv = append([]corev1.EnvVar{
-				{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: fg.Spec.SecretName},
-						Key:                  "dsn",
-					},
-				}},
-			}, sidecarEnv...)
+			}},
 		}
+		mysqlContainer.Lifecycle = &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					// MYSQL_PWD keeps the password off argv so it
+					// doesn't show up in /proc/<pid>/cmdline where
+					// anything sharing the pod PID namespace could
+					// read it. `mysql --help` explicitly warns
+					// against the -p"$..." argv form (AUDIT M1).
+					Command: []string{
+						"sh", "-c",
+						`MYSQL_PWD="$(cat /etc/mysql/creds/operator/password)" mysql -u "$(cat /etc/mysql/creds/operator/username)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
+					},
+				},
+			},
+		}
+		mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+			corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
+			corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
+		)
+		appendCredVolume := func(name string) {
+			mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+				corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
+		}
+		if fg.Spec.Credentials.AppSecret != "" {
+			appendCredVolume("app")
+		}
+		if fg.Spec.Credentials.ReadOnlySecret != "" {
+			appendCredVolume("readonly")
+		}
+		if fg.Spec.Credentials.MonitorSecret != "" {
+			appendCredVolume("monitor")
+		}
+		if fg.Spec.Credentials.BackupSecret != "" {
+			appendCredVolume("backup")
+		}
+
+		// Files rather than MYSQL_USER/MYSQL_PASSWORD env so the
+		// operator password stays out of the pod spec's env and
+		// /proc/<pid>/environ. Rotation still rolls the pod through
+		// the spec hash, and the sidecar re-reads the files on start.
+		sidecarEnv = append([]corev1.EnvVar{
+			{Name: "MYSQL_CREDS_DIR", Value: "/etc/mysql/creds/operator"},
+		}, sidecarEnv...)
+		sidecarVolumeMounts = append(sidecarVolumeMounts, corev1.VolumeMount{
+			Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true,
+		})
 
 		// PITR sidecar wiring from the group's resolved render (no-op when
 		// it is disabled).
@@ -1786,36 +1722,34 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			})
 		}
 
-		if fg.Spec.UsesCredentials() {
-			credSecretVolume := func(volName, secretName string) corev1.Volume {
-				return corev1.Volume{
-					Name: volName,
-					VolumeSource: corev1.VolumeSource{
-						Secret: &corev1.SecretVolumeSource{
-							SecretName: secretName,
-							Items: []corev1.KeyToPath{
-								{Key: "username", Path: "username"},
-								{Key: "password", Path: "password"},
-							},
+		credSecretVolume := func(volName, secretName string) corev1.Volume {
+			return corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: secretName,
+						Items: []corev1.KeyToPath{
+							{Key: "username", Path: "username"},
+							{Key: "password", Path: "password"},
 						},
 					},
-				}
+				},
 			}
-			volumes = append(volumes,
-				credSecretVolume("creds-operator", fg.Spec.Credentials.OperatorSecret),
-			)
-			if s := fg.Spec.Credentials.AppSecret; s != "" {
-				volumes = append(volumes, credSecretVolume("creds-app", s))
-			}
-			if s := fg.Spec.Credentials.ReadOnlySecret; s != "" {
-				volumes = append(volumes, credSecretVolume("creds-readonly", s))
-			}
-			if s := fg.Spec.Credentials.MonitorSecret; s != "" {
-				volumes = append(volumes, credSecretVolume("creds-monitor", s))
-			}
-			if s := fg.Spec.Credentials.BackupSecret; s != "" {
-				volumes = append(volumes, credSecretVolume("creds-backup", s))
-			}
+		}
+		volumes = append(volumes,
+			credSecretVolume("creds-operator", fg.Spec.Credentials.OperatorSecret),
+		)
+		if s := fg.Spec.Credentials.AppSecret; s != "" {
+			volumes = append(volumes, credSecretVolume("creds-app", s))
+		}
+		if s := fg.Spec.Credentials.ReadOnlySecret; s != "" {
+			volumes = append(volumes, credSecretVolume("creds-readonly", s))
+		}
+		if s := fg.Spec.Credentials.MonitorSecret; s != "" {
+			volumes = append(volumes, credSecretVolume("creds-monitor", s))
+		}
+		if s := fg.Spec.Credentials.BackupSecret; s != "" {
+			volumes = append(volumes, credSecretVolume("creds-backup", s))
 		}
 
 		// PITR contributions (AWS creds secret or backup PVC volume).
@@ -2483,8 +2417,8 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, se
 			keyringComponentConfigJSON(fg.Spec.KeyringDataFilePath(), sealed))
 	}
 
-	// Secret contents (TLS material and, in credentials mode, every
-	// referenced credential Secret) enter only as a keyed digest, so
+	// Secret contents (TLS material and every referenced credential
+	// Secret) enter only as a keyed digest, so
 	// rotating a password or certificate rolls the pods while the
 	// published hash cannot be used to check password guesses.
 	fmt.Fprintf(h, "secrets=%s\n", secretDigest)

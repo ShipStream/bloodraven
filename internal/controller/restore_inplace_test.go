@@ -305,7 +305,7 @@ func TestReconcileInPlaceRestore_InvalidConfirmTerminates(t *testing.T) {
 	fg := fgInPlaceRestore("")
 	fg.Spec.RestoreInPlace.Confirm = "not-a-timestamp"
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcileInPlaceRestore: %v", err)
@@ -337,7 +337,7 @@ func TestReconcileInPlaceRestore_InvalidConfirmTerminates(t *testing.T) {
 func TestReconcileInPlaceRestore_FirstCallMovesToPreflight(t *testing.T) {
 	fg := fgInPlaceRestore("")
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("first pass: %v", err)
@@ -366,7 +366,7 @@ func TestReconcileInPlaceRestore_Preflight_WaitsForWritableActive(t *testing.T) 
 	}
 
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
 	if err != nil {
@@ -396,7 +396,7 @@ func TestReconcileInPlaceRestore_Preflight_TransitionsToFencing(t *testing.T) {
 		StartTime: ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 	withFenceRunner(r, c, fg)
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -427,7 +427,7 @@ func TestReconcileInPlaceRestore_FullInstance_CreatesJobWithDropAndReset(t *test
 	// Fenced pod lets the builder read labels if it needs to; not
 	// strictly required for Restoring phase but harmless.
 	fencedPod := primaryFencedPod(fg.Name, fg.Spec.Sites[0].Name)
-	r, c := newReconciler(fg, seed, dsnSecret(), fencedPod)
+	r, c := newReconciler(fg, seed, operatorCredsSecret(), fencedPod)
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -465,7 +465,7 @@ func TestReconcileInPlaceRestore_PerSchema_CreatesJobWithDropAndSkipBinlogFalse(
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -566,7 +566,7 @@ func TestReconcileInPlaceRestore_StaleJobNotInherited(t *testing.T) {
 	// Stale Job: older confirm than the current spec, terminally Failed.
 	stale := inPlaceRestoreJobObj(fg, "2026-04-17T13:00:00Z", true)
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret(), stale)
+	r, c := newReconciler(fg, seed, operatorCredsSecret(), stale)
 
 	// Reconcile #1: the stale Job is cleared, not attributed to this request.
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
@@ -618,7 +618,7 @@ func TestReconcileInPlaceRestore_MatchingFailedJobIsHonored(t *testing.T) {
 	}
 	own := inPlaceRestoreJobObj(fg, fg.Spec.RestoreInPlace.Confirm, true)
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret(), own)
+	r, c := newReconciler(fg, seed, operatorCredsSecret(), own)
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -661,7 +661,7 @@ func TestReconcileInPlaceRestore_RunningJobSurvivesConfirmChange(t *testing.T) {
 	// No terminal condition: the Job is still dropping/loading right now.
 	running := inPlaceRestoreJobObj(fg, accepted, false)
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret(), running)
+	r, c := newReconciler(fg, seed, operatorCredsSecret(), running)
 
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
 	if err != nil {
@@ -791,7 +791,7 @@ func TestReconcileInPlaceRestore_TerminalTokenComesFromTheJob(t *testing.T) {
 		Status: corev1.ConditionTrue,
 	}}
 	seed := succeededSeedBackup()
-	r, _ := newReconciler(fg, seed, dsnSecret(), done)
+	r, _ := newReconciler(fg, seed, operatorCredsSecret(), done)
 
 	// #1 Restoring → Resuming, carrying the Job's confirm.
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -838,7 +838,7 @@ func TestReconcileInPlaceRestore_FailedJobRecordsTheJobsConfirm(t *testing.T) {
 	}
 	failed := inPlaceRestoreJobObj(fg, ran, true)
 	seed := succeededSeedBackup()
-	r, _ := newReconciler(fg, seed, dsnSecret(), failed)
+	r, _ := newReconciler(fg, seed, operatorCredsSecret(), failed)
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile #1: %v", err)
@@ -867,7 +867,7 @@ func TestReconcileInPlaceRestore_TerminalSucceededStaysIdle(t *testing.T) {
 		ConfirmTokenUsed: "2026-04-17T14:00:00Z",
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -900,7 +900,7 @@ func TestReconcileInPlaceRestore_FailedJobRecordsConfirmAndHolds(t *testing.T) {
 	}
 	own := inPlaceRestoreJobObj(fg, confirm, true)
 	seed := succeededSeedBackup()
-	r, _ := newReconciler(fg, seed, dsnSecret(), own)
+	r, _ := newReconciler(fg, seed, operatorCredsSecret(), own)
 
 	// Reconcile #1: the Job failed → Failed, executed confirm recorded.
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -939,7 +939,7 @@ func TestReconcileInPlaceRestore_TerminalFailedStaysIdleOnSameConfirm(t *testing
 		ConfirmTokenUsed: fg.Spec.RestoreInPlace.Confirm,
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
 	if err != nil {
@@ -971,7 +971,7 @@ func TestReconcileInPlaceRestore_TerminalFailedRearmsOnNewerConfirm(t *testing.T
 		ConfirmTokenUsed: "2026-04-17T14:00:00Z",
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -995,7 +995,7 @@ func TestReconcileInPlaceRestore_TerminalSucceededRearmsOnNewerConfirm(t *testin
 		ConfirmTokenUsed: "2026-04-17T14:00:00Z",
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -1019,7 +1019,7 @@ func TestReconcileInPlaceRestore_PerSchema_ResumingSkipsRecloneAnnotation(t *tes
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -1048,7 +1048,7 @@ func TestReconcileInPlaceRestore_FullInstance_ResumingReleasesRecloneQueue(t *te
 		StartTime:  ptrTime(time.Now()),
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -1114,7 +1114,7 @@ func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testi
 	seed.Status.StorageType = v1alpha1.BackupStorageS3
 	seed.Status.Encrypted = true
 	recordTestDumpKey(seed)
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	func() {
 		defer func() {
@@ -1140,16 +1140,12 @@ func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testi
 	}
 }
 
-// In-place PITR cannot work yet: the live primary's own gtid_executed
-// already holds every archived GTID, so the replay is skipped and the
-// restore would report success with data at the dump point. Until a
-// staging design lands, a spec with pointInTime is rejected at reconcile
-// time, before the deployment lease, the fence or the topology-generation
-// bump, and without consuming the confirm. The rejection must also be
-// stable: the next reconcile neither rewrites status nor re-emits the
-// event (a rewrite would itself trigger another reconcile).
-func TestReconcileInPlaceRestore_PointInTimeRejected(t *testing.T) {
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+// A spec that fails validation (here two includeSchemas entries) is
+// rejected at reconcile time, before the deployment lease, the fence or the
+// topology-generation bump, and without consuming the confirm. The
+// rejection must also be stable: the next reconcile neither rewrites status
+// nor re-emits the event (a rewrite would itself trigger another reconcile).
+func TestReconcileInPlaceRestore_ValidationRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		schema         string
@@ -1163,8 +1159,8 @@ func TestReconcileInPlaceRestore_PointInTimeRejected(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInPlaceRestore(tc.schema)
-			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-			fg.Spec.RestoreInPlace.PointInTime = pit
+			valid := fg.Spec.RestoreInPlace.LoadOptions
+			fg.Spec.RestoreInPlace.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{"orders", "billing"}}
 			if tc.phase != "" {
 				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 					Phase: tc.phase, Scope: "full", StartTime: ptrTime(time.Now()),
@@ -1175,7 +1171,7 @@ func TestReconcileInPlaceRestore_PointInTimeRejected(t *testing.T) {
 				fg.Status.Sites[0].State = "read-only"
 			}
 			gen := fg.Status.TopologyGeneration
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			rec := r.Recorder.(*record.FakeRecorder)
 
 			if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -1185,7 +1181,7 @@ func TestReconcileInPlaceRestore_PointInTimeRejected(t *testing.T) {
 			if st == nil || st.Phase != v1alpha1.RestoreInPlaceFailed {
 				t.Fatalf("want Failed, got %+v", st)
 			}
-			if !strings.Contains(st.Message, "restoreInPlace.pointInTime is not supported") {
+			if !strings.Contains(st.Message, "supports at most one schema") {
 				t.Errorf("status message should explain the rejection, got %q", st.Message)
 			}
 			if st.ConfirmTokenUsed != "" {
@@ -1215,9 +1211,9 @@ func TestReconcileInPlaceRestore_PointInTimeRejected(t *testing.T) {
 				t.Errorf("an unchanged rejection must not re-emit events, got %q", again)
 			}
 
-			// The confirm was not consumed: dropping pointInTime lets the
-			// same confirm start a restore to the backup.
-			fg.Spec.RestoreInPlace.PointInTime = nil
+			// The confirm was not consumed: fixing the spec lets the same
+			// confirm start the restore.
+			fg.Spec.RestoreInPlace.LoadOptions = valid
 			if err := c.Update(context.Background(), fg); err != nil {
 				t.Fatalf("update spec: %v", err)
 			}
@@ -1225,24 +1221,8 @@ func TestReconcileInPlaceRestore_PointInTimeRejected(t *testing.T) {
 				t.Fatalf("reconcile after fix: %v", err)
 			}
 			if got := fg.Status.RestoreInPlace.Phase; got != v1alpha1.RestoreInPlacePreflight {
-				t.Errorf("after removing pointInTime the same confirm should start the restore; phase=%s", got)
+				t.Errorf("after fixing the spec the same confirm should start the restore; phase=%s", got)
 			}
 		})
-	}
-}
-
-// Defence in depth: even if a pointInTime spec reached the Job builder
-// (for example an object accepted by an older operator and resumed at
-// Restoring), it must refuse to build a replaying Job.
-func TestBuildInPlaceRestoreJob_RefusesPointInTime(t *testing.T) {
-	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
-	defer SetOperatorImageDefaults("", "")
-	fg := fgInPlaceRestore("orders")
-	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-	fg.Spec.RestoreInPlace.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
-	r, _ := newReconciler(fg, succeededSeedBackup())
-	_, err := r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", false, "orders")
-	if err == nil || !strings.Contains(err.Error(), "pointInTime") {
-		t.Fatalf("want a pointInTime refusal, got %v", err)
 	}
 }

@@ -942,9 +942,6 @@ func marshalLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
 	if l.Threads > 0 {
 		opts["threads"] = l.Threads
 	}
-	if l.ResetProgress != nil {
-		opts["resetProgress"] = *l.ResetProgress
-	}
 	if l.SkipBinlog != nil {
 		opts["skipBinlog"] = *l.SkipBinlog
 	}

@@ -225,7 +225,7 @@ func TestReconcileRestoreJob_FailedEventCarriesRecovery(t *testing.T) {
 	ctx := context.Background()
 	fg := fgInitFromMysqlBackup()
 	seedPublished(fg)
-	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), operatorCredsSecret())
 	rec := record.NewFakeRecorder(20)
 	r.Recorder = rec
 	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {

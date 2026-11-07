@@ -115,7 +115,7 @@ func TestReconcileRestoreJob_WaitsForPrimaryReady(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
 	seed := succeededSeedBackup()
 	// No deployment object -> not found path.
-	r, _ := newReconciler(fg, seed, dsnSecret())
+	r, _ := newReconciler(fg, seed, operatorCredsSecret())
 
 	d, err := r.reconcileRestoreJob(context.Background(), fg)
 	if err != nil {
@@ -132,7 +132,7 @@ func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
 
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 		t.Fatalf("reconcileRestoreJob: %v", err)
@@ -335,7 +335,7 @@ func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
 
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 		t.Fatalf("first pass: %v", err)
@@ -382,7 +382,7 @@ func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 	jobKey := types.NamespacedName{Name: restoreJobName("lion", "iad"), Namespace: "ns"}
 
 	steps := []struct {
@@ -434,7 +434,7 @@ func TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced(t *testing.T) {
 	ctx := context.Background()
 	fg := fgInitFromMysqlBackup()
 	seedPublished(fg)
-	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), operatorCredsSecret())
 	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 		t.Fatal(err)
 	}

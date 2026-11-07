@@ -24,7 +24,6 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
-	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -774,34 +773,18 @@ func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg 
 // backup role: they DROP and CREATE schemas, set global variables
 // (local_infile) and, for a full-instance in-place restore, must keep
 // working under the offline_mode fence, none of which the backup role's
-// grants allow. In legacy mode the DSN secret is parsed.
+// grants allow.
 func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, secretName string) error {
-	var user, password string
-
-	backupSecretName := fg.Spec.EffectiveOperatorSecretName()
+	operatorSecretName := fg.Spec.Credentials.OperatorSecret
 	var srcSecret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: backupSecretName}, &srcSecret); err != nil {
-		return fmt.Errorf("get credential secret %s: %w", backupSecretName, err)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &srcSecret); err != nil {
+		return fmt.Errorf("get credential secret %s: %w", operatorSecretName, err)
 	}
 
-	if fg.Spec.UsesCredentials() {
-		user = string(srcSecret.Data["username"])
-		password = string(srcSecret.Data["password"])
-	} else {
-		dsnBytes, ok := srcSecret.Data["dsn"]
-		if !ok {
-			return fmt.Errorf("secret %s missing 'dsn' key", backupSecretName)
-		}
-		parsed, err := internalmysql.ParseDSN(string(dsnBytes))
-		if err != nil {
-			return fmt.Errorf("parse dsn: %w", err)
-		}
-		user = parsed.User
-		password = parsed.Passwd
-	}
-
+	user := string(srcSecret.Data["username"])
+	password := string(srcSecret.Data["password"])
 	if user == "" {
-		return fmt.Errorf("secret %s has empty username", backupSecretName)
+		return fmt.Errorf("secret %s has empty username", operatorSecretName)
 	}
 
 	derived := &corev1.Secret{

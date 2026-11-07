@@ -15,9 +15,9 @@
 
 ---
 
-**Front:** `spec.secretName` versus `spec.credentials`
+**Front:** What `spec.credentials` requires
 
-**Back:** Mutually exclusive, enforced by CEL: *exactly one of secretName or credentials must be set*. `secretName` is the legacy single-Secret mode and the operator reads a `dsn` key from it; `credentials` names up to five per-role Secrets and the operator creates a user per role with a fixed grant set.
+**Back:** `spec.credentials` is required, and so is its `operatorSecret` (keys `username`, `password`, `MYSQL_ROOT_PASSWORD`). The other four role Secrets are optional; the operator creates a user per role with a fixed grant set. The single-Secret `spec.secretName` DSN mode was removed in v1.7.0.
 
 ---
 
@@ -27,7 +27,7 @@
 
 ---
 
-**Front:** Grants the `app` user receives in credentials mode
+**Front:** Grants the `app` user receives
 
 **Back:** DML and DDL on `*.*` — **without** `GRANT OPTION`, `SUPER` or any other administrative privilege. It cannot grant privileges to anyone. The grant sets are fixed and not configurable, which is what makes them an answer you can give a security review.
 

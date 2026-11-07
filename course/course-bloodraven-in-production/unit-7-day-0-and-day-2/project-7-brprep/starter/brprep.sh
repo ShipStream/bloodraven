@@ -61,11 +61,13 @@ secs() {
   echo "$total"
 }
 
-# The nine admission rules, in the fixed order brprep reports them. Seven are
+# The nine admission rules, in the fixed order brprep reports them. Most are
 # CEL rules on the CRD; the site-count one is a MinItems/MaxItems constraint on
-# the schema. Both are refusals at `kubectl apply`, which is all brprep claims.
+# the schema, and the credentials one is a required field plus kubectl's strict
+# field validation. All are refusals at `kubectl apply`, which is all brprep
+# claims.
 # The grader matches these tokens exactly, so do not reword them.
-RULE_CREDENTIALS="exactly one of secretName or credentials must be set"
+RULE_CREDENTIALS="spec.credentials.operatorSecret is required and spec.secretName is not a field"
 RULE_SITE_COUNT="spec.sites must contain between 2 and 16 entries"
 RULE_SITE_NAMES="spec.sites[].name must be unique"
 RULE_TWO_CANDIDATES="spec.sites must contain at least two sites with role primary-candidate"
@@ -91,9 +93,12 @@ WARN_RECREATE="updateStrategy Recreate patches every site Deployment in one pass
 #
 # The nine rules, and what each one actually checks:
 #
-#   RULE_CREDENTIALS    exactly one of .spec.secretName and .spec.credentials
-#                       is present and non-empty. Both, or neither, is a
-#                       rejection.
+#   RULE_CREDENTIALS    .spec.credentials.operatorSecret is present and
+#                       non-empty, and .spec.secretName is absent. A missing
+#                       credentials block is a required-field error; the
+#                       single-Secret secretName mode was removed in v1.7.0,
+#                       so kubectl's strict field validation refuses it as
+#                       an unknown field.
 #   RULE_SITE_COUNT     2 <= (.spec.sites | length) <= 16.
 #   RULE_SITE_NAMES     every .spec.sites[].name is distinct.
 #   RULE_TWO_CANDIDATES at least two sites have role "primary-candidate".

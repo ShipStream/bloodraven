@@ -57,11 +57,12 @@ metadata:
     shipstream.io/failover-group: ${GROUP}
     shipstream.io/backup-profile: ${profile}
     app.kubernetes.io/managed-by: bloodraven
+  annotations:
+    bloodraven.shipstream.io/triggered-by: manual
 spec:
   failoverGroupRef:
     name: ${GROUP}
   profileName: ${profile}
-  triggeredBy: manual
 YAML
 }
 

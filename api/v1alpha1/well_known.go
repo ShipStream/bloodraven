@@ -219,6 +219,12 @@ const (
 	VerificationScheduleLabel = "shipstream.io/verification-schedule"
 )
 
+// TriggeredByAnnotation records what created a MysqlBackup or a
+// MysqlBackupVerification: "manual", "schedule/<name>" or
+// "retry/<name>/attempt-<n>". Set by the schedules, the trigger commands and
+// kubectl bloodraven. Informational; nothing reads it. Public.
+const TriggeredByAnnotation = "bloodraven.shipstream.io/triggered-by"
+
 // Backup bookkeeping. Internal (may change).
 const (
 	// BackupRetryOfLabel names the MysqlBackup a retry replaces.
