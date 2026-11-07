@@ -93,7 +93,7 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 			Enabled:             true,
 			ProfileName:         backupE2EProfile,
 			MaxBinlogSize:       "1M",
-			ArchivePollInterval: &metav1.Duration{Duration: 2 * time.Second},
+			ArchivePollInterval: &metav1.Duration{Duration: 5 * time.Second},
 		}
 	}
 	return spec

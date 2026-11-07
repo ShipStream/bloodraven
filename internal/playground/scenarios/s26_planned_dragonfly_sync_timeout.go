@@ -16,7 +16,7 @@ func init() {
 
 // scenario26PlannedDragonflySyncTimeout drives the
 // WaitingForDragonflySync timeout branch deterministically by
-// patching maxSyncWait=1ms and scaling the failover target's Dragonfly
+// patching maxSyncWait=1s and scaling the failover target's Dragonfly
 // StatefulSet to 0 before annotating the planned-failover trigger.
 //
 // Asserts:
@@ -46,7 +46,7 @@ func scenario26PlannedDragonflySyncTimeout() runner.Scenario {
 	return runner.Scenario{
 		ID:    "26-planned-dragonfly-sync-timeout-proceed",
 		Title: "Planned failover with Dragonfly sync timeout (onSyncTimeout=Proceed) marks sessions lost but still succeeds",
-		Hypothesis: "Patching maxSyncWait=1ms and scaling the target's Dragonfly StatefulSet to 0 forces both " +
+		Hypothesis: "Patching maxSyncWait=1s and scaling the target's Dragonfly StatefulSet to 0 forces both " +
 			"the WaitingForDragonflySync target-poll and the PromotingDragonfly REPLTAKEOVER to fail. " +
 			"With onSyncTimeout=Proceed, the operator records dragonfly.sessions=Lost, completes MySQL " +
 			"failover anyway, and increments dragonfly_promotions_total{result=\"failed\"}.",
@@ -100,16 +100,16 @@ func snapshotForS26() runner.Step {
 
 // tightenS26SyncBudget patches the MFG so any non-trivial wait in
 // WaitingForDragonflySync trips the timeout branch on the first
-// post-offset-capture reconcile (poll interval is 1s, so 1ms is
-// always behind). The reverter restores the original 30s/proceed
+// post-offset-capture reconcile. 1s is the smallest budget admission
+// accepts; with the target scaled to 0 the wait cannot succeed anyway. The reverter restores the original 30s/proceed
 // values from the playground manifest.
 func tightenS26SyncBudget() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "patch maxSyncWait=1ms onSyncTimeout=Proceed",
+		Name:  "patch maxSyncWait=1s onSyncTimeout=Proceed",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			env.Capture.Note("patching dragonfly sync budget to 1ms / proceed")
-			return env.Chaos.PatchDragonflySyncBudget(ctx, "1ms", string(v1alpha1.DragonflySyncTimeoutProceed))
+			env.Capture.Note("patching dragonfly sync budget to 1s / proceed")
+			return env.Chaos.PatchDragonflySyncBudget(ctx, "1s", string(v1alpha1.DragonflySyncTimeoutProceed))
 		},
 	}
 }
@@ -119,7 +119,7 @@ func tightenS26SyncBudget() runner.Step {
 // both the WaitingForDragonflySync poll-target step and the later
 // PromotingDragonfly dial-target step fail with "no endpoints", which
 // independently is enough to drive the sessions=Lost path.
-// The 1ms budget from the prior step adds defense-in-depth in case
+// The 1s budget from the prior step adds defense-in-depth in case
 // the operator manages to dial mid-scale-down.
 func scaleS26TargetDragonflyToZero() runner.Step {
 	return runner.Step{
