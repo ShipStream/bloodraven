@@ -600,7 +600,7 @@ func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 // reads the owner Secret, validates it, stamps Creating and then fails the
 // admin connection *before* dialing — every status-writing path that could
 // echo Secret bytes executes, while the no-dial invariant still holds.
-// Without the group, reconciliation would stop at Pending(GroupNotFound)
+// Without the group, reconciliation would stop at Pending(GroupNotYetCreated)
 // before ever reading the Secret, and the test would prove nothing.
 func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 	ns := createNamespace(t, "mydb-nosecret")

@@ -466,6 +466,10 @@ const (
 	// DragonflyUpgradeReasonSnapshotSaveFailed: SAVE failed on the active
 	// Dragonfly.
 	DragonflyUpgradeReasonSnapshotSaveFailed DragonflyUpgradeReason = "DragonflySnapshotSaveFailed"
+	// DragonflyUpgradeReasonWorkloadSelectorMismatch: a site's StatefulSet
+	// was refused for its selector (WorkloadSelectorMismatch) while the
+	// upgrade ran, so the upgrade stopped before touching it.
+	DragonflyUpgradeReasonWorkloadSelectorMismatch DragonflyUpgradeReason = "WorkloadSelectorMismatch"
 )
 
 // DragonflySiteStatus describes the observed state of one site's Dragonfly

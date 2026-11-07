@@ -316,7 +316,7 @@ func EffectiveFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (Fa
 
 	limit := now.Add(FailoverClockSkewGrace)
 	if !statusRecord.LastFailover.IsZero() && statusRecord.LastFailover.After(limit) {
-		readErr.Status = fmt.Errorf("status.lastFailover %s is more than %s ahead of local time %s",
+		readErr.Status = fmt.Errorf("status.lastFailover.time %s is more than %s ahead of local time %s",
 			statusRecord.LastFailover.Format(time.RFC3339), FailoverClockSkewGrace, now.UTC().Format(time.RFC3339))
 		statusRecord = FailoverRecord{}
 	}
@@ -327,7 +327,7 @@ func EffectiveFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (Fa
 	}
 	if statusRecord.LastFailoverTarget != "" && !failoverTargetInSpec(fg, statusRecord.LastFailoverTarget) {
 		readErr.Status = errors.Join(readErr.Status,
-			fmt.Errorf("status.lastFailoverTarget %q is not present in spec.sites", statusRecord.LastFailoverTarget))
+			fmt.Errorf("status.lastFailover.target %q is not present in spec.sites", statusRecord.LastFailoverTarget))
 		statusRecord = FailoverRecord{}
 	}
 	if oobErr == nil && oobRecord.LastFailoverTarget != "" && !failoverTargetInSpec(fg, oobRecord.LastFailoverTarget) {

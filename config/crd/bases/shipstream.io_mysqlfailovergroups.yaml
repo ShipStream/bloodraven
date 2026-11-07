@@ -632,6 +632,7 @@ spec:
                               description: ExcludeSchemas skipped by the dump.
                               items:
                                 maxLength: 64
+                                minLength: 1
                                 type: string
                               maxItems: 256
                               type: array
@@ -641,6 +642,7 @@ spec:
                                 the dump to these schemas.
                               items:
                                 maxLength: 64
+                                minLength: 1
                                 type: string
                               maxItems: 256
                               type: array
@@ -741,7 +743,10 @@ spec:
                               default: 10
                               description: |-
                                 KeepFailed is how many of the newest failed backups are kept; 0
-                                keeps none.
+                                keeps none. A failed backup that is still its schedule's latest is
+                                kept until a newer backup of that schedule exists, whatever this
+                                says: spec.backup.retry retries it, and status.backupSchedules
+                                reports it.
                               format: int32
                               minimum: 0
                               type: integer
@@ -5692,6 +5697,7 @@ spec:
                           Forwarded to util.loadDump() as excludeSchemas.
                         items:
                           maxLength: 64
+                          minLength: 1
                           type: string
                         maxItems: 256
                         type: array
@@ -5704,6 +5710,7 @@ spec:
                           Forwarded to util.loadDump() as includeSchemas.
                         items:
                           maxLength: 64
+                          minLength: 1
                           type: string
                         maxItems: 256
                         type: array
@@ -5790,7 +5797,8 @@ spec:
                       backupRef:
                         description: |-
                           BackupRef restores from a previously-completed MysqlBackup in
-                          the same namespace. Its status.location is resolved automatically.
+                          the same namespace. Its status.artifactStorage is resolved
+                          automatically.
                         properties:
                           name:
                             description: Name of the MysqlBackup.
@@ -6325,6 +6333,7 @@ spec:
                           Forwarded to util.loadDump() as excludeSchemas.
                         items:
                           maxLength: 64
+                          minLength: 1
                           type: string
                         maxItems: 256
                         type: array
@@ -6337,6 +6346,7 @@ spec:
                           Forwarded to util.loadDump() as includeSchemas.
                         items:
                           maxLength: 64
+                          minLength: 1
                           type: string
                         maxItems: 256
                         type: array
@@ -6368,7 +6378,8 @@ spec:
                       backupRef:
                         description: |-
                           BackupRef restores from a previously-completed MysqlBackup in
-                          the same namespace. Its status.location is resolved automatically.
+                          the same namespace. Its status.artifactStorage is resolved
+                          automatically.
                         properties:
                           name:
                             description: Name of the MysqlBackup.
@@ -6939,9 +6950,11 @@ spec:
                 description: |-
                   ActiveSite is the name of the site currently acting as primary (writable).
                   Durable: the topology manager restores it after a restart, before it
-                  has observed the sites. Lost beside a failover record, it makes the
-                  manager refuse automatic promotion until it observes a writable
-                  primary.
+                  has observed the sites. Lost beside a failover record (empty, with
+                  topologyGeneration 0), it makes the manager refuse automatic
+                  promotion until it observes a unique writable primary candidate; the
+                  status stays empty until then, so a replaced or restarted manager
+                  keeps refusing.
                 type: string
               backupSchedules:
                 description: |-
@@ -7449,10 +7462,12 @@ spec:
                   has applied: the generation its configuration was built from, or the
                   newest generation an unchanged configuration was resynchronised
                   against. The topology conditions (Ready, Degraded, Bootstrapping,
-                  Updating, RecoveryPending, DivergentPromotion) carry the same value.
-                  A condition another writer owns carries the generation that writer
-                  evaluated, and status.encryptionAtRest.observedGeneration is the
-                  encryption reconcile's own.
+                  Updating, RecoveryPending) carry the same value. DivergentPromotion
+                  keeps the generation at which its promotion was recorded: only an
+                  administrator removes it. A condition another writer owns carries
+                  the generation that writer evaluated, and
+                  status.encryptionAtRest.observedGeneration is the encryption
+                  reconcile's own.
                 format: int64
                 minimum: 0
                 type: integer

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -132,5 +133,52 @@ func TestFinalize_RetainUnfinishedWaitsForProducer(t *testing.T) {
 	}
 	if n := countEvents(f.rec, "Normal ArtifactRetained"); n != 1 {
 		t.Fatal("no ArtifactRetained Event")
+	}
+}
+
+// TestFinalize_RetainWaitsForVerificationReaders (O-03): a Retain backup a
+// verification may still read keeps its finalizer, as a Delete one does,
+// because the PITR binlog retention cutoff stops counting a Terminating
+// backup once its object is gone: releasing it under a running replay lets
+// the archive prune binlogs the replay has yet to download. It is released,
+// with nothing cleaned up, once the verification has finished.
+func TestFinalize_RetainWaitsForVerificationReaders(t *testing.T) {
+	f, snap := retainFixture(t)
+	ctx := context.Background()
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	reader := verifyCR("reader", "lion", "nightly-s3")
+	reader.Status.Phase = v1alpha1.VerificationPhaseRestoring
+	reader.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, testArtifactLocation(f.mb))}
+	if err := f.c.Create(ctx, reader); err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(f.rec)
+	for range 2 {
+		if done, requeue := f.finalize(t); done || requeue != 30*time.Second {
+			t.Fatalf("done=%v requeue=%s, want a 30s deferral while a verification reads the retained artifact", done, requeue)
+		}
+	}
+	cond := cleanupCondition(t, f)
+	if cond == nil || cond.Reason != v1alpha1.ReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
+		t.Fatalf("condition %+v, want HeldByVerification naming the reader", cond)
+	}
+	if n := countEvents(f.rec, "ArtifactRetained"); n != 0 {
+		t.Fatal("ArtifactRetained emitted while a verification still reads")
+	}
+
+	reader.Status.Phase = v1alpha1.VerificationPhaseSucceeded
+	if err := f.c.Update(ctx, reader); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := f.finalize(t); !done {
+		t.Fatal("a Retain backup was not released once its reader finished")
+	}
+	if _, ok := f.cleanupJob(t); ok {
+		t.Fatal("a cleanup Job ran for a Retain backup")
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(snap), &corev1.Secret{}); err != nil {
+		t.Fatalf("the dump-key snapshot of a retained artifact was not kept: %v", err)
 	}
 }

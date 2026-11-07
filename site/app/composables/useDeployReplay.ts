@@ -221,7 +221,7 @@ const fence: Scenario = {
     ...acquisition(),
     ...renewBoth(6.3, 21.5),
     { at: 8.0, actor: 'a', tone: 'muted', text: 'ALTER TABLE shipments ADD COLUMN routed_at DATETIME (2/3)', apply: (_w, c) => { c.a.ddl = 2; c.a.detail = 'DDL 2/3 · schema v41 → v42' } },
-    { at: 8.8, actor: 'chaos', tone: 'danger', text: 'chaos: site iad lost (node gone)', apply: (w) => { w.sites.iad = 'unreachable'; w.stable = false; w.unstableReason = 'Degraded'; w.siteLostAt = 8.8 } },
+    { at: 8.8, actor: 'chaos', tone: 'danger', text: 'chaos: site iad lost (node gone)', apply: (w) => { w.sites.iad = 'unreachable'; w.stable = false; w.unstableReason = 'SiteUnhealthy'; w.siteLostAt = 8.8 } },
     { at: 9.0, actor: 'operator', tone: 'warn', text: 'probe iad: dial tcp 10.0.1.1:3306 i/o timeout (1/3)' },
     { at: 9.9, actor: 'operator', tone: 'warn', text: 'probe iad: dial tcp 10.0.1.1:3306 i/o timeout (3/3) · failureThreshold reached' },
     { at: 10.3, actor: 'operator', tone: 'danger', text: 'emergency failover · deployment leases not consulted · candidate pdx: freshest GTID set', apply: (w) => { w.unstableReason = 'NoPrimary' } },

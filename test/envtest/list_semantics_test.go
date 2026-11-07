@@ -245,6 +245,15 @@ func TestE4_SchemaListsAreSets(t *testing.T) {
 			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z", Source: backupRef,
 				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"a", "b"}}}
 		}, []string{"restoreInPlace.loadOptions.includeSchemas supports at most one schema"}},
+		// O-09: an empty name would produce an in-place restore scope its
+		// own status rule refuses, stalling the restore silently.
+		{"restoreInPlace includeSchemas empty name", func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z", Source: backupRef,
+				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{""}}}
+		}, []string{"includeSchemas", "at least 1"}},
+		{"initFromBackup excludeSchemas empty name", func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: backupRef, LoadOptions: &v1alpha1.LoadOptions{ExcludeSchemas: []string{""}}}
+		}, []string{"excludeSchemas", "at least 1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := newVerificationFG(ns)

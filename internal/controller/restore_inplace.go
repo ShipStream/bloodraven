@@ -307,6 +307,11 @@ func validateInPlaceRestoreSpec(spec *v1alpha1.RestoreInPlaceSpec) error {
 		return fmt.Errorf("restoreInPlace.loadOptions.includeSchemas supports at most one schema (got %d); use a full-instance restore instead",
 			len(spec.LoadOptions.IncludeSchemas))
 	}
+	// Admission refuses an empty name; a Go-built spec must not reach the
+	// restore scope with one, which its status rule refuses.
+	if spec.LoadOptions != nil && len(spec.LoadOptions.IncludeSchemas) == 1 && spec.LoadOptions.IncludeSchemas[0] == "" {
+		return fmt.Errorf("restoreInPlace.loadOptions.includeSchemas names an empty schema")
+	}
 	// Source must be set to exactly one of the three alternatives. The
 	// CEL rule on RestoreSource already enforces this but we
 	// re-check so we emit a clean preflight error instead of crashing

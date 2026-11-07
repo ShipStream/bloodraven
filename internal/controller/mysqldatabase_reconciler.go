@@ -234,7 +234,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// A terminating group is about to lose its primary; starting new tenant
 	// DDL on it would create state the teardown then has to reason about.
-	// Wait — the group disappearing entirely is handled by GroupNotFound.
+	// Wait — the group disappearing entirely is handled by GroupNotYetCreated.
 	if !fg.DeletionTimestamp.IsZero() {
 		return r.pending(ctx, &mdb, v1alpha1.ReasonGroupTerminating,
 			fmt.Sprintf("MysqlFailoverGroup %q is being deleted; not applying new tenant DDL", fg.Name))

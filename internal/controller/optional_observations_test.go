@@ -107,3 +107,75 @@ func TestApplyCoverage_CopiesUnknownFlagsThrough(t *testing.T) {
 		t.Error("status aliases the probe's value")
 	}
 }
+
+// TestApplyCoverage_EachFlagMissingFalseTrue (F-13): each coverage flag,
+// unreported, false and true, lands in status as nil, false and true,
+// whatever an earlier observation recorded, without touching the others.
+// keyringReadOnly is unreported when the sidecar sends no component.
+func TestApplyCoverage_EachFlagMissingFalseTrue(t *testing.T) {
+	type flag struct {
+		name   string
+		set    func(*mysql.KeyringStatus, *bool)
+		status func(*v1alpha1.SiteEncryptionCoverage) *bool
+	}
+	flags := []flag{
+		{"systemTablespaceEncrypted", func(l *mysql.KeyringStatus, b *bool) { l.Coverage.SystemTablespaceEncrypted = b },
+			func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.SystemTablespaceEncrypted }},
+		{"redoLogEncrypted", func(l *mysql.KeyringStatus, b *bool) { l.Coverage.RedoLogEncrypted = b },
+			func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.RedoLogEncrypted }},
+		{"undoLogEncrypted", func(l *mysql.KeyringStatus, b *bool) { l.Coverage.UndoLogEncrypted = b },
+			func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.UndoLogEncrypted }},
+		{"binlogEncrypted", func(l *mysql.KeyringStatus, b *bool) { l.Coverage.BinlogEncrypted = b },
+			func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.BinlogEncrypted }},
+		{"keyringReadOnly", func(l *mysql.KeyringStatus, b *bool) {
+			if b == nil {
+				l.Component = nil
+				return
+			}
+			l.Component.ReadOnly = *b
+		}, func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.KeyringReadOnly }},
+	}
+	show := func(b *bool) string {
+		if b == nil {
+			return "missing"
+		}
+		return map[bool]string{true: "true", false: "false"}[*b]
+	}
+	for _, f := range flags {
+		for _, state := range []*bool{nil, new(false), new(true)} {
+			t.Run(f.name+"/"+show(state), func(t *testing.T) {
+				// An earlier observation recorded every flag, opposite to
+				// what this probe reports where it reports one.
+				prior := true
+				if state != nil {
+					prior = !*state
+				}
+				site := &v1alpha1.SiteEncryptionStatus{Name: "dc1", Coverage: &v1alpha1.SiteEncryptionCoverage{
+					SystemTablespaceEncrypted: new(prior), RedoLogEncrypted: new(prior), UndoLogEncrypted: new(prior),
+					BinlogEncrypted: new(prior), KeyringReadOnly: new(prior),
+				}}
+				live := &mysql.KeyringStatus{
+					Component: &mysql.KeyringComponentStatus{Name: "component_keyring_file", ReadOnly: true},
+					Coverage: &mysql.KeyringCoverage{SystemTablespaceEncrypted: new(true), RedoLogEncrypted: new(true),
+						UndoLogEncrypted: new(true), BinlogEncrypted: new(true)},
+				}
+				f.set(live, state)
+				applyCoverage(site, live, metav1.Now())
+				for _, other := range flags {
+					want := "true"
+					if other.name == f.name {
+						want = show(state)
+						if state == nil && other.name == "keyringReadOnly" {
+							// No component in the probe: the earlier
+							// observation of it stands.
+							want = show(&prior)
+						}
+					}
+					if got := show(other.status(site.Coverage)); got != want {
+						t.Errorf("%s = %s, want %s", other.name, got, want)
+					}
+				}
+			})
+		}
+	}
+}

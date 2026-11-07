@@ -102,6 +102,9 @@ Next steps:
          - name: iad
            serverID: 101
            zone: us-east-1a
+           taintNodeSelector:
+             bloodraven.shipstream.io/failover-group.orders: "true"
+             bloodraven.shipstream.io/site.orders: iad
            lbIP: 10.0.1.1
            storage:
              size: 50Gi
@@ -109,6 +112,9 @@ Next steps:
          - name: pdx
            serverID: 102
            zone: us-west-2a
+           taintNodeSelector:
+             bloodraven.shipstream.io/failover-group.orders: "true"
+             bloodraven.shipstream.io/site.orders: pdx
            lbIP: 10.0.2.1
            storage:
              size: 50Gi
@@ -118,10 +124,10 @@ Next steps:
      Groups that leave spec.sidecar.image empty run the sidecar this release
      ships with: {{ include "bloodraven.sidecarImage" . }}
 
-  3. Monitor the operator:
+  4. Monitor the operator:
      kubectl logs -f deploy/{{ include "bloodraven.fullname" . }} -n {{ .Release.Namespace }}
 
-  4. Check the failover group status:
+  5. Check the failover group status:
      kubectl get mysqlfailovergroups -n {{ .Release.Namespace }}
 
   5. (ArgoCD users) Register custom health checks so MysqlFailoverGroup and

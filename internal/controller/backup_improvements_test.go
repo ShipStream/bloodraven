@@ -947,3 +947,38 @@ func TestFinalize_CreatesCleanupJobAndWaits(t *testing.T) {
 		t.Errorf("second pass: want (true, nil), got (%v, %v)", done, err)
 	}
 }
+
+// TestPruneRetention_KeepsScheduleLatestFailed (O-05): keepFailed 0 deletes
+// failed backups, but never one that is still its schedule's latest: the
+// operator retry (spec.backup.retry) is created from it, and the schedule
+// status reports it. Once a newer backup of the schedule exists (its retry,
+// or the next run), it is pruned like any other.
+func TestPruneRetention_KeepsScheduleLatestFailed(t *testing.T) {
+	now := time.Now()
+	fg := fgWithBackup()
+	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))}
+	scheduled := func(b v1alpha1.MysqlBackup, sched string, created time.Duration) *v1alpha1.MysqlBackup {
+		b.Labels[v1alpha1.BackupScheduleLabel] = sched
+		b.CreationTimestamp = metav1.NewTime(now.Add(-created).Truncate(time.Second))
+		return &b
+	}
+	objs := []client.Object{fg,
+		// nightly: an old failure, then a success, then the failure a
+		// retry is due for.
+		scheduled(failedBackup("nightly-old-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-47*time.Hour))), "nightly", 48*time.Hour),
+		scheduled(succeededBackup("nightly-ok", "ns", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-23*time.Hour))), "nightly", 24*time.Hour),
+		scheduled(failedBackup("nightly-latest-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-time.Minute))), "nightly", time.Hour),
+		// hourly: its failure already has a newer attempt (the retry).
+		scheduled(failedBackup("hourly-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-50*time.Minute))), "hourly", time.Hour),
+		scheduled(succeededBackup("hourly-retry", "ns", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-10*time.Minute))), "hourly", 30*time.Minute),
+	}
+	adhoc := failedBackup("adhoc-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-time.Minute)))
+	objs = append(objs, &adhoc)
+	r, _ := newBackupReconciler(t, objs...)
+	trigger := v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: "trigger", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3"}}
+	if err := r.pruneRetention(context.Background(), &trigger); err != nil {
+		t.Fatalf("pruneRetention: %v", err)
+	}
+	assertEqualSet(t, listBackupNames(t, r), []string{"nightly-ok", "nightly-latest-failed", "hourly-retry"})
+}

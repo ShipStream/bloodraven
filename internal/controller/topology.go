@@ -406,8 +406,10 @@ type TopologyManager struct {
 	lastActiveSiteNamed bool
 	// awaitingObservedPrimary is set by a restore whose status was lost
 	// (it names no authority although the group has failover history):
-	// automatic promotion is refused until a poll observes exactly one
-	// writable site. Protected by mu.
+	// automatic promotion is refused until a poll observes a unique
+	// authoritative primary (observedPrimaryAfterLostStatusLocked). The
+	// restore leaves status naming no authority while it is set, so the
+	// next manager re-arms it from the same lost shape. Protected by mu.
 	awaitingObservedPrimary bool
 
 	// failoverState persists lastFailover/lastFailoverTarget out of band
@@ -1206,6 +1208,39 @@ func (tm *TopologyManager) activeSiteLocked() string {
 	return ""
 }
 
+// observedPrimaryAfterLostStatusLocked returns the site whose observation
+// ends the wait a lost status arms (awaitingObservedPrimary), or "". It is
+// the normal authority rule (activeSiteLocked: the only writable site, and
+// a primary candidate) made stricter in two ways, because this observation
+// is the only evidence of a primary the operator has:
+//
+//   - no other site, a clone recipient included, is writable or answered
+//     writable on its latest successful probe; a writable reader or
+//     disaster-recovery site is being fenced, never the primary;
+//   - the primary's latest probe answered, and answered writable, so the
+//     wait never ends on a debounced state whose latest probe failed.
+//
+// Caller holds tm.mu.
+func (tm *TopologyManager) observedPrimaryAfterLostStatusLocked() string {
+	active := tm.activeSiteLocked()
+	if active == "" {
+		return ""
+	}
+	for i := range tm.sites {
+		s := &tm.sites[i]
+		if s.name == active {
+			if !s.isPromotable() || s.state != state.StateWritable || s.probeFailed || !s.lastAnswerWritable {
+				return ""
+			}
+			continue
+		}
+		if s.state == state.StateWritable || s.lastAnswerWritable {
+			return ""
+		}
+	}
+	return active
+}
+
 func (tm *TopologyManager) Status() StatusResponse {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -1515,13 +1550,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		}
 	}
 	if tm.awaitingObservedPrimary {
-		writable := 0
-		for k := range tm.sites {
-			if tm.sites[k].state == state.StateWritable {
-				writable++
-			}
-		}
-		if writable == 1 {
+		if tm.observedPrimaryAfterLostStatusLocked() != "" {
 			tm.awaitingObservedPrimary = false
 			tm.logger.Info("observed a unique writable primary after a lost status; automatic promotion re-enabled")
 		}
@@ -3943,15 +3972,25 @@ func (tm *TopologyManager) emitStatusSnapshot() {
 	// Collect replication status for read-only sites.
 	ctx := context.Background()
 	siteRepl := make([]*mysql.ReplicaStatus, len(tm.sites))
+	read := make([]bool, len(tm.sites))
 	for i := range tm.sites {
 		if tm.sites[i].state == state.StateReadOnly {
 			rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
 			if err == nil {
-				siteRepl[i] = rs
+				siteRepl[i], read[i] = rs, true
 			}
 		}
 	}
-	tm.StatusCallback(tm.buildSnapshot(siteRepl))
+	snap := tm.buildSnapshot(siteRepl)
+	// The snapshot carries this read, not the last poll's: a site whose
+	// read failed here has no replica status in it, which is Unknown, not
+	// Broken (a read that found no replication).
+	for i := range snap.Sites {
+		if i < len(read) {
+			snap.Sites[i].ReplicaStatusRead = read[i]
+		}
+	}
+	tm.StatusCallback(snap)
 }
 
 // SpecDriftSites returns the sites whose ordered update is still

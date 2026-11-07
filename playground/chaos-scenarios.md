@@ -792,7 +792,7 @@ The scenario temporarily scales the target Dragonfly StatefulSet to 0 and patche
 ### 28. Planned Dragonfly Sync Timeout Proceeds
 **Category**: Degraded planned failover | **Risk**: Medium
 
-**Hypothesis**: With `maxSyncWait=1ms`, target Dragonfly scaled to 0, and `onSyncTimeout=Proceed`, the planned failover does not claim session preservation but still completes MySQL promotion.
+**Hypothesis**: With `maxSyncWait=1s`, target Dragonfly scaled to 0, and `onSyncTimeout=Proceed`, the planned failover does not claim session preservation but still completes MySQL promotion.
 
 **Injection**: `make chaos-run SCENARIO=26-planned-dragonfly-sync-timeout-proceed`
 
@@ -850,7 +850,7 @@ The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `Mysql
 
 **Injection**: `make chaos-run SCENARIO=31-pitr-verification-rustfs`
 
-The scenario uses the same RustFS bucket/profile/credential Secret as scenario 30 but isolates objects under `e2e/31-pitr-verification-rustfs/<run-stamp>/` and enables `spec.backup.pitr` (`profileName=rustfs-e2e`, `maxBinlogSize=1M`, `archivePollInterval=2s`). It waits for `Ready=True` from the patched MFG generation with no ordered update in progress, then requires the active sidecar `/archiver/status` endpoint to report `enabled=true`, `primary=true`, `storageType=S3`, and manifest prefix `<prefix>/binlogs` before taking the baseline backup. The generation gate prevents stale pre-patch readiness from starting a backup during the PITR sidecar rollout.
+The scenario uses the same RustFS bucket/profile/credential Secret as scenario 30 but isolates objects under `e2e/31-pitr-verification-rustfs/<run-stamp>/` and enables `spec.backup.pitr` (`profileName=rustfs-e2e`, `maxBinlogSize=1M`, `archivePollInterval=5s`). It waits for `Ready=True` from the patched MFG generation with no ordered update in progress, then requires the active sidecar `/archiver/status` endpoint to report `enabled=true`, `primary=true`, `storageType=S3`, and manifest prefix `<prefix>/binlogs` before taking the baseline backup. The generation gate prevents stale pre-patch readiness from starting a backup during the PITR sidecar rollout.
 
 **Verify**: After the full backup succeeds, the scenario inserts a before-target marker row, captures a MySQL UTC timestamp, sleeps 2 seconds, inserts an after-target marker, executes `FLUSH BINARY LOGS`, and waits for sidecar archiver coverage with zero backlog. The pinned PITR verification uses `spec.pointInTime.mode=Timestamp` and a sanity scalar that returns `1` only when baseline and before-target rows are present and the after-target row is absent. Success also requires `status.pointInTime.newestReplayedCommitTime` and `Verified=True`.
 

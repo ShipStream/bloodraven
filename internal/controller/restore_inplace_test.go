@@ -130,6 +130,13 @@ func TestValidateInPlaceRestoreSpec(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 
+	// Invalid: an empty schema name.
+	bad5 := *good
+	bad5.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{""}}
+	if err := validateInPlaceRestoreSpec(&bad5); err == nil {
+		t.Error("an empty includeSchemas name should be rejected")
+	}
+
 	// Invalid: no source set.
 	bad3 := *good
 	bad3.Source = v1alpha1.RestoreSource{}

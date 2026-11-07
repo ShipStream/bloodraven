@@ -309,30 +309,52 @@ func TestPITRTokenCatalogMatchesAPI(t *testing.T) {
 		byType[tn][name] = constant.StringVal(c.Val())
 	}
 
-	// The API declares what the operator serves: the replay script's
-	// sentinel is served as PITRReplayFailed.
+	// Both sides come from the code, not from a list someone keeps: every
+	// Token constant internal/pitrarchive declares, through Served (the
+	// replay script's sentinel is served as PITRReplayFailed). The
+	// hand-kept AllTokens must hold every one of them too, except
+	// TokenReplayFailed, which is served but never parsed out of a message.
+	tokenNames := pitrTokenNames(t, a, "Token")
 	want := map[string]string{}
-	for _, tok := range pitrarchive.ServedTokens {
-		want[string(tok)] = ""
+	for v := range tokenNames {
+		want[string(pitrarchive.Token(v).Served())] = ""
 	}
 	got := map[string]string{}
 	for name, v := range byType["PITRToken"] {
 		got[v] = name
 	}
 	compareSets(t, "PITRToken", got, want)
+	listed := map[string]bool{}
+	for _, tok := range pitrarchive.AllTokens {
+		listed[string(tok)] = true
+	}
+	for v, name := range tokenNames {
+		if !listed[v] && pitrarchive.Token(v) != pitrarchive.TokenReplayFailed {
+			t.Errorf("internal/pitrarchive.%s = %q is not in AllTokens, so ParseToken and Known do not know it", name, v)
+		}
+	}
 
+	reasonNames := pitrTokenNames(t, a, "RefusalReason")
 	want = map[string]string{}
-	for _, r := range pitrarchive.ArchiveReadyReasons {
-		want[string(r)] = ""
+	for v := range reasonNames {
+		want[v] = ""
 	}
 	got = map[string]string{}
 	for name, v := range byType["PITRArchiveRefusalReason"] {
 		got[v] = name
 	}
 	compareSets(t, "PITRArchiveRefusalReason", got, want)
+	listedReasons := map[string]bool{}
+	for _, r := range pitrarchive.ArchiveReadyReasons {
+		listedReasons[string(r)] = true
+	}
+	for v, name := range reasonNames {
+		if !listedReasons[v] {
+			t.Errorf("internal/pitrarchive.%s = %q is not in ArchiveReadyReasons", name, v)
+		}
+	}
 
 	// Names follow the catalog's: TokenArchiveGap is PITRTokenArchiveGap.
-	tokenNames := pitrTokenNames(t, a)
 	for v, apiName := range invert(byType["PITRToken"]) {
 		if want := "PITR" + tokenNames[v]; apiName != want {
 			t.Errorf("api/v1alpha1.%s = %q; the catalog names it %s, so the API constant is %s", apiName, v, tokenNames[v], want)
@@ -362,9 +384,9 @@ func compareSets(t *testing.T, what string, got, want map[string]string) {
 	}
 }
 
-// pitrTokenNames maps each catalog value to its internal/pitrarchive
-// constant name.
-func pitrTokenNames(t *testing.T, a *analysis) map[string]string {
+// pitrTokenNames maps the value of each internal/pitrarchive constant of
+// the named type to its constant name.
+func pitrTokenNames(t *testing.T, a *analysis, typeName string) map[string]string {
 	t.Helper()
 	var pa *packages.Package
 	packages.Visit(a.pkgs, nil, func(p *packages.Package) {
@@ -382,7 +404,7 @@ func pitrTokenNames(t *testing.T, a *analysis) map[string]string {
 		if !ok {
 			continue
 		}
-		if n, ok := c.Type().(*types.Named); ok && n.Obj().Name() == "Token" {
+		if n, ok := c.Type().(*types.Named); ok && n.Obj().Name() == typeName {
 			out[constant.StringVal(c.Val())] = name
 		}
 	}

@@ -27,3 +27,56 @@ func TestKeyringCoverageDecodesOmittedFlagAsUnknown(t *testing.T) {
 		t.Errorf("unencryptedTablespaces = %d", c.UnencryptedTablespaces)
 	}
 }
+
+// TestKeyringCoverageDecode_EachFlagMissingFalseTrue (F-13): each coverage
+// flag the sidecar may send, omitted, false and true, decodes to nil,
+// false and true on the operator side, without touching the others.
+func TestKeyringCoverageDecode_EachFlagMissingFalseTrue(t *testing.T) {
+	flags := []string{"systemTablespaceEncrypted", "redoLogEncrypted", "undoLogEncrypted", "binlogEncrypted"}
+	field := func(c *KeyringCoverage, name string) *bool {
+		return map[string]*bool{
+			"systemTablespaceEncrypted": c.SystemTablespaceEncrypted, "redoLogEncrypted": c.RedoLogEncrypted,
+			"undoLogEncrypted": c.UndoLogEncrypted, "binlogEncrypted": c.BinlogEncrypted,
+		}[name]
+	}
+	for _, flag := range flags {
+		for _, state := range []string{"missing", "false", "true"} {
+			t.Run(flag+"/"+state, func(t *testing.T) {
+				cov := map[string]any{"unencryptedTablespaces": 1}
+				for _, other := range flags {
+					cov[other] = true
+				}
+				switch state {
+				case "missing":
+					delete(cov, flag)
+				case "false":
+					cov[flag] = false
+				}
+				raw, err := json.Marshal(map[string]any{"enabled": true, "present": true, "coverage": cov})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var st KeyringStatus
+				if err := json.Unmarshal(raw, &st); err != nil {
+					t.Fatal(err)
+				}
+				if st.Coverage == nil {
+					t.Fatal("coverage lost")
+				}
+				for _, other := range flags {
+					want := "true"
+					if other == flag {
+						want = state
+					}
+					got := "missing"
+					if b := field(st.Coverage, other); b != nil {
+						got = map[bool]string{true: "true", false: "false"}[*b]
+					}
+					if got != want {
+						t.Errorf("%s decoded as %s, want %s (%s)", other, got, want, raw)
+					}
+				}
+			})
+		}
+	}
+}

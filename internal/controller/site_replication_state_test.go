@@ -172,6 +172,46 @@ func TestPoll_PublishesReplicationState(t *testing.T) {
 	}
 }
 
+// TestEmitStatusSnapshot_FailedReadIsUnknown (O-15): an out-of-band status
+// snapshot reads replica status itself. A site whose read fails there is
+// published Unknown, not Broken: the last poll's successful read says
+// nothing about this snapshot's missing status.
+func TestEmitStatusSnapshot_FailedReadIsUnknown(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	var last TopologySnapshot
+	tm.StatusCallback = func(s TopologySnapshot) { last = s }
+	pollN(tm, 8)
+	var st v1alpha1.MysqlFailoverGroupStatus
+	if !MergeTopologySnapshotStatus(&st, last) || st.Sites[1].Replication != v1alpha1.SiteReplicationHealthy {
+		t.Fatalf("setup: replica replication %s, want Healthy", st.Sites[1].Replication)
+	}
+
+	site1.mu.Lock()
+	site1.replicaStatusVal, site1.replicaStatusErr = nil, context.DeadlineExceeded
+	site1.mu.Unlock()
+	tm.emitStatusSnapshot()
+	st = v1alpha1.MysqlFailoverGroupStatus{}
+	if !MergeTopologySnapshotStatus(&st, last) {
+		t.Fatal("snapshot not merged")
+	}
+	if got := st.Sites[1].Replication; got != v1alpha1.SiteReplicationUnknown {
+		t.Fatalf("a failed out-of-band read published %s, want Unknown", got)
+	}
+
+	// A successful out-of-band read that finds no source is Broken.
+	site1.mu.Lock()
+	site1.replicaStatusErr = nil
+	site1.mu.Unlock()
+	tm.emitStatusSnapshot()
+	st = v1alpha1.MysqlFailoverGroupStatus{}
+	MergeTopologySnapshotStatus(&st, last)
+	if got := st.Sites[1].Replication; got != v1alpha1.SiteReplicationBroken {
+		t.Fatalf("a read with no source published %s, want Broken", got)
+	}
+}
+
 // TestWSStatusCarriesCRShapes pins A-114's /ws/status reshapes: the
 // failover record as one lastFailover{time, target,
 // promotionGtidExecuted} object, sites[].replication carrying the CR value

@@ -641,3 +641,144 @@ func TestDragonflyUpgradeInFlight(t *testing.T) {
 		t.Fatal("Succeeded should be terminal")
 	}
 }
+
+// foreignSelectorDragonflySite gives site's seeded StatefulSet an extra
+// immutable selector label, as a StatefulSet created by hand or by
+// another release would carry, and returns its resourceVersion.
+func foreignSelectorDragonflySite(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site)}
+	var sts appsv1.StatefulSet
+	if err := c.Get(ctx, key, &sts); err != nil {
+		t.Fatal(err)
+	}
+	sts.Spec.Selector.MatchLabels["tier"] = "cache"
+	if err := c.Update(ctx, &sts); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, key, &sts); err != nil {
+		t.Fatal(err)
+	}
+	return key.Name, sts.ResourceVersion
+}
+
+func dragonflyStatefulSetResourceVersion(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) string {
+	t.Helper()
+	var sts appsv1.StatefulSet
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site)}, &sts); err != nil {
+		t.Fatal(err)
+	}
+	return sts.ResourceVersion
+}
+
+// R1-04 (A-77): a snapshot-restore run is not admitted while any site's
+// StatefulSet is refused for its selector, and a run in flight when one
+// becomes refused stops before saving, restarting or updating any site.
+// The refusal is recorded as the render records it.
+func TestDragonflySnapshotUpgrade_HonoursSelectorRefusal(t *testing.T) {
+	for _, refusedSite := range []string{"dc1", "dc2"} {
+		t.Run("admission/"+refusedSite, func(t *testing.T) {
+			ctx := context.Background()
+			fg := fgWithDragonflySnapshotUpgrade()
+			r, c := newReconciler(fg)
+			rec := record.NewFakeRecorder(64)
+			r.Recorder = rec
+			r.Runner = NewTopologyManagerRunner(c, nil, nil, rec, testLogger())
+			seedDragonflyStatefulSets(t, r, c, fg, bothSites(dfSourceImage))
+			name, rv := foreignSelectorDragonflySite(t, c, fg, refusedSite)
+			conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+			r.dragonflyConnector = func(context.Context, string, string) (DragonflyConnection, error) { return conn, nil }
+
+			for pass := range 3 {
+				step, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg)))
+				if err != nil {
+					t.Fatalf("pass %d: %v", pass, err)
+				}
+				if step.hold != 0 || step.wait == 0 {
+					t.Fatalf("pass %d: step %+v, want a wait without a hold", pass, step)
+				}
+			}
+			if up := upgradeRecord(t, c, fg); up != nil {
+				t.Fatalf("a run was admitted with %s refused: %+v", name, up)
+			}
+			if got := dragonflyStatefulSetResourceVersion(t, c, fg, refusedSite); got != rv {
+				t.Fatalf("the refused StatefulSet was written (resourceVersion %s -> %s)", rv, got)
+			}
+			if conn.saveCalls != 0 {
+				t.Fatalf("SAVE ran %d times", conn.saveCalls)
+			}
+			if reason, msg := r.Runner.refusalDegraded(fgNN(fg)); reason != v1alpha1.ReasonWorkloadSelectorMismatch || !strings.Contains(msg, name) {
+				t.Fatalf("refusal = %s %q, want WorkloadSelectorMismatch naming %s", reason, msg, name)
+			}
+			events := drainEventReasons(rec)
+			if n := countMatching(events, v1alpha1.EventWorkloadSelectorMismatch); n != 1 {
+				t.Fatalf("%d WorkloadSelectorMismatch Events (%v), want 1", n, events)
+			}
+			if n := countMatching(events, v1alpha1.EventDragonflyUpgradeDeferred); n != 1 {
+				t.Fatalf("%d DragonflyUpgradeDeferred Events (%v), want 1", n, events)
+			}
+		})
+	}
+
+	for _, phase := range []v1alpha1.DragonflyUpgradePhase{
+		v1alpha1.DragonflyUpgradePhasePending,
+		v1alpha1.DragonflyUpgradePhaseSavingSnapshot,
+		v1alpha1.DragonflyUpgradePhaseUpdatingActive,
+		v1alpha1.DragonflyUpgradePhaseReattachingReplicas,
+	} {
+		for _, refusedSite := range []string{"dc1", "dc2"} {
+			t.Run("inFlight/"+string(phase)+"/"+refusedSite, func(t *testing.T) {
+				ctx := context.Background()
+				fg := fgWithDragonflySnapshotUpgrade()
+				now := metav1.Now()
+				fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{
+					Phase: phase, SourceImage: dfSourceImage, TargetImage: dfTargetImage, ActiveSite: "dc1",
+					SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly), StartTime: &now,
+				}
+				r, c := newReconciler(fg)
+				r.Runner = NewTopologyManagerRunner(c, nil, nil, record.NewFakeRecorder(64), testLogger())
+				seedDragonflyStatefulSets(t, r, c, fg, bothSites(dfSourceImage))
+				_, rv := foreignSelectorDragonflySite(t, c, fg, refusedSite)
+				var pods []*corev1.Pod
+				for _, site := range []string{"dc1", "dc2"} {
+					p := dragonflyPodForTest(fg, site, dfSourceImage, true)
+					if err := c.Create(ctx, p); err != nil {
+						t.Fatal(err)
+					}
+					pods = append(pods, p)
+				}
+				conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+				r.dragonflyConnector = func(context.Context, string, string) (DragonflyConnection, error) { return conn, nil }
+
+				if _, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
+					t.Fatal(err)
+				}
+				up := upgradeRecord(t, c, fg)
+				if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch {
+					t.Fatalf("upgrade = %+v, want Failed/WorkloadSelectorMismatch", up)
+				}
+				if got := dragonflyStatefulSetResourceVersion(t, c, fg, refusedSite); got != rv {
+					t.Fatalf("the refused StatefulSet was written (resourceVersion %s -> %s)", rv, got)
+				}
+				for _, site := range []string{"dc1", "dc2"} {
+					if img := liveDragonflyImage(t, c, fg, site); img != dfSourceImage {
+						t.Fatalf("site %s StatefulSet moved to %q", site, img)
+					}
+				}
+				for _, p := range pods {
+					var got corev1.Pod
+					if err := c.Get(ctx, client.ObjectKeyFromObject(p), &got); err != nil || got.DeletionTimestamp != nil {
+						t.Fatalf("pod %s was deleted (%v)", p.Name, err)
+					}
+				}
+				if conn.saveCalls != 0 {
+					t.Fatalf("SAVE ran %d times", conn.saveCalls)
+				}
+				if reason, _ := r.Runner.refusalDegraded(fgNN(fg)); reason != v1alpha1.ReasonWorkloadSelectorMismatch {
+					t.Fatalf("refusal = %q, want WorkloadSelectorMismatch", reason)
+				}
+			})
+		}
+	}
+}

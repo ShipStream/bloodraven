@@ -467,7 +467,10 @@ type BackupRetention struct {
 	KeepWithinDays *int32 `json:"keepWithinDays,omitempty"`
 
 	// KeepFailed is how many of the newest failed backups are kept; 0
-	// keeps none.
+	// keeps none. A failed backup that is still its schedule's latest is
+	// kept until a newer backup of that schedule exists, whatever this
+	// says: spec.backup.retry retries it, and status.backupSchedules
+	// reports it.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=0
 	// +optional
@@ -601,6 +604,7 @@ type DumpOptions struct {
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=64
 	ExcludeSchemas []string `json:"excludeSchemas,omitempty"`
 
@@ -608,6 +612,7 @@ type DumpOptions struct {
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=64
 	IncludeSchemas []string `json:"includeSchemas,omitempty"`
 
@@ -747,7 +752,8 @@ type InitFromBackupSpec struct {
 // RestoreSource is the tagged-union selector for the restore source.
 type RestoreSource struct {
 	// BackupRef restores from a previously-completed MysqlBackup in
-	// the same namespace. Its status.location is resolved automatically.
+	// the same namespace. Its status.artifactStorage is resolved
+	// automatically.
 	// +optional
 	BackupRef *LocalMysqlBackupRef `json:"backupRef,omitempty"`
 
@@ -807,6 +813,7 @@ type LoadOptions struct {
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=64
 	IncludeSchemas []string `json:"includeSchemas,omitempty"`
 
@@ -815,6 +822,7 @@ type LoadOptions struct {
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=64
 	ExcludeSchemas []string `json:"excludeSchemas,omitempty"`
 }

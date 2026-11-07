@@ -44,8 +44,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].dump.bytesPerChunk` | string |  | `"64M"` |  |
 | `spec.backup.profiles[].dump.compression` | string |  | `"zstd"` | enum: `none`, `gzip`, `zstd` |
 | `spec.backup.profiles[].dump.consistent` | boolean |  | `true` |  |
-| `spec.backup.profiles[].dump.excludeSchemas` | []string |  |  | maxItems=256; listType=set; items maxLength=64 |
-| `spec.backup.profiles[].dump.includeSchemas` | []string |  |  | maxItems=256; listType=set; items maxLength=64 |
+| `spec.backup.profiles[].dump.excludeSchemas` | []string |  |  | maxItems=256; listType=set; items minLength=1; items maxLength=64 |
+| `spec.backup.profiles[].dump.includeSchemas` | []string |  |  | maxItems=256; listType=set; items minLength=1; items maxLength=64 |
 | `spec.backup.profiles[].dump.ocimds` | boolean |  | `false` |  |
 | `spec.backup.profiles[].dump.threads` | integer (int32) |  | `4` | minimum=1 |
 | `spec.backup.profiles[].encryption` | object |  |  |  |
@@ -174,8 +174,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.initFromBackup.decryption.passphraseSecretKeyRef.key` | string |  | `"passphrase"` | minLength=1; maxLength=253; pattern=`^[-._a-zA-Z0-9]+$` |
 | `spec.initFromBackup.decryption.passphraseSecretKeyRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.initFromBackup.loadOptions` | object |  |  |  |
-| `spec.initFromBackup.loadOptions.excludeSchemas` | []string |  |  | maxItems=256; listType=set; items maxLength=64 |
-| `spec.initFromBackup.loadOptions.includeSchemas` | []string |  |  | maxItems=256; listType=set; items maxLength=64 |
+| `spec.initFromBackup.loadOptions.excludeSchemas` | []string |  |  | maxItems=256; listType=set; items minLength=1; items maxLength=64 |
+| `spec.initFromBackup.loadOptions.includeSchemas` | []string |  |  | maxItems=256; listType=set; items minLength=1; items maxLength=64 |
 | `spec.initFromBackup.loadOptions.loadIndexes` | boolean |  | `true` |  |
 | `spec.initFromBackup.loadOptions.skipBinlog` | boolean |  | `true` |  |
 | `spec.initFromBackup.loadOptions.threads` | integer (int32) |  | `4` | minimum=1 |
@@ -217,8 +217,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.restoreInPlace.decryption.passphraseSecretKeyRef.key` | string |  | `"passphrase"` | minLength=1; maxLength=253; pattern=`^[-._a-zA-Z0-9]+$` |
 | `spec.restoreInPlace.decryption.passphraseSecretKeyRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.restoreInPlace.loadOptions` | object |  |  |  |
-| `spec.restoreInPlace.loadOptions.excludeSchemas` | []string |  |  | maxItems=256; listType=set; items maxLength=64 |
-| `spec.restoreInPlace.loadOptions.includeSchemas` | []string |  |  | maxItems=256; listType=set; items maxLength=64 |
+| `spec.restoreInPlace.loadOptions.excludeSchemas` | []string |  |  | maxItems=256; listType=set; items minLength=1; items maxLength=64 |
+| `spec.restoreInPlace.loadOptions.includeSchemas` | []string |  |  | maxItems=256; listType=set; items minLength=1; items maxLength=64 |
 | `spec.restoreInPlace.loadOptions.loadIndexes` | boolean |  | `true` |  |
 | `spec.restoreInPlace.loadOptions.skipBinlog` | boolean |  | `true` |  |
 | `spec.restoreInPlace.loadOptions.threads` | integer (int32) |  | `4` | minimum=1 |

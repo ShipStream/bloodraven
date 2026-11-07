@@ -687,19 +687,23 @@ type MysqlFailoverGroupStatus struct {
 	// has applied: the generation its configuration was built from, or the
 	// newest generation an unchanged configuration was resynchronised
 	// against. The topology conditions (Ready, Degraded, Bootstrapping,
-	// Updating, RecoveryPending, DivergentPromotion) carry the same value.
-	// A condition another writer owns carries the generation that writer
-	// evaluated, and status.encryptionAtRest.observedGeneration is the
-	// encryption reconcile's own.
+	// Updating, RecoveryPending) carry the same value. DivergentPromotion
+	// keeps the generation at which its promotion was recorded: only an
+	// administrator removes it. A condition another writer owns carries
+	// the generation that writer evaluated, and
+	// status.encryptionAtRest.observedGeneration is the encryption
+	// reconcile's own.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// ActiveSite is the name of the site currently acting as primary (writable).
 	// Durable: the topology manager restores it after a restart, before it
-	// has observed the sites. Lost beside a failover record, it makes the
-	// manager refuse automatic promotion until it observes a writable
-	// primary.
+	// has observed the sites. Lost beside a failover record (empty, with
+	// topologyGeneration 0), it makes the manager refuse automatic
+	// promotion until it observes a unique writable primary candidate; the
+	// status stays empty until then, so a replaced or restarted manager
+	// keeps refusing.
 	// +optional
 	ActiveSite string `json:"activeSite,omitempty"`
 

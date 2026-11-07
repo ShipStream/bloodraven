@@ -53,7 +53,7 @@ type MysqlBackupReconciler struct {
 
 	// Clientset is optional; when non-nil it is used to tail backup Job
 	// pod logs for the BLOODRAVEN_DUMP_COMPLETE sentinel so that
-	// status.location / status.size can be populated. Tests using the
+	// status.artifactStorage.location / status.size can be populated. Tests using the
 	// controller-runtime fake client leave it nil.
 	Clientset kubernetes.Interface
 
@@ -866,20 +866,8 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		}
 		// A verification may still be reading the artifact (a manual
 		// delete during a run, or a hold retention could not see).
-		readers, err := artifactReaders(ctx, r.apiReader(), backup)
-		if err != nil {
-			return false, 0, err
-		}
-		if len(readers) > 0 {
-			message := fmt.Sprintf("verification %s may still be reading the artifact", strings.Join(readers, ", "))
-			previous := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
-			if previous == nil || previous.Reason != v1alpha1.ReasonHeldByVerification || previous.Message != message {
-				r.Recorder.Eventf(backup, corev1.EventTypeNormal, v1alpha1.EventArtifactCleanupDeferred, "cleanup waits: %s", message)
-			}
-			if err := r.setArtifactCleanupCondition(ctx, backup, v1alpha1.ReasonHeldByVerification, message); err != nil {
-				return false, 0, err
-			}
-			return false, 30 * time.Second, nil
+		if wait, err := r.waitForArtifactReaders(ctx, backup); err != nil || wait > 0 {
+			return false, wait, err
 		}
 		// Never overlap executions: a retried Job's pods must be gone
 		// before its replacement starts.
@@ -1032,6 +1020,12 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 // while the old uploader may still write. A successor of the same name
 // then finds the retained backup stamp, and its stamp step refuses the
 // destination while dump objects remain there.
+//
+// It is also released only once no verification may still read it, as
+// the Delete path's cleanup waits: the PITR binlog retention
+// cutoff keeps a Terminating backup's coverage only while its object
+// exists and is held or read, so releasing it under a running replay
+// lets the archive prune binlogs the replay has yet to download.
 func (r *MysqlBackupReconciler) retainArtifact(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, time.Duration, error) {
 	if !backupArtifactCompleted(&backup.Status) && backup.UID != "" {
 		producer, err := r.ownedBackupJob(ctx, backup)
@@ -1041,6 +1035,14 @@ func (r *MysqlBackupReconciler) retainArtifact(ctx context.Context, backup *v1al
 		if wait, err := r.stopAbandonedProducer(ctx, backup, producer); err != nil || wait > 0 {
 			return false, wait, err
 		}
+	}
+	if stripped, err := r.stripDeadHolds(ctx, backup); err != nil {
+		return false, 0, err
+	} else if !stripped {
+		return false, 2 * time.Second, nil
+	}
+	if wait, err := r.waitForArtifactReaders(ctx, backup); err != nil || wait > 0 {
+		return false, wait, err
 	}
 	location := "no recorded destination"
 	if storage := backup.Status.ArtifactStorage; storage != nil && storage.Location != "" {
@@ -1058,6 +1060,29 @@ func (r *MysqlBackupReconciler) retainArtifact(ctx context.Context, backup *v1al
 		"deletionPolicy is Retain: the artifact (%s) is left in storage%s; delete %s by hand once no longer needed",
 		location, key, what)
 	return true, 0, nil
+}
+
+// waitForArtifactReaders returns a requeue while a verification may still
+// be reading backup's artifact, recording why on the ArtifactCleanup
+// condition (HeldByVerification) and emitting ArtifactCleanupDeferred when
+// the readers change.
+func (r *MysqlBackupReconciler) waitForArtifactReaders(ctx context.Context, backup *v1alpha1.MysqlBackup) (time.Duration, error) {
+	readers, err := artifactReaders(ctx, r.apiReader(), backup)
+	if err != nil {
+		return 0, err
+	}
+	if len(readers) == 0 {
+		return 0, nil
+	}
+	message := fmt.Sprintf("verification %s may still be reading the artifact", strings.Join(readers, ", "))
+	previous := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
+	if previous == nil || previous.Reason != v1alpha1.ReasonHeldByVerification || previous.Message != message {
+		r.Recorder.Eventf(backup, corev1.EventTypeNormal, v1alpha1.EventArtifactCleanupDeferred, "cleanup waits: %s", message)
+	}
+	if err := r.setArtifactCleanupCondition(ctx, backup, v1alpha1.ReasonHeldByVerification, message); err != nil {
+		return 0, err
+	}
+	return 30 * time.Second, nil
 }
 
 // skipAbandonedCleanup gives up on an unfinished backup's leftovers and
@@ -1765,6 +1790,9 @@ func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1a
 		return err
 	}
 
+	// Computed before the in-place filter below reuses list.Items.
+	scheduleLatest := latestScheduledBackups(list.Items, trigger.Spec.FailoverGroupRef.Name)
+
 	filtered := list.Items[:0]
 	for _, b := range list.Items {
 		if b.Spec.FailoverGroupRef.Name != trigger.Spec.FailoverGroupRef.Name {
@@ -1792,7 +1820,30 @@ func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1a
 			return err
 		}
 	}
-	return r.pruneByPhase(ctx, filtered, v1alpha1.BackupPhaseFailed, int(policy.keepFailed))
+	return r.pruneFailed(ctx, filtered, int(policy.keepFailed), scheduleLatest)
+}
+
+// latestScheduledBackups returns the names of the backups that are their
+// schedule's latest (the rollup's status.backupSchedules[].lastBackupName,
+// by the same order, startAfter) among items of group, ignoring those
+// being deleted.
+func latestScheduledBackups(items []v1alpha1.MysqlBackup, group string) map[string]bool {
+	latest := map[string]*v1alpha1.MysqlBackup{}
+	for i := range items {
+		b := &items[i]
+		sched := b.Labels[v1alpha1.BackupScheduleLabel]
+		if sched == "" || b.Spec.FailoverGroupRef.Name != group || !b.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if cur, ok := latest[sched]; !ok || startAfter(b, cur) {
+			latest[sched] = b
+		}
+	}
+	names := make(map[string]bool, len(latest))
+	for _, b := range latest {
+		names[b.Name] = true
+	}
+	return names
 }
 
 // backupRetentionPolicy is a profile's effective retention.
@@ -1884,14 +1935,20 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 	return nil
 }
 
-// pruneByPhase keeps the newest `keep` entries in the given phase and
-// deletes the rest; 0 keeps none. Entries without a CompletionTime sort
-// last.
-func (r *MysqlBackupReconciler) pruneByPhase(ctx context.Context, all []v1alpha1.MysqlBackup, phase v1alpha1.BackupPhase, keep int) error {
+// pruneFailed keeps the newest `keep` Failed backups and deletes the
+// rest; 0 keeps none. Entries without a CompletionTime sort last.
+//
+// A Failed backup that is still its schedule's latest (scheduleLatest) is
+// never deleted, whatever keep says, until a newer backup of the schedule
+// exists. It is the only input of the operator retry (spec.backup.retry
+// retries the schedule's latest backup when it failed), and the schedule
+// status reports it (lastBackupPhase Failed); deleting it would cancel the
+// retry and show the previous success instead.
+func (r *MysqlBackupReconciler) pruneFailed(ctx context.Context, all []v1alpha1.MysqlBackup, keep int, scheduleLatest map[string]bool) error {
 	keep = max(keep, 0)
 	bucket := make([]v1alpha1.MysqlBackup, 0, len(all))
 	for _, b := range all {
-		if b.Status.Phase == phase {
+		if b.Status.Phase == v1alpha1.BackupPhaseFailed {
 			bucket = append(bucket, b)
 		}
 	}
@@ -1905,8 +1962,11 @@ func (r *MysqlBackupReconciler) pruneByPhase(ctx context.Context, all []v1alpha1
 	})
 	for i := keep; i < len(bucket); i++ {
 		victim := bucket[i]
+		if scheduleLatest[victim.Name] {
+			continue
+		}
 		if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete old %s backup %s: %w", phase, victim.Name, err)
+			return fmt.Errorf("delete old %s backup %s: %w", v1alpha1.BackupPhaseFailed, victim.Name, err)
 		}
 	}
 	return nil

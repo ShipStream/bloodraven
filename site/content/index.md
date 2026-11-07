@@ -200,7 +200,7 @@ cards:
     to: /docs/architecture/multi-site
     code: |-
       - name: reader
-        role: read-only
+        role: ReadOnly
         zone: us-east-1b
   - token: CRD
     title: Tenant databases as resources
@@ -285,6 +285,8 @@ yaml: |-
   metadata:
     name: orders
   spec:
+    credentials:
+      operatorSecretName: orders-mysql-operator
     dns:
       hostname: orders.az.example.com
       ttlSeconds: 60
@@ -301,7 +303,7 @@ yaml: |-
         lbIP: 10.0.2.1
       - name: reader
         serverID: 103
-        role: read-only
+        role: ReadOnly
         zone: us-east-1b
 ---
 ::

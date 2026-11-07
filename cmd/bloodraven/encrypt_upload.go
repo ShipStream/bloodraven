@@ -223,7 +223,7 @@ func encryptUploadStoreConfig(storageType, outputURL string) (*sidecar.PITRConfi
 // verifies the mount but does not probe write access.
 //
 // For PVC the operator passes BLOODRAVEN_SOURCE_PREFIX relative to the
-// mount (backup.status.location minus the mount path), while
+// mount (backup.status.artifactStorage.location minus the mount path), while
 // storageConfigFromEnv expects an absolute path under the mount, so a
 // relative prefix is anchored at BLOODRAVEN_PVC_MOUNT_PATH first.
 func decryptDownloadStoreConfig(storageType, sourcePrefix string) (*sidecar.PITRConfig, string, string, error) {
@@ -238,7 +238,7 @@ func decryptDownloadStoreConfig(storageType, sourcePrefix string) (*sidecar.PITR
 // storageConfigFromEnv translates the BLOODRAVEN_STORAGE_* env vars into
 // a sidecar.PITRConfig suitable for sidecar.NewArchiveStore, and
 // returns the storage-relative key prefix to write under and the
-// user-facing location string recorded on MysqlBackup.status.location.
+// user-facing location string recorded on MysqlBackup.status.artifactStorage.location.
 //
 // Re-using PITRConfig for dumps is fine — the struct is just the
 // storage plumbing (bucket/endpoint/creds or mount path), not

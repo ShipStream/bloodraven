@@ -42,7 +42,8 @@
             "type": "S3",
             "s3": {
               "bucket": "ledger-backups",
-              "prefix": "ledger"
+              "prefix": "ledger",
+              "credentialsSecretName": "ledger-backup-s3"
             }
           },
           "retention": {

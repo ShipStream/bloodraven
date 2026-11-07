@@ -340,7 +340,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	if !encrypted {
 		// Legacy single-container layout. mysqlsh dumps directly to
-		// the final storage target; status.location reflects that
+		// the final storage target; status.artifactStorage.location reflects that
 		// target verbatim.
 		envVars := append([]corev1.EnvVar{}, baseEnv...)
 		envVars = append(envVars, corev1.EnvVar{Name: "HOME", Value: mysqlshHomeMountPath})
@@ -786,7 +786,7 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 			return "", nil, nil, nil, fmt.Errorf("profile %q storage.type=S3 but storage.s3 is nil", profile.Name)
 		}
 		// The prefix is normalized once, here, so the dump, its backup
-		// stamp, status.location, dump-meta and artifact cleanup all
+		// stamp, status.artifactStorage.location, dump-meta and artifact cleanup all
 		// spell the same bucket-relative key: "/prod" and "prod" are the
 		// same prefix, as they are for the PITR archive. A leading "/"
 		// would make the stamp writer's key differ from the key dump-meta

@@ -563,13 +563,13 @@ func (a *Actions) ScaleAllDragonflyToZero(ctx context.Context) error {
 // onSyncTimeout skip patching that field.
 //
 // Used by scenario D4 to drive the planned-failover state machine into
-// the WaitingForDragonflySync timeout branch deterministically: a 1ms
-// budget plus a target Dragonfly that has been scaled to 0 forces both
+// the WaitingForDragonflySync timeout branch deterministically: a 1s
+// budget (the admission minimum) plus a target Dragonfly that has been scaled to 0 forces both
 // the offset-poll-against-target and the REPLTAKEOVER step to fail,
 // independently of master/replica replication latency in the cluster.
 //
 // The values pass through metav1.Duration's JSON UnmarshalJSON, so
-// maxSyncWait must be a Go duration string ("1ms", "30s"). Empty
+// maxSyncWait must be a Go duration string ("1s", "30s"). Empty
 // onSyncTimeout means "leave as-is, do not patch".
 func (a *Actions) PatchDragonflySyncBudget(ctx context.Context, maxSyncWait, onSyncTimeout string) error {
 	if maxSyncWait == "" && onSyncTimeout == "" {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -113,11 +114,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 	// matching the uncached state.
 	r.setDragonflyUpgradePause(nn, dragonflyUpgradeInFlight(cur))
 	if !dragonflyUpgradeInFlight(cur) {
-		reader := client.Reader(r.Client)
-		if r.APIReader != nil {
-			reader = r.APIReader
-		}
-		d, err := r.dragonflyUpgradeDecide(ctx, reader, fg)
+		d, err := r.dragonflyUpgradeDecide(ctx, r.uncachedReader(), fg)
 		if err != nil {
 			return dragonflyUpgradeStep{}, err
 		}
@@ -142,6 +139,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 	}
 	if why != "" {
 		return r.abandonDragonflyUpgrade(ctx, fg, cur, why, mysqlActive)
+	}
+	// A site whose StatefulSet became refused after the run was admitted
+	// (replaced by hand, or by another release) ends the run before any
+	// step saves, restarts or updates it. Holding the run instead would
+	// keep the reconcile from re-creating the StatefulSet once it is
+	// deleted, which is the refusal's only remedy.
+	_, refused, err := dragonflyLiveImages(ctx, r.uncachedReader(), fg)
+	if err != nil {
+		return dragonflyUpgradeStep{}, err
+	}
+	if why := r.noteDragonflySelectorRefusals(fg, refused); why != "" {
+		return r.failDragonflyUpgrade(ctx, fg, cur, v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch, why)
 	}
 
 	switch cur.Phase {
@@ -205,8 +214,11 @@ func dragonflySpecDigest(spec *v1alpha1.DragonflySpec) string {
 // dragonflyLiveImages returns each spec site's live Dragonfly image, read
 // from its StatefulSet's pod template. A site whose StatefulSet does not
 // exist, or has no Dragonfly container, is absent: its image is unknown.
-func dragonflyLiveImages(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (map[string]string, error) {
+// It also returns the StatefulSets whose immutable selector differs from
+// the rendered one (workload_selector.go), which an upgrade must not touch.
+func dragonflyLiveImages(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (map[string]string, []*workloadSelectorMismatchError, error) {
 	out := make(map[string]string, len(fg.Spec.Sites))
+	var refused []*workloadSelectorMismatchError
 	for _, site := range fg.Spec.Sites {
 		var sts appsv1.StatefulSet
 		key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
@@ -214,13 +226,34 @@ func dragonflyLiveImages(ctx context.Context, reader client.Reader, fg *v1alpha1
 			if apierrors.IsNotFound(err) {
 				continue
 			}
-			return nil, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
+			return nil, nil, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
+		}
+		if mismatch := statefulSetSelectorMismatch(&sts, fg, site.Name); mismatch != nil {
+			refused = append(refused, mismatch)
 		}
 		if img := dragonflyTemplateImage(&sts); img != "" {
 			out[site.Name] = img
 		}
 	}
-	return out, nil
+	return out, refused, nil
+}
+
+// noteDragonflySelectorRefusals records refused StatefulSets as group
+// refusals, as the render does, and returns why an upgrade cannot touch
+// the sites, or "" when none is refused. Every snapshot-restore run saves,
+// restarts or re-attaches every site, so one refused site keeps the whole
+// run from being admitted or continued.
+func (r *MysqlFailoverGroupReconciler) noteDragonflySelectorRefusals(fg *v1alpha1.MysqlFailoverGroup, refused []*workloadSelectorMismatchError) string {
+	if len(refused) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(refused))
+	for _, m := range refused {
+		r.noteWorkloadSelector(fg, m.kind, m.name, m)
+		names = append(names, m.name)
+	}
+	return fmt.Sprintf("StatefulSet %s has a selector the operator does not render and is refused (WorkloadSelectorMismatch); "+
+		"delete it and the operator re-creates it", strings.Join(names, ", "))
 }
 
 // dragonflyTemplateImage is the Dragonfly container image of a
@@ -252,7 +285,7 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeDecide(ctx context.Contex
 		// from a SnapshotRestore run needs a look (its removal below).
 		return dragonflyUpgradeDecision{}, nil
 	}
-	live, err := dragonflyLiveImages(ctx, reader, fg)
+	live, refused, err := dragonflyLiveImages(ctx, reader, fg)
 	if err != nil {
 		return dragonflyUpgradeDecision{}, err
 	}
@@ -277,6 +310,11 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeDecide(ctx context.Contex
 	digest := dragonflySpecDigest(spec)
 	if cur != nil && cur.Phase == v1alpha1.DragonflyUpgradePhaseFailed && cur.TargetImage == target && cur.SpecDigest == digest {
 		return dragonflyUpgradeDecision{}, nil
+	}
+	if why := r.noteDragonflySelectorRefusals(fg, refused); why != "" {
+		// Admitting the run would save, restart or update a site whose
+		// workload the operator refuses.
+		return dragonflyUpgradeDecision{action: dragonflyUpgradeWait, why: why + "; the run starts once no site is refused"}, nil
 	}
 	active := fg.Status.ActiveSite
 	if active == "" {
@@ -311,6 +349,15 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeDecide(ctx context.Contex
 		d.source = live[drifted]
 	}
 	return d, nil
+}
+
+// uncachedReader is the API server reader when one is wired, else the
+// cached client.
+func (r *MysqlFailoverGroupReconciler) uncachedReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // noteDragonflyUpgradeDeferral logs a waiting run and emits
@@ -652,6 +699,12 @@ func (r *MysqlFailoverGroupReconciler) updateDragonflyStatefulSetImage(ctx conte
 		key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, siteName)}
 		if err := r.Get(ctx, key, &sts); err != nil {
 			return err
+		}
+		// The run checked every selector before this step; this keeps a
+		// refused StatefulSet from being updated whatever the caller.
+		if mismatch := statefulSetSelectorMismatch(&sts, fg, siteName); mismatch != nil {
+			r.noteWorkloadSelector(fg, mismatch.kind, mismatch.name, mismatch)
+			return mismatch
 		}
 		if len(sts.Spec.Template.Spec.Containers) == 0 {
 			return fmt.Errorf("dragonfly statefulset %s has no containers", key.Name)

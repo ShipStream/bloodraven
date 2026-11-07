@@ -436,7 +436,7 @@ func s63HoldViolation(mfg *v1alpha1.MysqlFailoverGroup, runID, target, baselineL
 		return fmt.Errorf("status.activeSite=%q while run %s was held: the target was promoted outside the run", target, runID)
 	}
 	if lft := mfg.Status.LastFailoverTarget(); lft != baselineLastFailoverTarget {
-		return fmt.Errorf("status.lastFailoverTarget changed %q -> %q while run %s was held", baselineLastFailoverTarget, lft, runID)
+		return fmt.Errorf("status.lastFailover.target changed %q -> %q while run %s was held", baselineLastFailoverTarget, lft, runID)
 	}
 	return nil
 }

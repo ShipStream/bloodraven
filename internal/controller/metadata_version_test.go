@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -150,6 +151,95 @@ func TestDeploymentLeaseRecordVersion(t *testing.T) {
 	nn := client.ObjectKeyFromObject(fg)
 	if reason, msg := runner.refusalDegraded(nn); reason != v1alpha1.ReasonMetadataVersionUnsupported || !strings.Contains(msg, l.Name) {
 		t.Fatalf("refusal = %s %q", reason, msg)
+	}
+}
+
+// TestDeploymentLeaseRecordVersionRefusalEndsWithTheLease (O-04): the
+// refusal of an unreadable lease record lasts until the Lease is deleted,
+// as its message says, not until the operator restarts. Grant refuses
+// while Degraded reports it, before it reads any Lease, so housekeeping
+// must notice the deletion. A hold Lease (named by its operation) is
+// covered the same way.
+func TestDeploymentLeaseRecordVersionRefusalEndsWithTheLease(t *testing.T) {
+	for _, kind := range []string{"migration", "failover-hold"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			m, fg, _ := deploymentLeaseFixture(t)
+			runner := NewTopologyManagerRunner(m.client, nil, nil, record.NewFakeRecorder(16), testLogger())
+			m.SetGroupRefusals(runner)
+			grantDeploymentLease(t, m, fg, "migration", "op1", 60)
+			if kind == "failover-hold" {
+				grantDeploymentLease(t, m, fg, "failover-hold", "op1", 60)
+			}
+			operation := ""
+			if kind == "failover-hold" {
+				operation = "op1"
+			}
+			l := &coordinationv1.Lease{}
+			if err := m.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: deploymentLeaseName(fg.Name, kind, operation)}, l); err != nil {
+				t.Fatal(err)
+			}
+			var probe map[string]any
+			if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &probe); err != nil {
+				t.Fatal(err)
+			}
+			probe["schemaVersion"] = 2
+			b, _ := json.Marshal(probe)
+			l.Annotations[v1alpha1.DeploymentLeaseAnnotation] = string(b)
+			if err := m.client.Update(ctx, l); err != nil {
+				t.Fatal(err)
+			}
+			nn := client.ObjectKeyFromObject(fg)
+			snap := TopologySnapshot{
+				TopologyGeneration: fg.Status.TopologyGeneration, ActiveSite: "iad", DegradedReason: v1alpha1.ReasonHealthy,
+				Sites: []SiteSnapshot{
+					{Name: "iad", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
+					{Name: "pdx", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged,
+						ReplicaStatusRead: true, Replication: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: ptrTo(int64(0))}},
+				},
+			}
+			publish := func() {
+				t.Helper()
+				if err := runner.updateCRStatus(ctx, nn, snap); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Housekeeping finds the record and the status write reports it.
+			if err := m.TopologyPersisted(ctx, fg, 0); err == nil {
+				t.Fatal("housekeeping read the unknown record")
+			}
+			publish()
+			fresh, err := m.fresh(ctx, fg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionDegraded); c == nil || c.Reason != v1alpha1.ReasonMetadataVersionUnsupported {
+				t.Fatalf("Degraded = %+v, want MetadataVersionUnsupported", c)
+			}
+			_, err = m.Grant(ctx, fg, "migration", "op2", "tenant", "tenant-ns", "deployer", 60)
+			requireDeploymentError(t, err, 423, "unstable")
+
+			// The admin deletes the Lease, as the message says.
+			if err := m.client.Delete(ctx, l); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.TopologyPersisted(ctx, fg, 0); err != nil {
+				t.Fatalf("housekeeping after the Lease was deleted: %v", err)
+			}
+			if reason, msg := runner.refusalDegraded(nn); reason != "" {
+				t.Fatalf("refusal outlived its Lease: %s %q", reason, msg)
+			}
+			publish()
+			fresh, err = m.fresh(ctx, fg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionDegraded); c == nil || c.Status != metav1.ConditionFalse {
+				t.Fatalf("Degraded = %+v, want False once the Lease is gone", c)
+			}
+			// A new lease of the deleted Lease's kind is granted.
+			grantDeploymentLease(t, m, fresh, kind, "op1", 60)
+		})
 	}
 }
 

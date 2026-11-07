@@ -193,8 +193,14 @@ func leaseTokenHash(token string) string {
 
 func (m *DeploymentLeaseManager) read(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, operation string) (*coordinationv1.Lease, *deploymentLeaseRecord, error) {
 	l := &coordinationv1.Lease{}
-	err := m.reader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: deploymentLeaseName(fg.Name, kind, operation)}, l)
+	name := deploymentLeaseName(fg.Name, kind, operation)
+	err := m.reader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, l)
 	if apierrors.IsNotFound(err) {
+		// A refusal of a record this operator could not read ends with
+		// the Lease that carried it.
+		if report := m.refusals.Load(); report != nil {
+			(*report).clear(client.ObjectKeyFromObject(fg), leaseRefusalKey(name))
+		}
 		return nil, nil, nil
 	}
 	if err != nil {
@@ -216,7 +222,7 @@ func (m *DeploymentLeaseManager) read(ctx context.Context, fg *v1alpha1.MysqlFai
 // readable one clears that refusal.
 func (m *DeploymentLeaseManager) decodeRecord(fg *v1alpha1.MysqlFailoverGroup, l *coordinationv1.Lease) (*deploymentLeaseRecord, error) {
 	raw := l.Annotations[v1alpha1.DeploymentLeaseAnnotation]
-	key := "lease/" + l.Name
+	key := leaseRefusalKey(l.Name)
 	var r deploymentLeaseRecord
 	if err := json.Unmarshal([]byte(raw), &r); err != nil {
 		return nil, fmt.Errorf("invalid deployment Lease: %w", err)
@@ -236,6 +242,38 @@ func (m *DeploymentLeaseManager) decodeRecord(fg *v1alpha1.MysqlFailoverGroup, l
 	return &r, nil
 }
 
+// leaseRefusalPrefix prefixes the group refusal key of a Lease whose
+// record this operator cannot read.
+const leaseRefusalPrefix = "lease/"
+
+func leaseRefusalKey(leaseName string) string { return leaseRefusalPrefix + leaseName }
+
+// pruneLeaseRefusals clears fg's lease refusals whose Lease is gone. Only
+// a successful decode of the same Lease clears a refusal otherwise, and a
+// deleted Lease is never decoded again: Grant refuses while Degraded
+// reports the refusal, before it reads any Lease, and housekeeping lists
+// only the hold Leases that still exist. Read uncached, as every Lease
+// read here is.
+func (m *DeploymentLeaseManager) pruneLeaseRefusals(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	report := m.refusals.Load()
+	if report == nil || (*report).keys == nil {
+		return nil
+	}
+	nn := client.ObjectKeyFromObject(fg)
+	for _, key := range (*report).keys(nn, leaseRefusalPrefix) {
+		name := strings.TrimPrefix(key, leaseRefusalPrefix)
+		err := m.reader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &coordinationv1.Lease{})
+		if apierrors.IsNotFound(err) {
+			(*report).clear(nn, key)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // errLeaseRecordVersion is a lease record with an unknown schemaVersion.
 type errLeaseRecordVersion struct{ msg string }
 
@@ -246,6 +284,7 @@ func (e errLeaseRecordVersion) Error() string { return e.msg }
 type leaseRefusalReporter struct {
 	set   func(fg *v1alpha1.MysqlFailoverGroup, key, reason, message string)
 	clear func(nn types.NamespacedName, key string)
+	keys  func(nn types.NamespacedName, prefix string) []string
 }
 
 // SetGroupRefusals injects the runner's group refusal registry
@@ -256,7 +295,7 @@ func (m *DeploymentLeaseManager) SetGroupRefusals(r *TopologyManagerRunner) {
 		m.refusals.Store(nil)
 		return
 	}
-	m.refusals.Store(&leaseRefusalReporter{set: r.SetGroupRefusal, clear: r.ClearGroupRefusal})
+	m.refusals.Store(&leaseRefusalReporter{set: r.SetGroupRefusal, clear: r.ClearGroupRefusal, keys: r.GroupRefusalKeys})
 }
 
 func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, l *coordinationv1.Lease, r *deploymentLeaseRecord, operation string) error {
@@ -917,6 +956,9 @@ func (m *DeploymentLeaseManager) TopologyPersisted(ctx context.Context, fg *v1al
 	defer m.mu.Unlock()
 	fg, err := m.fresh(ctx, fg)
 	if err != nil {
+		return err
+	}
+	if err := m.pruneLeaseRefusals(ctx, fg); err != nil {
 		return err
 	}
 	if _, _, err := m.current(ctx, fg, "migration"); err != nil {

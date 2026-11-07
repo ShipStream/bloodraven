@@ -493,7 +493,7 @@ kubectl -n $NS apply -f playground/manifests/failovergroup.yaml
 ```bash
 kubectl -n $NS patch mfg playground --type json -p '[
   {"op":"add","path":"/spec/sites/-","value":{
-    "name":"fra","role":"DisasterRecovery","zone":"zone-fra","lbIP":"10.96.100.30",
+    "name":"fra","serverID":104,"role":"DisasterRecovery","zone":"zone-fra","lbIP":"10.96.100.30",
     "taintNodeSelector":{"bloodraven.shipstream.io/failover-group.playground":"true","bloodraven.shipstream.io/site.playground":"fra"},
     "storage":{"storageClassName":"playground-fast","size":"1Gi"},
     "resources":{

@@ -1405,17 +1405,25 @@ func (tm *TopologyManager) restoreFailoverRecordFrom(fg *v1alpha1.MysqlFailoverG
 		tm.promotionGtidExecuted = failoverRecord.PromotionGtidExecuted
 		tm.groupHasData = true
 	}
-	if fromAnnotations && !failoverRecord.sameEvent(statusRecord) {
-		// A promotion survived in annotations but its generation did not reach
-		// /status. Invalidate old leases even if authority returned to the same site.
-		tm.topologyGeneration++
-		tm.deploymentActiveSite = failoverRecord.LastFailoverTarget
-	}
 	// A status that names no authority (no active site, generation 0)
 	// beside a failover record of the group's history was lost, not
 	// fresh: until this process has observed a unique writable primary
 	// it knows of no primary to fail away from, so it promotes nothing.
-	if fg.Status.ActiveSite == "" && fg.Status.TopologyGeneration == 0 && !failoverRecord.IsZero() {
+	lostStatus := fg.Status.ActiveSite == "" && fg.Status.TopologyGeneration == 0 && !failoverRecord.IsZero()
+	if fromAnnotations && !failoverRecord.sameEvent(statusRecord) && !lostStatus {
+		// A promotion survived in annotations but its generation did not reach
+		// /status. Invalidate old leases even if authority returned to the same site.
+		//
+		// Not for a lost status: naming the annotation's target here would
+		// publish an authority nobody observed (activeSite and generation
+		// 1), and that status no longer looks lost to the next manager,
+		// which would then promote without the wait below. The generation
+		// advances instead when the observation that ends the wait names
+		// the primary (buildSnapshot's deploymentAuthorityLocked).
+		tm.topologyGeneration++
+		tm.deploymentActiveSite = failoverRecord.LastFailoverTarget
+	}
+	if lostStatus {
 		tm.mu.Lock()
 		tm.awaitingObservedPrimary = true
 		tm.mu.Unlock()
