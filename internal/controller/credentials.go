@@ -57,6 +57,19 @@ const appAdminPrivilegeQuery = `SELECT
 		Repl_slave_priv = 'Y' OR Repl_client_priv = 'Y' OR
 		Create_tablespace_priv = 'Y' OR Create_role_priv = 'Y' OR Drop_role_priv = 'Y'))`
 
+// Optional operator Secret keys naming a dedicated replication account. Each
+// defaults to the operator's own username or password when absent.
+const (
+	replicationUserKey     = "MYSQL_REPLICATION_USER"
+	replicationPasswordKey = "MYSQL_REPLICATION_PASSWORD"
+)
+
+// replicationGrants is what a dedicated replication account needs: the
+// replica IO thread (REPLICATION SLAVE), the replica-status reads the
+// bootstrap and recovery paths make (REPLICATION CLIENT), and a clone donor
+// session (BACKUP_ADMIN, CLONE_ADMIN).
+const replicationGrants = "REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN"
+
 // credentialRole defines a MySQL user role with its expected privileges.
 type credentialRole struct {
 	name       string
@@ -491,7 +504,7 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 			return nil, fmt.Errorf("read group credential secret %s/%s: %w", fg.Namespace, name, err)
 		}
 		add(string(secret.Data["username"]))
-		add(string(secret.Data["MYSQL_REPLICATION_USER"]))
+		add(string(secret.Data[replicationUserKey]))
 	}
 	return reserved, nil
 }

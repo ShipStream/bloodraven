@@ -329,3 +329,19 @@ func TestStartFailureEvent_RecreatedWithinOneSyncGetsFreshFloor(t *testing.T) {
 		t.Fatalf("recreated group's second failure: want one Warning despite the old object's floor, got %v", ev)
 	}
 }
+
+// An operator Secret whose username is present but empty fails the start
+// the same way a missing key does, instead of dialing an empty account.
+func TestStartFailureEvent_EmptyUsernameFailsStart(t *testing.T) {
+	h := newStartEventHarness(t)
+	h.setSecretData(map[string][]byte{"username": {}, "password": []byte("pw")})
+
+	h.sync()
+	ev := h.sync()
+	if startFailureWarnings(ev) != 1 || len(ev) != 1 {
+		t.Fatalf("want one %s Warning, got %v", v1alpha1.EventTopologyManagerStartFailed, ev)
+	}
+	if !strings.Contains(ev[0], `has an empty value for key "username"`) {
+		t.Fatalf("Warning message lacks the cause: %q", ev[0])
+	}
+}

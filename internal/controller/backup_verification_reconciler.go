@@ -126,10 +126,11 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 			logger.Error(err, "post-terminal cleanup")
 		}
 		requeue = shorterRequeue(requeue, r.maybeReleaseHold(ctx, &v))
-		if err := r.pruneRetention(ctx, &v); err != nil {
+		pruneRequeue, err := r.pruneRetention(ctx, &v)
+		if err != nil {
 			logger.Error(err, "retention prune")
 		}
-		return ctrl.Result{RequeueAfter: requeue}, nil
+		return ctrl.Result{RequeueAfter: shorterRequeue(requeue, pruneRequeue)}, nil
 	}
 
 	var job batchv1.Job
@@ -465,10 +466,11 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 			logger.Error(err, "post-terminal cleanup")
 		}
 		requeue = shorterRequeue(requeue, r.maybeReleaseHold(ctx, v))
-		if err := r.pruneRetention(ctx, v); err != nil {
+		pruneRequeue, err := r.pruneRetention(ctx, v)
+		if err != nil {
 			logger.Error(err, "retention prune")
 		}
-		return ctrl.Result{RequeueAfter: requeue}, nil
+		return ctrl.Result{RequeueAfter: shorterRequeue(requeue, pruneRequeue)}, nil
 	}
 
 	patch := client.MergeFrom(v.DeepCopy())
@@ -503,10 +505,11 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		logger.Error(err, "post-terminal cleanup")
 	}
 	requeue = shorterRequeue(requeue, r.maybeReleaseHold(ctx, v))
-	if err := r.pruneRetention(ctx, v); err != nil {
+	pruneRequeue, err := r.pruneRetention(ctx, v)
+	if err != nil {
 		logger.Error(err, "retention prune")
 	}
-	return ctrl.Result{RequeueAfter: requeue}, nil
+	return ctrl.Result{RequeueAfter: shorterRequeue(requeue, pruneRequeue)}, nil
 }
 
 // SetupWithManager registers the reconciler with the manager.
@@ -1010,11 +1013,13 @@ func parseSanitySentinel(line string) (*v1alpha1.SanityCheckResult, bool) {
 // pruneRetention deletes old MysqlBackupVerification CRs for the same
 // (group, profile). Succeeded and Failed buckets are capped
 // independently; failed-keep defaults to 10 so operators can always
-// find the last few failures to debug.
-func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, trigger *v1alpha1.MysqlBackupVerification) error {
+// find the last few failures to debug. A verification that completed less
+// than terminalRetentionGrace ago is kept whatever the counts say, and the
+// returned duration says when the first such grace ends (0 when none).
+func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, trigger *v1alpha1.MysqlBackupVerification) (time.Duration, error) {
 	var list v1alpha1.MysqlBackupVerificationList
 	if err := r.List(ctx, &list, client.InNamespace(trigger.Namespace)); err != nil {
-		return err
+		return 0, err
 	}
 
 	filtered := list.Items[:0]
@@ -1038,10 +1043,13 @@ func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, 
 	}
 	keepLast, keepFailed := resolveVerificationRetention(profile)
 
-	if err := r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseSucceeded, int(keepLast)); err != nil {
-		return err
+	now := time.Now()
+	succeededRequeue, err := r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseSucceeded, int(keepLast), now)
+	if err != nil {
+		return 0, err
 	}
-	return r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseFailed, int(keepFailed))
+	failedRequeue, err := r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseFailed, int(keepFailed), now)
+	return shorterRequeue(succeededRequeue, failedRequeue), err
 }
 
 // resolveVerificationRetention returns the effective (keepLast,
@@ -1066,8 +1074,9 @@ func resolveVerificationRetention(profile *v1alpha1.BackupProfile) (keepLast, ke
 // pruneVerificationsByPhase keeps the newest `keep` entries in the
 // given phase and deletes the rest; 0 keeps none. Only terminal phases
 // are passed, so an in-flight CR is never swept; entries without a
-// CompletionTime sort last.
-func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx context.Context, all []v1alpha1.MysqlBackupVerification, phase v1alpha1.VerificationPhase, keep int) error {
+// CompletionTime sort last. An entry still within terminalRetentionGrace
+// is kept, and the returned duration says when the first such grace ends.
+func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx context.Context, all []v1alpha1.MysqlBackupVerification, phase v1alpha1.VerificationPhase, keep int, now time.Time) (time.Duration, error) {
 	keep = max(keep, 0)
 	bucket := make([]v1alpha1.MysqlBackupVerification, 0, len(all))
 	for _, it := range all {
@@ -1076,20 +1085,25 @@ func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx contex
 		}
 	}
 	if len(bucket) <= keep {
-		return nil
+		return 0, nil
 	}
 	sort.Slice(bucket, func(i, j int) bool {
 		ti := timeOrZero(bucket[i].Status.CompletionTime)
 		tj := timeOrZero(bucket[j].Status.CompletionTime)
 		return ti.After(tj)
 	})
+	var requeue time.Duration
 	for i := keep; i < len(bucket); i++ {
 		victim := bucket[i]
+		if grace := terminalRetentionGraceLeft(victim.Status.CompletionTime, now); grace > 0 {
+			requeue = shorterRequeue(requeue, grace)
+			continue
+		}
 		if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete old %s verification %s: %w", phase, victim.Name, err)
+			return 0, fmt.Errorf("delete old %s verification %s: %w", phase, victim.Name, err)
 		}
 	}
-	return nil
+	return requeue, nil
 }
 
 // waitVerification records why a verification has not launched yet and

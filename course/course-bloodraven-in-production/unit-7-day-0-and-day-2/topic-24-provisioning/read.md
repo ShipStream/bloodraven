@@ -30,7 +30,7 @@ things it never will.
       "aspect": "Inside MySQL",
       "cells": [
         "Nothing, on a fresh datadir. Everything, if you point it at a datadir that already exists.",
-        "The clone plugin and the operator user, plus the app, read-only, monitor and backup users whose Secrets you set, each with a fixed grant set. Not a dedicated replication user."
+        "The clone plugin and the operator user, plus the app, read-only, monitor and backup users whose Secrets you set, each with a fixed grant set, and a dedicated replication user if the operator Secret names one."
       ]
     },
     {
@@ -89,8 +89,8 @@ with a fixed grant set it will not let you widen:
 
 The operator Secret also carries `MYSQL_ROOT_PASSWORD`, and optionally
 `MYSQL_REPLICATION_USER` / `MYSQL_REPLICATION_PASSWORD` — omit those and replication simply
-reuses the operator's username and password. Name a dedicated replication user and it is yours to
-create on every site: the operator does not (the playground's setup script does it for you).
+reuses the operator's username and password. Name a dedicated replication user and the first-boot
+script creates it with `REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN`, nothing more.
 
 The grant lists are worth one careful read, because they are the security review answer you will be
 asked for. The application user cannot grant privileges to anyone. The monitor user cannot read your

@@ -344,6 +344,26 @@ func EffectiveFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (Fa
 	return winner, fromAnnotations, readErr
 }
 
+// failoverHistoryRecorded reports whether either durable copy of the
+// failover record is present on fg, whether or not EffectiveFailoverRecord
+// accepts it: any failover-record annotation key, or a status record. A
+// copy rejected as malformed, future-dated or naming a site no longer in
+// spec is still evidence that the group has failed over. The rejection
+// rules decide what the cooldown may use, not whether there is history.
+func failoverHistoryRecorded(fg *v1alpha1.MysqlFailoverGroup) bool {
+	for _, k := range []string{
+		v1alpha1.LastFailoverAnnotation,
+		v1alpha1.LastFailoverTargetAnnotation,
+		v1alpha1.PromotionGtidExecutedAnnotation,
+		v1alpha1.PromotionGtidExecutedForAnnotation,
+	} {
+		if _, ok := fg.GetAnnotations()[k]; ok {
+			return true
+		}
+	}
+	return fg.Status.LastFailover != nil
+}
+
 func failoverTargetInSpec(fg *v1alpha1.MysqlFailoverGroup, target string) bool {
 	for i := range fg.Spec.Sites {
 		if fg.Spec.Sites[i].Name == target {

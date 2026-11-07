@@ -350,6 +350,14 @@ func TestE5_EndpointShapes(t *testing.T) {
 		{"credentials", "https://user:pass@s3.example.com", false},
 		{"query", "https://s3.example.com?x=1", false},
 		{"other-scheme", "s3://bucket", false},
+		{"ipv6-port", "http://[fd00::1]:9000", true},
+		{"max-port", "http://rustfs:65535", true},
+		// N-13: Dragonfly would get --s3_endpoint=rustfs: or rustfs:abc.
+		{"empty-port", "http://rustfs:", false},
+		{"non-numeric-port", "http://rustfs:abc", false},
+		{"port-zero", "http://rustfs:0", false},
+		{"port-too-large", "http://rustfs:65536", false},
+		{"two-ports", "http://rustfs:9000:1", false},
 	} {
 		t.Run("s3EndpointURL-"+tc.name, func(t *testing.T) {
 			u := snapshot("snap-"+tc.name, tc.url)

@@ -29,3 +29,9 @@ tests:
   healthStatus: {status: Progressing, message: "Waiting for the first classification of iad, pdx"}
 - inputPath: no-writable-primary.yaml
   healthStatus: {status: Degraded, message: "NoPrimary: both sites are read-only"}
+- inputPath: spec-not-applied-degraded.yaml
+  healthStatus: {status: Degraded, message: "SiteUnhealthy: pdx unreachable while iad is primary"}
+- inputPath: spec-not-applied-held.yaml
+  healthStatus: {status: Degraded, message: "AutomaticFailoverHeld: planned failover run r1 ended ManualRecoveryRequired (ForeignWritable)"}
+- inputPath: spec-not-applied-recovery-pending.yaml
+  healthStatus: {status: Degraded, message: "RecoveryPending: Old primary pdx is being reconfigured as a replica"}

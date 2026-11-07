@@ -164,14 +164,15 @@ type DragonflySnapshotSpec struct {
 
 	// S3EndpointURL overrides the S3 endpoint for S3-compatible services
 	// such as RustFS or MinIO, in the URL form backup storage uses: an
-	// absolute http:// or https:// URL with a host and optional port, and
-	// no path, credentials, query or fragment. The operator passes the
-	// host and port to Dragonfly as --s3_endpoint and the scheme as
-	// --s3_use_https (false for http://, true for https://). Omit it, or
-	// leave it empty, for AWS S3 with Dragonfly's defaults.
+	// absolute http:// or https:// URL with a host (a name, an IPv4
+	// address, or an IPv6 address in brackets) and an optional port from 1
+	// to 65535, and no path, credentials, query or fragment. The operator
+	// passes the host and port to Dragonfly as --s3_endpoint and the
+	// scheme as --s3_use_https (false for http://, true for https://).
+	// Omit it, or leave it empty, for AWS S3 with Dragonfly's defaults.
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="s3EndpointURL must be at most 512 bytes (UTF-8)"
-	// +kubebuilder:validation:Pattern=`^(https?://[^\s/?#@]+/?)?$`
+	// +kubebuilder:validation:Pattern=`^(https?://(\[[0-9A-Fa-f:.]+\]|[^\s/?#@:\[\]]+)(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?/?)?$`
 	// +optional
 	S3EndpointURL string `json:"s3EndpointURL,omitempty"`
 
@@ -470,6 +471,11 @@ const (
 	// was refused for its selector (WorkloadSelectorMismatch) while the
 	// upgrade ran, so the upgrade stopped before touching it.
 	DragonflyUpgradeReasonWorkloadSelectorMismatch DragonflyUpgradeReason = "WorkloadSelectorMismatch"
+	// DragonflyUpgradeReasonActiveWorkloadDeleted: the active site's
+	// StatefulSet was deleted before its snapshot was saved or after it
+	// restored, so the data the upgrade moves was lost; the operator
+	// re-creates the StatefulSet.
+	DragonflyUpgradeReasonActiveWorkloadDeleted DragonflyUpgradeReason = "ActiveWorkloadDeleted"
 )
 
 // DragonflySiteStatus describes the observed state of one site's Dragonfly

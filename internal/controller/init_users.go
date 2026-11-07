@@ -79,8 +79,10 @@ run_mysql() {
 }
 `
 
-// generateInitUsersScript creates the replication user and the configured
-// role users from the credential Secrets mounted under /etc/mysql/creds.
+// generateInitUsersScript installs the clone plugin and creates the operator
+// user, the dedicated replication user when the operator Secret names one,
+// and the configured role users, from the credential Secrets mounted under
+// /etc/mysql/creds. Every statement is idempotent.
 func generateInitUsersScript(fg *v1alpha1.MysqlFailoverGroup) string {
 	script := `#!/bin/bash
 set -euo pipefail
@@ -121,11 +123,43 @@ FLUSH PRIVILEGES;
 EOSQL
 }
 
+# The replication account resolves as the topology manager resolves it:
+# MYSQL_REPLICATION_USER / MYSQL_REPLICATION_PASSWORD (mounted as
+# replication/username and replication/password), each defaulting to the
+# operator's own value. The operator account already holds every privilege,
+# so only a dedicated account is created.
+create_replication_user() {
+    local op_user repl_user repl_pass
+    op_user=$(read_cred operator username)
+    repl_user=$(read_cred replication username)
+    repl_pass=$(read_cred replication password)
+    [ -n "$repl_user" ] || repl_user="$op_user"
+    [ -n "$repl_pass" ] || repl_pass=$(read_cred operator password)
+    if [ -z "$repl_user" ] || [ -z "$repl_pass" ]; then
+        echo "bloodraven-init: skipping replication (credentials not mounted)"
+        return
+    fi
+    if [ "$repl_user" = "$op_user" ]; then
+        echo "bloodraven-init: replication uses the operator account"
+        return
+    fi
+    repl_user=$(escape_sql "$repl_user")
+    repl_pass=$(escape_sql "$repl_pass")
+    echo "bloodraven-init: creating replication user '${repl_user}'"
+    run_mysql <<EOSQL
+CREATE USER IF NOT EXISTS '${repl_user}'@'%' IDENTIFIED BY '${repl_pass}';
+ALTER USER '${repl_user}'@'%' IDENTIFIED BY '${repl_pass}';
+GRANT ` + replicationGrants + ` ON *.* TO '${repl_user}'@'%';
+FLUSH PRIVILEGES;
+EOSQL
+}
+
 `
 	// Operator user — full admin for topology management, replication, cloning.
 	script += `install_clone_plugin
 
 create_user_with_grants operator "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%' WITH GRANT OPTION;"
+create_replication_user
 `
 
 	if fg.Spec.Credentials.AppSecretName != "" {

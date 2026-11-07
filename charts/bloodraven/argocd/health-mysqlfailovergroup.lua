@@ -6,15 +6,6 @@ if obj.status == nil or obj.status.conditions == nil then
   return hs
 end
 
--- status.observedGeneration is the generation the topology manager has
--- applied; every topology condition carries the same value.
-if obj.metadata.generation ~= nil then
-  if obj.status.observedGeneration == nil or obj.status.observedGeneration < obj.metadata.generation then
-    hs.message = "Controller processing updated spec"
-    return hs
-  end
-end
-
 local degraded = nil
 local ready = nil
 local bootstrapping = nil
@@ -63,6 +54,19 @@ if updating ~= nil and updating.status == "True" and updating.reason == "Ordered
   hs.status = "Degraded"
   hs.message = "OrderedUpdateStalled: " .. (updating.message or "Ordered update stalled")
   return hs
+end
+
+-- status.observedGeneration is the generation the topology manager has
+-- applied; every topology condition carries the same value. It can lag for
+-- as long as no manager applies the spec (unreadable connection material,
+-- a replacement manager that fails to start), so it gates only the
+-- Progressing and Healthy verdicts below: a hold, Degraded, a pending
+-- recovery or a stalled update stays visible meanwhile.
+if obj.metadata.generation ~= nil then
+  if obj.status.observedGeneration == nil or obj.status.observedGeneration < obj.metadata.generation then
+    hs.message = "Controller processing updated spec"
+    return hs
+  end
 end
 
 -- Bootstrapping is True only while a clone runs.

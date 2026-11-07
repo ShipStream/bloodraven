@@ -180,6 +180,11 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			f.tm.mu.Unlock()
 			f.tm.finishDeploymentTopologyChange()
 		}},
+		{"lost-status wait", "RRRAAW", func(t *testing.T, f *claimFixture) {
+			f.tm.mu.Lock()
+			f.tm.awaitingObservedPrimary = true // restoreFailoverRecordFrom
+			f.tm.mu.Unlock()
+		}},
 		{"planned-failover claim", "RRRRRW", func(t *testing.T, f *claimFixture) {
 			holdPlannedClaim(f, claimModeRun, false)
 		}},

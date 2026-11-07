@@ -822,11 +822,20 @@ func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Con
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	for _, key := range []string{"username", "password", "MYSQL_ROOT_PASSWORD"} {
-		if _, ok := secret.Data[key]; !ok {
+		// An empty username or password is refused like a missing one: the
+		// manager would dial an empty account and report every site
+		// unreachable. MYSQL_ROOT_PASSWORD only has to be present, as the
+		// admin connection skips root when it is empty.
+		if problem := credentialKeyProblem(secret.Data, key, key != "MYSQL_ROOT_PASSWORD"); problem != "" {
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretMissingKey,
-				"operator secret %q missing required key %q", operatorSecretName, key)
+				"operator secret %q %s %q", operatorSecretName, problem, key)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
+	}
+	if msg := replicationAccountConflict(secret.Data); msg != "" {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretMissingKey,
+			"operator secret %q: %s", operatorSecretName, msg)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Validate optional credential secrets have required keys.
@@ -853,14 +862,42 @@ func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Con
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		for _, key := range []string{"username", "password"} {
-			if _, ok := s.Data[key]; !ok {
+			if problem := credentialKeyProblem(s.Data, key, true); problem != "" {
 				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretMissingKey,
-					"%s secret %q missing required key %q", opt.role, opt.name, key)
+					"%s secret %q %s %q", opt.role, opt.name, problem, key)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+// credentialKeyProblem describes why key in a credential Secret's data is
+// unusable ("missing required key", or "has an empty value for key" when
+// nonEmpty is set), or returns "" when it is usable.
+func credentialKeyProblem(data map[string][]byte, key string, nonEmpty bool) string {
+	v, ok := data[key]
+	switch {
+	case !ok:
+		return "missing required key"
+	case nonEmpty && len(v) == 0:
+		return "has an empty value for key"
+	}
+	return ""
+}
+
+// replicationAccountConflict refuses an operator Secret whose
+// MYSQL_REPLICATION_USER names the operator account with a different
+// MYSQL_REPLICATION_PASSWORD: the two keys would set two passwords on one
+// MySQL account, and replication would present the one MySQL does not
+// hold. It returns "" when there is no conflict.
+func replicationAccountConflict(data map[string][]byte) string {
+	user, pass := string(data[replicationUserKey]), string(data[replicationPasswordKey])
+	if user == "" || pass == "" || user != string(data["username"]) || pass == string(data["password"]) {
+		return ""
+	}
+	return fmt.Sprintf("%s names the operator account %q, but %s differs from its password; omit both keys to replicate as the operator, or name a dedicated account",
+		replicationUserKey, user, replicationPasswordKey)
 }
 
 // resourceName returns a deterministic name for a per-site resource.
@@ -1581,6 +1618,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
 			corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
+			corev1.VolumeMount{Name: "creds-replication", MountPath: "/etc/mysql/creds/replication", ReadOnly: true},
 			corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
 		)
 		appendCredVolume := func(name string) {
@@ -1762,8 +1800,27 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				},
 			}
 		}
+		// The optional replication account comes from the operator
+		// Secret's MYSQL_REPLICATION_USER / MYSQL_REPLICATION_PASSWORD
+		// keys. Optional, so a Secret without them mounts an empty
+		// directory and the init script falls back to the operator
+		// account, as the topology manager does.
+		replicationOptional := true
 		volumes = append(volumes,
 			credSecretVolume("creds-operator", fg.Spec.Credentials.OperatorSecretName),
+			corev1.Volume{
+				Name: "creds-replication",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: fg.Spec.Credentials.OperatorSecretName,
+						Items: []corev1.KeyToPath{
+							{Key: replicationUserKey, Path: "username"},
+							{Key: replicationPasswordKey, Path: "password"},
+						},
+						Optional: &replicationOptional,
+					},
+				},
+			},
 		)
 		if s := fg.Spec.Credentials.AppSecretName; s != "" {
 			volumes = append(volumes, credSecretVolume("creds-app", s))

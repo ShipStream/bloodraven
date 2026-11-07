@@ -292,10 +292,12 @@ if [[ -n "$SANITY_Q" ]]; then
     # mysql -B -N renders tab-separated, no header, no pretty borders —
     # ideal for single-column scalar capture. -e escapes `"` in the query
     # via printf %q to avoid tripping on user-quoted literals. timeout
-    # wraps mysql so a runaway query can't hold the Job forever.
+    # wraps mysql so a runaway query can't hold the Job forever. Without
+    # --preserve-status, timeout exits 124 when the query ran out of time
+    # and mysql's own status otherwise, which is what tells the two apart.
     set +e
     START_NS=$(date +%s%N)
-    SANITY_OUT=$(timeout --preserve-status "${SANITY_MAX}" \
+    SANITY_OUT=$(timeout "${SANITY_MAX}" \
         mysql --socket="$SOCKET" --user=root -B -N -e "$SANITY_Q" 2>&1)
     SANITY_RC=$?
     END_NS=$(date +%s%N)

@@ -698,6 +698,18 @@ func TestDragonflyS3EndpointArgs(t *testing.T) {
 		{"rustfs:9000", nil},
 		{"https://", nil},
 		{"https://minio.example.com/bucket", nil},
+		// N-13: an empty, non-numeric or out-of-range port.
+		{"http://rustfs:", nil},
+		{"http://rustfs:abc", nil},
+		{"http://rustfs:0", nil},
+		{"http://rustfs:65536", nil},
+		{"http://rustfs:09000", nil},
+		{"http://rustfs:9000:1", nil},
+		{"http://[fd00::1]:", nil},
+		{"http://[fd00::1]x", nil},
+		{"http://[]:9000", nil},
+		{"http://rustfs:65535", []string{"--s3_endpoint=rustfs:65535", "--s3_use_https=false"}},
+		{"http://[fd00::1]", []string{"--s3_endpoint=[fd00::1]", "--s3_use_https=false"}},
 	} {
 		t.Run(tc.url, func(t *testing.T) {
 			got := dragonflyS3EndpointArgs(tc.url)

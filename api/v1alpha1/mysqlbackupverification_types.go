@@ -425,7 +425,9 @@ type VerificationSpec struct {
 // VerificationRetention caps the MysqlBackupVerification objects kept per
 // (group, profile). Succeeded and Failed runs are counted separately, so a
 // run of failures does not evict the record of the last successful
-// verification.
+// verification. A verification is kept for two minutes after it
+// completes, whatever the counts say, so a waiting client reads its
+// verdict.
 type VerificationRetention struct {
 	// KeepLast is how many of the newest Succeeded verifications are kept;
 	// 0 keeps none.

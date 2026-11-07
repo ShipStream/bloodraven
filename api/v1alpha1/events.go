@@ -341,8 +341,10 @@ const (
 	EventDragonflyUpgradeSucceeded = "DragonflyUpgradeSucceeded"
 	// A Dragonfly snapshot-restore upgrade failed, once per run; the
 	// message gives the reason. On `DragonflySnapshotDialFailed`,
-	// `DragonflySnapshotSaveFailed` or `UnknownPhase` the operator
-	// restores the active site's traffic label. On `ActiveSiteChanged` the
+	// `DragonflySnapshotSaveFailed`, `UnknownPhase`,
+	// `WorkloadSelectorMismatch` or `ActiveWorkloadDeleted` the operator
+	// restores the active site's traffic label; on `ActiveWorkloadDeleted`
+	// it re-creates the active site's StatefulSet. On `ActiveSiteChanged` the
 	// upgrade was abandoned because MySQL failed over or a promotion moved
 	// the Dragonfly master. The run is not restarted while
 	// `spec.dragonfly` is unchanged: change it, or set
@@ -793,7 +795,10 @@ const (
 	EventCredentialReconcileFailed = "CredentialReconcileFailed"
 	// Referenced Secret not found.
 	EventSecretNotFound = "SecretNotFound"
-	// Secret is missing a required key.
+	// A credential Secret is missing a required key, has an empty
+	// `username` or `password`, or names the operator account in
+	// `MYSQL_REPLICATION_USER` with a different `MYSQL_REPLICATION_PASSWORD`;
+	// the message names the Secret and key.
 	EventSecretMissingKey = "SecretMissingKey"
 	// A `credentialsSecretName` the group references for S3 storage is
 	// missing, or lacks a non-empty `AWS_ACCESS_KEY_ID` or

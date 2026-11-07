@@ -143,7 +143,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.dragonfly.snapshot` | object |  |  |  |
 | `spec.dragonfly.snapshot.credentialsSecretName` | string |  |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.dragonfly.snapshot.dir` | string |  |  |  |
-| `spec.dragonfly.snapshot.s3EndpointURL` | string |  |  | maxLength=512; pattern=`^(https?://[^\s/?#@]+/?)?$`; CEL: `bytes(self).size() <= 512` |
+| `spec.dragonfly.snapshot.s3EndpointURL` | string |  |  | maxLength=512; pattern=`^(https?://(\[[0-9A-Fa-f:.]+\]\|[^\s/?#@:\[\]]+)(:(6553[0-5]\|655[0-2][0-9]\|65[0-4][0-9]{2}\|6[0-4][0-9]{3}\|[1-5][0-9]{4}\|[1-9][0-9]{0,3}))?/?)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.dragonfly.snapshot.s3SignPayload` | boolean |  |  |  |
 | `spec.dragonfly.snapshot.serviceAccountName` | string |  |  |  |
 | `spec.dragonfly.upgradeStrategy` | string |  | `"Rolling"` | enum: `Rolling`, `SnapshotRestore` |

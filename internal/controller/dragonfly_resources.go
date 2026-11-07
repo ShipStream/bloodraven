@@ -298,9 +298,10 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 // Dragonfly's two flags: --s3_endpoint takes host[:port] without a scheme,
 // and --s3_use_https takes the scheme as a boolean. An empty URL means AWS
 // S3 with Dragonfly's defaults, so neither flag is emitted. Admission only
-// admits an http:// or https:// URL with a host and no path; anything else
-// (reachable only through a client that skips admission) also emits
-// nothing rather than a flag Dragonfly would misread.
+// admits an http:// or https:// URL with a host, an optional port from 1 to
+// 65535 and no path; anything else (reachable only through a client that
+// skips admission) also emits nothing rather than a flag Dragonfly would
+// misread.
 func dragonflyS3EndpointArgs(endpointURL string) []string {
 	var useHTTPS bool
 	var hostPort string
@@ -313,13 +314,47 @@ func dragonflyS3EndpointArgs(endpointURL string) []string {
 		return nil
 	}
 	hostPort = strings.TrimSuffix(hostPort, "/")
-	if hostPort == "" || strings.ContainsAny(hostPort, "/?#@ \t\r\n") {
+	if hostPort == "" || strings.ContainsAny(hostPort, "/?#@ \t\r\n") || !validDragonflyEndpointHostPort(hostPort) {
 		return nil
 	}
 	return []string{
 		"--s3_endpoint=" + hostPort,
 		"--s3_use_https=" + strconv.FormatBool(useHTTPS),
 	}
+}
+
+// validDragonflyEndpointHostPort reports whether hostPort is a host (a
+// name, an IPv4 address, or an IPv6 address in brackets) with an optional
+// port from 1 to 65535: no empty or non-numeric port.
+func validDragonflyEndpointHostPort(hostPort string) bool {
+	host, port := hostPort, ""
+	if strings.HasPrefix(hostPort, "[") {
+		end := strings.Index(hostPort, "]")
+		if end < 0 {
+			return false
+		}
+		host, port = hostPort[:end+1], hostPort[end+1:]
+		if port != "" && !strings.HasPrefix(port, ":") {
+			return false
+		}
+		port = strings.TrimPrefix(port, ":")
+		if len(host) <= 2 || port == "" && strings.HasSuffix(hostPort, ":") {
+			return false
+		}
+	} else if i := strings.IndexByte(hostPort, ':'); i >= 0 {
+		host, port = hostPort[:i], hostPort[i+1:]
+		if port == "" {
+			return false
+		}
+	}
+	if host == "" || strings.ContainsAny(strings.Trim(host, "[]"), "[]") {
+		return false
+	}
+	if port == "" {
+		return true
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535 && strconv.Itoa(n) == port
 }
 
 func dragonflyServiceAccountName(spec *v1alpha1.DragonflySpec) string {

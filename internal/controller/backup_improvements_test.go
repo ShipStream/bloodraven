@@ -240,9 +240,11 @@ func failedBackup(name, fgName, profile string, completed metav1.Time) v1alpha1.
 func TestPruneRetention_KeepIfAny(t *testing.T) {
 	h, d := time.Hour, 24*time.Hour
 	ages := func(n int, step time.Duration) []time.Duration {
+		// Starts one step back: a backup that completed within
+		// terminalRetentionGrace is kept whatever the counts say.
 		out := make([]time.Duration, n)
 		for i := range out {
-			out[i] = time.Duration(i) * step
+			out[i] = time.Duration(i+1) * step
 		}
 		return out
 	}
@@ -301,7 +303,7 @@ func TestPruneRetention_KeepIfAny(t *testing.T) {
 			r, _ := newBackupReconciler(t, objs...)
 			trigger := v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: "trigger", Namespace: "ns"},
 				Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: profile}}
-			if err := r.pruneRetention(context.Background(), &trigger); err != nil {
+			if _, err := r.pruneRetention(context.Background(), &trigger); err != nil {
 				t.Fatalf("pruneRetention: %v", err)
 			}
 			// Both buckets are named in age order, newest first.
@@ -350,7 +352,7 @@ func TestPruneRetention_WorksForUnlabelledAdHocBackups(t *testing.T) {
 	r, _ := newBackupReconciler(t, fg, b1, b2, b3)
 
 	trigger := *b1
-	if err := r.pruneRetention(context.Background(), &trigger); err != nil {
+	if _, err := r.pruneRetention(context.Background(), &trigger); err != nil {
 		t.Fatalf("pruneRetention: %v", err)
 	}
 	assertEqualSet(t, listBackupNames(t, r), []string{"adhoc-1", "adhoc-2"})
@@ -957,6 +959,10 @@ func TestPruneRetention_KeepsScheduleLatestFailed(t *testing.T) {
 	now := time.Now()
 	fg := fgWithBackup()
 	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))}
+	fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{
+		{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"},
+		{Name: "hourly", ProfileName: "nightly-s3", Schedule: "0 * * * *"},
+	}
 	scheduled := func(b v1alpha1.MysqlBackup, sched string, created time.Duration) *v1alpha1.MysqlBackup {
 		b.Labels[v1alpha1.BackupScheduleLabel] = sched
 		b.CreationTimestamp = metav1.NewTime(now.Add(-created).Truncate(time.Second))
@@ -972,13 +978,58 @@ func TestPruneRetention_KeepsScheduleLatestFailed(t *testing.T) {
 		scheduled(failedBackup("hourly-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-50*time.Minute))), "hourly", time.Hour),
 		scheduled(succeededBackup("hourly-retry", "ns", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-10*time.Minute))), "hourly", 30*time.Minute),
 	}
-	adhoc := failedBackup("adhoc-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-time.Minute)))
-	objs = append(objs, &adhoc)
+	adhoc := failedBackup("adhoc-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-time.Hour)))
+	// N-09: the latest backup of a schedule the group no longer names has
+	// no retry and no rollup entry, so it is pruned like any other.
+	retired := scheduled(failedBackup("retired-latest-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-2*time.Hour))), "weekly", 3*time.Hour)
+	objs = append(objs, &adhoc, retired)
 	r, _ := newBackupReconciler(t, objs...)
 	trigger := v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: "trigger", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3"}}
-	if err := r.pruneRetention(context.Background(), &trigger); err != nil {
+	if _, err := r.pruneRetention(context.Background(), &trigger); err != nil {
 		t.Fatalf("pruneRetention: %v", err)
 	}
 	assertEqualSet(t, listBackupNames(t, r), []string{"nightly-ok", "nightly-latest-failed", "hourly-retry"})
+}
+
+// N-08: keep-none (keepFailed: 0) must not delete a backup in its own
+// terminal pass, before `kubectl bloodraven backup --wait` reads the
+// verdict. A Failed backup is kept for terminalRetentionGrace after it
+// completed; the pass asks to be requeued when the grace ends, and the
+// pass after it prunes the backup.
+func TestPruneRetention_KeepNoneWaitsOutTerminalGrace(t *testing.T) {
+	now := time.Now()
+	fg := fgWithBackup()
+	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))}
+	justFailed := failedBackup("adhoc-just-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-10*time.Second)))
+	oldFailed := failedBackup("adhoc-old-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-time.Hour)))
+	r, c := newBackupReconciler(t, fg, &justFailed, &oldFailed)
+
+	requeue, err := r.pruneRetention(context.Background(), &justFailed)
+	if err != nil {
+		t.Fatalf("pruneRetention: %v", err)
+	}
+	assertEqualSet(t, listBackupNames(t, r), []string{"adhoc-just-failed"})
+	if requeue <= 0 || requeue > terminalRetentionGrace {
+		t.Fatalf("requeue = %s, want the rest of the %s grace", requeue, terminalRetentionGrace)
+	}
+
+	// The grace has ended: the requeued pass prunes it.
+	var b v1alpha1.MysqlBackup
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(&justFailed), &b); err != nil {
+		t.Fatal(err)
+	}
+	ended := metav1.NewTime(now.Add(-terminalRetentionGrace - time.Second))
+	b.Status.CompletionTime = &ended
+	if err := c.Status().Update(context.Background(), &b); err != nil {
+		t.Fatal(err)
+	}
+	requeue, err = r.pruneRetention(context.Background(), &b)
+	if err != nil {
+		t.Fatalf("pruneRetention: %v", err)
+	}
+	assertEqualSet(t, listBackupNames(t, r), nil)
+	if requeue != 0 {
+		t.Fatalf("requeue = %s after the grace, want 0", requeue)
+	}
 }

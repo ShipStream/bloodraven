@@ -566,15 +566,16 @@ func TestVerificationRetention(t *testing.T) {
 			v.Status.CompletionTime = &ct
 			objs = append(objs, v)
 		}
+		// Every run completed before terminalRetentionGrace.
 		for i := 0; i < 3; i++ {
-			mk(fmt.Sprintf("ok-%02d", i), v1alpha1.VerificationPhaseSucceeded, time.Duration(i)*time.Hour)
+			mk(fmt.Sprintf("ok-%02d", i), v1alpha1.VerificationPhaseSucceeded, time.Duration(i+1)*time.Hour)
 		}
 		for i := 0; i < 12; i++ {
-			mk(fmt.Sprintf("bad-%02d", i), v1alpha1.VerificationPhaseFailed, time.Duration(i)*time.Hour)
+			mk(fmt.Sprintf("bad-%02d", i), v1alpha1.VerificationPhaseFailed, time.Duration(i+1)*time.Hour)
 		}
 		mk("running", v1alpha1.VerificationPhaseRestoring, 0)
 		r, c := newVerificationReconciler(t, objs...)
-		if err := r.pruneRetention(context.Background(), verifyCR("trigger", fg.Name, "nightly-s3")); err != nil {
+		if _, err := r.pruneRetention(context.Background(), verifyCR("trigger", fg.Name, "nightly-s3")); err != nil {
 			t.Fatal(err)
 		}
 		var list v1alpha1.MysqlBackupVerificationList
@@ -593,6 +594,45 @@ func TestVerificationRetention(t *testing.T) {
 		sort.Strings(want)
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Fatalf("kept %v, want %v", got, want)
+		}
+	})
+
+	// N-08: keep-none must not delete a verification in its own terminal
+	// pass, before `kubectl bloodraven verify --wait` reads the verdict.
+	t.Run("keep none waits out the terminal grace", func(t *testing.T) {
+		fg := verifyFG()
+		fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{
+			Retention: v1alpha1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))},
+		}
+		mk := func(name string, phase v1alpha1.VerificationPhase, age time.Duration) *v1alpha1.MysqlBackupVerification {
+			v := verifyCR(name, fg.Name, "nightly-s3")
+			v.Status.Phase = phase
+			ct := metav1.NewTime(time.Now().Add(-age))
+			v.Status.CompletionTime = &ct
+			return v
+		}
+		justOK := mk("just-ok", v1alpha1.VerificationPhaseSucceeded, 5*time.Second)
+		justBad := mk("just-bad", v1alpha1.VerificationPhaseFailed, 30*time.Second)
+		oldOK := mk("old-ok", v1alpha1.VerificationPhaseSucceeded, time.Hour)
+		r, c := newVerificationReconciler(t, fg, justOK, justBad, oldOK)
+		requeue, err := r.pruneRetention(context.Background(), justOK)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list v1alpha1.MysqlBackupVerificationList
+		if err := c.List(context.Background(), &list, client.InNamespace("ns")); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, it := range list.Items {
+			got = append(got, it.Name)
+		}
+		sort.Strings(got)
+		if strings.Join(got, ",") != "just-bad,just-ok" {
+			t.Fatalf("kept %v, want the two inside the grace", got)
+		}
+		if limit := terminalRetentionGrace - 30*time.Second; requeue <= 0 || requeue > limit+time.Second {
+			t.Fatalf("requeue = %s, want the earliest grace end (about %s)", requeue, limit)
 		}
 	})
 }

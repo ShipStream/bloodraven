@@ -148,9 +148,11 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return ctrl.Result{}, err
 			}
 		}
-		if err := r.pruneRetention(ctx, &backup); err != nil {
+		requeue, err := r.pruneRetention(ctx, &backup)
+		if err != nil {
 			logger.Error(err, "retention prune")
 		}
+		recovery.RequeueAfter = shorterRequeue(recovery.RequeueAfter, requeue)
 		return recovery, nil
 	}
 
@@ -448,9 +450,11 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Exactly-once short-circuit.
 	if backup.Status.Phase == phase && equality.Semantic.DeepEqual(&backup.Status, &next) {
 		// Nothing to do — still run retention once though.
-		if err := r.pruneRetention(ctx, &backup); err != nil {
+		requeue, err := r.pruneRetention(ctx, &backup)
+		if err != nil {
 			logger.Error(err, "retention prune after terminal state")
 		}
+		metadataResult.RequeueAfter = shorterRequeue(metadataResult.RequeueAfter, requeue)
 		return metadataResult, nil
 	}
 
@@ -477,9 +481,11 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			"backup %s failed: %s", backup.Name, message)
 	}
 
-	if err := r.pruneRetention(ctx, &backup); err != nil {
+	requeue, err := r.pruneRetention(ctx, &backup)
+	if err != nil {
 		logger.Error(err, "retention prune after terminal state")
 	}
+	metadataResult.RequeueAfter = shorterRequeue(metadataResult.RequeueAfter, requeue)
 
 	return metadataResult, nil
 }
@@ -1784,14 +1790,38 @@ func (r *MysqlBackupReconciler) maybeWarnInFlightFailover(backup *v1alpha1.Mysql
 // selector so the sweep works for ad-hoc CRs that may not carry the
 // canonical labels. Successes go through the keep-if-any rules of the
 // profile's retention; failures go through a count cap.
-func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1alpha1.MysqlBackup) error {
+//
+// It returns how soon to look again when a Failed backup was kept only for
+// terminalRetentionGrace, or 0.
+func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1alpha1.MysqlBackup) (time.Duration, error) {
 	var list v1alpha1.MysqlBackupList
 	if err := r.List(ctx, &list, client.InNamespace(trigger.Namespace)); err != nil {
-		return err
+		return 0, err
 	}
 
-	// Computed before the in-place filter below reuses list.Items.
-	scheduleLatest := latestScheduledBackups(list.Items, trigger.Spec.FailoverGroupRef.Name)
+	// Resolve the effective policy from the (possibly nil) profile.
+	var profile *v1alpha1.BackupProfile
+	var fg v1alpha1.MysqlFailoverGroup
+	groupRead := false
+	if err := r.Get(ctx, types.NamespacedName{Namespace: trigger.Namespace, Name: trigger.Spec.FailoverGroupRef.Name}, &fg); err == nil {
+		groupRead = true
+		profile = findProfile(&fg, trigger.Spec.ProfileName)
+	}
+	policy := resolveRetention(profile)
+
+	// Computed before the in-place filter below reuses list.Items. Only a
+	// schedule the group still names keeps its latest backup; when the
+	// group cannot be read, every schedule label does.
+	var schedules map[string]bool
+	if groupRead {
+		schedules = map[string]bool{}
+		if fg.Spec.Backup != nil {
+			for _, sched := range fg.Spec.Backup.Schedules {
+				schedules[sched.Name] = true
+			}
+		}
+	}
+	scheduleLatest := latestScheduledBackups(list.Items, trigger.Spec.FailoverGroupRef.Name, schedules)
 
 	filtered := list.Items[:0]
 	for _, b := range list.Items {
@@ -1807,32 +1837,29 @@ func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1a
 		filtered = append(filtered, b)
 	}
 
-	// Resolve the effective policy from the (possibly nil) profile.
-	var profile *v1alpha1.BackupProfile
-	var fg v1alpha1.MysqlFailoverGroup
-	if err := r.Get(ctx, types.NamespacedName{Namespace: trigger.Namespace, Name: trigger.Spec.FailoverGroupRef.Name}, &fg); err == nil {
-		profile = findProfile(&fg, trigger.Spec.ProfileName)
-	}
-	policy := resolveRetention(profile)
-
 	if policy.pruneSucceeded {
 		if err := r.pruneSuccessful(ctx, filtered, policy.keepLast, policy.keepWithin); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return r.pruneFailed(ctx, filtered, int(policy.keepFailed), scheduleLatest)
+	return r.pruneFailed(ctx, filtered, int(policy.keepFailed), scheduleLatest, time.Now())
 }
 
 // latestScheduledBackups returns the names of the backups that are their
 // schedule's latest (the rollup's status.backupSchedules[].lastBackupName,
 // by the same order, startAfter) among items of group, ignoring those
-// being deleted.
-func latestScheduledBackups(items []v1alpha1.MysqlBackup, group string) map[string]bool {
+// being deleted. A non-nil schedules limits it to the schedules it names:
+// a removed or renamed schedule has no retry and no rollup entry, so its
+// last backup is pruned like any other.
+func latestScheduledBackups(items []v1alpha1.MysqlBackup, group string, schedules map[string]bool) map[string]bool {
 	latest := map[string]*v1alpha1.MysqlBackup{}
 	for i := range items {
 		b := &items[i]
 		sched := b.Labels[v1alpha1.BackupScheduleLabel]
 		if sched == "" || b.Spec.FailoverGroupRef.Name != group || !b.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if schedules != nil && !schedules[sched] {
 			continue
 		}
 		if cur, ok := latest[sched]; !ok || startAfter(b, cur) {
@@ -1944,7 +1971,11 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 // retries the schedule's latest backup when it failed), and the schedule
 // status reports it (lastBackupPhase Failed); deleting it would cancel the
 // retry and show the previous success instead.
-func (r *MysqlBackupReconciler) pruneFailed(ctx context.Context, all []v1alpha1.MysqlBackup, keep int, scheduleLatest map[string]bool) error {
+//
+// A Failed backup that completed less than terminalRetentionGrace ago is
+// kept too, and the returned duration says when the first such grace
+// ends.
+func (r *MysqlBackupReconciler) pruneFailed(ctx context.Context, all []v1alpha1.MysqlBackup, keep int, scheduleLatest map[string]bool, now time.Time) (time.Duration, error) {
 	keep = max(keep, 0)
 	bucket := make([]v1alpha1.MysqlBackup, 0, len(all))
 	for _, b := range all {
@@ -1953,23 +1984,49 @@ func (r *MysqlBackupReconciler) pruneFailed(ctx context.Context, all []v1alpha1.
 		}
 	}
 	if len(bucket) <= keep {
-		return nil
+		return 0, nil
 	}
 	sort.Slice(bucket, func(i, j int) bool {
 		ti := timeOrZero(bucket[i].Status.CompletionTime)
 		tj := timeOrZero(bucket[j].Status.CompletionTime)
 		return ti.After(tj)
 	})
+	var requeue time.Duration
 	for i := keep; i < len(bucket); i++ {
 		victim := bucket[i]
 		if scheduleLatest[victim.Name] {
 			continue
 		}
+		if grace := terminalRetentionGraceLeft(victim.Status.CompletionTime, now); grace > 0 {
+			requeue = shorterRequeue(requeue, grace)
+			continue
+		}
 		if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete old %s backup %s: %w", v1alpha1.BackupPhaseFailed, victim.Name, err)
+			return 0, fmt.Errorf("delete old %s backup %s: %w", v1alpha1.BackupPhaseFailed, victim.Name, err)
 		}
 	}
-	return nil
+	return requeue, nil
+}
+
+// terminalRetentionGrace is how long a terminal backup or verification is
+// kept after it completes whatever the retention counts say. With a
+// keep-none rule (keepFailed: 0, verification keepLast: 0) the object would
+// otherwise be deleted in its own terminal pass, before `kubectl bloodraven
+// backup --wait` or `verify --wait` (which poll every 5 seconds) or anyone
+// else reads the verdict.
+const terminalRetentionGrace = 2 * time.Minute
+
+// terminalRetentionGraceLeft is how much of terminalRetentionGrace is left
+// for an object that completed at completion, or 0. An object without a
+// completion time has none.
+func terminalRetentionGraceLeft(completion *metav1.Time, now time.Time) time.Duration {
+	if completion == nil {
+		return 0
+	}
+	if left := completion.Add(terminalRetentionGrace).Sub(now); left > 0 {
+		return left
+	}
+	return 0
 }
 
 func timeOrZero(t *metav1.Time) time.Time {

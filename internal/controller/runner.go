@@ -978,8 +978,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// unreachable; fail the start instead, so the group gets a
 	// TopologyManagerStartFailed Warning naming the Secret.
 	for _, key := range []string{"username", "password"} {
-		if _, ok := secret.Data[key]; !ok {
+		v, ok := secret.Data[key]
+		if !ok {
 			return fmt.Errorf("operator secret %s missing %q key", secretNN, key)
+		}
+		if len(v) == 0 {
+			return fmt.Errorf("operator secret %s has an empty value for key %q", secretNN, key)
 		}
 	}
 
@@ -1106,6 +1110,13 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}
 
 	r.restoreFailoverState(tm, fg, nn)
+	if prev != nil && tm.carryLostStatusWait(prev.tm) {
+		tm.mu.RLock()
+		target := tm.lastFailoverTarget
+		tm.mu.RUnlock()
+		r.logger.Warn("status names no active site but the group has failover history; automatic promotion waits until a writable primary is observed",
+			"fg", nn.String(), "lastFailoverTarget", target)
+	}
 	r.restorePlannedFailoverState(tm, plannedView, nn)
 	if plannedView == nil && prev != nil {
 		// The uncached read failed, so nothing re-derived the planned
@@ -1406,10 +1417,12 @@ func (tm *TopologyManager) restoreFailoverRecordFrom(fg *v1alpha1.MysqlFailoverG
 		tm.groupHasData = true
 	}
 	// A status that names no authority (no active site, generation 0)
-	// beside a failover record of the group's history was lost, not
-	// fresh: until this process has observed a unique writable primary
-	// it knows of no primary to fail away from, so it promotes nothing.
-	lostStatus := fg.Status.ActiveSite == "" && fg.Status.TopologyGeneration == 0 && !failoverRecord.IsZero()
+	// beside any copy of a failover record, usable or rejected, was lost,
+	// not fresh: until this process has observed a unique writable primary
+	// it knows of no primary to fail away from, so it makes no site
+	// writable and publishes no authority (awaitingObservedPrimary).
+	lostStatus := fg.Status.ActiveSite == "" && fg.Status.TopologyGeneration == 0 &&
+		(!failoverRecord.IsZero() || failoverHistoryRecorded(fg))
 	if fromAnnotations && !failoverRecord.sameEvent(statusRecord) && !lostStatus {
 		// A promotion survived in annotations but its generation did not reach
 		// /status. Invalidate old leases even if authority returned to the same site.
@@ -1424,12 +1437,43 @@ func (tm *TopologyManager) restoreFailoverRecordFrom(fg *v1alpha1.MysqlFailoverG
 		tm.deploymentActiveSite = failoverRecord.LastFailoverTarget
 	}
 	if lostStatus {
-		tm.mu.Lock()
-		tm.awaitingObservedPrimary = true
-		tm.mu.Unlock()
+		tm.armLostStatusWait()
 		logger.Warn("status names no active site but the group has failover history; automatic promotion waits until a writable primary is observed",
 			"fg", nn.String(), "lastFailoverTarget", failoverRecord.LastFailoverTarget)
 	}
+}
+
+// armLostStatusWait sets the lost-status wait (awaitingObservedPrimary).
+// Only before the manager runs: the wait is never re-armed on a running
+// manager, so its holders may check it before an unlocked action.
+func (tm *TopologyManager) armLostStatusWait() {
+	tm.mu.Lock()
+	tm.awaitingObservedPrimary = true
+	tm.mu.Unlock()
+}
+
+// carryLostStatusWait arms the lost-status wait on tm, a replacement not yet
+// running, when old, the manager it replaces in this process, still waits.
+// The replacement re-arms on its own from a status that keeps the lost shape;
+// this covers a replacement built from a cached object that has not caught up
+// with it. It reports whether it carried the wait.
+func (tm *TopologyManager) carryLostStatusWait(old *TopologyManager) bool {
+	if tm == nil || old == nil || tm == old {
+		return false
+	}
+	old.mu.RLock()
+	waiting := old.awaitingObservedPrimary
+	old.mu.RUnlock()
+	if !waiting {
+		return false
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.awaitingObservedPrimary {
+		return false
+	}
+	tm.awaitingObservedPrimary = true
+	return true
 }
 
 // stopAll cancels all running topology managers.
@@ -1860,6 +1904,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		degradedStatus, degradedMessage = metav1.ConditionUnknown, readyMessage
 	case v1alpha1.ReasonBootstrapFailed:
 		degradedMessage = bootstrapFailedMessage(snap, &freshFG)
+	case v1alpha1.ReasonAwaitingPrimaryObservation:
+		degradedMessage = awaitingPrimaryObservationMessage(snap)
+		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, v1alpha1.ReasonAwaitingPrimaryObservation, degradedMessage
 	}
 	// A group whose initFromBackup restore has not succeeded is not ready
 	// for applications whatever its topology: the operator keeps them off
@@ -2782,24 +2829,47 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 
 // degradedReason returns the Degraded condition reason for a topology
 // snapshot: the topology verdict (topologyDegradedReason), or
-// BootstrapFailed when the last clone failed and its target does not
-// replicate yet. BootstrapFailed ranks below the cross-site alerts and above
-// SiteUnhealthy; Initializing is no verdict and keeps its Unknown.
+// BootstrapFailed when the last clone failed and its target has not
+// replicated since, or AwaitingPrimaryObservation while the lost-status
+// wait stands. The wait outranks every verdict but SplitBrain and
+// TotalLoss (more urgent, with their own Events): it is what decides that
+// the operator will not promote. BootstrapFailed ranks below the cross-site
+// alerts and above SiteUnhealthy. Initializing is no verdict and keeps its
+// Unknown.
 func degradedReason(snap TopologySnapshot) string {
 	reason := topologyDegradedReason(snap)
+	if snap.AwaitingObservedPrimary && reason != v1alpha1.ReasonSplitBrain && reason != v1alpha1.ReasonTotalLoss &&
+		reason != v1alpha1.ReasonInitializing {
+		return v1alpha1.ReasonAwaitingPrimaryObservation
+	}
 	if (reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonSiteUnhealthy) && bootstrapFailureStands(snap) {
 		return v1alpha1.ReasonBootstrapFailed
 	}
 	return reason
 }
 
+// awaitingPrimaryObservationMessage is the Degraded and Ready message while
+// the lost-status wait stands.
+func awaitingPrimaryObservationMessage(snap TopologySnapshot) string {
+	msg := "status.activeSite was empty with failover history recorded (the status was lost), and no unique writable " +
+		"PrimaryCandidate has been observed since: the operator makes no site writable, publishes no active site " +
+		"(no DNS update, no primary label) and refuses deployment leases until one is observed. If no site is " +
+		"writable, make the right primary writable by hand"
+	if snap.Alert != "" {
+		msg += "; " + snap.Alert
+	}
+	return msg
+}
+
 // bootstrapFailureStands reports whether the snapshot's failed bootstrap
-// still needs attention: the phase is Failed and its target neither
-// replicates (Healthy or Lagging) nor is the writable primary. A failure
+// still needs attention: the phase is Failed and its target has neither
+// replicated (Healthy or Lagging) nor been the writable primary since the
+// failure (BootstrapFailureResolved latches the first time it did, so a
+// later unrelated blip does not bring the old clone error back). A failure
 // before a target was chosen stands until the next bootstrap starts. A
 // target no longer configured has nothing left to report.
 func bootstrapFailureStands(snap TopologySnapshot) bool {
-	if BootstrapPhase(snap.BootstrapPhase) != BootstrapPhaseFailed {
+	if BootstrapPhase(snap.BootstrapPhase) != BootstrapPhaseFailed || snap.BootstrapFailureResolved {
 		return false
 	}
 	if snap.BootstrapTarget == "" {

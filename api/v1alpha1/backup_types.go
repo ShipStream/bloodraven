@@ -467,7 +467,9 @@ type BackupRetention struct {
 	KeepWithinDays *int32 `json:"keepWithinDays,omitempty"`
 
 	// KeepFailed is how many of the newest failed backups are kept; 0
-	// keeps none. A failed backup that is still its schedule's latest is
+	// keeps none. A failed backup is kept for two minutes after it
+	// completes, so a waiting client reads its verdict. A failed backup
+	// that is still the latest of a schedule in spec.backup.schedules is
 	// kept until a newer backup of that schedule exists, whatever this
 	// says: spec.backup.retry retries it, and status.backupSchedules
 	// reports it.

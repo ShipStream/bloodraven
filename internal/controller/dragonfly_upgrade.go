@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -140,17 +141,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 	if why != "" {
 		return r.abandonDragonflyUpgrade(ctx, fg, cur, why, mysqlActive)
 	}
-	// A site whose StatefulSet became refused after the run was admitted
-	// (replaced by hand, or by another release) ends the run before any
-	// step saves, restarts or updates it. Holding the run instead would
-	// keep the reconcile from re-creating the StatefulSet once it is
-	// deleted, which is the refusal's only remedy.
-	_, refused, err := dragonflyLiveImages(ctx, r.uncachedReader(), fg)
-	if err != nil {
-		return dragonflyUpgradeStep{}, err
-	}
-	if why := r.noteDragonflySelectorRefusals(fg, refused); why != "" {
-		return r.failDragonflyUpgrade(ctx, fg, cur, v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch, why)
+	if step, done, err := r.checkDragonflyUpgradeWorkloads(ctx, fg, cur); done || err != nil {
+		return step, err
 	}
 
 	switch cur.Phase {
@@ -211,31 +203,140 @@ func dragonflySpecDigest(spec *v1alpha1.DragonflySpec) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// dragonflyLiveImages returns each spec site's live Dragonfly image, read
-// from its StatefulSet's pod template. A site whose StatefulSet does not
-// exist, or has no Dragonfly container, is absent: its image is unknown.
-// It also returns the StatefulSets whose immutable selector differs from
-// the rendered one (workload_selector.go), which an upgrade must not touch.
-func dragonflyLiveImages(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (map[string]string, []*workloadSelectorMismatchError, error) {
-	out := make(map[string]string, len(fg.Spec.Sites))
-	var refused []*workloadSelectorMismatchError
+// dragonflyLiveWorkloads is what dragonflyLiveImages read.
+type dragonflyLiveWorkloads struct {
+	// images is each site's live Dragonfly image. A site whose StatefulSet
+	// does not exist, or has no Dragonfly container, is absent: its image
+	// is unknown.
+	images map[string]string
+	// refused are the StatefulSets whose immutable selector differs from
+	// the rendered one (workload_selector.go), which an upgrade must not
+	// touch.
+	refused []*workloadSelectorMismatchError
+	// missing are the spec sites whose StatefulSet does not exist.
+	missing []string
+}
+
+// dragonflyLiveImages reads each spec site's Dragonfly StatefulSet: its
+// live image (from the pod template), whether it is refused for its
+// selector, and whether it exists.
+func dragonflyLiveImages(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (dragonflyLiveWorkloads, error) {
+	out := dragonflyLiveWorkloads{images: make(map[string]string, len(fg.Spec.Sites))}
 	for _, site := range fg.Spec.Sites {
 		var sts appsv1.StatefulSet
 		key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
 		if err := reader.Get(ctx, key, &sts); err != nil {
 			if apierrors.IsNotFound(err) {
+				out.missing = append(out.missing, site.Name)
 				continue
 			}
-			return nil, nil, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
+			return dragonflyLiveWorkloads{}, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
 		}
 		if mismatch := statefulSetSelectorMismatch(&sts, fg, site.Name); mismatch != nil {
-			refused = append(refused, mismatch)
+			out.refused = append(out.refused, mismatch)
 		}
 		if img := dragonflyTemplateImage(&sts); img != "" {
-			out[site.Name] = img
+			out.images[site.Name] = img
 		}
 	}
-	return out, refused, nil
+	return out, nil
+}
+
+// checkDragonflyUpgradeWorkloads checks, uncached, the StatefulSets of an
+// admitted run before its next step. done reports that it ended the run
+// or used the pass, and step is then the pass's result.
+//
+// A refused StatefulSet (replaced by hand, or by another release) ends the
+// run before a step saves, restarts or updates it. Holding the run instead
+// would keep the reconcile from re-creating the StatefulSet once it is
+// deleted, which is the refusal's only remedy. Once the active site's
+// image has moved (UpdatingActive after the image update, and
+// WaitingForActiveRestore), only the active's own refusal ends the run: the
+// active may still be loading its snapshot, and ending the run gives its
+// traffic back. A refused replica is recorded and ends the run at
+// ReattachingReplicas, the step that touches it, once the active has
+// restored.
+//
+// A deleted StatefulSet must not wedge the run either: the run holds the
+// reconcile before the render that would re-create it. Where the run's own
+// step would leave the site on the target image anyway, the run re-creates
+// it on the target image and continues: a replica in any phase, which
+// ReattachingReplicas moves and re-attaches, and the active once the
+// snapshot is saved and before it is restored (UpdatingActive,
+// WaitingForActiveRestore), where the new pod restores from the snapshot
+// as the restarted one would. An active deleted before its snapshot was
+// saved (Pending, SavingSnapshot) or after it restored (ReattachingReplicas)
+// lost the data the run moves, so the run ends with ActiveWorkloadDeleted
+// and the ordinary render and the Dragonfly manager take the site over, as
+// they would without a run.
+func (r *MysqlFailoverGroupReconciler) checkDragonflyUpgradeWorkloads(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus) (dragonflyUpgradeStep, bool, error) {
+	live, err := dragonflyLiveImages(ctx, r.uncachedReader(), fg)
+	if err != nil {
+		return dragonflyUpgradeStep{}, true, err
+	}
+	activeMoved := cur.Phase == v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore ||
+		(cur.Phase == v1alpha1.DragonflyUpgradePhaseUpdatingActive && live.images[cur.ActiveSite] == cur.TargetImage)
+	blocking := live.refused
+	if activeMoved {
+		blocking = nil
+		for _, m := range live.refused {
+			if m.site == cur.ActiveSite {
+				blocking = append(blocking, m)
+			} else {
+				r.noteWorkloadSelector(fg, m.kind, m.name, m)
+			}
+		}
+	}
+	if why := r.noteDragonflySelectorRefusals(fg, blocking); why != "" {
+		step, err := r.failDragonflyUpgrade(ctx, fg, cur, v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch, why)
+		return step, true, err
+	}
+	if len(live.missing) == 0 {
+		return dragonflyUpgradeStep{}, false, nil
+	}
+	for _, site := range live.missing {
+		if site != cur.ActiveSite {
+			continue
+		}
+		switch cur.Phase {
+		case v1alpha1.DragonflyUpgradePhaseUpdatingActive, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore:
+		default:
+			step, err := r.failDragonflyUpgrade(ctx, fg, cur, v1alpha1.DragonflyUpgradeReasonActiveWorkloadDeleted,
+				fmt.Sprintf("StatefulSet %s of the active site %s was deleted during %s; the run ends and the operator re-creates it",
+					dragonflyStatefulSetName(fg.Name, site), site, cur.Phase))
+			return step, true, err
+		}
+	}
+	for _, site := range fg.Spec.Sites {
+		if !slices.Contains(live.missing, site.Name) {
+			continue
+		}
+		if err := r.recreateDragonflyStatefulSetForUpgrade(ctx, fg, site, cur.TargetImage); err != nil {
+			return dragonflyUpgradeStep{}, true, err
+		}
+		log.FromContext(ctx).Info("dragonfly snapshot-upgrade re-created a deleted StatefulSet",
+			"fg", fg.Namespace+"/"+fg.Name, "site", site.Name, "phase", string(cur.Phase), "image", cur.TargetImage)
+	}
+	msg := fmt.Sprintf("re-created the deleted Dragonfly StatefulSet of site %s on %q", strings.Join(live.missing, ", "), cur.TargetImage)
+	return dragonflyUpgradeStep{hold: dragonflyUpgradePollInterval}, true, r.updateDragonflyUpgradeMessage(ctx, fg, cur, msg)
+}
+
+// recreateDragonflyStatefulSetForUpgrade creates site's StatefulSet as the
+// render would, on image.
+func (r *MysqlFailoverGroupReconciler) recreateDragonflyStatefulSetForUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, image string) error {
+	sts, err := r.desiredDragonflyStatefulSet(fg, site, nil)
+	if err != nil {
+		return err
+	}
+	for i := range sts.Spec.Template.Spec.Containers {
+		if sts.Spec.Template.Spec.Containers[i].Name == dragonflyContainerName {
+			sts.Spec.Template.Spec.Containers[i].Image = image
+		}
+	}
+	if err := r.Create(ctx, sts); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("re-create dragonfly statefulset %s: %w", sts.Name, err)
+	}
+	return nil
 }
 
 // noteDragonflySelectorRefusals records refused StatefulSets as group
@@ -285,10 +386,11 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeDecide(ctx context.Contex
 		// from a SnapshotRestore run needs a look (its removal below).
 		return dragonflyUpgradeDecision{}, nil
 	}
-	live, refused, err := dragonflyLiveImages(ctx, reader, fg)
+	workloads, err := dragonflyLiveImages(ctx, reader, fg)
 	if err != nil {
 		return dragonflyUpgradeDecision{}, err
 	}
+	live, refused := workloads.images, workloads.refused
 	target := spec.Image
 	drifted := ""
 	for _, site := range fg.Spec.Sites {

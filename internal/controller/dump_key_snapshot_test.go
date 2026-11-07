@@ -438,7 +438,7 @@ func TestRetentionPrunedEncryptedBackupReleasesDumpKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.r.pruneRetention(ctx, newer); err != nil {
+	if _, err := f.r.pruneRetention(ctx, newer); err != nil {
 		t.Fatalf("pruneRetention: %v", err)
 	}
 	if got := getBackup(t, f.c, f.mb); got.DeletionTimestamp.IsZero() {

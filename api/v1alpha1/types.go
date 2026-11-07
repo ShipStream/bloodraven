@@ -629,7 +629,9 @@ type CredentialsSpec struct {
 	// OperatorSecretName names the Secret for operator and sidecar connections.
 	// Required keys: username, password, MYSQL_ROOT_PASSWORD.
 	// Optional keys: MYSQL_REPLICATION_USER, MYSQL_REPLICATION_PASSWORD
-	// (default to operator username/password if omitted).
+	// (default to operator username/password if omitted). A dedicated
+	// replication account is created on first boot with replication and
+	// clone grants.
 	// Grants: ALL PRIVILEGES WITH GRANT OPTION.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253

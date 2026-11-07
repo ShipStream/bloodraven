@@ -743,7 +743,9 @@ spec:
                               default: 10
                               description: |-
                                 KeepFailed is how many of the newest failed backups are kept; 0
-                                keeps none. A failed backup that is still its schedule's latest is
+                                keeps none. A failed backup is kept for two minutes after it
+                                completes, so a waiting client reads its verdict. A failed backup
+                                that is still the latest of a schedule in spec.backup.schedules is
                                 kept until a newer backup of that schedule exists, whatever this
                                 says: spec.backup.retry retries it, and status.backupSchedules
                                 reports it.
@@ -1545,7 +1547,9 @@ spec:
                       OperatorSecretName names the Secret for operator and sidecar connections.
                       Required keys: username, password, MYSQL_ROOT_PASSWORD.
                       Optional keys: MYSQL_REPLICATION_USER, MYSQL_REPLICATION_PASSWORD
-                      (default to operator username/password if omitted).
+                      (default to operator username/password if omitted). A dedicated
+                      replication account is created on first boot with replication and
+                      clone grants.
                       Grants: ALL PRIVILEGES WITH GRANT OPTION.
                     maxLength: 253
                     minLength: 1
@@ -2234,13 +2238,14 @@ spec:
                         description: |-
                           S3EndpointURL overrides the S3 endpoint for S3-compatible services
                           such as RustFS or MinIO, in the URL form backup storage uses: an
-                          absolute http:// or https:// URL with a host and optional port, and
-                          no path, credentials, query or fragment. The operator passes the
-                          host and port to Dragonfly as --s3_endpoint and the scheme as
-                          --s3_use_https (false for http://, true for https://). Omit it, or
-                          leave it empty, for AWS S3 with Dragonfly's defaults.
+                          absolute http:// or https:// URL with a host (a name, an IPv4
+                          address, or an IPv6 address in brackets) and an optional port from 1
+                          to 65535, and no path, credentials, query or fragment. The operator
+                          passes the host and port to Dragonfly as --s3_endpoint and the
+                          scheme as --s3_use_https (false for http://, true for https://).
+                          Omit it, or leave it empty, for AWS S3 with Dragonfly's defaults.
                         maxLength: 512
-                        pattern: ^(https?://[^\s/?#@]+/?)?$
+                        pattern: ^(https?://(\[[0-9A-Fa-f:.]+\]|[^\s/?#@:\[\]]+)(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?/?)?$
                         type: string
                         x-kubernetes-validations:
                         - message: s3EndpointURL must be at most 512 bytes (UTF-8)

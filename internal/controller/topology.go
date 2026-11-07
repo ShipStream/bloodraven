@@ -201,6 +201,17 @@ type TopologySnapshot struct {
 	// "" when it failed before choosing one. Set only while BootstrapPhase
 	// is Failed.
 	BootstrapTarget string
+	// BootstrapFailureResolved is set once the failed bootstrap's target
+	// has been seen replicating (Healthy or Lagging) or writable since the
+	// failure. The failure then no longer stands (Degraded leaves
+	// BootstrapFailed for good, whatever the site does later), while
+	// Bootstrapping keeps reporting the last clone's outcome. A new
+	// bootstrap or a new failure resets it.
+	BootstrapFailureResolved bool
+	// AwaitingObservedPrimary is set while the lost-status wait stands (see
+	// TopologyManager.awaitingObservedPrimary). ActiveSite is then "" and
+	// TopologyGeneration is not advanced.
+	AwaitingObservedPrimary bool
 	// AppliedGeneration is the .metadata.generation the manager has
 	// applied: the one its configuration was built from, or a newer one
 	// whose unchanged configuration the runner resynchronised. The status
@@ -404,12 +415,21 @@ type TopologyManager struct {
 	// operator history a fence stays for a human. Both protected by mu.
 	lastActiveSite      string
 	lastActiveSiteNamed bool
-	// awaitingObservedPrimary is set by a restore whose status was lost
-	// (it names no authority although the group has failover history):
-	// automatic promotion is refused until a poll observes a unique
-	// authoritative primary (observedPrimaryAfterLostStatusLocked). The
-	// restore leaves status naming no authority while it is set, so the
-	// next manager re-arms it from the same lost shape. Protected by mu.
+	// awaitingObservedPrimary is the lost-status wait (A-89). A restore
+	// whose status names no authority although the group has failover
+	// history sets it; only a poll that observes a unique writable primary
+	// (observedPrimaryAfterLostStatusLocked) clears it. While it is set:
+	//
+	//   - activeSiteLocked, the authority every consumer reads (status,
+	//     DNS, /active-site, deployment authority, planned failover,
+	//     ordered updates, recovery, convergence, clone donors), is "";
+	//   - deploymentAuthorityLocked neither names a site nor advances the
+	//     topology generation, so every status write keeps the lost shape
+	//     and any manager restored from it re-arms the wait;
+	//   - the claims before every operator-issued read_only=OFF refuse
+	//     (automaticWritabilityRefusedLocked).
+	//
+	// Protected by mu.
 	awaitingObservedPrimary bool
 
 	// failoverState persists lastFailover/lastFailoverTarget out of band
@@ -513,6 +533,11 @@ type TopologyManager struct {
 	// failed, or "" when it failed before choosing one. Read only while
 	// bootstrapPhase is Failed. Protected by mu.
 	bootstrapFailedTarget string
+	// bootstrapFailureResolved latches that bootstrapFailedTarget has been
+	// seen replicating or writable since the failure
+	// (TopologySnapshot.BootstrapFailureResolved). Cleared whenever
+	// bootstrapPhase leaves Failed or fails again. Protected by mu.
+	bootstrapFailureResolved bool
 
 	// Recovery state for old primaries after failover, per site. More than
 	// one site can need recovery at once (e.g. two former primaries after
@@ -1172,10 +1197,35 @@ func (tm *TopologyManager) SetSourceConvergence(site, host string, convergence S
 	}
 }
 
-// activeSiteLocked returns the unique writable primary-candidate. Any second
-// writable site, including a reader or dr-only anomaly, makes authority
-// ambiguous and returns empty. Must be called with tm.mu held.
+// activeSiteLocked returns the site the operator treats as the group's
+// authoritative primary: the unique writable primary-candidate
+// (uniqueWritableCandidateLocked), or "" while the lost-status wait stands
+// (awaitingObservedPrimary). Every consumer of authority reads this, so a
+// path added later inherits the wait without checking it. Must be called
+// with tm.mu held.
 func (tm *TopologyManager) activeSiteLocked() string {
+	if tm.awaitingObservedPrimary {
+		return ""
+	}
+	return tm.uniqueWritableCandidateLocked()
+}
+
+// automaticWritabilityRefusedLocked reports whether the operator must not
+// make any site writable on its own authority: the lost-status wait
+// stands. The claims taken before every operator-issued read_only=OFF
+// (beginAutoPromotionOf, the ordered-update claim, the fresh-deploy seed)
+// check it under the same lock. Must be called with tm.mu held.
+func (tm *TopologyManager) automaticWritabilityRefusedLocked() bool {
+	return tm.awaitingObservedPrimary
+}
+
+// uniqueWritableCandidateLocked returns the unique writable
+// primary-candidate as observed, whatever the lost-status wait says. Any
+// second writable site, including a reader or dr-only anomaly, makes
+// authority ambiguous and returns empty. Only the observation that ends
+// the wait reads it directly; everything else reads activeSiteLocked.
+// Must be called with tm.mu held.
+func (tm *TopologyManager) uniqueWritableCandidateLocked() string {
 	var active *siteTracker
 	for i := range tm.sites {
 		// A reader that is writable *because the operator is cloning into it*
@@ -1210,35 +1260,42 @@ func (tm *TopologyManager) activeSiteLocked() string {
 
 // observedPrimaryAfterLostStatusLocked returns the site whose observation
 // ends the wait a lost status arms (awaitingObservedPrimary), or "". It is
-// the normal authority rule (activeSiteLocked: the only writable site, and
-// a primary candidate) made stricter in two ways, because this observation
-// is the only evidence of a primary the operator has:
+// the only evidence of a primary the operator has, so it is stricter than
+// the normal authority rule, and self-contained (it does not build on
+// activeSiteLocked, which the wait itself gates):
 //
-//   - no other site, a clone recipient included, is writable or answered
-//     writable on its latest successful probe; a writable reader or
-//     disaster-recovery site is being fenced, never the primary;
-//   - the primary's latest probe answered, and answered writable, so the
-//     wait never ends on a debounced state whose latest probe failed.
+//   - exactly one site is classified Writable, it is a primary candidate,
+//     and its latest probe answered, writable: a debounced state whose
+//     latest probe failed never ends the wait;
+//   - no other site, a clone recipient included, is Writable or holds a
+//     writable answer (still debouncing to Writable, or unclassified after
+//     one): a writable reader or disaster-recovery site is being fenced,
+//     never the primary. A site classified Unreachable holds none: its
+//     last answer expires with the classification (Poll), so a writer
+//     that went away cannot hold the wait forever.
 //
 // Caller holds tm.mu.
 func (tm *TopologyManager) observedPrimaryAfterLostStatusLocked() string {
-	active := tm.activeSiteLocked()
-	if active == "" {
+	var primary *siteTracker
+	for i := range tm.sites {
+		s := &tm.sites[i]
+		if s.state != state.StateWritable {
+			continue
+		}
+		if primary != nil {
+			return ""
+		}
+		primary = s
+	}
+	if primary == nil || !primary.isPromotable() || primary.probeFailed || !primary.lastAnswerWritable {
 		return ""
 	}
 	for i := range tm.sites {
-		s := &tm.sites[i]
-		if s.name == active {
-			if !s.isPromotable() || s.state != state.StateWritable || s.probeFailed || !s.lastAnswerWritable {
-				return ""
-			}
-			continue
-		}
-		if s.state == state.StateWritable || s.lastAnswerWritable {
+		if s := &tm.sites[i]; s != primary && s.lastAnswerWritable {
 			return ""
 		}
 	}
-	return active
+	return primary.name
 }
 
 func (tm *TopologyManager) Status() StatusResponse {
@@ -1537,6 +1594,13 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		prevStates[i] = tm.sites[i].state
 		if newStates[i] != prevStates[i] {
 			tm.sites[i].state = newStates[i]
+			// A site classified Unreachable has no current answer: the
+			// writable one it gave before it went away is not evidence of a
+			// second writer any more (it would otherwise hold the lost-status
+			// wait until the site answered again, possibly never).
+			if newStates[i] == state.StateUnreachable {
+				tm.sites[i].lastAnswerWritable = false
+			}
 			// Leaving StateReadOnly invalidates any prior replication-health signal.
 			if newStates[i] != state.StateReadOnly {
 				tm.sites[i].replicating = false
@@ -1549,9 +1613,11 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				"site", tm.sites[i].name, "probes", tm.sites[i].probes)
 		}
 	}
+	lostStatusWaitCleared := false
 	if tm.awaitingObservedPrimary {
 		if tm.observedPrimaryAfterLostStatusLocked() != "" {
 			tm.awaitingObservedPrimary = false
+			lostStatusWaitCleared = true
 			tm.logger.Info("observed a unique writable primary after a lost status; automatic promotion re-enabled")
 		}
 	}
@@ -1736,6 +1802,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 			replicationChanged = true
 		}
 	}
+	if tm.latchBootstrapFailureResolutionLocked() {
+		replicationChanged = true
+	}
 	tm.mu.Unlock()
 	for site := range replicaProbeFailed {
 		handledConvergence[site] = struct{}{}
@@ -1835,7 +1904,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		tm.statusRefreshRequested = false
 	}
 	tm.mu.Unlock()
-	statusChanged := anyTransition || classificationLapsed || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted || refreshRequested
+	statusChanged := lostStatusWaitCleared || anyTransition || classificationLapsed || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted || refreshRequested
 	if (statusChanged || statusRetry) && tm.StatusCallback != nil {
 		var snapshot TopologySnapshot
 		haveSnapshot := false
@@ -1866,6 +1935,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				snapshot.BootstrapPhase = string(tm.bootstrapPhase)
 				snapshot.BootstrapSource = tm.bootstrapSource
 				snapshot.BootstrapTarget = tm.bootstrapTargetLocked()
+				snapshot.BootstrapFailureResolved = tm.bootstrapFailureResolvedLocked()
 				snapshot.AppliedGeneration = tm.appliedGeneration
 				// A note acknowledged since the snapshot was built must not
 				// be written again: an administrator may have removed it.
@@ -2277,6 +2347,8 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 
 		RestoreReclonePromotionRefused: append([]string(nil), tm.restoreReclonePromotionRefused...),
 		BootstrapRefusedRestoreHold:    tm.bootstrapRefusedSite,
+		BootstrapFailureResolved:       tm.bootstrapFailureResolvedLocked(),
+		AwaitingObservedPrimary:        tm.awaitingObservedPrimary,
 	}
 	if tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation {
 		snap.DeploymentEpoch = 0
@@ -2692,8 +2764,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		awaiting := tm.awaitingObservedPrimary
 		tm.mu.RUnlock()
 		if awaiting {
-			// The observation that ends the wait is itself a state
-			// transition, which re-evaluates this action.
+			// No retry is armed: the observation that ends the wait is a
+			// unique writable primary, after which there is nothing to
+			// promote. beginAutoPromotionOf refuses as well; this check
+			// only keeps the refusal's log line.
 			tm.logger.Warn("promotion refused: the status was lost and no writable primary has been observed since the operator started",
 				"site", promote)
 			return
@@ -4388,6 +4462,7 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 		err := fmt.Errorf("no recipient site available for bootstrap")
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapFailureResolved = false
 		tm.bootstrapErr = err
 		tm.bootstrapFailedTarget = ""
 		tm.mu.Unlock()
@@ -4408,6 +4483,7 @@ func (tm *TopologyManager) seedFreshDeploy(ctx context.Context) string {
 		err := fmt.Errorf("no primary-candidate site available to seed")
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapFailureResolved = false
 		tm.bootstrapErr = err
 		tm.bootstrapFailedTarget = ""
 		tm.mu.Unlock()
@@ -4443,6 +4519,17 @@ func (tm *TopologyManager) seedFreshDeploy(ctx context.Context) string {
 	}
 	// The seed's sidecar may have fenced it on startup. The operator is the
 	// authority that lifts that fence, as it does for a promoted candidate.
+	// Not while the lost-status wait stands: a group with failover history
+	// is never seeded (a rejected annotation arms the wait with an empty
+	// lastFailoverTarget, so the caller's check is not enough).
+	tm.mu.RLock()
+	refused := tm.automaticWritabilityRefusedLocked()
+	tm.mu.RUnlock()
+	if refused {
+		tm.logger.Warn("promotion refused: the status was lost and no writable primary has been observed since the operator started",
+			"site", seed)
+		return ""
+	}
 	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
 		if err := seedSite.mysql.SetSuperReadOnly(probeCtx, false); err != nil {
 			return err
@@ -4513,6 +4600,7 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		err := fmt.Errorf("bootstrap: donor host not configured for site %s", donor)
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapFailureResolved = false
 		tm.bootstrapErr = err
 		tm.bootstrapFailedTarget = recipient
 		tm.mu.Unlock()
@@ -4619,6 +4707,7 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		}
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
+			tm.bootstrapFailureResolved = false
 			tm.bootstrapErr = err
 			tm.bootstrapFailedTarget = recipient
 			tm.logger.Error("bootstrap failed", "source", source, "error", err)
@@ -5083,6 +5172,14 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 
 	tm.mu.RLock()
+	// The lost-status wait refuses every automatic writability change, and
+	// this one's authority (lastFailoverTarget) is exactly the restored
+	// record the wait does not trust. beginAutoPromotionOf decides; this
+	// only skips the GTID probes.
+	if tm.automaticWritabilityRefusedLocked() {
+		tm.mu.RUnlock()
+		return false
+	}
 	target, authority := tm.lastFailoverTarget, "lastFailoverTarget"
 	named := true
 	restoreSeed := false
@@ -5995,4 +6092,29 @@ func (tm *TopologyManager) bootstrapTargetLocked() string {
 		return ""
 	}
 	return tm.bootstrapFailedTarget
+}
+
+// bootstrapFailureResolvedLocked is TopologySnapshot.BootstrapFailureResolved.
+// Caller holds mu.
+func (tm *TopologyManager) bootstrapFailureResolvedLocked() bool {
+	return tm.bootstrapPhase == BootstrapPhaseFailed && tm.bootstrapFailureResolved
+}
+
+// latchBootstrapFailureResolutionLocked records that the failed
+// bootstrap's target has recovered by another path: it replicates
+// (Healthy or Lagging) or is the writable site. From then on the failure
+// no longer stands, so a later, unrelated replication error or outage of
+// that site reports its own reason, not the old clone error and its
+// reclone remedy. It reports whether it latched. Caller holds mu, after
+// the poll's replication states are computed.
+func (tm *TopologyManager) latchBootstrapFailureResolutionLocked() bool {
+	if tm.bootstrapPhase != BootstrapPhaseFailed || tm.bootstrapFailureResolved || tm.bootstrapFailedTarget == "" {
+		return false
+	}
+	site := tm.getSite(tm.bootstrapFailedTarget)
+	if site == nil || !(site.state == state.StateWritable || site.replicationState.Running()) {
+		return false
+	}
+	tm.bootstrapFailureResolved = true
+	return true
 }

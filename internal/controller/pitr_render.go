@@ -506,7 +506,7 @@ func credentialRoleSecretNames(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKe
 // Secret enters it.
 func credentialHashSecretKeys(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
 	out := credentialRoleSecretNames(fg)
-	out.add(fg.Spec.Credentials.OperatorSecretName, "MYSQL_REPLICATION_USER", "MYSQL_REPLICATION_PASSWORD")
+	out.add(fg.Spec.Credentials.OperatorSecretName, replicationUserKey, replicationPasswordKey)
 	return out
 }
 

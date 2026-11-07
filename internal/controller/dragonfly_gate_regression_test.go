@@ -57,6 +57,9 @@ func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T)
 	})
 	r := &MysqlFailoverGroupReconciler{Client: c, APIReader: c, Scheme: testScheme(), Runner: runner,
 		Recorder: record.NewFakeRecorder(64), dragonflyGateWait: 50 * time.Millisecond}
+	// The run checks its StatefulSets before each step, and one deleted
+	// before the snapshot was saved ends it.
+	seedDragonflyStatefulSets(t, r, c, fg, bothSites(dfSourceImage))
 	save := &blockingSaveConn{fakeDragonflyConn: &fakeDragonflyConn{}, entered: make(chan struct{}), release: make(chan struct{})}
 	r.dragonflyConnector = func(context.Context, string, string) (DragonflyConnection, error) { return save, nil }
 

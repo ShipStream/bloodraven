@@ -437,8 +437,13 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 		return v1alpha1.UnstableReasonDeploymentRevocationPending
 	}
 	if fg.Status.ActiveSite == "" {
-		if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionReady); c != nil && c.Reason == v1alpha1.ReasonInitializing {
-			return v1alpha1.UnstableReasonInitializing
+		if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionReady); c != nil {
+			switch c.Reason {
+			case v1alpha1.ReasonInitializing:
+				return v1alpha1.UnstableReasonInitializing
+			case v1alpha1.ReasonAwaitingPrimaryObservation:
+				return v1alpha1.UnstableReasonAwaitingPrimaryObservation
+			}
 		}
 		return v1alpha1.UnstableReasonNoPrimary
 	}

@@ -19,9 +19,10 @@ import (
 // TestBootstrapFailed_DegradedPersistsAndClearsOnRecovery pins A-72 and
 // F-30: a failed clone is Bootstrapping=False/BootstrapFailed plus
 // Degraded=True/BootstrapFailed, recomputed from the snapshot on every
-// poll rather than latched. It persists while the target does not
-// replicate, refuses deployment leases, clears when the target replicates
-// without another clone, and leases are granted again.
+// poll. It persists while the target does not replicate, refuses
+// deployment leases, clears when the target replicates without another
+// clone, and leases are granted again. Once the manager has latched that
+// recovery, a later break of the site reports its own reason.
 func TestBootstrapFailed_DegradedPersistsAndClearsOnRecovery(t *testing.T) {
 	ctx := context.Background()
 	m, fg, _ := deploymentLeaseFixture(t)
@@ -99,6 +100,19 @@ func TestBootstrapFailed_DegradedPersistsAndClearsOnRecovery(t *testing.T) {
 		t.Fatalf("after recovery unstableReason = %q, want stable", reason)
 	}
 	grantDeploymentLease(t, m, got, "migration", "op1", 30)
+
+	// Recovered, then broken again for another reason (N-02): the manager
+	// latched the resolution, so the old clone error and its reclone
+	// remedy do not come back; the site's own reason is reported.
+	resolved := snapshot(broken, BootstrapPhaseFailed)
+	resolved.BootstrapFailureResolved = true
+	_, degraded, boot = write(resolved)
+	if degraded == nil || degraded.Reason == v1alpha1.ReasonBootstrapFailed {
+		t.Fatalf("recovered, then broken: Degraded = %+v resurrects the old clone failure", degraded)
+	}
+	if boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1alpha1.ReasonBootstrapFailed {
+		t.Fatalf("recovered, then broken: Bootstrapping = %+v, want False/BootstrapFailed (the last clone's outcome)", boot)
+	}
 
 	// A new clone ends the failure: Bootstrapping is True while it runs
 	// and Degraded no longer reports the old failure.
