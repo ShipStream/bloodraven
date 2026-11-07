@@ -541,9 +541,6 @@ func validateRestoreArchiveProfile(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha
 	return nil
 }
 
-// buildRestorePITRFragmentsFor renders req's pitr-download init container
-// and the main container's replay env. A nil req is a no-op: callers get an
-// empty fragments struct and skip the init containers entirely.
 // pitrReplayRequestEnv renders the replay request env that pitr-download
 // and restore.py both read.
 func pitrReplayRequestEnv(req *pitrReplayRequest) []corev1.EnvVar {
@@ -574,6 +571,9 @@ func VerificationPITRRequestEnvForTest(spec *v1alpha1.PointInTimeVerificationSpe
 	return out, nil
 }
 
+// buildRestorePITRFragmentsFor renders req's pitr-download init container
+// and the main container's replay env. A nil req is a no-op: callers get an
+// empty fragments struct and skip the init containers entirely.
 func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrReplayRequest) (restorePITRFragments, error) {
 	var out restorePITRFragments
 

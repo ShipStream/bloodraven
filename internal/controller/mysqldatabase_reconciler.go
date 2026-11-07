@@ -213,8 +213,9 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if !controllerutil.ContainsFinalizer(&mdb, v1alpha1.MysqlDatabaseFinalizer) {
+		base := mdb.DeepCopy()
 		controllerutil.AddFinalizer(&mdb, v1alpha1.MysqlDatabaseFinalizer)
-		if err := r.Update(ctx, &mdb); err != nil {
+		if err := r.Patch(ctx, &mdb, metadataPatch(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -2584,8 +2585,9 @@ func (r *MysqlDatabaseReconciler) stampStatus(ctx context.Context, mdb *v1alpha1
 }
 
 func (r *MysqlDatabaseReconciler) removeFinalizer(ctx context.Context, mdb *v1alpha1.MysqlDatabase) error {
+	base := mdb.DeepCopy()
 	controllerutil.RemoveFinalizer(mdb, v1alpha1.MysqlDatabaseFinalizer)
-	if err := r.Update(ctx, mdb); err != nil {
+	if err := r.Patch(ctx, mdb, metadataPatch(base)); err != nil {
 		return fmt.Errorf("remove finalizer: %w", err)
 	}
 	return nil

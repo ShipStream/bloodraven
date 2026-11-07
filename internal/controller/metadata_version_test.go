@@ -272,3 +272,42 @@ func TestVerificationSourceRecordVersion(t *testing.T) {
 }
 
 func ptrTo[T any](v T) *T { return &v }
+
+// K107: renewal, release and the GET observation of a Lease whose record
+// this operator cannot read return the structured refusal the deployment
+// API serves (423 unstable, reason MetadataVersionUnsupported), not an
+// error it can only answer with a generic 503.
+func TestDeploymentLeaseRecordVersionIsStructuredRefusal(t *testing.T) {
+	ctx := context.Background()
+	m, fg, _ := deploymentLeaseFixture(t)
+	runner := NewTopologyManagerRunner(m.client, nil, nil, record.NewFakeRecorder(16), testLogger())
+	m.SetGroupRefusals(runner)
+	lease := grantDeploymentLease(t, m, fg, "migration", "op1", 60)
+	var leases coordinationv1.LeaseList
+	if err := m.client.List(ctx, &leases, client.InNamespace(fg.Namespace)); err != nil || len(leases.Items) != 1 {
+		t.Fatalf("leases = %v, %v", leases.Items, err)
+	}
+	l := &leases.Items[0]
+	var probe map[string]any
+	if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &probe); err != nil {
+		t.Fatal(err)
+	}
+	probe["schemaVersion"] = 2
+	b, _ := json.Marshal(probe)
+	l.Annotations[v1alpha1.DeploymentLeaseAnnotation] = string(b)
+	if err := m.client.Update(ctx, l); err != nil {
+		t.Fatal(err)
+	}
+	check := func(name string, err error) {
+		t.Helper()
+		var le *DeploymentLeaseError
+		if !errors.As(err, &le) || le.Status != 423 || le.Code != "unstable" || le.Reason != v1alpha1.ReasonMetadataVersionUnsupported {
+			t.Errorf("%s = %v, want 423 unstable/%s", name, err, v1alpha1.ReasonMetadataVersionUnsupported)
+		}
+	}
+	_, err := m.Renew(ctx, fg, "migration", "op1", "tenant", "tenant-ns", "deployer", lease.Token, 30)
+	check("renew", err)
+	check("release", m.Release(ctx, fg, "migration", "op1", "tenant", "tenant-ns", "deployer", lease.Token))
+	_, _, err = m.Snapshot(ctx, fg)
+	check("observation", err)
+}

@@ -212,7 +212,7 @@ func s12VerifyClusterHealthy() runner.Step {
 				return fmt.Errorf("Ready condition status=%q (want True)", status)
 			}
 			for _, s := range mfg.Status.Sites {
-				if s.RecoveryState == "RecoveryBlocked" {
+				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 					return fmt.Errorf("site %s in RecoveryBlocked after roll", s.Name)
 				}
 			}

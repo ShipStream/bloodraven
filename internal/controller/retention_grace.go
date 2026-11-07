@@ -9,7 +9,8 @@ import (
 )
 
 // retentionGraceClock decides when terminalRetentionGrace starts for a
-// terminal backup or verification. The grace protects a verdict until
+// Failed backup or a terminal verification (successful backups are pruned
+// by count and age, with no grace). The grace protects a verdict until
 // readers have seen it, so it counts from the latest of:
 //
 //   - the run's status.completionTime, which for a Job-driven run is the

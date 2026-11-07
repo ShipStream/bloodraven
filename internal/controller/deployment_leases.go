@@ -170,7 +170,24 @@ func (m *DeploymentLeaseManager) UnstableReason(fg *v1alpha1.MysqlFailoverGroup)
 	if holdClaimed || PlannedHoldFrom(fg) != nil {
 		return v1alpha1.UnstableReasonAutomaticFailoverHeld
 	}
+	if reason == "" && m.workloadRefused(fg) {
+		// A refused workload is reported as Degraded only while no
+		// higher-ranked reason holds the condition, and some of those
+		// (replica-audit divergence) do not gate deployments; the standing
+		// refusal gates on its own.
+		return v1alpha1.ReasonWorkloadSelectorMismatch
+	}
 	return reason
+}
+
+// workloadRefused reports whether fg has a standing workload selector
+// refusal (workload_selector.go).
+func (m *DeploymentLeaseManager) workloadRefused(fg *v1alpha1.MysqlFailoverGroup) bool {
+	report := m.refusals.Load()
+	if report == nil || (*report).keys == nil {
+		return false
+	}
+	return len((*report).keys(client.ObjectKeyFromObject(fg), workloadRefusalPrefix)) > 0
 }
 
 func deploymentLeaseName(group, kind, operation string) string {
@@ -229,7 +246,9 @@ func (m *DeploymentLeaseManager) decodeRecord(fg *v1alpha1.MysqlFailoverGroup, l
 	}
 	if r.SchemaVersion != deploymentLeaseRecordSchemaVersion {
 		msg := fmt.Sprintf("deployment Lease %s has a %s record with schemaVersion %d, which this operator does not know (it reads %d); "+
-			"lease requests for the group are refused until the Lease is deleted or an operator release that reads it runs",
+			"lease requests for the group, the admission of planned operations (planned failover, ordered update, in-place restore) "+
+			"and the reopening of admission after a topology change are refused until the Lease is deleted "+
+			"or an operator release that reads it runs",
 			l.Name, v1alpha1.DeploymentLeaseAnnotation, r.SchemaVersion, deploymentLeaseRecordSchemaVersion)
 		if report := m.refusals.Load(); report != nil {
 			(*report).set(fg, key, v1alpha1.ReasonMetadataVersionUnsupported, msg)
@@ -275,9 +294,16 @@ func (m *DeploymentLeaseManager) pruneLeaseRefusals(ctx context.Context, fg *v1a
 }
 
 // errLeaseRecordVersion is a lease record with an unknown schemaVersion.
+// The deployment API serves it as its structured refusal (Unwrap):
+// 423 unstable with reason MetadataVersionUnsupported, the group's
+// Degraded reason, rather than a generic 503.
 type errLeaseRecordVersion struct{ msg string }
 
 func (e errLeaseRecordVersion) Error() string { return e.msg }
+
+func (e errLeaseRecordVersion) Unwrap() error {
+	return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.ReasonMetadataVersionUnsupported}
+}
 
 // leaseRefusalReporter is the runner's group refusal registry, as the
 // lease manager uses it.
@@ -431,6 +457,20 @@ func (m *DeploymentLeaseManager) revocation(fg *v1alpha1.MysqlFailoverGroup, r *
 	}
 }
 
+// orderedUpdateInProgress reports whether an ordered update is in
+// progress: a phase is recorded, or the update is stalled waiting for a
+// pod to become Ready (Updating=True/OrderedUpdateStalled). A stall clears
+// the phase while the update has not finished, and it resumes by itself,
+// so it stays as unstable for deployments and as exclusive of other
+// operations as the phase it paused.
+func orderedUpdateInProgress(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if fg.Status.UpdatePhase != "" {
+		return true
+	}
+	c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating)
+	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == v1alpha1.ReasonOrderedUpdateStalled
+}
+
 // DeploymentUnstableReason mirrors the companion API stability contract.
 func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 	if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
@@ -445,7 +485,7 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 	if plannedFailoverActive(fg) {
 		return v1alpha1.UnstableReasonPlannedFailover
 	}
-	if fg.Status.UpdatePhase != "" {
+	if orderedUpdateInProgress(fg) {
 		return v1alpha1.UnstableReasonOrderedUpdate
 	}
 	if restoreInFlight(fg) || (fg.Status.Restore != nil && fg.Status.Restore.Phase != "" && fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded && fg.Status.Restore.Phase != v1alpha1.BackupPhaseFailed) {
@@ -918,7 +958,7 @@ func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1alpha1.
 	// claim slot has been hydrated from it (after a restart).
 	if (operation != deploymentOperationPlannedFailover && (plannedFailoverOwnsSites(fg) || m.claimHeld(fg) || PlannedHoldFrom(fg) != nil)) ||
 		(operation != deploymentOperationRestoreInPlace && inPlaceRestoreInFlight(fg)) ||
-		(operation != deploymentOperationOrderedUpdate && fg.Status.UpdatePhase != "") {
+		(operation != deploymentOperationOrderedUpdate && orderedUpdateInProgress(fg)) {
 		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonConcurrentOperation, RetryAfterSeconds: 1}
 	}
 	nn := client.ObjectKeyFromObject(fg)

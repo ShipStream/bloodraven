@@ -1,12 +1,15 @@
 package scenarios
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
+	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -139,7 +142,9 @@ func TestBackupArtifactPrefix(t *testing.T) {
 		{name: "plain", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "e2e/s30/x/b1", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30/x/b1/", ok: true},
 		{name: "encrypted", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "s3://bk/e2e/s30e/x/b1/", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30e/x/b1/", ok: true},
 		{name: "encrypted, other bucket", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "s3://other/x/b1/", Bucket: "bk"}), wantErr: true},
-		{name: "no recorded destination", backup: succeeded(nil), wantErr: true},
+		{name: "no recorded destination", backup: succeeded(nil)},
+		{name: "recorded S3 without bucket", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "x/b1"}), wantErr: true},
+		{name: "recorded S3 without location", backup: succeeded(&v1alpha1.BackupArtifactStorage{Bucket: "bk"}), wantErr: true},
 		{name: "PVC", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded,
 			ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStoragePVC, Location: "/backups/b1"}}}},
 		{name: "failed backup", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed,
@@ -151,5 +156,68 @@ func TestBackupArtifactPrefix(t *testing.T) {
 				t.Fatalf("got (%q, %q, %v, %v)", bucket, prefix, ok, err)
 			}
 		})
+	}
+}
+
+func TestPITRBaselineRestored(t *testing.T) {
+	profile := v1alpha1.BackupProfile{Name: "orig", Storage: v1alpha1.BackupStorage{
+		Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "bk", Prefix: "orig"},
+	}}
+	origDest, err := pitrprofile.DestinationFor(&v1alpha1.MysqlFailoverGroup{}, &profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarioDest, err := pitrarchive.NewS3Destination("bk", "e2e/s31", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := func(generation, readyGeneration int64, pitrOn bool, status *v1alpha1.PITRStatus) *v1alpha1.MysqlFailoverGroup {
+		mfg := &v1alpha1.MysqlFailoverGroup{
+			ObjectMeta: metav1.ObjectMeta{Generation: generation},
+			Spec:       v1alpha1.MysqlFailoverGroupSpec{Backup: &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile}}},
+			Status: v1alpha1.MysqlFailoverGroupStatus{
+				ActiveSite: "iad",
+				PITR:       status,
+				Conditions: []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: readyGeneration}},
+			},
+		}
+		if pitrOn {
+			mfg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "orig"}
+		}
+		return mfg
+	}
+	observing := func(dest string) *v1alpha1.PITRStatus {
+		return &v1alpha1.PITRStatus{Archive: &v1alpha1.PITRArchiveObservation{Destination: dest, State: v1alpha1.PITRArchiveVerified}}
+	}
+	leftover := observing(scenarioDest.String())
+	for _, tc := range []struct {
+		name        string
+		mfg         *v1alpha1.MysqlFailoverGroup
+		wantPITR    bool
+		want        bool
+		wantMessage string
+	}{
+		// The patch has landed but the operator has not reconciled it:
+		// Ready still names the previous generation.
+		{name: "disable, Ready from the previous generation", mfg: group(6, 5, false, nil), wantMessage: "readyAtGeneration=false"},
+		{name: "disable, status.pitr still reported", mfg: group(6, 6, false, leftover), wantMessage: "status.pitr not yet removed"},
+		{name: "disable, reconciled", mfg: group(6, 6, false, nil), want: true},
+		{name: "re-enable, Ready from the previous generation", mfg: group(6, 5, true, observing(origDest.String())), wantPITR: true, wantMessage: "readyAtGeneration=false"},
+		{name: "re-enable, leftover scenario archive", mfg: group(6, 6, true, leftover), wantPITR: true, wantMessage: "want " + origDest.String()},
+		{name: "re-enable, no observation", mfg: group(6, 6, true, &v1alpha1.PITRStatus{}), wantPITR: true, wantMessage: "no status.pitr.archive"},
+		{name: "re-enable, spec not yet restored", mfg: group(6, 6, false, observing(origDest.String())), wantPITR: true, wantMessage: "spec PITR profile"},
+		{name: "re-enable, reconciled", mfg: group(6, 6, true, observing(origDest.String())), wantPITR: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, msg := pitrBaselineRestored(tc.mfg, tc.wantPITR, "orig")
+			if got != tc.want || !strings.Contains(msg, tc.wantMessage) {
+				t.Fatalf("pitrBaselineRestored = %v (%s), want %v containing %q", got, msg, tc.want, tc.wantMessage)
+			}
+		})
+	}
+	ordered := group(6, 6, true, observing(origDest.String()))
+	ordered.Status.UpdatePhase = "UpdateReplica"
+	if got, msg := pitrBaselineRestored(ordered, true, "orig"); got {
+		t.Fatalf("an ordered update in progress must hold the cleanup: %s", msg)
 	}
 }

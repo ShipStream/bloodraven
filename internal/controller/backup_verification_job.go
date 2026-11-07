@@ -187,14 +187,12 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		if v.Spec.SanityCheck.Timeout != nil {
 			timeout = v.Spec.SanityCheck.Timeout.Duration
 		}
-		var minResult int64
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS", Value: strconv.FormatInt(wholeSecondsCeil(timeout), 10)})
+		// The floor is rendered only when set: an explicit minResult of 0
+		// still rejects a negative result, an unset one compares nothing.
 		if v.Spec.SanityCheck.MinResult != nil {
-			minResult = *v.Spec.SanityCheck.MinResult
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MIN_ROWS", Value: strconv.FormatInt(*v.Spec.SanityCheck.MinResult, 10)})
 		}
-		env = append(env,
-			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS", Value: strconv.FormatInt(wholeSecondsCeil(timeout), 10)},
-			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MIN_ROWS", Value: strconv.FormatInt(minResult, 10)},
-		)
 	}
 
 	// The ephemeral datadir, mysqld socket/pid dir, mysqlsh HOME, /tmp, and
@@ -258,14 +256,16 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 				backup.Name, in.Profile.Name)
 		}
 		awsCredsSecret = in.Profile.Storage.S3.CredentialsSecretName
+		// The recorded destination is already expanded; escape it so
+		// kubelet's $(VAR) expansion cannot change it again.
 		env = append(env,
-			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: storage.Bucket},
+			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: literalArtifactEnvValue(storage.Bucket)},
 		)
 		if storage.EndpointURL != "" {
-			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: storage.EndpointURL})
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: literalArtifactEnvValue(storage.EndpointURL)})
 		}
 		if storage.Region != "" {
-			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: storage.Region})
+			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: literalArtifactEnvValue(storage.Region)})
 		}
 	case v1alpha1.BackupStoragePVC:
 		volumes = append(volumes, corev1.Volume{
@@ -371,15 +371,15 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			_, prefix := splitS3Location(storage.Location)
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: literalArtifactEnvValue(prefix)},
-				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: storage.Bucket},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: literalArtifactEnvValue(storage.Bucket)},
 			)
 			if storage.EndpointURL != "" {
 				decEnv = append(decEnv, corev1.EnvVar{
-					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: storage.EndpointURL,
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: literalArtifactEnvValue(storage.EndpointURL),
 				})
 			}
 			if storage.Region != "" {
-				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: storage.Region})
+				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: literalArtifactEnvValue(storage.Region)})
 			}
 			if in.Profile.Storage.S3.CredentialsSecretName != "" {
 				decMounts = append(decMounts, corev1.VolumeMount{

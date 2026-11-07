@@ -121,7 +121,7 @@ Next steps:
              storageClassName: fast-ssd
      EOF
 
-     Groups that leave spec.sidecar.image empty run the sidecar this release
+     Groups that leave spec.sidecar.image unset run the sidecar this release
      ships with: {{ include "bloodraven.sidecarImage" . }}
 
   4. Monitor the operator:
@@ -130,7 +130,7 @@ Next steps:
   5. Check the failover group status:
      kubectl get mysqlfailovergroups -n {{ .Release.Namespace }}
 
-  5. (ArgoCD users) Register custom health checks so MysqlFailoverGroup and
+  6. (ArgoCD users) Register custom health checks so MysqlFailoverGroup and
      MysqlBackup resources show proper health in the ArgoCD UI.
 
      Extract the patch file from the chart and apply it:

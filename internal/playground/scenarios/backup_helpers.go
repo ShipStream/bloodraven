@@ -20,6 +20,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
+	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -528,14 +529,18 @@ func deleteBackupAndAssertArtifactGone(ctx context.Context, env *runner.Env, nam
 
 // backupArtifactPrefix returns the bucket and object-key prefix (ending in
 // "/") of an S3 backup's artifact, from the recorded destination. ok is
-// false for a backup with no S3 artifact to check.
+// false for a backup with no S3 artifact to check: one that did not
+// succeed, one recorded on a PVC, or one with no recorded destination at
+// all (a Succeeded backup whose destination could not be recovered, which
+// the finalizer releases with ArtifactCleanupSkipped). An S3 destination
+// that is recorded but lacks its location or bucket is an error.
 func backupArtifactPrefix(b *v1alpha1.MysqlBackup) (bucket, prefix string, ok bool, err error) {
 	storage := b.Status.ArtifactStorage
-	if b.Status.Phase != v1alpha1.BackupPhaseSucceeded || storage != nil && storage.Type != v1alpha1.BackupStorageS3 {
+	if b.Status.Phase != v1alpha1.BackupPhaseSucceeded || storage == nil || storage.Type != v1alpha1.BackupStorageS3 {
 		return "", "", false, nil
 	}
-	if storage == nil || storage.Location == "" || storage.Bucket == "" {
-		return "", "", false, fmt.Errorf("succeeded S3 backup has no recorded status.artifactStorage")
+	if storage.Location == "" || storage.Bucket == "" {
+		return "", "", false, fmt.Errorf("succeeded S3 backup records status.artifactStorage without a location or bucket")
 	}
 	locBucket, key, inBucket := backupmeta.SplitS3Location(storage.Location)
 	if inBucket && locBucket != storage.Bucket {
@@ -738,6 +743,59 @@ func originalPITRExpected(env *runner.Env) (enabled bool, profile string, err er
 		return false, "", nil
 	}
 	return true, original.PITR.ProfileName, nil
+}
+
+// pitrBaselineRestored is the PITR scenarios' cleanup predicate after
+// restoreOriginalBackupSpec: the operator has reconciled the restored spec
+// (Ready=True at the current generation, an active site, no ordered update
+// in progress) and its PITR observation matches it. With PITR restored off,
+// status.pitr is gone (the operator removes it once PITR is disabled). With
+// PITR restored on, the spec names the original profile and
+// status.pitr.archive observes that profile's archive destination, not
+// one the scenario left behind. Spec reads alone are true as soon as the
+// patch lands, before the operator has acted on it.
+func pitrBaselineRestored(mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+	ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
+	settled := backupProfileRolloutReady(mfg)
+	observed, why := pitrObservationRestored(mfg, wantPITR, wantProfile)
+	return ready && settled && observed, fmt.Sprintf("readyAtGeneration=%v generation=%d active=%q updatePhase=%q pitr=%v (%s) wantPITR=%v wantProfile=%q",
+		ready, mfg.Generation, mfg.Status.ActiveSite, mfg.Status.UpdatePhase, observed, why, wantPITR, wantProfile)
+}
+
+// pitrObservationRestored is the PITR half of pitrBaselineRestored.
+func pitrObservationRestored(mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+	if !wantPITR {
+		if pitrSpecProfile(mfg) != "" {
+			return false, "spec still enables PITR"
+		}
+		if mfg.Status.PITR != nil {
+			return false, "status.pitr not yet removed"
+		}
+		return true, "disabled"
+	}
+	if got := pitrSpecProfile(mfg); got != wantProfile {
+		return false, fmt.Sprintf("spec PITR profile %q", got)
+	}
+	var profile *v1alpha1.BackupProfile
+	for i := range mfg.Spec.Backup.Profiles {
+		if mfg.Spec.Backup.Profiles[i].Name == wantProfile {
+			profile = &mfg.Spec.Backup.Profiles[i]
+		}
+	}
+	if profile == nil {
+		return false, fmt.Sprintf("profile %q not in spec", wantProfile)
+	}
+	dest, err := pitrprofile.DestinationFor(mfg, profile)
+	if err != nil {
+		return false, fmt.Sprintf("restored profile destination: %v", err)
+	}
+	if mfg.Status.PITR == nil || mfg.Status.PITR.Archive == nil {
+		return false, "no status.pitr.archive observation yet"
+	}
+	if got := mfg.Status.PITR.Archive.Destination; got != dest.String() {
+		return false, fmt.Sprintf("status.pitr.archive observes %s, want %s", got, dest.String())
+	}
+	return true, "archive=" + pitrArchiveSummary(mfg)
 }
 
 func backupStatusSummary(b *v1alpha1.MysqlBackup) string {

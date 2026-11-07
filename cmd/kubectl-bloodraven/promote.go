@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +30,7 @@ status.plannedFailover.phase=Succeeded with result.outcome=Succeeded. With
 annotation (status writes stalled) is reported from that annotation.
 
 Per-request override (defaults to spec.plannedFailover.maxLagWait):
-  --max-lag-wait DURATION   override spec.plannedFailover.maxLagWait
+  --max-lag-wait DURATION   override spec.plannedFailover.maxLagWait (1s to 1h)
 
 drainTimeout is not an annotation override — the operator only
 consults spec.plannedFailover.drainTimeout. Set it on the CR if you
@@ -83,7 +82,16 @@ func runPromote(args []string, stdout, stderr *os.File) error {
 		return fmt.Errorf("group and site must be non-empty")
 	}
 
-	value, err := buildPlannedFailoverValue(site, maxLagWait)
+	// An unset flag leaves the group's spec.plannedFailover.maxLagWait in
+	// force; a set one is checked against the operator's bounds here, so a
+	// value the operator would refuse is never written.
+	var lagOverride *time.Duration
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "max-lag-wait" {
+			lagOverride = &maxLagWait
+		}
+	})
+	value, err := buildPlannedFailoverValue(site, lagOverride)
 	if err != nil {
 		return err
 	}
@@ -297,28 +305,26 @@ var (
 // buildPlannedFailoverValue assembles the annotation value the operator
 // parses. Mirrors the controller's grammar exactly: "<site>" or
 // "<site>:key=value[:key=value...]". Caller is expected to validate
-// the site. The operator currently recognises only the "maxLagWait"
-// key (see internal/controller/planned_failover.go); other overrides
-// would be rejected.
-func buildPlannedFailoverValue(site string, maxLagWait time.Duration) (string, error) {
+// the site. The operator recognises only the "maxLagWait" key (see
+// internal/controller/planned_failover.go). maxLagWait is nil when no
+// override was given; a given one must lie within
+// v1alpha1.PlannedFailoverMaxLagWait{Min,Max}, which the operator
+// enforces too.
+func buildPlannedFailoverValue(site string, maxLagWait *time.Duration) (string, error) {
 	if site == "" {
 		return "", fmt.Errorf("site is required")
 	}
-	pairs := []kv{}
-	if maxLagWait > 0 {
-		// The annotation grammar admits only [A-Za-z0-9._/+-] in a value;
-		// time.Duration renders microseconds with "µs", so a sub-millisecond
-		// value is written in nanoseconds instead.
-		d := maxLagWait.String()
-		if strings.ContainsRune(d, 'µ') {
-			d = strconv.FormatInt(int64(maxLagWait), 10) + "ns"
-		}
-		pairs = append(pairs, kv{"maxLagWait", d})
-	}
-	if len(pairs) == 0 {
+	if maxLagWait == nil {
 		return site, nil
 	}
-	return site + ":" + joinKVs(pairs), nil
+	d := *maxLagWait
+	if d < v1alpha1.PlannedFailoverMaxLagWaitMin || d > v1alpha1.PlannedFailoverMaxLagWaitMax {
+		return "", fmt.Errorf("--max-lag-wait must be between %s and %s (got %s)",
+			v1alpha1.PlannedFailoverMaxLagWaitMin, v1alpha1.PlannedFailoverMaxLagWaitMax, d)
+	}
+	// At least a second, time.Duration's spelling stays within the
+	// annotation value charset [A-Za-z0-9._/+-] and parses back exactly.
+	return site + ":" + joinKVs([]kv{{"maxLagWait", d.String()}}), nil
 }
 
 func groupHasSite(fg *v1alpha1.MysqlFailoverGroup, site string) bool {

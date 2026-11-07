@@ -196,7 +196,7 @@ func s16VerifyNoSplitBrain() runner.Step {
 						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}

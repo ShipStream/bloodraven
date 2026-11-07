@@ -25,10 +25,17 @@ const (
 	s20PostFailoverWaitWindow = 60 * time.Second
 )
 
-var (
-	s20PlaygroundReadOnly = v1alpha1.ReadOnlyTaintKey(pgkube.PlaygroundNamespace, "playground")
-	s20InventoryReadOnly  = v1alpha1.ReadOnlyTaintKey(pgkube.PlaygroundNamespace, s20InventoryGroup)
-)
+// s20PlaygroundReadOnly is the read-only taint key of the group under
+// test, scoped to the run's namespace and group (--namespace, --fg).
+func s20PlaygroundReadOnly(env *runner.Env) string {
+	return v1alpha1.ReadOnlyTaintKey(env.Namespace, env.FG)
+}
+
+// s20InventoryReadOnly is the key the operator would use for the
+// unrelated inventory group in the same namespace.
+func s20InventoryReadOnly(env *runner.Env) string {
+	return v1alpha1.ReadOnlyTaintKey(env.Namespace, s20InventoryGroup)
+}
 
 // scenario20SharedNodeSelectorIsolation locks down the per-failover-
 // group taint scoping that lets one physical node serve multiple
@@ -115,7 +122,7 @@ func s20InjectMultiTenantTopology() runner.Step {
 						s20InventorySiteLabel:  active,
 					},
 					Tolerations: []corev1.Toleration{{
-						Key:      s20PlaygroundReadOnly,
+						Key:      s20PlaygroundReadOnly(env),
 						Operator: corev1.TolerationOpExists,
 						Effect:   corev1.TaintEffectNoExecute,
 					}},
@@ -189,7 +196,7 @@ func s20ObserveTaintApplied() runner.Step {
 						keys = append(keys, t.Key)
 					}
 					last = fmt.Sprintf("taintKeys=%v", keys)
-					if pgkube.NodeHasTaint(n, s20PlaygroundReadOnly) {
+					if pgkube.NodeHasTaint(n, s20PlaygroundReadOnly(env)) {
 						env.Capture.Note(fmt.Sprintf("playground taint applied on %s; %s", node, last))
 						return nil
 					}
@@ -218,12 +225,12 @@ func s20VerifyTaintScopedToPlayground() runner.Step {
 			if err != nil {
 				return err
 			}
-			if !pgkube.NodeHasTaint(n, s20PlaygroundReadOnly) {
-				return fmt.Errorf("expected %s taint on %s, taints=%v", s20PlaygroundReadOnly, node, n.Spec.Taints)
+			if !pgkube.NodeHasTaint(n, s20PlaygroundReadOnly(env)) {
+				return fmt.Errorf("expected %s taint on %s, taints=%v", s20PlaygroundReadOnly(env), node, n.Spec.Taints)
 			}
-			if pgkube.NodeHasTaint(n, s20InventoryReadOnly) {
+			if pgkube.NodeHasTaint(n, s20InventoryReadOnly(env)) {
 				return fmt.Errorf("operator leaked %s onto %s — taint scoping regression (taints=%v)",
-					s20InventoryReadOnly, node, n.Spec.Taints)
+					s20InventoryReadOnly(env), node, n.Spec.Taints)
 			}
 			env.Capture.Note(fmt.Sprintf("node %s correctly tainted only for playground", node))
 			return nil

@@ -7,6 +7,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -182,5 +183,71 @@ func TestSync_EqualConfigEditAdvancesObservedGeneration(t *testing.T) {
 	settle()
 	if gen, obs, ready := observed(); obs != gen || ready != gen {
 		t.Fatalf("after the equal-config resync: observedGeneration %d, Ready.observedGeneration %d, want metadata.generation %d", obs, ready, gen)
+	}
+}
+
+// K017: a callback whose status write conflicts with a newer one at the
+// same topology generation (a later callback that published a newer
+// applied generation first) must not move observedGeneration, or the
+// topology conditions' observedGeneration, back on its retry.
+func TestUpdateCRStatus_OlderCallbackRetryDoesNotMoveGenerationBack(t *testing.T) {
+	ctx := context.Background()
+	runner, c, fg, _ := lifecycleRunner(t)
+	nn := client.ObjectKeyFromObject(fg)
+	var cur v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &cur); err != nil {
+		t.Fatal(err)
+	}
+	cur.Generation = 5
+	if err := c.Update(ctx, &cur); err != nil {
+		t.Fatal(err)
+	}
+	snap := TopologySnapshot{
+		ActiveSite: "dc1",
+		Sites: []SiteSnapshot{
+			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
+			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, ReplicaStatusRead: true,
+				Replication: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: new(int64(0))}, SourceConvergenceState: sourceConvergenceConverged},
+		},
+		DegradedReason:    v1alpha1.ReasonHealthy,
+		AppliedGeneration: 4,
+	}
+	// The newer callback's write lands between the older one's read and
+	// its first update attempt, which then conflicts.
+	raced := false
+	runner.client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if !raced {
+				raced = true
+				var newer v1alpha1.MysqlFailoverGroup
+				if err := cl.Get(ctx, nn, &newer); err != nil {
+					return err
+				}
+				newer.Status.ObservedGeneration = 5
+				newer.Status.TopologyGeneration = snap.TopologyGeneration
+				newer.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue,
+					Reason: v1alpha1.ReasonHealthy, ObservedGeneration: 5, LastTransitionTime: metav1.Now()}}
+				if err := cl.Status().Update(ctx, &newer); err != nil {
+					return err
+				}
+			}
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	if err := runner.updateCRStatus(ctx, nn, snap); err != nil {
+		t.Fatal(err)
+	}
+	if !raced {
+		t.Fatal("the race was not staged")
+	}
+	var got v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ObservedGeneration != 5 {
+		t.Fatalf("status.observedGeneration = %d, want the newer write's 5", got.Status.ObservedGeneration)
+	}
+	if ready := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady); ready == nil || ready.ObservedGeneration != 5 {
+		t.Fatalf("Ready = %+v, want the newer write's generation 5", ready)
 	}
 }

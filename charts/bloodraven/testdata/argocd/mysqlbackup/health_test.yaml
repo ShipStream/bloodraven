@@ -9,3 +9,5 @@ tests:
   healthStatus: {status: Progressing, message: no healthy source}
 - inputPath: spec-not-applied.yaml
   healthStatus: {status: Progressing, message: Controller processing updated spec}
+- inputPath: succeeded-spec-edit-acknowledged.yaml
+  healthStatus: {status: Healthy, message: backup completed}

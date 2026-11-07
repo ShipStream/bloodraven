@@ -112,7 +112,7 @@ report_status() {
 	echo
 	info "escrow secrets"
 	kubectl -n "$NAMESPACE" get secrets -l app.kubernetes.io/name=mysql-keyring \
-		-o custom-columns=NAME:.metadata.name,SITE:.metadata.labels.shipstream\\.io/site,VERSION:.metadata.labels.shipstream\\.io/keyring-version \
+		-o custom-columns=NAME:.metadata.name,SITE:.metadata.labels.bloodraven\\.shipstream\\.io/site,VERSION:.metadata.labels.bloodraven\\.shipstream\\.io/keyring-version \
 		2>/dev/null || warn "no escrow secrets yet"
 }
 

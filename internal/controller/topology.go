@@ -798,6 +798,9 @@ type TopologyManager struct {
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
 	// Protected by mu.
 	specDriftSites []string
+	// specRefusedSites lists the sites whose Deployment is refused for its
+	// selector (workload_selector.go), as the runner last computed them.
+	specRefusedSites []string
 	// specDriftKnown is set once the runner has computed specDriftSites.
 	specDriftKnown bool
 
@@ -875,10 +878,13 @@ type SiteStatusEntry struct {
 
 // StatusResponse is returned by the /status endpoint.
 type StatusResponse struct {
-	ActiveSite            string            `json:"activeSite"`
-	Sites                 []SiteStatusEntry `json:"sites"`
-	PollTime              string            `json:"pollTime"`
-	PromotionGtidExecuted string            `json:"promotionGtidExecuted,omitempty"`
+	ActiveSite string            `json:"activeSite"`
+	Sites      []SiteStatusEntry `json:"sites"`
+	PollTime   string            `json:"pollTime"`
+	// LastFailover is the most recent failover in the shape of the CR's
+	// status.lastFailover, as /ws/status carries it; omitted before the
+	// first one.
+	LastFailover *platform.FailoverRecord `json:"lastFailover,omitempty"`
 }
 
 const (
@@ -1241,11 +1247,33 @@ func (tm *TopologyManager) Status() StatusResponse {
 		}
 	}
 	return StatusResponse{
-		ActiveSite:            tm.effectiveActiveSiteLocked(),
-		Sites:                 sites,
-		PollTime:              tm.lastPollTime.Format(time.RFC3339),
-		PromotionGtidExecuted: tm.promotionGtidExecuted,
+		ActiveSite:   tm.effectiveActiveSiteLocked(),
+		Sites:        sites,
+		PollTime:     tm.lastPollTime.Format(time.RFC3339),
+		LastFailover: tm.failoverRecordLocked(),
 	}
+}
+
+// PromotionGtidExecuted is the failover record's promoted site's GTID set
+// at promotion, or "" before the first failover.
+func (s StatusResponse) PromotionGtidExecuted() string {
+	if s.LastFailover == nil {
+		return ""
+	}
+	return s.LastFailover.PromotionGtidExecuted
+}
+
+// failoverRecordLocked is the manager's failover record as /status and
+// /ws/status publish it, or nil before the first failover.
+func (tm *TopologyManager) failoverRecordLocked() *platform.FailoverRecord {
+	if tm.lastFailover.IsZero() && tm.lastFailoverTarget == "" && tm.promotionGtidExecuted == "" {
+		return nil
+	}
+	rec := &platform.FailoverRecord{Target: tm.lastFailoverTarget, PromotionGtidExecuted: tm.promotionGtidExecuted}
+	if !tm.lastFailover.IsZero() {
+		rec.Time = tm.lastFailover.Format(time.RFC3339)
+	}
+	return rec
 }
 
 func (tm *TopologyManager) effectiveActiveSiteLocked() string {
@@ -1697,6 +1725,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 			// unprobed is no change.
 			prev = v1alpha1.SiteReplicationUnknown
 		}
+		st = lagHysteresis(prev, st, siteRepl[i], tm.cfg.MaxLagSeconds)
 		tm.sites[i].replicationState = st
 		if st != prev {
 			replicationChanged = true
@@ -2341,19 +2370,16 @@ func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus
 	}
 
 	msg := platform.TopologyMessage{
-		Namespace:  tm.cfg.Namespace,
-		Group:      tm.cfg.Name,
-		ActiveSite: tm.activeSiteLocked(),
-		Sites:      sites,
-		Alert:      alertMsg,
-		PollTime:   tm.lastPollTime.Format(time.RFC3339),
+		Namespace:    tm.cfg.Namespace,
+		Group:        tm.cfg.Name,
+		ActiveSite:   tm.activeSiteLocked(),
+		Sites:        sites,
+		Alert:        alertMsg,
+		PollTime:     tm.lastPollTime.Format(time.RFC3339),
+		LastFailover: tm.failoverRecordLocked(),
 	}
-	if !tm.lastFailover.IsZero() || tm.lastFailoverTarget != "" || tm.promotionGtidExecuted != "" {
-		rec := &platform.FailoverRecord{Target: tm.lastFailoverTarget, PromotionGtidExecuted: tm.promotionGtidExecuted}
-		if !tm.lastFailover.IsZero() {
-			rec.Time = tm.lastFailover.Format(time.RFC3339)
-		}
-		msg.LastFailover = rec
+	if tm.updater != nil {
+		msg.UpdatePhase = string(tm.updater.Phase())
 	}
 	return msg
 }
@@ -2384,6 +2410,29 @@ func siteReplicationState(st state.SiteState, repl *mysql.ReplicaStatus, read, h
 	default:
 		return v1alpha1.SiteReplicationUnknown
 	}
+}
+
+// lagHysteresis keeps a Lagging site Lagging until its lag has fallen a
+// band below the threshold: lag that hovers around maxLagSeconds would
+// otherwise flip Healthy and Lagging on every poll, and each flip is a
+// status write. Entering Lagging is not delayed, and every other
+// transition (Broken, Unknown, NotApplicable) is published at once.
+func lagHysteresis(prev, st v1alpha1.SiteReplicationState, repl *mysql.ReplicaStatus, maxLagSeconds int64) v1alpha1.SiteReplicationState {
+	if prev != v1alpha1.SiteReplicationLagging || st != v1alpha1.SiteReplicationHealthy ||
+		repl == nil || repl.SecondsBehindSource == nil {
+		return st
+	}
+	if *repl.SecondsBehindSource > maxLagSeconds-lagHysteresisBand(maxLagSeconds) {
+		return v1alpha1.SiteReplicationLagging
+	}
+	return st
+}
+
+// lagHysteresisBand is how far below maxLagSeconds a Lagging site's lag
+// must fall to read Healthy again: a fifth of the threshold, at least a
+// second, and never below zero lag (maxLagSeconds 0 has no band).
+func lagHysteresisBand(maxLagSeconds int64) int64 {
+	return min(maxLagSeconds, max(1, maxLagSeconds/5))
 }
 
 // computeState applies debounce logic and returns the new state for a site.
@@ -3578,6 +3627,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	activeName := tm.activeSiteLocked()
 	updateAuthorityEpoch := tm.authorityEpoch
 	driftSites := append([]string(nil), tm.specDriftSites...)
+	refusedSites := append([]string(nil), tm.specRefusedSites...)
 	stallRetryAt := tm.updateStallRetryAt
 	tm.mu.RUnlock()
 	if activeName == "" {
@@ -3596,7 +3646,8 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	activeSite := tm.getSite(activeName)
 	active := UpdateTarget{
 		Name: activeName, Host: activeSite.host, Checker: activeSite.mysql, Promotable: true, Drifted: drifted[activeName],
-		ReplUser: tm.bootstrapCfg.ReplUser, ReplPassword: tm.bootstrapCfg.ReplPassword, UseSSL: tm.bootstrapCfg.UseSSL,
+		SelectorRefused: slices.Contains(refusedSites, activeName),
+		ReplUser:        tm.bootstrapCfg.ReplUser, ReplPassword: tm.bootstrapCfg.ReplPassword, UseSSL: tm.bootstrapCfg.UseSSL,
 		PodReady: tm.podReadyProbe(activeName),
 	}
 	followers := make([]UpdateTarget, 0, len(tm.sites)-1)
@@ -3610,7 +3661,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 		tm.mu.RUnlock()
 		followers = append(followers, UpdateTarget{
 			Name: site.name, Host: site.host, Checker: site.mysql, Promotable: site.isPromotable(),
-			Drifted: drifted[site.name], ExpectedSource: activeSite.host,
+			Drifted: drifted[site.name], SelectorRefused: slices.Contains(refusedSites, site.name), ExpectedSource: activeSite.host,
 			RotationBlocked: block.rotation, ReclonePending: block.reclonePending,
 			DivergenceBlocked:     block.divergence.state == v1alpha1.RecoveryStateBlocked,
 			DivergentTransactions: block.divergence.divergentCount, DivergentGtid: block.divergence.divergentGtid,
@@ -3974,6 +4025,15 @@ func (tm *TopologyManager) SpecDriftView() (sites []string, known bool) {
 func (tm *TopologyManager) specDriftComputed() bool {
 	_, known := tm.SpecDriftView()
 	return known
+}
+
+// SetSpecRefusedSites records which sites' Deployments are refused for
+// their selector. The ordered updater never takes them as running the
+// current template, nor as a handoff target.
+func (tm *TopologyManager) SetSpecRefusedSites(sites []string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.specRefusedSites = sites
 }
 
 // SetSpecDriftSites records which sites have spec drift (Deployment hash != desired hash).

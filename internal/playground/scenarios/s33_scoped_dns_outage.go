@@ -229,7 +229,7 @@ func s33ObserveDNSScoped() runner.Step {
 					if s.State == v1alpha1.SiteStateWritable {
 						writable++
 					}
-					if s.RecoveryState == "RecoveryBlocked" {
+					if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 						return fmt.Errorf("site %s RecoveryBlocked during scoped DNS outage", s.Name)
 					}
 				}
@@ -311,7 +311,7 @@ func s33RemovePolicyAndRecover() runner.Step {
 						if s.State == v1alpha1.SiteStateWritable {
 							writable++
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							return false, "RecoveryBlocked on " + s.Name, fmt.Errorf("site %s RecoveryBlocked after policy removal", s.Name)
 						}
 						if s.Name != mfg.Status.ActiveSite && s.Replication.Running() {

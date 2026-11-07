@@ -175,7 +175,7 @@ func s34ObserveReplacementCompletes() runner.Step {
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							return false, "", fmt.Errorf("site %s RecoveryBlocked during update", s.Name)
 						}
 					}
@@ -276,7 +276,7 @@ func s34RestoreMemory() runner.Step {
 						case v1alpha1.SiteStateReadOnly:
 							readOnly++
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							return false, "", fmt.Errorf("site %s RecoveryBlocked during revert roll", s.Name)
 						}
 					}

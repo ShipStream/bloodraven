@@ -256,7 +256,7 @@ func s41ObserveContinuously(ctx context.Context, env *runner.Env, state *s41RunS
 			if status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
 				observation.fail(fmt.Errorf("reader entered SourceConvergenceState=Blocked (reason=%s) during failover", status.SourceConvergenceReason))
 			}
-			if status.RecoveryState == "RecoveryBlocked" {
+			if status.RecoveryState == v1alpha1.RecoveryStateBlocked {
 				observation.fail(fmt.Errorf("reader entered RecoveryBlocked during failover"))
 			}
 			observation.recordSourceHost(status.SourceHost)

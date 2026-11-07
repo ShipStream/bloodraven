@@ -63,8 +63,11 @@ func (e *workloadSelectorMismatchError) refusalKey() string {
 	return workloadRefusalKey(e.kind, e.name)
 }
 
+// workloadRefusalPrefix prefixes every workload selector refusal key.
+const workloadRefusalPrefix = "selector/"
+
 func workloadRefusalKey(kind, name string) string {
-	return "selector/" + kind + "/" + name
+	return workloadRefusalPrefix + kind + "/" + name
 }
 
 // checkWorkloadSelector returns the mismatch of a live object's selector
@@ -111,6 +114,29 @@ func (r *MysqlFailoverGroupReconciler) clearDragonflySelectorRefusals(fg *v1alph
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	for _, k := range r.Runner.GroupRefusalKeys(nn, workloadRefusalKey("StatefulSet", "")) {
 		r.Runner.ClearGroupRefusal(nn, k)
+	}
+}
+
+// pruneRemovedSiteSelectorRefusals clears fg's workload refusals whose
+// object belongs to no site in spec.sites (a site removed while its
+// Deployment or Dragonfly StatefulSet was refused). The per-site checks
+// only ever look at spec sites, so nothing else would clear them, and a
+// standing refusal keeps Degraded=True and refuses deploy leases.
+func (r *MysqlFailoverGroupReconciler) pruneRemovedSiteSelectorRefusals(fg *v1alpha1.MysqlFailoverGroup) {
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	keys := r.Runner.GroupRefusalKeys(nn, workloadRefusalPrefix)
+	if len(keys) == 0 {
+		return
+	}
+	current := make(map[string]struct{}, 2*len(fg.Spec.Sites))
+	for _, site := range fg.Spec.Sites {
+		current[workloadRefusalKey("Deployment", resourceName(fg.Name, site.Name))] = struct{}{}
+		current[workloadRefusalKey("StatefulSet", dragonflyStatefulSetName(fg.Name, site.Name))] = struct{}{}
+	}
+	for _, k := range keys {
+		if _, ok := current[k]; !ok {
+			r.Runner.ClearGroupRefusal(nn, k)
+		}
 	}
 }
 

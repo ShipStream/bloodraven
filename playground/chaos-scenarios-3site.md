@@ -30,7 +30,7 @@ failover, split-brain, and recovery paths and are not repeated here.
    kubectl -n $NS get mfg playground -o wide
    # ACTIVE=iad  READY=True
    kubectl -n $NS get mfg playground -o jsonpath='{.status.sites[*].state}'
-   # writable read-only read-only     (iad, pdx, fra respectively)
+   # Writable ReadOnly ReadOnly     (iad, pdx, fra respectively)
    ```
 5. Verify the star topology wired up: both `pdx` and `fra` should be
    replicating from the `mysql-playground-iad` service.
@@ -508,9 +508,12 @@ kubectl -n $NS patch mfg playground --type json -p '[
 - `kubectl -n $NS get deployments` shows three deployments within 10s.
 - Reconciler creates `mysql-playground-fra`, PVC, and the two
   ClusterIP services.
-- Operator triggers auto-clone to populate `fra`'s empty instance;
-  `status.sites[2].state` transitions `unknown → writable → read-only`
-  over the course of the clone.
+- Operator triggers auto-clone to populate `fra`'s empty instance. The
+  `fra` entry of `status.sites` (`kubectl -n $NS get mfg playground -o
+  jsonpath='{.status.sites[?(@.name=="fra")].state}'`) is absent at first,
+  may read `Unreachable` or `Unknown` while the pod starts and the clone
+  restarts it, and converges to `ReadOnly` with `replication` `Healthy`
+  once the clone finishes. Do not expect a particular intermediate state.
 - `status.activeSite` stays on the original primary throughout — no
   disruption.
 - `sitePriorities` (if present) is untouched and still only names

@@ -166,7 +166,7 @@ func upgradeDuringEmergency(phase v1alpha1.DragonflyUpgradePhase, start, failedA
 	fg := fgWithDragonflySnapshotUpgrade()
 	st := metav1.NewTime(start)
 	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{Phase: phase, ActiveSite: "dc1",
-		TargetImage: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0", SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, StartTime: &st}
+		TargetImage: fg.Spec.Dragonfly.Image, SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly), SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, StartTime: &st}
 	if !failedAt.IsZero() {
 		at := metav1.NewTime(failedAt)
 		fg.Status.SetLastFailover(&at, "dc2", "")

@@ -94,10 +94,13 @@ func buildScheduledVerification(fg *v1alpha1.MysqlFailoverGroup, group, profile,
 		}
 	}
 
+	// A profile has one verification schedule, named after the profile,
+	// so the schedule label carries the profile name, as on its CronJob.
 	labels := map[string]string{
-		v1alpha1.FailoverGroupLabel:    group,
-		v1alpha1.BackupProfileLabel:    profile,
-		"app.kubernetes.io/managed-by": "bloodraven",
+		v1alpha1.FailoverGroupLabel:        group,
+		v1alpha1.BackupProfileLabel:        profile,
+		v1alpha1.VerificationScheduleLabel: profile,
+		"app.kubernetes.io/managed-by":     "bloodraven",
 	}
 
 	verify := &v1alpha1.MysqlBackupVerification{

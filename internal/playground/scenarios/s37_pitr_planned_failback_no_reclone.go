@@ -511,23 +511,19 @@ func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...stri
 	waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
 	if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR scenario cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		ready := conditionTrue(mfg.Status.Conditions, v1alpha1.ConditionReady)
 		wantPITR, wantProfile, err := originalPITRExpected(env)
 		if err != nil {
 			return false, "", err
 		}
-		pitrRestored := !wantPITR && pitrSpecProfile(mfg) == ""
-		if wantPITR {
-			pitrRestored = pitrSpecProfile(mfg) == wantProfile && mfg.Status.PITR != nil
-		}
+		restored, restoredMsg := pitrBaselineRestored(mfg, wantPITR, wantProfile)
 		var cooldown string
 		if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailoverTime() != nil {
 			if rem := mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailoverTime().Time); rem > 0 {
 				cooldown = rem.Round(time.Second).String()
 			}
 		}
-		done := ready && mfg.Status.ActiveSite != "" && mfg.Status.UpdatePhase == "" && pitrRestored && cooldown == ""
-		return done, fmt.Sprintf("ready=%v active=%q pitrRestored=%v cooldown=%q", ready, mfg.Status.ActiveSite, pitrRestored, cooldown), nil
+		done := restored && cooldown == ""
+		return done, fmt.Sprintf("%s cooldown=%q", restoredMsg, cooldown), nil
 	}); err != nil {
 		errs = append(errs, err)
 	} else {

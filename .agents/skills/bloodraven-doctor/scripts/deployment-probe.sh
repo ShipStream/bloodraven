@@ -57,12 +57,18 @@ kubectl get mysqldatabases.shipstream.io -n "$NAMESPACE" -o json | jq --arg grou
     [.items[] | select(.spec.failoverGroupRef.name == $group) |
     {instance: .metadata.name, deploymentClients: (.spec.deploymentClients // [])}]'
 
+# The deployment Lease record schemaVersion this release's operator reads
+# (deploymentLeaseRecordSchemaVersion in internal/controller/deployment_leases.go).
+LEASE_RECORD_SCHEMA_VERSION=1
+
 echo "--- Durable deployment Lease records (not leader election) ---"
-kubectl get leases.coordination.k8s.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" '
+kubectl get leases.coordination.k8s.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" --argjson supported "$LEASE_RECORD_SCHEMA_VERSION" '
     [.items[] | select(any(.metadata.ownerReferences[]?; .kind == "MysqlFailoverGroup" and .name == $group)) |
     select(.metadata.annotations["bloodraven.shipstream.io/deployment-lease"] != null) |
     {name: .metadata.name, record: (.metadata.annotations["bloodraven.shipstream.io/deployment-lease"] |
-        (try fromjson catch {state: "invalid_record"}) | {kind, operationId, instance, namespace, serviceAccount, expiresAt,
+        (try fromjson catch {state: "invalid_record"}) |
+        {schemaVersion, readable: (.schemaVersion == $supported), kind, operationId, instance, namespace, serviceAccount, expiresAt,
                     topologyGeneration, createdAt, state, reason})}]'
 
-echo "Lease records are observations; expiry is enforced by the operator clock. Do not delete or edit them."
+echo "Lease records are observations; expiry is enforced by the operator clock. Do not delete or edit a readable one (readable=true)."
+echo "A record with readable=false has a schemaVersion this operator does not read (it reads $LEASE_RECORD_SCHEMA_VERSION): lease requests for the group are refused (Degraded=True/MetadataVersionUnsupported) until it is gone. Run the operator release that wrote it, or, once no deployment client uses it, delete that Lease (playbook 44)."

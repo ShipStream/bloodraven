@@ -48,7 +48,7 @@ type MysqlBackupVerificationReconciler struct {
 
 	// Clientset is optional; when non-nil the reconciler tails the
 	// verification Job pod logs for the BLOODRAVEN_VERIFY_SANITY_COMPLETE
-	// sentinel and populates status.sanityCheck. (status.replayedThroughBinlog
+	// sentinel and populates status.sanityCheck. (status.pointInTime
 	// comes only from a PITR verification's termination verdict.)
 	// Fake-client tests leave this nil; status will then only carry the
 	// terminal Phase and Conditions.
@@ -104,8 +104,9 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 			} else if !released || !stopped {
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
+			base := v.DeepCopy()
 			controllerutil.RemoveFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer)
-			if err := r.Update(ctx, &v); err != nil {
+			if err := r.Patch(ctx, &v, metadataPatch(base)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 			}
 		}
@@ -114,9 +115,10 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 
 	// Stamp finalizer + labels on first encounter.
 	if !controllerutil.ContainsFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer) {
+		base := v.DeepCopy()
 		controllerutil.AddFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer)
 		_ = ensureVerificationLabels(&v)
-		if err := r.Update(ctx, &v); err != nil {
+		if err := r.Patch(ctx, &v, metadataPatch(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -165,6 +167,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 
 	// Coalesce owner-ref + label stamp.
 	needsUpdate := false
+	base := v.DeepCopy()
 	if len(v.OwnerReferences) == 0 {
 		if err := controllerutil.SetControllerReference(&fg, v, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("set owner ref: %w", err)
@@ -175,7 +178,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 		needsUpdate = true
 	}
 	if needsUpdate {
-		if err := r.Update(ctx, v); err != nil {
+		if err := r.Patch(ctx, v, metadataPatch(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update owner ref / labels: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -392,20 +395,22 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	// verification is certified only by its termination verdict, which is
 	// also the only source of replay detail.
 	sentinels := r.tailVerificationSentinels(ctx, v, job)
-	switch {
-	case sentinels.Sanity != nil:
-		next.SanityCheck = sentinels.Sanity
-	case jobFailed && sentinels.LogsRead && v.Spec.SanityCheck != nil && v.Spec.SanityCheck.Query != "":
-		// The whole log tail was read and the sanity phase never reported:
-		// the Job failed before it (load or replay).
-		next.SanityCheck = &v1alpha1.SanityCheckResult{Outcome: v1alpha1.SanityCheckOutcomeSkipped}
-	}
 	pitr := jobHasPITR(job)
+	sanityConfigured := v.Spec.SanityCheck != nil && v.Spec.SanityCheck.Query != ""
 	var pod *corev1.Pod
-	if pitr {
+	if pitr || jobFailed && sanityConfigured && sentinels.Sanity == nil {
 		if pod, err = latestJobPod(ctx, r.Client, job); err != nil {
 			return ctrl.Result{}, fmt.Errorf("list verification Job pods: %w", err)
 		}
+	}
+	switch {
+	case sentinels.Sanity != nil:
+		next.SanityCheck = sentinels.Sanity
+	case jobFailed && sanityConfigured && sanityPhaseNotReached(pod):
+		// The pod proves the Job failed before the sanity phase (load or
+		// replay). Without that proof sanityCheck stays unset: an absent
+		// completion sentinel alone may be a query interrupted mid-run.
+		next.SanityCheck = &v1alpha1.SanityCheckResult{Outcome: v1alpha1.SanityCheckOutcomeSkipped}
 	}
 	// A terminal observation always recomputes the certified result.
 	next.PointInTime = nil
@@ -477,14 +482,16 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		return ctrl.Result{RequeueAfter: shorterRequeue(requeue, pruneRequeue)}, nil
 	}
 
-	wasTerminal := v.Status.Phase == next.Phase
+	// The grace is recorded before the write: a Patch that commits but
+	// whose response is lost must still protect the verdict from a
+	// keep-none prune on the retry. A write that fails only lengthens it.
+	if v.Status.Phase != next.Phase {
+		r.graceClock.recordVerdict(v, time.Now())
+	}
 	patch := client.MergeFrom(v.DeepCopy())
 	v.Status = next
 	if err := r.Status().Patch(ctx, v, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch final status: %w", err)
-	}
-	if !wasTerminal {
-		r.graceClock.recordVerdict(v, time.Now())
 	}
 
 	execution := v.DeepCopy()
@@ -915,22 +922,58 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 	}
 }
 
+// sanityStartedMarker opens the termination message verify.sh writes just
+// before it runs the sanity query; every later exit replaces it. A pod
+// whose main container still ends with it was stopped mid-query.
+const sanityStartedMarker = "SanityCheckInterrupted:"
+
+// sanityPhaseNotReached reports whether pod proves that verify.sh failed
+// before its sanity phase: an init container failed, so the main container
+// never ran, or the main container exited non-zero with a termination
+// message that neither marks a started query nor names a sanity failure.
+// verify.sh writes the start marker before the query and kubelet falls
+// back to the log tail only for an empty message, so a container killed
+// during the query keeps the marker. A pod that is gone, still running or
+// unreadable proves nothing.
+func sanityPhaseNotReached(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if term := status.State.Terminated; term != nil && term.ExitCode != 0 {
+			return true
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != backupJobContainerName {
+			continue
+		}
+		term := status.State.Terminated
+		if term == nil || term.ExitCode == 0 {
+			return false
+		}
+		message := strings.TrimSpace(term.Message)
+		return !strings.HasPrefix(message, sanityStartedMarker) &&
+			!strings.HasPrefix(message, "SanityCheckFailed") &&
+			!strings.HasPrefix(message, "SanityCheckTimeout")
+	}
+	return false
+}
+
 // verifySentinels bundles the parsed output of the verify.sh post-load
-// sentinel. Sanity is nil when the phase did not run or the log is
-// unreadable; it never decides the outcome. LogsRead is true only after
-// the complete bounded log scan, so a nil Sanity with LogsRead means the
-// sanity phase did not run.
+// sentinel. Sanity is nil when the phase did not run, the log is
+// unreadable or the sentinel is outside the bounded tail; it never decides
+// the outcome, and a nil Sanity alone never proves the query did not run
+// (see sanityPhaseNotReached).
 type verifySentinels struct {
-	Sanity   *v1alpha1.SanityCheckResult
-	LogsRead bool
+	Sanity *v1alpha1.SanityCheckResult
 }
 
 // tailVerificationSentinels reads the verification Job pod's logs and
 // parses the trailing BLOODRAVEN_VERIFY_SANITY_COMPLETE sentinel into a
 // structured status fragment. (verify.sh no longer prints
 // BLOODRAVEN_VERIFY_REPLAY_COMPLETE; replay detail comes from the PITR
-// termination verdict.) LogsRead is true only after the complete bounded log scan;
-// a read failure cannot certify either present or absent completion metadata.
+// termination verdict.) A read failure leaves Sanity nil.
 func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) verifySentinels {
 	out := verifySentinels{}
 	if r.Clientset == nil {
@@ -987,7 +1030,6 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 		return out
 	}
 	out.Sanity = sanity
-	out.LogsRead = true
 	return out
 }
 

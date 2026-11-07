@@ -74,7 +74,9 @@ type MysqlBackupSpec struct {
 	//     both. Nothing tracks them afterwards: delete them by hand when
 	//     they are no longer needed.
 	// It is read when the deletion is processed, so it can be changed up to
-	// then.
+	// then. Once a cleanup Job has been created for the deletion, a change
+	// to Retain is not applied: that Job may already have deleted part of
+	// the artifact, so the cleanup runs to its end.
 	// +kubebuilder:default=Delete
 	// +optional
 	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`

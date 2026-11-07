@@ -28,9 +28,10 @@ import (
 // emptyDir datadir, with a derived credentials Secret for the restore
 // script. No Service or PersistentVolumeClaim is created; the Pod binds
 // 127.0.0.1 only and is not reachable from outside its own network
-// namespace. On success all artifacts are cleaned up; on failure
-// KeepOnFailure (default true) leaves the Job and its Pod in place for
-// inspection until the retention sweep reclaims them.
+// namespace. After a success the Job and its Pod are cleaned up as
+// ttlSecondsAfterFinished says (unset keeps them until retention deletes
+// the verification); after a failure KeepOnFailure (default true) leaves
+// them in place for inspection until the retention sweep reclaims them.
 type MysqlBackupVerification struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -74,8 +75,8 @@ type MysqlBackupVerificationSpec struct {
 	// KeepOnFailure leaves the verification Job and its Pod in place when the
 	// verification terminates in Failed, so operators can kubectl exec
 	// into the verification instance to inspect why the load failed.
-	// On success all artifacts are always cleaned up regardless of
-	// this field.
+	// It does not apply to a success, whose Job and Pod are cleaned up as
+	// ttlSecondsAfterFinished says.
 	//
 	// Defaults to true. Retention GC still reclaims KeepOnFailure
 	// artifacts once the CR ages out of the failed-run retention bucket.
@@ -256,7 +257,9 @@ type MysqlBackupVerificationStatus struct {
 	// SanityCheck is populated when spec.sanityCheck is set. Records
 	// the check's outcome, its duration, and the scalar result so
 	// operators can look at `kubectl describe` and tell what the
-	// verification actually asserted.
+	// verification actually asserted. It stays unset when a failed run
+	// leaves no evidence of whether the query ran (a pod stopped while
+	// the query ran, a pod or log that cannot be read).
 	// +optional
 	SanityCheck *SanityCheckResult `json:"sanityCheck,omitempty"`
 
@@ -270,7 +273,7 @@ type MysqlBackupVerificationStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions represent the latest available observations of this
-	// verification's state. Types include "Verified" and
+	// verification's state. Types include "Ready", "Verified" and
 	// "ResourcesCleanedUp".
 	// +optional
 	// +listType=map
@@ -290,8 +293,9 @@ const (
 	SanityCheckOutcomeFailed SanityCheckOutcome = "Failed"
 	// SanityCheckOutcomeTimedOut: the query ran longer than Timeout.
 	SanityCheckOutcomeTimedOut SanityCheckOutcome = "TimedOut"
-	// SanityCheckOutcomeSkipped: the verification ended before the sanity
-	// phase (the load or the replay failed), so the query never ran.
+	// SanityCheckOutcomeSkipped: the verification's pod shows it failed
+	// before the sanity phase (the load or the replay failed), so the
+	// query never ran.
 	SanityCheckOutcomeSkipped SanityCheckOutcome = "Skipped"
 )
 

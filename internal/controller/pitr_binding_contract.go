@@ -806,7 +806,7 @@ var pitrBindingReleaseGrammar = actionvalue.Grammar{
 // parsePITRBindingRelease parses a release annotation value
 // "<id>:confirm=<fg name>:uid=<fg uid>". It returns the id, or an error
 // for a malformed value or a confirm or uid that is not fg's (Warning
-// ReleaseRejected; the annotation is removed).
+// PITRArchiveBindingReleaseRejected; the annotation is removed).
 func parsePITRBindingRelease(value string, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 	full := actionvalue.Format("<id>", actionvalue.ConfirmPairs(fg.Name, string(fg.UID))...)
 	v, err := actionvalue.Parse(value, pitrBindingReleaseGrammar)

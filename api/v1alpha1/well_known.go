@@ -46,8 +46,15 @@ const (
 // a value uses the ISO 8601 basic UTC form, for example `20261104T100000Z`.
 // A destructive action on a site-name subject carries
 // `confirm=<metadata.name>:uid=<metadata.uid>`; an operation id the
-// operator minted and never reuses needs neither. Never commit an action
-// annotation to a GitOps repository: a sync re-applies it.
+// operator minted and never reuses needs neither. Two keys are outside the
+// grammar: RevokeDeploymentLeasesAnnotation is presence-only (its value is
+// ignored), and RotateKeyringAnnotation takes a bare site name, since a
+// rotation destroys nothing. A value that does not parse, or fails its
+// interlock, is never acted on: each key's consumer reports why (a Warning
+// Event, or the status of the request) and, for most keys, removes the
+// annotation so the request can be set again; the entries below say which.
+// Never commit an action annotation to a GitOps repository: a sync
+// re-applies it.
 const (
 	// PlannedFailoverAnnotation triggers a graceful, cooldown-respecting
 	// switchover to the named PrimaryCandidate site. The operator removes
@@ -92,10 +99,12 @@ const (
 	RecloneAnnotation = "bloodraven.shipstream.io/reclone-site"
 
 	// RevokeDeploymentLeasesAnnotation revokes every deployment lease the
-	// group holds.
+	// group holds. Lease admission stays closed while it is set; the
+	// operator removes it once every revocation has persisted, and a value
+	// changed meanwhile is a new request it handles first.
 	//
 	// On: MysqlFailoverGroup.
-	// Writer: user.
+	// Writer: user; the operator removes it.
 	// Value: any; its presence is the request.
 	// Stability: Public.
 	RevokeDeploymentLeasesAnnotation = "bloodraven.shipstream.io/revoke-deployment-leases"
@@ -293,10 +302,14 @@ const (
 const (
 	// FailoverGroupLabel names the owning MysqlFailoverGroup. It is also
 	// on MysqlBackups and MysqlBackupVerifications (spec.failoverGroupRef),
-	// and kubectl bloodraven sets it on the ones it creates.
+	// and kubectl bloodraven sets it on the ones it creates. The one place
+	// a user writes it is a MysqlBackup or MysqlBackupVerification created
+	// by hand: set it to spec.failoverGroupRef, with BackupProfileLabel.
+	// On every object the operator manages it is the operator's.
 	//
 	// On: managed objects and pods; MysqlBackup, MysqlBackupVerification.
-	// Writer: operator; kubectl bloodraven backup and verify.
+	// Writer: operator; kubectl bloodraven backup and verify; user, on a
+	// MysqlBackup or MysqlBackupVerification it creates.
 	// Value: the group name.
 	// Stability: Operator-owned read-only.
 	FailoverGroupLabel = "bloodraven.shipstream.io/failover-group"
@@ -449,10 +462,11 @@ const (
 	// Stability: Operator-owned read-only.
 	ResourceLabel = "bloodraven.shipstream.io/resource"
 
-	// BackupEncryptedLabel marks a MysqlBackup whose artifact is
-	// encrypted.
+	// BackupEncryptedLabel marks a backup Job (and its pods) that writes
+	// an encrypted artifact. The MysqlBackup itself does not carry it: read
+	// status.encryption.mode there.
 	//
-	// On: backup Jobs, MysqlBackup.
+	// On: backup Jobs and their pods.
 	// Writer: operator.
 	// Value: `true`, or absent.
 	// Stability: Operator-owned read-only.
@@ -468,20 +482,25 @@ const (
 	MysqlBackupVerificationLabel = "bloodraven.shipstream.io/mysqlbackup-verification"
 
 	// VerificationScheduleLabel names the verification schedule that
-	// created a MysqlBackupVerification.
+	// created a MysqlBackupVerification. A verification created by hand or
+	// by kubectl bloodraven verify does not carry it.
 	//
-	// On: MysqlBackupVerification, verification CronJobs.
-	// Writer: operator.
-	// Value: the schedule name.
+	// On: scheduled MysqlBackupVerifications, verification CronJobs.
+	// Writer: operator (the CronJob and the trigger command it runs).
+	// Value: the backup profile name (a profile has one verification
+	// schedule, named after it).
 	// Stability: Public.
 	VerificationScheduleLabel = "bloodraven.shipstream.io/verification-schedule"
 
 	// TriggeredByAnnotation records what created a MysqlBackup or a
-	// MysqlBackupVerification. Informational; nothing reads it.
+	// MysqlBackupVerification. Informational free text; nothing reads it.
 	//
 	// On: MysqlBackup, MysqlBackupVerification.
-	// Writer: the schedules, the trigger commands, kubectl bloodraven.
-	// Value: `manual`, `schedule/<name>` or `retry/<name>/attempt-<n>`.
+	// Writer: the schedules, the trigger commands, kubectl bloodraven
+	// (--triggered-by, default `manual`), user.
+	// Value: free text. The operator's writers use `schedule`,
+	// `schedule/<name>` and `retry/<name>/attempt-<n>`; other writers may
+	// record anything.
 	// Stability: Public.
 	TriggeredByAnnotation = "bloodraven.shipstream.io/triggered-by"
 )

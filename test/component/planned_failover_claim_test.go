@@ -969,7 +969,7 @@ func TestPF_I22_WatermarkRestoredAfterRestart(t *testing.T) {
 	h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
 	h.newProcess()
 	h.tick()
-	if got := h.tm.Status().PromotionGtidExecuted; got != pfF {
+	if got := h.tm.Status().PromotionGtidExecuted(); got != pfF {
 		t.Fatalf("restored watermark %q, want F %q", got, pfF)
 	}
 	if rec, err := controller.FailoverRecordFromAnnotations(h.store.Object().GetAnnotations()); err != nil ||

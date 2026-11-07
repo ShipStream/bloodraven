@@ -45,12 +45,13 @@ func TestMysqlDatabaseGlobalGrantsSurviveCleanupRetries(t *testing.T) {
 					}
 					return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 				},
-				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				// The finalizer is removed with a metadata merge patch.
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 					if m, ok := obj.(*v1alpha1.MysqlDatabase); ok && failFinalizer && !m.DeletionTimestamp.IsZero() && len(m.Finalizers) == 0 {
 						failFinalizer = false
-						return errors.New("injected finalizer update failure")
+						return errors.New("injected finalizer patch failure")
 					}
-					return c.Update(ctx, obj, opts...)
+					return c.Patch(ctx, obj, patch, opts...)
 				},
 			}
 			grant := v1alpha1.MysqlDatabaseGrant{Username: username, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}

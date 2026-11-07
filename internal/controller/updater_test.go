@@ -1372,3 +1372,36 @@ func TestUpdateController_PhasesAreAPIEnumValues(t *testing.T) {
 		})
 	})
 }
+
+// K016: a follower whose Deployment is refused for its selector has no
+// drift only because it cannot be updated. It is not taken as running the
+// new template (no pod-readiness evidence is asked of it) and is never the
+// handoff target, so the active is not fenced for it.
+func TestUpdateController_ExecuteTargetsNeverHandsOffToSelectorRefusedFollower(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	refused := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	probed := false
+	promoted := false
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Checker: active, Drifted: true,
+	}, []UpdateTarget{
+		{Name: "refused", Host: "refused-internal", Checker: refused, Promotable: true, SelectorRefused: true, ExpectedSource: "primary-internal",
+			PodReady: func(context.Context) (PodReadiness, error) { probed = true; return PodReadiness{Ready: true}, nil }},
+	}, func(context.Context, string) error { return nil }, func(string, string) { promoted = true })
+	if err == nil || !strings.Contains(err.Error(), "WorkloadSelectorMismatch") {
+		t.Fatalf("err = %v, want the selector refusal", err)
+	}
+	if promoted || !refused.ReadOnlyVal || slices.Contains(active.Calls, "SetSuperReadOnly(ON)") {
+		t.Fatal("the active was handed off to a refused follower")
+	}
+	if probed {
+		t.Fatal("a refused follower's pod was taken as evidence of the new template")
+	}
+	if got := sitesOnTemplate(UpdateTarget{Name: "a", SelectorRefused: true}, []UpdateTarget{{Name: "b"}, {Name: "c", SelectorRefused: true}}); len(got) != 1 || got[0].Name != "b" {
+		t.Fatalf("sitesOnTemplate = %+v, want only b", got)
+	}
+}

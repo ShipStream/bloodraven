@@ -78,7 +78,7 @@ func s08VerifyRecoveryBlocked() runner.Step {
 						}
 						msg := fmt.Sprintf("site=%s recoveryState=%q divergentCount=%d divergentGtid=%q",
 							s.Name, s.RecoveryState, count, s.DivergentGtid)
-						return s.RecoveryState == "RecoveryBlocked" && count > 0, msg, nil
+						return s.RecoveryState == v1alpha1.RecoveryStateBlocked && count > 0, msg, nil
 					}
 					return false, fmt.Sprintf("site %s not present in status.sites", site), nil
 				},
@@ -158,7 +158,7 @@ func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
 				case v1alpha1.SiteStateReadOnly:
 					readOnly = append(readOnly, s.Name)
 				}
-				if s.RecoveryState == "RecoveryBlocked" {
+				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 					blocked = append(blocked, s.Name)
 				}
 				if s.DivergentGtid != "" {

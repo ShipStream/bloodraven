@@ -186,6 +186,23 @@ func (r *TopologyManagerRunner) setRefusalDegraded(conds *[]metav1.Condition, nn
 	})
 }
 
+// appendRefusalDetail keeps nn's refusals visible when a higher-ranked
+// reason holds the Degraded condition (a topology alert, or a divergence
+// block set after setRefusalDegraded): their messages, which carry the
+// remedy, are appended to the condition's message. Call it after every
+// other Degraded writer.
+func (r *TopologyManagerRunner) appendRefusalDetail(conds *[]metav1.Condition, nn types.NamespacedName) {
+	reason, message := r.refusalDegraded(nn)
+	if reason == "" {
+		return
+	}
+	c := apimeta.FindStatusCondition(*conds, v1alpha1.ConditionDegraded)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason == reason || strings.Contains(c.Message, message) {
+		return
+	}
+	c.Message = strings.TrimSuffix(c.Message, ".") + ". Also refused (" + reason + "): " + message
+}
+
 // refusalOverrides are the Degraded=True reasons a refusal replaces: the
 // per-site reasons, which a workload the operator cannot update or a
 // payload it cannot read usually explains. Healthy and Initializing set

@@ -229,11 +229,11 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 								return false, "old primary not in status yet", nil
 							}
 							msg := fmt.Sprintf("old=%s state=%s replication=%s recovery=%q ready=%s", old.Name, old.State, old.Replication, old.RecoveryState, readyOf(mfg))
-							if old.RecoveryState == "RecoveryBlocked" {
+							if old.RecoveryState == v1alpha1.RecoveryStateBlocked {
 								return false, msg, fmt.Errorf("old primary %s RecoveryBlocked", activeSite)
 							}
 							healthyReplica := old.State == v1alpha1.SiteStateReadOnly && old.Replication.Running() && readyOf(mfg) == "True"
-							return healthyReplica || old.RecoveryState == "RecoveryInProgress", msg, nil
+							return healthyReplica || old.RecoveryState == v1alpha1.RecoveryStateInProgress, msg, nil
 						})
 					if err != nil {
 						return err

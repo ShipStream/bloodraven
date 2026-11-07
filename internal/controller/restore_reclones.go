@@ -613,9 +613,10 @@ func (r *MysqlFailoverGroupReconciler) removeOwnRecloneAnnotation(ctx context.Co
 		if annotations[v1alpha1.RecloneAnnotation] != recloneAnnotationValue(&fresh, site) {
 			return nil
 		}
+		base := fresh.DeepCopy()
 		delete(annotations, v1alpha1.RecloneAnnotation)
 		fresh.SetAnnotations(annotations)
-		if err := r.Update(ctx, &fresh); err != nil {
+		if err := r.Patch(ctx, &fresh, metadataPatch(base)); err != nil {
 			return err
 		}
 		*fg = fresh
@@ -982,12 +983,13 @@ func (r *MysqlFailoverGroupReconciler) writeRecloneAnnotation(ctx context.Contex
 			written = false
 			return nil
 		}
+		base := fresh.DeepCopy()
 		if annotations == nil {
 			annotations = map[string]string{}
 		}
 		annotations[v1alpha1.RecloneAnnotation] = value
 		fresh.SetAnnotations(annotations)
-		if err := r.Update(ctx, &fresh); err != nil {
+		if err := r.Patch(ctx, &fresh, metadataPatch(base)); err != nil {
 			return err
 		}
 		written = true

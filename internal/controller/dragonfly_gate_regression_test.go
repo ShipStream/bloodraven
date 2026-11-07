@@ -41,7 +41,8 @@ func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T)
 	fg := fgWithDragonflySnapshotUpgrade()
 	start := metav1.Now()
 	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{
-		Phase: v1alpha1.DragonflyUpgradePhaseSavingSnapshot, ActiveSite: "dc1", TargetImage: "dragonfly:new", StartTime: &start,
+		Phase: v1alpha1.DragonflyUpgradePhaseSavingSnapshot, ActiveSite: "dc1", TargetImage: fg.Spec.Dragonfly.Image,
+		SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly), StartTime: &start,
 	}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(makeDragonflyPod(fg.Name, "dc1", "master", false), makeDragonflyPod(fg.Name, "dc2", "replica", false)).Build()

@@ -2276,12 +2276,17 @@ spec:
                           from that snapshot, then moves the other sites and re-attaches
                           them as replicas. Cache and session traffic is shed while it
                           runs; status.dragonfly.upgrade records the run. The ordinary
-                          render never moves an image under this strategy. A run that
-                          fails is not restarted for the same spec.dragonfly: change it
-                          (or set Image back to the running image and then forward again)
-                          to retry. Requires snapshot.dir.
-                      Switching to Rolling while a change is pending rolls it the ordinary
-                      way.
+                          render never moves an image under this strategy; it rolls out
+                          every other change first, and a run starts only once the sites
+                          run it. A run that fails is not restarted for the same
+                          spec.dragonfly: change spec.dragonfly to retry. When every site
+                          still runs one image, setting Image back to it removes the
+                          failed record, and setting it forward again retries; when the
+                          sites run different images, that would start a run back to the
+                          old image instead. A run ends when spec.dragonfly changes under
+                          it, and after an hour. Requires snapshot.dir.
+                      Switching to Rolling, during a run or while a change is pending,
+                      rolls it the ordinary way.
                     enum:
                     - Rolling
                     - SnapshotRestore
@@ -6523,12 +6528,13 @@ spec:
                 properties:
                   image:
                     description: |-
-                      Image is the sidecar image, also used by the init container. Empty
+                      Image is the sidecar image, also used by the init container. Unset
                       means the sidecar image the running operator release ships with
                       (the chart's sidecar.image.repository and sidecar.image.tag), so an
-                      operator upgrade moves the sidecar with it. A non-empty value pins
-                      the image; the operator warns (SidecarVersionSkew) when a pin is
-                      tagged with a different release than the operator.
+                      operator upgrade moves the sidecar with it; an empty string is
+                      refused. A value pins the image; the operator warns
+                      (SidecarVersionSkew) when a pin is tagged with a different release
+                      than the operator.
                     minLength: 1
                     type: string
                   leaseTimeout:

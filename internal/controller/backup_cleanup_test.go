@@ -211,6 +211,7 @@ func TestArtifactIdentityProblem(t *testing.T) {
 		name, recorded string
 		storageType    v1alpha1.BackupStorageType
 		producer       *batchv1.Job
+		edit           func(*v1alpha1.BackupArtifactStorage)
 		want           string
 	}{
 		{name: "matches the producing Job", recorded: "lion/art", storageType: v1alpha1.BackupStorageS3, producer: producer},
@@ -222,11 +223,33 @@ func TestArtifactIdentityProblem(t *testing.T) {
 		{name: "encrypted S3 other bucket", recorded: "s3://other/lion/art/", storageType: v1alpha1.BackupStorageS3, want: "differs from the recorded bucket"},
 		{name: "PVC outside the mount", recorded: "/var/art", storageType: v1alpha1.BackupStoragePVC, want: "is not under /backups"},
 		{name: "differs from the producing Job", recorded: "elsewhere/art", storageType: v1alpha1.BackupStorageS3, producer: producer, want: "differs from the producing Job"},
+		// The same location in another bucket, endpoint or key is
+		// another artifact: the full identity is compared.
+		{name: "same location, other bucket than the producing Job", recorded: "lion/art", storageType: v1alpha1.BackupStorageS3, producer: producer,
+			edit: func(s *v1alpha1.BackupArtifactStorage) { s.Bucket = "other" }, want: "differs from the producing Job's"},
+		{name: "same location, other endpoint than the producing Job", recorded: "lion/art", storageType: v1alpha1.BackupStorageS3, producer: producer,
+			edit: func(s *v1alpha1.BackupArtifactStorage) { s.EndpointURL = "https://elsewhere.local" }, want: "differs from the producing Job's"},
+		{name: "same location, other passphrase than the producing Job", recorded: "lion/art", storageType: v1alpha1.BackupStorageS3, producer: producer,
+			edit: func(s *v1alpha1.BackupArtifactStorage) {
+				s.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "other", Key: "k"}
+			}, want: "differs from the producing Job's"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			b := mb.DeepCopy()
 			storage := &v1alpha1.BackupArtifactStorage{Type: tc.storageType, Location: tc.recorded, Bucket: "bloodraven-backups", ClaimName: "claim"}
+			if tc.producer != nil {
+				// What the launch recorded from this Job.
+				recorded, err := artifactStorageFromJob(tc.producer)
+				if err != nil {
+					t.Fatal(err)
+				}
+				recorded.Location = tc.recorded
+				storage = recorded
+			}
+			if tc.edit != nil {
+				tc.edit(storage)
+			}
 			got := artifactIdentityProblem(b, storage, tc.producer)
 			if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
 				t.Fatalf("got %q, want %q", got, tc.want)

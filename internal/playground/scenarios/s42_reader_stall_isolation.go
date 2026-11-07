@@ -176,7 +176,7 @@ func s42SoakGroupUnaffected(state *s42RunState) runner.Step {
 				if status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
 					return fmt.Errorf("reader entered SourceConvergenceState=Blocked (reason=%s) during a pure lag stall", status.SourceConvergenceReason)
 				}
-				if status.RecoveryState == "RecoveryBlocked" {
+				if status.RecoveryState == v1alpha1.RecoveryStateBlocked {
 					return fmt.Errorf("reader entered RecoveryBlocked during a pure lag stall")
 				}
 				if status.SecondsBehindSource != nil && *status.SecondsBehindSource > state.maxObservedLag {

@@ -295,7 +295,7 @@ func TestRecovery_StatusResponse_CarriesRecoveryFields(t *testing.T) {
 	}
 
 	// PromotionGtidExecuted should be populated from the failover.
-	if s.PromotionGtidExecuted == "" {
+	if s.PromotionGtidExecuted() == "" {
 		t.Error("expected PromotionGtidExecuted to be populated after failover")
 	}
 }

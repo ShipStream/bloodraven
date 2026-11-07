@@ -8,6 +8,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -371,12 +372,54 @@ func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.Bac
 			return fmt.Sprintf("location %q is not under %s", location, backupPVCMountPath)
 		}
 	}
-	if producer != nil {
-		if _, expected, err := backupJobDestination(producer); err == nil && expected != location {
-			return fmt.Sprintf("location %q differs from the producing Job's destination %q", location, expected)
+	return producerStorageProblem(storage, producer)
+}
+
+// producerStorageProblem returns a non-empty reason when producer, the
+// backup's own Job, does not write where storage says: another location,
+// or, when the Job's destination can be read in full, another storage
+// type, bucket, endpoint, region, claim or passphrase key. A replacement
+// Job built from an edited profile writes elsewhere while
+// status.artifactStorage, which cannot change once recorded, still names
+// the first Job's destination. producer is nil when the Job is gone.
+func producerStorageProblem(storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) string {
+	if producer == nil {
+		return ""
+	}
+	if actual, err := artifactStorageFromJob(producer); err == nil {
+		switch {
+		case actual.Location != storage.Location:
+			return fmt.Sprintf("location %q differs from the producing Job's destination %q", storage.Location, actual.Location)
+		case !equality.Semantic.DeepEqual(storage, actual):
+			return fmt.Sprintf("the recorded destination (%s) differs from the producing Job's (%s)",
+				describeArtifactStorage(storage), describeArtifactStorage(actual))
 		}
+		return ""
+	}
+	if _, expected, err := backupJobDestination(producer); err == nil && expected != storage.Location {
+		return fmt.Sprintf("location %q differs from the producing Job's destination %q", storage.Location, expected)
 	}
 	return ""
+}
+
+// describeArtifactStorage spells the identity of a destination for a
+// message: what producerStorageProblem compares, never a credential.
+func describeArtifactStorage(storage *v1alpha1.BackupArtifactStorage) string {
+	parts := []string{"type=" + string(storage.Type), fmt.Sprintf("location=%q", storage.Location)}
+	for _, field := range []struct{ name, value string }{
+		{"bucket", storage.Bucket}, {"endpointURL", storage.EndpointURL},
+		{"region", storage.Region}, {"claimName", storage.ClaimName},
+	} {
+		if field.value != "" {
+			parts = append(parts, fmt.Sprintf("%s=%q", field.name, field.value))
+		}
+	}
+	if ref := storage.PassphraseSecretKeyRef; ref != nil {
+		parts = append(parts, fmt.Sprintf("passphrase=%s/%s", ref.Name, ref.Key))
+	} else {
+		parts = append(parts, "passphrase=none")
+	}
+	return strings.Join(parts, ", ")
 }
 
 // cleanupPodWaiting returns why the cleanup container has not started, for

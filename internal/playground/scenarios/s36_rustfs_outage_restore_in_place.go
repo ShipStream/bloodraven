@@ -455,7 +455,7 @@ func s36VerifySafety() runner.Step {
 				if s.State == v1alpha1.SiteStateWritable {
 					writable++
 				}
-				if s.RecoveryState == "RecoveryBlocked" {
+				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 					return fmt.Errorf("site %s RecoveryBlocked after failed restore", s.Name)
 				}
 			}

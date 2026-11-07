@@ -358,11 +358,11 @@ func TestPITRRecloneRequest(t *testing.T) {
 	}{
 		{"divergent site not yet blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly}, true, false, ""},
 		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, true, false, ""},
-		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, true, "iad:confirm=mfg:uid=u-1:gtidPrefix=3e11fa47"},
-		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateUnreachable, RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, false, ""},
+		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: div}, true, true, "iad:confirm=mfg:uid=u-1:gtidPrefix=3e11fa47"},
+		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateUnreachable, RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: div}, true, false, ""},
 		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}, false, true, "iad:confirm=mfg:uid=u-1"},
 		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, false, false, ""},
-		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: "RecoveryBlocked"}, false, false, ""},
+		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked}, false, false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -694,11 +694,11 @@ func TestPITRSiteReplicating(t *testing.T) {
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
 		t.Fatal("a replicating read-only site was not accepted")
 	}
-	mfg.Status.Sites[1].RecoveryState = "RecoveryBlocked"
+	mfg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateBlocked
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
 		t.Fatal("a RecoveryBlocked replica counted as a planned-failover target")
 	}
-	mfg.Status.Sites[1].RecoveryState = "RecoveryInProgress"
+	mfg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateInProgress
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
 		t.Fatal("a replica in RecoveryInProgress (not refused by validation) was not accepted")
 	}

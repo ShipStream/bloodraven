@@ -55,9 +55,10 @@ spec:
           emptyDir datadir, with a derived credentials Secret for the restore
           script. No Service or PersistentVolumeClaim is created; the Pod binds
           127.0.0.1 only and is not reachable from outside its own network
-          namespace. On success all artifacts are cleaned up; on failure
-          KeepOnFailure (default true) leaves the Job and its Pod in place for
-          inspection until the retention sweep reclaims them.
+          namespace. After a success the Job and its Pod are cleaned up as
+          ttlSecondsAfterFinished says (unset keeps them until retention deletes
+          the verification); after a failure KeepOnFailure (default true) leaves
+          them in place for inspection until the retention sweep reclaims them.
         properties:
           apiVersion:
             description: |-
@@ -115,8 +116,8 @@ spec:
                   KeepOnFailure leaves the verification Job and its Pod in place when the
                   verification terminates in Failed, so operators can kubectl exec
                   into the verification instance to inspect why the load failed.
-                  On success all artifacts are always cleaned up regardless of
-                  this field.
+                  It does not apply to a success, whose Job and Pod are cleaned up as
+                  ttlSecondsAfterFinished says.
 
                   Defaults to true. Retention GC still reclaims KeepOnFailure
                   artifacts once the CR ages out of the failed-run retention bucket.
@@ -391,7 +392,7 @@ spec:
               conditions:
                 description: |-
                   Conditions represent the latest available observations of this
-                  verification's state. Types include "Verified" and
+                  verification's state. Types include "Ready", "Verified" and
                   "ResourcesCleanedUp".
                 items:
                   description: Condition contains details for one aspect of the current
@@ -655,7 +656,9 @@ spec:
                   SanityCheck is populated when spec.sanityCheck is set. Records
                   the check's outcome, its duration, and the scalar result so
                   operators can look at `kubectl describe` and tell what the
-                  verification actually asserted.
+                  verification actually asserted. It stays unset when a failed run
+                  leaves no evidence of whether the query ran (a pod stopped while
+                  the query ran, a pod or log that cannot be read).
                 properties:
                   durationMilliseconds:
                     description: |-

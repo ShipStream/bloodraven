@@ -95,10 +95,15 @@ const (
 	// planned failover, ordered update, promotion or in-place restore
 	// holding the sites has finished.
 	EventRecloneRequested = "RecloneRequested"
-	// The reclone annotation failed the safety interlock (unknown site,
-	// missing, short or mismatched divergent-GTID prefix), or named a site
-	// whose post-restore reclone queue is `Armed` or `Held`. The
-	// annotation is cleared so the administrator can retry.
+	// The reclone annotation failed the safety interlock, or named a site
+	// whose post-restore reclone queue is `Armed` or `Held`. The interlock
+	// refuses a value that does not parse as `<site>:confirm=<group>:uid=<group
+	// UID>[:gtidPrefix=<prefix>]` (no site, an unknown key, a bare site
+	// name), a `confirm=` or `uid=` that does not name this group, an
+	// unknown site, and a divergent-GTID prefix that is missing, too short
+	// or mismatched, or given for a site with no recorded divergence. The
+	// message names the full value to set. The annotation is cleared so the
+	// administrator can retry.
 	EventRecloneRejected = "RecloneRejected"
 	// A clone into a site was refused because an in-place restore holds it
 	// (its reclone queue is `Armed` or `Held`, or the topology is frozen).
@@ -141,7 +146,11 @@ const (
 	// planned-failover terminal marker, a deployment lease record) it is
 	// reported as `Degraded=True/MetadataVersionUnsupported` and the
 	// payload is refused, except that a terminal marker naming a run with
-	// outcome `ManualRecoveryRequired` still holds automatic failover; on
+	// outcome `ManualRecoveryRequired` still holds automatic failover. An
+	// unreadable lease record refuses lease requests (the deployment API
+	// answers `423 unstable` with this reason), the admission of planned
+	// operations, and the reopening of admission after a topology change,
+	// until the Lease is deleted or an operator that reads it runs; on
 	// a MysqlBackupVerification (the verification Job's source record) the
 	// run fails with `Verified=False/MetadataVersionUnsupported`.
 	EventMetadataVersionUnsupported = ReasonMetadataVersionUnsupported
@@ -342,20 +351,28 @@ const (
 	// A Dragonfly snapshot-restore upgrade failed, once per run; the
 	// message gives the reason. On `DragonflySnapshotDialFailed`,
 	// `DragonflySnapshotSaveFailed`, `UnknownPhase`,
-	// `WorkloadSelectorMismatch` or `ActiveWorkloadDeleted` the operator
-	// restores the active site's traffic label; on `ActiveWorkloadDeleted`
-	// it re-creates the active site's StatefulSet. On `ActiveSiteChanged` the
-	// upgrade was abandoned because MySQL failed over or a promotion moved
-	// the Dragonfly master. The run is not restarted while
-	// `spec.dragonfly` is unchanged: change it, or set
-	// `spec.dragonfly.image` back to the running image and then forward
-	// again, to retry.
+	// `WorkloadSelectorMismatch`, `ActiveWorkloadDeleted`, `SpecChanged`,
+	// `DragonflyDisabled` or `TimedOut` the operator restores the active
+	// site's traffic label; on `ActiveWorkloadDeleted` it re-creates the
+	// active site's StatefulSet. On `ActiveSiteChanged` the upgrade was
+	// abandoned because MySQL failed over or a promotion moved the
+	// Dragonfly master. `SpecChanged`: `spec.dragonfly` changed during the
+	// run, and the operator decides again for the new spec. `TimedOut`: the
+	// run had not finished an hour after it started. The run is not
+	// restarted while `spec.dragonfly` is unchanged: change it to retry.
+	// When every site still runs one image, setting `spec.dragonfly.image`
+	// back to it and then forward again also retries; when the sites run
+	// different images, that starts a run back to the old image instead.
 	EventDragonflyUpgradeFailed = "DragonflyUpgradeFailed"
 	// A snapshot-restore upgrade run is needed but waits: `status.activeSite`
-	// is empty, a planned failover run or automation hold owns the sites,
-	// or the Dragonfly master is not on the MySQL active site. Emitted when
-	// the cause changes; the run is retried every 10 seconds and starts
-	// once the cause clears. No site moves meanwhile.
+	// is empty, a site's StatefulSet is refused for its selector
+	// (`WorkloadSelectorMismatch`), a planned failover run or automation
+	// hold owns the sites, the Dragonfly master is not on the MySQL active
+	// site, or the sites do not run the other `spec.dragonfly` settings
+	// (snapshot flags, credentials, service account) yet. Emitted when the
+	// cause changes; the run is retried every 10 seconds and starts once
+	// the cause clears. No site's image moves meanwhile; the render rolls
+	// out the other settings, keeping each site's image.
 	EventDragonflyUpgradeDeferred = "DragonflyUpgradeDeferred"
 )
 
@@ -828,7 +845,8 @@ const (
 	EventBackupStarted = "BackupStarted"
 	// Backup completed successfully.
 	EventBackupSucceeded = "BackupSucceeded"
-	// Backup Job failed.
+	// Backup Job failed, or it succeeded at a destination other than the
+	// recorded `status.artifactStorage` (`Ready=False/DestinationMismatch`).
 	EventBackupFailed = "BackupFailed"
 	// Completion logs are unavailable, missing, or disagree with the Job.
 	// Check `MetadataComplete`; a recovered location remains usable, while
@@ -921,7 +939,9 @@ const (
 	// `Verified=False/ProfileNotFound`.
 	EventProfileNotFound = ReasonProfileNotFound
 	// The operator could not build the Job spec. On a `MysqlBackup` the
-	// backup is `Failed` with `Ready=False/BuildJobFailed`. On a
+	// backup is `Failed` with `Ready=False/BuildJobFailed`, also when the
+	// backup Job is gone mid-run and a replacement built from the current
+	// profile would not write to the destination recorded at launch. On a
 	// `MysqlBackupVerification` the run is `Failed` with
 	// `Verified=False/BuildJobFailed`; a PITR refusal uses its refusal
 	// token as the reason instead.

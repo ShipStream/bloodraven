@@ -44,7 +44,7 @@ func fgWithDragonflySnapshotUpgrade() *v1alpha1.MysqlFailoverGroup {
 }
 
 // seedDragonflyStatefulSets creates each named site's StatefulSet as the
-// render would, running the given image.
+// render would, running the given image, with its template rolled out.
 func seedDragonflyStatefulSets(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client, fg *v1alpha1.MysqlFailoverGroup, images map[string]string) {
 	t.Helper()
 	for _, site := range fg.Spec.Sites {
@@ -57,9 +57,46 @@ func seedDragonflyStatefulSets(t *testing.T, r *MysqlFailoverGroupReconciler, c 
 			t.Fatal(err)
 		}
 		sts.Spec.Template.Spec.Containers[0].Image = img
+		sts.Status = rolledOutDragonflyStatus(sts)
 		if err := c.Create(context.Background(), sts); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// renderDragonflyRolledOut applies the ordinary render to every site's
+// StatefulSet, as reconcileDragonflyResources would, and marks each one
+// rolled out.
+func renderDragonflyRolledOut(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client, fg *v1alpha1.MysqlFailoverGroup) {
+	t.Helper()
+	ctx := context.Background()
+	for _, site := range fg.Spec.Sites {
+		if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
+			t.Fatal(err)
+		}
+		setDragonflyStatefulSetStatus(t, c, fg, site.Name, func(sts *appsv1.StatefulSet) { sts.Status = rolledOutDragonflyStatus(sts) })
+	}
+}
+
+// setDragonflyStatefulSetStatus rewrites site's StatefulSet status.
+func setDragonflyStatefulSetStatus(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string, mutate func(*appsv1.StatefulSet)) {
+	t.Helper()
+	var sts appsv1.StatefulSet
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site)}, &sts); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&sts)
+	if err := c.Status().Update(context.Background(), &sts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rolledOutDragonflyStatus is the status of a StatefulSet whose one pod
+// runs its current template and is Ready.
+func rolledOutDragonflyStatus(sts *appsv1.StatefulSet) appsv1.StatefulSetStatus {
+	return appsv1.StatefulSetStatus{
+		ObservedGeneration: sts.Generation, Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, CurrentReplicas: 1,
+		CurrentRevision: "rev", UpdateRevision: "rev",
 	}
 }
 
@@ -255,9 +292,22 @@ func TestDragonflySnapshotUpgrade_SpecChangeRearms(t *testing.T) {
 		t.Fatal(err)
 	}
 	conn.saveErr = nil
+	// K001: the fixed --dir is not on the running pods yet, so the run
+	// waits for the render to roll it out rather than SAVE to the old one.
 	step, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg)))
+	if err != nil || step.hold != 0 || step.wait == 0 {
+		t.Fatalf("before the render = (%+v, %v), want a wait", step, err)
+	}
+	if up := upgradeRecord(t, c, fg); up.SpecDigest != failed.SpecDigest {
+		t.Fatalf("a run started before the render rolled out the fix: %+v", up)
+	}
+	renderDragonflyRolledOut(t, r, c, getFGByKey(t, c, fgNN(fg)))
+	step, err = r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg)))
 	if err != nil || step.hold == 0 {
 		t.Fatalf("= (%+v, %v), want a new run", step, err)
+	}
+	if conn.saveCalls != 1 {
+		t.Fatalf("SAVE ran %d times before the new run reached it, want once (the failed run)", conn.saveCalls)
 	}
 	up := upgradeRecord(t, c, fg)
 	if up.Phase != v1alpha1.DragonflyUpgradePhasePending || up.SpecDigest == failed.SpecDigest ||
@@ -559,6 +609,7 @@ func TestDragonflySnapshotUpgrade_SaveThenUpdateActive(t *testing.T) {
 		TargetImage: dfTargetImage,
 		ActiveSite:  "dc1",
 		SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir,
+		SpecDigest:  dragonflySpecDigest(fg.Spec.Dragonfly),
 		StartTime:   &now,
 	}
 	r, c := newReconciler(fg)

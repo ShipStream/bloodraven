@@ -52,7 +52,6 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/actionvalue"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
-	"github.com/shipstream/bloodraven/internal/controller"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
@@ -1296,7 +1295,7 @@ func pitrSiteReplicating(mfg *v1alpha1.MysqlFailoverGroup, site string) (bool, s
 			continue
 		}
 		msg := fmt.Sprintf("state=%s replication=%s recovery=%q lastSeen=%v", st.State, st.Replication, st.RecoveryState, st.LastSeenTime)
-		return st.State == v1alpha1.SiteStateReadOnly && st.Replication.Running() && st.RecoveryState != "RecoveryBlocked", msg, nil
+		return st.State == v1alpha1.SiteStateReadOnly && st.Replication.Running() && st.RecoveryState != v1alpha1.RecoveryStateBlocked, msg, nil
 	}
 	return false, "site not in status", nil
 }
@@ -1358,15 +1357,15 @@ func pitrRecloneRequest(mfg *v1alpha1.MysqlFailoverGroup, site string, expectDiv
 			return false, "", msg
 		}
 		if expectDivergent {
-			if s.RecoveryState != "RecoveryBlocked" || len(div) < 8 {
+			if s.RecoveryState != v1alpha1.RecoveryStateBlocked || len(div) < 8 {
 				return false, "", msg + " (waiting for RecoveryBlocked with a divergent GTID)"
 			}
-			return true, controller.RecloneAnnotationValueWithPrefix(mfg, site, div[:8]), msg
+			return true, brcontroller.RecloneAnnotationValueWithPrefix(mfg, site, div[:8]), msg
 		}
-		if div != "" || s.RecoveryState == "RecoveryBlocked" {
+		if div != "" || s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 			return false, "", msg + " (a cold reclone needs a site with no recorded divergence)"
 		}
-		return true, controller.RecloneAnnotationValue(mfg, site), msg
+		return true, brcontroller.RecloneAnnotationValue(mfg, site), msg
 	}
 	return false, "", "site absent"
 }
