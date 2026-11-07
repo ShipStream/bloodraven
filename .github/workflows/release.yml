@@ -1,5 +1,8 @@
 name: Release
 
+# A tag with a hyphen (vX.Y.Z-rc.N) publishes a prerelease: its images and
+# GitHub Release never become `latest`, and the site is not redeployed. Helm
+# installs a prerelease chart only with --devel or an explicit --version.
 on:
   push:
     tags:
@@ -116,6 +119,8 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           body_path: release-body.md
           generate_release_notes: true
 
@@ -152,9 +157,10 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ matrix.image }}
+          # A prerelease tag (vX.Y.Z-rc.N) never moves `latest`.
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: Build and push
         id: build-push
@@ -251,12 +257,16 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
 
   # A release published with GITHUB_TOKEN fires no `release` event, so call
   # the site deploy directly. It builds bloodraven.dev from the latest release.
   deploy-site:
     name: Deploy site
     needs: [publish-release]
+    # The site follows the latest plain release; a prerelease never deploys it.
+    if: ${{ !contains(github.ref_name, '-') }}
     uses: ./.github/workflows/deploy-site.yml
     secrets: inherit
 

@@ -124,6 +124,8 @@ git push origin v1.2.3
 
 This publishes Docker images, creates a GitHub Release, commits the packaged chart + `index.yaml` to the `gh-pages` branch, and pushes the chart to GHCR as an OCI artifact automatically.
 
+A tag with a hyphen, such as `v1.7.0-rc.0`, publishes a prerelease. Its images get no `latest` tag, its GitHub Release is marked as a prerelease and not as latest, and the site is not redeployed. Helm installs the chart only with `--devel` or an explicit `--version`.
+
 #### Required setup for Helm chart publishing
 
 The `gh-pages` branch must exist (can be empty). The release workflow bootstraps it automatically, or create it once with:
